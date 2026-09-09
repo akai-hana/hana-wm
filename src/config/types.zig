@@ -183,41 +183,15 @@ pub fn resolveKeycodes(keybindings: []Keybind, state: *xkbcommon.XkbState) void 
 
 // Tiling layout types
 
-/// Result of lowerStringCI: the lowercased string is embedded *by value*
-/// (copied into `buf`, not borrowed from the caller's stack frame), so it's
-/// safe to return this from a function and keep using it afterward.
-pub fn LowerResult(comptime max_len: usize) type {
-    return union(enum) {
-        ok: struct {
-            buf: [max_len]u8,
-            len: usize,
-
-            pub fn slice(self: *const @This()) []const u8 {
-                return self.buf[0..self.len];
-            }
-        },
-        too_long,
-    };
-}
-
-/// Lowercases `str` into a `max_len`-byte stack buffer if it fits, or reports
-/// `.too_long` (distinct from "not found", so callers can warn on overlong
-/// values). Shared by the layout-name and string_map lookups; keyNameToKeysym
-/// bypasses it: the C API needs a verbatim NUL-terminated copy.
-pub fn lowerStringCI(comptime max_len: usize, str: []const u8) LowerResult(max_len) {
-    if (str.len > max_len) return .too_long;
-    var result: LowerResult(max_len) = .{ .ok = .{ .buf = undefined, .len = str.len } };
-    _ = std.ascii.lowerString(result.ok.buf[0..str.len], str);
-    return result;
-}
-
-/// Inlined so the lowercased buffer lives in the caller's frame: use the
-/// result immediately (null when `str` is too long).
+/// Lowercases `str` into a `max_len`-byte stack buffer if it fits; returns
+/// null when `str` is too long. Shared by the layout-name and string_map
+/// lookups; keyNameToKeysym bypasses it: the C API needs a verbatim
+/// NUL-terminated copy.
 pub inline fn lowerSlice(comptime max_len: usize, str: []const u8) ?[]const u8 {
-    return switch (lowerStringCI(max_len, str)) {
-        .too_long => null,
-        .ok => |r| r.slice(),
-    };
+    if (str.len > max_len) return null;
+    var buf: [max_len]u8 = undefined;
+    _ = std.ascii.lowerString(buf[0..str.len], str);
+    return buf[0..str.len];
 }
 
 /// Case-insensitive enum lookup shared by enums that expose a `string_map` decl.
@@ -311,6 +285,21 @@ pub const TilingConfig = struct {
         return lookup;
     }
 
+    /// Resolves the per-workspace layout overrides into a fixed-size,
+    /// workspace-indexed lookup of override indices with last-wins semantics
+    /// (a duplicate entry for one workspace overrides its predecessor).
+    /// `null` at an index means no override for that workspace. Shared by the
+    /// core seed path (actions.seedParamsFromConfig) and the workspaces addon
+    /// (applyWorkspaceOverrides) so the last-wins rule lives in one place.
+    pub fn workspaceLayoutLookup(self: *const TilingConfig) [constants.max_workspaces]?usize {
+        var lookup: [constants.max_workspaces]?usize = .{null} ** constants.max_workspaces;
+        for (self.workspace_layout_overrides.items, 0..) |o, oi| {
+            if (o.workspace_idx < constants.max_workspaces)
+                lookup[o.workspace_idx] = oi;
+        }
+        return lookup;
+    }
+
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
@@ -361,7 +350,7 @@ pub const IndicatorLocation = enum {
             .{ "up", .up }, .{ "down", .down }, .{ "left", .left }, .{ "right", .right },
         };
         const diags = [_]struct { []const u8, []const u8, IndicatorLocation }{
-            .{ "up", "left", .up_left }, .{ "up", "right", .up_right },
+            .{ "up", "left", .up_left },     .{ "up", "right", .up_right },
             .{ "down", "left", .down_left }, .{ "down", "right", .down_right },
         };
         var kvs: [cardinals.len + diags.len * 4]struct { []const u8, IndicatorLocation } = undefined;
@@ -395,8 +384,7 @@ pub const BarSegmentAnchor = enum {
 
 /// One column of the bar: an anchor position and an ordered list of segment
 /// names (registry names) to display. Names are resolved against the generated
-/// `bar_modules` registry at layout time; unknown/removed names draw nothing
-/// (D7).
+/// `bar_modules` registry at layout time; unknown/removed names draw nothing.
 pub const BarLayout = struct {
     position: BarSegmentAnchor,
     segments: std.ArrayList([]const u8),
@@ -504,7 +492,7 @@ pub const BarConfig = struct {
 
     transparency: f32 = 1.0,
 
-    // NOTE(I-4): indicator_focused/unfocused are always independently owned
+    // NOTE: indicator_focused/unfocused are always independently owned
     // (each set via schema.assignStr which always dupes). If one mirrors
     // the other, both point to separate allocations. Do not bypass assignStr.
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
@@ -512,17 +500,22 @@ pub const BarConfig = struct {
         freeStrings(&self.fonts, allocator, false);
         for (self.layout.items) |*item| item.deinit(allocator);
         self.layout.deinit(allocator);
-        inline for (.{ &self.clock_format, &self.drun_prompt,
-            &self.indicator_focused, &self.indicator_unfocused }) |f| if (f.*) |s| allocator.free(s);
+        inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused }) |f| if (f.*) |s| allocator.free(s);
     }
 
     fn drunColor(self: *const BarConfig, comptime color_field: []const u8, comptime fallback_field: []const u8) Color {
         return @field(self, color_field) orelse @field(self, fallback_field);
     }
 
-    pub inline fn drunBg(self: *const BarConfig) Color { return self.drunColor("drun_bg", "bg"); }
-    pub inline fn drunFg(self: *const BarConfig) Color { return self.drunColor("drun_fg", "fg"); }
-    pub inline fn drunPromptColor(self: *const BarConfig) Color { return self.drunColor("drun_prompt_color", "accent_color"); }
+    pub inline fn drunBg(self: *const BarConfig) Color {
+        return self.drunColor("drun_bg", "bg");
+    }
+    pub inline fn drunFg(self: *const BarConfig) Color {
+        return self.drunColor("drun_fg", "fg");
+    }
+    pub inline fn drunPromptColor(self: *const BarConfig) Color {
+        return self.drunColor("drun_prompt_color", "accent_color");
+    }
 
     /// Derives horizontal segment padding from font_size.
     /// Percentage path: margin = (bar_height - font_height) / 2, scaled.

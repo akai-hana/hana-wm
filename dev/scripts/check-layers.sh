@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Layer guards (REARCHITECTURE_PLAN.md §13, WP7).
-# Exits non-zero when a rule is violated outside its documented allowlist.
+# Wire-policy guards. The tree is NOT a strict import stack: core and window
+# import each other (both are core systems) around a hub-and-spoke model of
+# a single core model + sync sink. These rules enforce the one policy the
+# split actually cares about -- wire mutations belong behind the sync
+# boundary, and model/tiling must stay xcb-pure -- plus formatting. Each rule
+
+# exits non-zero when its policy is violated outside a documented allowlist.
 set -u
 cd "$(dirname "$0")/../.."
 fail=0
@@ -13,15 +18,16 @@ code_lines() { # strip comment-only lines from grep output on stdin
         [ -z "$line" ] && continue
         content=${line#*:}          # file:line:content -> line:content
         content=${content#*:}       # -> content
-        trimmed=$(printf '%s' "$content" | sed 's/^[[:space:]]*//')
+        trimmed=${content#"${content%%[![:space:]]*}"}
         case "$trimmed" in //*) continue ;; esac
         printf '%s\n' "$line"
     done
 }
 
-# Rule 1 allowlist (REARCHITECTURE_PLAN.md §13): files permitted to send
-# configure/map/change_attributes outside src/sync/. Each case documents the
-# surviving wire traffic and why it has not (yet) moved behind sync.
+# Rule 1 allowlist: files permitted to send
+# configure/map/change_attributes outside of the sync boundary's wire policy.
+# Each case documents the surviving wire traffic and why it has not (yet)
+# moved behind sync.
 wire_allowed() {
     case "$1" in
         # Bar's OWN window lifecycle: map on show, Y-reposition on height
@@ -31,14 +37,14 @@ wire_allowed() {
         # hook; bar self-management stays local to avoid a bar<->sync cycle.
         src/bar/bar.zig|src/bar/drawing.zig|src/bar/win.zig) ;;
 
-        # ConfigureRequest compliance (BC03/BC04/BC05): client-requested
+        # ConfigureRequest compliance: client-requested
         # geometry is honored for floating windows and BW recorded for tiled
         # -- protocol duty that answers the CLIENT, not layout.
         # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
         src/window/window.zig|src/window/wincache.zig) ;;
 
         # Click-raise and focus-flag restack requests tied to the X11 focus
-        # protocol (R2 keeps protocol in window.*). focus.zig rides the
+        # protocol (kept in window.*). focus.zig rides the
         # allowlist for that protocol duty (set_input_focus / raise / the
         # _NET_ACTIVE_WINDOW property write).
         src/window/focus.zig) ;;
@@ -51,9 +57,9 @@ wire_allowed() {
         # Wire PRIMITIVES: sync/sink.zig dispatches through
         # core/x11/wire.zig's configureWindow / raiseWindow / setBorderPixel /
         # pushWindowOffscreen*. Primitive home is not a policy violation --
-        # grep cannot distinguish definition from rogue send. D6 moved these
-        # definitions out of utils.zig into core/x11/wire.zig so the
-        # model/tiling layer only ever sees xcb-free utils decls.
+        # grep cannot distinguish definition from rogue send. These
+        # definitions were moved out of utils.zig into core/x11/wire.zig so
+        # the model/tiling layer only ever sees xcb-free utils decls.
         src/core/x11/wire.zig) ;;
 
         # Re-export DECLARATIONS only: utils.zig's `pub const raiseWindow =
@@ -82,14 +88,14 @@ wire_allowed() {
     return 0
 }
 
-# Rule 2 allowlist (same §13): files permitted to grab the server
-# outside src/sync/. Per plan this list starts non-empty and shrinks.
+# Rule 2 allowlist (same wire policy): files permitted to grab the server
+# outside the sync boundary. This list starts non-empty and shrinks.
 # Note: grab_allowed covers BOTH the raw xcb.xcb_grab_server call and the
 # utils.grabServer wrapper (Rule 2 matches both; see pat2 below).
 grab_allowed() {
     case "$1" in
-        # core/x11/wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES
-        # (D6 move from utils.zig). sync.zig's reconcileUnderGrab calls
+        # core/x11/wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES;
+        # sync.zig's reconcileUnderGrab calls
         # these; the primitive home is not itself a policy violation, but
         # grep cannot tell call from definition.
         src/core/x11/wire.zig) ;;
@@ -106,8 +112,8 @@ grab_allowed() {
     return 0
 }
 
-# Rule 1: wire-mutating XCB requests only under src/sync/ (+ allowlist).
-# ND-23 widening: the original pattern missed unmap/destroy/circulate and
+# Rule 1: wire-mutating XCB requests belong behind the sync boundary
+# (+ allowlist). The original pattern missed unmap/destroy/circulate and
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
@@ -118,9 +124,10 @@ while IFS= read -r line; do
     viol "rule 1 ($f outside src/sync/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
 
-# Rule 2: server grab only under src/sync/ (+ allowlist). Comment mentions of
-# xcb_grab_server are stripped so documentation doesn't trip the guard. Match
-# BOTH the raw XCB primitive and the utils.grabServer/ungrabServer wrappers.
+# Rule 2: server grabs belong behind the sync boundary (+ allowlist). Comment
+# mentions of xcb_grab_server are stripped so documentation doesn't trip the
+# guard. Match BOTH the raw XCB primitive and the utils.grabServer/ungrabServer
+# wrappers.
 # Siblings like sync.zig route grabs through the Sink vtable (sink.grabServer,
 # never literally `utils.grabServer`), so a wrapper match isolates files that
 # grab the server directly, which is exactly the policy being enforced.

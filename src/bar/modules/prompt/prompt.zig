@@ -15,7 +15,7 @@ const build_options = @import("build_options");
 const masks = @import("masks");
 const segmod = @import("segment");
 // The vim modal-editing engine registers its handlers into this module on
-// init (D11): the vim lifecycle lives here, gated on has_vim.
+// init: the vim lifecycle lives here, gated on has_vim.
 const vim = if (build_options.has_vim) @import("vim") else struct {
     pub fn register() void {}
     pub fn init(_: std.mem.Allocator, _: usize) !void {}
@@ -209,8 +209,8 @@ const PromptState = struct {
 
     allocator: std.mem.Allocator = undefined,
 
-    /// Bar-provided service handles (present/dismiss/isBarWindow), set at init
-    /// (D10): prompt never imports the bar orchestrator.
+    /// Bar-provided service handles (present/dismiss/isBarWindow), set at init;
+    /// prompt never imports the bar orchestrator.
     handlers: ?*const segmod.BarHandlers = null,
 
     key_syms: ?*xcb_key_symbols_t = null,
@@ -331,7 +331,7 @@ pub fn init(
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
-    // The vim engine is a prompt addon (D11): its lifecycle lives here.
+    // The vim engine is a prompt addon: its lifecycle lives here.
     vim.register();
     try vim.init(allocator, default_max_input);
 }

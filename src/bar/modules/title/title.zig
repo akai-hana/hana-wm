@@ -4,12 +4,9 @@
 //!
 //! The title render/snapshot machinery and the `DrawCtx`/`Frame` vocabulary
 //! live in `segment.zig` (shared across bar segments); this module only owns
-//! the rendering of the title slot and the prompt overlay (D9).
-
-const std = @import("std");
+//! the rendering of the title slot and the prompt overlay.
 
 const core = @import("core");
-const xcb = core.xcb;
 const utils = @import("utils");
 const refresh = @import("refresh");
 const debug = @import("debug");
@@ -44,7 +41,7 @@ const carousel = if (build_options.has_seg_carousel) @import("carousel") else st
         return 0;
     }
 };
-// The prompt overlays this slot when active (D9): this module delegates its
+// The prompt overlays this slot when active: this module delegates its
 // draw/click to it rather than the bar adapting the title slot.
 const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
     pub fn isActive() bool {
@@ -57,7 +54,7 @@ const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
 };
 // The minimized-state service (set synthesis + per-window checks) is provided
 // by the window module registry and forwarded through the shared DrawCtx by
-// the bar (D12); the title segment just reads `snapshot.minimized_set`.
+// the bar; the title segment just reads `snapshot.minimized_set`.
 
 const SegmentGeometry = struct {
     seg_x: u16,
@@ -70,22 +67,21 @@ const SegmentGeometry = struct {
 /// `scaledSegmentPadding`.
 const title_lead_px: u16 = 4;
 
-/// Shared body of all title draw entry points.
+/// Shared body of all title draw entry points. Titles/geoms are read from the
+/// snapshot (in-process caches populated by the bar); no X11 and no owned
+/// buffers to free here.
 fn drawInner(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
-    allocator: std.mem.Allocator,
-    title_invalidated: bool,
 ) !u16 {
     refresh.ensureRefreshRateDetected(ctx.conn);
-    std.debug.assert((ctx.cached_title != null) == (ctx.cached_title_window != null));
     const window_count = snapshot.current_ws_wins.len;
     if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
 
     if (window_count == 1) {
-        try drawSingleWindow(ctx, snapshot, allocator, title_invalidated);
+        try drawSingleWindow(ctx, snapshot);
     } else {
-        try drawSegmentedTitles(ctx, snapshot, allocator);
+        try drawSegmentedTitles(ctx, snapshot);
     }
 
     return ctx.start_x + ctx.width;
@@ -97,8 +93,6 @@ fn renderTitle(ctx: *segmod.DrawCtx, x: u16) !u16 {
     return drawInner(
         ctx.titleRenderContext(x, ctx.width),
         ctx.titleSnapshot(),
-        ctx.allocator,
-        false,
     );
 }
 
@@ -106,8 +100,6 @@ fn renderTitle(ctx: *segmod.DrawCtx, x: u16) !u16 {
 fn drawSingleWindow(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
-    allocator: std.mem.Allocator,
-    title_invalidated: bool,
 ) !void {
     const single_win = snapshot.current_ws_wins[0];
     const is_minimized = snapshot.minimized_set.contains(single_win);
@@ -140,15 +132,6 @@ fn drawSingleWindow(
     }
 
     if (snapshot.focused_title.len == 0) return;
-
-    if (ctx.cached_title) |buf| {
-        const window_slot = ctx.cached_title_window.?;
-        if (title_invalidated or window_slot.* != snapshot.focused_window) {
-            buf.clearRetainingCapacity();
-            buf.appendSlice(allocator, snapshot.focused_title) catch {};
-            window_slot.* = snapshot.focused_window;
-        }
-    }
 
     const fg = if (workspace_has_focus) ctx.config.selected_fg else ctx.config.fg;
     try drawFittedTitle(
@@ -260,7 +243,6 @@ fn drawFittedTitle(
 fn drawSegmentedTitles(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
-    allocator: std.mem.Allocator,
 ) !void {
     const windows = snapshot.current_ws_wins;
     if (windows.len > constants.max_rendered_title_windows)
@@ -271,8 +253,7 @@ fn drawSegmentedTitles(
     const win_count = @min(windows.len, constants.max_rendered_title_windows);
 
     var scratch: segmod.GatherScratch = .{};
-    defer scratch.freeBorrowedTitles(snapshot, win_count, allocator);
-    const sorted = (try scratch.gather(ctx, snapshot, allocator, windows, win_count)) orelse return;
+    const sorted = (try scratch.gather(snapshot, windows, win_count)) orelse return;
 
     const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);

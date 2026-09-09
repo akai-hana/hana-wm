@@ -7,10 +7,9 @@ const std = @import("std");
 const testing = std.testing;
 const model = @import("model");
 const constants = @import("constants");
-const utils = @import("utils");
 const sync = @import("sync");
-const linux = std.os.linux;
 const build_options = @import("build_options");
+const helpers = @import("helpers");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -19,19 +18,13 @@ const Model = model.Model;
 const WindowId = model.WindowId;
 const WSId = model.WSId;
 
-fn makeModel() Model {
-    return .{};
-}
+const makeModel = helpers.makeModel;
 
-fn nowNs() i128 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
-}
+const nowNs = helpers.nowNs;
 
-fn regCur(m: *Model, win: WindowId) void {
-    model.register(m, win, null) catch unreachable;
-}
+const regCur = helpers.regCur;
+
+const makeCtx = helpers.makeCtx;
 
 test "bench: findHome scan (100 wins, 10 ws)" {
     var m = makeModel();
@@ -143,41 +136,7 @@ test "bench: reorderTiled (50 wins)" {
     std.debug.print("[bench] reorderTiled (50 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
-const BenchRecorder = struct {
-    count: usize = 0,
-
-    fn mapShim(_: *anyopaque, _: model.WindowId) void {}
-    fn geomShim(_: *anyopaque, _: model.WindowId, _: utils.Rect, _: ?sync.Stack) void {}
-    fn bwShim(_: *anyopaque, _: model.WindowId, _: u16) void {}
-    fn pixelShim(_: *anyopaque, _: model.WindowId, _: u32) void {}
-    fn parkShim(self_ptr: *anyopaque, _: model.WindowId) void {
-        const self: *BenchRecorder = @ptrCast(@alignCast(self_ptr));
-        self.count += 1;
-    }
-    fn stackShim(_: *anyopaque, _: model.WindowId, _: sync.Stack) void {}
-    fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
-    fn flushShim(_: *anyopaque) void {}
-    fn grabShim(_: *anyopaque) void {}
-    fn ungrabShim(_: *anyopaque) void {}
-
-    fn sink(self: *BenchRecorder) sync.Sink {
-        return .{
-            .ptr = self,
-            .vt = &.{
-                .map = mapShim,
-                .geom = geomShim,
-                .border_width = bwShim,
-                .border_pixel = pixelShim,
-                .park = parkShim,
-                .stack_only = stackShim,
-                .set_ewmh_fullscreen = ewmhShim,
-                .flush = flushShim,
-                .grab_server = grabShim,
-                .ungrab_and_flush = ungrabShim,
-            },
-        };
-    }
-};
+const BenchRecorder = helpers.TestSink(.parks);
 
 fn testColor(_: model.WindowId, _: *const model.Model) u32 {
     return 100;
@@ -191,19 +150,11 @@ test "bench: reconcile pass (50 windows)" {
     model.setFocus(&m, 25);
 
     var recorder = BenchRecorder{};
-    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
 
     sync.init();
     defer sync.deinit();
 
-    var ctx: sync.Ctx = .{
-        .sink = recorder.sink(),
-        .screen = screen,
-        .workarea = screen,
-        .cfg_bw = 2,
-        .color_of = testColor,
-        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
-    };
+    var ctx = makeCtx(recorder.sink(), testColor);
 
     const iterations: usize = 1_000;
     const t0 = nowNs();
@@ -235,15 +186,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     defer sync.deinit();
 
     var recorder = BenchRecorder{};
-    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
-    var ctx: sync.Ctx = .{
-        .sink = recorder.sink(),
-        .screen = screen,
-        .workarea = screen,
-        .cfg_bw = 2,
-        .color_of = testColor,
-        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
-    };
+    var ctx = makeCtx(recorder.sink(), testColor);
 
     // Warm once so the sent ledger is seeded (steady-state drag).
     sync.reconcile(&m, &ctx, .{});

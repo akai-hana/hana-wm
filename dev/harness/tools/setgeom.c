@@ -2,7 +2,7 @@
  *
  * Sends ONE ConfigureRequest carrying a mixed value mask
  * (X|Y|Width|Height[|BorderWidth]) - exercises the WM's mixed-mask
- * routing (ND-14 / S4F7b) rather than the BW-only fast path.
+ * routing rather than the BW-only fast path.
  * Built on demand by run-scenario.sh; needs only libX11.
  */
 #include <X11/Xlib.h>

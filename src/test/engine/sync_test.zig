@@ -9,6 +9,7 @@ const model = @import("model");
 const constants = @import("constants");
 
 const sync = @import("sync");
+const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
@@ -23,140 +24,11 @@ fn testColor(win: model.WindowId, m: *const model.Model) u32 {
     return if (m.focused == win) focused_pixel else unfocused_pixel;
 }
 
-fn stdScreen() utils.Rect {
-    return .{ .x = 0, .y = 0, .width = 800, .height = 600 };
-}
-
 fn stdWa() utils.Rect {
     return .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 }
 
-const Op = union(enum) {
-    map: model.WindowId,
-    geom: struct { win: model.WindowId, rect: utils.Rect, stack: ?sync.Stack },
-    bw: struct { win: model.WindowId, w: u16 },
-    pixel: struct { win: model.WindowId, p: u32 },
-    park: model.WindowId,
-    stack: struct { win: model.WindowId, s: sync.Stack },
-};
-
-const Recorder = struct {
-    ops: std.ArrayList(Op) = .empty,
-
-    fn deinit(self: *Recorder) void {
-        self.ops.deinit(testing.allocator);
-    }
-
-    fn clear(self: *Recorder) void {
-        self.ops.clearRetainingCapacity();
-    }
-
-    // -- Sink vtable shims ------------------------------------------------
-    fn mapShim(ptr: *anyopaque, win: model.WindowId) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{ .map = win }) catch unreachable;
-    }
-    fn geomShim(ptr: *anyopaque, win: model.WindowId, rect: utils.Rect, stack: ?sync.Stack) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{
-            .geom = .{ .win = win, .rect = rect, .stack = stack },
-        }) catch unreachable;
-    }
-    fn bwShim(ptr: *anyopaque, win: model.WindowId, w: u16) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{ .bw = .{ .win = win, .w = w } }) catch unreachable;
-    }
-    fn pixelShim(ptr: *anyopaque, win: model.WindowId, p: u32) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{ .pixel = .{ .win = win, .p = p } }) catch unreachable;
-    }
-    fn parkShim(ptr: *anyopaque, win: model.WindowId) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{ .park = win }) catch unreachable;
-    }
-    fn stackShim(ptr: *anyopaque, win: model.WindowId, s: sync.Stack) void {
-        const self: *Recorder = @ptrCast(@alignCast(ptr));
-        self.ops.append(testing.allocator, .{ .stack = .{ .win = win, .s = s } }) catch unreachable;
-    }
-    fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
-    fn flushShim(_: *anyopaque) void {}
-    fn grabShim(_: *anyopaque) void {}
-    fn ungrabShim(_: *anyopaque) void {}
-
-    fn sink(self: *Recorder) sync.Sink {
-        return .{
-            .ptr = self,
-            .vt = &.{
-                .map = mapShim,
-                .geom = geomShim,
-                .border_width = bwShim,
-                .border_pixel = pixelShim,
-                .park = parkShim,
-                .stack_only = stackShim,
-                .set_ewmh_fullscreen = ewmhShim,
-                .flush = flushShim,
-                .grab_server = grabShim,
-                .ungrab_and_flush = ungrabShim,
-            },
-        };
-    }
-    // ---------------------------------------------------------------------
-
-    fn expectLen(self: *const Recorder, n: usize) !void {
-        try testing.expectEqual(n, self.ops.items.len);
-    }
-
-    fn expectGeom(
-        self: *const Recorder,
-        i: usize,
-        win: model.WindowId,
-        x: i32,
-        y: i32,
-        w: u16,
-        h: u16,
-        stack: ?sync.Stack,
-    ) !void {
-        const op = self.ops.items[i];
-        try testing.expect(op == .geom);
-        try testing.expectEqual(win, op.geom.win);
-        try testing.expectEqual(x, @as(i32, op.geom.rect.x));
-        try testing.expectEqual(y, @as(i32, op.geom.rect.y));
-        try testing.expectEqual(w, op.geom.rect.width);
-        try testing.expectEqual(h, op.geom.rect.height);
-        if (stack) |s| {
-            try testing.expect(op.geom.stack != null);
-            try testing.expectEqual(s, op.geom.stack.?);
-        } else {
-            try testing.expect(op.geom.stack == null);
-        }
-    }
-
-    fn expectPixel(self: *const Recorder, i: usize, win: model.WindowId, p: u32) !void {
-        const op = self.ops.items[i];
-        try testing.expect(op == .pixel);
-        try testing.expectEqual(win, op.pixel.win);
-        try testing.expectEqual(p, op.pixel.p);
-    }
-
-    fn expectBw(self: *const Recorder, i: usize, win: model.WindowId, w: u16) !void {
-        const op = self.ops.items[i];
-        try testing.expect(op == .bw);
-        try testing.expectEqual(win, op.bw.win);
-        try testing.expectEqual(w, op.bw.w);
-    }
-
-    fn expectMap(self: *const Recorder, i: usize, win: model.WindowId) !void {
-        const op = self.ops.items[i];
-        try testing.expect(op == .map);
-        try testing.expectEqual(win, op.map);
-    }
-
-    fn expectPark(self: *const Recorder, i: usize, win: model.WindowId) !void {
-        const op = self.ops.items[i];
-        try testing.expect(op == .park);
-        try testing.expectEqual(win, op.park);
-    }
-};
+const Recorder = helpers.TestSink(.record);
 
 const Fixture = struct {
     m: model.Model,
@@ -198,10 +70,7 @@ const Fixture = struct {
 
 test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-sends nothing" {
     var fx: Fixture = undefined;
-    fx.init(
-        .{ .x = 0, .y = 0, .width = 800, .height = 600 },
-        .{ .x = 0, .y = 0, .width = 800, .height = 600 },
-    );
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 101, null) catch unreachable;
@@ -235,7 +104,7 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-send
 
 test "focus change: delta-sends ONLY the two border pixels, no raise" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 201, null) catch unreachable;
@@ -258,7 +127,7 @@ test "focus change: delta-sends ONLY the two border pixels, no raise" {
 
 test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; exit restores" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 301, null) catch unreachable;
@@ -294,7 +163,7 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
 
 test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 501, null) catch unreachable;
@@ -336,7 +205,7 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
 
 test "minimize parks every pass; restore replays original slot geometry" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 401, null) catch unreachable;
@@ -370,11 +239,11 @@ test "minimize parks every pass; restore replays original slot geometry" {
     try fx.rec.expectGeom(2, 402, 404, 8, 384, 580, null);
 }
 
-// -- Fullscreen -> minimize -> restore -> un-fullscreen (user bug report) ----
+// -- Fullscreen -> minimize -> restore -> un-fullscreen ------------------------
 // The fullscreen-prev window's saved slot must survive restore, ending fully tiled.
 test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 601, null) catch unreachable;
@@ -437,7 +306,7 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
 
 test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark raises" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 501, 0) catch unreachable; // stays here
@@ -462,22 +331,22 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
     // Switch back: 501's ledger kept its rect across the park; returning
     // winner counts as UNPARKED => ABOVE merged into the replay even though
     // the rect itself did not move. 502 parks again.
+    // Delta-send elides pixel/bw: 501's focused color equals the value last
+    // sent on the baseline pass, and nothing since changed it.
     fx.m.current = 0;
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
+    try fx.rec.expectLen(3);
     try fx.rec.expectMap(0, 501);
-    try fx.rec.expectPixel(1, 501, focused_pixel);
-    try fx.rec.expectBw(2, 501, cfg_bw);
-    try fx.rec.expectGeom(3, 501, 8, 8, 780, 580, .above);
-    try fx.rec.expectPark(4, 502);
+    try fx.rec.expectGeom(1, 501, 8, 8, 780, 580, .above);
+    try fx.rec.expectPark(2, 502);
 }
 
 // -- Multi-tag orphan resurface (ledger read #1) ------------------------------
 
 test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 701, null) catch unreachable; // home ws 0
@@ -498,12 +367,10 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     // the mask shows it here - kept at its previous REAL geometry
     // (never parks a window with sent history). Even though it is the
     // fallback winner, the raise stays suppressed: same rect, no transition,
-    // no restack (winner-raise only-on-change, ledger read #2).
-    try fx.rec.expectLen(4);
-    try fx.rec.expectMap(0, 701);
-    try fx.rec.expectPixel(1, 701, focused_pixel);
-    try fx.rec.expectBw(2, 701, cfg_bw);
-    try fx.rec.expectGeom(3, 701, 8, 8, 780, 580, null);
+    // no restack (winner-raise only-on-change, ledger read #2). Delta-send:
+    // the window is already mapped at that rect with that color, so there is
+    // nothing to emit.
+    try fx.rec.expectLen(0);
     try testing.expectEqual(real_rect, sync.lastRectFor(701).?);
 
     // History-less variant: registered here with mask bit for ws 1 but NEVER
@@ -516,12 +383,8 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.m.current = 1;
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 701);
-    try fx.rec.expectPixel(1, 701, focused_pixel);
-    try fx.rec.expectBw(2, 701, cfg_bw);
-    try fx.rec.expectGeom(3, 701, 8, 8, 780, 580, null);
-    try fx.rec.expectPark(4, 702);
+    try fx.rec.expectLen(1);
+    try fx.rec.expectPark(0, 702);
     try testing.expectEqual(@as(?utils.Rect, null), sync.lastRectFor(702));
 }
 
@@ -529,7 +392,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
 
 test "forget clears the sent ledger; next pass treats the window as first sight" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     model.register(&fx.m, 801, null) catch unreachable;
@@ -565,7 +428,7 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
 // when a shared-home-bucket survivor was swap-removed.
 test "ledger index: swap-remove across a shared home bucket does not hit tombstones" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     // x and z differ by the index capacity, so they share a home bucket;
@@ -589,11 +452,70 @@ test "ledger index: swap-remove across a shared home bucket does not hit tombsto
     try testing.expect(sync.sentGet(z) != null);
 }
 
+// Stress the id→slot index: chains of ids sharing a home bucket, removed in
+// shuffle order, must stay consistent (no lost entries, no phantom entries)
+// after every swap-remove + re-insert cycle.
+test "ledger index: swap-remove stress keeps every surviving record findable" {
+    var fx: Fixture = undefined;
+    fx.init(stdWa(), stdWa());
+    defer fx.deinit();
+
+    const base: model.WindowId = 2000;
+    // 48 ids that map into the same 12 home buckets (mod capacity 128), so
+    // every getOrPut probes through a shared chain.
+    const n: usize = 48;
+    var win: [n]model.WindowId = undefined;
+    for (0..n) |i| win[i] = base + @as(model.WindowId, @intCast(i)) * 3;
+
+    for (0..n) |i| {
+        model.register(&fx.m, win[i], null) catch unreachable;
+    }
+    fx.reconcile(.{});
+
+    var present: [n]bool = .{true} ** n;
+    var rng = std.Random.DefaultPrng.init(42);
+    const rand = rng.random();
+
+    // Remove every window one at a time in random order; after each removal,
+    // every still-present window must be findable (and nothing else).
+    var remaining = n;
+    while (remaining > 1) : (remaining -= 1) {
+        // Random survivor to drop this round, then drop it.
+        const pick = rand.intRangeAtMost(usize, 0, remaining - 1);
+        var k: usize = 0;
+        var drop: usize = 0;
+        for (0..n) |i| {
+            if (present[i]) {
+                if (k == pick) {
+                    drop = i;
+                    break;
+                }
+                k += 1;
+            }
+        }
+        present[drop] = false;
+        sync.forget(win[drop]);
+
+        var found: usize = 0;
+        for (0..n) |i| {
+            const e = sync.sentGet(win[i]);
+            if (present[i]) {
+                try testing.expect(e != null);
+                try testing.expectEqual(win[i], e.?.id);
+                found += 1;
+            } else {
+                try testing.expect(e == null);
+            }
+        }
+        try testing.expectEqual(remaining - 1, found);
+    }
+}
+
 // -- Park wire shape ----------------------------------------------------------
 
 test "park: offscreen-X constant, ONE merged request per parked window per pass" {
     var fx: Fixture = undefined;
-    fx.init(stdScreen(), stdWa());
+    fx.init(stdWa(), stdWa());
     defer fx.deinit();
 
     // Production Sink.park folds X-offscreen + BELOW into ONE configure:
@@ -614,21 +536,17 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectGeom(3, 901, 8, 8, 780, 580, .above);
     try fx.rec.expectPark(4, 902);
 
-    // Parks replay every pass (idempotent configure), still one op each.
+    // Steady state: nothing changed since the baseline pass, so delta-send
+    // elides every op (901's map/pixel/bw/geom and 902's park were all sent).
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(5);
-    try fx.rec.expectMap(0, 901);
-    try fx.rec.expectPixel(1, 901, focused_pixel);
-    try fx.rec.expectBw(2, 901, cfg_bw);
-    try fx.rec.expectGeom(3, 901, 8, 8, 780, 580, null);
-    try fx.rec.expectPark(4, 902);
+    try fx.rec.expectLen(0);
 
-    // Minimized windows ride the same single-op park shape.
+    // Minimized windows ride the same single-op park shape. Only 901's park
+    // is new: 902's park was already sent on the baseline pass.
     minimize.minimize(&fx.m, 901) catch unreachable;
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(2);
+    try fx.rec.expectLen(1);
     try fx.rec.expectPark(0, 901);
-    try fx.rec.expectPark(1, 902);
 }

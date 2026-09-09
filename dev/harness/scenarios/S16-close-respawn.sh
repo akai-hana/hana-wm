@@ -1,7 +1,7 @@
 # S16 - close-then-respawn: the model registry must not leak closed windows.
 #
-# Regression gate for fix P0-1 (actions.unmanage was never called; ghosts
-# accumulated in the model store and shifted every later window's slot).
+# Regression gate: actions.unmanage was never called, so ghosts
+# accumulated in the model store and shifted every later window's slot.
 spawn_client A
 spawn_client B
 settle 300

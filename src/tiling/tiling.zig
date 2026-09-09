@@ -6,9 +6,62 @@ const utils = @import("utils");
 const model = @import("model");
 const build_options = @import("build_options");
 
-pub const hints = @import("hints");
-const applyHints = hints.applyHints;
 const plugin = @import("plugin");
+
+/// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
+/// clamp, then aspect clamp (with a re-snap, since a client may declare both).
+/// Declared minimums are intentionally NOT enforced; tiling owns window size,
+/// and honouring them would pin the rect and block mod_h/mod_l resizing.
+pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
+    if (h.isEmpty()) return rect;
+    var width: u16 = rect.width;
+    var height: u16 = rect.height;
+
+    width = snapDimToIncrement(width, 0, h.inc_width);
+    height = snapDimToIncrement(height, 0, h.inc_height);
+
+    if (h.max_width > 0) width = @min(width, h.max_width);
+    if (h.max_height > 0) height = @min(height, h.max_height);
+
+    // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
+    // convention); cross-multiplied to avoid FP division per retile.
+    if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
+        const fw: f32 = @floatFromInt(width);
+        const fh: f32 = @floatFromInt(height);
+        // Clamp to u16 range before narrowing so a huge aspect ratio caps.
+        if (fw > fh * h.max_aspect) {
+            width = clampAspectDim(fh, h.max_aspect, h.inc_width, h.max_width);
+        } else if (fh > fw * h.min_aspect) {
+            height = clampAspectDim(fw, h.min_aspect, h.inc_height, h.max_height);
+        }
+    }
+
+    // Centre the (possibly shrunk) window inside its allocated slot.
+    const dx: i16 = @intCast((rect.width -| width) / 2);
+    const dy: i16 = @intCast((rect.height -| height) / 2);
+    return .{
+        .x = rect.x + dx,
+        .y = rect.y + dy,
+        .width = width,
+        .height = height,
+    };
+}
+
+/// Clamp `other * ratio` (a cross-multiplied aspect product) into u16 range,
+/// snap down to the increment, then cap at `max_dim`.
+inline fn clampAspectDim(other: f32, ratio: f32, inc: u16, max_dim: u16) u16 {
+    const aspect = utils.scaling.roundToU16(other * ratio, 0.0);
+    var dim = snapDimToIncrement(aspect, 0, inc);
+    if (max_dim > 0) dim = @min(dim, max_dim);
+    return dim;
+}
+
+/// Snap `dim` down to the nearest multiple of `inc` above `base`.
+inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
+    if (inc == 0 or dim <= base) return dim;
+    const excess = dim - base;
+    return base + (excess / inc) * inc;
+}
 
 // The layout interchange vocabulary lives on the tiling CONTRACT (plugin.zig)
 // so the always-compiled reconciler can name it even without this tiling engine;
@@ -19,6 +72,12 @@ pub const HintsView = plugin.HintsView;
 pub const Env = plugin.Env;
 pub const View = plugin.View;
 pub const List = plugin.List;
+pub const LayoutCtx = struct {
+    v: *const View,
+    out: *List,
+    m: utils.Margins,
+    min_dim: u16,
+};
 
 /// Prefer `v.focused` when it appears in `windows`, else `fallback`
 /// (verbatim port of layouts.focusedElse).
@@ -115,9 +174,7 @@ const tiling_mods = @import("tiling_modules").modules;
 /// lowercased match on module names.
 pub fn layoutByName(name: []const u8) ?usize {
     if (name.len > 64) return null;
-    var buf: [64]u8 = undefined;
-    const lower = std.ascii.lowerString(buf[0..name.len], name);
-    for (tiling_mods, 0..) |m, i| if (std.mem.eql(u8, lower, m.name)) return i;
+    for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return i;
     return null;
 }
 
@@ -150,7 +207,10 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     var indices: [256]u8 = undefined;
     var n: usize = 0;
     for (names) |nm| if (layoutByName(nm)) |idx| {
-        if (n < indices.len) { indices[n] = @intCast(idx); n += 1; }
+        if (n < indices.len) {
+            indices[n] = @intCast(idx);
+            n += 1;
+        }
     };
     if (n == 0) return cur;
     for (indices[0..n], 0..) |idx, i| if (idx == cur) {

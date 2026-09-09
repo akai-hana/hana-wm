@@ -16,107 +16,18 @@ const model = @import("model");
 const utils = @import("utils");
 const sync = @import("sync");
 const tiling = @import("tiling");
-const linux = std.os.linux;
+const helpers = @import("helpers");
 
-const Model = model.Model;
 const WindowId = model.WindowId;
-const WSId = model.WSId;
 
-fn nowNs() i128 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
-}
+const makeModel = helpers.makeModel;
+const regCur = helpers.regCur;
+const nowNs = helpers.nowNs;
 
-fn makeModel() Model {
-    return .{};
-}
+const CountingSink = helpers.TestSink(.category);
 
-fn regCur(m: *Model, win: WindowId) void {
-    model.register(m, win, null) catch unreachable;
-}
-
-const CountingSink = struct {
-    map: usize = 0,
-    park: usize = 0,
-    geom: usize = 0,
-    bw: usize = 0,
-    pixel: usize = 0,
-    total: usize = 0,
-    grab: usize = 0,
-
-    fn mapShim(self_ptr: *anyopaque, _: model.WindowId) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.map += 1;
-        s.total += 1;
-    }
-    fn geomShim(self_ptr: *anyopaque, _: model.WindowId, _: utils.Rect, _: ?sync.Stack) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.geom += 1;
-        s.total += 1;
-    }
-    fn bwShim(self_ptr: *anyopaque, _: model.WindowId, _: u16) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.bw += 1;
-        s.total += 1;
-    }
-    fn pixelShim(self_ptr: *anyopaque, _: model.WindowId, _: u32) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.pixel += 1;
-        s.total += 1;
-    }
-    fn parkShim(self_ptr: *anyopaque, _: model.WindowId) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.park += 1;
-        s.total += 1;
-    }
-    fn stackShim(_: *anyopaque, _: model.WindowId, _: sync.Stack) void {}
-    fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
-    fn flushShim(_: *anyopaque) void {}
-    fn grabShim(self_ptr: *anyopaque) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.grab += 1;
-    }
-    fn ungrabShim(_: *anyopaque) void {}
-
-    fn reset(self: *CountingSink) void {
-        self.* = .{};
-    }
-
-    fn sink(self: *CountingSink) sync.Sink {
-        return .{
-            .ptr = self,
-            .vt = &.{
-                .map = mapShim,
-                .geom = geomShim,
-                .border_width = bwShim,
-                .border_pixel = pixelShim,
-                .park = parkShim,
-                .stack_only = stackShim,
-                .set_ewmh_fullscreen = ewmhShim,
-                .flush = flushShim,
-                .grab_server = grabShim,
-                .ungrab_and_flush = ungrabShim,
-            },
-        };
-    }
-};
-
-fn colorOfFocused(win: WindowId, m: *const Model) u32 {
-    return if (m.focused == win) 1 else 0;
-}
-
-fn makeCtx(sink: *CountingSink) sync.Ctx {
-    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
-    return .{
-        .sink = sink.sink(),
-        .screen = screen,
-        .workarea = screen,
-        .cfg_bw = 2,
-        .color_of = colorOfFocused,
-        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
-    };
-}
+const colorOfFocused = helpers.colorOfFocused;
+const makeCtx = helpers.makeCtx;
 
 // Reconcile CPU cost + request count scaling with window count, all windows
 // on ONE workspace (the realistic many-window tiling case).
@@ -131,13 +42,13 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
 
         // Warm: seed steady-state ledger (delta-send from here on).
         var warm = CountingSink{};
-        var warm_ctx = makeCtx(&warm);
+        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
         sync.reconcile(&m, &warm_ctx, .{});
 
         // CPU cost of one steady-state reconcile pass (all desire compute +
         // ledger scans; sends mostly elided by delta-send).
         var bench = CountingSink{};
-        var bench_ctx = makeCtx(&bench);
+        var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
         const iterations: usize = 5_000;
         const t0 = nowNs();
         for (0..iterations) |_| sync.reconcile(&m, &bench_ctx, .{});
@@ -146,7 +57,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         // What a single CHANGED pass costs: flip the layout kind so every
         // rect changes -> geometry requests sent for every visible window.
         var move = CountingSink{};
-        var move_ctx = makeCtx(&move);
+        var move_ctx = makeCtx(move.sink(), colorOfFocused);
         m.ws[m.current].params.kind = 1;
         const t1 = nowNs();
         sync.reconcile(&m, &move_ctx, .{});
@@ -179,11 +90,11 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         defer sync.deinit();
 
         var warm = CountingSink{};
-        var warm_ctx = makeCtx(&warm);
+        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
         sync.reconcile(&m, &warm_ctx, .{});
 
         var bench = CountingSink{};
-        var bench_ctx = makeCtx(&bench);
+        var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
         const iterations: usize = 5_000;
         const t0 = nowNs();
         for (0..iterations) |_| sync.reconcile(&m, &bench_ctx, .{});
@@ -235,10 +146,10 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 
     var warm = CountingSink{};
-    var warm_ctx = makeCtx(&warm);
+    var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
     sync.reconcile(&m, &warm_ctx, .{});
     var bench = CountingSink{};
-    var bench_ctx = makeCtx(&bench);
+    var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
     const t1 = nowNs();
     const iters2: usize = 5_000;
     for (0..iters2) |_| sync.reconcile(&m, &bench_ctx, .{});
@@ -263,11 +174,11 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         defer sync.deinit();
 
         var warm = CountingSink{};
-        var warm_ctx = makeCtx(&warm);
+        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
         sync.reconcile(&m, &warm_ctx, .{});
 
         var sink = CountingSink{};
-        var ctx = makeCtx(&sink);
+        var ctx = makeCtx(sink.sink(), colorOfFocused);
         m.ws[m.current].params.kind = 1;
         ctx.sink.grabServer();
         sync.reconcile(&m, &ctx, .{});

@@ -19,7 +19,6 @@
 //! src/window/modules/ and `zig build test` stays green — that is the
 //! contract's litmus test.
 //!
-//! The full contract + onboarding guide lives in PLUGIN_PROVIDER.md.
 
 const std = @import("std");
 const constants = @import("constants");
@@ -87,7 +86,7 @@ pub fn deinit() void {
 /// Per-window teardown, dispatched by the wire layer after model.unregister
 /// (the model itself stays feature-free and never names this module). DROP
 /// every record for `win` here — a dangling record is how recycled XIDs
-/// inherit stale state (the T12 test class).
+/// inherit stale state.
 pub fn onWindowGone(win: u32) void {
     if (findRec(win)) |idx| {
         g_recs[idx] = g_recs[g_len - 1];
@@ -109,10 +108,10 @@ pub fn onWindowGone(win: u32) void {
 /// presence == .present and I have a record" — so the sets can never
 /// overlap regardless of registry order.
 ///
-/// The model arrives as `*anyopaque` so this seam stays free of a model
-/// type at the contract boundary; cast it back on this side.
-pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
-    const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
+/// The model arrives as a READ-ONLY `*const model.Model` (serialization
+/// never mutates; writing through it is a compile error, and persist does
+/// NOT @constCast across this seam). No cast needed on this side.
+pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const idx = findRec(win) orelse return null;
     // Presence-driven exclusivity (see ownership rule above). TODO: pick the
     // presence values your feature owns (here: only .present windows).
@@ -189,7 +188,7 @@ pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
 
 // ---------------------------------------------------------------------------
 // Feature-to-feature interaction (when your feature must ask another one).
-// Two hard rules (see PLUGIN_PROVIDER.md §5):
+// Two hard rules:
 //   1. `@import("otherfeature")` may appear ONLY inside a function body,
 //      gated by `if (build_options.has_otherfeature)`. Never in a signature,
 //      a top-level declaration, or a struct type.

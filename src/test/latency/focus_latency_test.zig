@@ -16,90 +16,20 @@
 
 const std = @import("std");
 const model = @import("model");
-const utils = @import("utils");
 const sync = @import("sync");
-const linux = std.os.linux;
+const helpers = @import("helpers");
 
-const Model = model.Model;
-const WindowId = model.WindowId;
+const nowNs = helpers.nowNs;
 
-fn nowNs() i128 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
-}
+const makeModel = helpers.makeModel;
 
-fn makeModel() Model {
-    return .{};
-}
+const regCur = helpers.regCur;
 
-fn regCur(m: *Model, win: WindowId) void {
-    model.register(m, win, null) catch unreachable;
-}
+const CountingSink = helpers.TestSink(.count);
 
-const CountingSink = struct {
-    count: usize = 0,
+const colorOfFocused = helpers.colorOfFocused;
 
-    fn mapShim(self_ptr: *anyopaque, _: model.WindowId) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.count += 1;
-    }
-    fn geomShim(self_ptr: *anyopaque, _: model.WindowId, _: utils.Rect, _: ?sync.Stack) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.count += 1;
-    }
-    fn bwShim(self_ptr: *anyopaque, _: model.WindowId, _: u16) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.count += 1;
-    }
-    fn pixelShim(self_ptr: *anyopaque, _: model.WindowId, _: u32) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.count += 1;
-    }
-    fn parkShim(self_ptr: *anyopaque, _: model.WindowId) void {
-        const s: *CountingSink = @ptrCast(@alignCast(self_ptr));
-        s.count += 1;
-    }
-    fn stackShim(_: *anyopaque, _: model.WindowId, _: sync.Stack) void {}
-    fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
-    fn flushShim(_: *anyopaque) void {}
-    fn grabShim(_: *anyopaque) void {}
-    fn ungrabShim(_: *anyopaque) void {}
-
-    fn sink(self: *CountingSink) sync.Sink {
-        return .{
-            .ptr = self,
-            .vt = &.{
-                .map = mapShim,
-                .geom = geomShim,
-                .border_width = bwShim,
-                .border_pixel = pixelShim,
-                .park = parkShim,
-                .stack_only = stackShim,
-                .set_ewmh_fullscreen = ewmhShim,
-                .flush = flushShim,
-                .grab_server = grabShim,
-                .ungrab_and_flush = ungrabShim,
-            },
-        };
-    }
-};
-
-fn colorOfFocused(win: WindowId, m: *const Model) u32 {
-    return if (m.focused == win) 1 else 0;
-}
-
-fn makeCtx(sink: *CountingSink) sync.Ctx {
-    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
-    return .{
-        .sink = sink.sink(),
-        .screen = screen,
-        .workarea = screen,
-        .cfg_bw = 2,
-        .color_of = colorOfFocused,
-        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
-    };
-}
+const makeCtx = helpers.makeCtx;
 
 // Reconcile cost scaling with window count + the number of wire requests a
 // single focus change issues (reconcile replays every window unconditionally).
@@ -113,12 +43,12 @@ test "latency: reconcile cost + request count at focus change" {
 
         // Steady-state pass with a live counter (populates the ledger once).
         var warm = CountingSink{};
-        var warm_ctx = makeCtx(&warm);
+        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
         sync.reconcile(&m, &warm_ctx, .{});
 
         // Measure CPU cost of one reconcile pass.
         var bench = CountingSink{};
-        var bench_ctx = makeCtx(&bench);
+        var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
         const iterations: usize = 5_000;
         const t0 = nowNs();
         for (0..iterations) |_| sync.reconcile(&m, &bench_ctx, .{});
@@ -126,7 +56,7 @@ test "latency: reconcile cost + request count at focus change" {
 
         // Count requests in one representative pass (fresh sink).
         var probe = CountingSink{};
-        var probe_ctx = makeCtx(&probe);
+        var probe_ctx = makeCtx(probe.sink(), colorOfFocused);
         sync.reconcile(&m, &probe_ctx, .{});
 
         std.debug.print(
@@ -154,15 +84,15 @@ test "latency: Mod+k focus + redundant viewport-snap reconcile" {
     sync.init();
     defer sync.deinit();
 
-    const warm = CountingSink{};
-    var warm_ctx = makeCtx(@constCast(&warm));
+    var warm = CountingSink{};
+    var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
     sync.reconcile(&m, &warm_ctx, .{});
 
     const iters: usize = 5_000;
 
     // Phase 1: the focus transition reconcile.
     var s1 = CountingSink{};
-    var c1 = makeCtx(&s1);
+    var c1 = makeCtx(s1.sink(), colorOfFocused);
     model.setFocus(&m, 2);
     const t0 = nowNs();
     for (0..iters) |_| {
@@ -176,7 +106,7 @@ test "latency: Mod+k focus + redundant viewport-snap reconcile" {
     // Mod+k; with the snap-skip optimization the real path returns early here,
     // so the redundant pass is zeroed out for the on-screen common case.
     var s2 = CountingSink{};
-    var c2 = makeCtx(&s2);
+    var c2 = makeCtx(s2.sink(), colorOfFocused);
     const t1 = nowNs();
     for (0..iters) |_| sync.reconcile(&m, &c2, .{});
     const snap_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters));

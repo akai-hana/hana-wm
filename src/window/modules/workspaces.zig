@@ -34,16 +34,6 @@ pub const State = struct {
 
 var g_state: ?State = null;
 
-/// Last matching override wins: duplicate entries for one workspace now
-/// resolve identically across ALL per-ws fields.
-fn lookupVariant(cfg_tiling: *const types.TilingConfig, id: u8) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (cfg_tiling.workspace_layout_overrides.items) |o| {
-        if (o.workspace_idx == id) found = o.variant;
-    }
-    return found;
-}
-
 /// Applies per-workspace master-count/variant overrides from `cfg_tiling`.
 ///
 /// `primary_width` and `secondary_balance` have no config-file representation;
@@ -55,13 +45,17 @@ pub fn applyWorkspaceOverrides(
 ) void {
     const max_ws = constants.max_workspaces;
 
-    // Last-wins (loop-overwrite) master-count lookup (shared with the core
-    // seed path; the rule lives on TilingConfig.masterCountLookup).
+    // Last-wins (loop-overwrite) lookups, shared with the core seed path;
+    // the rules live on TilingConfig.
+    const layout_lookup = cfg_tiling.workspaceLayoutLookup();
     const master_count_lookup = cfg_tiling.masterCountLookup();
 
     for (wss) |*ws| {
         const id = ws.id;
-        ws.variants = if (id < max_ws) lookupVariant(cfg_tiling, id) else null;
+        ws.variants = if (id < max_ws)
+            if (layout_lookup[id]) |oi| cfg_tiling.workspace_layout_overrides.items[oi].variant else null
+        else
+            null;
         ws.master_count = if (id < max_ws) master_count_lookup[id] else null;
     }
 }

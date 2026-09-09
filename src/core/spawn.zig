@@ -84,7 +84,7 @@ const spawn_msg_max: usize = pid_msg_len + 1;
 /// Lifecycle state for a single double-fork spawn.
 const PendingSpawn = struct {
     pid: c_int, // PID of intermediate child; used for targeted waitpid.
-    spawn_fd: c_int, // Read end of the spawn pipe (O_NONBLOCK). -1 once done.
+    spawn_fd: ?c_int, // Read end of the spawn pipe (O_NONBLOCK). null once done.
     buf: [spawn_msg_max]u8 = undefined, // Accumulates bytes until the conversation ends.
     len: usize = 0, // Valid bytes accumulated in buf so far.
     spawn_ws: ?u8, // Target workspace for window.registerSpawn.
@@ -166,26 +166,26 @@ pub fn drainPendingSpawns() void {
     while (i < g_pending.len) {
         const entry = &g_pending.slice()[i];
 
-        if (entry.spawn_fd >= 0) {
-            const n = c.read(entry.spawn_fd, &entry.buf[entry.len], entry.buf.len - entry.len);
+        if (entry.spawn_fd) |fd| {
+            const n = c.read(fd, &entry.buf[entry.len], entry.buf.len - entry.len);
             if (n > 0) {
                 entry.len += @intCast(n);
                 if (entry.len == entry.buf.len) {
                     // Buffer full: both possible messages have necessarily
                     // arrived already; no need to wait for EOF too.
-                    _ = c.close(entry.spawn_fd);
-                    entry.spawn_fd = -1;
+                    _ = c.close(fd);
+                    entry.spawn_fd = null;
                 }
             } else if (n < 0 and std.posix.errno(n) == .AGAIN) {
                 // Not ready yet; retry on the next call.
             } else {
                 // EOF (n == 0) or a hard read error: conversation is over.
-                _ = c.close(entry.spawn_fd);
-                entry.spawn_fd = -1;
+                _ = c.close(fd);
+                entry.spawn_fd = null;
             }
         }
 
-        if (entry.spawn_fd >= 0) {
+        if (entry.spawn_fd != null) {
             i += 1;
             continue;
         }

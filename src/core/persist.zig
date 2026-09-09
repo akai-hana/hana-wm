@@ -1,5 +1,5 @@
-//! WM state hand-off across a re-exec (see restart.zig for the trigger/exec
-//! machinery).
+//! WM state hand-off across a re-exec (see the restart module for the
+//! trigger/exec machinery).
 //!
 //! Pure serialize/deserialize of the model to a temp file: no X11 traffic.
 //! save() dumps the model; the booting process loadToGlobal()s the file and
@@ -31,7 +31,7 @@ const model = @import("model");
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
-/// scenario matrix removes src/tiling entirely).
+/// scenario matrix removes the tiling subsystem entirely).
 const tiling_mods = @import("plugin").tiling_mods;
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
@@ -115,12 +115,14 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
         // Opaque feature blob: ask each module in registry order whether it
         // owns this window; the first module that returns bytes claims it.
         // `blob` memory is allocator-owned and freed by the caller (below).
-        // The model is handed across the seam as *anyopaque so the module
-        // layer can read presence while serializing (parked-only claims).
+        // The model is handed across the seam AS-IS (a `*const` handle --
+        // serialization never mutates, and the contract type is const so this
+        // save path can't even @constCast: writing through it is a compile
+        // error).
         var blob: ?[]const u8 = null;
         for (window_mods) |mod| {
             if (mod.serializeWindow) |f| {
-                if (f(@constCast(m), item.key, allocator)) |b| {
+                if (f(m, item.key, allocator)) |b| {
                     blob = b;
                     break;
                 }
@@ -178,10 +180,10 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     // name, so we never write through a planted entry. A stale temp left by a
     // crashed run is the one legitimate occupant; remove it and retry once.
     const file = blk: {
-        const attempt = createTmpExclusive(io, tmp) catch |err| switch (err) {
+        const attempt = std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 std.Io.Dir.deleteFileAbsolute(io, tmp) catch {};
-                break :blk try createTmpExclusive(io, tmp);
+                break :blk try std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true });
             },
             else => return err,
         };
@@ -189,19 +191,9 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     };
     defer file.close(io);
     try file.writeStreamingAll(io, al.items);
-    // fsync the temp file before renaming it into place so its content is
-    // flushed to disk. Otherwise the directory entry can point at unflushed
-    // page-cache data, and a power-loss can leave a truncated restore file.
-    try file.sync(io);
     // POSIX rename replaces the name while the fd stays open; the defer's
     // close lands after the rename moved the temp into place.
     try std.Io.Dir.renameAbsolute(tmp, path, io);
-}
-
-/// Opens `path` for writing, creating it exclusively so a pre-existing
-/// symlink or hardlink at the name is rejected (O_EXCL) rather than followed.
-fn createTmpExclusive(io: std.Io, path: []const u8) std.Io.File.OpenError!std.Io.File {
-    return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
 }
 
 /// Parses the restore file into the module-global `loaded`. Returns false

@@ -2,16 +2,16 @@
 //! Creates and manages the WM status bar, rendering all configured segments.
 //!
 //! Rendering uses per-segment dirty tracking: the dirty set is registry-sized
-//! (one bool per bar_modules entry, D13); only dirty segments are repainted on
+//! (one bool per bar_modules entry); only dirty segments are repainted on
 //! each draw. The global force flag or a full dirty set triggers a complete
 //! background clear + repaint. Coalescing happens through the dirty-mark
 //! scheduling (scheduleRedraw & friends).
 //!
-//! Bar segments are an open, drop-in addon set (D3/B3): the build generates the
+//! Bar segments are an open, drop-in addon set: the build generates the
 //! `bar_modules.modules` registry and this orchestrator owns NO segment logic.
 //! Lifecycle/polls/draw/width/click/prompt-extras are all driven by uniform
 //! loops over that registry, dispatching through the Segment contract. The bar
-//! never names a specific segment module (D9/D10): services flow one-way
+//! never names a specific segment module: services flow one-way
 //! through `segmod.BarHandlers`, the prompt overlay lives in the title module,
 //! and reverse edges are resolved through the registry.
 
@@ -34,6 +34,8 @@ const focus = @import("focus");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const model = @import("model");
+const sync = @import("sync");
+const wincache = @import("wincache");
 
 const window = @import("window");
 
@@ -46,7 +48,7 @@ const visibility = @import("visibility");
 
 // Window-addon registry (generated): the fullscreen-hide decision is routed
 // through the isWindowHidden/collectHiddenSet seams instead of naming the
-// minimize or fullscreen module directly (D12).
+// minimize or fullscreen module directly.
 const window_mods = @import("window_modules").modules;
 
 // Registry-resolved segment identity (comptime): the bar locates modules by
@@ -163,7 +165,7 @@ pub fn pollTimeoutMs() i32 {
     // whose offset only advances inside a draw). Suppress all deadlines while
     // hidden; the next visibility transition re-arms them.
     if (gBar.state) |s| {
-        if (!s.is_visible) return -1;
+        if (!s.vis.shown) return -1;
     }
     var timeout: i32 = -1;
     for (bar_mods) |m| {
@@ -186,7 +188,7 @@ pub fn chromeHandleKeypress(
 
 /// Toggles the chrome overlay. Routed through the resolved title module's
 /// onClick hook (right-click path): the overlay lives in the title module
-/// (D9) and the bar must not name it.
+/// and the bar must not name it.
 pub fn chromeToggleOverlay() void {
     const s = gBar.state orelse return;
     if (center_slot_role) |tid| {
@@ -199,28 +201,16 @@ pub fn chromeToggleOverlay() void {
 /// thread; no mutex protection required.
 const Bar = struct {
     state: ?*State = null,
-    /// Forces the next draw to re-fetch title data (per-window titles +
-    /// geometries, focused title) even when the cheap change-detection keys
-    /// say nothing changed. Set by expose/reload/show/property-notify paths;
-    /// normal ticks just redraw from live state. Consumed by every draw.
+    /// Forces the next draw to repaint every segment (full background clear)
+    /// even when the change-detection keys say nothing changed. Set by
+    /// expose/reload/show paths; normal ticks just redraw from live state.
+    /// Consumed by every draw.
     force: bool = false,
     /// True when presentForPrompt() had to map an otherwise-hidden bar (e.g.
     /// hidden by a fullscreen window, or by the user toggling it off) purely
     /// so the inline prompt would be visible. dismissAfterPrompt() checks this
     /// to know whether hiding the bar again is part of "returning to normal".
     prompt_forced_visible: bool = false,
-    /// When set, the next draw skips the title-data refetch (focused title
-    /// + batched titles/geometries) and uses whatever was last cached. Set
-    /// by the bar-toggle show path so the initial frame avoids blocking on
-    /// XCB property reads; cleared after the first draw so the next event
-    /// batch picks up fresh titles.
-    skip_title_refetch: bool = false,
-    /// Set when title text data has actually changed (property-notify on the
-    /// focused window). The batched title/geometry refetch is only needed
-    /// when the WINDOW SET changed (fetch_dirty) or title data changed
-    /// (this flag), not on every `force` redraw. Expose-only redraws are
-    /// pixel-only and skip the blocking XCB property reads.
-    title_data_changed: bool = false,
 };
 
 var gBar: Bar = .{};
@@ -239,7 +229,6 @@ const WindowCtx = struct {
     conn: core.Connection,
     win_id: u32,
     colormap: u32,
-    net_wm_name_atom: xcb.xcb_atom_t,
 
     fn deinit(self: *WindowCtx) void {
         if (self.colormap != 0) _ = xcb.xcb_free_colormap(self.conn, self.colormap);
@@ -283,34 +272,53 @@ const SegBound = struct {
     }
 };
 
-/// All live bar state. The title-data scratch below is refetched only when
-/// its tiny change-detection key (window ids + minimized flags) changes or a
-/// draw is forced; every other field is recomputed per frame.
-const State = struct {
-    win: WindowCtx,
-    render: RenderCtx,
+/// All live bar state. The title-window scratch below is rebuilt every frame
+/// from in-process caches (no X11, nothing to refetch); every other field is
+/// recomputed per frame.
+///
+/// State is plain data owned by this file alone: the poll-driven loop reads
+/// and mutates it directly, and segments receive only per-segment sub-views
+/// (via the DrawCtx), never State itself.
+const Visibility = struct {
+    /// Asked-to-be-shown; cleared by the per-segment empty checks.
+    shown: bool = true,
+    /// Shown-ness after the fullscreen sink reported every screen occupied:
+    /// the bar must hide even though no segment requested a hide.
+    preferred: bool = true,
+};
 
-    is_visible: bool = true,
-    is_globally_visible: bool = true,
-    is_dirty: bool = false,
+const Dirty = struct {
+    /// Whole-bar redraw requested (a fact revision or forced draw).
+    flag: bool = false,
     /// Per-segment dirty flags, one per entry in the generated bar_modules
-    /// registry (D13). When set, the segment is repainted on the next draw;
+    /// registry. When set, the segment is repainted on the next draw;
     /// cleared after painting. Every segment starts dirty so the first draw
     /// is a full redraw.
-    segment_dirty: [bar_mods.len]bool = @splat(true),
+    segments: [bar_mods.len]bool = @splat(true),
+    /// Left edge (inclusive) of the current draw's dirty span: the bounding
+    /// x/w of every repainted segment + gap, tracked by extendDirtySpan so
+    /// flushRender copies only the changed region.
+    span_x: u16 = 0,
+    /// Width of the current draw's dirty span. 0 means "whole bar".
+    span_w: u16 = 0,
+};
 
+const Clock = struct {
     /// Reserved width of the clock segment (measure string + padding).
-    clock_width: u16 = 0,
+    width: u16 = 0,
     /// Left edge of the clock from the last layout pass; enables the
     /// region-scoped clock blit in drawClockOnly.
-    clock_x: ?u16 = null,
+    x: ?u16 = null,
+};
 
+const Clicks = struct {
     /// Click bounds recorded by the last layout pass, in record order.
     bounds: [max_click_bounds]SegBound = undefined,
-    bounds_len: usize = 0,
+    len: usize = 0,
+};
 
-    // -- Live frame state (recollected on every draw; see scanLiveFrame) --
-
+/// Live frame state (recollected on every draw; see scanLiveFrame).
+const FrameState = struct {
     ws_count: u32 = 0,
     current_ws: u8 = 0,
     all_view: bool = false,
@@ -319,62 +327,58 @@ const State = struct {
     wins_len: usize = 0,
     /// Per-frame title rendering context from the last draw, reused for
     /// post-draw click hit-testing (backing buffers are stable for the rest
-    /// of the event-loop batch: any title-data refetch redraws before the
-    /// next dispatch).
+    /// of the event-loop batch: they live on State, and nothing reallocates
+    /// them between draws).
     last_ctx: segmod.DrawCtx = undefined,
+};
 
-    // -- Title data scratch --
-
-    /// Change-detection key for the batched prefetch: the current
-    /// workspace's window ids plus their minimized membership. Compared
-    /// against the previous frame's key; a mismatch is what triggers the
-    /// (blocking) X11 batch refetch.
-    fetch_key_ids: [max_frame_windows]u32 = undefined,
-    fetch_key_minimized: [max_frame_windows]bool = undefined,
-    fetch_key_len: usize = 0,
-    fetch_key_valid: bool = false,
-    /// Set by scanLiveFrame when the key changed since the stored key.
-    fetch_dirty: bool = false,
-
+/// Title-data scratch: the current workspace's window title/geometry values
+/// for the frame plus the minimized-set service. Titles are read from the
+/// WM-owned title cache (wincache.peekTitle) and stale never: no async
+/// fetch, no positional slot, no X11 in the draw path.
+const TitleScratch = struct {
     minimized: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Title addon's minimized-state service, cached from the DrawCtx after
     /// the first draw so scanLiveFrame can synthesize the set each frame
-    /// without bar.zig naming the minimize addon (D12).
+    /// without bar.zig naming the minimize addon.
     minimized_api: segmod.MinimizedApi = .{},
-    /// Title-string arena: every slice in `titles_buf` points into it, so a
-    /// refetch reclaims all strings with one reset (capacity retained).
-    titles_arena: std.heap.ArenaAllocator = undefined,
-    /// Batched per-window prefetch scratch (see segmod.fetchTitlesAndGeoms),
-    /// valid in [0, fetched_len) until the next refetch. Failed geometry
-    /// replies are padded with the off-screen sentinel at refetch time.
+    /// Per-window titles/geoms for the current frame, filled by fillDrawCtx
+    /// from the title cache and the sync truth-rect (never the wire). Valid
+    /// in [0, frame.wins_len) for the frame; the DrawCtx's title snapshot
+    /// points into them and click hit-testing reuses them after the draw.
     titles_buf: [max_frame_windows][]const u8 = undefined,
     geoms_buf: [max_frame_windows]?utils.Rect = undefined,
-    fetched_len: usize = 0,
-    /// An in-flight asynchronously-fired title/geometry prefetch. When set,
-    /// the current frame is drawn with the last-fetched (stale) titles/geoms
-    /// and the batch's replies are collected on a later event-loop pass (see
-    /// refreshTitleData/commitPendingPrefetch). Null when no fetch is
-    /// outstanding.
-    pending_prefetch: ?segmod.PendingPrefetch = null,
-    focused_title: std.ArrayListUnmanaged(u8) = .empty,
-    /// Window the focused_title buffer was fetched for (null = never/stale).
-    focused_title_window: ?u32 = null,
+};
 
-    // -- Last-seen core fact revisions (see core.Facts) --
-
-    /// Last focus_rev we diffed in updateIfDirty. A change marks the title
-    /// segment dirty (cheap). Initialized sentinel so the first update draws.
-    last_focus_rev: u32 = std.math.maxInt(u32),
+/// Last-seen core fact revisions (see core.Facts). Each is diffed against the
+/// live core fact in updateIfDirty; a mismatch marks segments dirty (cheap)
+/// or forces a full redraw. Initialized to the sentinel so the first update
+/// draws.
+const Facts = struct {
+    /// Last focus_rev we diffed. A change marks the title segment dirty.
+    focus_rev: u32 = std.math.maxInt(u32),
     /// Last window_rev we diffed. A change marks all segments dirty (the
     /// workspaces/title segments reflect window & workspace state).
-    last_window_rev: u32 = std.math.maxInt(u32),
-    /// Last layout_rev we diffed. A change forces a full redraw (all segments
-    /// + a title-data refetch).
-    last_layout_rev: u32 = std.math.maxInt(u32),
+    window_rev: u32 = std.math.maxInt(u32),
+    /// Last layout_rev we diffed. A change forces a full redraw (all segments).
+    layout_rev: u32 = std.math.maxInt(u32),
     /// Last fullscreen_rev we diffed. A change means fullscreen occupancy of
     /// the current workspace changed; the bar recomputes its forced hidden/
     /// shown state (shared-screen reaction) from the core fact.
-    last_fullscreen_rev: u32 = std.math.maxInt(u32),
+    fullscreen_rev: u32 = std.math.maxInt(u32),
+};
+
+const State = struct {
+    win: WindowCtx,
+    render: RenderCtx,
+
+    vis: Visibility = .{},
+    dirty: Dirty = .{},
+    clock: Clock = .{},
+    clicks: Clicks = .{},
+    frame: FrameState = .{},
+    title_data: TitleScratch = .{},
+    facts: Facts = .{},
 
     fn init(
         allocator: std.mem.Allocator,
@@ -399,7 +403,6 @@ const State = struct {
                 .conn = conn,
                 .win_id = win_id,
                 .colormap = colormap,
-                .net_wm_name_atom = utils.getAtomCached("_NET_WM_NAME") catch 0,
             },
             .render = .{
                 .dc = dc,
@@ -408,18 +411,14 @@ const State = struct {
                 .height = height,
                 .allocator = allocator,
             },
-            .clock_width = clock_width,
+            .clock = .{ .width = clock_width },
         };
-        s.titles_arena = std.heap.ArenaAllocator.init(allocator);
         // Partial-failure mirror of deinit(); the caller's errdefers own the
         // window+colormap and the dc.
         errdefer {
-            s.minimized.deinit(allocator);
-            s.focused_title.deinit(allocator);
-            s.titles_arena.deinit();
+            s.title_data.minimized.deinit(allocator);
             allocator.destroy(s);
         }
-        try s.focused_title.ensureTotalCapacity(allocator, 256);
         // Width caches for size-varying segments (workspaces/layout/variants)
         // are invalidated per bar creation via their uniform invalidate hooks.
         runVoidHook("invalidate");
@@ -429,28 +428,42 @@ const State = struct {
     fn deinit(self: *State) void {
         self.win.deinit();
         const alloc = self.render.allocator;
-        self.minimized.deinit(alloc);
-        self.focused_title.deinit(alloc);
-        self.titles_arena.deinit();
+        self.title_data.minimized.deinit(alloc);
         alloc.destroy(self);
     }
 
     fn markDirty(self: *State) void {
-        self.is_dirty = true;
+        self.dirty.flag = true;
         self.markAllSegmentsDirty();
     }
 
     fn clearSegmentDirty(self: *State, name: []const u8) void {
-        if (segId(name)) |id| self.segment_dirty[id] = false;
+        if (segId(name)) |id| self.dirty.segments[id] = false;
+    }
+
+    /// Extends the current draw's dirty span to cover [x, x + w).
+    /// Called for every repainted segment + gap so the blit copies only
+    /// the region that actually changed.
+    inline fn extendDirtySpan(self: *State, x: u16, w: u16) void {
+        if (w == 0) return;
+        if (self.dirty.span_w == 0) {
+            self.dirty.span_x = x;
+            self.dirty.span_w = w;
+        } else {
+            const end = self.dirty.span_x + self.dirty.span_w;
+            const new_end = x + w;
+            if (x < self.dirty.span_x) self.dirty.span_x = x;
+            if (new_end > end) self.dirty.span_w = new_end - self.dirty.span_x;
+        }
     }
 
     /// Marks dirty every segment whose declared `dirty_sources` has bit
     /// `source` set, and flags the bar dirty. Name-free: the bit masks are a
     /// declared contract capability, not a name-keyed lookup.
     fn markDirtySource(self: *State, source: segmod.DirtySourcesSource) void {
-        self.is_dirty = true;
+        self.dirty.flag = true;
         for (bar_mods, 0..) |m, i| {
-            if (segmod.hasSource(m.dirty_sources, source)) self.segment_dirty[i] = true;
+            if (segmod.hasSource(m.dirty_sources, source)) self.dirty.segments[i] = true;
         }
     }
 
@@ -461,20 +474,20 @@ const State = struct {
     /// not skip it). Uniform: resolved by registry, never by segment name.
     fn isSegmentRepaintable(self: *const State, name: []const u8) bool {
         const id = segId(name) orelse return false;
-        if (self.segment_dirty[id]) return true;
+        if (self.dirty.segments[id]) return true;
         if (bar_mods[id].needsRepaint) |q| return q();
         return false;
     }
 
     fn markAllSegmentsDirty(self: *State) void {
-        @memset(&self.segment_dirty, true);
+        @memset(&self.dirty.segments, true);
     }
 
     /// True when every registry slot is dirty (the complete-background-clear
     /// trigger). Non-configured segments (e.g. the prompt overlay) are never
     /// drawn and never cleared, so an all-dirty set only occurs on force.
     fn isFullDirty(self: *const State) bool {
-        for (self.segment_dirty) |d| {
+        for (self.dirty.segments) |d| {
             if (!d) return false;
         }
         return true;
@@ -487,13 +500,13 @@ const State = struct {
     fn recordClickBound(self: *State, name: []const u8, x: u16, w: u16) void {
         const id = segId(name) orelse return;
         if (!bar_mods[id].clickable) return;
-        if (self.bounds_len >= max_click_bounds) return;
-        self.bounds[self.bounds_len] = .{ .name = name, .x = x, .w = w };
-        self.bounds_len += 1;
+        if (self.clicks.len >= max_click_bounds) return;
+        self.clicks.bounds[self.clicks.len] = .{ .name = name, .x = x, .w = w };
+        self.clicks.len += 1;
     }
 
     fn recordedBound(self: *const State, name: []const u8) ?SegBound {
-        for (self.bounds[0..self.bounds_len]) |b| {
+        for (self.clicks.bounds[0..self.clicks.len]) |b| {
             if (std.mem.eql(u8, b.name, name)) return b;
         }
         return null;
@@ -512,7 +525,7 @@ const State = struct {
     /// naturalWidth hook, or 0 for an unknown/removed segment name.
     fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, name: []const u8) u16 {
         const id = segId(name) orelse return 0;
-        if (bar_mods[id].naturalWidth) |nw| return nw(frame, self.clock_width);
+        if (bar_mods[id].naturalWidth) |nw| return nw(frame, self.clock.width);
         return 0;
     }
 
@@ -520,55 +533,62 @@ const State = struct {
     /// draw hook, including the title snapshot slots.
     fn fillDrawCtx(self: *State, ctx: *segmod.DrawCtx) void {
         ctx.frame = .{
-            .workspace_count = self.ws_count,
-            .current_workspace = self.current_ws,
-            .is_all_view_active = self.all_view,
-            .workspace_has_windows = self.ws_has_windows[0..self.ws_count],
+            .workspace_count = self.frame.ws_count,
+            .current_workspace = self.frame.current_ws,
+            .is_all_view_active = self.frame.all_view,
+            .workspace_has_windows = self.frame.ws_has_windows[0..self.frame.ws_count],
         };
         // The minimized-state service is drawn from the window module registry
         // here (upfront, per frame) so the title segment need not name the
-        // addon that owns it (D12). All hooks null => empty api => scanLiveFrame
+        // addon that owns it. All hooks null => empty api => scanLiveFrame
         // no-ops, matching prior boot ordering.
         ctx.minimized_api = minimizedApiFromRegistry();
-        // All backing memory lives on State (titles arena, focused-title
-        // buffer), valid for the rest of the frame AND for post-draw click
-        // handling through the cached `last_ctx`.
-        const wins_slice = self.wins[0..self.wins_len];
+        // Titles/geoms below come from the WM-owned title cache and the sync
+        // truth-rect -- neither performs X11 work, so the draw path is
+        // non-blocking and no positional batch exists to scramble. The backing
+        // arrays live on State, valid for the rest of the frame AND for
+        // post-draw click handling through the cached `frame.last_ctx`.
+        const wins_slice = self.frame.wins[0..self.frame.wins_len];
+        for (wins_slice, 0..) |w, i| {
+            self.title_data.titles_buf[i] = wincache.peekTitle(w);
+            self.title_data.geoms_buf[i] = titleGeom(w, self.title_data.minimized.contains(w));
+        }
         // Title of the minimized window, used in the single-window title case.
         var minimized_title: []const u8 = "";
-        if (wins_slice.len > 0 and self.minimized.contains(wins_slice[0]) and self.fetched_len > 0)
-            minimized_title = self.titles_buf[0];
+        if (wins_slice.len > 0 and self.title_data.minimized.contains(wins_slice[0]))
+            minimized_title = self.title_data.titles_buf[0];
         ctx.focused_window = focus.getFocused();
-        ctx.focused_title = self.focused_title.items;
+        ctx.focused_title = if (ctx.focused_window) |fw| wincache.peekTitle(fw) else "";
         ctx.minimized_title = minimized_title;
         ctx.current_ws_wins = wins_slice;
-        ctx.minimized_set = &self.minimized;
-        ctx.titles = self.titles_buf[0..self.fetched_len];
-        ctx.geoms = self.geoms_buf[0..self.fetched_len];
+        ctx.minimized_set = &self.title_data.minimized;
+        ctx.titles = self.title_data.titles_buf[0..self.frame.wins_len];
+        ctx.geoms = self.title_data.geoms_buf[0..self.frame.wins_len];
     }
 
     // -- Live-state collection ------------------------------------------------
 
-    /// Reads workspace/window state into the frame fields and diffs the
-    /// batch-refetch key against the stored one. Pure model reads: no X11.
-    /// Returns true when the key changed (batch refetch needed).
-    fn scanLiveFrame(self: *State) bool {
+    /// Reads workspace/window state into the frame fields. Pure model reads:
+    /// no X11. The per-window titles/geoms are filled later (fillDrawCtx)
+    /// straight from the WM-owned title cache and the sync truth-rect, so
+    /// there is no fetch key to diff and nothing to prefetch.
+    fn scanLiveFrame(self: *State) void {
         const m = pipeline.model();
-        // The minimized set feeds the fetch-key diff below and the title
-        // snapshot; the title addon owns the synthesis (D12), exposed through
-        // the cached DrawCtx api. Synthesizing fresh each scan makes set
-        // membership equivalent to a live per-window query.
+        // The minimized set feeds the title snapshot; the title addon owns the
+        // synthesis, exposed through the cached DrawCtx api. Synthesizing
+        // fresh each scan makes set membership equivalent to a live
+        // per-window query.
         if (build_options.has_minimize) {
-            if (self.minimized_api.collect) |f| f(m, &self.minimized, self.render.allocator);
+            if (self.title_data.minimized_api.collect) |f| f(m, &self.title_data.minimized, self.render.allocator);
         }
         if (build_options.has_workspaces) {
-            self.ws_count = @intCast(tracking.getWorkspaceCount());
-            self.current_ws = @intCast(m.current);
-            self.all_view = m.all_view_active;
-            @memset(&self.ws_has_windows, false);
-            self.wins_len = 0;
-            const cur_bit: u64 = if (self.current_ws < self.ws_count)
-                tracking.workspaceBit(self.current_ws)
+            self.frame.ws_count = @intCast(tracking.getWorkspaceCount());
+            self.frame.current_ws = @intCast(m.current);
+            self.frame.all_view = m.all_view_active;
+            @memset(&self.frame.ws_has_windows, false);
+            self.frame.wins_len = 0;
+            const cur_bit: u64 = if (self.frame.current_ws < self.frame.ws_count)
+                tracking.workspaceBit(self.frame.current_ws)
             else
                 0;
             // OR-accumulate all window masks in a single pass, collecting the
@@ -577,185 +597,27 @@ const State = struct {
             for (tracking.allWindows()) |entry| {
                 combined_mask |= entry.mask;
                 if (cur_bit != 0 and entry.mask & cur_bit != 0 and
-                    self.wins_len < max_frame_windows)
+                    self.frame.wins_len < max_frame_windows)
                 {
-                    self.wins[self.wins_len] = entry.win;
-                    self.wins_len += 1;
+                    self.frame.wins[self.frame.wins_len] = entry.win;
+                    self.frame.wins_len += 1;
                 }
             }
-            for (0..self.ws_count) |i| {
-                self.ws_has_windows[i] = combined_mask &
+            for (0..self.frame.ws_count) |i| {
+                self.frame.ws_has_windows[i] = combined_mask &
                     tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
             }
         }
-
-        // Diff the fetch key: ids plus minimized membership (a minimize flips
-        // the window's title-view geometry to the off-screen sentinel, which
-        // demotes it in the split-view sort, and that IS a data change).
-        var changed = !self.fetch_key_valid or self.fetch_key_len != self.wins_len;
-        for (0..self.wins_len) |i| {
-            const minf = if (build_options.has_minimize)
-                (if (self.minimized_api.is_minimized) |f| f(m, self.wins[i]) else false)
-            else
-                false;
-            if (!changed and (self.fetch_key_ids[i] != self.wins[i] or
-                self.fetch_key_minimized[i] != minf))
-            {
-                changed = true;
-            }
-            self.fetch_key_ids[i] = self.wins[i];
-            self.fetch_key_minimized[i] = minf;
-        }
-        self.fetch_key_len = self.wins_len;
-        self.fetch_key_valid = true;
-        return changed;
     }
 
-    /// Refreshes title data: the focused window's title and the batched
-    /// per-window titles/geometries (only when the window set changed).
-    /// The batch refetch is async on the normal draw path: `fireAsyncPrefetch`
-    /// sends the property/geometry requests and flushes without blocking, so
-    /// the frame that follows a window-set change draws with the previous
-    /// (stale) data and hydrates one event-loop pass later (when the replies
-    /// have arrived). `force` (reload/prompt) instead blocks for fresh data
-    /// synchronously. When the focused window is part of the current
-    /// workspace's window set, its title is reused from the batch instead of a
-    /// standalone fetch (saves 1-2 blocking round-trips); a standalone property
-    /// read is only used when focus is on another workspace or the window is
-    /// not batched.
-    fn refreshTitleData(self: *State, force: bool) void {
-        if (gBar.skip_title_refetch) {
-            gBar.skip_title_refetch = false;
-            return;
-        }
-
-        const alloc = self.render.allocator;
-
-        // Commit any in-flight async prefetch whose replies have arrived
-        // (non-blocking on the normal path; forced on reload/prompt paths).
-        if (self.pending_prefetch != null) self.commitPendingPrefetch(force);
-
-        // Start a fetch when the window set changed and none is in flight.
-        if (self.fetch_dirty and self.pending_prefetch == null) {
-            if (force) self.refetchBatchedTitleData() else _ = self.fireAsyncPrefetch();
-        }
-        self.fetch_dirty = false;
-
-        // Focused-title resolution is deferred while the batched prefetch is
-        // still in flight: on the fire frame the batch's replies have not
-        // landed (and that frame is not rendered anyway), and on the commit
-        // frame the fresh batch covers the newly-focused window, so the title
-        // is taken from the batch instead of a standalone blocking round-trip.
-        // `title_data_changed` is preserved so a rename isn't dropped while a
-        // fetch is outstanding; it's cleared once we actually resolve.
-        if (self.pending_prefetch == null) {
-            const fw = focus.getFocused();
-            if (fw) |f| {
-                if (!(fw == self.focused_title_window and !gBar.title_data_changed)) {
-                    // Focused title data is stale (focus moved or renamed): resolve.
-                    var resolved = false;
-                    for (self.wins[0..self.wins_len], 0..) |w, i| {
-                        if (w == f and i < self.fetched_len) {
-                            // Reuse the batched title for this window (already
-                            // fetched for this or a prior frame): no redundant
-                            // standalone property round-trip.
-                            self.focused_title.clearRetainingCapacity();
-                            self.focused_title.appendSlice(alloc, self.titles_buf[i]) catch {};
-                            self.focused_title_window = fw;
-                            resolved = true;
-                            break;
-                        }
-                    }
-                    if (!resolved) {
-                        self.focused_title.clearRetainingCapacity();
-                        segmod.fetchWindowTitleInto(
-                            self.win.conn,
-                            f,
-                            &self.focused_title,
-                            alloc,
-                        ) catch {};
-                        self.focused_title_window = fw;
-                    }
-                }
-            } else {
-                self.focused_title_window = null;
-            }
-            gBar.title_data_changed = false;
-        }
-    }
-
-    /// Pad failed live geometry replies with the off-screen sentinel so a dead
-    /// window sorts last instead of vanishing from the split view.
-    fn padFailedGeoms(self: *State) void {
-        for (self.geoms_buf[0..self.fetched_len]) |*g| {
-            if (g.* == null) g.* = segmod.offscreen_rect;
-        }
-    }
-
-    /// Fires the batched title/geometry prefetch asynchronously: issues all
-    /// property (+ missing-truth geometry) requests, flushes them, and records
-    /// the batch on `pending_prefetch` WITHOUT waiting for any reply. The
-    /// current frame keeps the previous (stale) titles/geoms; `commitPendingPrefetch`
-    /// hydrates them once the replies arrive. Returns true when a batch was
-    /// fired, false when there was nothing to prefetch (empty window set).
-    fn fireAsyncPrefetch(self: *State) bool {
-        if (self.wins_len == 0) {
-            self.fetched_len = 0;
-            return false;
-        }
-        var pb = segmod.PendingPrefetch.init(self.win.conn, self.render.allocator);
-        pb.fireAsync(self.wins[0..self.wins_len], &self.minimized);
-        self.pending_prefetch = pb;
-        return true;
-    }
-
-    /// Collects the outstanding async prefetch into the scratch buffers. On
-    /// the normal path this is non-blocking -- if the replies have not arrived
-    /// yet the batch stays in flight and the frame keeps stale data; on the
-    /// force path it blocks until the replies arrive (reload/prompt need fresh
-    /// data immediately). On a successful commit, `fetched_len` advances,
-    /// `pending_prefetch` clears, and the bar is flagged dirty so the next
-    /// updateIfDirty pass renders with the fresh data.
-    fn commitPendingPrefetch(self: *State, force: bool) void {
-        const pb = &self.pending_prefetch.?;
-        if (pb.collect(
-            self.wins[0..self.wins_len],
-            &self.minimized,
-            .{
-                .titles = self.titles_buf[0..self.wins_len],
-                .geoms = self.geoms_buf[0..self.wins_len],
-            },
-            &self.titles_arena,
-            force,
-        )) {
-            self.fetched_len = self.wins_len;
-            self.pending_prefetch = null;
-            self.padFailedGeoms();
-            // A normal-path commit happened outside a render: schedule the
-            // fresh frame (the current render was deferred on fire).
-            if (!force) self.is_dirty = true;
-        }
-    }
-
-    /// Re-runs the batched title/geometry prefetch into the scratch buffers,
-    /// blocking for the replies (used on the reload/prompt force paths).
-    /// One dupe per title, ~2 round-trips total, zero blocking waits beyond
-    /// those replies themselves (see segmod.fetchTitlesAndGeoms).
-    fn refetchBatchedTitleData(self: *State) void {
-        _ = self.titles_arena.reset(.retain_capacity);
-        segmod.fetchTitlesAndGeoms(
-            self.win.conn,
-            self.wins[0..self.wins_len],
-            &self.minimized,
-            .{},
-            .{
-                .titles = self.titles_buf[0..self.wins_len],
-                .geoms = self.geoms_buf[0..self.wins_len],
-            },
-            self.titles_arena.allocator(),
-        );
-        self.fetched_len = self.wins_len;
-        self.padFailedGeoms();
+    /// Canonical title-slot geometry for `win`: the off-screen sentinel while
+    /// minimized, else the sync truth-rect (floating anchor / last sent rect)
+    /// with the off-screen sentinel for windows that have never been placed
+    /// (parked/unsent). Mirrors the old batch behavior (truth-rect first,
+    /// sentinel fallback) without the xcb_get_geometry round-trip.
+    fn titleGeom(win: u32, minimized: bool) ?utils.Rect {
+        if (minimized) return segmod.offscreen_rect;
+        return sync.truthRect(pipeline.model(), win) orelse segmod.offscreen_rect;
     }
 
     // -- Drawing ---------------------------------------------------------------
@@ -851,7 +713,7 @@ const State = struct {
             right_x -= seg_w;
             if (pending_gap) right_x -= scaled_spacing;
 
-            if (self.isRole(names[i], self_ticking_role)) self.clock_x = right_x;
+            if (self.isRole(names[i], self_ticking_role)) self.clock.x = right_x;
             self.recordClickBound(names[i], right_x, seg_w);
 
             if (self.isSegmentRepaintable(names[i])) {
@@ -863,10 +725,15 @@ const State = struct {
                         self.render.height,
                         self.render.config.bg,
                     );
+                    self.extendDirtySpan(right_x, seg_w);
                 }
                 const drew = self.drawSegmentSafe(ctx, names[i], right_x, null) != right_x;
                 if (drew) {
-                    if (pending_gap) self.paintGap(right_x + seg_w, scaled_spacing);
+                    self.extendDirtySpan(right_x, seg_w);
+                    if (pending_gap) {
+                        self.extendDirtySpan(right_x + seg_w, scaled_spacing);
+                        self.paintGap(right_x + seg_w, scaled_spacing);
+                    }
                 } else {
                     right_x += seg_w;
                     if (pending_gap) right_x += scaled_spacing;
@@ -893,9 +760,12 @@ const State = struct {
         const frame = &ctx.frame;
         const scaled_spacing = r.config.scaledSpacing(r.height);
         const is_full_redraw = self.isFullDirty();
+        self.dirty.span_x = 0;
+        self.dirty.span_w = 0;
 
         if (is_full_redraw) {
             r.dc.fillRect(0, 0, r.width, r.height, r.config.bg);
+            self.dirty.span_w = r.width;
         }
 
         var right_total: u16 = 0;
@@ -916,7 +786,7 @@ const State = struct {
         }
         const right_measured = right_widx <= max_right_segments;
 
-        self.bounds_len = 0;
+        self.clicks.len = 0;
         var x: u16 = 0;
         var right_ridx: usize = 0;
         for (r.config.layout.items) |lay| {
@@ -941,15 +811,17 @@ const State = struct {
                         else
                             self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
-                        // clock_x must be recorded for a self-ticking segment
+                        // clock.x must be recorded for a self-ticking segment
                         // in ANY cluster (not just right): drawClockOnly relies
                         // on it regardless of where the clock is laid out.
-                        if (self.isRole(seg, self_ticking_role)) self.clock_x = x;
+                        if (self.isRole(seg, self_ticking_role)) self.clock.x = x;
                         if (self.isSegmentRepaintable(seg)) {
                             if (!is_full_redraw) {
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;
                                 r.dc.fillRect(x, 0, clear_w, r.height, r.config.bg);
+                                self.extendDirtySpan(x, clear_w);
                             }
+                            const x_before = x;
                             x = self.drawRowSegment(
                                 ctx,
                                 seg,
@@ -958,6 +830,7 @@ const State = struct {
                                 lay.position == .center,
                                 scaled_spacing,
                             );
+                            if (x != x_before) self.extendDirtySpan(x_before, x - x_before);
                             self.clearSegmentDirty(seg);
                         } else {
                             x += w;
@@ -980,7 +853,7 @@ const State = struct {
     /// Redraws just the clock segment when its on-screen content is stale
     /// (second rolled over). Cheap region-scoped blit.
     fn drawClockOnly(self: *State) void {
-        const clock_x = self.clock_x orelse return;
+        const clock_x = self.clock.x orelse return;
         const cid = self_ticking_role orelse return;
         if (bar_mods[cid].draw == null) return;
         var ctx = frameCtx(self);
@@ -997,7 +870,7 @@ const State = struct {
         // still get overwritten with the clean background the last full
         // frame left.
         const drawn_w: u16 = drawn_end -| clock_x;
-        self.render.dc.blitRegion(clock_x, @max(self.clock_width, drawn_w));
+        self.render.dc.blitRegion(clock_x, @max(self.clock.width, drawn_w));
         self.clearSegmentDirty(bar_mods[cid].name);
     }
 };
@@ -1024,33 +897,26 @@ fn frameCtx(s: *State) segmod.DrawCtx {
 /// normal paths, ungrabAndFlush inside grabs).
 fn performDraw() void {
     const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+    if (!s.vis.shown) return;
     if (gBar.force) s.markAllSegmentsDirty();
-    s.fetch_dirty = s.scanLiveFrame();
-    s.refreshTitleData(gBar.force);
+    s.scanLiveFrame();
 
-    // Async title/geometry prefetch deferral: when a window-set change fired a
-    // fetch just now (pending_prefetch set, not a force/reload path), the
-    // freshly-needed data does not exist yet -- the title/geometry batch is in
-    // flight across the wire. Rather than render a stale frame (which would
-    // force the title segment's gather to block on a synchronous refetch of
-    // the very requests still outstanding), skip this frame's render entirely.
-    // The replies arrive on the socket, the event loop wakes, the following
-    // updateIfDirty pass commits the prefetch (see commitPendingPrefetch,
-    // which flags is_dirty) and renders one fresh frame. The bar simply holds
-    // its previous pixels for one event batch -- no blocking, no stale titles.
-    if (s.pending_prefetch != null and !gBar.force) {
-        return;
-    }
-
-var ctx = frameCtx(s);
+    // Titles/geoms are read from in-process caches (wincache + sync
+    // truth-rect) with no X11 round-trip, so every frame renders inline:
+    // there is no async prefetch to fire, defer, or commit.
+    var ctx = frameCtx(s);
     s.fillDrawCtx(&ctx);
+    s.drawAllInner(&ctx);
     // Cache the minimized-state service (built by fillDrawCtx from the window
     // module registry) so scanLiveFrame can synthesize the set each frame
-    // (D12). Guarded so an empty api still leaves the prior snapshot intact.
-    if (ctx.minimized_api.is_minimized != null) s.minimized_api = ctx.minimized_api;
-    s.last_ctx = ctx;
-    s.render.dc.queueBlit();
+    // Guarded so an empty api still leaves the prior snapshot intact.
+    if (ctx.minimized_api.is_minimized != null) s.title_data.minimized_api = ctx.minimized_api;
+    s.frame.last_ctx = ctx;
+    // Only enqueue the dirty span: drawAllInner tracks the bounding x/w of
+    // every repainted segment; skip the XCopyArea entirely when nothing
+    // changed. No flush here (queueBlit), matching the grab-path contract.
+    if (s.dirty.span_w > 0)
+        s.render.dc.queueBlit(s.dirty.span_x, s.dirty.span_w);
     gBar.force = false;
 }
 
@@ -1117,8 +983,8 @@ pub fn init() !void {
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
     _ = xcb.xcb_flush(cs.conn);
     // Uniform lifecycle: every registered mechanism segment (incl. the prompt,
-    // whose init owns the vim addon lifecycle, D11) is initialised with the
-    // bar's one-way service handles (D10). The handles live in the file-scope
+    // whose init owns the vim addon lifecycle) is initialised with the
+    // bar's one-way service handles. The handles live in the file-scope
     // g_bar_handlers (bar-lifetime storage); a pointer to a stack local would
     // dangle as soon as this init returns, and the prompt calls back through
     // it on the first toggle.
@@ -1182,13 +1048,13 @@ fn applyReload(old: *State, height: u16) !void {
         return err;
     };
     const new_state = new_bar.state;
-    new_state.is_visible = old.is_visible;
-    new_state.is_globally_visible = old.is_globally_visible;
+    new_state.vis.shown = old.vis.shown;
+    new_state.vis.preferred = old.vis.preferred;
     gBar.state = new_state;
     screen.setSurfaceWindow(new_bar.setup.win_id);
     syncScreenClaim();
     submitDrawBlockingFull();
-    if (new_state.is_visible) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
+    if (new_state.vis.shown) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
     _ = xcb.xcb_destroy_window(cs.conn, old.win.win_id);
     ungrabAndFlush();
     old.render.dc.deinit();
@@ -1198,7 +1064,7 @@ fn applyReload(old: *State, height: u16) !void {
 // Public event handlers & queries
 
 /// Builds the minimized-state service the title segment consumes, from the
-/// window module registry's hide family (D12). The bar never names the addon;
+/// window module registry's hide family. The bar never names the addon;
 /// it only forwards the registry's `isWindowHidden`/`collectHiddenSet` hooks
 /// through the shared DrawCtx. All hooks null (no hide module compiled in) =>
 /// the empty api, so the bar's synthesis loops no-op.
@@ -1212,8 +1078,8 @@ fn minimizedApiFromRegistry() segmod.MinimizedApi {
 }
 
 /// Live per-window hidden query forwarded to the hide-family provider
-/// (DrawCtx api signature, D12). `m` is the bar-passed model behind
-/// `*const anyopaque` (type-free seam, D3).
+/// (DrawCtx api signature). `m` is the bar-passed model behind
+/// `*const anyopaque` (type-free seam).
 fn minimizedIsHidden(m: *const anyopaque, win: u32) bool {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
     if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden)) |wm|
@@ -1222,7 +1088,7 @@ fn minimizedIsHidden(m: *const anyopaque, win: u32) bool {
 }
 
 /// Full hidden-set synthesis forwarded to the hide-family provider
-/// (DrawCtx api signature, D12).
+/// (DrawCtx api signature).
 fn minimizedCollect(
     m: *const anyopaque,
     set: *std.AutoHashMapUnmanaged(u32, void),
@@ -1244,7 +1110,7 @@ pub fn toggleBarSegmentAnchor() void {
     barwin.setWindowProperties(s.win.win_id, s.render.height);
     gBar.force = true;
     s.markDirty();
-    s.clock_x = null;
+    s.clock.x = null;
     utils.grabServer(cs.conn);
     _ = xcb.xcb_configure_window(
         cs.conn,
@@ -1288,7 +1154,7 @@ fn syncScreenClaim() void {
     const s = gBar.state orelse return;
     const cs = core.getState();
     const edge: screen.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
-    const px: u16 = if (s.is_visible) s.render.height else 0;
+    const px: u16 = if (s.vis.shown) s.render.height else 0;
     screen.setClaim(screen.bar_id.?, edge, px);
 }
 
@@ -1306,29 +1172,18 @@ pub fn winId() ?u32 {
 /// Phase 2: the caller's ungrabAndFlush() sends configure_window +
 /// copy_area + ungrab in one flush, producing exactly one compositor frame.
 ///
-/// Frames whose refresh would run blocking property round trips under this
-/// grab are DEFERRED instead of rendered: every client stalls until the
-/// replies arrive, and each reply's implicit flush tears the caller's queued
-/// configure/map batch apart mid-operation, exactly what the grab exists to
-/// prevent (see the O(N*N)-in-grab note in window.zig). Those frames fall
-/// back to the coalesced post-batch redraw; cheap frames still render inline.
+/// Title data is sourced from in-process caches (wincache + sync truth-rect),
+/// so no frame blocks or defers under the grab: a click-triggered redraw here
+/// is as cheap as any other frame.
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+    if (!s.vis.shown) return;
     if (gBar.force) {
         s.markDirty();
         return;
     }
-    const focus_changed = s.focused_title_window != focus.getFocused();
-    const frame_changed = s.scanLiveFrame();
-    if (focus_changed or frame_changed) {
-        if (focus_changed) s.markDirtySource(.focus);
-        if (frame_changed) s.markDirtySource(.frame);
-        return;
-    }
-    // Phase 1+2a: render to pixmap, queue the blit; sent with ungrabAndFlush().
     performDraw();
-    s.is_dirty = false;
+    s.dirty.flag = false;
 }
 
 pub fn raiseBar() void {
@@ -1352,12 +1207,12 @@ pub fn raiseBar() void {
 /// video. Pair with `dismissAfterPrompt` so the bar returns to its prior state.
 pub fn presentForPrompt() void {
     const s = gBar.state orelse return;
-    if (visibility.promptNeedsForcedShow(s.is_visible)) {
+    if (visibility.promptNeedsForcedShow(s.vis.shown)) {
         // The bar is hidden; draw fresh content into it before mapping
         // (same ordering setBarState's show path uses) so the compositor
         // never shows a blank or stale bar for a frame.
         gBar.prompt_forced_visible = true;
-        s.is_visible = true;
+        s.vis.shown = true;
         submitDrawBlockingFull();
         _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
     }
@@ -1381,9 +1236,9 @@ pub fn dismissAfterPrompt() void {
     if (!gBar.prompt_forced_visible) return;
     gBar.prompt_forced_visible = false;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const should_show = visibility.keepPromptOverride(current_ws, s.is_globally_visible);
+    const should_show = visibility.keepPromptOverride(current_ws, s.vis.preferred);
     if (should_show) return; // conditions changed while the prompt was open; stay visible
-    s.is_visible = false;
+    s.vis.shown = false;
     _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
     _ = xcb.xcb_flush(s.win.conn);
 }
@@ -1394,19 +1249,18 @@ pub fn dismissAfterPrompt() void {
 /// revision in `applyFullscreenVisibility`, so no subsystem pokes the bar.
 pub fn setBarState(action: types.Action) void {
     const s = gBar.state orelse return;
-    if (action == .toggle_bar_visibility) s.is_globally_visible = !s.is_globally_visible;
+    if (action == .toggle_bar_visibility) s.vis.preferred = !s.vis.preferred;
     applyFullscreenVisibility();
 }
 
-/// Applies a decided visibility change: updates `is_visible`, draws when
+/// Applies a decided visibility change: updates `vis.shown`, draws when
 /// shown, maps/unmaps, and re-derives the screen claim. `do_reconcile`
 /// additionally grabs the server, reconciles (the usable area changed with
 /// the claim) and flushes -- used by the fullscreen-fact reaction path, not
 /// by the workspace-switch path whose caller runs its own reconcile.
 fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
-    s.is_visible = should_be_visible;
+    s.vis.shown = should_be_visible;
     if (should_be_visible) {
-        gBar.skip_title_refetch = true;
         submitDrawBlockingFull();
     }
     const conn = core.getState().conn;
@@ -1428,7 +1282,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
 /// reconcile; the bar merely updates its occupancy state here.
 pub fn updateBarVisibilityForWorkspace(ws: u8) void {
     const s = gBar.state orelse return;
-    const decision = visibility.desiredVisibility(ws, s.is_visible, s.is_globally_visible);
+    const decision = visibility.desiredVisibility(ws, s.vis.shown, s.vis.preferred);
     if (!decision.needs_change) return;
     applyVisibility(s, decision.should_be_visible, false);
     debug.info("Bar {s} for workspace {}", .{ if (decision.should_be_visible) "shown" else "hidden", ws });
@@ -1440,8 +1294,8 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
 /// is already hidden or not initialised.
 pub fn hideBarForFullscreen() void {
     const s = gBar.state orelse return;
-    if (!visibility.barNeedsFullscreenHide(s.is_visible)) return;
-    s.is_visible = false;
+    if (!visibility.barNeedsFullscreenHide(s.vis.shown)) return;
+    s.vis.shown = false;
     const conn = core.getState().conn;
     _ = xcb.xcb_unmap_window(conn, s.win.win_id);
     syncScreenClaim();
@@ -1457,7 +1311,7 @@ pub fn hideBarForFullscreen() void {
 pub fn applyFullscreenVisibility() void {
     const s = gBar.state orelse return;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const decision = visibility.desiredVisibility(current_ws, s.is_visible, s.is_globally_visible);
+    const decision = visibility.desiredVisibility(current_ws, s.vis.shown, s.vis.preferred);
     if (!decision.needs_change) return;
     applyVisibility(s, decision.should_be_visible, true);
     debug.info(
@@ -1469,38 +1323,31 @@ pub fn applyFullscreenVisibility() void {
 pub fn updateIfDirty() !void {
     const s = gBar.state orelse return;
 
-    // Commit any in-flight async title/geometry prefetch before deciding
-    // whether to draw. This runs on every socket-readable wake, so the moment
-    // the batch's replies land, the fresh data is committed and flagged dirty
-    // (see commitPendingPrefetch) -- no blocking, and independent of whether a
-    // revision also changed.
-    if (s.pending_prefetch != null) s.commitPendingPrefetch(false);
-
     // Fullscreen-occupancy reaction runs even when the bar is currently hidden
     // (it may need to become visible again on fullscreen exit). Diff the core
     // fact revision; when changed, we recompute shared-screen visibility. Core
     // owns the fact; we react over a one-way signal rather than being poked.
-    const fullscreen_rev = core.fullscreenRev();
-    if (s.last_fullscreen_rev != fullscreen_rev) {
-        s.last_fullscreen_rev = fullscreen_rev;
+    const fullscreen_rev = core.fullscreen.rev();
+    if (s.facts.fullscreen_rev != fullscreen_rev) {
+        s.facts.fullscreen_rev = fullscreen_rev;
         applyFullscreenVisibility();
     }
-    if (!s.is_visible) return;
+    if (!s.vis.shown) return;
 
     // Diff core's fact revisions against what we last drew. Core owns these
     // facts; we react over a one-way signal (revision counters) rather than
-    // being poked by name. Layout changes force a full redraw (title-data
-    // refetch); window/workspace changes repaint all segments; focus changes
-    // cheaply mark only the title.
-    if (s.last_focus_rev != core.focusRev()) s.markDirtySource(.focus);
-    if (s.last_window_rev != core.windowRev()) s.markDirty();
-    if (s.last_layout_rev != core.layoutRev()) {
+    // being poked by name. Layout changes force a full redraw; window/workspace
+    // changes repaint all segments (split-view titles/tile counts); focus
+    // changes cheaply mark only the title.
+    if (s.facts.focus_rev != core.focus.rev()) s.markDirtySource(.focus);
+    if (s.facts.window_rev != core.window.rev()) s.markDirty();
+    if (s.facts.layout_rev != core.layout.rev()) {
         gBar.force = true;
         s.markDirty();
     }
-    s.last_focus_rev = core.focusRev();
-    s.last_window_rev = core.windowRev();
-    s.last_layout_rev = core.layoutRev();
+    s.facts.focus_rev = core.focus.rev();
+    s.facts.window_rev = core.window.rev();
+    s.facts.layout_rev = core.layout.rev();
 
     // Fold any module redraw request into the force flag (as the poll
     // wakeup path does), then draw. Loop: a module may queue another request
@@ -1512,10 +1359,10 @@ pub fn updateIfDirty() !void {
     while (true) {
         if (barModsConsumeRedrawRequest()) {
             gBar.force = true;
-            s.is_dirty = true;
+            s.dirty.flag = true;
         }
-        if (!s.is_dirty) break;
-        s.is_dirty = false;
+        if (!s.dirty.flag) break;
+        s.dirty.flag = false;
         submitDraw();
     }
 }
@@ -1536,7 +1383,7 @@ fn cs_configClockFormat() []const u8 {
 /// on every event batch: it no-ops unless staleness is detected.
 pub fn updateClock() bool {
     const s = gBar.state orelse return false;
-    if (!s.is_visible) return false;
+    if (!s.vis.shown) return false;
     if (self_ticking_role == null) return false;
     const fmt = cs_configClockFormat();
     var redraw_clock = false;
@@ -1558,25 +1405,18 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
         gBar.force = true;
         const dragging = if (build_options.has_floating) actions.isDragging() else false;
         if (dragging) {
-            s.is_dirty = true;
+            s.dirty.flag = true;
             s.markAllSegmentsDirty();
         } else submitDraw();
     };
 }
 
-pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void {
-    const s = gBar.state orelse return;
-    const focused_win = focus.getFocused() orelse return;
-    if (event.window != focused_win) return;
-    const net_wm_name = s.win.net_wm_name_atom;
-    if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        // Renamed focused window: force the title data refetch on the next
-        // draw (the fetch key alone wouldn't notice a text-only change).
-        gBar.force = true;
-        gBar.title_data_changed = true;
-        s.markDirtySource(.focus);
-    }
-}
+/// Property-notify on the bar surface needs no title handling: title changes
+/// are refreshed by the WM window layer (window.handlePropertyNotify), which
+/// bumps the window fact so the next updateIfDirty pass repaints. Kept as a
+/// slot-filling no-op for the surfaces contract; all other property-notifies
+/// are already ignored by the bar.
+pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t) void {}
 
 // Mouse click handling
 
@@ -1598,7 +1438,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 /// cycles the current layout's variant forward/backward the same way.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
-    if (!s.is_visible) return;
+    if (!s.vis.shown) return;
     if (event.event_x < 0) return;
     const x: u16 = @intCast(event.event_x);
 
@@ -1606,7 +1446,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const right = event.detail == constants.mouse_button_right;
     if (!left and !right) return;
 
-    const h = for (s.bounds[0..s.bounds_len]) |b| {
+    const h = for (s.clicks.bounds[0..s.clicks.len]) |b| {
         if (b.contains(x)) break b;
     } else return;
     const id = segId(h.name) orelse return;
@@ -1615,23 +1455,22 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 }
 
 /// `offset` is the click position relative to the title segment's start.
-/// Resolves which window is under the click via the title scratch data
-/// (populated by the last draw; hitTest makes no X11 round-trips when the
-/// prefetched lists cover the window set), then:
+/// Resolves which window is under the click via the title snapshot captured
+/// by the last draw (hitTest never touches X11: titles/geoms come from the
+/// frame's in-process per-window caches), then:
 ///   - no window under the click -> no-op (empty title is handled by the
 ///     right-click prompt path in `handleButtonPress`, before this is called)
 ///   - the window is minimized -> unminimizes that window
 ///   - the window is already focused -> minimizes it
 ///   - otherwise -> focuses it
 fn handleTitleClick(s: *State, offset: u16) void {
-    if (s.wins_len == 0) return;
+    if (s.frame.wins_len == 0) return;
     const center_id = center_slot_role orelse return;
     const tb = s.recordedBound(bar_mods[center_id].name) orelse return;
 
     const target = (segmod.hitTest(
-        s.last_ctx.titleRenderContext(tb.x, tb.w),
-        s.last_ctx.titleSnapshot(),
-        s.render.allocator,
+        s.frame.last_ctx.titleRenderContext(tb.x, tb.w),
+        s.frame.last_ctx.titleSnapshot(),
         offset,
     ) catch |e| {
         debug.warnOnErr(e, "bar title click hitTest");
@@ -1639,7 +1478,7 @@ fn handleTitleClick(s: *State, offset: u16) void {
     }) orelse return;
 
     // `target.minimized` comes from the title snapshot's minimized set, which
-    // the title addon synthesizes fresh (D12); bar.zig never names minimize.
+    // the title addon synthesizes fresh; bar.zig never names minimize.
     if (target.minimized)
         actions.restore(target.window)
     else if (focus.getFocused() == target.window)

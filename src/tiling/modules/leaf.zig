@@ -5,15 +5,27 @@ const utils = @import("utils");
 const model = @import("model");
 const tiling = @import("tiling");
 
+const Region = struct {
+    x: i32,
+    y: i32,
+    w: u16,
+    h: u16,
+};
+
 /// Compute BSP layout: recursive bisection of the longer axis 50/50 with one
 /// gap at each seam; border subtracted at leaf nodes only.
 pub fn compute(v: tiling.View, out: *tiling.List) void {
-    const m = v.env.margins;
+    const ctx = tiling.LayoutCtx{
+        .v = &v,
+        .out = out,
+        .m = v.env.margins,
+        .min_dim = v.env.min_dim,
+    };
 
     // Strip the outer gap; each recursive split inserts one gap at its seam
     // (adjacent windows stay one gap_width apart).
-    const area = tiling.outerArea(v.workarea, m.gap);
-    tileRegion(&v, out, v.order, m, v.env.min_dim, area.x, area.y, area.w, area.h);
+    const area = tiling.outerArea(v.workarea, ctx.m.gap);
+    tileRegion(ctx, v.order, .{ .x = area.x, .y = area.y, .w = area.w, .h = area.h });
 }
 
 // Splits `dim` into two halves separated by `gap`, each clamped to `min_dim`.
@@ -29,38 +41,36 @@ inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, se
 /// Recursively tile `windows` into the region, splitting the longer axis
 /// 50/50 with one gap per seam (border at leaf nodes; ties favour vertical).
 fn tileRegion(
-    v: *const tiling.View,
-    out: *tiling.List,
+    ctx: tiling.LayoutCtx,
     windows: []const model.WindowId,
-    m: utils.Margins,
-    min_dim: u16,
-    x: i32,
-    y: i32,
-    w: u16,
-    h: u16,
+    r: Region,
 ) void {
     const n = windows.len;
     if (n == 0) return;
 
-    const border2: u16 = utils.doubledBorder(m);
+    const border2: u16 = utils.doubledBorder(ctx.m);
 
     if (n == 1) {
         // All leaf placements are visible; hints applied by tiling.emitView.
-        tiling.emitView(v, out, windows[0], tiling.insetRect(x, y, w, h, border2, min_dim), true);
+        tiling.emitView(ctx.v, ctx.out, windows[0], tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim), true);
         return;
     }
 
     const n_left: usize = n / 2;
-    const gap = m.gap;
+    const gap = ctx.m.gap;
 
-    const horizontal = w >= h;
-    const split = halveWithMin(if (horizontal) w else h, gap, min_dim);
+    const horizontal = r.w >= r.h;
+    const split = halveWithMin(if (horizontal) r.w else r.h, gap, ctx.min_dim);
     const split_offset: i32 = @as(i32, @intCast(split.first +| gap));
-    const second_x: i32 = if (horizontal) x + split_offset else x;
-    const second_y: i32 = if (horizontal) y else y + split_offset;
 
-    tileRegion(v, out, windows[0..n_left], m, min_dim, x, y, if (horizontal) split.first else w, if (horizontal) h else split.first);
-    tileRegion(v, out, windows[n_left..], m, min_dim, second_x, second_y, if (horizontal) split.second else w, if (horizontal) h else split.second);
+    const first = Region{ .x = r.x, .y = r.y, .w = if (horizontal) split.first else r.w, .h = if (horizontal) r.h else split.first };
+    const second = if (horizontal)
+        Region{ .x = r.x + split_offset, .y = r.y, .w = split.second, .h = r.h }
+    else
+        Region{ .x = r.x, .y = r.y + split_offset, .w = r.w, .h = split.second };
+
+    tileRegion(ctx, windows[0..n_left], first);
+    tileRegion(ctx, windows[n_left..], second);
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.

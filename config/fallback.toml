@@ -35,26 +35,10 @@ Mod+Comma       = "increase_master_count"
 Mod+Period      = "decrease_master_count"
 
 # Workspaces 1-9
-Mod+1 = "workspace_1"
-Mod+2 = "workspace_2"
-Mod+3 = "workspace_3"
-Mod+4 = "workspace_4"
-Mod+5 = "workspace_5"
-Mod+6 = "workspace_6"
-Mod+7 = "workspace_7"
-Mod+8 = "workspace_8"
-Mod+9 = "workspace_9"
+Mod+{1-9} = "workspace"
 
 # Move window to workspace
-Mod+Shift+1 = "move_to_workspace_1"
-Mod+Shift+2 = "move_to_workspace_2"
-Mod+Shift+3 = "move_to_workspace_3"
-Mod+Shift+4 = "move_to_workspace_4"
-Mod+Shift+5 = "move_to_workspace_5"
-Mod+Shift+6 = "move_to_workspace_6"
-Mod+Shift+7 = "move_to_workspace_7"
-Mod+Shift+8 = "move_to_workspace_8"
-Mod+Shift+9 = "move_to_workspace_9"
+Mod+Shift+{1-9} = "move_to_workspace"
 
 # Bar toggle
 Mod+B = "toggle_bar_visibility"

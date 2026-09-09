@@ -14,10 +14,9 @@
 //! hooks are real, copy-pasteable code that builds and tests identically
 //! (110/110) with or without the file. That is the contract's litmus test.
 //!
-//! The full contract + onboarding guide lives in PLUGIN_PROVIDER.md (§1.8
-//! and §7). The placement machinery (View/List/emit helpers) lives in
-//! src/tiling/engine.zig — import it with `@import("engine")`; the engine
-//! never imports your module (the registry dispatch is the one edge).
+//! The placement machinery (View/List/emit helpers) lives in the tiling
+//! engine — import it with `@import("engine")`; the engine never imports
+//! your module (the registry dispatch is the one edge).
 
 const utils = @import("utils");
 const model = @import("model");

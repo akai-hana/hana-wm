@@ -1,6 +1,6 @@
 //! XCB modifier masks and event masks.
 //!
-//! Separated from constants.zig to keep the model layer (which imports
+//! Separated from the core constants to keep the model layer (which imports
 //! constants) free of transitive XCB dependencies.
 
 const xcb = @import("xcb").xcb;

@@ -77,16 +77,18 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     }
 }
 
-/// Pre-reconcile duty, exactly the former pipeline.preReconcileDuties body:
-/// snap right when the visible count grew (spawn/restore/tag-add), then
-/// clamp to content. `p` is `*model.LayoutParams`.
-fn preReconcileHook(p: *anyopaque, n: usize, wa_width: u16) void {
-    const lp: *model.LayoutParams = @ptrCast(@alignCast(p));
+/// Pre-reconcile duty (pure): snap right when the visible count grew
+/// (spawn/restore/tag-add), then clamp to content. Takes the workspace's
+/// layout params BY VALUE; the pipeline choke point applies the returned
+/// delta (value-in, value-out -- no mutable pointer into the model).
+fn preReconcileHook(p: model.LayoutParams, n: usize, wa_width: u16) model.LayoutParams {
     const slot_w = slotWidth(wa_width);
     const max_off = maxOffset(n, slot_w, wa_width);
-    if (n > lp.viewport_prev_count) lp.viewport_offset = max_off;
-    lp.viewport_offset = std.math.clamp(lp.viewport_offset, 0, max_off);
-    lp.viewport_prev_count = @intCast(n);
+    var next = p;
+    if (n > next.viewport_prev_count) next.viewport_offset = max_off;
+    next.viewport_offset = std.math.clamp(next.viewport_offset, 0, max_off);
+    next.viewport_prev_count = @intCast(n);
+    return next;
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hooks.

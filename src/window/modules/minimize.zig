@@ -50,7 +50,7 @@ var g_seq: u32 = 0;
 
 pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     if (isMinimized(m, win)) return; // idempotent
-    // Capacity check BEFORE any mutation (T17).
+    // Capacity check BEFORE any mutation.
     if (g_recs.len() >= MAX_MINIMIZED) return error.CapacityFull;
     var slot: ?usize = null;
     if (model.findHome(m, win)) |h| {
@@ -74,7 +74,10 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // re-listed; floating-anchored ones restore to their saved rect directly
     // and are never appended (a phantom layout member). A covering (fullscreen)
     // window keeps its anchor, so re-listing also applies to fullscreen-tiled.
-    if (switch (e.anchor) { .tiled => true, .floating => false }) {
+    if (switch (e.anchor) {
+        .tiled => true,
+        .floating => false,
+    }) {
         const h = model.lowestBit(e.mask) orelse return; // follows tag-moves made while hidden
         const list = &m.ws[h].tiled_order;
         // Refuse-before-mutate: a full home list leaves the window parked
@@ -105,6 +108,11 @@ fn slotLess(a: ?usize, b: ?usize) bool {
     return if (b == null) true else a.? < b.?;
 }
 
+const RestoreCandidate = struct {
+    win: model.WindowId,
+    slot: ?usize,
+};
+
 /// Parked-on-ws predicate: the window exists, is parked (minimized), and its
 /// tag mask includes `ws`.
 fn parkedOnWs(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
@@ -132,7 +140,10 @@ fn bestSeq(
             .fifo => best == null or rec.seq < best_seq,
             .lifo => best == null or rec.seq > best_seq,
         };
-        if (better) { best = rec.win; best_seq = rec.seq; }
+        if (better) {
+            best = rec.win;
+            best_seq = rec.seq;
+        }
     }
     return best;
 }
@@ -152,28 +163,19 @@ pub fn latestMinimizedBase(m: *const model.Model, ws: model.WSId) ?model.WindowI
 }
 
 pub fn restoreAllOnWs(m: *model.Model, ws: model.WSId) void {
-    var wins: [MAX_MINIMIZED]model.WindowId = undefined;
-    var slots: [MAX_MINIMIZED]?usize = undefined;
+    var cands: [MAX_MINIMIZED]RestoreCandidate = undefined;
     var n: usize = 0;
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
-        wins[n] = rec.win;
-        slots[n] = rec.slot;
+        cands[n] = .{ .win = rec.win, .slot = rec.slot };
         n += 1;
     }
-    // insertion sort by slot ascending, nulls last
-    for (1..n) |a| {
-        const w = wins[a];
-        const s = slots[a];
-        var b = a;
-        while (b > 0 and slotLess(s, slots[b - 1])) : (b -= 1) {
-            wins[b] = wins[b - 1];
-            slots[b] = slots[b - 1];
+    std.mem.sort(RestoreCandidate, cands[0..n], {}, struct {
+        fn lessThan(_: void, a: RestoreCandidate, b: RestoreCandidate) bool {
+            return slotLess(a.slot, b.slot);
         }
-        wins[b] = w;
-        slots[b] = s;
-    }
-    for (0..n) |i| restore(m, wins[i]);
+    }.lessThan);
+    for (cands[0..n]) |c| restore(m, c.win);
 }
 
 /// True when `win` currently holds a minimized record in the module store.
@@ -208,16 +210,15 @@ pub fn collectMinimizedIntoSet(
 /// when the window has no minimized record OR the model presence is not
 /// parked (a covering window is fullscreen's blob). The returned slice is
 /// allocator-owned; persist frees it after writing.
-fn serializePreamble(model_ptr: *anyopaque, win: u32) ?struct { *const model.Model, Rec } {
-    const m: *const model.Model = @ptrCast(@alignCast(model_ptr));
+fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const model.Model, Rec } {
     const idx = g_recs.find(win) orelse return null;
     const e = m.store.get(win) orelse return null;
     if (e.presence != .parked) return null;
     return .{ m, g_recs.slice()[idx] };
 }
 
-pub fn serializeWindow(model_ptr: *anyopaque, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
-    const p = serializePreamble(model_ptr, win) orelse return null;
+pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+    const p = serializePreamble(m, win) orelse return null;
     const rec = p[1];
     const held = alloc.alloc(u8, 9) catch return null;
     held[0] = 0x5A;

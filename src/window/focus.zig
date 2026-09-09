@@ -10,6 +10,8 @@ const utils = @import("utils");
 const window = @import("window");
 const tracking = @import("tracking");
 
+const gate = tracking.gate;
+
 // Module state
 //
 // Grouped into a single State struct so init() resets everything in one
@@ -383,7 +385,7 @@ fn clearTail() void {
     state.?.suppress_reason = .none;
     const cs = core.getState();
     focusNow(cs.conn, cs.root);
-    core.bumpFocus();
+    core.focus.bump();
     advertiseActiveWindow(xcb.XCB_WINDOW_NONE);
 }
 
@@ -404,15 +406,15 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             if (intent.flags.raise) utils.raiseWindow(conn, intent.win);
 
             if (intent.flags.send_wm_take_focus) {
-        if (intent.flags.take_focus_known) |advertises| window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
-    }
+                if (intent.flags.take_focus_known) |advertises| window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
+            }
 
             if (intent.flags.arm_confirm) {
                 state.?.confirm_cookie = xcb.xcb_get_input_focus(conn);
                 state.?.confirm_win = intent.win;
             }
 
-            if (intent.flags.schedule_bar) core.bumpFocus();
+            if (intent.flags.schedule_bar) core.focus.bump();
 
             advertiseActiveWindow(intent.win);
         },
@@ -544,7 +546,7 @@ pub fn clearFocus() void {
     // one-store semantics without a separate model call.
     {
         const pl = @import("pipeline");
-        if (pl.initialized) @import("model").clearFocus(pl.model());
+        if (pl.initialized) @import("model").clearFocus(pl.mut(&gate));
     }
     const ft = prepareClearFocus();
     if (ft == .none) {
@@ -604,7 +606,7 @@ pub fn grabFocus(win: u32, reason: Reason) void {
     const ft = prepareFocus(win, reason, null);
     if (ft == .none) return;
     const pl = @import("pipeline");
-    @import("model").setFocus(pl.model(), win);
+    @import("model").setFocus(pl.mut(&gate), win);
     pl.reconcileUnderGrabNowWithFocus(.{}, ft);
 }
 
@@ -612,7 +614,7 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 /// + geometry all land inside one grab.
 pub fn grabFocusClear() void {
     const pl = @import("pipeline");
-    @import("model").clearFocus(pl.model());
+    @import("model").clearFocus(pl.mut(&gate));
     const ft = prepareClearFocus();
     if (ft == .none) {
         // last_applied already null: no X focus to clear, but still
@@ -651,7 +653,7 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
     });
 
     const pl = @import("pipeline");
-    @import("model").setFocus(pl.model(), prev);
+    @import("model").setFocus(pl.mut(&gate), prev);
     // Inline grab: need focusNow(root) before applyPendingFocus for
     // offscreen steals (breaks the fight with the stealing client).
     const c = pl.grabCtx();
@@ -767,5 +769,9 @@ fn focusCycle(forward: bool) void {
     grabFocus(wins[cycleIndex(forward, idx, len)], .user_command);
 }
 
-pub fn focusNext() void { focusCycle(true); }
-pub fn focusPrev() void { focusCycle(false); }
+pub fn focusNext() void {
+    focusCycle(true);
+}
+pub fn focusPrev() void {
+    focusCycle(false);
+}

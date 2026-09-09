@@ -57,33 +57,40 @@ pub fn build(b: *std.Build) !void {
     const has_minimize = hasPathOption(b, build_opts, "has_minimize", source_root ++ "window/modules/minimize.zig");
     const has_fullscreen = hasPathOption(b, build_opts, "has_fullscreen", source_root ++ "window/modules/fullscreen.zig");
     const has_workspaces = hasPathOption(b, build_opts, "has_workspaces", source_root ++ "window/modules/workspaces.zig");
-    _ = hasPathOption(b, build_opts, "has_vim", source_root ++ "bar/modules/prompt/vim.zig");
 
     // Tier 5: bar internals; if any core internal is missing, forfeit the entire bar.
     const has_drawing = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/drawing.zig");
-    const has_bar_render = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/render.zig");
     const has_bar_win = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/win.zig");
     const has_bar_segment = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar/segment.zig");
     const has_bar_dir = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
-    const has_bar = has_bar_dir and has_drawing and has_bar_render and has_bar_win and has_bar_segment;
+    const has_bar = has_bar_dir and has_drawing and has_bar_win and has_bar_segment;
     build_opts.addOption(bool, "has_bar", has_bar);
-
-    // Tier 3: individual tiling layout modules
-    _ = hasPathOption(b, build_opts, "has_layout_master", source_root ++ "tiling/modules/master.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_monocle", source_root ++ "tiling/modules/monocle.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_fibonacci", source_root ++ "tiling/modules/fibonacci.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_grid", source_root ++ "tiling/modules/grid.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_leaf", source_root ++ "tiling/modules/leaf.zig");
-    _ = hasPathOption(b, build_opts, "has_layout_scroll", source_root ++ "tiling/modules/scroll.zig");
 
     // Tier 4: individual bar segment modules
     const has_seg_clock = hasPathOption(b, build_opts, "has_seg_clock", source_root ++ "bar/modules/clock.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_tags", source_root ++ "bar/modules/tags.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_layout", source_root ++ "bar/modules/layout.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_title", source_root ++ "bar/modules/title/title.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_prompt", source_root ++ "bar/modules/prompt/prompt.zig");
     const has_seg_carousel = hasPathOption(b, build_opts, "has_seg_carousel", source_root ++ "bar/modules/title/carousel.zig");
-    _ = hasPathOption(b, build_opts, "has_seg_variants", source_root ++ "bar/modules/variants.zig");
+
+    // The remaining has_* options: emitted to compiled source only, never
+    // read back here, so probe them from a table.
+    const optional_features = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "has_vim", .path = source_root ++ "bar/modules/prompt/vim.zig" },
+        // Tier 3: individual tiling layout modules
+        .{ .name = "has_layout_master", .path = source_root ++ "tiling/modules/master.zig" },
+        .{ .name = "has_layout_monocle", .path = source_root ++ "tiling/modules/monocle.zig" },
+        .{ .name = "has_layout_fibonacci", .path = source_root ++ "tiling/modules/fibonacci.zig" },
+        .{ .name = "has_layout_grid", .path = source_root ++ "tiling/modules/grid.zig" },
+        .{ .name = "has_layout_leaf", .path = source_root ++ "tiling/modules/leaf.zig" },
+        .{ .name = "has_layout_scroll", .path = source_root ++ "tiling/modules/scroll.zig" },
+        // Tier 4: individual bar segment modules
+        .{ .name = "has_seg_tags", .path = source_root ++ "bar/modules/tags.zig" },
+        .{ .name = "has_seg_layout", .path = source_root ++ "bar/modules/layout.zig" },
+        .{ .name = "has_seg_title", .path = source_root ++ "bar/modules/title/title.zig" },
+        .{ .name = "has_seg_prompt", .path = source_root ++ "bar/modules/prompt/prompt.zig" },
+        .{ .name = "has_seg_variants", .path = source_root ++ "bar/modules/variants.zig" },
+    };
+    for (optional_features) |feature| {
+        _ = hasPathOption(b, build_opts, feature.name, feature.path);
+    }
 
     // Module discovery
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
@@ -104,8 +111,7 @@ pub fn build(b: *std.Build) !void {
     // `plugins` is reduced to the chrome-surface (bar) contract; the window
     // behaviors moved to per-owner `modules` registries below.
     const plugins_mod = buildPluginsModule(b, &discovery.modules, build_opts_mod, fallback_toml_mod, target, optimize);
-    stripIfRelease(plugins_mod, optimize);
-    addSystemDirs(plugins_mod, b);
+    finalizeModule(plugins_mod, optimize, b);
 
     // Directory-scan discovery of `modules/` dirs under src/: every `.zig`
     // under a `modules/` dir registers into a generated `<owner>_modules`
@@ -121,8 +127,7 @@ pub fn build(b: *std.Build) !void {
     const owner_modules = try buildOwnerRegistries(b, &discovery.modules, build_opts_mod, fallback_toml_mod, target, optimize, &registry);
     var oms_it = owner_modules.valueIterator();
     while (oms_it.next()) |m| {
-        stripIfRelease(m.*, optimize);
-        addSystemDirs(m.*, b);
+        finalizeModule(m.*, optimize, b);
     }
 
     // Root module
@@ -141,14 +146,13 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    stripIfRelease(root_mod, optimize);
 
     // Some hosts (e.g. musl-based distros) report an empty default system
     // include/library search path, so headers and libraries under /usr aren't
     // found. Point at them explicitly when they exist; the extra paths are
     // harmless elsewhere and absent on non-FHS distros (NixOS, Guix) whose
     // toolchains already provide the real locations.
-    addSystemDirs(root_mod, b);
+    finalizeModule(root_mod, optimize, b);
     // Wire & link
     Module.wireAll(root_mod, &discovery.modules, shared_ctx);
     SystemLibraries.link(root_mod);
@@ -156,10 +160,11 @@ pub fn build(b: *std.Build) !void {
     // give each one the same system paths for its @cImport / link work.
     var mod_it = discovery.modules.valueIterator();
     while (mod_it.next()) |mod| {
-        addSystemDirs(mod.*, b);
+        finalizeModule(mod.*, optimize, b);
     }
 
-    // Unit tests for the reworked architecture layers (src/test/*.zig):
+    // Unit tests for the reworked architecture layers (src/test/**, grouped
+    // by category: engine/, window/, bar/, config/, latency/):
     // every discovered module named *_test.zig becomes a `zig build test`
     // run. Discovered modules are cross-wired with all others, so a test
     // file's named imports
@@ -167,36 +172,48 @@ pub fn build(b: *std.Build) !void {
     // standalone `zig test <file>` cannot resolve them (module-root escape),
     // which is why tests go through the build system.
     const unit_test_step = b.step("test", "Run unit tests");
+    // X-gated integration tests connect to the same $DISPLAY; chain their run
+    // steps so server-global input-focus assertions cannot race across the
+    // parallel test processes.
+    var x_gated_run: ?*std.Build.Step = null;
+    // Tests whose modules only exist when their feature's source file is
+    // present; the gate is the same has_* bool that guards the feature.
+    const test_gates = [_]struct { name: []const u8, gate: bool }{
+        .{ .name = "clock_test", .gate = has_seg_clock },
+        .{ .name = "carousel_test", .gate = has_seg_carousel },
+        .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces },
+        .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces },
+        .{ .name = "tiling_test", .gate = has_tiling },
+        .{ .name = "sync_test", .gate = has_tiling and has_minimize and has_fullscreen },
+        .{ .name = "workspaces_test", .gate = has_workspaces },
+    };
     {
         var test_it = discovery.modules.iterator();
-        while (test_it.next()) |entry| {
+        test_loop: while (test_it.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.key_ptr.*, "_test")) continue;
-            // clock_test imports the `clock` module, which only exists when
-            // src/bar/modules/clock.zig is present (has_seg_clock).
-            if (!has_seg_clock and std.mem.eql(u8, entry.key_ptr.*, "clock_test")) continue;
-            // carousel_test imports the `carousel` module, which only exists
-            // when src/bar/modules/title/carousel.zig is present.
-            if (!has_seg_carousel and std.mem.eql(u8, entry.key_ptr.*, "carousel_test")) continue;
-            // model_test exercises all four window feature modules
-            // (minimize/fullscreen/floating/workspaces), so every one must be present.
-            if (!(has_minimize and has_fullscreen and has_floating and has_workspaces) and std.mem.eql(u8, entry.key_ptr.*, "model_test")) continue;
-            // perf_test replays minimize/fullscreen/workspaces scenarios; without
-            // those modules the referenced behaviors don't exist.
-            if (!(has_minimize and has_fullscreen and has_workspaces) and std.mem.eql(u8, entry.key_ptr.*, "perf_test")) continue;
-            // tiling_test exercises the tiling layout engine internals; without
-            // src/tiling there is no engine to test, and its `engine.HintsView`
-            // reference no longer resolves.
-            if (!has_tiling and std.mem.eql(u8, entry.key_ptr.*, "tiling_test")) continue;
-            // sync_test replays tiling-centric scenarios (retile, fullscreen
-            // enter/exit, minimize, workspace switch), which need minimize and
-            // fullscreen modules in addition to the tiling engine itself.
-            if ((!has_tiling or !has_minimize or !has_fullscreen) and std.mem.eql(u8, entry.key_ptr.*, "sync_test")) continue;
-            // workspaces_test exercises the workspaces behavior; without
-            // src/window/modules/workspaces.zig its `Workspace` type is
-            // replaced by an empty struct and the test no longer compiles.
-            if (!has_workspaces and std.mem.eql(u8, entry.key_ptr.*, "workspaces_test")) continue;
+            // X-gated integration tests: actions/focus/pipeline all funnel
+            // through pipeline's real libxcb sink, so they only exist when the
+            // tiling engine (whose placements they assert) is compiled in.
+            const is_x_gated =
+                std.mem.eql(u8, entry.key_ptr.*, "actions_test") or
+                std.mem.eql(u8, entry.key_ptr.*, "focus_test") or
+                std.mem.eql(u8, entry.key_ptr.*, "pipeline_test");
+            if (is_x_gated and !has_tiling) continue;
+            if (is_x_gated) {
+                // They link the same X11 stack as the root module.
+                entry.value_ptr.*.link_libc = true;
+                SystemLibraries.link(entry.value_ptr.*);
+            }
+            for (test_gates) |gate| {
+                if (std.mem.eql(u8, entry.key_ptr.*, gate.name) and !gate.gate) continue :test_loop;
+            }
             const t = b.addTest(.{ .root_module = entry.value_ptr.* });
-            unit_test_step.dependOn(&b.addRunArtifact(t).step);
+            const run = b.addRunArtifact(t);
+            unit_test_step.dependOn(&run.step);
+            if (is_x_gated) {
+                if (x_gated_run) |prev| run.step.dependOn(prev);
+                x_gated_run = &run.step;
+            }
         }
     }
 
@@ -208,8 +225,8 @@ pub fn build(b: *std.Build) !void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
-    // Layer guards (REARCHITECTURE_PLAN.md §13 / WP7): `zig build check`
-    // type-checks AND enforces the sync-owned wire rules.
+    // Layer guards: `zig build check` type-checks AND enforces the
+    // sync-owned wire rules.
     const check_step = b.step("check", "Type-check + layer guards");
     check_step.dependOn(&exe.step);
     const layers = b.addSystemCommand(&.{"./dev/scripts/check-layers.sh"});
@@ -346,10 +363,7 @@ fn buildPluginsModule(
     // The chrome-surface module is referenceable (`@import("bar")`) only when
     // its source was discovered; the comptime has_bar guard keeps the
     // no-registration case from ever being analyzed.
-    const referenced = [_][]const u8{"bar"};
-    for (referenced) |name| {
-        if (discovered.get(name)) |m| mod.addImport(name, m);
-    }
+    if (discovered.get("bar")) |m| mod.addImport("bar", m);
     mod.addImport("build_options", build_opts);
     mod.addImport("fallback_toml", fallback_toml);
     return mod;
@@ -470,7 +484,7 @@ const OwnerRegistry = struct {
                     .file => {
                         if (!Module.isZigSource(entry.name)) continue;
                         const rel_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
-                        if (Module.isEntryPointPath(rel_path, ctx.entry_point_path)) continue;
+                        if (std.mem.eql(u8, rel_path, ctx.entry_point_path)) continue;
 
                         const stem = try b.allocator.dupe(u8, std.fs.path.stem(entry.name));
                         // In a nested segment directory, keep only the
@@ -498,10 +512,7 @@ const OwnerRegistry = struct {
     /// Basename of a path, tolerating trailing slashes (source_root is
     /// `"src/"`), so the owner name never comes out empty for `src/`.
     fn pathBasename(path: []const u8) []const u8 {
-        var p = path;
-        while (p.len > 1 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
-        if (std.mem.lastIndexOfScalar(u8, p, '/')) |i| return p[i + 1 ..];
-        return p;
+        return std.fs.path.basename(path);
     }
 };
 
@@ -534,11 +545,14 @@ fn validateRegistryNames(
 /// addons to the matching contract in plugin.zig. Unknown owners are a
 /// developer error (a brand-new modules/ dir must pick its contract here or
 /// the generated registry would mis-type every module's `module` value).
+const owner_contracts = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "window", "WindowModule" },
+    .{ "bar", "Segment" },
+    .{ "tiling", "Layout" },
+});
+
 fn ownerContractName(owner: []const u8) []const u8 {
-    if (std.mem.eql(u8, owner, "window")) return "WindowModule";
-    if (std.mem.eql(u8, owner, "bar")) return "Segment";
-    if (std.mem.eql(u8, owner, "tiling")) return "Layout";
-    @panic("unknown module owner contract");
+    return owner_contracts.get(owner) orelse @panic("unknown module owner contract");
 }
 
 /// Generates one synthesized `<owner>_modules` registry module per discovered
@@ -693,6 +707,11 @@ fn addSystemDirs(mod: *std.Build.Module, b: *std.Build) void {
     if (pathExists(root, io, "/usr/include")) mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
 }
 
+fn finalizeModule(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode, b: *std.Build) void {
+    stripIfRelease(mod, optimize);
+    addSystemDirs(mod, b);
+}
+
 // Module namespace discovery & wiring
 
 /// Namespace that owns all logic related to module discovery and wiring.
@@ -764,7 +783,7 @@ const Module = struct {
                         if (!isZigSource(entry.name)) continue;
 
                         const rel_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
-                        if (isEntryPointPath(rel_path, ctx.entry_point_path)) continue;
+                        if (std.mem.eql(u8, rel_path, ctx.entry_point_path)) continue;
 
                         try ctx.registerModule(b.allocator.dupe(u8, rel_path) catch unreachable);
                     },
@@ -830,7 +849,7 @@ const Module = struct {
         all: *std.StringHashMap(*std.Build.Module),
         ctx: SharedBuildContext,
     ) void {
-        // NOTE(I-1): Cross-wiring is blanket O(n²). Layer purity (model/tiling
+        // NOTE: Cross-wiring is blanket O(n²). Layer purity (model/tiling
         // xcb-free, sync sole wire writer) is enforced by dev/scripts/check-layers.sh
         // at zig build check time, NOT at the module level. If a module accidentally
         // imports a forbidden dependency, the build succeeds but check-layers catches
@@ -864,18 +883,6 @@ const Module = struct {
 
     fn isZigSource(filename: []const u8) bool {
         return std.mem.endsWith(u8, filename, ".zig");
-    }
-
-    /// Compares a discovered path against the entry-point path component-wise
-    /// rather than byte-wise.
-    ///
-    /// `rel_path` is produced by `std.fs.path.join`, which joins using the
-    /// host's native separator; `entry_point_path` is a POSIX-style literal
-    /// defined above. On POSIX hosts the two happen to use the same
-    /// separator already, but comparing components keeps this correct on
-    /// any host regardless.
-    fn isEntryPointPath(rel_path: []const u8, entry_point: []const u8) bool {
-        return std.mem.eql(u8, rel_path, entry_point);
     }
 };
 

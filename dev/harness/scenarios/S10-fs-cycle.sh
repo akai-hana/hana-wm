@@ -1,4 +1,4 @@
-# S10 - fs-cycle: enter/exit fullscreen restores border width AND pixel (BC14 gate).
+# S10 - fs-cycle: enter/exit fullscreen restores border width AND pixel.
 spawn_client A
 spawn_client B
 dump tiled

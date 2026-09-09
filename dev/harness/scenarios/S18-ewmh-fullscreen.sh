@@ -1,7 +1,7 @@
 # S18 - EWMH fullscreen: client-requested _NET_WM_STATE works end to end.
 #
-# Regression gate for fix P0-3 (the client-message path was gated on the
-# empty legacy registry and silently dropped requests).
+# Regression gate: the client-message path was gated on the empty
+# registry and silently dropped requests.
 spawn_client A
 spawn_client B
 settle 300

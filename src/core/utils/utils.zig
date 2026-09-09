@@ -3,13 +3,13 @@
 //! Purely xcb-free: geometry/scaling helpers plus re-exports of every public
 //! decl from the modules below so existing `utils.X` call sites are unchanged:
 //!
-//!   bounded.zig   BoundedList                       (xcb-free)
-//!   proc.zig      lifecycle flags, wake pipe, pipes  (xcb-free)
+//!   bounded   BoundedList                       (xcb-free)
+//!   proc      lifecycle flags, wake pipe, pipes  (xcb-free)
 //!
 //! Layer note: model/tiling reference only the xcb-free decls here and in
 //! this file's own pure section. The xcb-dependent halves (X11 wire
-//! primitives and masks) live under core/x11/ and are re-exported here so
-//! window/bar/core call sites stay unchanged.
+//! primitives and masks) live in the core x11 group and are re-exported here
+//! so window/bar/core call sites stay unchanged.
 
 const std = @import("std");
 const constants = @import("constants");
@@ -105,7 +105,7 @@ pub fn WindowedProfiler(
 // --- bounded collections (re-exports) ---------------------------------------
 pub const BoundedList = bounded.BoundedList;
 
-// --- X11 wire primitives (re-exports; xcb-dependent live in core/x11/wire.zig) ---
+// --- X11 wire primitives (re-exports; xcb-dependent live in the x11 wire module) ---
 pub const initAtomCache = x11wire.initAtomCache;
 pub const getAtomCached = x11wire.getAtomCached;
 pub const getAtomOrZero = x11wire.getAtomOrZero;
@@ -114,7 +114,6 @@ pub const fetchPropertyToBuffer = x11wire.fetchPropertyToBuffer;
 pub const collectPropertyReply = x11wire.collectPropertyReply;
 pub const collectGeometryReply = x11wire.collectGeometryReply;
 pub const configureWindow = x11wire.configureWindow;
-pub const configureWindowStackMode = x11wire.configureWindowStackMode;
 pub const raiseWindow = x11wire.raiseWindow;
 pub const setBorderPixel = x11wire.setBorderPixel;
 pub const grabServer = x11wire.grabServer;
@@ -196,3 +195,7 @@ pub const scaling = struct {
         return @intCast(std.math.clamp(v, 0, std.math.maxInt(u16)));
     }
 };
+
+pub inline fn eventCast(comptime T: type, event: *anyopaque) T {
+    return @ptrCast(@alignCast(event));
+}

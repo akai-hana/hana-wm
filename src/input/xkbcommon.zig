@@ -255,34 +255,35 @@ fn retryPoll(comptime T: type, op: anytype) ?T {
 /// Calls xkb_x11_setup_xkb_extension, retrying up to max_attempts times.
 /// The extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: *anyopaque) !void {
-    var ok: c_int = 0;
-    inline for (0..max_attempts) |i| {
-        ok = xkb.xkb_x11_setup_xkb_extension(
-            @ptrCast(xcb_conn),
-            xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
-            xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
-            xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-            null,
-            null,
-            null,
-            null,
-        );
-        if (ok != 0) return;
-        retryDelay(@intCast(i));
-    }
-    return error.XkbSetupFailed;
+    _ = retryPoll(c_int, struct {
+        conn: *anyopaque,
+        fn call(self: @This()) ?c_int {
+            const ok = xkb.xkb_x11_setup_xkb_extension(
+                @ptrCast(self.conn),
+                xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
+                xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
+                xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
+                null,
+                null,
+                null,
+                null,
+            );
+            return if (ok != 0) ok else null;
+        }
+    }{ .conn = xcb_conn }) orelse return error.XkbSetupFailed;
 }
 
 /// Calls xkb_x11_get_core_keyboard_device_id, retrying up to max_attempts
 /// times; the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
-    inline for (0..max_attempts) |i| {
-        const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
-        if (device_id != -1) return device_id;
-        retryDelay(@intCast(i));
-    }
-    return error.XkbNoKeyboard;
+    return retryPoll(i32, struct {
+        conn: *anyopaque,
+        fn call(self: @This()) ?i32 {
+            const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(self.conn));
+            return if (device_id != -1) device_id else null;
+        }
+    }{ .conn = xcb_conn }) orelse error.XkbNoKeyboard;
 }
 
 /// Minimum reachable keysyms in 8..128 for a keymap to count as populated.

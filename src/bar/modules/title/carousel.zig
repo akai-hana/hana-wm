@@ -12,7 +12,7 @@
 //!     event-driven redraws always show the current position.
 //!   - Frames are requested through pollDeadlineMs(), contributed via the
 //!     bar's poll-timeout minimum; rendering rides the normal redraw path.
-//!   - The math is pure (see src/test/carousel_test.zig); identity is tracked
+//!   - The math is pure (see the carousel unit tests); identity is tracked
 //!     by (window id, title hash) so a newly focused or renamed title always
 //!     restarts from its beginning.
 

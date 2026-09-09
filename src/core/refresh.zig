@@ -24,6 +24,13 @@ const max_sane_hz: f64 = 1000.0;
 /// collapses the burst into one query.
 const min_redetect_interval_ns: u64 = 100 * std.time.ns_per_ms;
 
+/// Bounds for the pipeline scratch arrays. Real setups have a handful of
+/// outputs/crtcs; these caps are far above anything a single screen can
+/// expose while keeping the detection fully stack-allocated (no allocator
+/// dependency in the boot path).
+const max_outputs = 64;
+const max_cached_modes = 256;
+
 /// RandR extension event base (`first_event`), 0 until detection has run.
 /// Extension event types are server-assigned, so the event dispatcher can
 /// only recognise them once the extension has been queried.
@@ -69,12 +76,29 @@ pub fn randrFirstEvent() u8 {
 var redetect_pending: bool = false;
 
 /// Called by the event loop on any RandR extension event (screen change, CRTC
-/// change, output change). Rate-limits and flags a re-detection rather than
-/// querying inline: detectRefreshRate performs synchronous XCB round-trips that
-/// would stall the event-dispatch loop mid-batch, so the query is deferred to
-/// runPendingRedetect at a controlled point in the loop. Main thread only.
-pub fn handleRandrNotifyEvent(conn: core.Connection) void {
+/// change, output change).
+///
+/// Fast path: an RRNotify event carrying a CRTC change puts the newly-active
+/// mode id directly in the payload. When that mode is present in the cached
+/// mode table (populated on the last detection), the rate is resolved with
+/// zero additional XCB requests and published immediately.
+///
+/// Fallback: any event without an in-cache mode (screen/output changes, or a
+/// mode not yet in the table) is rate-limited and flags a deferred full
+/// re-detection, which runs at a controlled point in the loop
+/// (runPendingRedetect) and refreshes the cached mode table. Main thread only.
+pub fn handleRandrNotifyEvent(conn: core.Connection, event: *anyopaque) void {
     _ = conn;
+    if (rateFromNotifyEvent(event)) |rate| {
+        // A burst of RandR notify events describes one configuration. Once the
+        // mode is resolved from the payload, drop any full re-detection that a
+        // sibling event (e.g. screen change) in the same burst may have queued;
+        // the cached table already holds the authoritative rate for this mode.
+        redetect_pending = false;
+        publishDetectedRate(rate);
+        return;
+    }
+
     const now = utils.monotonicNs();
     if (now -| last_redetect_ns < min_redetect_interval_ns) return;
     last_redetect_ns = now;
@@ -102,77 +126,180 @@ fn setupRandr(conn: core.Connection, root: xcb.xcb_window_t) bool {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Cached mode table
+//
+// The screen-resources reply carries the full mode table (id -> refresh rate).
+// It is cached at every detection so the CRTC-change event path can resolve a
+// mode id from an event payload with zero XCB requests. Main-thread only.
+
+const CachedMode = struct {
+    id: xcb.xcb_randr_mode_t,
+    hz: f64,
+};
+
+var cached_modes: [max_cached_modes]CachedMode = undefined;
+var cached_mode_count: usize = 0;
+
+/// Precomputes the refresh rate for every mode in the resources reply and
+/// stores it in the cache (capped at max_cached_modes).
+fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
+    cached_mode_count = @min(modes.len, max_cached_modes);
+    for (modes[0..cached_mode_count], 0..) |mode, i| {
+        cached_modes[i] = .{
+            .id = mode.id,
+            .hz = if (mode.htotal == 0 or mode.vtotal == 0)
+                0.0
+            else
+                @as(f64, @floatFromInt(mode.dot_clock)) /
+                    (@as(f64, @floatFromInt(mode.htotal)) * @as(f64, @floatFromInt(mode.vtotal))),
+        };
+    }
+}
+
+/// Looks up the refresh rate for a mode id in the cached table. Returns null
+/// when the id is absent or the mode yields no valid rate.
+fn rateForModeId(mode_id: xcb.xcb_randr_mode_t) ?f64 {
+    for (cached_modes[0..cached_mode_count]) |m| {
+        if (m.id != mode_id) continue;
+        if (m.hz > 0.0) return m.hz;
+        return null;
+    }
+    return null;
+}
+
+/// Extracts the refresh rate from a RandR event payload when possible:
+/// an RRNotify event (extension base + 1) whose CRTC-change member carries the
+/// newly-active mode id, resolved from the cached mode table. Returns null for
+/// every other event (screen change, output change, unknown subCode, or a mode
+/// absent from the cache), signalling the caller to fall back to a full detect.
+fn rateFromNotifyEvent(event: *anyopaque) ?f64 {
+    // Only the RRNotify event (base + 1) carries a subCode and notify-data
+    // union. The screen-change event (base) has a rotation byte in the same
+    // offset as subCode, so trust it only when response_type matches base + 1.
+    if (randr_first_event == 0) return null;
+    const notify = utils.eventCast(*xcb.xcb_randr_notify_event_t, event);
+    if (notify.*.response_type != randr_first_event + 1) return null;
+    if (notify.*.subCode != xcb.XCB_RANDR_NOTIFY_CRTC_CHANGE) return null;
+    const mode_id = notify.*.u.cc.mode;
+    if (mode_id == 0) return null;
+    return rateForModeId(mode_id);
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined refresh detection
+//
+// The old path fired one request and immediately drained it with _reply,
+// blocking per dependant: screen resources, then output primary, then per
+// output (output info -> crtc info) = 1 + 2*N blocking waits. The pipelined
+// path fires every independent cookie first, then collects the replies in
+// order (poll-preferring via the XCB reply calls), collapsing the N waits into
+// three phases: (1) resources + primary, (2) all output infos, (3) all crtc
+// infos.
+
 fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
+    // Phase 1: fire both independent requests, then drain them in order.
     const res_cookie = xcb.xcb_randr_get_screen_resources_current(conn, root);
+    const primary_cookie = xcb.xcb_randr_get_output_primary(conn, root);
+
     const res = xcb.xcb_randr_get_screen_resources_current_reply(conn, res_cookie, null) orelse
         return;
     defer std.c.free(res);
 
-    if (refreshRateFromOutputs(conn, root, res)) |rate| publishDetectedRate(rate);
-}
-
-/// Returns the refresh rate from the mode active on the screen's primary
-/// output, falling back to other outputs if the primary has no active mode.
-fn refreshRateFromOutputs(
-    conn: core.Connection,
-    root: xcb.xcb_window_t,
-    res: *xcb.xcb_randr_get_screen_resources_current_reply_t,
-) ?f64 {
     var primary: xcb.xcb_randr_output_t = 0;
-    const primary_cookie = xcb.xcb_randr_get_output_primary(conn, root);
     if (xcb.xcb_randr_get_output_primary_reply(conn, primary_cookie, null)) |reply| {
         defer std.c.free(reply);
         primary = reply.*.output;
     }
 
-    if (primary != 0) if (refreshRateFromOutput(conn, primary, res)) |rate| return rate;
-
-    const outputs = xcb.xcb_randr_get_screen_resources_current_outputs(res);
-    const output_count: usize = @intCast(
-        xcb.xcb_randr_get_screen_resources_current_outputs_length(res),
-    );
-    for (outputs[0..output_count]) |output| {
-        if (output == primary) continue;
-        if (refreshRateFromOutput(conn, output, res)) |rate| return rate;
-    }
-    return null;
-}
-
-/// Derives the refresh rate from the pixel clock: dot_clock / (htotal * vtotal).
-fn findModeRate(modes: anytype, mode_id: anytype) ?f64 {
-    for (modes) |mode| {
-        if (mode.id != mode_id) continue;
-        if (mode.htotal == 0 or mode.vtotal == 0) return null;
-        return @as(f64, @floatFromInt(mode.dot_clock)) /
-            (@as(f64, @floatFromInt(mode.htotal)) * @as(f64, @floatFromInt(mode.vtotal)));
-    }
-    return null;
-}
-
-/// Queries the output and its CRTC for the currently-active mode, then
-/// resolves the mode's refresh rate from the mode table.
-fn refreshRateFromOutput(
-    conn: core.Connection,
-    output: xcb.xcb_randr_output_t,
-    res: *const xcb.xcb_randr_get_screen_resources_current_reply_t,
-) ?f64 {
-    const out_cookie = xcb.xcb_randr_get_output_info(conn, output, res.*.config_timestamp);
-    const out = xcb.xcb_randr_get_output_info_reply(conn, out_cookie, null) orelse return null;
-    defer std.c.free(out);
-    const crtc = out.*.crtc;
-    if (crtc == 0) return null;
-
-    const crtc_cookie = xcb.xcb_randr_get_crtc_info(conn, crtc, res.*.config_timestamp);
-    const crtc_info = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookie, null) orelse return null;
-    defer std.c.free(crtc_info);
-    const mode_id = crtc_info.*.mode;
-    if (mode_id == 0) return null;
-
+    // Cache the mode table while it is in hand; the event path reuses it to
+    // resolve CRTC-change mode ids with zero requests.
     const modes = xcb.xcb_randr_get_screen_resources_current_modes(res);
     const mode_count: usize = @intCast(
         xcb.xcb_randr_get_screen_resources_current_modes_length(res),
     );
-    return findModeRate(modes[0..mode_count], mode_id);
+    cacheModes(modes[0..mode_count]);
+
+    if (pipelinedRefreshRateFromOutputs(conn, res, primary)) |rate| publishDetectedRate(rate);
+}
+
+/// Returns the refresh rate of the mode active on the screen's primary output,
+/// falling back to other outputs when the primary has no active mode. All
+/// output-info requests are fired before any reply is collected, and all
+/// crtc-info requests are fired before any reply is collected, so the whole
+/// probe takes ~3 blocking waits regardless of output count (vs 1 + 2*N before).
+fn pipelinedRefreshRateFromOutputs(
+    conn: core.Connection,
+    res: *xcb.xcb_randr_get_screen_resources_current_reply_t,
+    primary: xcb.xcb_randr_output_t,
+) ?f64 {
+    const outputs = xcb.xcb_randr_get_screen_resources_current_outputs(res);
+    const output_count: i32 = xcb.xcb_randr_get_screen_resources_current_outputs_length(res);
+    if (output_count <= 0) return null;
+    const n_out: usize = @intCast(output_count);
+
+    // Build a priority-ordered candidate list (primary first), capped.
+    var order: [max_outputs]xcb.xcb_randr_output_t = undefined;
+    var n_order: usize = 0;
+    if (primary != 0) {
+        order[0] = primary;
+        n_order = 1;
+    }
+    for (outputs[0..@min(n_out, max_outputs)]) |out| {
+        if (out == primary) continue;
+        if (n_order >= max_outputs) break;
+        order[n_order] = out;
+        n_order += 1;
+    }
+    if (n_order == 0) return null;
+
+    // Phase 2: fire an output-info request for every candidate, then collect.
+    var out_cookies: [max_outputs]xcb.xcb_randr_get_output_info_cookie_t = undefined;
+    var out_info_ptrs: [max_outputs]?*xcb.xcb_randr_get_output_info_reply_t = undefined;
+    var out_info_valid: [max_outputs]bool = undefined;
+    const config_ts = res.*.config_timestamp;
+    for (order[0..n_order], 0..) |out, i|
+        out_cookies[i] = xcb.xcb_randr_get_output_info(conn, out, config_ts);
+    for (order[0..n_order], 0..) |_, i| {
+        const info = xcb.xcb_randr_get_output_info_reply(conn, out_cookies[i], null) orelse {
+            out_info_valid[i] = false;
+            continue;
+        };
+        out_info_ptrs[i] = info;
+        out_info_valid[i] = true;
+    }
+    defer for (order[0..n_order], 0..) |_, i| {
+        if (out_info_valid[i]) std.c.free(out_info_ptrs[i].?);
+    };
+
+    // Phase 3: fire a crtc-info request for every output that has a CRTC.
+    var crtc_cookies: [max_outputs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
+    var crtc_valid: [max_outputs]bool = undefined;
+    for (order[0..n_order], 0..) |_, i| {
+        if (!out_info_valid[i]) {
+            crtc_valid[i] = false;
+            continue;
+        }
+        const crtc = out_info_ptrs[i].?.crtc;
+        if (crtc == 0) {
+            crtc_valid[i] = false;
+            continue;
+        }
+        crtc_cookies[i] = xcb.xcb_randr_get_crtc_info(conn, crtc, config_ts);
+        crtc_valid[i] = true;
+    }
+
+    // Collect the crtc replies in priority order and resolve the active mode.
+    for (order[0..n_order], 0..) |_, i| {
+        if (!crtc_valid[i]) continue;
+        const crtc_info = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookies[i], null) orelse
+            continue;
+        const mode_id = crtc_info.*.mode;
+        std.c.free(crtc_info);
+        if (mode_id == 0) continue;
+        if (rateForModeId(mode_id)) |rate| return rate;
+    }
+    return null;
 }
 
 fn publishDetectedRate(rate: f64) void {

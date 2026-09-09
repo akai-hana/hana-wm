@@ -8,7 +8,7 @@ const testing = std.testing;
 
 const parser = @import("parser");
 
-test "P1 parses root + named sections into a flat Document" {
+test "parses root + named sections into a flat Document" {
     const alloc = testing.allocator;
     const src =
         \\str_key = "hello"
@@ -38,7 +38,7 @@ test "P1 parses root + named sections into a flat Document" {
     try testing.expect(!extra.asScalar(parser.ScalableValue).?.is_percentage);
 }
 
-test "P2 double-quoted strings resolve escapes; single-quoted pass through" {
+test "double-quoted strings resolve escapes; single-quoted pass through" {
     const alloc = testing.allocator;
     const src = "a = \"line1\\nline2\\ttab\"\n" ++ "b = 'raw\\nnot-an-escape'\n";
     var doc = try parser.parse(alloc, src);
@@ -49,7 +49,7 @@ test "P2 double-quoted strings resolve escapes; single-quoted pass through" {
     try testing.expectEqualStrings("raw\\nnot-an-escape", doc.root.get("b").?.asScalar([]const u8).?);
 }
 
-test "P3 missing key / missing section yield absent, not panic" {
+test "missing key / missing section yield absent, not panic" {
     const alloc = testing.allocator;
     var doc = try parser.parse(alloc, "present = 1\n");
     defer doc.deinit();
@@ -57,7 +57,7 @@ test "P3 missing key / missing section yield absent, not panic" {
     try testing.expect(doc.sections.getPtr("nope") == null);
 }
 
-test "P4 parseColor accepts forms and rejects out-of-range" {
+test "parseColor accepts forms and rejects out-of-range" {
     try testing.expectEqual(@as(u32, 0xFFFFFF), try parser.parseColor("0xFFFFFF"));
     try testing.expectEqual(@as(u32, 0x61AFEF), try parser.parseColor("#61AFEF"));
     try testing.expectEqual(@as(u32, 0xFF), try parser.parseColor("#0000ff"));
@@ -68,7 +68,7 @@ test "P4 parseColor accepts forms and rejects out-of-range" {
     try testing.expectError(error.InvalidColor, parser.parseColor("zzz"));
 }
 
-test "P5 mergeDocumentsInto: later document wins for scalars" {
+test "mergeDocumentsInto: later document wins for scalars" {
     const alloc = testing.allocator;
     var base = try parser.parse(alloc, "theme = \"dark\"\n[bar]\nheight = 24\n");
     defer base.deinit();
@@ -82,7 +82,7 @@ test "P5 mergeDocumentsInto: later document wins for scalars" {
     try testing.expectEqual(@as(i64, 32), bar.get("height").?.asScalar(i64).?);
 }
 
-test "P6 malformed lines are skipped without aborting the parse" {
+test "malformed lines are skipped without aborting the parse" {
     const alloc = testing.allocator;
     // A bad section header and a bad value don't poison the documents; the
     // parser recovers by skipping to the next line.

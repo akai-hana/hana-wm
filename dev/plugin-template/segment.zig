@@ -18,8 +18,7 @@
 //! nor paints anything. Drop it into `src/bar/modules/` and `zig build test`
 //! stays identical (110/110) — that is the contract's litmus test.
 //!
-//! The full contract + onboarding guide lives in PLUGIN_PROVIDER.md (§1.7
-//! and §7). The shared bar vocabulary (Frame, Env, DrawCtx, title snapshot
+//! The shared bar vocabulary (Frame, Env, DrawCtx, title snapshot
 //! types) lives in src/bar/segment.zig — import it with `@import("segment")`.
 
 const std = @import("std");
@@ -45,7 +44,7 @@ var g_polls: u32 = 0;
 /// `allocator`/`conn` are bar-wide services; `handlers` is the bar's service
 /// handle for your segment if you are a chrome-surface overlay like the
 /// prompt (`*const segment.BarHandlers` — presentForPrompt/dismissAfterPrompt/
-/// isBarWindow, see D10). Cast it on this side; leave null-ignored when your
+/// isBarWindow). Cast it on this side; leave null-ignored when your
 /// segment needs no bar services.
 pub fn init(allocator: std.mem.Allocator, conn: core.Connection, handlers: ?*const anyopaque) anyerror!void {
     _ = conn;

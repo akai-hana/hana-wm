@@ -10,25 +10,9 @@ const std = @import("std");
 const testing = std.testing;
 
 const config = @import("config");
+const scratch = @import("scratch");
 
-const io = std.Options.debug_io;
-const scratch_dir = "/tmp/opencode";
-
-fn scratchPath(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{s}/hana-cfgtest-{s}", .{ scratch_dir, name });
-}
-
-fn writeScratchFile(abs_path: []const u8, bytes: []const u8) !void {
-    const f = try std.Io.Dir.createFileAbsolute(io, abs_path, .{});
-    defer f.close(io);
-    try f.writePositionalAll(io, bytes, 0);
-}
-
-fn cleanupScratch(abs_path: []const u8) void {
-    std.Io.Dir.deleteFileAbsolute(io, abs_path) catch {};
-}
-
-test "C1 readFileAlloc round-trips a >64KiB file exactly" {
+test "readFileAlloc round-trips a >64KiB file exactly" {
     const alloc = testing.allocator;
 
     // Patterned so any truncation/reorder breaks equality (not just length).
@@ -36,63 +20,63 @@ test "C1 readFileAlloc round-trips a >64KiB file exactly" {
     defer alloc.free(big);
     for (big, 0..) |*b, i| b.* = @truncate(i * 7 + (i % 251));
 
-    const path = try scratchPath(alloc, "big");
+    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "big");
     defer alloc.free(path);
-    try writeScratchFile(path, big);
-    defer cleanupScratch(path);
+    try scratch.writeScratchFile(path, big);
+    defer scratch.cleanupScratch(path);
 
     const got = try config.readFileAlloc(alloc, path);
     defer alloc.free(got);
     try testing.expectEqualSlices(u8, big, got);
 }
 
-test "C2 readFileAlloc accepts exactly max_file_bytes" {
+test "readFileAlloc accepts exactly max_file_bytes" {
     const alloc = testing.allocator;
 
     const exact = try alloc.alloc(u8, config.max_file_bytes);
     defer alloc.free(exact);
     @memset(exact, 'x');
 
-    const path = try scratchPath(alloc, "exact");
+    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "exact");
     defer alloc.free(path);
-    try writeScratchFile(path, exact);
-    defer cleanupScratch(path);
+    try scratch.writeScratchFile(path, exact);
+    defer scratch.cleanupScratch(path);
 
     const got = try config.readFileAlloc(alloc, path);
     defer alloc.free(got);
     try testing.expectEqual(exact.len, got.len);
 }
 
-test "C3 readFileAlloc rejects max_file_bytes + 1" {
+test "readFileAlloc rejects max_file_bytes + 1" {
     const alloc = testing.allocator;
 
     const over = try alloc.alloc(u8, config.max_file_bytes + 1);
     defer alloc.free(over);
     @memset(over, 'y');
 
-    const path = try scratchPath(alloc, "over");
+    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "over");
     defer alloc.free(path);
-    try writeScratchFile(path, over);
-    defer cleanupScratch(path);
+    try scratch.writeScratchFile(path, over);
+    defer scratch.cleanupScratch(path);
 
     const got = config.readFileAlloc(alloc, path);
     try testing.expectError(error.FileTooLarge, got);
 }
 
-test "C4 readFileAlloc returns empty slice for empty file" {
+test "readFileAlloc returns empty slice for empty file" {
     const alloc = testing.allocator;
 
-    const path = try scratchPath(alloc, "empty");
+    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "empty");
     defer alloc.free(path);
-    try writeScratchFile(path, "");
-    defer cleanupScratch(path);
+    try scratch.writeScratchFile(path, "");
+    defer scratch.cleanupScratch(path);
 
     const got = try config.readFileAlloc(alloc, path);
     defer alloc.free(got);
     try testing.expectEqual(@as(usize, 0), got.len);
 }
 
-test "C5 readFileAlloc growth path handles stat-less files (/proc)" {
+test "readFileAlloc growth path handles stat-less files (/proc)" {
     const alloc = testing.allocator;
     // /proc/self/status reports stat.size == 0 with real content: forces the
     // fallback read-with-growth loop.

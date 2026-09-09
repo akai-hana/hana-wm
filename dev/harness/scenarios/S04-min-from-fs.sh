@@ -1,5 +1,5 @@
 # S04 - min-from-fs: minimize while fullscreen, restore re-enters fullscreen
-# with the saved rect (BC08).
+# with the saved rect.
 spawn_client A
 spawn_client B
 key super+f          # fullscreen the focused (newest)

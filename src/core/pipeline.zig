@@ -3,9 +3,9 @@
 //! reconcile slots entry points call.
 //!
 //! Call sites (all marked `// PIPELINE:`):
-//!   src/main.zig    startup calls init(alloc)
-//!   floating.zig    updateDrag calls dragTick()
-//!   window.zig      unmanage/EWMH call actions.unmanage / fullscreenToggleWindow
+//!   startup        calls init(alloc)
+//!   floating       updateDrag calls dragTick()
+//!   window         unmanage/EWMH call actions.unmanage / fullscreenToggleWindow
 
 const std = @import("std");
 const model_mod = @import("model");
@@ -41,8 +41,28 @@ pub fn init(_: std.mem.Allocator) void {
     initialized = true;
     sync.init();
 }
-pub inline fn model() *model_mod.Model {
+/// READ-ONLY access to the WM model (single source of truth). The return type
+/// is `*const`, so any attempt to write through this handle is a compile
+/// error: the compiler is the mutation tripwire. A MUTABLE handle requires
+/// the transition-layer gate (`pipeline.mut`); only modules that own model
+/// transitions declare a private `Gate` (actions/window/focus/tracking).
+pub inline fn model() *const model_mod.Model {
     if (!initialized) @panic("pipeline.model() called before init()");
+    return &instance;
+}
+
+/// Capability gate for mutable model access (see `mut`). Accident-resistant,
+/// not adversarial: declaring a fresh Gate compiles, but no module does so by
+/// accident -- the read-only `model()` handle is the default.
+pub const Gate = struct {};
+
+/// MUTABLE access to the WM model. Requires a `Gate` value, which only the
+/// transition layer declares privately; every other module sees only the
+/// read-only `model()` handle. Zero-cost: the empty gate is compile-time
+/// discarded.
+pub inline fn mut(g: *const Gate) *model_mod.Model {
+    _ = g;
+    if (!initialized) @panic("pipeline.mut() called before init()");
     return &instance;
 }
 
@@ -102,7 +122,7 @@ fn ctx() *sync.Ctx {
             .height = screen_h,
         },
         .workarea = screen.workArea(cs.screen),
-        .cfg_bw = wincache.width(),
+        .cfg_bw = core.borderWidth(),
         .env = .{
             .margins = .{
                 .gap = utils.scaling.scaleBorderWidth(cs.config.tiling.gap_width, screen_h),
@@ -158,14 +178,17 @@ pub fn dragTickLatency() ?struct { avg_ns: u64, count: u64 } {
 /// provides no hook has no pre-reconcile duty).
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
-    const m = model();
-    const p = &m.ws[m.current].params;
+    // Internal choke point: touches the private `instance` directly (not via
+    // model()/mut()) because this is the model owner applying the active
+    // layout's pure pre-reconcile delta (value-in, value-out -- no layout
+    // module receives a mutable pointer into the model anymore).
+    const p = &instance.ws[instance.current].params;
     if (p.kind >= tiling_mods.len) return;
     const md = tiling_mods[p.kind];
     if (md.preReconcile == null) return;
-    const n = model_mod.tiledCountOnWs(m, m.current);
+    const n = model_mod.tiledCountOnWs(&instance, instance.current);
     const wa = screen.workArea(core.getState().screen);
-    md.preReconcile.?(@ptrCast(p), n, wa.width);
+    p.* = md.preReconcile.?(p.*, n, wa.width);
 }
 
 /// Grab server, reconcile, then ungrabAndFlush, atomically.

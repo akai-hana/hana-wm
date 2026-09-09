@@ -72,24 +72,20 @@ inline fn asHandler(comptime f: anytype) EventHandler {
     return @ptrCast(&f);
 }
 
-inline fn eventCast(comptime T: type, event: *anyopaque) T {
-    return @ptrCast(@alignCast(event));
-}
-
 fn handleExpose(event: *anyopaque) void {
-    const e = eventCast(*xcb.xcb_expose_event_t, event);
+    const e = utils.eventCast(*xcb.xcb_expose_event_t, event);
     if (build_options.has_bar) surfaces.handleExpose(e);
 }
 
 fn handlePropertyNotify(event: *anyopaque) void {
-    const e = eventCast(*xcb.xcb_property_notify_event_t, event);
+    const e = utils.eventCast(*xcb.xcb_property_notify_event_t, event);
     if (build_options.has_bar) surfaces.handlePropertyNotify(e);
     window.handlePropertyNotify(e);
 }
 
 // Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
-    const e = eventCast(*xcb.xcb_configure_notify_event_t, event);
+    const e = utils.eventCast(*xcb.xcb_configure_notify_event_t, event);
     for (window_mods) |m| if (m.notifyConfigureIfPending) |f| f(e.window, e.width, e.height);
 }
 
@@ -97,7 +93,7 @@ fn handleConfigureNotify(event: *anyopaque) void {
 // This clears any pending deferred bar-show for a window that exits fullscreen
 // and is then destroyed before it can send a ConfigureNotify.
 fn handleDestroyNotify(event: *anyopaque) void {
-    const e = eventCast(*xcb.xcb_destroy_notify_event_t, event);
+    const e = utils.eventCast(*xcb.xcb_destroy_notify_event_t, event);
     for (window_mods) |m| if (m.onWindowGone) |f| f(e.window);
     window.handleDestroyNotify(e);
 }
@@ -162,7 +158,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // this branch such errors would be silently dropped, making real-world
     // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
     if (event_type == 0) {
-        const e = eventCast(*xcb.xcb_generic_error_t, event);
+        const e = utils.eventCast(*xcb.xcb_generic_error_t, event);
         debug.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
         return;
     }
@@ -171,7 +167,10 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // here; they sit above the fixed dispatch table and would otherwise be
     // dropped by the bounds guard below.
     if (isRandrEvent(event_type)) {
-        refresh.handleRandrNotifyEvent(core.getState().conn);
+        // Pass the raw event: a CRTC-change payload carries the active mode id,
+        // letting refresh resolve the rate from its cached mode table with zero
+        // XCB round-trips (see refresh.handleRandrNotifyEvent).
+        refresh.handleRandrNotifyEvent(core.getState().conn, event);
         return;
     }
 
@@ -295,23 +294,30 @@ fn handleConfigReload() !void {
     const old_ptr = cs.config;
     cs.config = new_ptr;
 
-    if (build_options.has_bar) surfaces.onReload();
-    actions.applyConfigReload();
-    // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
-    // and sweeping first would send every border twice -- once here, once
-    // again deduped against fresh state. Sweeping last lets borders.apply
-    // dedup against entries the reconcile just wrote.
-    window.reloadBorders();
+    // Per-subsystem change detection: only tear down and rebuild the
+    // subsystems whose config actually changed.  E.g. a bar color tweak
+    // should not regrab keybindings, and a keybinding change should not
+    // rebuild the bar.
+    const changes = config.detectChanges(old_ptr, new_ptr);
+
+    if (build_options.has_bar and changes.bar) surfaces.onReload();
+    if (changes.tiling) {
+        actions.applyConfigReload();
+        // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
+        // and sweeping first would send every border twice -- once here, once
+        // again deduped against fresh state. Sweeping last lets borders.apply
+        // dedup against entries the reconcile just wrote.
+        window.reloadBorders();
+        // Rebuild after the swap so borrowed key slices point into the new config's memory.
+        window.buildRulesMap();
+    }
 
     // Free the displaced old config after subsystem reloads have moved on.
     old_ptr.deinit(cs.alloc);
 
-    grabKeybindings();
+    if (changes.keys) grabKeybindings();
 
-    // Rebuild after the swap so borrowed key slices point into the new config's memory.
-    window.buildRulesMap();
-
-    debug.info("Reload complete", .{});
+    debug.info("Reload complete (bar={} tiling={} keys={})", .{ changes.bar, changes.tiling, changes.keys });
 }
 
 // Re-exec hand-off, driven by restart.consumeReexec() in run(). The sequence
@@ -388,7 +394,10 @@ fn handleXcbEvents() void {
             // signal pipe and timer paths the cap exists to protect.
             while (dispatched + coalesced < max_events_per_batch) {
                 const next = xcb.xcb_poll_for_event(conn) orelse break;
-                if (!isMotion(next)) { pending = next; break; }
+                if (!isMotion(next)) {
+                    pending = next;
+                    break;
+                }
                 std.c.free(event);
                 event = next; // keep only the newest motion of the run
                 coalesced += 1;
@@ -405,6 +414,22 @@ fn handleXcbEvents() void {
     // normal (socket-empty) exit path `pending` is always null and nothing is
     // carried.
     if (pending) |p| stashed_event = p;
+
+    // Drain remaining events from XCB's internal event queue. When the
+    // batch cap is hit above, events already buffered inside XCB (but not
+    // in the kernel socket buffer) would otherwise wait for the next
+    // poll() cycle — potentially up to the timer deadline — before being
+    // dispatched. xcb_poll_for_queued_event reads only from the internal
+    // queue without touching the socket, so it surfaces these stranded
+    // events immediately.
+    {
+        var extra: usize = 0;
+        while (extra < 256) : (extra += 1) {
+            const event = xcb.xcb_poll_for_queued_event(conn) orelse break;
+            defer std.c.free(event);
+            dispatch(@as(*u8, @ptrCast(event)).*, event);
+        }
+    }
 
     // Drain any spawn pipes that became readable during this event batch.
     // This catches the common case where SIGCHLD and the MapRequest arrive in

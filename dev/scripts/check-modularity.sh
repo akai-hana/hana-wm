@@ -286,10 +286,6 @@ run_scenarios() {
         "src/bar/drawing.zig"
 
     run_scenario \
-        "bar internal: -render" \
-        "src/bar/render.zig"
-
-    run_scenario \
         "bar internal: -win" \
         "src/bar/win.zig"
 
