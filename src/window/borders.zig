@@ -22,8 +22,7 @@ pub fn color(win: u32) u32 {
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }
 
-/// Returns the effective border width for tiled windows. Falls back to
-/// the scaled config value when tiling is disabled or not compiled in.
+/// Returns the effective border width for tiled windows.
 pub fn width() u16 {
     return core.borderWidth();
 }

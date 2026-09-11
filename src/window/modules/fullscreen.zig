@@ -25,12 +25,13 @@ const xcb = core.xcb;
 const bounded = @import("bounded");
 const utils = @import("utils");
 const model = @import("model");
+const plugin = @import("plugin");
 const build_options = @import("build_options");
 
 /// One fullscreen window's record. `anchor` is the *pre-fullscreen* base mode
-/// (the geometry/placement the window returns to on exit). `ws` is the
-/// workspace whose screen the window owns while covering.
-const Rec = struct { win: model.WindowId, ws: model.WSId, anchor: model.BaseMode };
+/// (the geometry/placement the window returns to on exit). The capture target
+/// workspace is read from the MODEL's core `covering_ws` intent, not the rec.
+const Rec = struct { win: model.WindowId, anchor: model.BaseMode };
 
 /// Capacity ceiling for the fullscreen store, sourced from the model's store
 /// capacity (no more fullscreen windows than windows): allocation-free,
@@ -81,8 +82,9 @@ pub fn deinit() void {
 
 /// Toggle `win`'s fullscreen capture of the current workspace.
 ///
-/// ON (no existing rec): records `{ win, ws = m.current, anchor = <<deep copy
-/// of e.anchor>> }` and sets `e.presence = .covering`. `anchor` is copied by
+/// ON (no existing rec): records `{ win, anchor = <<deep copy of e.anchor>> }`
+/// and sets `e.presence = .covering` plus the model's `covering_ws` intent
+/// (the single authority on the capture target). `anchor` is copied by
 /// value (BaseMode is a value union; Rect copies cleanly) so the model keeps
 /// its current anchor while the module remembers the pre-fullscreen one.
 /// OFF (rec exists): drops the rec and sets `e.presence = .present`.
@@ -97,8 +99,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (g_recs.remove(win)) {
         // OFF: leave fullscreen; restore the pre-fullscreen anchor to the model.
-        e.presence = .present;
-        e.covering_ws = null; // release the core covering intent
+        releaseCovering(m, win);
         return true;
     }
     // ON: capacity guard BEFORE any mutation — a full store refuses the
@@ -116,15 +117,9 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     // ws the entrant is not on must not displace the resident owner.
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
-        for (g_recs.slice()) |rec| {
-            if (rec.win == win) continue;
-            if (rec.ws != m.current) continue;
-            if (!presentAndVisible(m, rec, m.current)) continue;
-            _ = g_recs.remove(rec.win);
-            if (m.store.getPtr(rec.win)) |prev| {
-                prev.presence = .present;
-                prev.covering_ws = null; // release the core covering intent
-            }
+        while (presentVisibleRecOnWs(m, m.current, win)) |occupant| {
+            _ = g_recs.remove(occupant);
+            releaseCovering(m, occupant);
         }
     }
 
@@ -132,7 +127,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
         .tiled => model.BaseMode.tiled,
         .floating => |r| model.BaseMode{ .floating = r },
     };
-    _ = g_recs.append(.{ .win = win, .ws = m.current, .anchor = anchor });
+    _ = g_recs.append(.{ .win = win, .anchor = anchor });
     e.presence = .covering;
     e.covering_ws = m.current; // model stays the authority on the capture target
     return true;
@@ -152,11 +147,11 @@ pub fn isFullscreenMode(m: *const model.Model, win: model.WindowId) bool {
 }
 
 /// The workspace `win`'s covering capture anchors to, per the MODEL's core
-/// `covering_ws` intent (the module's `g_recs[].ws` is kept in lockstep with
-/// it, but the model is the single authoritative reader). GHOST: still reports
-/// the ws even while the model presence is parked (minimized-from-fullscreen:
-/// minimize leaves `covering_ws` set), so callers classifying drops/withdraw-
-/// without-destroy can read the true target before teardown.
+/// `covering_ws` intent (the single authority; the module's `g_recs` carries
+/// no capture target). GHOST: still reports the ws even while the model
+/// presence is parked (minimized-from-fullscreen: minimize leaves
+/// `covering_ws` set), so callers classifying drops/withdraw-without-destroy
+/// can read the true target before teardown.
 pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
     const e = m.store.get(win) orelse return null;
     return e.covering_ws;
@@ -164,19 +159,34 @@ pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
 
 /// Whether `win` has a fullscreen record targeting `ws`. Unlike
 /// fullscreenOccupantOnWs this does NOT consult visibility; callers use it for
-/// pre-toggle classification and was-fullscreen captures.
+/// pre-toggle classification and was-fullscreen captures. Reads the model's
+/// `covering_ws` intent (kept in lockstep with the record).
 pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WSId) bool {
-    _ = m;
-    const idx = g_recs.find(win) orelse return false;
-    return g_recs.slice()[idx].ws == ws;
+    if (g_recs.find(win) == null) return false;
+    return fullscreenWsOf(m, win) == ws;
 }
 
-/// Occupant-eligibility predicate: the window exists, is present-not-parked,
-/// and visible on `ws`.
-fn presentAndVisible(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
-    const e = m.store.get(rec.win) orelse return false;
-    if (e.presence == .parked) return false;
-    return model.visibleOn(m, rec.win, ws);
+/// Drops `win`'s core covering intent, restoring the window to plain
+/// presence. Shared by the toggle-offs and the occupant-eviction loop.
+fn releaseCovering(m: *model.Model, win: model.WindowId) void {
+    const e = m.store.getPtr(win) orelse return;
+    e.presence = .present;
+    e.covering_ws = null; // release the core covering intent
+}
+
+/// The first record on `ws` whose window is present-not-parked AND visible on
+/// `ws`, skipping `skip` (null scans every record). The shared occupant scan
+/// behind fullscreenOccupantOnWs/fullscreenOccupied and the covering-switch
+/// eviction loop. The `ws` match reads the model's `covering_ws` intent.
+fn presentVisibleRecOnWs(m: *const model.Model, ws: model.WSId, skip: ?model.WindowId) ?model.WindowId {
+    for (g_recs.constSlice()) |rec| {
+        if (skip) |s| if (rec.win == s) continue;
+        const e = m.store.get(rec.win) orelse continue;
+        if (e.covering_ws != ws) continue;
+        if (e.presence == .parked or !model.visibleOn(m, rec.win, ws)) continue;
+        return rec.win;
+    }
+    return null;
 }
 
 /// The first record on `ws` whose window exists, is present-not-parked AND
@@ -187,51 +197,35 @@ fn presentAndVisible(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
 /// rec still exists on-disk. At most one
 /// visible fullscreen per ws is guaranteed by sync (others parked).
 pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
-    for (g_recs.constSlice()) |rec| {
-        if (rec.ws != ws) continue;
-        if (!presentAndVisible(m, rec, ws)) continue;
-        return rec.win;
-    }
-    return null;
+    return presentVisibleRecOnWs(m, ws, null);
 }
 
 /// True iff some OTHER window's record covers `dest`: a rec with `r.win != win`,
-/// `r.ws == dest`, whose window is present-not-parked AND visible on `dest`
-/// (same visibility rule as the occupant query). Shared with the workspaces
-/// move/tag slice: fullscreen transfer-on-move drops the mover rather than
-/// clobbering a resident.
+/// whose covering intent anchors `dest`, whose window is present-not-parked AND
+/// visible on `dest` (same visibility rule as the occupant query). Shared with
+/// the workspaces move/tag slice: fullscreen transfer-on-move drops the mover
+/// rather than clobbering a resident.
 pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: model.WSId) bool {
-    for (g_recs.constSlice()) |rec| {
-        if (rec.win == win) continue;
-        if (rec.ws != dest) continue;
-        if (!presentAndVisible(m, rec, dest)) continue;
-        return true;
-    }
-    return false;
+    return presentVisibleRecOnWs(m, dest, win) != null;
 }
 
-/// Seam for the workspaces module's move/tag slice: retargets `win`'s record
-/// to `ws`. This now SYNCS the model's core `covering_ws` intent alongside the
-/// module record (a covering window stays covering; a ghost record of a
-/// minimized window follows the mask) so the model stays the single authority
-/// on the capture target and the module never diverges from it. The caller has
+/// Seam for the workspaces module's move/tag slice: retargets `win`'s
+/// covering intent to `ws` (a covering window stays covering; a ghost record
+/// of a minimized window follows the mask) by writing the MODEL's core
+/// `covering_ws` — the single authority on the capture target. The caller has
 /// already confirmed the destination is not occupied.
 pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WSId) void {
-    const idx = g_recs.find(win) orelse return;
+    if (g_recs.find(win) == null) return;
     const eptr = @constCast(m).store.getPtr(win) orelse return;
-    g_recs.slice()[idx].ws = ws;
     eptr.covering_ws = ws;
 }
 
-/// The first record whose store entry exists, is present-not-parked,
-/// and either targets `ws` directly or is visible on `ws`. A faithful
-/// migration of the old Tier-1 sync fs-scan; kept as a direct helper
-/// (model.coveringOccupantOnWs is the sync-facing query).
+/// Test-only; the production occupant query is model.coveringOccupantOnWs.
 pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         const e = m.store.get(rec.win) orelse continue;
         if (e.presence == .parked) continue;
-        if (rec.ws == ws or model.visibleOn(m, rec.win, ws)) return rec.win;
+        if (e.covering_ws == ws or model.visibleOn(m, rec.win, ws)) return rec.win;
     }
     return null;
 }
@@ -273,24 +267,25 @@ fn readLE(comptime T: type, bytes: []const u8, off: usize) T {
 /// ghost and the single `ext` slot belongs to minimize — return null so the
 /// minimized blob wins (design §6). The returned slice is allocator-owned;
 /// persist frees it after writing.
-fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const model.Model, *const Rec } {
+fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const Rec, model.Entry } {
     const idx = g_recs.find(win) orelse return null;
     const rec = &g_recs.slice()[idx];
     const e = m.store.get(win) orelse return null;
     if (e.presence == .parked) return null; // parked window: minimize owns the blob
-    return .{ m, rec };
+    return .{ rec, e };
 }
 
 pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const p = serializePreamble(m, win) orelse return null;
-    const rec = p[1];
+    const rec = p[0];
+    const ws = p[1].covering_ws orelse return null; // model owns the capture target
     const len: usize = switch (rec.anchor) {
         .tiled => BLOB_LEN_TILED,
         .floating => BLOB_LEN_FLOATING,
     };
     const buf = alloc.alloc(u8, len) catch return null;
     buf[0] = FS_MAGIC;
-    writeLE(u16, buf, 1, rec.ws);
+    writeLE(u16, buf, 1, ws);
     switch (rec.anchor) {
         .tiled => buf[3] = TAG_TILED,
         .floating => |r| {
@@ -314,7 +309,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 /// exists.
 fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
     if (bytes.len < 1 or bytes[0] != FS_MAGIC) return null; // not ours
-    const m: *model.Model = @ptrCast(@alignCast(ptr));
+    const m: *model.Model = plugin.modelPtrOf(ptr);
     if (g_recs.find(win) != null) return .{ m, null }; // already adopted; idempotent
     const e = m.store.getPtr(win) orelse return null;
     return .{ m, e };
@@ -352,9 +347,9 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     // This hook is only dispatched for non-parked windows (fullscreen blob
     // only exists for non-parked), so we can safely mark the window covering.
     if (g_recs.len() >= MAX_FULLSCREEN) return false;
-    _ = g_recs.append(.{ .win = win, .ws = ws, .anchor = anchor });
+    _ = g_recs.append(.{ .win = win, .anchor = anchor });
     e.presence = .covering;
-    e.covering_ws = ws; // sync the model's core covering intent with the record
+    e.covering_ws = ws; // model stays the single authority on the capture target
     return true;
 }
 

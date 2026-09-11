@@ -106,9 +106,16 @@ pub fn setWindowProperties(win_id: u32, height: u16) void {
             setAtomProperty(cs.conn, win_id, atom, e[1], e[2]);
     }
 }
+
+/// Frees the bar's colormap (identity on the non-transparent 0 case). Shared
+/// by the window teardown and the bar orchestrator's WindowCtx teardown.
+pub fn freeColormap(conn: core.Connection, colormap: u32) void {
+    if (colormap != 0) _ = xcb.xcb_free_colormap(conn, colormap);
+}
+
 pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void {
     _ = xcb.xcb_destroy_window(conn, win_id);
-    if (colormap != 0) _ = xcb.xcb_free_colormap(conn, colormap);
+    freeColormap(conn, colormap);
 }
 
 pub fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {

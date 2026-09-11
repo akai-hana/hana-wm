@@ -20,19 +20,11 @@ const W = segdraw.widthState("layout");
 /// definition).
 fn getIcon() []const u8 {
     const kind = segmod.currentLayoutKind() orelse return "><>";
-    if (tiling_mods[kind].icon) |ic| return ic;
-    return "><>";
+    return tiling_mods[kind].icon orelse "><>";
 }
 
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    const end_x = try dc.drawSegment(
-        start_x,
-        height,
-        getIcon(),
-        config.scaledSegmentPadding(height),
-        config.bg,
-        config.fg,
-    );
+    const end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, getIcon());
     W.store(end_x - start_x);
     return end_x;
 }

@@ -39,10 +39,6 @@ const FileIdentity = struct {
     mtime_sec: i64,
     mtime_nsec: u32,
     size: u64,
-    /// Whether two captures describe the same file.
-    pub fn eql(a: FileIdentity, b: FileIdentity) bool {
-        return std.meta.eql(a, b);
-    }
 };
 
 /// Boot-time identity of the running image (stat of `/proc/self/exe`).
@@ -76,10 +72,7 @@ fn statIdentity(path_z: [*:0]const u8) ?FileIdentity {
         std.os.linux.STATX.BASIC_STATS,
         &stx,
     );
-    switch (std.posix.errno(rc)) {
-        .SUCCESS => {},
-        else => return null,
-    }
+    if (std.posix.errno(rc) != .SUCCESS) return null;
     return .{
         .dev_major = stx.dev_major,
         .dev_minor = stx.dev_minor,
@@ -108,15 +101,14 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
-    switch (std.posix.errno(n)) {
-        .SUCCESS => exec_path_z = alloc.dupeZ(u8, buf[0..n]) catch null,
-        else => {
-            debug.warn(
-                "restart: readlink /proc/self/exe failed; binary-change re-exec disabled",
-                .{},
-            );
-            exec_path_z = null;
-        },
+    if (std.posix.errno(n) != .SUCCESS) {
+        debug.warn(
+            "restart: readlink /proc/self/exe failed; binary-change re-exec disabled",
+            .{},
+        );
+        exec_path_z = null;
+    } else {
+        exec_path_z = alloc.dupeZ(u8, buf[0..n]) catch null;
     }
 }
 
@@ -131,7 +123,7 @@ pub fn binaryChanged() bool {
     const boot = boot_identity orelse return false;
     const exec_path = exec_path_z orelse return false;
     const now = statIdentity(exec_path) orelse return false;
-    return !now.eql(boot);
+    return !std.meta.eql(now, boot);
 }
 
 /// The unified entry: everything the `reload` keybind (and SIGUSR1) means.

@@ -5,7 +5,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const debug = @import("debug");
 
 const types = @import("types");
@@ -13,14 +12,15 @@ const types = @import("types");
 const drawing = @import("drawing");
 const build_options = @import("build_options");
 const masks = @import("masks");
+const paths = @import("paths");
 const segmod = @import("segment");
 // The vim modal-editing engine registers its handlers into this module on
 // init: the vim lifecycle lives here, gated on has_vim.
-const vim = if (build_options.has_vim) @import("vim") else struct {
+const vim = segmod.ifEnabled(build_options.has_vim, @import("vim"), struct {
     pub fn register() void {}
     pub fn init(_: std.mem.Allocator, _: usize) !void {}
     pub fn deinit(_: std.mem.Allocator) void {}
-};
+});
 pub const XK = core.XK;
 pub const xk_back_space = @intFromEnum(XK.BackSpace);
 pub const xk_return = @intFromEnum(XK.Return);
@@ -38,15 +38,9 @@ pub const Mode = enum(u2) {
     insert = 0,
     normal = 1,
     pub fn label(self: Mode) []const u8 {
-        return mode_label_fn(self);
+        return handlers.mode_label(self);
     }
 };
-
-var mode_label_fn: *const fn (Mode) []const u8 = struct {
-    fn f(_: Mode) []const u8 {
-        return "";
-    }
-}.f;
 
 pub const EditorState = struct {
     allocator: std.mem.Allocator = undefined,
@@ -129,40 +123,42 @@ pub fn insertChar(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
             );
             es.len -= 1;
         },
-        xk_left => { if (es.cursor > 0) es.cursor -= 1; },
-        xk_right => { if (es.cursor < es.len) es.cursor += 1; },
+        xk_left => {
+            if (es.cursor > 0) es.cursor -= 1;
+        },
+        xk_right => {
+            if (es.cursor < es.len) es.cursor += 1;
+        },
         xk_home => es.cursor = 0,
         xk_end => es.cursor = es.len,
         else => if (isPrintableAscii(sym)) {
-            const ch: u8 = @truncate(sym); insertSlice(es, &[1]u8{ch});
+            const ch: u8 = @truncate(sym);
+            insertSlice(es, &[1]u8{ch});
         },
     }
     return .none;
 }
 
-pub var handle_insert: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleInsertBasic;
-pub var handle_normal: *const fn (*EditorState, xcb.xcb_keysym_t) Action = struct {
-    fn f(_: *EditorState, _: xcb.xcb_keysym_t) Action {
-        return .none;
-    }
-}.f;
-pub var handle_ctrl: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleCtrl;
-pub var on_deactivate: *const fn (*EditorState) void = onDeactivate;
-
 pub const Handlers = struct {
-    handle_insert: *const fn (*EditorState, xcb.xcb_keysym_t) Action,
-    handle_normal: *const fn (*EditorState, xcb.xcb_keysym_t) Action,
-    handle_ctrl: *const fn (*EditorState, xcb.xcb_keysym_t) Action,
-    on_deactivate: *const fn (*EditorState) void,
-    mode_label: *const fn (Mode) []const u8,
+    handle_insert: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleInsertBasic,
+    handle_normal: *const fn (*EditorState, xcb.xcb_keysym_t) Action = struct {
+        fn f(_: *EditorState, _: xcb.xcb_keysym_t) Action {
+            return .none;
+        }
+    }.f,
+    handle_ctrl: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleCtrl,
+    on_deactivate: *const fn (*EditorState) void = onDeactivate,
+    mode_label: *const fn (Mode) []const u8 = struct {
+        fn f(_: Mode) []const u8 {
+            return "";
+        }
+    }.f,
 };
 
+var handlers: Handlers = .{};
+
 pub fn registerHandlers(h: Handlers) void {
-    handle_insert = h.handle_insert;
-    handle_normal = h.handle_normal;
-    handle_ctrl = h.handle_ctrl;
-    on_deactivate = h.on_deactivate;
-    mode_label_fn = h.mode_label;
+    handlers = h;
 }
 
 const c = @cImport({
@@ -450,7 +446,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 
     // Ctrl-modified keys
     if (ctrl_held) {
-        const action = if (vim_mode) handle_ctrl(&g.vim_state, sym) else .none;
+        const action = if (vim_mode) handlers.handle_ctrl(&g.vim_state, sym) else .none;
         // handleCtrl may have deleted text (Ctrl-W / Ctrl-U), so the ghost is
         // recomputed in the shared tail.  The blink phase is left untouched.
         return finishKeyPress(action, false);
@@ -464,8 +460,8 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     const action = if (!vim_mode and g.vim_state.mode == .insert)
         handleInsertBasic(&g.vim_state, sym)
     else switch (g.vim_state.mode) {
-        .insert => handle_insert(&g.vim_state, sym),
-        .normal => handle_normal(&g.vim_state, sym),
+        .insert => handlers.handle_insert(&g.vim_state, sym),
+        .normal => handlers.handle_normal(&g.vim_state, sym),
     };
     return finishKeyPress(action, true);
 }
@@ -577,7 +573,7 @@ fn activate() void {
 
 fn deactivate() void {
     g.is_active = false;
-    if (vimModeEnabled()) on_deactivate(&g.vim_state);
+    if (vimModeEnabled()) handlers.on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);
@@ -598,9 +594,8 @@ fn loadCompletions() void {
 
     var dir_buf: [std.fs.max_path_bytes:0]u8 = undefined;
 
-    var dir_it = std.mem.splitScalar(u8, path_env, ':');
+    var dir_it = paths.dirIterator(path_env);
     outer: while (dir_it.next()) |dir_path| {
-        if (dir_path.len == 0) continue;
         _ = copyToZ(&dir_buf, dir_path) orelse continue;
 
         const dirp = c.opendir(&dir_buf) orelse continue;
@@ -1032,19 +1027,28 @@ fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
     if (g.cached_caret_top == null) {
         const asc, const desc = dc.font.getMetrics();
         const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
-        g.cached_caret_top = (height -| font_h) / 2;
+        // The caret's top is the baseline less the ascent: vertical-centering
+        // math identical to drawing.baselineY's (top_pad + asc), so derive it
+        // from there instead of re-rolling the (height -| font_h) / 2 formula.
+        g.cached_caret_top = dc.baselineY(height) -| @as(u16, @intCast(asc));
         g.cached_caret_h = @min(font_h, height);
     }
+}
+
+/// Pixel width of `text`, measured once and cached (font and text are
+/// constant between reloads). Shared by promptWidth and the mode pill.
+fn measureCached(cache: *?u16, dc: *drawing.DrawContext, text: []const u8) u16 {
+    return cache.* orelse blk: {
+        const w = dc.measureTextWidth(text);
+        cache.* = w;
+        break :blk w;
+    };
 }
 
 /// Pixel width of the prompt text, measured once and cached (font and prompt
 /// are constant between reloads).
 fn promptWidth(dc: *drawing.DrawContext, prompt: []const u8) u16 {
-    return g.cached_prompt_w orelse blk: {
-        const w = dc.measureTextWidth(prompt);
-        g.cached_prompt_w = w;
-        break :blk w;
-    };
+    return measureCached(&g.cached_prompt_w, dc, prompt);
 }
 
 /// Recompute the cached caret widths and scroll offset, but only when
@@ -1119,11 +1123,7 @@ fn drawPill(
     const vim_mode = vimModeEnabled();
     const mode_label = if (vim_mode) g.vim_state.mode.label() else "";
     const mode_idx: usize = @intFromEnum(g.vim_state.mode);
-    const mode_w: u16 = g.cached_mode_w[mode_idx] orelse blk: {
-        const w = dc.measureTextWidth(mode_label);
-        g.cached_mode_w[mode_idx] = w;
-        break :blk w;
-    };
+    const mode_w: u16 = measureCached(&g.cached_mode_w[mode_idx], dc, mode_label);
 
     // The pill only exists when there is a mode label (vim mode enabled);
     // basic mode gets the full width for the scrollable text region.
@@ -1192,8 +1192,7 @@ fn drawNormalMode(
 ) !void {
     const cur_hi = @min(g.vim_state.cursor + @intFromBool(g.vim_state.mode != .insert), g.vim_state.len);
 
-    const style: CursorStyle = .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x,
-        .baseline = baseline, .height = height, .accent = accent, .bg = bg };
+    const style: CursorStyle = .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg };
     try drawBlockCursor(
         dc,
         px,
@@ -1238,7 +1237,7 @@ fn drawActive(
     const scroll_end_x = drawPill(dc, height, baseline, text_left_x, text_end_x, accent) orelse
         return end_x;
     // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
-    const ellipsis_end_x = scroll_end_x -| 2;
+    const post_clip_end_x = scroll_end_x -| 2;
 
     const max_scroll_px: u16 = scroll_end_x - text_left_x;
     const prompt_w = promptWidth(dc, prompt);
@@ -1267,7 +1266,7 @@ fn drawActive(
     }
 
     const post_start = @min(g.vim_state.cursor + @intFromBool(g.vim_state.mode != .insert), g.vim_state.len);
-    try drawScrollSpan(true, dc, &px, text_left_x, ellipsis_end_x, baseline, g.vim_state.buf[post_start..g.vim_state.len], null, fg);
+    try drawScrollSpan(true, dc, &px, text_left_x, post_clip_end_x, baseline, g.vim_state.buf[post_start..g.vim_state.len], null, fg);
 
     // No blitRegion here: the prompt draws as a segment inside performDraw,
     // whose end-of-batch queueBlit copies the whole frame (and the caller

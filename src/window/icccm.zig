@@ -51,7 +51,7 @@ const CachedProps = struct {
 // At realistic window counts (<=100 typical, <=300 extreme) a linear scan over
 // u32 IDs in a flat array is cache-local and allocation-free. Windows beyond
 // max_window_cache still work; they just fall through to the live X11 path.
-const max_window_cache: usize = 512;
+pub const max_window_cache: usize = 512;
 
 const CacheSlot = struct {
     id: u32,
@@ -162,12 +162,19 @@ fn peekCachedProps(win: u32) ?CachedProps {
     return null;
 }
 
-/// Returns cached props if available, otherwise performs a live query, caches
-/// the result, and returns it. Used by cache-miss paths so the populate logic
-/// lives in exactly one place.
-fn getOrQueryCachedProps(conn: core.Connection, win: u32) CachedProps {
-    if (peekCachedProps(win)) |p| return p;
-    const protocols = queryWMProtocolsProps(conn, win);
+/// Returns cached props if available, otherwise queries (consuming an optional
+/// pre-fired WM_PROTOCOLS cookie on a miss), caches the result, and returns it.
+/// Used by the input-model resolve paths so the populate logic lives in one
+/// place; a pre-fired cookie is discarded on a cache hit.
+fn getOrQueryCachedProps(conn: core.Connection, win: u32, pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t) CachedProps {
+    if (peekCachedProps(win)) |p| {
+        discardProtocolCookie(conn, pre_protocols_cookie);
+        return p;
+    }
+    const protocols = if (pre_protocols_cookie) |ck|
+        drainWMProtocolsReply(conn, ck)
+    else
+        queryWMProtocolsProps(conn, win);
     const props = CachedProps{
         .accepts_input = queryWMHintsAcceptsInput(conn, win),
         .wm_delete = protocols.wm_delete,
@@ -186,12 +193,15 @@ pub const InputModelResolution = struct {
     take_focus: bool,
 };
 
-pub fn getInputModelResolved(conn: core.Connection, win: u32) InputModelResolution {
-    const props = getOrQueryCachedProps(conn, win);
+fn resolve(props: CachedProps) InputModelResolution {
     return .{
         .model = inputModelFrom(props.take_focus, props.accepts_input),
         .take_focus = props.take_focus,
     };
+}
+
+pub fn getInputModelResolved(conn: core.Connection, win: u32) InputModelResolution {
+    return resolve(getOrQueryCachedProps(conn, win, null));
 }
 
 /// Resolves the input model from the focus-property cache only, consuming a
@@ -205,27 +215,7 @@ pub fn getInputModelResolvedConsume(
     win: u32,
     pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t,
 ) InputModelResolution {
-    const props: CachedProps = if (peekCachedProps(win)) |p| blk: {
-        discardProtocolCookie(conn, pre_protocols_cookie);
-        break :blk p;
-    } else blk: {
-        const protocols = if (pre_protocols_cookie) |ck|
-            drainWMProtocolsReply(conn, ck)
-        else
-            queryWMProtocolsProps(conn, win);
-        const accepts_input = queryWMHintsAcceptsInput(conn, win);
-        const fresh: CachedProps = .{
-            .accepts_input = accepts_input,
-            .wm_delete = protocols.wm_delete,
-            .take_focus = protocols.take_focus,
-        };
-        putCachedProps(win, fresh);
-        break :blk fresh;
-    };
-    return .{
-        .model = inputModelFrom(props.take_focus, props.accepts_input),
-        .take_focus = props.take_focus,
-    };
+    return resolve(getOrQueryCachedProps(conn, win, pre_protocols_cookie));
 }
 
 /// Resolves the ICCCM 4.1.7 focus-delivery model for `win`. Both accepts_input
@@ -237,7 +227,7 @@ pub fn getInputModel(conn: core.Connection, win: u32) InputModel {
 
 /// Falls back to a live query only on a genuine cache miss (extremely rare).
 pub fn supportsWMDeleteCached(conn: core.Connection, win: u32) bool {
-    return getOrQueryCachedProps(conn, win).wm_delete;
+    return getOrQueryCachedProps(conn, win, null).wm_delete;
 }
 
 /// True when `win`'s input-model verdict is already cached (seeded at map
@@ -247,20 +237,22 @@ pub fn isInputModelCached(win: u32) bool {
     return peekCachedProps(win) != null;
 }
 
+/// The WM_PROTOCOLS and WM_TAKE_FOCUS atoms this module's focus paths share.
+const FocusAtoms = struct { protocols: u32, take_focus: u32 };
+
 /// Called by `sendWMTakeFocus` (live round-trip path) to keep the send logic in one place.
 fn dispatchTakeFocusMessage(
     conn: core.Connection,
     win: u32,
     time: u32,
-    protocols_atom: u32,
-    take_focus_atom: u32,
+    at: FocusAtoms,
     proto_list: []const u32,
 ) void {
     for (proto_list) |atom| {
-        if (atom == take_focus_atom) break;
+        if (atom == at.take_focus) break;
     } else return; // window does not advertise WM_TAKE_FOCUS
 
-    sendTakeFocusEvent(conn, win, time, protocols_atom, take_focus_atom);
+    sendTakeFocusEvent(conn, win, time, at);
 }
 
 /// Builds and sends the WM_TAKE_FOCUS ClientMessage. No protocol-list scan:
@@ -269,18 +261,26 @@ fn sendTakeFocusEvent(
     conn: core.Connection,
     win: u32,
     time: u32,
-    protocols_atom: u32,
-    take_focus_atom: u32,
+    at: FocusAtoms,
 ) void {
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
     event.response_type = xcb.XCB_CLIENT_MESSAGE;
     event.window = win;
-    event.type = protocols_atom;
+    event.type = at.protocols;
     event.format = 32;
-    event.data.data32[0] = take_focus_atom;
+    event.data.data32[0] = at.take_focus;
     event.data.data32[1] = time;
 
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+}
+
+/// Resolves the WM_PROTOCOLS and WM_TAKE_FOCUS atoms this module's focus paths
+/// share, or null when the atom cache is not ready. The atom set is atomic
+/// (one cache), so a partial failure is impossible.
+fn focusAtoms() ?FocusAtoms {
+    const protocols = utils.getAtomCached("WM_PROTOCOLS") catch return null;
+    const take_focus = utils.getAtomCached("WM_TAKE_FOCUS") catch return null;
+    return .{ .protocols = protocols, .take_focus = take_focus };
 }
 
 /// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit, the one
@@ -294,9 +294,8 @@ pub fn sendWMTakeFocusKnown(
     advertises_take_focus: bool,
 ) void {
     if (!advertises_take_focus) return;
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return;
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch return;
-    sendTakeFocusEvent(conn, win, time, protocols_atom, take_focus_atom);
+    const at = focusAtoms() orelse return;
+    sendTakeFocusEvent(conn, win, time, at);
 }
 
 /// Shared body of sendWMTakeFocus and sendWMTakeFocusWithCookie: resolves the
@@ -311,11 +310,7 @@ fn dispatchTakeFocus(
     time: u32,
     cookie: ?xcb.xcb_get_property_cookie_t,
 ) void {
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
-        discardProtocolCookie(conn, cookie);
-        return;
-    };
-    const take_focus_atom = utils.getAtomCached("WM_TAKE_FOCUS") catch {
+    const at = focusAtoms() orelse {
         discardProtocolCookie(conn, cookie);
         return;
     };
@@ -328,8 +323,7 @@ fn dispatchTakeFocus(
         conn,
         win,
         time,
-        protocols_atom,
-        take_focus_atom,
+        at,
         u32Values(proto_reply)[0..@intCast(proto_reply.*.value_len)],
     );
 }
@@ -392,14 +386,15 @@ fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
 /// above) into take_focus/wm_delete. Sharing one drain keeps the pipelined
 /// verdict byte-identical to the live one; the caller fired the query BEFORE
 /// the pointer round trip so its reply is typically already buffered by the
-/// time this is reached. An un-consumable atom cache scans against 0 (which
-/// never matches), so the reply still drains cleanly.
+/// time this is reached. A failed atom resolution (cache not ready) returns
+/// early with empty props, so the reply still drains cleanly.
 fn drainWMProtocolsReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) WMProtocolsProps {
     const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return .{};
     defer std.c.free(reply);
+    const at = focusAtoms() orelse return .{};
     return protocolPropsFromReply(
         reply,
-        utils.getAtomOrZero("WM_TAKE_FOCUS"),
+        at.take_focus,
         utils.getAtomOrZero("WM_DELETE_WINDOW"),
     );
 }

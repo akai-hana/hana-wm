@@ -14,20 +14,13 @@ const build_options = @import("build_options");
 const model = @import("model");
 const pipeline = @import("pipeline");
 
-/// Whether a window module (the fullscreen addon) claims the screen on `ws`
-/// via the core model helper (coveringOccupantOnWs). Non-null means the bar
-/// must hide to share the screen.
-pub fn fullscreenScreenClaimer(ws: u8) ?u32 {
-    return model.coveringOccupantOnWs(pipeline.model(), @intCast(ws));
-}
-
 /// True when a fullscreen window on `ws` forces the bar hidden (shared-screen
 /// reaction). Compile-time folded when the fullscreen module is absent: the
 /// model read is comptime-unreachable, matching the inlined guards that used
 /// to live at each decision site.
 pub fn barForcedHiddenByFullscreen(ws: u8) bool {
     return if (build_options.has_fullscreen)
-        fullscreenScreenClaimer(ws) != null
+        model.coveringOccupantOnWs(pipeline.model(), @intCast(ws)) != null
     else
         false;
 }
@@ -68,19 +61,4 @@ pub fn desiredVisibility(ws: u8, is_visible: bool, is_globally_visible: bool) De
 /// trusting the decision made at activation.
 pub fn keepPromptOverride(ws: u8, is_globally_visible: bool) bool {
     return shouldBeVisible(is_globally_visible, barForcedHiddenByFullscreen(ws));
-}
-
-/// Decision for `hideBarForFullscreen`: the bar is currently mapped, so the
-/// immediate fullscreen-enter hide action is required now (an already-hidden
-/// bar no-ops). Pass the bar's `is_visible`.
-pub fn barNeedsFullscreenHide(is_visible: bool) bool {
-    return is_visible;
-}
-
-/// Decision for `presentForPrompt`: the bar is currently hidden, so the
-/// prompt path must draw fresh content, flag the prompt-forced override, and
-/// map the bar before raising it (a visible bar just gets raised). Pass the
-/// bar's `is_visible`.
-pub fn promptNeedsForcedShow(is_visible: bool) bool {
-    return !is_visible;
 }

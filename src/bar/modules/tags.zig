@@ -8,7 +8,6 @@ const actions = @import("actions");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
-const segdraw = @import("segdraw");
 
 /// Reserved row width when no workspaces are configured (moved here from
 /// bar.zig: width policy belongs to the segment that owns the pixels).
@@ -79,20 +78,20 @@ fn indicatorPos(
     const cw: f32 = @floatFromInt(cell_w);
     const bh: f32 = @floatFromInt(bar_height);
 
-    const Corner = struct { x: f32, y: f32 };
-    const corner: Corner = switch (location) {
-        .left => .{ .x = 0.0, .y = 0.5 },
-        .right => .{ .x = 1.0, .y = 0.5 },
-        .up => .{ .x = 0.5, .y = 0.0 },
-        .down => .{ .x = 0.5, .y = 1.0 },
-        .up_left => .{ .x = 0.0, .y = 0.0 },
-        .up_right => .{ .x = 1.0, .y = 0.0 },
-        .down_left => .{ .x = 0.0, .y = 1.0 },
-        .down_right => .{ .x = 1.0, .y = 1.0 },
+    // [x, y] anchoring fractions, one per indicator location.
+    const corner: [2]f32 = switch (location) {
+        .left => .{ 0.0, 0.5 },
+        .right => .{ 1.0, 0.5 },
+        .up => .{ 0.5, 0.0 },
+        .down => .{ 0.5, 1.0 },
+        .up_left => .{ 0.0, 0.0 },
+        .up_right => .{ 1.0, 0.0 },
+        .down_left => .{ 0.0, 1.0 },
+        .down_right => .{ 1.0, 1.0 },
     };
 
-    const ax: f32 = corner.x + padding * (0.5 - corner.x);
-    const ay: f32 = corner.y + padding * (0.5 - corner.y);
+    const ax: f32 = corner[0] + padding * (0.5 - corner[0]);
+    const ay: f32 = corner[1] + padding * (0.5 - corner[1]);
 
     const iw: f32 = @floatFromInt(item_w);
     const ih: f32 = @floatFromInt(item_h);
@@ -106,7 +105,7 @@ fn indicatorPos(
 // `ws_current`: index of the currently active workspace. `ws_has_windows`:
 // one bool per workspace; true when it has at least one window (drives the
 // indicator glyph).
-pub fn draw(
+fn drawFrame(
     dc: *drawing.DrawContext,
     config: types.BarConfig,
     height: u16,
@@ -150,6 +149,22 @@ pub fn draw(
     return x;
 }
 
+/// Draw workspace tags: the per-frame frame state (current workspace,
+/// per-workspace window flags, all-view) lives in the shared DrawCtx the bar
+/// builds every frame, so no separate frame-arg draw signature is needed.
+pub fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
+    const f = ctx.frame;
+    return drawFrame(
+        ctx.dc,
+        ctx.config,
+        ctx.height,
+        start_x,
+        f.current_workspace,
+        f.workspace_has_windows,
+        f.is_all_view_active,
+    );
+}
+
 /// This module's bar-segment contribution (registry binding).
 fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
     const f: *const segmod.Frame = @ptrCast(@alignCast(frame));
@@ -185,16 +200,16 @@ fn onClickHook(
     return true;
 }
 
-pub const module = segdraw.module(
-    "workspaces",
-    draw,
-    null,
-    false,
-    .{
-        .dirty_sources = .{ .frame = true },
-        .invalidate = invalidate,
-        .natural_width = naturalWidthHook,
-        .on_click = onClickHook,
-        .frame_args = true,
-    },
-);
+fn drawHook(ctx: *anyopaque, x: u16) !u16 {
+    return draw(segmod.castDraw(ctx), x);
+}
+
+pub const module: @import("plugin").Segment = .{
+    .name = "workspaces",
+    .clickable = true,
+    .dirty_sources = .{ .frame = true },
+    .invalidate = invalidate,
+    .naturalWidth = naturalWidthHook,
+    .draw = drawHook,
+    .onClick = onClickHook,
+};

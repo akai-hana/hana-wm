@@ -22,18 +22,7 @@ pub const XcbSink = struct {
     pub fn sink(self: *XcbSink) sync.Sink {
         return .{
             .ptr = self,
-            .vt = &.{
-                .map = mapShim,
-                .geom = geomShim,
-                .border_width = borderWidthShim,
-                .border_pixel = borderPixelShim,
-                .park = parkShim,
-                .stack_only = stackOnlyShim,
-                .set_ewmh_fullscreen = setEwmhFullscreenShim,
-                .flush = flushShim,
-                .grab_server = grabShim,
-                .ungrab_and_flush = ungrabAndFlushShim,
-            },
+            .vt = &xcb_vtable,
         };
     }
 
@@ -122,6 +111,21 @@ pub const XcbSink = struct {
     fn ungrabAndFlushShim(ptr: *anyopaque) void {
         utils.ungrabAndFlush(XcbSink.fromPtr(ptr).conn);
     }
+};
+
+/// Shared vtable for the production sink: one const instead of re-inlining the
+/// shim table in every XcbSink::sink() call.
+const xcb_vtable: sync.Sink.VTable = .{
+    .map = XcbSink.mapShim,
+    .geom = XcbSink.geomShim,
+    .border_width = XcbSink.borderWidthShim,
+    .border_pixel = XcbSink.borderPixelShim,
+    .park = XcbSink.parkShim,
+    .stack_only = XcbSink.stackOnlyShim,
+    .set_ewmh_fullscreen = XcbSink.setEwmhFullscreenShim,
+    .flush = XcbSink.flushShim,
+    .grab_server = XcbSink.grabShim,
+    .ungrab_and_flush = XcbSink.ungrabAndFlushShim,
 };
 
 inline fn stackMode(s: sync.Stack) u32 {

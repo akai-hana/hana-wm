@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const core = @import("core");
-const xcb = core.xcb;
+const constants = @import("constants");
 const utils = @import("utils");
 const build_options = @import("build_options");
 
@@ -34,6 +34,15 @@ pub const BarHandlers = struct {
     /// True when `win` is the bar window.
     isBarWindow: *const fn (u32) bool,
 };
+
+/// Comptime feature switch for optional segment modules: `real` when the
+/// build option is on, else `stub` (an inline stand-in exposing the same
+/// members, so importing call sites still type-check). Takes three args
+/// because the real module and its stub expose *different* members; a
+/// two-argument form could not synthesize a usable substitution.
+pub fn ifEnabled(comptime on: bool, comptime real: type, comptime stub: type) type {
+    return if (on) real else stub;
+}
 
 /// Live workspace state for one bar frame, collected fresh by bar.zig every
 /// draw. The only segment-visible slice of WM state (besides what a segment
@@ -136,7 +145,7 @@ pub const DrawCtx = struct {
 pub const title_min_width: u16 = 100;
 
 /// Maximum number of windows rendered in split-view.
-const max_visible_windows: usize = 128;
+const max_visible_windows = constants.Limits.max_tiled_windows;
 
 /// Off-screen sentinel: sorts last in position, drawing is skipped.
 pub const offscreen_rect: utils.Rect = .{
@@ -305,32 +314,19 @@ pub fn idByName(modules: []const @import("plugin").Segment, name: []const u8) ?u
     return null;
 }
 
-/// Resolves the registry index of the first module whose capability `check`
-/// predicate holds, or null when no module claims it (first-match wins, like
-/// `idByName`). `check` is a comptime predicate over a segment (e.g. a struct
-/// literal `.{ .self_ticking = true }` compared by field); used by the bar to
-/// locate role-bearing segments without naming them. Comptime-friendly: the
-/// returned index can feed `const` role ids so role-null guards
-/// dead-code-eliminate, just like the `registry_empty` comptime pattern.
+/// Resolves the registry index of the first module whose capability field
+/// `name` is set (e.g. "self_ticking"), or null when no module claims it
+/// (first-match wins, like `idByName`). Used by the bar to locate role-bearing
+/// segments without naming them. Comptime-friendly: the returned index can
+/// feed `const` role ids so role-null guards dead-code-eliminate.
 pub fn findByCapability(
     modules: []const @import("plugin").Segment,
-    comptime check: anytype,
+    comptime name: []const u8,
 ) ?usize {
     for (modules, 0..) |m, i| {
-        if (matchCapabilities(m, check)) return i;
+        if (@field(m, name)) return i;
     }
     return null;
-}
-
-fn matchCapabilities(m: @import("plugin").Segment, comptime check: anytype) bool {
-    comptime var ok = true;
-    inline for (std.meta.fields(@TypeOf(check))) |f| {
-        if (@field(m, f.name) != @field(check, f.name)) {
-            ok = false;
-            break;
-        }
-    }
-    return ok;
 }
 
 /// Index of the currently active tiling layout in the build-generated layout

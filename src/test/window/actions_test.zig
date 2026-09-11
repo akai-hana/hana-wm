@@ -28,7 +28,7 @@ test "actions: mapRequest admits, maps, and focuses a window" {
     fx.flush();
 
     try std.testing.expect(m.store.has(win));
-    try std.testing.expect(m.focused != null and m.focused.? == win);
+    try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expectEqual(@as(usize, 1), model.tiledCountOnWs(m, m.current));
     try std.testing.expect(fx.isViewable(win));
     try std.testing.expectEqual(win, fx.inputFocus());
@@ -43,7 +43,7 @@ test "actions: moveWindowTo transfers membership and parks off-screen" {
     const win = fx.createWindow();
     actions.mapRequest(win, 0, true);
     fx.flush();
-    try std.testing.expect(m.focused != null and m.focused.? == win);
+    try std.testing.expectEqual(win, m.focused.?);
 
     actions.moveWindowTo(win, 2);
     fx.flush();
@@ -109,7 +109,7 @@ test "actions: minimize parks, restore unmaps-and-redraws" {
     const win = fx.createWindow();
     actions.mapRequest(win, 0, true);
     fx.flush();
-    try std.testing.expect(m.focused != null and m.focused.? == win);
+    try std.testing.expectEqual(win, m.focused.?);
 
     actions.minimize(win);
     fx.flush();
@@ -120,7 +120,7 @@ test "actions: minimize parks, restore unmaps-and-redraws" {
 
     actions.restore(win);
     fx.flush();
-    try std.testing.expect(m.focused != null and m.focused.? == win);
+    try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expectEqual(win, fx.inputFocus());
     try fx.expectTiledGeometry(win);
 }
@@ -164,7 +164,7 @@ test "actions: unmanage drops the window and re-focuses" {
     actions.mapRequest(w1, 0, true);
     actions.mapRequest(w2, 0, true);
     fx.flush();
-    try std.testing.expect(m.focused != null and m.focused.? == w2);
+    try std.testing.expectEqual(w2, m.focused.?);
 
     // Non-focused removal is silent for focus.
     // Silent removal, no focus involved.
@@ -174,7 +174,7 @@ test "actions: unmanage drops the window and re-focuses" {
     try std.testing.expect(!m.store.has(w1));
     try std.testing.expect(sync.lastRectFor(w1) == null); // ledger forgot it
     try std.testing.expect(m.store.has(w2));
-    try std.testing.expect(m.focused != null and m.focused.? == w2);
+    try std.testing.expectEqual(w2, m.focused.?);
     try fx.expectTiledGeometry(w2);
 
     // Focused removal with no remaining candidate clears to root.
@@ -200,25 +200,25 @@ test "actions: swapPrimary and moveFocused rotate the tiled order" {
     actions.mapRequest(w3, 0, true);
     fx.flush();
     try std.testing.expect(order.len == 3);
-    try std.testing.expect(m.focused != null and m.focused.? == w3);
+    try std.testing.expectEqual(w3, m.focused.?);
 
     // swap_master: head and follower exchange.
     actions.swapPrimaryAction(false);
     try std.testing.expectEqual(w2, order.items[0]);
     try std.testing.expectEqual(w1, order.items[1]);
-    try std.testing.expect(m.focused != null and m.focused.? == w3);
+    try std.testing.expectEqual(w3, m.focused.?);
 
     // swap_master focus variant: the displaced follower is focused.
     actions.swapPrimaryAction(true);
     try std.testing.expectEqual(w1, order.items[0]);
-    try std.testing.expect(m.focused != null and m.focused.? == w2);
+    try std.testing.expectEqual(w2, m.focused.?);
 
     // moveFocused steps the focused window one slot (wraps off the far edge).
     actions.moveFocused(1);
     try std.testing.expectEqual(w1, order.items[0]);
     try std.testing.expectEqual(w3, order.items[1]);
     try std.testing.expectEqual(w2, order.items[2]);
-    try std.testing.expect(m.focused != null and m.focused.? == w2);
+    try std.testing.expectEqual(w2, m.focused.?);
 }
 
 test "actions: layout parameters adjust within clamps" {

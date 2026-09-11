@@ -17,9 +17,10 @@
 const std = @import("std");
 const model = @import("model");
 const sync = @import("sync");
+const utils = @import("utils");
 const helpers = @import("helpers");
 
-const nowNs = helpers.nowNs;
+const nowNs = utils.monotonicNs;
 
 const makeModel = helpers.makeModel;
 
@@ -41,18 +42,9 @@ test "latency: reconcile cost + request count at focus change" {
         sync.init();
         defer sync.deinit();
 
-        // Steady-state pass with a live counter (populates the ledger once).
-        var warm = CountingSink{};
-        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
-        sync.reconcile(&m, &warm_ctx, .{});
-
-        // Measure CPU cost of one reconcile pass.
-        var bench = CountingSink{};
-        var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
-        const iterations: usize = 5_000;
-        const t0 = nowNs();
-        for (0..iterations) |_| sync.reconcile(&m, &bench_ctx, .{});
-        const per_pass_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
+        // Warm once (a live counter seeds the ledger), then measure the CPU
+        // cost of one reconcile pass.
+        const per_pass_ns = helpers.benchReconcile(&m, 5_000);
 
         // Count requests in one representative pass (fresh sink).
         var probe = CountingSink{};

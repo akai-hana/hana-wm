@@ -70,9 +70,6 @@ pub const Opts = struct {
     /// (clock) when `measureString` is set, else the cached drawn width.
     natural_width: ?NaturalWidth = null,
     on_click: ?OnClick = null,
-    /// The `draw` fn takes the per-frame Frame args (tags) rather than the
-    /// icon-style (dc, config, height, x) signature.
-    frame_args: bool = false,
 };
 
 /// The width-state naturalWidth/draw/onClick wiring, one adapter per hook.
@@ -81,23 +78,6 @@ fn drawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!u16 {
         fn f(ctx: *anyopaque, x: u16) !u16 {
             const c = segmod.castDraw(ctx);
             return draw(c.dc, c.config, c.height, x);
-        }
-    }.f;
-}
-
-fn frameDrawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!u16 {
-    return struct {
-        fn f(ctx: *anyopaque, x: u16) !u16 {
-            const c = segmod.castDraw(ctx);
-            return draw(
-                c.dc,
-                c.config,
-                c.height,
-                x,
-                c.frame.current_workspace,
-                c.frame.workspace_has_windows,
-                c.frame.is_all_view_active,
-            );
         }
     }.f;
 }
@@ -146,7 +126,7 @@ pub fn module(
         .consumeRedrawRequest = if (with_collapse) W.consumeRedrawRequest else null,
         .measureString = opts.measureString,
         .naturalWidth = opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),
-        .draw = if (opts.frame_args) frameDrawHook(draw) else drawHook(draw),
+        .draw = drawHook(draw),
         .onClick = opts.on_click orelse clickHook(action),
     };
 }

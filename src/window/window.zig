@@ -51,11 +51,48 @@ pub fn callHookBool(
     return false;
 }
 
+/// Runs a hook on EVERY module that binds it, not just the first (callHook
+/// returns after the first provider). Dispatch loops shared by actions.
+pub fn dispatchAll(
+    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    args: anytype,
+) void {
+    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| @call(.auto, f, args);
+}
+
+/// Like dispatchAll but returns true at the first provider whose hook does;
+/// false when no provider binds the hook or none returns true.
+pub fn dispatchFirstTrue(
+    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    args: anytype,
+) bool {
+    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
+        if (@call(.auto, f, args)) return true;
+    };
+    return false;
+}
+
+/// The return type of a hook field's optional function pointer
+/// (`?*const fn(...) T`); lets callHook-value wrappers avoid hardcoding it.
+fn HookReturnOf(comptime Hook: type) type {
+    return @typeInfo(@typeInfo(@typeInfo(Hook).optional.child).pointer.child).@"fn".return_type.?;
+}
+
+/// Returns the first provider's hook result (callHook that yields a value),
+/// with the return type derived from the hook field instead of hardcoded.
+pub inline fn callFirst(
+    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    args: anytype,
+) ?HookReturnOf(@TypeOf(@field(window_mods[0], @tagName(field)))) {
+    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| return @call(.auto, f, args);
+    return null;
+}
+
 /// True when `win` is currently screen-covering via a covering-mode module
-/// (fullscreen). Shared by the configure-resolution and client-message paths.
-fn isCovering(win: u32) bool {
-    const model = pipeline.model();
-    return callHookBool(.isCoveringMode, .{ model, win });
+/// (fullscreen). Shared by the configure-resolution and client-message paths;
+/// actions aliases this as its dispatch seam.
+pub fn isCoveringMode(m: *const @import("model").Model, win: u32) bool {
+    return callHookBool(.isCoveringMode, .{ m, win });
 }
 
 // ICCCM protocol surface (ICCCM 4.1.2/4.1.7) lives in icccm.zig; window.zig
@@ -440,9 +477,10 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     const cs = core.getState();
 
     // Workspace resolution cookies (conditional).
+    const wm_class_atom = utils.getAtomOrZero("WM_CLASS");
     const c_wm_class: ?xcb.xcb_get_property_cookie_t =
-        if (cs.config.workspaces.rules.items.len > 0 and utils.getAtomOrZero("WM_CLASS") != 0)
-            icccm.firePropQuery(conn, win, utils.getAtomOrZero("WM_CLASS"), xcb.XCB_ATOM_STRING, constants.property_max_length)
+        if (cs.config.workspaces.rules.items.len > 0 and wm_class_atom != 0)
+            icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, constants.property_max_length)
         else
             null;
 
@@ -503,9 +541,11 @@ fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) voi
     discardProtocolCookie(conn, cookies.c_wm_class);
     discardProtocolCookie(conn, cookies.c_net_wm_pid);
     wincache.discardTitleCookies(conn, cookies.title_cookies);
-    xcb.xcb_discard_reply(conn, cookies.normal_hints_cookie.sequence);
-    xcb.xcb_discard_reply(conn, cookies.protocols_cookie.sequence);
-    xcb.xcb_discard_reply(conn, cookies.hints_cookie.sequence);
+    inline for (.{
+        cookies.normal_hints_cookie,
+        cookies.protocols_cookie,
+        cookies.hints_cookie,
+    }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
 }
 
 /// Handles a MapRequest by firing ALL property query cookies up-front, then
@@ -742,30 +782,22 @@ pub fn adoptRootWindows() !usize {
         const win = entry.win;
 
         const attr_reply = xcb.xcb_get_window_attributes_reply(conn, entry.attr_cookie, null);
-        if (attr_reply) |r| {
-            const override_redirect = r.*.override_redirect != 0;
-            const map_state = r.*.map_state;
-            std.c.free(r);
+        defer std.c.free(attr_reply);
 
-            // Override-redirect windows are transient/popup, never manage.
-            if (override_redirect) {
-                discardAdmissionCookies(conn, entry.cookies);
-                continue;
-            }
-
-            // Visibility gate: adopt mapped windows; adopt unmapped ONLY when
-            // the restore file records them as parked (a surviving hidden
-            // window must stay hidden). Other unmapped windows are likely
-            // withdrawn toplevels and are skipped.
-            if (map_state != xcb.XCB_MAP_STATE_VIEWABLE and
-                (entry.record == null or entry.record.?.presence != .parked))
-            {
-                discardAdmissionCookies(conn, entry.cookies);
-                continue;
-            }
-        } else {
-            // Window vanished between pass 1 and this drain; release its
-            // up-front admission replies without parsing them.
+        // Override-redirect windows are transient/popup, never manage.
+        // Visibility gate: adopt mapped windows; adopt unmapped ONLY when
+        // the restore file records them as parked (a surviving hidden
+        // window must stay hidden). Other unmapped windows are likely
+        // withdrawn toplevels and are skipped. A null reply means the
+        // window vanished between pass 1 and this drain; release its
+        // up-front admission replies without parsing them.
+        const adopt = if (attr_reply) |r|
+            r.*.override_redirect == 0 and
+                (r.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE or
+                    (entry.record != null and entry.record.?.presence == .parked))
+        else
+            false;
+        if (!adopt) {
             discardAdmissionCookies(conn, entry.cookies);
             continue;
         }
@@ -821,15 +853,14 @@ fn unmanageWindow(win: u32) void {
     // cleared), so closing a window left the workspace unfocused until a
     // pointer event re-focused it. Both facts ride ctx into
     // actions.unmanage, which runs the same close fallback as the hide path.
+    const model = if (pipeline.initialized) pipeline.model() else null;
+    const fs_ws: ?@import("model").WSId = if (model) |m|
+        (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(m, win) else null)
+    else
+        null;
     var actx: actions.Ctx = .{
-        .withdrawn_fullscreen_ws = if (pipeline.initialized)
-            if (providerOf(.coveringWsOf)) |wm|
-                wm.coveringWsOf.?(pipeline.model(), win)
-            else
-                null
-        else
-            null,
-        .withdrawn_was_focused = pipeline.initialized and pipeline.model().focused == win,
+        .withdrawn_fullscreen_ws = fs_ws,
+        .withdrawn_was_focused = if (model) |m| m.focused == win else false,
     };
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
@@ -863,21 +894,15 @@ const geometry_mask: u16 =
     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
 
 fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
-    const ev = xcb.xcb_configure_notify_event_t{
-        .response_type = xcb.XCB_CONFIGURE_NOTIFY,
-        .pad0 = 0,
-        .sequence = 0,
-        .event = win,
-        .window = win,
-        .above_sibling = xcb.XCB_NONE,
-        .x = geom.x,
-        .y = geom.y,
-        .width = geom.width,
-        .height = geom.height,
-        .border_width = geom.border_width,
-        .override_redirect = 0,
-        .pad1 = 0,
-    };
+    var ev = std.mem.zeroes(xcb.xcb_configure_notify_event_t);
+    ev.response_type = xcb.XCB_CONFIGURE_NOTIFY;
+    ev.event = win;
+    ev.window = win;
+    ev.x = geom.x;
+    ev.y = geom.y;
+    ev.width = geom.width;
+    ev.height = geom.height;
+    ev.border_width = geom.border_width;
     _ = xcb.xcb_send_event(
         core.getState().conn,
         0,
@@ -912,7 +937,7 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         };
     }
 
-    if (isCovering(win)) {
+    if (isCoveringMode(pipeline.model(), win)) {
         const screen = core.getState().screen;
         return .{
             .x = 0,
@@ -954,10 +979,9 @@ fn handleManagedConfigureRequest(
             null,
     };
     const wm = providerOf(.honorConfigureRequest) orelse return;
+    const has_bw = build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0;
     switch (wm.honorConfigureRequest.?(pipeline.mut(&gate), win, req)) {
         .geometry_applied => {
-            if (build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0)
-                _ = wincache.cacheBorderWidth(win, event.border_width);
             // ICCCM 4.1.5: a border-width-only request needs the synthetic
             // ConfigureNotify (the width isn't otherwise observable).
             if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
@@ -965,10 +989,9 @@ fn handleManagedConfigureRequest(
                 return;
             }
             sendRequestedConfigure(win, event, mask);
+            return;
         },
         .border_only => {
-            if (build_options.has_tiling)
-                _ = wincache.cacheBorderWidth(win, event.border_width);
             if (mask != xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH)
                 _ = xcb.xcb_configure_window(
                     core.getState().conn,
@@ -976,14 +999,13 @@ fn handleManagedConfigureRequest(
                     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
                     &[_]u32{event.border_width},
                 );
-            // ICCCM 4.1.5: echo a synthetic ConfigureNotify so the client
-            // observes its denied geometry / new border width.
-            sendSyntheticConfigureNotify(win);
         },
-        .ignored => {
-            sendSyntheticConfigureNotify(win);
-        },
+        .ignored => {},
     }
+    if (has_bw) _ = wincache.cacheBorderWidth(win, event.border_width);
+    // ICCCM 4.1.5: echo a synthetic ConfigureNotify so the client observes
+    // its denied geometry / new border width.
+    sendSyntheticConfigureNotify(win);
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
@@ -1126,10 +1148,6 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     }
 }
 
-inline fn clampToU16(v: u32) u16 {
-    return @intCast(@min(v, std.math.maxInt(u16)));
-}
-
 // Extract a pair of consecutive u16 fields when the flag is set and enough
 // fields are present. Shared by max_size and resize_inc extraction which
 // share the same 2-field pattern.
@@ -1142,8 +1160,8 @@ fn extractFieldPair(
     comptime off: usize,
 ) SizePair {
     if (want and field_count >= off + 2) return .{
-        .width = clampToU16(fields[off]),
-        .height = clampToU16(fields[off + 1]),
+        .width = utils.scaling.clampToU16(fields[off]),
+        .height = utils.scaling.clampToU16(fields[off + 1]),
     };
     return .{ .width = 0, .height = 0 };
 }
@@ -1280,8 +1298,12 @@ pub fn updateWorkspaceBordersIfNeeded() void {
 
 /// Warn-once latches for client-message diagnostics (see
 /// handleClientMessage): pager loops would otherwise flood the log.
-var warned_active_unimplemented = false;
-var warned_state_unmanaged = false;
+var warned_once: u8 = 0;
+inline fn warnOnce(comptime bit: u3, msg: []const u8, args: anytype) void {
+    if (warned_once & (@as(u8, 1) << bit) != 0) return;
+    warned_once |= @as(u8, 1) << bit;
+    debug.warn(msg, args);
+}
 
 pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (event.format != 32) return;
@@ -1290,13 +1312,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     // fire once per process so a looping pager cannot flood the log.
     const net_active = utils.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
-        if (!warned_active_unimplemented) {
-            warned_active_unimplemented = true;
-            debug.warn(
-                "Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented",
-                .{event.window},
-            );
-        }
+        warnOnce(0, "Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
         return;
     }
 
@@ -1311,15 +1327,12 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     const win = event.window;
     if (!isValidManagedWindow(win)) {
-        if (!warned_state_unmanaged) {
-            warned_state_unmanaged = true;
-            debug.warn("Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
-        }
+        warnOnce(1, "Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
         return;
     }
 
     const action = event.data.data32[0];
-    const is_fs = isCovering(win);
+    const is_fs = isCoveringMode(pipeline.model(), win);
     const should_enter = switch (action) {
         1 => true, // _NET_WM_STATE_ADD
         0 => false, // _NET_WM_STATE_REMOVE

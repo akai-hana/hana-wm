@@ -111,27 +111,37 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         vals: [capacity]V = undefined,
         len: usize = 0,
 
-        fn binarySearch(
-            self: *const Self,
-            comptime mode: enum { exact, lower_bound },
-            k: K,
-        ) if (mode == .exact) ?usize else usize {
+        fn exactAt(self: *const Self, k: K) ?usize {
             var lo: usize = 0;
             var hi: usize = self.len;
             while (lo < hi) {
                 const mid = lo + (hi - lo) / 2;
-                if (mode == .exact and self.keys[mid] == k) return mid;
+                if (self.keys[mid] == k) return mid;
                 if (self.keys[mid] < k) {
                     lo = mid + 1;
                 } else {
                     hi = mid;
                 }
             }
-            return if (mode == .exact) null else lo;
+            return null;
+        }
+
+        fn lowerBound(self: *const Self, k: K) usize {
+            var lo: usize = 0;
+            var hi: usize = self.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (self.keys[mid] < k) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return lo;
         }
 
         pub fn getPtr(self: *Self, k: K) ?*V {
-            if (self.binarySearch(.exact, k)) |i| return &self.vals[i];
+            if (self.exactAt(k)) |i| return &self.vals[i];
             return null;
         }
 
@@ -144,21 +154,21 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         // a *V across such an operation on its own key.
 
         pub fn get(self: *const Self, k: K) ?V {
-            if (self.binarySearch(.exact, k)) |i| return self.vals[i];
+            if (self.exactAt(k)) |i| return self.vals[i];
             return null;
         }
 
         pub fn has(self: *const Self, k: K) bool {
-            return self.binarySearch(.exact, k) != null;
+            return self.exactAt(k) != null;
         }
 
         pub fn put(self: *Self, k: K, v: V) Error!*V {
-            if (self.binarySearch(.exact, k)) |i| {
+            if (self.exactAt(k)) |i| {
                 self.vals[i] = v;
                 return &self.vals[i];
             }
             if (self.len == capacity) return Error.StoreFull;
-            const pos = self.binarySearch(.lower_bound, k);
+            const pos = self.lowerBound(k);
             std.mem.copyBackwards(K, self.keys[pos + 1 .. self.len + 1], self.keys[pos..self.len]);
             std.mem.copyBackwards(V, self.vals[pos + 1 .. self.len + 1], self.vals[pos..self.len]);
             self.keys[pos] = k;
@@ -170,7 +180,7 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         /// Sorted-shift-remove: elements after `i` shift left to fill the gap.
         /// O(n); iteration order stays sorted-by-key.
         pub fn remove(self: *Self, k: K) bool {
-            if (self.binarySearch(.exact, k)) |i| {
+            if (self.exactAt(k)) |i| {
                 const last = self.len - 1;
                 std.mem.copyForwards(K, self.keys[i..last], self.keys[i + 1 .. self.len]);
                 std.mem.copyForwards(V, self.vals[i..last], self.vals[i + 1 .. self.len]);
@@ -280,21 +290,9 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     var n: usize = 0;
     for (m.ws[ws].tiled_order.constSlice()) |w| {
         const e = m.store.get(w) orelse continue;
-        if (e.mask & bit(ws) == 0) continue;
-        n += 1;
+        if (e.mask & bit(ws) != 0) n += 1;
     }
     return n;
-}
-
-/// Index of `win` within `ws`'s mask-visible tiled placements, or null when
-/// it has no tiled slot on `ws`. Same mask-visible scan as tiledCountOnWs.
-pub fn tiledIndexOnWs(m: *const Model, ws: WSId, win: WindowId) ?usize {
-    for (m.ws[ws].tiled_order.constSlice(), 0..) |w, i| {
-        const e = m.store.get(w) orelse continue;
-        if (e.mask & bit(ws) == 0) continue;
-        if (w == win) return i;
-    }
-    return null;
 }
 
 /// The covering occupant owning the screen on `ws`: a covering entry whose
@@ -347,12 +345,10 @@ pub fn setFocus(m: *Model, win: WindowId) void {
     m.focused = win;
     const list = &m.ws[m.current].focus_mru;
     removeValue(list, win);
-    // Newest-first insert; when at capacity, drop the OLDEST (tail) entry so
-    // the newest mru_capacity wins are retained.
-    if (!list.insert(0, win)) {
-        list.orderedRemove(list.len - 1);
-        _ = list.insert(0, win);
-    }
+    // Newest-first insert; insert only fails at capacity, so drop the OLDEST
+    // (tail) entry first, keeping the newest mru_capacity wins retained.
+    if (list.len == mru_capacity) list.orderedRemove(list.len - 1);
+    _ = list.insert(0, win);
 }
 
 /// Model-side focus drop (minimize/close with no eligible successor).
@@ -414,10 +410,7 @@ pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
     const len = list.len;
     if (len < 2) return;
     const idx = list.indexOfScalar(win) orelse return;
-    const next: usize = @intCast(@mod(
-        @as(i64, @intCast(idx)) + dir,
-        @as(i64, @intCast(len)),
-    ));
+    const next = utils.wrapIndex(idx, dir, len);
     reorderTiled(m, win, next);
 }
 
@@ -433,10 +426,10 @@ pub fn swapPrimary(m: *Model) void {
 }
 
 /// Steps the current workspace's primary-column width fraction by `delta`,
-/// clamped to [0.05, 0.95].
+/// clamped to the shared master-width bounds in constants.
 pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {
     const p = &m.ws[m.current].params;
-    p.primary_width = std.math.clamp(p.primary_width + delta, 0.05, 0.95);
+    p.primary_width = std.math.clamp(p.primary_width + delta, constants.min_master_width, constants.max_master_width);
 }
 
 pub fn applyConfigReload(m: *Model, tpl: LayoutParams) void {

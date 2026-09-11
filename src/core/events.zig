@@ -38,6 +38,10 @@ const fd_signal = 1;
 // signal pipe and timer paths get fair scheduling against a chatty client.
 const max_events_per_batch: usize = 128;
 
+// Cap for the post-batch drain of XCB's internal event queue (see the drain
+// loop in handleXcbEvents); a chatty client cannot fill it beyond this.
+const max_queued_drain: usize = 256;
+
 // Module-level carry for the non-motion event stashed while coalescing the
 // LAST batch's motions but not yet dispatched when the batch cap hit. It is
 // owned here (NOT in a stack-local `pending`) so it survives the gap between
@@ -182,6 +186,14 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // memory-safety bug; cheap insurance.
     if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
+}
+
+/// Dispatches an owned event: frees the heap-allocated XCB event after the
+/// handler runs. Every dispatch site in handleXcbEvents owns its event
+/// (stack- or heap-allocated by XCB), so they all funnel through here.
+fn dispatchOwned(event: *anyopaque) void {
+    defer std.c.free(event);
+    dispatch(@as(*u8, @ptrCast(event)).*, event);
 }
 
 const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
@@ -386,13 +398,11 @@ fn handleXcbEvents() void {
     var dispatched: usize = 0;
     while (dispatched < max_events_per_batch) : (dispatched += 1) {
         var event = takeEvent(&pending, conn) orelse break;
-        defer std.c.free(event);
-        var coalesced: usize = 0;
         if (isMotion(event)) {
             // Coalesce the run, but charge every drained motion against the
             // batch budget: an endless motion stream must not starve the
             // signal pipe and timer paths the cap exists to protect.
-            while (dispatched + coalesced < max_events_per_batch) {
+            while (dispatched < max_events_per_batch) {
                 const next = xcb.xcb_poll_for_event(conn) orelse break;
                 if (!isMotion(next)) {
                     pending = next;
@@ -400,11 +410,10 @@ fn handleXcbEvents() void {
                 }
                 std.c.free(event);
                 event = next; // keep only the newest motion of the run
-                coalesced += 1;
+                dispatched += 1;
             }
-            dispatched += coalesced;
         }
-        dispatch(@as(*u8, @ptrCast(event)).*, event);
+        dispatchOwned(event);
     }
 
     // A cap exit can leave a non-motion event held in `pending` (stashed
@@ -424,10 +433,9 @@ fn handleXcbEvents() void {
     // events immediately.
     {
         var extra: usize = 0;
-        while (extra < 256) : (extra += 1) {
+        while (extra < max_queued_drain) : (extra += 1) {
             const event = xcb.xcb_poll_for_queued_event(conn) orelse break;
-            defer std.c.free(event);
-            dispatch(@as(*u8, @ptrCast(event)).*, event);
+            dispatchOwned(event);
         }
     }
 
@@ -441,7 +449,6 @@ fn handleXcbEvents() void {
     if (build_options.has_bar)
         surfaces.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
     focus.drainPendingConfirm();
-    focus.drainPointerSync();
     // Must run after the event-draining loop above: any EnterNotify a tiling
     // reflow generated has to have already been dispatched (and filtered,
     // since suppression is still active) before this lifts suppression.

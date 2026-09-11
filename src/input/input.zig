@@ -40,11 +40,7 @@ const events = @import("events");
 
 // Constants
 
-const mouse_button_middle: u8 = 2;
-const mouse_button_scroll_up: u8 = 4;
-const mouse_button_scroll_down: u8 = 5;
-
-const mouse_buttons = [_]u8{ constants.mouse_button_left, mouse_button_middle, constants.mouse_button_right, mouse_button_scroll_up, mouse_button_scroll_down };
+const mouse_buttons = [_]u8{ constants.mouse_button_left, constants.mouse_button_middle, constants.mouse_button_right, constants.mouse_button_scroll_up, constants.mouse_button_scroll_down };
 
 var xkb_state: ?xkbcommon.XkbState = null;
 
@@ -52,26 +48,18 @@ var xkb_state: ?xkbcommon.XkbState = null;
 // to the grabbing window only if the mask selects it; keycodes are stable
 // across a gesture regardless of modifier release order, so keying on the
 // raw KEYCODE both suppresses autorepeat and always clears on release.
-const held_key_capacity = 32;
-var held_keys: [held_key_capacity]u8 = undefined;
-var held_key_count: usize = 0;
+var held_keys = std.StaticBitSet(256).initEmpty();
 
 fn keyHeld(keycode: u8) bool {
-    return std.mem.indexOfScalar(u8, held_keys[0..held_key_count], keycode) != null;
+    return held_keys.isSet(keycode);
 }
 
 fn setKeyHeld(keycode: u8) void {
-    if (held_key_count == held_keys.len) return; // saturate; releases still clear
-    held_keys[held_key_count] = keycode;
-    held_key_count += 1;
+    held_keys.set(keycode);
 }
 
 fn clearKeyHeld(keycode: u8) void {
-    const slice = held_keys[0..held_key_count];
-    if (std.mem.indexOfScalar(u8, slice, keycode)) |idx| {
-        held_keys[idx] = held_keys[held_key_count - 1];
-        held_key_count -= 1;
-    }
+    held_keys.unset(keycode);
 }
 
 /// Initialises the XKB context, keymap, and key state
@@ -105,9 +93,9 @@ pub fn getXkbState() ?*xkbcommon.XkbState {
 /// so keybindings keep firing after the mapping change.
 pub fn handleMappingNotify() void {
     const cs = core.getState();
-    const state = if (xkb_state) |*s| s else return;
+    const state = getXkbState() orelse return;
     state.rebuild(cs.conn);
-    held_key_count = 0; // keycodes may no longer map to the same keys post-rebuild
+    held_keys = std.StaticBitSet(256).initEmpty();
 
     // The dispatch map is keyed on keysym (unaffected by the rebuild), but
     // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
@@ -203,10 +191,9 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         });
         if (key_profile.enabled) key_profile.note(utils.monotonicNs() - key_t0);
         executeAction(action);
-    } else if (mods == 0 and keysym >= masks.modifier_keysym_lo and keysym <= masks.modifier_keysym_hi) {
-        // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R): can never
+    } else if (mods != 0 or keysym < masks.modifier_keysym_lo or keysym > masks.modifier_keysym_hi) {
+        // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R) can never
         // match a binding; staying silent keeps logs free of keystroke noise.
-    } else {
         debug.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
     }
 }
@@ -241,7 +228,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
     // a specific window, so they're checked before the managed-window guard
     // that would otherwise discard events fired over the desktop/bar.
-    if (super_held and (event.detail == mouse_button_scroll_up or event.detail == mouse_button_scroll_down)) {
+    if (super_held and (event.detail == constants.mouse_button_scroll_up or event.detail == constants.mouse_button_scroll_down)) {
         if (!tryConfigMouseBind(mods, event.detail, 0, event.time)) releaseGrab(event.time);
         return;
     }
@@ -287,7 +274,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
         return;
     }
 
-    if (focus.getSuppressReason() != .none) focus.setSuppressReason(.none);
+    focus.setSuppressReason(.none);
 }
 
 // Window operations
@@ -347,21 +334,22 @@ fn executeAction(action: *const types.Action) void {
         },
 
         .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
-        .toggle_layout => tilingOp(actions.cycleLayoutKind, 1),
-        .toggle_layout_reverse => tilingOp(actions.cycleLayoutKind, -1),
-        .cycle_layout_variants => tilingOp(actions.stepVariantDir, 1),
-        .cycle_layout_variants_reverse => tilingOp(actions.stepVariantDir, -1),
-        .increase_master => actions.adjustPrimaryWidthAction(0.025),
-        .decrease_master => actions.adjustPrimaryWidthAction(-0.025),
-        .increase_master_count => actions.adjustPrimaryCount(1),
-        .decrease_master_count => actions.adjustPrimaryCount(-1),
-        .grow_stack_top => actions.adjustSecondaryBalance(0.5),
-        .grow_stack_bottom => actions.adjustSecondaryBalance(-0.5),
-        .swap_master, .swap_master_focus_swap => actions.swapPrimaryAction(action.* == .swap_master_focus_swap),
+        .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, if (dir == .forward) @as(i32, 1) else -1),
+        .cycle_variants => |dir| tilingOp(actions.stepVariantDir, if (dir == .forward) @as(i32, 1) else -1),
+        .set_master_width => |dir| actions.adjustPrimaryWidthAction(if (dir == .forward) 0.025 else -0.025),
+        .set_master_count => |dir| actions.adjustPrimaryCount(if (dir == .forward) @as(i32, 1) else -1),
+        .grow_stack => |dir| actions.adjustSecondaryBalance(if (dir == .forward) 0.5 else -0.5),
+        .swap_master => |mode| actions.swapPrimaryAction(mode == .focus_swap),
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),
-        .scroll_view_left => actions.viewportStep(-1),
-        .scroll_view_right => actions.viewportStep(1),
+        .scroll_view => |dir| actions.viewportStep(if (dir == .forward) @as(i32, 1) else -1),
+
+        // Cycle focus: focus forward or backward, then snap viewport to the
+        // newly focused window so it is always visible on screen.
+        .cycle_focus => |dir| {
+            if (dir == .forward) focus.focusNext() else focus.focusPrev();
+            actions.snapViewportToFocused();
+        },
 
         // Workspaces. workspaces.zig self-gates to a single implicit
         // workspace when core.getState().config.workspaces.enabled is false,
@@ -370,7 +358,7 @@ fn executeAction(action: *const types.Action) void {
         .move_to_workspace => |ws| if (focus.getFocused()) |wid| actions.moveWindowTo(wid, ws),
         .toggle_tag => |ws| if (focus.getFocused()) |wid| actions.tagToggle(wid, ws, true),
         .all_workspaces => actions.allViewToggle(),
-        .move_to_all_workspaces, .toggle_tag_all => if (focus.getFocused()) |wid| actions.pinToggle(wid),
+        .pin_window => if (focus.getFocused()) |wid| actions.pinToggle(wid),
 
         // Bar: visibility toggle, position toggle, and chrome-overlay toggle.
         .toggle_bar_visibility => if (build_options.has_bar) surfaces.setBarState(.toggle_bar_visibility),
@@ -379,17 +367,11 @@ fn executeAction(action: *const types.Action) void {
 
         // Minimize: minimize, unminimize (LIFO/FIFO), and restore all.
         .minimize_window => actions.minimize(focus.getFocused()),
-        .unminimize_lifo => actions.restoreOrdered(.lifo),
-        .unminimize_fifo => actions.restoreOrdered(.fifo),
-        .unminimize_all => actions.restoreAll(),
-
-        // Window focus cycling (dwm-style Mod+k / Mod+j). Snaps the viewport
-        // to the newly focused window when it is off-screen. The server grab
-        // prevents a partial retile frame.
-        .focus_next_window, .focus_prev_window => {
-            if (action.* == .focus_next_window) focus.focusNext() else focus.focusPrev();
-            actions.snapViewportToFocused();
+        .unminimize => |order| switch (order) {
+            .lifo => actions.restoreOrdered(.lifo),
+            .fifo => actions.restoreOrdered(.fifo),
         },
+        .unminimize_all => actions.restoreAll(),
     }
 }
 
@@ -401,15 +383,6 @@ inline fn tilingOp(comptime op: anytype, arg: anytype) void {
     focus.setSuppressReason(.tiling_operation);
     op(arg);
     focus.beginTilingOpSettle();
-}
-
-/// Like executeAction but acts on the clicked window rather than the
-/// keyboard-focused one, so e.g. toggle_floating_window affects what was clicked.
-fn executeMouseAction(action: *const types.Action, clicked_win: u32) void {
-    switch (action.*) {
-        .toggle_floating_window => tilingOp(actions.toggleFloating, clicked_win),
-        else => executeAction(action),
-    }
 }
 
 // Diagnostics
@@ -450,7 +423,12 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     // Linear scan is intentional: mouse bindings are few (~5-10), hash overhead not worth it.
     for (core.getState().config.mouse_bindings.items) |*mb|
         if (mb.modifiers == mods and mb.button == button) {
-            executeMouseAction(&mb.action, win);
+            // Mouse binds act on the clicked window rather than the
+            // keyboard-focused one (e.g. toggle_floating_window).
+            switch (mb.action) {
+                .toggle_floating_window => tilingOp(actions.toggleFloating, win),
+                else => executeAction(&mb.action),
+            }
             releaseGrab(time);
             return true;
         };

@@ -21,6 +21,12 @@ const std = @import("std");
 /// Horizontal gap between the repeating copies of a title, in pixels.
 pub const gap_px: u16 = 48;
 
+/// Center-to-center distance between the repeating copies of a title (text
+/// width plus the inter-copy gap): the wrap period of the marquee cycle.
+pub fn cyclePx(text_w: u16) f32 {
+    return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(gap_px));
+}
+
 /// Frame cadence follows the detected monitor refresh rate (see
 /// refresh.detectedHz), so each frame advances by one display period
 /// and motion is locked to the monitor's scanout. Motion itself is
@@ -79,7 +85,7 @@ pub fn offsetFor(
 
     if (dt_ms > 0)
         offset_px += @as(f32, @floatFromInt(speed_px_s)) * @as(f32, @floatFromInt(dt_ms)) / 1000.0;
-    const cycle: f32 = @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(gap_px));
+    const cycle = cyclePx(text_w);
     offset_px = @mod(offset_px, cycle);
     return offset_px;
 }

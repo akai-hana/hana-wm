@@ -1,15 +1,7 @@
 //! ONLY this module (via its wire sink) sends geometry/border/map/stack
 //! requests. Pure orchestration lives here; every raw XCB request lives in
 //! the sink file, the sanctioned boundary. Raw libxcb symbols may appear only
-//! inside its send shims.
-//!
-//! Shims wrap EXISTING xcb patterns; do not invent new ones:
-//!   Sink.geom        ~ utils.configureWindow (+ merged stack-mode variant)
-//!   Sink.border_*    ~ borders.applyWidth + borders.apply + setBorderPixel
-//!   Sink.park        ~ X-offscreen + BELOW configure_window in ONE request
-//!   Sink.stack_only  ~ utils.raiseWindow / restack helpers used today
-//!   Sink.set_ewmh_fullscreen ~ xcb_change_property for _NET_WM_STATE_FULLSCREEN
-//!   Sink.flush       ~ conn.flush() (caller owns timing)
+//! inside its send shims. Sink shims are defined in sink.zig.
 //!
 //! Scroll viewport caller duties (snap-right-on-new, clamp, prev_count update)
 //! happen in ACTIONS before they call reconcile; this module never mutates
@@ -138,17 +130,6 @@ pub const Ctx = struct {
 
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
-// The sent ledger is a compact parallel array (get/put/swap-remove/clear; no
-// iteration-order needs, unlike model.Store). Lookups use a fixed-size
-// open-addressing hash index (id → slot) for O(1) amortized lookup instead of
-// a linear scan. The index table is the same size as store_capacity (128),
-// probing linearly on collision. Two sentinel values distinguish empty buckets
-// (probe stops) from tombstones (skip, keep probing) left by swap-removes.
-
-// Hash index sentinel values for open-addressing with linear probing.
-const idx_empty: u32 = std.math.maxInt(u32);
-const idx_tomb: u32 = std.math.maxInt(u32) - 1;
-
 /// What we last sent per window; WRITE-ONLY bookkeeping whose three contract
 /// reads are documented in the header:
 ///   - has_rect: whether a visible geometry was EVER sent (an explicit flag,
@@ -170,8 +151,6 @@ const SentEntry = struct {
 pub const State = struct {
     /// Ledger of sent state (see SentEntry), keyed by `.id`.
     sent: utils.BoundedList(SentEntry, model.store_capacity) = .{},
-    /// Hash index: id_to_slot[id % capacity] → slot in sent, or idx_empty/idx_tomb.
-    id_to_slot: [model.store_capacity]u32 = .{idx_empty} ** model.store_capacity,
 };
 
 /// Owned by the compositor process; re-init() on reconnect.
@@ -185,74 +164,10 @@ pub fn deinit() void {
     init();
 }
 
-/// Decoded state of an id_to_slot bucket during a probe.
-const Bucket = union(enum) {
-    empty,
-    tombstone,
-    occupied: u32,
-};
-
-fn probeBucket(probe: usize) Bucket {
-    const val = st.id_to_slot[probe];
-    return if (val == idx_empty)
-        .empty
-    else if (val == idx_tomb)
-        .tombstone
-    else
-        .{ .occupied = val };
-}
-
-/// Slot holding `win` in the ledger, or null when absent. O(1) amortized via
-/// open-addressing hash index with linear probing. Bounded by capacity so a
-/// fully-occupied table (no empty bucket) still terminates with a miss.
+/// Slot holding `win` in the ledger, or null when absent. Linear scan;
+/// sub-microsecond at 128 entries max.
 fn sentFind(win: model.WindowId) ?usize {
-    var probe = win % model.store_capacity;
-    var seen: u32 = 0;
-    while (seen < model.store_capacity) : (seen += 1) {
-        switch (probeBucket(probe)) {
-            .empty => return null,
-            .occupied => |slot| if (st.sent.items[slot].id == win) return slot,
-            .tombstone => {},
-        }
-        probe = (probe + 1) % model.store_capacity;
-    }
-    return null;
-}
-
-/// Insert an id→slot mapping into the hash index. Caller guarantees the id is
-/// not already present (caller checked via sentFind miss) and that the ledger
-/// has room (so at least one empty/tombstone bucket exists).
-fn sentIndexInsert(id: model.WindowId, slot: usize) void {
-    var probe = id % model.store_capacity;
-    var seen: u32 = 0;
-    while (seen < model.store_capacity) : (seen += 1) {
-        switch (probeBucket(probe)) {
-            .empty, .tombstone => {
-                st.id_to_slot[probe] = @intCast(slot);
-                return;
-            },
-            .occupied => {},
-        }
-        probe = (probe + 1) % model.store_capacity;
-    }
-    unreachable;
-}
-
-/// Remove the index entry for `id`, marking its bucket as a tombstone.
-fn sentIndexRemove(id: model.WindowId) void {
-    var probe = id % model.store_capacity;
-    var seen: u32 = 0;
-    while (seen < model.store_capacity) : (seen += 1) {
-        switch (probeBucket(probe)) {
-            .empty => return,
-            .occupied => |slot| if (st.sent.items[slot].id == id) {
-                st.id_to_slot[probe] = idx_tomb;
-                return;
-            },
-            .tombstone => {},
-        }
-        probe = (probe + 1) % model.store_capacity;
-    }
+    return st.sent.indexOfById(win);
 }
 
 pub fn sentGet(win: model.WindowId) ?SentEntry {
@@ -260,31 +175,22 @@ pub fn sentGet(win: model.WindowId) ?SentEntry {
     return st.sent.items[slot];
 }
 
-pub fn sentGetOrPut(win: model.WindowId) !struct { found_existing: bool, value_ptr: *SentEntry } {
-    if (sentFind(win)) |slot| {
-        return .{ .found_existing = true, .value_ptr = &st.sent.items[slot] };
-    }
-    if (st.sent.len >= model.store_capacity) return error.SentLedgerFull;
+/// Ledger get-or-create for `win`: pointer to its record, or null when the
+/// ledger is full and `win` has no slot yet. Null replaces the former
+/// `.found_existing` struct: callers treat both cases the same (reads see a
+/// fresh blank record; writes are logged+lost).
+pub fn sentGetOrPut(win: model.WindowId) !?*SentEntry {
+    if (sentFind(win)) |slot| return &st.sent.items[slot];
+    if (st.sent.len >= model.store_capacity) return null;
     const idx = st.sent.len;
     st.sent.len += 1;
     st.sent.items[idx] = .{ .id = win };
-    sentIndexInsert(win, idx);
-    return .{ .found_existing = false, .value_ptr = &st.sent.items[idx] };
+    return &st.sent.items[idx];
 }
 
 pub fn sentSwapRemove(win: model.WindowId) void {
     const slot = sentFind(win) orelse return;
-    const last_idx = st.sent.len - 1;
-    // Remove the target from the hash index.
-    sentIndexRemove(win);
-    if (slot < last_idx) {
-        // The last element moves into the vacated slot; update its index.
-        const moved_id = st.sent.items[last_idx].id;
-        sentIndexRemove(moved_id);
-        st.sent.items[slot] = st.sent.items[last_idx];
-        sentIndexInsert(moved_id, slot);
-    }
-    st.sent.len -= 1;
+    st.sent.swapRemove(slot);
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -348,20 +254,19 @@ pub fn reconcileDragTick(m: *const model.Model, sink: Sink, win: model.WindowId)
     sink.geom(win, rect, null);
 
     // Update sent ledger so lastRectFor / toggleFloating see the live position.
-    const gop = sentGetOrPut(win) catch return;
-    markSentVisible(gop.value_ptr, win, rect, 0, 0);
+    const gop = (sentGetOrPut(win) catch return) orelse return;
+    markSentVisible(gop, win, rect, 0, 0);
 }
 
 pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
-    // STEP 1: wa := workArea(ctx) (screen minus bar).
+    // Work-area (screen minus bar) and coverage winner: the core model helper
+    // resolves which covering window owns the current workspace's screen.
     const wa = ctx.workarea;
 
-    // STEP 2: coverage winner scan. The core model helper (coveringOccupantOnWs)
-    // resolves which covering window owns the screen on the current workspace,
-    // replacing the former per-module registry enumeration.
     const fs_win: ?model.WindowId = model.coveringOccupantOnWs(m, m.current);
 
-    // STEP 3 (else branch): run layout.compute over the shown workspace.
+    // Layout compute over the shown workspace (skipped when a covering window
+    // owns the screen, or when the tiling subsystem is absent).
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
     var placements: tiling.List = .{};
@@ -380,11 +285,6 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const view: plugin.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
         if (n > 0) {
             tiling.compute(params.kind, view, &placements);
-            std.sort.pdq(tiling.Placement, placements.slice(), {}, (struct {
-                fn lessThan(_: void, a: tiling.Placement, b: tiling.Placement) bool {
-                    return a.win < b.win;
-                }
-            }).lessThan);
         }
     }
 
@@ -403,15 +303,14 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         }
     };
 
-    // STEPS 4..8 fused into ONE pass: compute the desire for a store entry,
-    // then SEND it immediately, unconditionally. Send order per window:
-    // map -> pixel -> bw -> geometry (stack merged into that request);
-    // parked windows emit ONE merged park request instead (offscreen X +
-    // BELOW). Map precedes geometry so a first-show/unparking client
-    // exposes at its final rect.
+    // One fused pass over the store: compute a window's desire, then SEND it
+    // immediately. Send order per window: map -> pixel -> bw -> geometry
+    // (stack merged into that request); parked windows emit ONE merged park
+    // request instead (offscreen X + BELOW). Map precedes geometry so a
+    // first-show/unparking client exposes at its final rect.
     //
-    // The ledger reads below are contract, not optimization: the orphan
-    // branch keeps the last real geometry (header read 1), raise triggers
+    // The ledger reads below are contract, not optimization (header): the
+    // orphan branch keeps the last real geometry (read 1), raise triggers
     // derive from rect/parked comparisons (read 2), and everything written
     // here feeds lastRectFor/truthRect (read 3). Sends never consult the
     // ledger to SKIP anything.
@@ -421,32 +320,23 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const win = it.key;
         const e: *const model.Entry = it.val;
 
-        // One ledger get-or-create per window: the same record backs the
-        // pre-send contract reads (orphan keep-last, raise rule) AND the
-        // post-send write, so a visible window costs a single scan instead
-        // of two. The record is read before any send and only written after,
-        // so raises still derive from what we last sent, never from this
-        // pass's sends. When the ledger is full and `win` has no record yet,
-        // `gop` is null: reads see a fresh blank entry and the write is
-        // logged+lost after the sends, exactly as before (sends never depend
-        // on the ledger).
+        // One get-or-create per window: the same record backs the pre-send
+        // contract reads AND the post-send write, so a visible window costs a
+        // single scan. The record is read before any send and only written
+        // after, so raises still derive from what we last sent, never from
+        // this pass's sends. When the ledger is full and `win` has no record
+        // yet, `gop` is null: reads see a fresh blank entry and the write is
+        // logged+lost, exactly as before (sends never depend on the ledger).
         const gop = sentGetOrPut(win) catch null;
-        const ledger = (if (gop) |g| g.value_ptr.* else SentEntry{});
+        const ledger = (if (gop) |g| g.* else SentEntry{});
 
-        // OFF-WORKSPACE FAST PATH. A window whose desire is PROVABLY parked and
-        // which is ALREADY parked in the sent ledger needs no recompute and no
-        // send this pass: its record is unchanged, and parked windows (offscreen)
-        // have no geometry/border drift to repair, so unconditional compute is
-        // preserved for every window that could actually be visible.
-        //
-        // Every NON-parked desire satisfies `presence == .parked` false AND
-        // `all_view_active or mask has current ws` -- except the fullscreen/covering
-        // winner (fs_win), whose screen ownership can carry it without a current-ws
-        // mask bit. So skipping when those all fail AND it isn't fs_win AND it's
-        // already parked is identity-safe: the full path would derive parked,
-        // elide the park resend (ledger.parked already true), never be a fallback
-        // winner (parked), and rewrite the ledger to the same parked=true.
-        const is_fs = fs_win != null and win == fs_win.?;
+        // OFF-WORKSPACE FAST PATH: a desire that is PROVABLY parked (not the
+        // covering winner, not on the current ws, or presence parked) and is
+        // already parked in the ledger needs no recompute and no send -- the
+        // full path would derive parked, elide the park resend (ledger.parked
+        // already true), never be a fallback winner, and rewrite the same
+        // parked=true.
+        const is_fs = win == fs_win;
         const on_current = m.all_view_active or (e.mask & model.bit(m.current)) != 0;
         const definitely_parked_desire = e.presence == .parked or !on_current;
         if (!is_fs and definitely_parked_desire and ledger.parked) continue;
@@ -461,9 +351,8 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         if (parked) {
             if (!ledger.parked) ctx.sink.park(win);
         } else {
-            // Raise triggers derive from the ledger (header read 2): the
-            // winner rides .above exactly when its geometry moved, when it
-            // unparked, or under restack pressure, never on mere presence.
+            // Raise triggers per the ledger contract (header read 2): winner
+            // .above on geometry motion, unpark, or restack pressure only.
             const last = ledger;
             const first_send = !last.has_rect;
             const moved = first_send or !last.rect.eql(rect);
@@ -484,7 +373,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
         if (gop) |g| {
-            if (parked) g.value_ptr.parked = true else markSentVisible(g.value_ptr, win, rect, bw, pixel);
+            if (parked) g.parked = true else markSentVisible(g, win, rect, bw, pixel);
         } else std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
     }
 
@@ -550,7 +439,7 @@ fn computeDesire(
     if (e.presence == .parked or (e.presence == .covering and fs_win == null)) {
         markParked(&bw, &pixel, &parked);
     } else if (fs_win != null) {
-        if (win == fs_win.?) {
+        if (win == fs_win) {
             rect = ctx.screen;
             bw = 0;
             pixel = 0;
@@ -572,16 +461,14 @@ fn computeDesire(
 
     // Fallback winner: first non-parked desire in store order.
     if (winner.* == null and !parked) winner.* = win;
-    const is_winner = winner.* != null and winner.*.? == win;
+    const is_winner = winner.* == win;
     return .{ .rect = rect, .bw = bw, .pixel = pixel, .parked = parked, .is_winner = is_winner };
 }
 
 fn findPlacement(placements: *const tiling.List, win: model.WindowId) ?tiling.Placement {
-    const slice = placements.constSlice();
-    const idx = std.sort.binarySearch(tiling.Placement, slice, win, struct {
-        fn cmp(w: model.WindowId, p: tiling.Placement) std.math.Order {
-            return std.math.order(w, p.win);
-        }
-    }.cmp) orelse return null;
-    return slice[idx];
+    // Linear scan: the list holds one placement per window in placement order.
+    for (placements.constSlice()) |p| {
+        if (p.win == win) return p;
+    }
+    return null;
 }

@@ -8,6 +8,7 @@ const testing = std.testing;
 
 const utils = @import("utils");
 const model = @import("model");
+const helpers = @import("helpers");
 
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
@@ -31,22 +32,18 @@ const K_SCROLL: u8 = @intCast(tiling.layoutByName("scroll") orelse 0);
 const GRID_RELAX_VARIANT: u8 = 1;
 const MONOCLE_GAP_VARIANT: u8 = 1;
 
-/// Standard test margins/min_dim used by most cases.
-const gap = 8;
-const border = 2;
-const min_dim = 50;
-
-fn stdWa() utils.Rect {
-    return .{ .x = 0, .y = 0, .width = 800, .height = 600 };
-}
-
 const Fixture = struct {
     m: model.Model,
     hv: tiling.HintsView,
     hint_buf: [model.store_capacity]model.SizeHints = undefined,
     wa: utils.Rect,
 
-    fn init(self: *Fixture, wins: []const model.WindowId, wa: utils.Rect) void {
+    fn init(self: *Fixture, wins: []const model.WindowId) void {
+        self.initAt(wins, helpers.std_wa);
+    }
+
+    /// init with an explicit work area, for the non-standard-geometry cases.
+    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: utils.Rect) void {
         self.* = .{
             .m = .{},
             .hv = undefined,
@@ -60,10 +57,6 @@ const Fixture = struct {
         }
         const n = s0.tiled_order.len;
         self.hv = .{ .order = s0.tiled_order.constSlice(), .hints = self.hint_buf[0..n] };
-    }
-
-    fn deinit(self: *Fixture) void {
-        _ = self; // bounded lists need no teardown
     }
 
     fn view(self: *Fixture) tiling.View {
@@ -81,9 +74,16 @@ const Fixture = struct {
 /// View with the standard margin/min_dim tuning.
 fn tuned(fx: *Fixture) tiling.View {
     var v = fx.view();
-    v.env.margins = .{ .gap = gap, .border = border };
-    v.env.min_dim = min_dim;
+    v.env = helpers.std_env;
     return v;
+}
+
+/// One compute pass into a fresh list (a BoundedList, so returning by value
+/// is allocation-free).
+fn computeOf(kind: u8, v: tiling.View) List {
+    var list: List = .{};
+    tiling.compute(kind, v, &list);
+    return list;
 }
 
 fn expectP(out: *const List, i: usize, win: model.WindowId, x: i32, y: i32, w: u16, h: u16, visible: bool) !void {
@@ -99,11 +99,10 @@ fn expectP(out: *const List, i: usize, win: model.WindowId, x: i32, y: i32, w: u
 // master, single window fills the work area minus gaps/borders.
 test "master single window" {
     var fx: Fixture = undefined;
-    fx.init(&.{11}, stdWa());
-    defer fx.deinit();
+    fx.init(&.{11});
+    
 
-    var out: List = .{};
-    tiling.compute(K_MASTER, tuned(&fx), &out);
+    const out = computeOf(K_MASTER, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 1), out.len);
     // master_inner_w = shrink(800, gap*2 + border*2 = 20) = 780
@@ -114,11 +113,10 @@ test "master single window" {
 // master + stack, default 50/50 split.
 test "master two windows" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12 });
+    
 
-    var out: List = .{};
-    tiling.compute(K_MASTER, tuned(&fx), &out);
+    const out = computeOf(K_MASTER, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 2), out.len);
     // master_w = round(800 * 0.5) = 400; inner = shrink(400, 12 + 4) = 384
@@ -130,14 +128,13 @@ test "master two windows" {
 // primary_on_right mirrors the columns.
 test "master on right" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12 });
+    
 
     var v = tuned(&fx);
     v.env.primary_on_right = true;
 
-    var out: List = .{};
-    tiling.compute(K_MASTER, v, &out);
+    const out = computeOf(K_MASTER, v);
 
     try testing.expectEqual(@as(usize, 2), out.len);
     // master_x = 800 - 400 = 400; x = 408
@@ -151,11 +148,10 @@ test "master on right" {
 // grid 2x2.
 test "grid 2x2" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13, 14 });
+    
 
-    var out: List = .{};
-    tiling.compute(K_GRID, tuned(&fx), &out);
+    const out = computeOf(K_GRID, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 4), out.len);
     // cell_w = (800 - 3*8)/2 = 388 -> win_w 384; cell_h = (600-24)/2 = 288 -> 284
@@ -171,14 +167,13 @@ test "grid 2x2" {
 // narrow column stride, making neighbouring wide cells overlap each other).
 test "grid relaxed partial row" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14, 15 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13, 14, 15 });
+    
 
     var v = tuned(&fx);
     v.env.variant_idx = GRID_RELAX_VARIANT;
 
-    var out: List = .{};
-    tiling.compute(K_GRID, v, &out);
+    const out = computeOf(K_GRID, v);
 
     try testing.expectEqual(@as(usize, 5), out.len);
     // cols=3 rows=2; rigid win_w = shrink((800-32)/3 = 256, 4) = 252
@@ -191,9 +186,8 @@ test "grid relaxed partial row" {
     try expectP(&out, 4, 15, 404, 304, 384, 284, true);
 
     // Rigid mode keeps the column width in the partial row.
-    var outr: List = .{};
     v.env.variant_idx = 0;
-    tiling.compute(K_GRID, v, &outr);
+    const outr = computeOf(K_GRID, v);
     try expectP(&outr, 3, 14, 8, 304, 252, 284, true);
     try expectP(&outr, 4, 15, 272, 304, 252, 284, true);
 }
@@ -201,11 +195,10 @@ test "grid relaxed partial row" {
 // fibonacci spiral of four, counter-clockwise from top-left.
 test "fibonacci spiral" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13, 14 });
+    
 
-    var out: List = .{};
-    tiling.compute(K_FIB, tuned(&fx), &out);
+    const out = computeOf(K_FIB, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 4), out.len);
     // outerArea: (8,8) 784x584; win_dim=(784-8)/2=388 etc.
@@ -226,13 +219,12 @@ test "fibonacci overflow fallback" {
     var wins: [40]model.WindowId = undefined;
     for (&wins, 0..) |*w, i| w.* = @intCast(41 + i);
     var fx: Fixture = undefined;
-    fx.init(&wins, .{ .x = 0, .y = 0, .width = 200, .height = 200 });
-    defer fx.deinit();
+    fx.initAt(&wins, .{ .x = 0, .y = 0, .width = 200, .height = 200 });
+    
     model.setFocus(&fx.m, 75); // deep in the overflow tail
 
     const v = tuned(&fx);
-    var out: List = .{};
-    tiling.compute(K_FIB, v, &out);
+    const out = computeOf(K_FIB, v);
 
     try testing.expectEqual(@as(usize, 40), out.len);
     var visible_count: usize = 0;
@@ -255,11 +247,10 @@ test "fibonacci overflow fallback" {
 // leaf BSP splits the longer axis first, ties favour vertical.
 test "leaf balanced splits" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13, 14 });
+    
 
-    var out: List = .{};
-    tiling.compute(K_LEAF, tuned(&fx), &out);
+    const out = computeOf(K_LEAF, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 4), out.len);
     // Root split vertical-ish? No: w(784) >= h(584) -> horizontal halves at x=8 / x=404,
@@ -273,8 +264,8 @@ test "leaf balanced splits" {
 // scroll strip: caller pre-clamps offset; off-viewport slots parked.
 test "scroll strip and parking" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14, 15 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13, 14, 15 });
+    
 
     // Caller duties (algo_scroll header): snap right for new windows, clamp.
     const slot_w = scroll_algo.slotWidth(800);
@@ -287,8 +278,7 @@ test "scroll strip and parking" {
     params.viewport_offset = max_off;
     params.viewport_prev_count = 5;
 
-    var out: List = .{};
-    tiling.compute(K_SCROLL, tuned(&fx), &out);
+    const out = computeOf(K_SCROLL, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 5), out.len);
     // cols 0..2 fully left of the viewport -> parked.
@@ -304,15 +294,14 @@ test "scroll strip and parking" {
 // monocle raises focusedElse's pick, parks the rest; gaps variant insets.
 test "monocle gaps variant" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13 });
+    
     model.setFocus(&fx.m, 12);
 
     var v = tuned(&fx);
     v.env.variant_idx = MONOCLE_GAP_VARIANT;
 
-    var out: List = .{};
-    tiling.compute(K_MONOCLE, v, &out);
+    const out = computeOf(K_MONOCLE, v);
 
     try testing.expectEqual(@as(usize, 3), out.len);
     // total_margin = doubledBorder(4) + inset*2 (16) = 20
@@ -323,16 +312,15 @@ test "monocle gaps variant" {
 
     // Without the gaps variant the inset is zero: full size minus borders only.
     v.env.variant_idx = 0;
-    var out2: List = .{};
-    tiling.compute(K_MONOCLE, v, &out2);
+    const out2 = computeOf(K_MONOCLE, v);
     try expectP(&out2, 0, 12, 0, 0, 796, 596, true);
 }
 
 // size hints are applied centrally at emit time (inc snap + centring).
 test "hints applied at emit" {
     var fx: Fixture = undefined;
-    fx.init(&.{11}, stdWa());
-    defer fx.deinit();
+    fx.init(&.{11});
+    
 
     // Mutate the model entry, then re-materialize the View's hint snapshot
     // exactly as sync.reconcile does per retile (hints are frozen INTO
@@ -340,8 +328,7 @@ test "hints applied at emit" {
     fx.m.store.getPtr(11).?.size_hints = .{ .inc_width = 100, .inc_height = 100 };
     fx.hint_buf[0] = fx.m.store.getPtr(11).?.size_hints;
 
-    var out: List = .{};
-    tiling.compute(K_MASTER, tuned(&fx), &out);
+    const out = computeOf(K_MASTER, tuned(&fx));
 
     // Raw master rect is {8,8,780,580}; snapped down to 700x500 and centred
     // back into its slot: dx = (780-700)/2 = 40, dy = 40.
@@ -355,16 +342,15 @@ test "hints applied at emit" {
 // max_height capping, on the width axis.
 test "master swallows freed space from a narrow dialog slave" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12 });
+    
 
     // Window 12 (the stack slave) declares a small max_width. Re-materialize
     // the hint snapshot into the buffer, exactly as sync does per retile.
     fx.m.store.getPtr(12).?.size_hints = .{ .max_width = 200 };
     fx.hint_buf[1] = fx.m.store.getPtr(12).?.size_hints;
 
-    var out: List = .{};
-    tiling.compute(K_MASTER, tuned(&fx), &out);
+    const out = computeOf(K_MASTER, tuned(&fx));
 
     try testing.expectEqual(@as(usize, 2), out.len);
     // Raw stack pane = 800 - (0.5*800 = 400) = 400; natural width for the
@@ -379,18 +365,16 @@ test "master swallows freed space from a narrow dialog slave" {
 // purity: compute twice yields identical output and mutates nothing.
 test "deterministic and non-mutating" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13 });
+    
 
     const params_before = fx.m.ws[0].params;
     const focus_before = fx.m.focused;
     const store_count_before = fx.m.store.count();
 
     const v = tuned(&fx);
-    var out_a: List = .{};
-    tiling.compute(K_GRID, v, &out_a);
-    var out_b: List = .{};
-    tiling.compute(K_GRID, v, &out_b);
+    const out_a = computeOf(K_GRID, v);
+    const out_b = computeOf(K_GRID, v);
 
     try testing.expectEqual(out_a.len, out_b.len);
     for (out_a.constSlice(), out_b.constSlice()) |a, b| {
@@ -408,13 +392,12 @@ test "deterministic and non-mutating" {
 // calcGridShape(0).rows == 0 and monocle indexed order[len - 1].
 test "n=0 emits nothing across all layouts" {
     var fx: Fixture = undefined;
-    fx.init(&.{}, stdWa());
-    defer fx.deinit();
+    fx.init(&.{});
+    
 
     const kinds = [_]u8{ K_MASTER, K_MONOCLE, K_FIB, K_GRID, K_LEAF, K_SCROLL };
     for (kinds) |kind| {
-        var out: List = .{};
-        tiling.compute(kind, tuned(&fx), &out);
+        const out = computeOf(kind, tuned(&fx));
         try testing.expectEqual(@as(usize, 0), out.len);
     }
 }
@@ -428,8 +411,8 @@ test "n=0 emits nothing across all layouts" {
 //   - the shrink case (n drops, old offset exceeds the new max) clamps to 0.
 test "scroll orphan keep-last invariant" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13, 14 });
+    
 
     const slot_w = scroll_algo.slotWidth(800);
     const params = &fx.m.ws[0].params;
@@ -440,27 +423,24 @@ test "scroll orphan keep-last invariant" {
     try testing.expect(stale_off > scroll_algo.maxOffset(4, slot_w, 800));
     params.viewport_offset = stale_off;
     params.viewport_prev_count = 4;
-    var out_orphan: List = .{};
-    tiling.compute(K_SCROLL, tuned(&fx), &out_orphan);
+    const out_orphan = computeOf(K_SCROLL, tuned(&fx));
     try testing.expect(out_orphan.constSlice()[3].visible);
 
     // (2) Clamped per duty 2: the last window is at least flush-visible at
     // max offset (its slot's right edge reaches the screen edge).
     params.viewport_offset = @min(stale_off, scroll_algo.maxOffset(4, slot_w, 800));
-    var out_last: List = .{};
-    tiling.compute(K_SCROLL, tuned(&fx), &out_last);
+    const out_last = computeOf(K_SCROLL, tuned(&fx));
     try testing.expect(out_last.constSlice()[3].visible);
 
     // (3) Shrink 4 -> 2: maxOffset(2) == 0 forces offset 0; both visible.
     params.viewport_offset = @min(stale_off, scroll_algo.maxOffset(2, slot_w, 800));
     var fx2: Fixture = undefined;
-    fx2.init(&.{ 11, 12 }, stdWa());
-    defer fx2.deinit();
+    fx2.init(&.{ 11, 12 });
+    
     const params2 = &fx2.m.ws[0].params;
     params2.viewport_offset = 0;
     params2.viewport_prev_count = 2;
-    var out_shrunk: List = .{};
-    tiling.compute(K_SCROLL, tuned(&fx2), &out_shrunk);
+    const out_shrunk = computeOf(K_SCROLL, tuned(&fx2));
     try testing.expect(out_shrunk.constSlice()[0].visible);
     try testing.expect(out_shrunk.constSlice()[1].visible);
 }
@@ -471,15 +451,14 @@ test "scroll orphan keep-last invariant" {
 // already pinned per-layout above.
 test "emission order pin across layouts" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13 }, stdWa());
-    defer fx.deinit();
+    fx.init(&.{ 11, 12, 13 });
+    
     model.setFocus(&fx.m, 12);
 
     // Every input-order layout emits exactly the tiled_order sequence.
     const in_order_kinds = [_]u8{ K_MASTER, K_FIB, K_GRID, K_LEAF, K_SCROLL };
     for (in_order_kinds) |kind| {
-        var out: List = .{};
-        tiling.compute(kind, tuned(&fx), &out);
+        const out = computeOf(kind, tuned(&fx));
         try testing.expectEqual(@as(usize, 3), out.len);
         try testing.expectEqual(@as(model.WindowId, 11), out.constSlice()[0].win);
         try testing.expectEqual(@as(model.WindowId, 12), out.constSlice()[1].win);
@@ -487,8 +466,7 @@ test "emission order pin across layouts" {
     }
 
     // Monocle emits the focused window first, then hidden in list order.
-    var out_mono: List = .{};
-    tiling.compute(K_MONOCLE, tuned(&fx), &out_mono);
+    const out_mono = computeOf(K_MONOCLE, tuned(&fx));
     try testing.expectEqual(@as(usize, 3), out_mono.len);
     try testing.expectEqual(@as(model.WindowId, 12), out_mono.constSlice()[0].win);
     try testing.expectEqual(@as(model.WindowId, 11), out_mono.constSlice()[1].win);
@@ -500,7 +478,7 @@ test "emission order pin across layouts" {
 // are skipped); stepping wraps modulo the list. Replaces the removed
 // model.cycleLayout (kind is now an opaque u8, resolved at seed time).
 test "layout cycle is config-order and wraps" {
-    const names = [_][]const u8{ "master", "monocle", "grid", "fibonacci" };
+    const names = helpers.std_layout_names;
     var ring: [8]u8 = undefined;
     var n: usize = 0;
     for (names) |nm| {

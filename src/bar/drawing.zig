@@ -11,6 +11,15 @@ const xcb_connection_t = xcb.xcb_connection_t;
 const xcb_pixmap_t = xcb.xcb_pixmap_t;
 const xcb_visualtype_t = xcb.xcb_visualtype_t;
 
+const types = @import("types");
+
+/// The clock's display format: the configured value, or the built-in default
+/// when unset. Single accessor shared by the clock segment and the bar's
+/// updateClock (each previously re-derived the same fallback).
+pub fn clockFormat(config: types.BarConfig) []const u8 {
+    return config.clock_format orelse types.default_clock_format;
+}
+
 // Cairo, Pango, and GLib C bindings for bar rendering.
 // Declared as `pub extern fn` because library headers may not be present in
 // all build environments.
@@ -167,9 +176,7 @@ pub const FontState = struct {
 
     fn loadFont(self: *FontState, font_name: []const u8) !void {
         if (self.current_font_desc) |desc| pango_font_description_free(desc);
-        const converted = try convertFontName(self.allocator, font_name);
-        defer self.allocator.free(converted);
-        const pango_name_z = try self.allocator.dupeZ(u8, converted);
+        const pango_name_z = try convertFontName(self.allocator, font_name);
         defer self.allocator.free(pango_name_z);
         self.current_font_desc = pango_font_description_from_string(pango_name_z.ptr);
         if (self.current_font_desc == null) {
@@ -189,16 +196,8 @@ pub const FontState = struct {
             null,
         );
         defer pango_font_metrics_unref(metrics);
-        const ascent: i16 = @intCast(std.math.clamp(
-            @divTrunc(pango_font_metrics_get_ascent(metrics), pango_scale),
-            std.math.minInt(i16),
-            std.math.maxInt(i16),
-        ));
-        const descent: i16 = @intCast(std.math.clamp(
-            @divTrunc(pango_font_metrics_get_descent(metrics), pango_scale),
-            std.math.minInt(i16),
-            std.math.maxInt(i16),
-        ));
+        const ascent = pangoPxToI16(pango_font_metrics_get_ascent(metrics));
+        const descent = pangoPxToI16(pango_font_metrics_get_descent(metrics));
         self.cached_metrics = .{ .ascent = ascent, .descent = descent };
         return .{ ascent, descent };
     }
@@ -215,6 +214,14 @@ inline fn setCairoColor(ctx: *cairo_t, color: u32) void {
 
 inline fn pangoToF64(pango_units: c_int) f64 {
     return @as(f64, @floatFromInt(pango_units)) / pango_scale;
+}
+
+inline fn pangoPxToI16(val: c_int) i16 {
+    return @intCast(std.math.clamp(
+        @divTrunc(val, pango_scale),
+        std.math.minInt(i16),
+        std.math.maxInt(i16),
+    ));
 }
 
 inline fn pxToPango(px: u16) f64 {
@@ -596,6 +603,26 @@ pub const DrawContext = struct {
     }
 };
 
+/// Draws `text` at `x` using the config's scaled segment padding and bar
+/// colors. Collapses the identical drawSegment argument list the icon-ish
+/// segment modules (layout, variants, clock) would otherwise repeat.
+pub fn drawPaddedSegment(
+    dc: *DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    x: u16,
+    text: []const u8,
+) !u16 {
+    return dc.drawSegment(
+        x,
+        height,
+        text,
+        config.scaledSegmentPadding(height),
+        config.bg,
+        config.fg,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // One-shot font metrics probing (used by the bar height / font-size calc).
 
@@ -687,9 +714,9 @@ fn resolveVisualType(
 }
 
 /// Converts Xft `"FontName:size=N:weight=bold"` to Pango `"FontName Bold N"` format.
-fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const u8 {
+fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![:0]const u8 {
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null)
-        return allocator.dupe(u8, xft_name);
+        return allocator.dupeZ(u8, xft_name);
 
     var result: std.ArrayListUnmanaged(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -731,5 +758,5 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![]const 
         try result.appendSlice(allocator, s);
     }
 
-    return result.toOwnedSlice(allocator);
+    return result.toOwnedSliceSentinel(allocator, 0);
 }

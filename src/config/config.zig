@@ -71,27 +71,18 @@ const read_growth_initial_bytes = 64 * 1024;
 
 const default_tiling_layout = (types.TilingConfig{}).layout;
 
-/// Dupe-copies `buf[0..len]` into a fresh exact-size buffer and frees `buf`;
-/// the callers' errdefer frees it on the dupe's error path. Never hands back a
-/// subslice of a live allocation (freeing one would be UB).
-fn shrinkOwned(allocator: std.mem.Allocator, buf: []u8, len: usize) ![]u8 {
-    const trimmed = try allocator.dupe(u8, buf[0..len]);
-    allocator.free(buf);
-    return trimmed;
-}
-
-/// Reads `path` into a freshly allocated caller-owned slice;
-/// `error.FileTooLarge` when it exceeds `max_file_bytes`. Allocates the full
-/// ceiling up front and reallocs down; loading is startup/reload-only, so a
-/// stat-then-allocate dance (and its TOCTOU re-check) isn't worth it.
+/// Reads `path`, returning `error.FileTooLarge` when it exceeds
+/// `max_file_bytes`. The returned slice may alias a larger allocation
+/// (loading is arena-backed, so all ownership is released together by the
+/// arena reset; a bare caller's free of the slice frees the whole buffer).
 ///
-/// Dual-path rationale: the stat-known-size path is a fast optimization
-/// for regular files where stat reliably reports a positive size, avoiding the
-/// amortised doubling/realloc of the growth loop. The growth path (stat fails
-/// or reports zero) handles edge cases like procfs/sysfs/pipe file descriptors
-/// where stat returns 0 despite carrying content, and fds where stat itself
-/// errors. Collapsing to a single growth path would penalise the common case
-/// (normal config files) for no functional gain.
+/// Two paths: a size-known fast path (stat reliably reports a positive
+/// regular-file size) that allocates exactly that much and reads once; and a
+/// growth path for stat-less or zero-sized sources (procfs/sysfs/pipes),
+/// allocating `read_growth_initial_bytes` and doubling until EOF. A stat
+/// result of 0 is as untrustworthy as a failed stat, so both take the growth
+/// path. The growth path reallocs down to the exact size before handing
+/// ownership to the caller.
 pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
@@ -116,7 +107,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         errdefer allocator.free(buf);
         const n = try file.readPositionalAll(io, buf, 0);
         if (n == buf.len) return buf;
-        return shrinkOwned(allocator, buf, n);
+        return allocator.realloc(buf, n);
     }
     // Growth path (stat failed or reported zero). Single ownership throughout:
     // the armed errdefer frees the whole buffer exactly once on every error
@@ -135,15 +126,18 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     }
     if (total > max_file_bytes) return error.FileTooLarge;
     if (total == buf.len) return buf;
-    // Same shrink trick as the direct path above.
-    return shrinkOwned(allocator, buf, total);
+    // Hand the caller an owned buffer of the exact size (the growth buffer was
+    // oversized); shrinking via realloc transfers ownership instead of leaking
+    // a subslice the caller would double-free.
+    return allocator.realloc(buf, total);
 }
 
 /// Reads and parses the .toml at `path`, returning null for an empty file.
 /// Read/parse errors propagate to the caller, who decides how to handle them.
+/// `allocator` must be arena-backed: the file buffer and the parsed Document
+/// alias it, released together by the caller's load-scoped arena reset.
 fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?parser.Document {
     const raw = try readFileAlloc(allocator, path);
-    defer allocator.free(raw);
     if (raw.len == 0) return null;
     return try parser.parse(allocator, raw);
 }
@@ -159,12 +153,29 @@ fn tryParseTomlFile(allocator: std.mem.Allocator, path: []const u8) ?parser.Docu
     return doc;
 }
 
+/// Parses and merges one config file (path = `dir_path` + `name`) into `dst`,
+/// then resolves its own `include`s via mergeIncludes. Shared by the directory
+/// loader and include resolution: the parse/merge/log tail is the same in both
+/// (C2).
+fn mergeOneFile(
+    allocator: std.mem.Allocator,
+    dst: *parser.Document,
+    dir_path: []const u8,
+    name: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ dir_path, name });
+    var doc = tryParseTomlFile(allocator, path) orelse return;
+    try parser.mergeDocumentsInto(allocator, dst, &doc);
+    debug.info("Merged: {s}", .{path});
+    try mergeIncludes(allocator, dst, &doc, dir_path);
+}
+
 /// Merges files listed in `include = [...]` from `src_doc` into `dst`;
 /// `dir_path` is the base for relative paths. Includes resolve one level deep
 /// only: an included file's own `include` is skipped, keeping the graph
 /// cycle-free by construction (no cycle-detection machinery) at the cost of
-/// no chained includes.
-fn processIncludes(
+/// no chained includes. `allocator` is the load's arena allocator.
+fn mergeIncludes(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
     src_doc: *parser.Document,
@@ -182,9 +193,7 @@ fn processIncludes(
             continue;
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
-        defer allocator.free(abs);
         var inc_doc = tryParseTomlFile(allocator, abs) orelse continue;
-        defer inc_doc.deinit();
         try parser.mergeDocumentsInto(allocator, dst, &inc_doc);
         debug.info("Merged (include): {s}", .{abs});
     }
@@ -199,6 +208,14 @@ fn sliceLessThan(_: void, a: []u8, b: []u8) bool {
 /// arrays accumulate (enforced by the parser's Value getters: scalar reads resolve to
 /// the last declaration, array reads see every one).
 pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.Config {
+    // One load-scoped arena hosts every parsed Document (and its aliased file
+    // buffers); documents share strings through it, and the reset below
+    // reclaims them all once the Config has been built (Config dupes its own
+    // strings from the general `allocator`).
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
     var names: std.ArrayList([]u8) = .empty;
     defer {
         for (names.items) |n| allocator.free(n);
@@ -228,21 +245,26 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
     }
 
     std.mem.sort([]u8, names.items, {}, sliceLessThan);
-    var merged = parser.Document.init(allocator);
-    defer merged.deinit();
-    for (names.items) |name| {
-        const path = try std.fs.path.join(allocator, &.{ dir_path, name });
-        defer allocator.free(path);
-        var doc = tryParseTomlFile(allocator, path) orelse continue;
-        defer doc.deinit();
-        try parser.mergeDocumentsInto(allocator, &merged, &doc);
-        debug.info("Merged: {s}", .{path});
-        try processIncludes(allocator, &merged, &doc, dir_path);
-    }
+    var merged = parser.Document.init(a);
+    for (names.items) |name| try mergeOneFile(a, &merged, dir_path, name);
 
     const cfg = try buildConfigFromDoc(allocator, &merged);
     debug.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
     return cfg;
+}
+
+fn tryLoadOrWarn(
+    comptime loader: anytype,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    comptime err_msg: []const u8,
+    comptime silent: []const anyerror,
+) ?types.Config {
+    return loader(allocator, path) catch |err| {
+        for (silent) |e| if (err == e) return null;
+        debug.warn(err_msg, .{ path, err });
+        return null;
+    };
 }
 
 /// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
@@ -250,14 +272,13 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
 pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
-    var config_home_owned: bool = false;
+    // Always dupe and always free: the arena makes the extra dupe of the
+    // ~20-byte path negligible, and ownership never has to be tracked.
     const config_home = if (xdg_config_home) |ch|
-        std.mem.span(ch)
-    else blk: {
-        config_home_owned = true;
-        break :blk try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-    };
-    defer if (config_home_owned) allocator.free(config_home);
+        try allocator.dupe(u8, std.mem.span(ch))
+    else
+        try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
+    defer allocator.free(config_home);
     const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
     defer allocator.free(xdg_dir);
 
@@ -269,29 +290,16 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
 
     // Try directories first (contain multiple .toml files), then single files.
     const dir_attempts = [_][]const u8{ xdg_dir, local_dir };
-    for (dir_attempts) |dir| {
-        if (loadConfigFromDir(allocator, dir)) |cfg| return cfg else |err| switch (err) {
-            error.FileNotFound, error.NotDir => {}, // Expected: missing or directory
-            else => debug.warn("Config load error from {s}: {}", .{ dir, err }),
-        }
-    }
+    for (dir_attempts) |dir|
+        if (tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| return cfg;
 
     const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
     defer allocator.free(xdg_path);
     const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
     defer allocator.free(local);
     const file_attempts = [_][]const u8{ xdg_path, local };
-    for (file_attempts) |path| {
-        const cfg = loadConfig(allocator, path) catch |err| {
-            if (err != error.FileNotFound)
-                debug.warn(
-                    "hana: config file '{s}' found but failed to load: {}; falling back\n",
-                    .{ path, err },
-                );
-            continue;
-        };
-        return cfg;
-    }
+    for (file_attempts) |path|
+        if (tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| return cfg;
 
     debug.info("No config found, using fallback with auto-detection", .{});
     return try loadFallbackConfig(allocator);
@@ -324,12 +332,15 @@ pub fn validate(cfg: *const types.Config) !void {
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config {
-    var doc = try parseTomlFile(allocator, path) orelse {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try parseTomlFile(a, path) orelse {
         debug.info("Empty config file: {s}, using fallback", .{path});
         return try loadFallbackConfig(allocator);
     };
-    defer doc.deinit();
-    try processIncludes(allocator, &doc, &doc, std.fs.path.dirname(path) orelse ".");
+    try mergeIncludes(a, &doc, &doc, std.fs.path.dirname(path) orelse ".");
     const cfg = try buildConfigFromDoc(allocator, &doc);
     debug.info("Loaded: {s}", .{path});
     return cfg;
@@ -338,8 +349,10 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     const fallback = @import("fallback");
     const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
-    var doc = try parser.parse(allocator, fallback_toml);
-    defer doc.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try parser.parse(a, fallback_toml);
     var cfg = try buildConfigFromDoc(allocator, &doc);
     // If the terminal detection/dupe below errors, free the built config
     // rather than leaking it (the `try` above means buildConfigFromDoc's own
@@ -430,37 +443,61 @@ const action_aliases = [_]struct { key: []const u8, tag: std.meta.Tag(types.Acti
     .{ .key = "close", .tag = .close_window },
     .{ .key = "kill", .tag = .close_window },
     .{ .key = "reload", .tag = .reload_config },
-    .{ .key = "stack_top", .tag = .grow_stack_top },
-    .{ .key = "stack_bottom", .tag = .grow_stack_bottom },
     .{ .key = "fullscreen", .tag = .toggle_fullscreen },
     .{ .key = "minimize", .tag = .minimize_window },
-    .{ .key = "cycle_variants", .tag = .cycle_layout_variants },
-    .{ .key = "cycle_variants_reverse", .tag = .cycle_layout_variants_reverse },
     .{ .key = "prompt", .tag = .toggle_prompt },
-    .{ .key = "focus_next", .tag = .focus_next_window },
-    .{ .key = "focus_prev", .tag = .focus_prev_window },
-    .{ .key = "scroll_left", .tag = .scroll_view_left },
-    .{ .key = "scroll_right", .tag = .scroll_view_right },
 };
 
 const action_map: std.StaticStringMap(types.Action) = blk: {
     @setEvalBranchQuota(10000);
     const fields = @typeInfo(types.Action).@"union".fields;
-    var kvs: [fields.len + action_aliases.len]struct { []const u8, types.Action } = undefined;
+    const direction_entries = [_]struct { key: []const u8, action: types.Action }{
+        .{ .key = "toggle_layout", .action = .{ .cycle_layout = .forward } },
+        .{ .key = "toggle_layout_reverse", .action = .{ .cycle_layout = .reverse } },
+        .{ .key = "increase_master", .action = .{ .set_master_width = .forward } },
+        .{ .key = "decrease_master", .action = .{ .set_master_width = .reverse } },
+        .{ .key = "increase_master_count", .action = .{ .set_master_count = .forward } },
+        .{ .key = "decrease_master_count", .action = .{ .set_master_count = .reverse } },
+        .{ .key = "stack_top", .action = .{ .grow_stack = .forward } },
+        .{ .key = "stack_bottom", .action = .{ .grow_stack = .reverse } },
+        .{ .key = "swap_master", .action = .{ .swap_master = .normal } },
+        .{ .key = "swap_master_focus_swap", .action = .{ .swap_master = .focus_swap } },
+        .{ .key = "cycle_layout_variants", .action = .{ .cycle_variants = .forward } },
+        .{ .key = "cycle_layout_variants_reverse", .action = .{ .cycle_variants = .reverse } },
+        .{ .key = "cycle_variants", .action = .{ .cycle_variants = .forward } },
+        .{ .key = "focus_next_window", .action = .{ .cycle_focus = .forward } },
+        .{ .key = "focus_prev_window", .action = .{ .cycle_focus = .reverse } },
+        .{ .key = "scroll_view_left", .action = .{ .scroll_view = .reverse } },
+        .{ .key = "scroll_view_right", .action = .{ .scroll_view = .forward } },
+        .{ .key = "unminimize_lifo", .action = .{ .unminimize = .lifo } },
+        .{ .key = "unminimize_fifo", .action = .{ .unminimize = .fifo } },
+    };
+    const total = fields.len + action_aliases.len + direction_entries.len;
+    var kvs: [total]struct { []const u8, types.Action } = undefined;
     var n: usize = 0;
-    // Tag names first; aliases must not shadow them (checked below).
+    // Void tag names auto-generated from union fields.
     for (fields) |f| {
         if (f.type == void) {
             kvs[n] = .{ f.name, @field(types.Action, f.name) };
             n += 1;
         }
     }
+    // Hand-written void aliases.
     for (action_aliases) |a| {
         for (kvs[0..n]) |kv| {
             if (std.mem.eql(u8, kv[0], a.key))
                 @compileError("alias shadows an Action tag name: " ++ a.key);
         }
         kvs[n] = .{ a.key, @field(types.Action, @tagName(a.tag)) };
+        n += 1;
+    }
+    // Payload-bearing aliases (old tag names → merged variant with payload).
+    for (direction_entries) |de| {
+        for (kvs[0..n]) |kv| {
+            if (std.mem.eql(u8, kv[0], de.key))
+                @compileError("direction entry shadows existing action key: " ++ de.key);
+        }
+        kvs[n] = .{ de.key, de.action };
         n += 1;
     }
     break :blk .initComptime(kvs[0..n]);
@@ -512,7 +549,11 @@ fn expandRangeToken(
 ) !void {
     var ch = t[0];
     const end = t[2];
-    if (ch > end) debug.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end }) else while (ch <= end) : (ch += 1) try appendExpandedEntry(allocator, entries, prefix, suffix, &.{ch});
+    if (ch > end) {
+        debug.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end });
+        return;
+    }
+    while (ch <= end) : (ch += 1) try appendExpandedEntry(allocator, entries, prefix, suffix, &.{ch});
 }
 
 /// Expands `{...}` glob patterns in a keybind key (e.g. `Mod+{1-4,Q}` -> 5 entries,
@@ -549,8 +590,35 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
     return try entries.toOwnedSlice(allocator);
 }
 
-const workspace_action_bases = std.StaticStringMap(void).initComptime(.{
-    .{ "workspace", {} }, .{ "move_to_workspace", {} }, .{ "toggle_tag", {} },
+/// Workspace-scoped actions: one spec per base name, the single source of
+/// truth shared by resolveAndParseAction (which checks glob expansion against
+/// `workspace_action_bases`) and parseAction (which parses the direct
+/// `NAME_N` form into a payload-bearing action via `make`).
+const workspace_action_specs = [_]struct {
+    base: []const u8,
+    make: *const fn (u8) types.Action,
+}{
+    .{ .base = "workspace", .make = workspaceSwitchTo },
+    .{ .base = "move_to_workspace", .make = workspaceMoveTo },
+    .{ .base = "toggle_tag", .make = workspaceToggleTag },
+};
+
+fn workspaceSwitchTo(ws: u8) types.Action {
+    return .{ .switch_workspace = ws };
+}
+fn workspaceMoveTo(ws: u8) types.Action {
+    return .{ .move_to_workspace = ws };
+}
+fn workspaceToggleTag(ws: u8) types.Action {
+    return .{ .toggle_tag = ws };
+}
+
+/// Membership set of the workspace-action base names, derived from
+/// `workspace_action_specs` so the two stay in sync.
+const workspace_action_bases = std.StaticStringMap(void).initComptime(block: {
+    var kvs: [workspace_action_specs.len]struct { []const u8, void } = undefined;
+    for (workspace_action_specs, 0..) |spec, i| kvs[i] = .{ spec.base, {} };
+    break :block kvs;
 });
 
 fn resolveAndParseAction(
@@ -559,20 +627,19 @@ fn resolveAndParseAction(
     ws_idx: u16,
     kill_placeholder: ?[]const u8,
 ) !types.Action {
-    const ws_str: ?[]u8 = if (ws_idx > 0 and workspace_action_bases.has(cmd))
-        try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx })
-    else
-        null;
-    defer if (ws_str) |s| allocator.free(s);
-    const after_ws = ws_str orelse cmd;
-    if (kill_placeholder) |kp| {
-        if (std.mem.indexOf(u8, after_ws, "{kill}") != null) {
-            const final = try std.mem.replaceOwned(u8, allocator, after_ws, "{kill}", kp);
-            defer allocator.free(final);
-            return parseAction(allocator, final);
+    if (ws_idx > 0 and workspace_action_bases.has(cmd)) {
+        const ws_str = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx });
+        defer allocator.free(ws_str);
+        if (kill_placeholder) |kp| {
+            if (std.mem.indexOf(u8, ws_str, "{kill}") != null) {
+                const final = try std.mem.replaceOwned(u8, allocator, ws_str, "{kill}", kp);
+                defer allocator.free(final);
+                return parseAction(allocator, final);
+            }
         }
+        return parseAction(allocator, ws_str);
     }
-    return parseAction(allocator, after_ws);
+    return parseAction(allocator, cmd);
 }
 
 /// Resolves one `binds` value into a single Action, or null when the entry
@@ -596,8 +663,8 @@ fn actionFromValue(
             for (arr.items) |elem|
                 if (elem.asScalar([]const u8)) |cmd|
                     try acts.append(allocator, try resolveAndParseAction(allocator, cmd, ws_idx, kill));
-            if (acts.items.len <= 1) {
-                const only: ?types.Action = if (acts.items.len == 0) null else acts.items[0];
+            if (acts.items.len == 1) {
+                const only = acts.items[0];
                 acts.deinit(allocator);
                 return only;
             }
@@ -616,11 +683,9 @@ fn resolveModPlaceholder(
     key: []const u8,
     mod_placeholder: ?[]const u8,
 ) ![]const u8 {
-    if (mod_placeholder) |mod| {
-        if (std.ascii.startsWithIgnoreCase(key, "mod+")) {
+    if (mod_placeholder) |mod|
+        if (std.ascii.startsWithIgnoreCase(key, "mod+"))
             return try std.fmt.allocPrint(allocator, "{s}+{s}", .{ mod, key["mod+".len..] });
-        }
-    }
     return key;
 }
 
@@ -678,7 +743,8 @@ fn parseBindString(str: []const u8) !BindResult {
         const trimmed = std.mem.trim(u8, part, " \t");
         // Normalise to lowercase (modifiers are case-insensitive) via a bounded
         // helper; overlong tokens → null.
-        const lowered = types.lowerSlice(16, trimmed);
+        var lowered_buf: [16]u8 = undefined;
+        const lowered = types.lowerSlice(16, &lowered_buf, trimmed);
         const mod: ?u16 = if (lowered) |l| mod_map.get(l) else null;
         if (mod) |m| {
             modifiers |= m;
@@ -725,6 +791,7 @@ const action_verb_prefixes = [_][]const u8{
     "toggle_",     "increase_", "decrease_", "grow_",      "stack_", "swap_",
     "move_",       "move_to_",  "focus_",    "close_",     "kill_",  "minimize_",
     "unminimize_", "cycle_",    "scroll_",   "workspace_", "all_",   "dump_",
+    "pin_",
 };
 
 /// True when `cmd` is a bare identifier (letters, digits, underscores only,
@@ -744,9 +811,9 @@ fn looksLikeActionWord(cmd: []const u8) bool {
 
 fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     if (action_map.get(cmd)) |a| return a;
-    if (tryParseWorkspace(cmd, "workspace_")) |ws| return .{ .switch_workspace = ws };
-    if (tryParseWorkspace(cmd, "move_to_workspace_")) |ws| return .{ .move_to_workspace = ws };
-    if (tryParseWorkspace(cmd, "toggle_tag_")) |ws| return .{ .toggle_tag = ws };
+    inline for (workspace_action_specs) |spec| {
+        if (tryParseWorkspace(cmd, spec.base ++ "_")) |ws| return spec.make(ws);
+    }
     // The fallback is exec so any shell command can be bound, but a bare word
     // resembling a built-in action is almost always a typo, and running it as
     // an exec (which fails or does nothing) hides the mistake, so warn.
@@ -842,7 +909,10 @@ fn setTilingVariant(
     canon: []const u8,
     value: []const u8,
 ) !void {
-    if (cfg.tiling.variants.fetchRemove(canon)) |kv| types.freeStringPair(allocator, kv.key, kv.value);
+    if (cfg.tiling.variants.fetchRemove(canon)) |kv| {
+        allocator.free(kv.key);
+        allocator.free(kv.value);
+    }
     const key = try allocator.dupe(u8, canon);
     errdefer allocator.free(key);
     const val = try allocator.dupe(u8, value);
@@ -934,7 +1004,8 @@ const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
 
 /// Whether `name` is one of the known layout-name spellings (grammar test).
 fn isLayoutName(name: []const u8) bool {
-    const lowered = types.lowerSlice(32, name) orelse return false;
+    var buf: [32]u8 = undefined;
+    const lowered = types.lowerSlice(32, &buf, name) orelse return false;
     return layout_name_grammar.has(lowered);
 }
 
@@ -950,7 +1021,8 @@ fn parseLayoutVariant(
     layout_name: []const u8,
     variants_str: []const u8,
 ) !?[]const u8 {
-    const lowered = types.lowerSlice(32, layout_name) orelse {
+    var lowered_buf: [32]u8 = undefined;
+    const lowered = types.lowerSlice(32, &lowered_buf, layout_name) orelse {
         debug.warn("layouts array: layout name '{s}' too long to match against a " ++
             "variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
         return null;
@@ -999,7 +1071,8 @@ fn parseLayoutsArray(
             debug.warn("layouts array: expected a string at index {}, skipping", .{i});
             continue;
         };
-        const name_lower = types.lowerSlice(32, raw_name) orelse {
+        var name_lower_buf: [32]u8 = undefined;
+        const name_lower = types.lowerSlice(32, &name_lower_buf, raw_name) orelse {
             debug.warn("layouts array: layout name '{s}' at index {} is longer than the 32-byte limit, skipping", .{ raw_name, i });
             continue;
         };
@@ -1084,10 +1157,15 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
 
 fn padWorkspaceIcons(allocator: std.mem.Allocator, cfg: *types.Config) !void {
     while (cfg.bar.workspace_icons.items.len < cfg.workspaces.count) {
-        var num_buf: [3]u8 = undefined;
-        const s = std.fmt.bufPrint(&num_buf, "{}", .{cfg.bar.workspace_icons.items.len + 1}) catch break;
-        try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
+        try cfg.bar.workspace_icons.append(allocator, try dupeNum(allocator, cfg.bar.workspace_icons.items.len + 1));
     }
+}
+
+/// Formats integer `n` as decimal and dupes it to a string, the "int ->
+/// string icon" step shared by parseWorkspaceIcons and padWorkspaceIcons.
+fn dupeNum(allocator: std.mem.Allocator, n: anytype) ![]u8 {
+    var buf: [24]u8 = undefined;
+    return allocator.dupe(u8, try std.fmt.bufPrint(&buf, "{}", .{n}));
 }
 
 fn parseWorkspaceIcons(
@@ -1100,11 +1178,8 @@ fn parseWorkspaceIcons(
         for (arr) |item| {
             if (item.asScalar([]const u8)) |s|
                 try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
-            if (item.asScalar(i64)) |n| {
-                var num_buf: [20]u8 = undefined;
-                const s = std.fmt.bufPrint(&num_buf, "{}", .{n}) catch continue;
-                try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
-            }
+            if (item.asScalar(i64)) |n|
+                try cfg.bar.workspace_icons.append(allocator, try dupeNum(allocator, n));
         }
     } else if (section.getAs([]const u8, "icons")) |str| {
         var ch_buf: [1]u8 = undefined;
@@ -1118,8 +1193,7 @@ fn parseWorkspaceIcons(
 }
 
 fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    for (cfg.bar.layout.items) |*item| item.deinit(allocator);
-    cfg.bar.layout.clearRetainingCapacity();
+    types.freeBarLayouts(&cfg.bar.layout, allocator, true);
     const positions = [_]struct { name: []const u8, pos: types.BarSegmentAnchor }{
         .{ .name = "bar.layout.left", .pos = .left },
         .{ .name = "bar.layout.center", .pos = .center },
@@ -1214,27 +1288,72 @@ fn parseWorkspaceRuleSection(
 
 const Hash = std.hash.Wyhash;
 
-fn hashVal(h: *Hash, val: anytype) void {
-    h.update(std.mem.asBytes(&val));
-}
-
-fn hashSlice(h: *Hash, s: []const u8) void {
-    h.update(s);
-}
-
-fn hashOptSlice(h: *Hash, s: ?[]const u8) void {
-    if (s) |str| {
-        hashVal(h, @as(u8, 1));
-        h.update(str);
-    } else {
-        hashVal(h, @as(u8, 0));
+// Recursive logical-value hasher for the reload-change detectors (C1):
+// dispatches on @typeInfo so the three per-subsystem functions reduce to a
+// few hashes each. Hashes by CONTENT: std containers (ArrayList,
+// StringHashMap) are recognised by shape and hashed through their logical
+// items/entries -- never their internal capacity/allocator bytes, which
+// would make reload comparison depend on append history. Raw byte slices
+// hash verbatim under a length prefix; optionals carry a discriminator byte;
+// hashing a raw non-slice pointer is a compile error.
+fn hashValue(h: *Hash, v: anytype) void {
+    const T = @TypeOf(v);
+    switch (@typeInfo(T)) {
+        .int, .float, .bool, .@"enum" => h.update(std.mem.asBytes(&v)),
+        .optional => {
+            if (v) |inner| {
+                h.update(&[_]u8{1});
+                hashValue(h, inner);
+            } else {
+                h.update(&[_]u8{0});
+            }
+        },
+        .pointer => |p| switch (p.size) {
+            .slice => {
+                const len: u32 = @intCast(v.len);
+                h.update(std.mem.asBytes(&len));
+                if (p.child == u8) {
+                    h.update(v);
+                } else {
+                    for (v) |item| hashValue(h, item);
+                }
+            },
+            else => @compileError("hashValue: refused to hash raw pointer " ++ @typeName(T)),
+        },
+        .@"struct" => {
+            const list = comptime listLike(T);
+            const map = comptime mapLike(T);
+            if (list) {
+                hashValue(h, v.items);
+                return;
+            }
+            if (map) {
+                const count: u32 = @intCast(v.count());
+                h.update(std.mem.asBytes(&count));
+                var it = v.iterator();
+                while (it.next()) |entry| {
+                    hashValue(h, entry.key_ptr.*);
+                    hashValue(h, entry.value_ptr.*);
+                }
+                return;
+            }
+            inline for (std.meta.fields(T)) |f| hashValue(h, @field(v, f.name));
+        },
+        else => @compileError("hashValue: can't hash " ++ @typeName(T)),
     }
 }
 
-fn hashStringList(h: *Hash, list: anytype) void {
-    const items = list.items;
-    hashVal(h, @as(u32, @intCast(items.len)));
-    for (items) |item| hashSlice(h, item);
+// std.ArrayList-family: a struct carrying a slice `items` plus `capacity`
+// bookkeeping. The plain value structs in these configs never do.
+fn listLike(comptime T: type) bool {
+    return @hasField(T, "items") and @hasField(T, "capacity") and
+        @typeInfo(@FieldType(T, "items")) == .pointer;
+}
+
+// std.StringHashMap-family: carries `size`/`available`/`metadata`
+// bookkeeping alongside the keys/values slots.
+fn mapLike(comptime T: type) bool {
+    return @hasField(T, "size") and @hasField(T, "available") and @hasField(T, "metadata");
 }
 
 pub const ConfigChanges = struct {
@@ -1256,101 +1375,34 @@ pub fn detectChanges(old: *const types.Config, new: *const types.Config) ConfigC
 
 fn hashBarSubsystem(bar: *const types.BarConfig) u64 {
     var h = Hash.init(0x626172);
-    hashVal(&h, bar.enabled);
-    hashVal(&h, bar.vim_mode);
-    hashVal(&h, bar.bar_position);
-    hashVal(&h, bar.height);
-    hashVal(&h, bar.font_size);
-    hashVal(&h, bar.spacing);
-    hashVal(&h, bar.bg);
-    hashVal(&h, bar.fg);
-    hashVal(&h, bar.selected_bg);
-    hashVal(&h, bar.selected_fg);
-    hashVal(&h, bar.accent_color);
-    hashVal(&h, bar.title_accent_color);
-    hashVal(&h, bar.title_unfocused_accent);
-    hashVal(&h, bar.title_minimized_accent);
-    hashVal(&h, bar.indicator_size);
-    hashVal(&h, bar.workspace_tag_width);
-    hashVal(&h, bar.indicator_location);
-    hashVal(&h, bar.indicator_padding);
-    hashOptSlice(&h, bar.indicator_focused);
-    hashOptSlice(&h, bar.indicator_unfocused);
-    hashVal(&h, bar.indicator_color);
-    hashOptSlice(&h, bar.clock_format);
-    hashVal(&h, bar.carousel_enabled);
-    hashVal(&h, bar.carousel_speed_px_s);
-    hashVal(&h, bar.drun_bg);
-    hashVal(&h, bar.drun_fg);
-    hashVal(&h, bar.drun_prompt_color);
-    hashOptSlice(&h, bar.drun_prompt);
-    hashVal(&h, bar.transparency);
-    hashStringList(&h, bar.fonts);
-    hashStringList(&h, bar.workspace_icons);
-    hashVal(&h, @as(u32, @intCast(bar.layout.items.len)));
-    for (bar.layout.items) |*bl| {
-        hashVal(&h, bl.position);
-        hashStringList(&h, bl.segments);
-    }
+    hashValue(&h, bar.*);
     return h.final();
 }
 
 fn hashTilingSubsystem(cfg: *const types.Config) u64 {
     var h = Hash.init(0x74696c);
-    const t = &cfg.tiling;
-    hashVal(&h, t.enabled);
-    hashSlice(&h, t.layout);
-    hashStringList(&h, t.layouts);
-    hashVal(&h, t.master_side);
-    hashVal(&h, t.master_width);
-    hashVal(&h, t.master_count);
-    hashVal(&h, t.gap_width);
-    hashVal(&h, t.border_width);
-    hashVal(&h, t.border_focused);
-    hashVal(&h, t.border_unfocused);
-    hashVal(&h, t.min_window_dim);
-    hashVal(&h, t.global_layout);
-    hashVal(&h, @as(u32, @intCast(t.variants.count())));
-    var vit = t.variants.iterator();
-    while (vit.next()) |entry| {
-        hashSlice(&h, entry.key_ptr.*);
-        hashSlice(&h, entry.value_ptr.*);
-    }
-    hashVal(&h, @as(u32, @intCast(t.workspace_layout_overrides.items.len)));
-    for (t.workspace_layout_overrides.items) |o| {
-        hashVal(&h, o.workspace_idx);
-        hashVal(&h, o.layout_idx);
-        hashOptSlice(&h, o.variant);
-    }
-    hashVal(&h, @as(u32, @intCast(t.workspace_master_count_overrides.items.len)));
-    for (t.workspace_master_count_overrides.items) |o| {
-        hashVal(&h, o.workspace_idx);
-        hashVal(&h, o.count);
-    }
-    hashVal(&h, cfg.workspaces.enabled);
-    hashVal(&h, cfg.workspaces.count);
-    hashVal(&h, @as(u32, @intCast(cfg.workspaces.rules.items.len)));
-    for (cfg.workspaces.rules.items) |rule| {
-        hashSlice(&h, rule.class_name);
-        hashVal(&h, rule.workspace);
-    }
-    hashVal(&h, cfg.fullscreen_enabled);
-    hashVal(&h, cfg.drag_enabled);
-    hashVal(&h, cfg.snap_distance);
+    hashValue(&h, cfg.tiling);
+    hashValue(&h, cfg.workspaces);
+    hashValue(&h, cfg.fullscreen_enabled);
+    hashValue(&h, cfg.drag_enabled);
+    hashValue(&h, cfg.snap_distance);
     return h.final();
 }
 
 fn hashKeysSubsystem(cfg: *const types.Config) u64 {
     var h = Hash.init(0x6b6579);
-    hashVal(&h, @as(u32, @intCast(cfg.keybindings.items.len)));
+    // Action is deliberately excluded: two keybinds that differ only in their
+    // action (e.g. a changed command string) still share a keysym/modifiers
+    // pair, so the explicit loop keeps the pair layout part of the hash.
+    hashValue(&h, cfg.keybindings.items.len);
     for (cfg.keybindings.items) |kb| {
-        hashVal(&h, kb.modifiers);
-        hashVal(&h, kb.keysym);
+        hashValue(&h, kb.modifiers);
+        hashValue(&h, kb.keysym);
     }
-    hashVal(&h, @as(u32, @intCast(cfg.mouse_bindings.items.len)));
+    hashValue(&h, cfg.mouse_bindings.items.len);
     for (cfg.mouse_bindings.items) |mb| {
-        hashVal(&h, mb.modifiers);
-        hashVal(&h, mb.button);
+        hashValue(&h, mb.modifiers);
+        hashValue(&h, mb.button);
     }
     return h.final();
 }

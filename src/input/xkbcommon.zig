@@ -21,16 +21,22 @@ const xkb_keymap = xkb.struct_xkb_keymap;
 
 const max_attempts: u8 = 3;
 
-// Detectable auto-repeat (XKBproto.h, XkbSetDetectableAutoRepeat = 34).
-// Enabling it makes the server emit a held key's repeat as repeated KeyPress
-// events WITHOUT the interleaved, deactivating KeyRelease that X11's default
-// autorepeat produces on every cycle. Without it, hana's held-key ledger
-// (input.zig) clears a binding key on each autorepeat KeyRelease, so the very
-// next autorepeat KeyPress is treated as a fresh press and re-dispatches the
-// action — holding e.g. Super+1 keeps re-firing switch_to_workspace_1, and a
-// simultaneously-held Super+2 flaps between the two workspaces (whichever
-// repeat fires last wins). Sending the wire request (rather than a local
-// heuristic) keeps hana's event handling simple.
+/// Detectable auto-repeat (XKBproto.h, XkbSetDetectableAutoRepeat = 34).
+/// Enabling it makes the server emit a held key's repeat as repeated KeyPress
+/// events WITHOUT the interleaved, deactivating KeyRelease that X11's default
+/// autorepeat produces on every cycle. Without it, hana's held-key ledger
+/// (input.zig) clears a binding key on each autorepeat KeyRelease, so the very
+/// next autorepeat KeyPress is treated as a fresh press and re-dispatches the
+/// action — holding e.g. Super+1 keeps re-firing switch_to_workspace_1, and a
+/// simultaneously-held Super+2 flaps between the two workspaces (whichever
+/// repeat fires last wins). Sending the wire request (rather than a local
+/// heuristic) keeps hana's event handling simple.
+///
+/// The request is hand-marshalled rather than sent through a generated
+/// xcb_xkb_* binding: this environment's xcb/xkb.h declares no
+/// xcb_xkb_set_detectable_auto_repeat and the linked libxcb-xkb does not
+/// export it. The request bytes are the protocol struct, dispatched through
+/// xcb_send_request with the opcode resolved from xcb_xkb_id.
 const xkb_set_detectable_auto_repeat_req: u8 = 34;
 
 // XkbSetDetectableAutoRepeat request layout (8 bytes wire, length field = 2).
@@ -106,9 +112,9 @@ fn enableDetectableAutoRepeat(conn: *anyopaque) void {
 /// `get_one_sym`) would apply current locks: a CapsLock held at startup
 /// would pin the table to shifted symbols and break lowercase bindings.
 fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
-    var syms: [*c]const u32 = null;
+    var syms: [*c]const u32 = undefined;
     const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
-    if (n > 0 and syms != null) return syms[0];
+    if (n > 0) return syms[0];
     return xkb.XKB_KEY_NoSymbol;
 }
 
@@ -252,38 +258,51 @@ fn retryPoll(comptime T: type, op: anytype) ?T {
     return null;
 }
 
-/// Calls xkb_x11_setup_xkb_extension, retrying up to max_attempts times.
-/// The extension may not be ready immediately at WM startup.
-fn retrySetup(xcb_conn: *anyopaque) !void {
-    _ = retryPoll(c_int, struct {
+/// Runs a conn-bound `op` through retryPoll up to max_attempts times and
+/// converts exhaustion into `err`. `op` is a comptime `fn (*anyopaque) ?T`;
+/// the two retried XKB calls (retrySetup/retryDeviceId) differ only in it.
+fn retryXkb(comptime T: type, comptime err: anyerror, xcb_conn: *anyopaque, comptime op: anytype) !T {
+    if (retryPoll(T, struct {
         conn: *anyopaque,
-        fn call(self: @This()) ?c_int {
-            const ok = xkb.xkb_x11_setup_xkb_extension(
-                @ptrCast(self.conn),
-                xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
-                xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
-                xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-                null,
-                null,
-                null,
-                null,
-            );
-            return if (ok != 0) ok else null;
+        fn call(self: @This()) ?T {
+            return op(self.conn);
         }
-    }{ .conn = xcb_conn }) orelse return error.XkbSetupFailed;
+    }{ .conn = xcb_conn })) |value| return value;
+    return err;
 }
 
-/// Calls xkb_x11_get_core_keyboard_device_id, retrying up to max_attempts
-/// times; the core keyboard device may not be enumerable yet in the same
+/// One attempt at xkb_x11_setup_xkb_extension (nonzero return = success).
+fn setupXkb(conn: *anyopaque) ?c_int {
+    const ok = xkb.xkb_x11_setup_xkb_extension(
+        @ptrCast(conn),
+        xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
+        xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
+        xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
+        null,
+        null,
+        null,
+        null,
+    );
+    return if (ok != 0) ok else null;
+}
+
+/// Retries xkb_x11_setup_xkb_extension up to max_attempts times; the
+/// extension may not be ready immediately at WM startup.
+fn retrySetup(xcb_conn: *anyopaque) !void {
+    _ = try retryXkb(c_int, error.XkbSetupFailed, xcb_conn, setupXkb);
+}
+
+/// One attempt at xkb_x11_get_core_keyboard_device_id (-1 = device not ready).
+fn coreKeyboardDeviceId(conn: *anyopaque) ?i32 {
+    const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(conn));
+    return if (device_id != -1) device_id else null;
+}
+
+/// Retries xkb_x11_get_core_keyboard_device_id up to max_attempts times;
+/// the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
-    return retryPoll(i32, struct {
-        conn: *anyopaque,
-        fn call(self: @This()) ?i32 {
-            const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(self.conn));
-            return if (device_id != -1) device_id else null;
-        }
-    }{ .conn = xcb_conn }) orelse error.XkbNoKeyboard;
+    return try retryXkb(i32, error.XkbNoKeyboard, xcb_conn, coreKeyboardDeviceId);
 }
 
 /// Minimum reachable keysyms in 8..128 for a keymap to count as populated.

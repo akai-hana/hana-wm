@@ -41,7 +41,6 @@ const State = struct {
     // iteration to keep hot paths non-blocking.
     //
     // confirm_cookie/confirm_win: non-compliant-client focus confirmation.
-    // pointer_cookie: pending pointer-position query.
     // tiling_op_cookie: "has the server caught up" round trip from
     //   beginTilingOpSettle() (see its doc comment).
     // pre_protocols_cookie: WM_PROTOCOLS query fired at the START of focus
@@ -50,7 +49,6 @@ const State = struct {
     //   in the receive buffer. null when not in use.
     confirm_cookie: ?xcb.xcb_get_input_focus_cookie_t = null,
     confirm_win: ?u32 = null,
-    pointer_cookie: ?xcb.xcb_query_pointer_cookie_t = null,
     tiling_op_cookie: ?xcb.xcb_get_input_focus_cookie_t = null,
     pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t = null,
 };
@@ -72,7 +70,6 @@ pub fn deinit() void {
     // cycle; at process exit the connection close handles this implicitly.
     window.discardProtocolCookie(core.getState().conn, state.?.pre_protocols_cookie);
     window.discardProtocolCookie(core.getState().conn, state.?.confirm_cookie);
-    window.discardProtocolCookie(core.getState().conn, state.?.pointer_cookie);
     window.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
     state = null;
 }
@@ -191,11 +188,6 @@ pub const Reason = enum {
     /// focus-confirm machinery.
     mouse_enter,
 
-    /// Deferred pointer-position query resolved after a tiling retile or
-    /// window-close (drainPointerSync / resolveDestroyFocusTarget). Heavier:
-    /// may raise a floating window, arms confirm/retry.
-    pointer_sync,
-
     /// Keyboard-driven focus cycle or explicit WM command.
     user_command,
 
@@ -233,10 +225,6 @@ const CommitFlags = struct {
     /// pre-fired-cookie pipeline; defaulted unlike its siblings because it
     /// refines `send_wm_take_focus` rather than gating a side effect.
     take_focus_known: ?bool = null,
-
-    /// Arm the async focus-confirm cookie for a deferred raise-and-retry.
-    /// Used by pointer_sync for windows that may silently drop focus.
-    arm_confirm: bool,
 
     /// Bump the core focus fact so focus-consuming surfaces (e.g. the bar's
     /// title segment) redraw. False only inside a server grab; the caller
@@ -297,6 +285,14 @@ fn resetStaleProtocols() void {
     state.?.pre_protocols_cookie = null;
 }
 
+/// Clears both pending-async focus states ahead of a fresh transition: the
+/// stale confirm cookie (client-side discard) and the pre-fired WM_PROTOCOLS
+/// pipeline cookie. Shared by prepareFocus and grabFocusReassert.
+fn resetPendingFocusState() void {
+    cancelPendingConfirm();
+    resetStaleProtocols();
+}
+
 /// Phase 1: resolve input model via round trips (outside grab).
 /// Returns a FocusTransition that can be committed inside the grab.
 /// Returns .none when focus should not change (invalid window, same window,
@@ -321,7 +317,6 @@ fn noneWithDiscard(
 /// grabFocusReassert; `opts` carries the per-call-site differences.
 fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
     raise: bool,
-    arm_confirm: bool,
     new_suppress: core.FocusSuppressReason,
 }) FocusTransition {
     return .{ .set = .{
@@ -332,7 +327,6 @@ fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
             .raise = opts.raise,
             .send_wm_take_focus = true,
             .take_focus_known = resolved.take_focus,
-            .arm_confirm = opts.arm_confirm,
             .schedule_bar = true,
             .new_suppress = opts.new_suppress,
         },
@@ -348,24 +342,22 @@ pub fn prepareFocus(
     if (window.isInvalidWindow(win)) return noneWithDiscard(conn, pre_protocols_cookie);
     if (state.?.last_applied == win) return noneWithDiscard(conn, pre_protocols_cookie);
 
-    // Liveness guard: same as setFocus (mouse_click/user_command/pointer_sync
-    // must not focus a destroyed window).
+    // Liveness guard: same as setFocus (mouse_click must not focus a
+    // destroyed window).
     // .user_command is excluded: collectVisibleWindows already confirmed the
     // window is on the current workspace and visible, so the blocking
     // xcb_get_window_attributes round-trip is redundant.
-    if ((reason == .mouse_click or reason == .pointer_sync) and !isWindowMapped(conn, win))
+    if (reason == .mouse_click and !isWindowMapped(conn, win))
         return noneWithDiscard(conn, pre_protocols_cookie);
 
     const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
     if (resolved.model == .no_input) return .none;
 
     // Cancel any stale confirm cookie (client-side, no round trip).
-    cancelPendingConfirm();
-    resetStaleProtocols();
+    resetPendingFocusState();
 
     return setIntent(win, state.?.last_applied, resolved, .{
         .raise = shouldRaise(reason, win),
-        .arm_confirm = reason == .pointer_sync,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
     });
 }
@@ -407,11 +399,6 @@ pub fn applyPendingFocus(t: FocusTransition) void {
 
             if (intent.flags.send_wm_take_focus) {
                 if (intent.flags.take_focus_known) |advertises| window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
-            }
-
-            if (intent.flags.arm_confirm) {
-                state.?.confirm_cookie = xcb.xcb_get_input_focus(conn);
-                state.?.confirm_win = intent.win;
             }
 
             if (intent.flags.schedule_bar) core.focus.bump();
@@ -541,6 +528,28 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
     grabFocusReassert(prev, is_offscreen_steal);
 }
 
+/// Shared post-model-clear tail of clearFocus and grabFocusClear: prepare the
+/// clear transition and either replay it locally (clearFocus) or commit it
+/// under one grab with a reconcile (grabFocusClear, `reconcile_on_none`).
+fn applyClear(reconcile_on_none: bool) void {
+    const pl = @import("pipeline");
+    const ft = prepareClearFocus();
+    if (ft == .none) {
+        if (reconcile_on_none) {
+            // last_applied already null: no X focus to clear, but still
+            // reconcile so borders/stacking reflect the no-focus state.
+            pl.reconcileUnderGrabNow(.{});
+        } else {
+            clearTail();
+        }
+        return;
+    }
+    if (reconcile_on_none)
+        pl.reconcileUnderGrabNowWithFocus(.{}, ft)
+    else
+        applyPendingFocus(ft);
+}
+
 pub fn clearFocus() void {
     // Model is truth; clear it here so every clearFocus caller gets
     // one-store semantics without a separate model call.
@@ -548,12 +557,7 @@ pub fn clearFocus() void {
         const pl = @import("pipeline");
         if (pl.initialized) @import("model").clearFocus(pl.mut(&gate));
     }
-    const ft = prepareClearFocus();
-    if (ft == .none) {
-        clearTail();
-        return;
-    }
-    applyPendingFocus(ft);
+    applyClear(false);
 }
 
 /// Write `_NET_ACTIVE_WINDOW` to the root window so EWMH clients stay in sync.
@@ -575,7 +579,7 @@ inline fn shouldRaise(reason: Reason, win: u32) bool {
     return switch (reason) {
         // Tiled windows get their stacking from sync's raise-the-winner pass
         // during the post-transition reconcile; everything else raises here.
-        .mouse_click, .user_command, .pointer_sync => !tracking.isTiledMode(win),
+        .mouse_click, .user_command => !tracking.isTiledMode(win),
         .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
     };
 }
@@ -615,14 +619,7 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 pub fn grabFocusClear() void {
     const pl = @import("pipeline");
     @import("model").clearFocus(pl.mut(&gate));
-    const ft = prepareClearFocus();
-    if (ft == .none) {
-        // last_applied already null: no X focus to clear, but still
-        // reconcile so borders/stacking reflect the no-focus state.
-        pl.reconcileUnderGrabNow(.{});
-        return;
-    }
-    pl.reconcileUnderGrabNowWithFocus(.{}, ft);
+    applyClear(true);
 }
 
 /// Re-assert focus on `prev` after a FocusIn event indicates the server's
@@ -643,12 +640,10 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
         return;
     }
 
-    cancelPendingConfirm();
-    resetStaleProtocols();
+    resetPendingFocusState();
 
     const ft = setIntent(prev, state.?.last_applied, resolved, .{
         .raise = false,
-        .arm_confirm = false,
         .new_suppress = .none,
     });
 
@@ -664,39 +659,11 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
     @import("sync").reconcile(pl.model(), c, .{});
 }
 
-/// Cancel a pending pointer-sync cookie without consuming the reply. Call on
-/// workspace switches so a stale pre-switch pointer position cannot redirect
-/// focus back to an off-workspace window via drainPointerSync.
-pub fn cancelPointerSync() void {
-    window.discardProtocolCookie(core.getState().conn, state.?.pointer_cookie);
-    state.?.pointer_cookie = null;
-}
-
-/// Drain the deferred pointer-position reply and route focus to whichever
-/// managed window is currently under the pointer. Called from the event loop;
-/// safe to call when no query is pending.
-pub fn drainPointerSync() void {
-    const cs = core.getState();
-    const res = drainCookie(xcb.xcb_query_pointer_cookie_t, &state.?.pointer_cookie);
-    if (res.pending or res.errored) return;
-
-    const p = typedReply(xcb.xcb_query_pointer_reply_t, res) orelse return;
-    const child = p.*.child;
-    if (child == 0 or child == cs.root) return;
-    // Same ownership predicate as a workspace switch's pointer pick: the
-    // window must be visible on the CURRENT workspace (managed + tagged +
-    // not minimized). A stale reply referencing an off-workspace or
-    // unmanaged window is discarded rather than redirecting focus.
-    const pl = @import("pipeline");
-    if (!@import("model").visibleOn(pl.model(), child, pl.model().current)) return;
-    grabFocus(child, .pointer_sync);
-}
-
 /// Fire an async "has the server caught up" round trip that defers lifting
 /// EnterNotify suppression until crossing events from the tiling reflow have
 /// been delivered and filtered. Used by tiling ops that must NOT re-sync
-/// focus to wherever the pointer ends up; unlike beginPointerSync it never
-/// calls setFocus itself. The reflow's events precede this reply in XCB order.
+/// focus to wherever the pointer ends up; it never calls setFocus itself. The
+/// reflow's events precede this reply in XCB order.
 pub fn beginTilingOpSettle() void {
     window.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
     const cs = core.getState();

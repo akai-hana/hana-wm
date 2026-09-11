@@ -71,7 +71,7 @@ pub fn tickDeadlineMs() i32 {
 pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
-    const fmt = config.clock_format orelse types.default_clock_format;
+    const fmt = drawing.clockFormat(config);
     const str = try formatTime(&buf, sec, fmt);
     // Record the attempt before rendering: a persistent render failure
     // (e.g. fonts unavailable) must degrade to one retry per boundary --
@@ -80,14 +80,7 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
     // one extra second, exactly as the cadence design intends.
     rendered_sec = sec;
     rendered_fmt = fmt;
-    return dc.drawSegment(
-        start_x,
-        height,
-        str,
-        config.scaledSegmentPadding(height),
-        config.bg,
-        config.fg,
-    );
+    return drawing.drawPaddedSegment(dc, config, height, start_x, str);
 }
 
 fn currentEpochSeconds() i64 {

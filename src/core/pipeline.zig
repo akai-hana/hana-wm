@@ -38,6 +38,7 @@ pub var initialized: bool = false;
 var instance: model_mod.Model = undefined;
 pub fn init(_: std.mem.Allocator) void {
     instance = .{}; // bounded lists: no allocator inside the model
+    g_sink = .{ .conn = core.getState().conn };
     initialized = true;
     sync.init();
 }
@@ -95,13 +96,11 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
     });
 }
 
-var g_sink: ?xcb_sink.XcbSink = null;
+var g_sink: xcb_sink.XcbSink = undefined;
 
-/// Lazily-build the shared XCB sink. Cache hit after first build: pure pointer
-/// deref + vtable copy, no syscalls, no config/screen reads.
+/// The shared XCB sink: inited once in init(), then free across every use.
 inline fn sink() sync.Sink {
-    if (g_sink == null) g_sink = .{ .conn = core.getState().conn };
-    return (&g_sink.?).sink();
+    return (&g_sink).sink();
 }
 
 var g_ctx: sync.Ctx = undefined;
@@ -152,24 +151,8 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     return if (m.focused == win) cfg.border_focused else cfg.border_unfocused;
 }
 
-var drag_tick_sum_ns: u64 = 0;
-var drag_tick_count: u64 = 0;
-
-/// Per-tick latency instrumentation for the drag reconcile (targeted path).
-/// Measured from just before reconcileDragTick to just after it returns
-/// (all work is in-process: one queued XCB configure, no round trip).
 pub inline fn dragTick(win: model_mod.WindowId) void {
-    const s = sink();
-    const t0 = utils.monotonicNs();
-    sync.reconcileDragTick(&instance, s, win);
-    drag_tick_sum_ns += utils.monotonicNs() - t0;
-    drag_tick_count += 1;
-}
-
-/// Running average of the per-tick drag reconcile latency, in nanoseconds.
-pub fn dragTickLatency() ?struct { avg_ns: u64, count: u64 } {
-    if (drag_tick_count == 0) return null;
-    return .{ .avg_ns = drag_tick_sum_ns / drag_tick_count, .count = drag_tick_count };
+    sync.reconcileDragTick(&instance, sink(), win);
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke
@@ -278,9 +261,9 @@ pub inline fn reconcileUnderGrabNowFullscreen(
         if (build_options.has_bar) surfaces.hideBarForFullscreen();
     } else {
         // Exit: deferred bar show (unchanged path).
-        for (window_mods) |m| {
-            if (m.armPendingBarShow) |show| {
-                if (instance.focused) |w| show(w);
+        if (instance.focused) |w| {
+            for (window_mods) |m| {
+                if (m.armPendingBarShow) |show| show(w);
             }
         }
     }

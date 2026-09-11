@@ -31,7 +31,7 @@ const constants = @import("constants");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
 
 /// Bounded placement buffer width, mirroring the engine's own cap.
-pub const max_order = 64;
+pub const max_order = constants.Limits.max_tiled_windows;
 
 /// Connects the per-process fixture, self-skipping when no X display is
 /// reachable. `name` names the test in the SKIP message.
@@ -91,23 +91,26 @@ pub const Fx = struct {
             return fx;
         }
         const conn = xcb.xcb_connect(null, null) orelse return null;
+        var connected = false;
+        // Any early return below (server error, boot failure) tears the
+        // connection down; the FIRST successful boot keeps it for the process
+        // lifetime (the request sink caches it).
+        errdefer {
+            if (!connected) _ = xcb.xcb_disconnect(conn);
+        }
         if (xcb.xcb_connection_has_error(conn) != 0) {
-            _ = xcb.xcb_disconnect(conn);
             return null;
         }
         const iter = xcb.xcb_setup_roots_iterator(xcb.xcb_get_setup(conn));
         const scr = iter.data orelse {
-            _ = xcb.xcb_disconnect(conn);
             return null;
         };
 
         wire.initAtomCache(conn) catch {
-            _ = xcb.xcb_disconnect(conn);
             return null;
         };
 
         const fx = std.heap.page_allocator.create(Fx) catch {
-            _ = xcb.xcb_disconnect(conn);
             return null;
         };
         fx.* = .{ .conn = conn, .scr = scr, .root = scr.*.root, .alloc = alloc, .config = types.Config{} };
@@ -115,7 +118,6 @@ pub const Fx = struct {
         core.init(conn, scr, scr.*.root, alloc, &fx.config);
         window.init(alloc) catch {
             std.heap.page_allocator.destroy(fx);
-            _ = xcb.xcb_disconnect(conn);
             return null;
         };
         pipeline.init(alloc);
@@ -132,6 +134,7 @@ pub const Fx = struct {
             }
         }
         g_fx = fx;
+        connected = true;
         return fx;
     }
 

@@ -12,6 +12,14 @@ const testing = std.testing;
 const config = @import("config");
 const scratch = @import("scratch");
 
+fn writeAndRead(alloc: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]u8 {
+    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", name);
+    defer alloc.free(path);
+    try scratch.writeScratchFile(path, bytes);
+    defer scratch.cleanupScratch(path);
+    return config.readFileAlloc(alloc, path);
+}
+
 test "readFileAlloc round-trips a >64KiB file exactly" {
     const alloc = testing.allocator;
 
@@ -20,12 +28,7 @@ test "readFileAlloc round-trips a >64KiB file exactly" {
     defer alloc.free(big);
     for (big, 0..) |*b, i| b.* = @truncate(i * 7 + (i % 251));
 
-    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "big");
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, big);
-    defer scratch.cleanupScratch(path);
-
-    const got = try config.readFileAlloc(alloc, path);
+    const got = try writeAndRead(alloc, "big", big);
     defer alloc.free(got);
     try testing.expectEqualSlices(u8, big, got);
 }
@@ -37,12 +40,7 @@ test "readFileAlloc accepts exactly max_file_bytes" {
     defer alloc.free(exact);
     @memset(exact, 'x');
 
-    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "exact");
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, exact);
-    defer scratch.cleanupScratch(path);
-
-    const got = try config.readFileAlloc(alloc, path);
+    const got = try writeAndRead(alloc, "exact", exact);
     defer alloc.free(got);
     try testing.expectEqual(exact.len, got.len);
 }
@@ -54,24 +52,13 @@ test "readFileAlloc rejects max_file_bytes + 1" {
     defer alloc.free(over);
     @memset(over, 'y');
 
-    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "over");
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, over);
-    defer scratch.cleanupScratch(path);
-
-    const got = config.readFileAlloc(alloc, path);
-    try testing.expectError(error.FileTooLarge, got);
+    try testing.expectError(error.FileTooLarge, writeAndRead(alloc, "over", over));
 }
 
 test "readFileAlloc returns empty slice for empty file" {
     const alloc = testing.allocator;
 
-    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", "empty");
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, "");
-    defer scratch.cleanupScratch(path);
-
-    const got = try config.readFileAlloc(alloc, path);
+    const got = try writeAndRead(alloc, "empty", "");
     defer alloc.free(got);
     try testing.expectEqual(@as(usize, 0), got.len);
 }

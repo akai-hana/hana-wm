@@ -148,7 +148,7 @@ pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
 /// Returns a u64 bitmask with only the bit for `ws_idx` set.
 pub inline fn workspaceBit(ws_idx: anytype) u64 {
     std.debug.assert(ws_idx < 64);
-    return @as(u64, 1) << @intCast(ws_idx);
+    return model_mod.bit(@intCast(ws_idx));
 }
 
 // Comptime workspace label table

@@ -31,14 +31,7 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     const indicator = getIndicator();
     var end_x = start_x;
     if (indicator.len != 0) {
-        end_x = try dc.drawSegment(
-            start_x,
-            height,
-            indicator,
-            config.scaledSegmentPadding(height),
-            config.bg,
-            config.fg,
-        );
+        end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, indicator);
     }
     W.store(end_x - start_x);
     return end_x;

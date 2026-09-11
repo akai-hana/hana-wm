@@ -106,14 +106,11 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     var cmd_buf: [stack_cmd_capacity]u8 = undefined;
     var heap_cmd_z: ?[:0]const u8 = null;
     defer if (heap_cmd_z) |h| core.getState().alloc.free(h);
-    const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len) blk: {
-        @memcpy(cmd_buf[0..cmd.len], cmd);
-        cmd_buf[cmd.len] = 0;
-        break :blk @ptrCast(&cmd_buf[0]);
-    } else blk: {
-        const owned = try core.getState().alloc.dupeZ(u8, cmd);
-        heap_cmd_z = owned;
-        break :blk owned.ptr;
+    const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len)
+        std.fmt.bufPrintZ(&cmd_buf, "{s}", .{cmd}) catch unreachable
+    else blk: {
+        heap_cmd_z = try core.getState().alloc.dupeZ(u8, cmd);
+        break :blk heap_cmd_z.?.ptr;
     };
 
     if (g_pending.len >= max_pending_spawns)
@@ -207,20 +204,20 @@ fn finishSpawn(entry: *PendingSpawn) void {
     var grandchild: c_int = -1;
     var failed = data.len == 0;
 
-    var idx: usize = 0;
-    while (idx < data.len) {
-        switch (data[idx]) {
+    var rest = data;
+    while (rest.len > 0) {
+        switch (rest[0]) {
             tag_pid => {
-                if (idx + pid_msg_len > data.len) {
+                if (rest.len < pid_msg_len) {
                     failed = true;
                     break;
                 }
-                grandchild = std.mem.bytesToValue(c_int, data[idx + 1 ..][0..@sizeOf(c_int)]);
-                idx += pid_msg_len;
+                grandchild = std.mem.bytesToValue(c_int, rest[1..][0..@sizeOf(c_int)]);
+                rest = rest[pid_msg_len..];
             },
             tag_failed => {
                 failed = true;
-                idx += 1;
+                rest = rest[1..];
             },
             else => {
                 failed = true;

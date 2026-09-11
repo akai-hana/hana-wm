@@ -53,22 +53,26 @@ const window_mods = @import("window_modules").modules;
 
 // Registry-resolved segment identity (comptime): the bar locates modules by
 // name through the generated registry instead of importing them directly.
-// Every registry-indexing site is guarded by a comptime `registry_empty` check
-// so the bar still compiles when ALL segments are removed (empty registry):
-// the guards make the dead indexing expressions comptime-unreachable.
+// Role/named lookups return null on an absent (even empty) registry, so the
+// bar still compiles and no-ops when ALL segments are removed.
 const bar_mods = @import("bar_modules").modules;
-const registry_len = bar_mods.len;
-const registry_empty = registry_len == 0;
 
-const self_ticking_role: ?usize = segmod.findByCapability(&bar_mods, .{ .self_ticking = true });
-const center_slot_role: ?usize = segmod.findByCapability(&bar_mods, .{ .center_slot = true });
+const self_ticking_role: ?usize = segmod.findByCapability(&bar_mods, "self_ticking");
+const center_slot_role: ?usize = segmod.findByCapability(&bar_mods, "center_slot");
 
 /// Registry index for `name`, or null when absent (also when the registry is
 /// empty: `bar_mods` is then a zero-length slice and idByName finds nothing,
 /// so the empty-registry case needs no separate comptime guard at call sites).
 inline fn segId(name: []const u8) ?usize {
-    if (comptime registry_empty) return null;
     return segmod.idByName(&bar_mods, name);
+}
+
+/// True when `name` resolves to the segment claiming the registry role `role`
+/// (name-free; roles are the self-ticking clock and the reserved center
+/// slot/title capabilities today).
+fn isRole(name: []const u8, comptime role: ?usize) bool {
+    const id = segId(name) orelse return false;
+    return role != null and id == role.?;
 }
 
 fn runVoidHook(comptime hook: []const u8) void {
@@ -231,7 +235,7 @@ const WindowCtx = struct {
     colormap: u32,
 
     fn deinit(self: *WindowCtx) void {
-        if (self.colormap != 0) _ = xcb.xcb_free_colormap(self.conn, self.colormap);
+        barwin.freeColormap(self.conn, self.colormap);
     }
 };
 
@@ -257,6 +261,48 @@ const max_click_bounds: usize = 8;
 /// calculation and the draw; a config with more than this many right segments
 /// falls back to re-measuring at draw time (layout math identical, no win).
 const max_right_segments: usize = 16;
+
+/// Right-aligned cluster bookkeeping for one draw frame. Measures every
+/// right-position segment once up front, deriving both the reserved width
+/// (which left/center placement shrinks around) and the per-segment widths
+/// the draw consumes. Falls back to measure-at-draw when the segment count
+/// overflows `max_right_segments` (`take` then reports null).
+const RightCluster = struct {
+    /// Measured widths by position in the right cluster (concatenated right
+    /// layouts, in order). Only the first `max_right_segments` are recorded.
+    widths: [max_right_segments]u16 = undefined,
+    /// Number of right segments encountered this frame.
+    count: usize = 0,
+    /// Reserved width the right cluster occupies: segment widths plus the
+    /// inter-segment spacing, minus the trailing gap of each right layout.
+    total: u16 = 0,
+    /// Running draw index, advanced by `take` per right layout.
+    ridx: usize = 0,
+
+    /// Measures all right segments across the bar's layouts.
+    fn measure(self: *RightCluster, s: *State, frame: *const segmod.Frame, scaled_spacing: u16) void {
+        for (s.render.config.layout.items) |lay| {
+            if (lay.position != .right) continue;
+            for (lay.segments.items) |seg| {
+                const w = s.measureSegmentWidth(frame, seg);
+                if (self.count < max_right_segments) self.widths[self.count] = w;
+                self.count += 1;
+                self.total += w + scaled_spacing;
+            }
+            if (lay.segments.items.len > 0) self.total -= scaled_spacing;
+        }
+    }
+
+    /// Slices out the measured widths for one right layout's segments,
+    /// advancing the internal index. Returns null when the measurement buffer
+    /// overflowed, signalling the draw to re-measure per segment.
+    fn take(self: *RightCluster, segments: []const []const u8) ?[]const u16 {
+        const start = self.ridx;
+        self.ridx += segments.len;
+        if (self.count > max_right_segments) return null;
+        return self.widths[start..][0..segments.len];
+    }
+};
 
 /// On-screen hit-test bound of one segment, recorded by recordClickBound
 /// during the layout pass. THE click-bound storage: hit-testing iterates
@@ -457,6 +503,14 @@ const State = struct {
         }
     }
 
+    /// Clears a horizontal region to the bar background and extends the dirty
+    /// span to cover it: the shared repaint idiom for every segment region
+    /// (including the full-redraw path, where `x = 0, w = width`).
+    fn clearRegion(self: *State, x: u16, w: u16) void {
+        self.render.dc.fillRect(x, 0, w, self.render.height, self.render.config.bg);
+        self.extendDirtySpan(x, w);
+    }
+
     /// Marks dirty every segment whose declared `dirty_sources` has bit
     /// `source` set, and flags the bar dirty. Name-free: the bit masks are a
     /// declared contract capability, not a name-keyed lookup.
@@ -510,15 +564,6 @@ const State = struct {
             if (std.mem.eql(u8, b.name, name)) return b;
         }
         return null;
-    }
-
-    /// True when `name` resolves to the segment claiming the registry role
-    /// `role` (name-free; roles are the self-ticking clock and the reserved
-    /// center slot/title capabilities today).
-    fn isRole(self: *const State, name: []const u8, comptime role: ?usize) bool {
-        _ = self;
-        const id = segId(name) orelse return false;
-        return role != null and id == role.?;
     }
 
     /// Measures a segment's natural (reserved) width via its uniform
@@ -649,27 +694,26 @@ const State = struct {
     }
 
     /// Draws one segment of a left-to-right row, painting the inter-segment gap
-    /// and advancing `x`. `w` is the reserved width; `omit_gap_after_title`
-    /// suppresses the gap after a title so the next segment sits flush (center
-    /// layout). Returns the new `x`.
+    /// and advancing `x`. `w` is the reserved width; `omit_gap` suppresses the
+    /// gap after a title so the next segment sits flush (center layout).
+    /// Returns the new `x`.
     fn drawRowSegment(
         self: *State,
         ctx: *segmod.DrawCtx,
         name: []const u8,
         x: u16,
         w: u16,
-        omit_gap_after_title: bool,
+        omit_gap: bool,
         scaled_spacing: u16,
     ) u16 {
-        const omit_gap = omit_gap_after_title and self.isRole(name, center_slot_role);
         const x_before = x;
-        const drawn_x = self.drawSegmentSafe(ctx, name, x, w);
-        const drew = drawn_x != x_before;
+        const drew_x = self.drawSegmentSafe(ctx, name, x, w);
+        const drew = drew_x != x_before;
         if (!omit_gap) {
             // On success advance past the drawn text plus the trailing gap.
             if (drew) {
-                self.paintGap(drawn_x, scaled_spacing);
-                return drawn_x + scaled_spacing;
+                self.paintGap(drew_x, scaled_spacing);
+                return advancedX(drew_x, x_before, w, scaled_spacing);
             }
             // On failure drawSegmentSafe returns x unchanged ("drew nothing").
             // Still consume the full reserved slot + gap so the NEXT segment
@@ -677,19 +721,22 @@ const State = struct {
             // unchanged x would let that segment paint over this failed slot
             // (and, on the follow-up frame, desync the whole cluster). Matches
             // drawRightSegments' failed-draw handling.
-            return x + w + scaled_spacing;
+            return advancedX(drew_x, x_before, w, scaled_spacing);
         }
-        return drawn_x;
+        return drew_x;
+    }
+
+    /// Slot + trailing-gap accounting for a draw that may have failed: on
+    /// success the row advances past `drew_x` plus `gap`; on failure
+    /// `drawSegmentSafe` returned `x_before` unchanged, so the full reserved
+    /// `w` + gap is still consumed (see the failure comments in both draw
+    /// paths). Shared by drawRowSegment and drawRightSegments.
+    inline fn advancedX(drew_x: u16, x_before: u16, w: u16, gap: u16) u16 {
+        return if (drew_x != x_before) drew_x + gap else x_before + w + gap;
     }
 
     fn paintGap(self: *State, gap_x: u16, scaled_spacing: u16) void {
-        self.render.dc.fillRect(
-            gap_x,
-            0,
-            scaled_spacing,
-            self.render.height,
-            self.render.config.bg,
-        );
+        self.clearRegion(gap_x, scaled_spacing);
     }
 
     fn drawRightSegments(
@@ -713,19 +760,12 @@ const State = struct {
             right_x -= seg_w;
             if (pending_gap) right_x -= scaled_spacing;
 
-            if (self.isRole(names[i], self_ticking_role)) self.clock.x = right_x;
+            if (isRole(names[i], self_ticking_role)) self.clock.x = right_x;
             self.recordClickBound(names[i], right_x, seg_w);
 
             if (self.isSegmentRepaintable(names[i])) {
                 if (!is_full_redraw) {
-                    self.render.dc.fillRect(
-                        right_x,
-                        0,
-                        seg_w,
-                        self.render.height,
-                        self.render.config.bg,
-                    );
-                    self.extendDirtySpan(right_x, seg_w);
+                    self.clearRegion(right_x, seg_w);
                 }
                 const drew = self.drawSegmentSafe(ctx, names[i], right_x, null) != right_x;
                 if (drew) {
@@ -734,9 +774,6 @@ const State = struct {
                         self.extendDirtySpan(right_x + seg_w, scaled_spacing);
                         self.paintGap(right_x + seg_w, scaled_spacing);
                     }
-                } else {
-                    right_x += seg_w;
-                    if (pending_gap) right_x += scaled_spacing;
                 }
                 // A failed draw still occupies its reserved slot as empty
                 // (background) space, so the next segment leftward gets the
@@ -764,36 +801,19 @@ const State = struct {
         self.dirty.span_w = 0;
 
         if (is_full_redraw) {
-            r.dc.fillRect(0, 0, r.width, r.height, r.config.bg);
-            self.dirty.span_w = r.width;
+            self.clearRegion(0, r.width);
         }
 
-        var right_total: u16 = 0;
-        var right_widths: [max_right_segments]u16 = undefined;
-        var right_widx: usize = 0;
-        for (r.config.layout.items) |lay| {
-            if (lay.position != .right) continue;
-            for (lay.segments.items) |seg| {
-                // One measurement per right segment per draw; the reserved
-                // widths feed BOTH the right-cluster total (used by the
-                // left/center placement below) and the draw itself.
-                const w = self.measureSegmentWidth(frame, seg);
-                if (right_widx < max_right_segments) right_widths[right_widx] = w;
-                right_widx += 1;
-                right_total += w + scaled_spacing;
-            }
-            if (lay.segments.items.len > 0) right_total -= scaled_spacing;
-        }
-        const right_measured = right_widx <= max_right_segments;
+        var right = RightCluster{};
+        right.measure(self, frame, scaled_spacing);
 
         self.clicks.len = 0;
         var x: u16 = 0;
-        var right_ridx: usize = 0;
         for (r.config.layout.items) |lay| {
             switch (lay.position) {
                 .left, .center => {
                     // Available horizontal space before the right cluster.
-                    const avail = r.width -| x -| right_total;
+                    const avail = r.width -| x -| right.total;
                     const remaining = if (lay.position == .center)
                         // Clamp to available space so a tight right+left row
                         // can't overflow into the right-segment area.
@@ -804,7 +824,7 @@ const State = struct {
                     else
                         0;
                     for (lay.segments.items) |seg| {
-                        const is_center = self.isRole(seg, center_slot_role);
+                        const is_center = isRole(seg, center_slot_role);
                         const omit_gap = (lay.position == .center) and is_center;
                         const w = if (is_center)
                             remaining
@@ -814,12 +834,11 @@ const State = struct {
                         // clock.x must be recorded for a self-ticking segment
                         // in ANY cluster (not just right): drawClockOnly relies
                         // on it regardless of where the clock is laid out.
-                        if (self.isRole(seg, self_ticking_role)) self.clock.x = x;
+                        if (isRole(seg, self_ticking_role)) self.clock.x = x;
                         if (self.isSegmentRepaintable(seg)) {
                             if (!is_full_redraw) {
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;
-                                r.dc.fillRect(x, 0, clear_w, r.height, r.config.bg);
-                                self.extendDirtySpan(x, clear_w);
+                                self.clearRegion(x, clear_w);
                             }
                             const x_before = x;
                             x = self.drawRowSegment(
@@ -827,7 +846,7 @@ const State = struct {
                                 seg,
                                 x,
                                 w,
-                                lay.position == .center,
+                                omit_gap,
                                 scaled_spacing,
                             );
                             if (x != x_before) self.extendDirtySpan(x_before, x - x_before);
@@ -839,12 +858,7 @@ const State = struct {
                     }
                 },
                 .right => {
-                    const ws = if (right_measured)
-                        right_widths[right_ridx..][0..lay.segments.items.len]
-                    else
-                        null;
-                    self.drawRightSegments(ctx, lay.segments.items, ws, is_full_redraw);
-                    right_ridx += lay.segments.items.len;
+                    self.drawRightSegments(ctx, lay.segments.items, right.take(lay.segments.items), is_full_redraw);
                 },
             }
         }
@@ -857,10 +871,10 @@ const State = struct {
         const cid = self_ticking_role orelse return;
         if (bar_mods[cid].draw == null) return;
         var ctx = frameCtx(self);
-        const drawn_end = bar_mods[cid].draw.?(&ctx, clock_x) catch |e| {
-            debug.warnOnErr(e, "drawClockOnly");
-            return;
-        };
+        // Shared harness: catches/logs draw errors; returns x unchanged
+        // ("drew nothing") on failure, which must skip the blit below.
+        const drawn_end = self.drawSegmentSafe(&ctx, bar_mods[cid].name, clock_x, null);
+        if (drawn_end == clock_x) return;
         // Region-scoped blit: copies only the clock region and flushes (this
         // is a timer-driven path; no event-loop flush is coming). Blit at
         // least what was PAINTED (drawn_end can exceed the layout-time
@@ -933,6 +947,14 @@ inline fn ungrabAndFlush() void {
 /// calling thread.
 pub fn submitDraw() void {
     performDraw();
+}
+
+/// Forces the next draw to repaint every segment and mark the whole bar dirty.
+/// Used by paths that need a full background-clear repaint (layout facts,
+/// module redraw requests, bar re-anchoring).
+fn requestFullRedraw() void {
+    gBar.force = true;
+    if (gBar.state) |s| s.dirty.flag = true;
 }
 
 /// Everything a fully-initialised bar owns; returned by createBar.
@@ -1108,8 +1130,7 @@ pub fn toggleBarSegmentAnchor() void {
     };
     const new_y = barwin.calcBarYPos(s.render.height);
     barwin.setWindowProperties(s.win.win_id, s.render.height);
-    gBar.force = true;
-    s.markDirty();
+    requestFullRedraw();
     s.clock.x = null;
     utils.grabServer(cs.conn);
     _ = xcb.xcb_configure_window(
@@ -1207,7 +1228,7 @@ pub fn raiseBar() void {
 /// video. Pair with `dismissAfterPrompt` so the bar returns to its prior state.
 pub fn presentForPrompt() void {
     const s = gBar.state orelse return;
-    if (visibility.promptNeedsForcedShow(s.vis.shown)) {
+    if (!s.vis.shown) {
         // The bar is hidden; draw fresh content into it before mapping
         // (same ordering setBarState's show path uses) so the compositor
         // never shows a blank or stale bar for a frame.
@@ -1294,7 +1315,7 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
 /// is already hidden or not initialised.
 pub fn hideBarForFullscreen() void {
     const s = gBar.state orelse return;
-    if (!visibility.barNeedsFullscreenHide(s.vis.shown)) return;
+    if (!s.vis.shown) return;
     s.vis.shown = false;
     const conn = core.getState().conn;
     _ = xcb.xcb_unmap_window(conn, s.win.win_id);
@@ -1342,8 +1363,7 @@ pub fn updateIfDirty() !void {
     if (s.facts.focus_rev != core.focus.rev()) s.markDirtySource(.focus);
     if (s.facts.window_rev != core.window.rev()) s.markDirty();
     if (s.facts.layout_rev != core.layout.rev()) {
-        gBar.force = true;
-        s.markDirty();
+        requestFullRedraw();
     }
     s.facts.focus_rev = core.focus.rev();
     s.facts.window_rev = core.window.rev();
@@ -1358,8 +1378,7 @@ pub fn updateIfDirty() !void {
     // consumed, so the loop terminates unless a module genuinely re-requests.
     while (true) {
         if (barModsConsumeRedrawRequest()) {
-            gBar.force = true;
-            s.dirty.flag = true;
+            requestFullRedraw();
         }
         if (!s.dirty.flag) break;
         s.dirty.flag = false;
@@ -1373,11 +1392,6 @@ fn barModsConsumeRedrawRequest() bool {
     return anyBoolHook("consumeRedrawRequest", .{});
 }
 
-fn cs_configClockFormat() []const u8 {
-    const cs = core.getState();
-    return cs.config.bar.clock_format orelse types.default_clock_format;
-}
-
 /// Redraws just the clock segment when its on-screen content is stale
 /// (second rolled over, or config reload changed the format). Cheap to call
 /// on every event batch: it no-ops unless staleness is detected.
@@ -1385,7 +1399,7 @@ pub fn updateClock() bool {
     const s = gBar.state orelse return false;
     if (!s.vis.shown) return false;
     if (self_ticking_role == null) return false;
-    const fmt = cs_configClockFormat();
+    const fmt = drawing.clockFormat(core.getState().config.bar);
     var redraw_clock = false;
     for (bar_mods) |m| {
         if (m.secondsElapsed) |h| {
@@ -1402,12 +1416,7 @@ pub fn updateClock() bool {
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
-        gBar.force = true;
-        const dragging = if (build_options.has_floating) actions.isDragging() else false;
-        if (dragging) {
-            s.dirty.flag = true;
-            s.markAllSegmentsDirty();
-        } else submitDraw();
+        if (build_options.has_floating and actions.isDragging()) s.dirty.flag = true else submitDraw();
     };
 }
 

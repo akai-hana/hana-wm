@@ -10,7 +10,6 @@ const events = @import("events");
 const signals = @import("signals");
 const config = @import("config");
 const types = @import("types");
-const constants = @import("constants");
 const masks = @import("masks");
 const scale = @import("scale");
 const debug = @import("debug");
