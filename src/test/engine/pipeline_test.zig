@@ -13,16 +13,22 @@ const sync = @import("sync");
 const actions = @import("actions");
 const fixture = @import("fixture");
 
-test "pipeline: reconcile tiles to engine placements and records LastSent" {
-    var fx = fixture.setUp("pipeline_test") orelse return;
-    defer fx.deinit();
-    const m = pipeline.model();
-
+/// Two mapped windows, the arrangement most pipeline tests seed.
+fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
     actions.mapRequest(w1, 0, true);
     actions.mapRequest(w2, 0, true);
     fx.flush();
+    return .{ w1, w2 };
+}
+
+test "pipeline: reconcile tiles to engine placements and records LastSent" {
+    var fx = fixture.setUp("pipeline_test") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    const w1, const w2 = seedTwo(fx);
 
     try std.testing.expectEqual(w2, m.focused.?);
     const order = m.ws[m.current].tiled_order.items;
@@ -48,11 +54,7 @@ test "pipeline: fullscreen winner covers the screen and parks siblings" {
     const m = pipeline.model();
     const cs = core.getState();
 
-    const w1 = fx.createWindow();
-    const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true);
-    actions.mapRequest(w2, 0, true);
-    fx.flush();
+    const w1, const w2 = seedTwo(fx);
 
     actions.fullscreenToggleWindow(w2);
     fx.flush();
@@ -75,11 +77,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     defer fx.deinit();
     const m = pipeline.model();
 
-    const w1 = fx.createWindow();
-    const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true);
-    actions.mapRequest(w2, 0, true);
-    fx.flush();
+    const w1, const w2 = seedTwo(fx);
 
     actions.fullscreenToggleWindow(w1);
     fx.flush();

@@ -15,6 +15,7 @@ const std = @import("std");
 const constants = @import("constants");
 const bounded = @import("bounded");
 const model = @import("model");
+const plugin = @import("plugin");
 const build_options = @import("build_options");
 
 fn resetState() void {
@@ -35,9 +36,18 @@ const MAX_MINIMIZED = constants.max_minimized;
 
 pub const MinimizeError = error{CapacityFull};
 
-/// One minimized window's parked record. The serialized form is `[2]u32` =
-/// {tiled slot, monotonic seq} (slot is maxInt for floating-originated).
+/// One minimized window's parked record. The on-disk blob is PackedMinimize
+/// ({magic: u8, slot: u32, seq: u32}; slot is maxInt for floating-originated).
 const Rec = struct { win: model.WindowId, slot: ?usize, seq: u32 };
+
+/// The on-disk blob layout: {magic: u8, slot-OR-maxInt: u32, seq: u32}. The
+/// native-endian u32 fields keep the byte layout of the hand-rolled slice
+/// format (8 bytes after the magic), so existing restore files stay readable.
+const PackedMinimize = extern struct {
+    magic: u8 align(1),
+    slot: u32 align(1),
+    seq: u32 align(1),
+};
 
 /// Self-contained minimized store: static, allocation-free, <= 32 entries,
 /// linear scans by design. No model bookkeeping backs it.
@@ -220,11 +230,13 @@ fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const model.Mod
 pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const p = serializePreamble(m, win) orelse return null;
     const rec = p[1];
-    const held = alloc.alloc(u8, 9) catch return null;
-    held[0] = 0x5A;
-    const raw = std.mem.bytesAsSlice(u32, held[1..9]);
-    raw[0] = @intCast(rec.slot orelse std.math.maxInt(u32));
-    raw[1] = rec.seq;
+    const held = alloc.alloc(u8, @sizeOf(PackedMinimize)) catch return null;
+    const blob: PackedMinimize = .{
+        .magic = 0x5A,
+        .slot = @intCast(rec.slot orelse std.math.maxInt(u32)),
+        .seq = rec.seq,
+    };
+    @memcpy(held, std.mem.asBytes(&blob));
     return held;
 }
 
@@ -234,7 +246,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 /// free of model types; the reverse cast happens on this side).
 fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
     if (bytes.len != 9 or bytes[0] != 0x5A) return null; // not our blob; let the loop continue
-    const m: *model.Model = @ptrCast(@alignCast(ptr));
+    const m: *model.Model = plugin.modelPtrOf(ptr);
     if (g_recs.find(win) != null) return .{ m, null }; // already adopted; idempotent
     if (g_recs.len() >= MAX_MINIMIZED) return null;
     const e = m.store.getPtr(win) orelse return null;
@@ -245,13 +257,12 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const p = deserializePreamble(win, bytes, ptr) orelse return false;
     const m = p[0];
     const e = p[1] orelse return true;
-    // Slice the payload back into two native-endian u32s via an aligned copy
-    // (persist buffers are byte-aligned; u32 loads need 4-byte align).
-    var buf: [8]u8 align(@alignOf(u32)) = [_]u8{0} ** 8;
-    @memcpy(&buf, bytes[1..9]);
-    const raw = std.mem.bytesAsSlice(u32, buf[0..]);
-    const slot: ?usize = if (raw[0] == std.math.maxInt(u32)) null else raw[0];
-    const seq = raw[1];
+    // Slice the payload back out via a byte-aligned copy (persist buffers are
+    // byte-aligned; the extern struct's align(1) u32s load unaligned safely).
+    var raw: PackedMinimize align(@alignOf(PackedMinimize)) = undefined;
+    @memcpy(std.mem.asBytes(&raw), bytes[0..@sizeOf(PackedMinimize)]);
+    const slot: ?usize = if (raw.slot == std.math.maxInt(u32)) null else raw.slot;
+    const seq = raw.seq;
     // Replay the minimize park: drop the tiled slot, mark parked. `mode`
     // comes from the model (already persisted), the blob restores the rec.
     if (model.findHome(m, win)) |h| model.removeValue(&m.ws[h].tiled_order, win);

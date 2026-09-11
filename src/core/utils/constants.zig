@@ -77,7 +77,10 @@ pub const property_no_delete: u8 = 0;
 
 // Mouse button codes (X11 button numbering)
 pub const mouse_button_left: u8 = 1;
+pub const mouse_button_middle: u8 = 2;
 pub const mouse_button_right: u8 = 3;
+pub const mouse_button_scroll_up: u8 = 4;
+pub const mouse_button_scroll_down: u8 = 5;
 
 // DPI / scaling
 /// Standard DPI for a 1x display. All scale factors are computed relative to this value.

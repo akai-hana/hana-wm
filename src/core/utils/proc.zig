@@ -31,6 +31,15 @@ pub fn setSignalWriteFd(fd: std.posix.fd_t) void {
     signal_write_fd = fd;
 }
 
+/// Wakes the event loop out of poll by writing the wake byte, if the signal
+/// pipe is registered. Lossy: a full (or unregistered) pipe drops the byte;
+/// the event loop polls its flags every iteration, so a lost byte only delays
+/// the action by one poll timeout at worst.
+fn writeWakeByte() void {
+    if (signal_write_fd >= 0)
+        _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
+}
+
 /// Gracefully stop the main event loop.
 pub fn quit() void {
     running.store(false, .release);
@@ -43,10 +52,7 @@ pub fn quit() void {
 /// also polls the flag itself every iteration, so a lost byte only delays the
 /// reload by one poll timeout at worst.
 pub fn reload() void {
-    if (!should_reload.swap(true, .acq_rel)) {
-        if (signal_write_fd >= 0)
-            _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
-    }
+    if (!should_reload.swap(true, .acq_rel)) writeWakeByte();
 }
 
 /// Wakes the event loop out of poll by writing the wake byte, without
@@ -56,8 +62,7 @@ pub fn reload() void {
 /// lossy-write tolerance as `reload()`: the event loop polls its flags every
 /// iteration, so a dropped byte only delays the action by one poll timeout.
 pub fn wake() void {
-    if (signal_write_fd >= 0)
-        _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
+    writeWakeByte();
 }
 
 /// Atomically consumes the reload flag.

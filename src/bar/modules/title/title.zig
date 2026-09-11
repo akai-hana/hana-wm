@@ -17,8 +17,11 @@ const types = @import("types");
 const drawing = @import("drawing");
 const build_options = @import("build_options");
 const segmod = @import("segment");
-const carousel = if (build_options.has_seg_carousel) @import("carousel") else struct {
+const carousel = segmod.ifEnabled(build_options.has_seg_carousel, @import("carousel"), struct {
     pub const gap_px: u16 = 0;
+    pub fn cyclePx(text_w: u16) f32 {
+        return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(gap_px));
+    }
     pub fn scrollingActive() bool {
         return false;
     }
@@ -40,10 +43,10 @@ const carousel = if (build_options.has_seg_carousel) @import("carousel") else st
         _ = now_ms;
         return 0;
     }
-};
+});
 // The prompt overlays this slot when active: this module delegates its
 // draw/click to it rather than the bar adapting the title slot.
-const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
+const prompt = segmod.ifEnabled(build_options.has_seg_prompt, @import("prompt"), struct {
     pub fn isActive() bool {
         return false;
     }
@@ -51,7 +54,7 @@ const prompt = if (build_options.has_seg_prompt) @import("prompt") else struct {
     pub fn draw(_: *segmod.DrawCtx, x: u16) !u16 {
         return x;
     }
-};
+});
 // The minimized-state service (set synthesis + per-window checks) is provided
 // by the window module registry and forwarded through the shared DrawCtx by
 // the bar; the title segment just reads `snapshot.minimized_set`.
@@ -105,12 +108,7 @@ fn drawSingleWindow(
     const is_minimized = snapshot.minimized_set.contains(single_win);
     const workspace_has_focus = snapshot.focused_window != null;
 
-    const accent = if (is_minimized)
-        ctx.config.title_minimized_accent
-    else if (workspace_has_focus)
-        ctx.config.title_accent_color
-    else
-        ctx.config.bg;
+    const accent = accentFor(ctx.config, workspace_has_focus, is_minimized, ctx.config.bg);
     ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, accent);
 
     const baseline_y = ctx.dc.baselineY(ctx.height);
@@ -170,7 +168,7 @@ fn drawMarqueeCell(
         try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
         return;
     }
-    const cycle: f32 = @as(f32, @floatFromInt(text_w)) + @as(f32, carousel.gap_px);
+    const cycle = carousel.cyclePx(text_w);
     // Anchor the scroll at the padded text start (same spot static mode uses),
     // so enabling the carousel continues seamlessly from where the head sat.
     const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
@@ -193,13 +191,18 @@ fn segmentBounds(total_width: u16, i: usize, count: u32) struct { x: u16, w: u16
 
 /// Accent colour for a title segment: focused wins, then minimized, then the
 /// unfocused fallback.
-inline fn accentFor(config: types.BarConfig, is_focused: bool, is_minimized: bool) u32 {
+inline fn accentFor(
+    config: types.BarConfig,
+    is_focused: bool,
+    is_minimized: bool,
+    unfocused_fallback: u32,
+) u32 {
     return if (is_focused)
         config.title_accent_color
     else if (is_minimized)
         config.title_minimized_accent
     else
-        config.title_unfocused_accent;
+        unfocused_fallback;
 }
 
 fn titleTextGeom(ctx: segmod.TitleRenderContext, seg_x: u16, seg_w: u16) SegmentGeometry {
@@ -265,7 +268,12 @@ fn drawSegmentedTitles(
         const segment_x = ctx.start_x + bounds.x;
 
         const is_focused_win = snapshot.focused_window == info.window;
-        const accent = accentFor(ctx.config, is_focused_win, info.minimized);
+        const accent = accentFor(
+            ctx.config,
+            is_focused_win,
+            info.minimized,
+            ctx.config.title_unfocused_accent,
+        );
         ctx.dc.fillRect(segment_x, 0, bounds.w, ctx.height, accent);
 
         if (info.title.len == 0 or bounds.w <= min_cell_w) continue;

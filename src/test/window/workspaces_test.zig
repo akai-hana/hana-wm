@@ -43,8 +43,7 @@ test "duplicate layout overrides: last variant wins" {
     var wss = [_]workspaces.Workspace{workspaces.Workspace.init(0)};
     workspaces.applyWorkspaceOverrides(&wss, &cfg);
 
-    const v = wss[0].variants orelse return error.TestUnexpectedNull;
-    try testing.expectEqualStrings("gaps", v);
+    try testing.expectEqualStrings("gaps", wss[0].variants.?);
 }
 
 test "out-of-range workspace indices are ignored" {

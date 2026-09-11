@@ -14,18 +14,12 @@ const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 
-const gap = 8;
-const border = 2;
 const cfg_bw = 2;
 const focused_pixel: u32 = 100;
 const unfocused_pixel: u32 = 200;
 
 fn testColor(win: model.WindowId, m: *const model.Model) u32 {
     return if (m.focused == win) focused_pixel else unfocused_pixel;
-}
-
-fn stdWa() utils.Rect {
-    return .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 }
 
 const Recorder = helpers.TestSink(.record);
@@ -35,7 +29,7 @@ const Fixture = struct {
     rec: Recorder,
     ctx: sync.Ctx,
 
-    fn init(self: *Fixture, screen: utils.Rect, workarea: utils.Rect) void {
+    fn init(self: *Fixture) void {
         self.* = .{
             .m = .{},
             .rec = .{},
@@ -47,11 +41,11 @@ const Fixture = struct {
         minimize.init() catch unreachable;
         self.ctx = .{
             .sink = self.rec.sink(),
-            .screen = screen,
-            .workarea = workarea,
+            .screen = helpers.std_wa,
+            .workarea = helpers.std_wa,
             .cfg_bw = cfg_bw,
             .color_of = testColor,
-            .env = .{ .margins = .{ .gap = gap, .border = border }, .min_dim = 50 },
+            .env = helpers.std_env,
         };
     }
 
@@ -70,10 +64,10 @@ const Fixture = struct {
 
 test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-sends nothing" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 101, null) catch unreachable;
+    helpers.regCur(&fx.m, 101);
     model.setFocus(&fx.m, 101);
 
     fx.reconcile(.{});
@@ -104,11 +98,11 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-send
 
 test "focus change: delta-sends ONLY the two border pixels, no raise" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 201, null) catch unreachable;
-    model.register(&fx.m, 202, null) catch unreachable;
+    helpers.regCur(&fx.m, 201);
+    helpers.regCur(&fx.m, 202);
     model.setFocus(&fx.m, 201);
     fx.reconcile(.{}); // baseline: 201 master (winner ABOVE), 202 stack
 
@@ -127,11 +121,11 @@ test "focus change: delta-sends ONLY the two border pixels, no raise" {
 
 test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; exit restores" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 301, null) catch unreachable;
-    model.register(&fx.m, 302, null) catch unreachable;
+    helpers.regCur(&fx.m, 301);
+    helpers.regCur(&fx.m, 302);
     model.setFocus(&fx.m, 301);
     fx.reconcile(.{}); // baseline tiled
 
@@ -163,11 +157,11 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
 
 test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 501, null) catch unreachable;
-    model.register(&fx.m, 502, null) catch unreachable;
+    helpers.regCur(&fx.m, 501);
+    helpers.regCur(&fx.m, 502);
     model.setFocus(&fx.m, 501);
     fx.reconcile(.{}); // baseline tiled
 
@@ -205,11 +199,11 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
 
 test "minimize parks every pass; restore replays original slot geometry" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 401, null) catch unreachable;
-    model.register(&fx.m, 402, null) catch unreachable;
+    helpers.regCur(&fx.m, 401);
+    helpers.regCur(&fx.m, 402);
     model.setFocus(&fx.m, 401);
     fx.reconcile(.{}); // baseline
 
@@ -243,11 +237,11 @@ test "minimize parks every pass; restore replays original slot geometry" {
 // The fullscreen-prev window's saved slot must survive restore, ending fully tiled.
 test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 601, null) catch unreachable;
-    model.register(&fx.m, 602, null) catch unreachable;
+    helpers.regCur(&fx.m, 601);
+    helpers.regCur(&fx.m, 602);
     model.setFocus(&fx.m, 601);
     fx.reconcile(.{}); // baseline tiled: both placed
 
@@ -306,7 +300,7 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
 
 test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark raises" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
     model.register(&fx.m, 501, 0) catch unreachable; // stays here
@@ -346,10 +340,10 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
 
 test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 701, null) catch unreachable; // home ws 0
+    helpers.regCur(&fx.m, 701); // home ws 0
     model.setFocus(&fx.m, 701);
     fx.m.store.getPtr(701).?.mask |= model.bit(1); // multi-tag onto ws 1
     fx.reconcile(.{}); // baseline: placed at master slot on ws 0
@@ -377,7 +371,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     // reconciled on its home ws (nothing ever sent): first sighting as an
     // orphan must PARK, not materialize a bogus geometry.
     fx.m.current = 0;
-    model.register(&fx.m, 702, null) catch unreachable; // home ws 0
+    helpers.regCur(&fx.m, 702); // home ws 0
     fx.m.store.getPtr(702).?.mask |= model.bit(1);
     // deliberately no reconcile on ws 0 => 702 has no sent history
     fx.m.current = 1;
@@ -392,10 +386,10 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
 
 test "forget clears the sent ledger; next pass treats the window as first sight" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 801, null) catch unreachable;
+    helpers.regCur(&fx.m, 801);
     model.setFocus(&fx.m, 801);
     fx.reconcile(.{});
     try testing.expect(sync.lastRectFor(801) != null);
@@ -428,7 +422,7 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
 // when a shared-home-bucket survivor was swap-removed.
 test "ledger index: swap-remove across a shared home bucket does not hit tombstones" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
     // x and z differ by the index capacity, so they share a home bucket;
@@ -437,9 +431,9 @@ test "ledger index: swap-remove across a shared home bucket does not hit tombsto
     const x = base;
     const y = base + 1;
     const z = base + model.store_capacity;
-    model.register(&fx.m, x, null) catch unreachable;
-    model.register(&fx.m, y, null) catch unreachable;
-    model.register(&fx.m, z, null) catch unreachable;
+    helpers.regCur(&fx.m, x);
+    helpers.regCur(&fx.m, y);
+    helpers.regCur(&fx.m, z);
     model.setFocus(&fx.m, x);
     fx.reconcile(.{});
 
@@ -457,7 +451,7 @@ test "ledger index: swap-remove across a shared home bucket does not hit tombsto
 // after every swap-remove + re-insert cycle.
 test "ledger index: swap-remove stress keeps every surviving record findable" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
     const base: model.WindowId = 2000;
@@ -468,7 +462,7 @@ test "ledger index: swap-remove stress keeps every surviving record findable" {
     for (0..n) |i| win[i] = base + @as(model.WindowId, @intCast(i)) * 3;
 
     for (0..n) |i| {
-        model.register(&fx.m, win[i], null) catch unreachable;
+        helpers.regCur(&fx.m, win[i]);
     }
     fx.reconcile(.{});
 
@@ -515,7 +509,7 @@ test "ledger index: swap-remove stress keeps every surviving record findable" {
 
 test "park: offscreen-X constant, ONE merged request per parked window per pass" {
     var fx: Fixture = undefined;
-    fx.init(stdWa(), stdWa());
+    fx.init();
     defer fx.deinit();
 
     // Production Sink.park folds X-offscreen + BELOW into ONE configure:

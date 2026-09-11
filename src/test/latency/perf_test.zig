@@ -8,6 +8,7 @@ const testing = std.testing;
 const model = @import("model");
 const constants = @import("constants");
 const sync = @import("sync");
+const utils = @import("utils");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
@@ -20,11 +21,16 @@ const WSId = model.WSId;
 
 const makeModel = helpers.makeModel;
 
-const nowNs = helpers.nowNs;
+const nowNs = utils.monotonicNs;
 
 const regCur = helpers.regCur;
 
 const makeCtx = helpers.makeCtx;
+
+/// Registers ids 1..n with home-workspace hint 0 (the fill most benchmarks use).
+fn fill(m: *Model, n: u32) void {
+    for (0..n) |i| model.register(m, @intCast(i + 1), 0) catch unreachable;
+}
 
 test "bench: findHome scan (100 wins, 10 ws)" {
     var m = makeModel();
@@ -77,9 +83,7 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
 
 test "bench: moveWindowToWs round-trip (50 wins)" {
     var m = makeModel();
-    for (0..50) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, 50);
 
     const iterations: usize = 10_000;
     const t0 = nowNs();
@@ -100,9 +104,7 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
     var m = makeModel();
     try minimize.init();
     defer minimize.deinit();
-    for (0..32) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, 32);
 
     const iterations: usize = 5_000;
     const t0 = nowNs();
@@ -121,9 +123,7 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
 
 test "bench: reorderTiled (50 wins)" {
     var m = makeModel();
-    for (0..50) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, 50);
 
     const iterations: usize = 10_000;
     const t0 = nowNs();
@@ -136,20 +136,16 @@ test "bench: reorderTiled (50 wins)" {
     std.debug.print("[bench] reorderTiled (50 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
-const BenchRecorder = helpers.TestSink(.parks);
-
 fn testColor(_: model.WindowId, _: *const model.Model) u32 {
     return 100;
 }
 
 test "bench: reconcile pass (50 windows)" {
     var m = makeModel();
-    for (0..50) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, 50);
     model.setFocus(&m, 25);
 
-    var recorder = BenchRecorder{};
+    var recorder = helpers.TestSink(.none){};
 
     sync.init();
     defer sync.deinit();
@@ -158,10 +154,7 @@ test "bench: reconcile pass (50 windows)" {
 
     const iterations: usize = 1_000;
     const t0 = nowNs();
-    for (0..iterations) |_| {
-        recorder.count = 0;
-        sync.reconcile(&m, &ctx, .{});
-    }
+    for (0..iterations) |_| sync.reconcile(&m, &ctx, .{});
     const elapsed_ns = nowNs() - t0;
     const per_pass_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
     std.debug.print("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
@@ -172,9 +165,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     // reconcile over every window) vs AFTER (a targeted reconcileDragTick that
     // sends only the dragged window's geometry).
     var m = makeModel();
-    for (0..50) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, 50);
     model.setFocus(&m, 25);
 
     // Float window 50 so it participates in the drag fast path.
@@ -185,7 +176,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     sync.init();
     defer sync.deinit();
 
-    var recorder = BenchRecorder{};
+    var recorder = helpers.TestSink(.none){};
     var ctx = makeCtx(recorder.sink(), testColor);
 
     // Warm once so the sent ledger is seeded (steady-state drag).
@@ -236,9 +227,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
     const t0 = nowNs();
     for (0..iterations) |_| {
         var m = makeModel();
-        for (0..50) |i| {
-            model.register(&m, @intCast(i + 1), 0) catch unreachable;
-        }
+        fill(&m, 50);
     }
     const elapsed_ns = nowNs() - t0;
     const per_reg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 50));
@@ -247,9 +236,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
 
 test "bench: fallbackFocusCandidate (50 wins)" {
     var m = makeModel();
-    for (0..50) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, 50);
     for (0..50) |i| {
         model.setFocus(&m, @intCast(i + 1));
     }
@@ -267,9 +254,7 @@ test "bench: fallbackFocusCandidate (50 wins)" {
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     var m = makeModel();
     const n = constants.Limits.max_tiled_windows;
-    for (0..n) |i| {
-        model.register(&m, @intCast(i + 1), 0) catch unreachable;
-    }
+    fill(&m, n);
 
     const iterations: usize = 50_000;
     const t0 = nowNs();

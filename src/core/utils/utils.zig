@@ -1,15 +1,15 @@
 //! Core utilities: FACADE.
 //!
-//! Purely xcb-free: geometry/scaling helpers plus re-exports of every public
-//! decl from the modules below so existing `utils.X` call sites are unchanged:
+//! Geometric/collection/timing helpers plus re-exports of every public decl
+//! from the modules below so existing `utils.X` call sites are unchanged:
 //!
 //!   bounded   BoundedList                       (xcb-free)
 //!   proc      lifecycle flags, wake pipe, pipes  (xcb-free)
 //!
 //! Layer note: model/tiling reference only the xcb-free decls here and in
-//! this file's own pure section. The xcb-dependent halves (X11 wire
-//! primitives and masks) live in the core x11 group and are re-exported here
-//! so window/bar/core call sites stay unchanged.
+//! this file's own pure section (wrapIndex, scaling, Rect).
+//! The x11 wire re-exports are xcb-typed; they live here for call-site
+//! convenience but stay out of model/tiling.
 
 const std = @import("std");
 const constants = @import("constants");
@@ -141,8 +141,8 @@ pub const Rect = struct {
 
 /// Gap and border widths applied around a tiled window.
 pub const Margins = struct {
-    gap: u16,
-    border: u16,
+    gap: u16 = 0,
+    border: u16 = 0,
 };
 
 /// Twice the border width (left+right / top+bottom inset).
@@ -198,4 +198,11 @@ pub const scaling = struct {
 
 pub inline fn eventCast(comptime T: type, event: *anyopaque) T {
     return @ptrCast(@alignCast(event));
+}
+
+/// Modulo-wraps `idx` by signed `dir` into [0, n); 0 for an empty range.
+/// Powers the round-robin focus/layout-direction cycles.
+pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
+    if (n == 0) return 0;
+    return @intCast(@mod(@as(i64, @intCast(idx)) + dir, @as(i64, @intCast(n))));
 }

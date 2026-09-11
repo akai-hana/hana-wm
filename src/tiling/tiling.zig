@@ -17,8 +17,8 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
     var width: u16 = rect.width;
     var height: u16 = rect.height;
 
-    width = snapDimToIncrement(width, 0, h.inc_width);
-    height = snapDimToIncrement(height, 0, h.inc_height);
+    width = snapDimToIncrement(width, h.inc_width);
+    height = snapDimToIncrement(height, h.inc_height);
 
     if (h.max_width > 0) width = @min(width, h.max_width);
     if (h.max_height > 0) height = @min(height, h.max_height);
@@ -51,16 +51,15 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
 /// snap down to the increment, then cap at `max_dim`.
 inline fn clampAspectDim(other: f32, ratio: f32, inc: u16, max_dim: u16) u16 {
     const aspect = utils.scaling.roundToU16(other * ratio, 0.0);
-    var dim = snapDimToIncrement(aspect, 0, inc);
+    var dim = snapDimToIncrement(aspect, inc);
     if (max_dim > 0) dim = @min(dim, max_dim);
     return dim;
 }
 
-/// Snap `dim` down to the nearest multiple of `inc` above `base`.
-inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
-    if (inc == 0 or dim <= base) return dim;
-    const excess = dim - base;
-    return base + (excess / inc) * inc;
+/// Snap `dim` down to the nearest multiple of `inc`.
+inline fn snapDimToIncrement(dim: u16, inc: u16) u16 {
+    if (inc == 0) return dim;
+    return (dim / inc) * inc;
 }
 
 // The layout interchange vocabulary lives on the tiling CONTRACT (plugin.zig)
@@ -91,6 +90,19 @@ pub fn focusedElse(
     return f;
 }
 
+/// Pane-inset total: the outer gap on both sides plus both border widths,
+/// saturating. The single source of the "2×gap + 2×border" shrink used by
+/// master, monocle, and scroll.
+pub inline fn totalInset(gap_amount: u16, m: utils.Margins) u16 {
+    return gap_amount *| 2 +| utils.doubledBorder(m);
+}
+
+/// Per-axis inset for a client window, read from a Margins value (scroll and
+/// any layout that needs the full shrink in one expression).
+pub inline fn fullInset(m: anytype) u16 {
+    return totalInset(m.gap, m);
+}
+
 /// Shrinks `dim` by `margin` (gap/border), floored to `min_dim` so a layout
 /// never hands a client a zero or negative size (verbatim port).
 pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
@@ -112,9 +124,18 @@ inline fn clampYToU16(y: i32) u16 {
     return @intCast(@max(y, 0));
 }
 
+/// A two-dimensional screen region in tiling coordinates (x/y are i32, w/h
+/// u16). The shared shape for outerArea and the layout modules' recursion.
+pub const Region = struct {
+    x: i32,
+    y: i32,
+    w: u16,
+    h: u16,
+};
+
 /// Work-area rect inset by the outer gap; x/y are i32, w/h u16
 /// (threaded through some layouts' recursion).
-pub inline fn outerArea(wa: utils.Rect, gap: u16) struct { x: i32, y: i32, w: u16, h: u16 } {
+pub inline fn outerArea(wa: utils.Rect, gap: u16) Region {
     return .{
         .x = @intCast(gap),
         .y = clampYToU16(wa.y) +| gap,
@@ -130,14 +151,7 @@ pub inline fn waY(v: *const View) u16 {
 
 /// Append one placement (shared append + overflow-assert tail of every emit).
 inline fn appendPlacement(out: *List, win: model.WindowId, rect: utils.Rect, visible: bool) void {
-    const ok = out.append(.{
-        .win = win,
-        .rect = rect,
-        .visible = visible,
-    });
-    if (std.debug.runtime_safety) {
-        std.debug.assert(ok);
-    }
+    std.debug.assert(out.append(.{ .win = win, .rect = rect, .visible = visible }));
 }
 
 /// Emit a placement with the window's size hints applied to `rect`.
@@ -222,15 +236,10 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
 /// Compute `kind`'s layout into `out` (cleared first). Each layout module
 /// binds its `compute` hook to the module's placement function and must
 /// append exactly one placement per window in `v.order` (off-viewport/hidden
-/// windows are parked via emitHidden). The caller sorts afterwards, so
-/// layout emission order is only pinned by tests, not by sync.
+/// windows are parked via emitHidden).
 pub fn compute(kind: u8, v: View, out: *List) void {
     out.clear();
     if (kind >= tiling_mods.len) return;
-    // Empty workspace emits nothing; layouts assume a non-empty order (grid
-    // divides by its shape, monocle indexes order[len - 1]), and sync's
-    // per-reconcile compute runs on an empty one, so it is a supported input
-    // short-circuited here once for every module.
     if (v.order.len == 0) return;
     if (tiling_mods[kind].compute) |f| f(&v, out);
 }
@@ -238,19 +247,6 @@ pub fn compute(kind: u8, v: View, out: *List) void {
 // Algo modules share this file's private emit helpers via pub re-exports.
 pub const emitView = emit;
 pub const emitHidden = emitParked;
-
-/// Builds a type-free `compute` hook that casts the opaque plugin seam to
-/// `View`/`List` and calls the given layout's typed `compute`. Shared by every
-/// layout module, which binds `.compute = tiling.computeHook(compute)`.
-pub fn computeHook(comptime F: anytype) fn (*const anyopaque, *anyopaque) void {
-    return struct {
-        fn hook(view: *const anyopaque, out: *anyopaque) void {
-            const v: *const View = @ptrCast(@alignCast(view));
-            const o: *List = @ptrCast(@alignCast(out));
-            F(v.*, o);
-        }
-    }.hook;
-}
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of
 /// the first exact-case match in `names`, or null when unmatched. Shared by
@@ -270,6 +266,6 @@ pub fn layoutModule(comptime name: []const u8, comptime icon: []const u8, compti
     var m = extra;
     m.name = name;
     m.icon = icon;
-    m.compute = computeHook(f);
+    m.compute = f;
     return m;
 }

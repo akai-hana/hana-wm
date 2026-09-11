@@ -62,13 +62,12 @@ pub fn surfaceWindow() ?core.WindowId {
 /// True when `win` is the chrome surface's own window (bar). Used to exclude
 /// it from window management / focus / drag handling.
 pub fn isSurfaceWindow(win: core.WindowId) bool {
-    return surface_win != null and surface_win.? == win;
+    return surface_win == win;
 }
 
 /// The chrome surface's window id when it currently occupies screen space
 /// (has an active claim); null otherwise. Used for raise-above stacking.
 pub fn mappedSurfaceWindow() ?core.WindowId {
-    if (surface_win == null) return null;
     for (claims) |c| if (c.active) return surface_win;
     return null;
 }

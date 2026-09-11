@@ -4,19 +4,13 @@
 const utils = @import("utils");
 const model = @import("model");
 const tiling = @import("tiling");
-
-const Region = struct {
-    x: i32,
-    y: i32,
-    w: u16,
-    h: u16,
-};
+const Region = tiling.Region;
 
 /// Compute BSP layout: recursive bisection of the longer axis 50/50 with one
 /// gap at each seam; border subtracted at leaf nodes only.
-pub fn compute(v: tiling.View, out: *tiling.List) void {
+pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx{
-        .v = &v,
+        .v = v,
         .out = out,
         .m = v.env.margins,
         .min_dim = v.env.min_dim,
@@ -46,8 +40,6 @@ fn tileRegion(
     r: Region,
 ) void {
     const n = windows.len;
-    if (n == 0) return;
-
     const border2: u16 = utils.doubledBorder(ctx.m);
 
     if (n == 1) {

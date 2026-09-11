@@ -160,11 +160,8 @@ fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
 /// Looks up the refresh rate for a mode id in the cached table. Returns null
 /// when the id is absent or the mode yields no valid rate.
 fn rateForModeId(mode_id: xcb.xcb_randr_mode_t) ?f64 {
-    for (cached_modes[0..cached_mode_count]) |m| {
-        if (m.id != mode_id) continue;
-        if (m.hz > 0.0) return m.hz;
-        return null;
-    }
+    for (cached_modes[0..cached_mode_count]) |m|
+        if (m.id == mode_id and m.hz > 0.0) return m.hz;
     return null;
 }
 
@@ -256,42 +253,31 @@ fn pipelinedRefreshRateFromOutputs(
     // Phase 2: fire an output-info request for every candidate, then collect.
     var out_cookies: [max_outputs]xcb.xcb_randr_get_output_info_cookie_t = undefined;
     var out_info_ptrs: [max_outputs]?*xcb.xcb_randr_get_output_info_reply_t = undefined;
-    var out_info_valid: [max_outputs]bool = undefined;
+    @memset(out_info_ptrs[0..n_order], null);
     const config_ts = res.*.config_timestamp;
     for (order[0..n_order], 0..) |out, i|
         out_cookies[i] = xcb.xcb_randr_get_output_info(conn, out, config_ts);
     for (order[0..n_order], 0..) |_, i| {
-        const info = xcb.xcb_randr_get_output_info_reply(conn, out_cookies[i], null) orelse {
-            out_info_valid[i] = false;
-            continue;
-        };
+        const info = xcb.xcb_randr_get_output_info_reply(conn, out_cookies[i], null) orelse continue;
         out_info_ptrs[i] = info;
-        out_info_valid[i] = true;
     }
     defer for (order[0..n_order], 0..) |_, i| {
-        if (out_info_valid[i]) std.c.free(out_info_ptrs[i].?);
+        if (out_info_ptrs[i]) |info| std.c.free(info);
     };
 
     // Phase 3: fire a crtc-info request for every output that has a CRTC.
     var crtc_cookies: [max_outputs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
-    var crtc_valid: [max_outputs]bool = undefined;
     for (order[0..n_order], 0..) |_, i| {
-        if (!out_info_valid[i]) {
-            crtc_valid[i] = false;
-            continue;
-        }
-        const crtc = out_info_ptrs[i].?.crtc;
-        if (crtc == 0) {
-            crtc_valid[i] = false;
-            continue;
-        }
+        const info = out_info_ptrs[i] orelse continue;
+        const crtc = info.crtc;
+        if (crtc == 0) continue;
         crtc_cookies[i] = xcb.xcb_randr_get_crtc_info(conn, crtc, config_ts);
-        crtc_valid[i] = true;
     }
 
     // Collect the crtc replies in priority order and resolve the active mode.
     for (order[0..n_order], 0..) |_, i| {
-        if (!crtc_valid[i]) continue;
+        const info = out_info_ptrs[i] orelse continue;
+        if (info.crtc == 0) continue;
         const crtc_info = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookies[i], null) orelse
             continue;
         const mode_id = crtc_info.*.mode;

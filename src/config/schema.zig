@@ -297,7 +297,6 @@ pub fn getInRange(
 }
 
 /// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`, `0xRRGGBB`, or an integer.
-/// Split from `getColor` so callers that already have the Value avoid a redundant hashmap lookup.
 fn getColorFromValue(key: []const u8, val: parser.Value, default: u32) u32 {
     if (val.asScalar(u32)) |c| return c;
     if (val.asScalar([]const u8)) |s| return parser.parseColor(s) catch {
@@ -306,12 +305,6 @@ fn getColorFromValue(key: []const u8, val: parser.Value, default: u32) u32 {
     };
     if (val.asScalar(i64)) |i| if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
     return default;
-}
-
-/// Resolves a color from a section key, accepting `#RRGGBB`, `0xRRGGBB`, or an integer.
-fn getColor(section: *parser.Section, key: []const u8, default: u32) u32 {
-    const val = section.get(key) orelse return default;
-    return getColorFromValue(key, val, default);
 }
 
 /// Reads `section.key` as a ScalableValue, warn-and-return-`default` below
@@ -425,11 +418,17 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             .auto_scalable => if (hit) |h| {
                 p.* = getScalableInRange(h.sec, h.key, null, 0, "auto");
             },
-            .color => if (hit) |h| { p.* = getColor(h.sec, h.key, p.*); },
+            .color => if (hit) |h| {
+                if (h.sec.get(h.key)) |val|
+                    p.* = getColorFromValue(h.key, val, p.*);
+            },
             .color_from => |sibling| {
                 const fallback = @field(cfg.bar, sibling);
                 if (hit) |h| {
-                    p.* = getColor(h.sec, h.key, fallback);
+                    p.* = if (h.sec.get(h.key)) |val|
+                        getColorFromValue(h.key, val, fallback)
+                    else
+                        fallback;
                 } else if (comptime k.copy_when_absent) {
                     p.* = fallback;
                 }

@@ -1,7 +1,6 @@
 //! Master-stack tiling layout.
 //! Master + stack panes, spilling overflow into a column-major grid.
 
-const std = @import("std");
 const utils = @import("utils");
 const constants = @import("constants");
 const model = @import("model");
@@ -26,12 +25,12 @@ pub const StackBoost = struct {
 /// Master-stack layout: master pane + stack pane, gaps at screen edges and
 /// half-gap between panes. Heights via cumulative integer division with
 /// max_height capping (water-filling).
-pub fn compute(v: tiling.View, out: *tiling.List) void {
+pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     const n = windows.len;
     const m = v.env.margins;
     const ctx = tiling.LayoutCtx{
-        .v = &v,
+        .v = v,
         .out = out,
         .m = m,
         .min_dim = v.env.min_dim,
@@ -41,6 +40,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     const screen_h = v.workarea.height;
     const master_n: u16 = @intCast(@min(v.params.primary_count, n));
     const stack_n: u16 = @intCast(n - master_n);
+    const y = tiling.waY(v);
 
     // When no stack exists the master pane takes the full width.
     const master_w_frac: u16 = if (stack_n > 0) blk: {
@@ -66,7 +66,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     // are then subtracted from the width.
     const master_inner_w = tiling.shrinkClamped(
         master_w,
-        if (stack_n > 0) stackSeamMargin(m) else m.gap *| 2 + utils.doubledBorder(m),
+        if (stack_n > 0) stackSeamMargin(m) else tiling.totalInset(m.gap, m),
         ctx.min_dim,
     );
 
@@ -74,7 +74,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
         ctx,
         windows[0..master_n],
         master_x +| m.gap,
-        tiling.waY(&v),
+        y,
         screen_h,
         master_inner_w,
         .{},
@@ -87,7 +87,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
         ctx,
         windows[master_n..],
         stack_origin,
-        tiling.waY(&v),
+        y,
         stack_w,
         screen_h,
         StackBoost.fromBalance(v.params.secondary_balance),
@@ -110,7 +110,7 @@ fn tileColumn(
 
     var heights_buf: [constants.Limits.max_tiled_windows]u16 = undefined;
     const heights = heights_buf[0..windows.len];
-    const used = distributeStackHeightsWeighted(ctx, windows, avail, boost, heights);
+    const used = fillHeights(ctx, windows, avail, boost, heights);
 
     // If every window is capped, sum(heights) < avail; centre the stack in
     // the column instead of stranding the slack at the bottom.
@@ -118,124 +118,65 @@ fn tileColumn(
     const pad_top: u16 = @intCast(dead_space / 2);
 
     var y: u16 = y_offset +| ctx.m.gap +| pad_top;
+    const row_pitch = rowPitch(ctx.m);
     for (windows, 0..) |win, i| {
-        tiling.emitView(ctx.v, ctx.out, win, .{ .x = @intCast(x), .y = @intCast(y), .width = inner_w, .height = heights[i] }, true);
-        y = y +| heights[i] +| ctx.m.gap +| 2 *| ctx.m.border;
+        const rect = utils.Rect{ .x = @intCast(x), .y = @intCast(y), .width = inner_w, .height = heights[i] };
+        tiling.emitView(ctx.v, ctx.out, win, rect, true);
+        y = y +| heights[i] +| row_pitch;
     }
 }
 
-/// Packed bit-bag test/set over the capped-window flags.
-inline fn bitIsSet(bits: []u8, i: usize) bool {
-    return bits[i / 8] & (@as(u8, 1) << @intCast(i % 8)) != 0;
-}
-
-/// Leftover budget after the water-filling pass: the pixels, total weight,
-/// and count of windows that were NOT capped.
-const CapResult = struct {
-    remaining_avail: u16,
-    remaining_weight: f32,
-    remaining_count: u16,
-};
-
-/// Water-filling pass: pins windows whose max_height is at or below their
-/// fair share and redistributes their pixels, until no new window pins.
-fn findCappedWindows(
-    ctx: tiling.LayoutCtx,
-    windows: []const model.WindowId,
-    avail: u16,
-    boost: StackBoost,
-    out: []u16,
-    capped: []u8,
-) CapResult {
+/// Water-filling: pins windows whose max_height is at or below their fair
+/// share and redistributes their pixels, then distributes heights to the rest.
+/// Zero boost uses an even split. Returns the total pixel height used.
+fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u16, boost: StackBoost, out: []u16) u32 {
     const n: u16 = @intCast(windows.len);
-    @memset(capped, 0);
-
-    var remaining_avail = avail;
-    var remaining_weight: f32 = @as(f32, @floatFromInt(n)) + boost.top + boost.bottom;
-    var remaining_count: u16 = n;
     const zero_boost = boost.isZero();
 
-    var pinned_any = true;
-    while (pinned_any and remaining_count > 0) {
-        pinned_any = false;
+    var capped: [constants.Limits.max_tiled_windows]bool = undefined;
+    @memset(capped[0..windows.len], false);
+    var rem_avail = avail;
+    var rem_weight: f32 = @as(f32, @floatFromInt(n)) + boost.top + boost.bottom;
+    var rem_count = n;
+
+    var pinned = true;
+    while (pinned and rem_count > 0) {
+        pinned = false;
         for (windows, 0..) |win, i| {
-            if (bitIsSet(capped, i)) continue;
-            // When boost is zero every weight is identically 1.0; skip the
-            // function call and its two branches to keep the hot path tight.
+            if (capped[i]) continue;
             const w_i: f32 = if (zero_boost) 1.0 else windowWeight(@intCast(i), n, boost);
-            const fair_share: u16 = if (remaining_weight > 0)
-                @intFromFloat(@as(f32, @floatFromInt(remaining_avail)) * w_i / remaining_weight)
+            const fair: u16 = if (rem_weight > 0)
+                @intFromFloat(@as(f32, @floatFromInt(rem_avail)) * w_i / rem_weight)
             else
                 0;
             const max_h = ctx.v.hints.forWin(win).max_height;
-            if (max_h > 0 and max_h <= fair_share) {
+            if (max_h > 0 and max_h <= fair) {
                 out[i] = @max(ctx.min_dim, max_h);
-                capped[i / 8] |= @as(u8, 1) << @intCast(i % 8);
-                remaining_avail = remaining_avail -| out[i];
-                remaining_weight -= w_i;
-                remaining_count -= 1;
-                pinned_any = true;
+                capped[i] = true;
+                rem_avail -|= out[i];
+                rem_weight -= w_i;
+                rem_count -= 1;
+                pinned = true;
             }
         }
     }
 
-    return .{
-        .remaining_avail = remaining_avail,
-        .remaining_weight = remaining_weight,
-        .remaining_count = remaining_count,
-    };
-}
-
-/// Assigns heights to uncapped windows: even division (zero boost) when
-/// `weighted` is false, else weighted cumulative division.
-fn distributeHeights(
-    weighted: bool,
-    windows: []const model.WindowId,
-    boost: StackBoost,
-    capped: []u8,
-    remaining_weight: f32,
-    remaining_count: u16,
-    remaining_avail: u16,
-    min_dim: u16,
-    out: []u16,
-) void {
-    const n: u16 = @intCast(windows.len);
     var cum: f32 = 0;
     var prev_px: f32 = 0;
     var seen: u16 = 0;
     for (windows, 0..) |_, i| {
-        if (bitIsSet(capped, i)) continue;
-        if (weighted) {
-            cum += windowWeight(@intCast(i), n, boost);
-            const px: f32 = if (remaining_weight > 0)
-                @round(@as(f32, @floatFromInt(remaining_avail)) * cum / remaining_weight)
-            else
-                0;
-            out[i] = @max(min_dim, @as(u16, @intFromFloat(@max(@as(f32, 0), px - prev_px))));
-            prev_px = px;
-        } else {
-            out[i] = windowHeight(seen, remaining_count, remaining_avail, min_dim);
+        if (capped[i]) continue;
+        if (zero_boost) {
+            out[i] = windowHeight(seen, rem_count, rem_avail, ctx.min_dim);
             seen += 1;
+        } else {
+            cum += windowWeight(@intCast(i), n, boost);
+            const px: f32 = if (rem_weight > 0) @round(@as(f32, @floatFromInt(rem_avail)) * cum / rem_weight) else 0;
+            out[i] = @max(ctx.min_dim, @as(u16, @intFromFloat(@max(@as(f32, 0), px - prev_px))));
+            prev_px = px;
         }
     }
-}
 
-/// Split `avail` content-height pixels across `windows` into `out`, pinning
-/// capped windows (water-filling); zero boost uses an even split.
-fn distributeStackHeightsWeighted(
-    ctx: tiling.LayoutCtx,
-    windows: []const model.WindowId,
-    avail: u16,
-    boost: StackBoost,
-    out: []u16,
-) u32 {
-    var capped_buf: [constants.Limits.max_tiled_windows / 8]u8 = undefined;
-    const capped = capped_buf[0 .. (windows.len + 7) / 8];
-
-    const cap = findCappedWindows(ctx, windows, avail, boost, out, capped);
-    distributeHeights(!boost.isZero(), windows, boost, capped, cap.remaining_weight, cap.remaining_count, cap.remaining_avail, ctx.min_dim, out);
-
-    // Return the total so the caller avoids a redundant summation pass.
     var total: u32 = 0;
     for (out) |h| total += h;
     return total;
@@ -251,7 +192,11 @@ inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
 }
 
 inline fn stackSeamMargin(m: utils.Margins) u16 {
-    return m.gap / 2 +| m.gap +| 2 *| m.border;
+    return m.gap / 2 +| rowPitch(m);
+}
+
+inline fn rowPitch(m: utils.Margins) u16 {
+    return m.gap +| 2 *| m.border;
 }
 
 /// Minimum stack-pane width: widest bounded slave's max_width (floored to
@@ -314,11 +259,12 @@ fn tileStackExtra(
     const stack_n: u16 = @intCast(windows.len);
     const row_avail = calcAvailableHeight(h, max_fit, ctx.m, ctx.min_dim);
 
+    const min_col_w: u16 = ctx.min_dim +| 2 *| ctx.m.border;
+
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
         // Cap each column to a min_dim+border window so neighbors never
         // overlap; surplus spills to the next row, bounded by the max_fit loop.
-        const min_col_w: u16 = ctx.min_dim +| 2 *| ctx.m.border;
         const cols_by_count: u16 = (stack_n - row + max_fit - 1) / max_fit;
         const cols_by_width: u16 = @max(1, (w +| ctx.m.gap) / (min_col_w +| ctx.m.gap));
         const cols_in_row: u16 = @max(1, @min(cols_by_count, cols_by_width));
@@ -330,13 +276,19 @@ fn tileStackExtra(
 
         const y_pos = y_offset +| ctx.m.gap +|
             @as(u16, @intCast(@as(u32, row) * @as(u32, row_avail) / @as(u32, max_fit))) +|
-            row *| (ctx.m.gap +| 2 *| ctx.m.border);
+            row *| rowPitch(ctx.m);
         const row_h = windowHeight(row, max_fit, row_avail, ctx.min_dim);
 
         var win_idx: u16 = row;
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
-            tiling.emitView(ctx.v, ctx.out, windows[win_idx], .{ .x = @intCast(x +| ctx.m.gap / 2 +| col *| (col_w +| ctx.m.gap)), .y = @intCast(y_pos), .width = col_inner_w, .height = row_h }, true);
+            const rect = utils.Rect{
+                .x = @intCast(x +| ctx.m.gap / 2 +| col *| (col_w +| ctx.m.gap)),
+                .y = @intCast(y_pos),
+                .width = col_inner_w,
+                .height = row_h,
+            };
+            tiling.emitView(ctx.v, ctx.out, windows[win_idx], rect, true);
         }
     }
 }

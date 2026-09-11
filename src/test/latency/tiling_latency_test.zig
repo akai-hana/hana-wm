@@ -22,7 +22,7 @@ const WindowId = model.WindowId;
 
 const makeModel = helpers.makeModel;
 const regCur = helpers.regCur;
-const nowNs = helpers.nowNs;
+const nowNs = utils.monotonicNs;
 
 const CountingSink = helpers.TestSink(.category);
 
@@ -40,19 +40,9 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         sync.init();
         defer sync.deinit();
 
-        // Warm: seed steady-state ledger (delta-send from here on).
-        var warm = CountingSink{};
-        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
-        sync.reconcile(&m, &warm_ctx, .{});
-
-        // CPU cost of one steady-state reconcile pass (all desire compute +
-        // ledger scans; sends mostly elided by delta-send).
-        var bench = CountingSink{};
-        var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
-        const iterations: usize = 5_000;
-        const t0 = nowNs();
-        for (0..iterations) |_| sync.reconcile(&m, &bench_ctx, .{});
-        const per_pass_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
+        // Warm: seed steady-state ledger, then measure one steady-state reconcile
+        // pass (all desire compute + ledger scans; sends mostly elided).
+        const per_pass_ns = helpers.benchReconcile(&m, 5_000);
 
         // What a single CHANGED pass costs: flip the layout kind so every
         // rect changes -> geometry requests sent for every visible window.
@@ -89,16 +79,8 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         sync.init();
         defer sync.deinit();
 
-        var warm = CountingSink{};
-        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
-        sync.reconcile(&m, &warm_ctx, .{});
-
-        var bench = CountingSink{};
-        var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
-        const iterations: usize = 5_000;
-        const t0 = nowNs();
-        for (0..iterations) |_| sync.reconcile(&m, &bench_ctx, .{});
-        const per_pass_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
+        // Warm, then measure one steady-state reconcile pass.
+        const per_pass_ns = helpers.benchReconcile(&m, 5_000);
 
         std.debug.print(
             "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass (current ws has only {d} windows)\n",
@@ -136,7 +118,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
         .workarea = screen,
         .hints = &hv,
         .focused = m.focused,
-        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
+        .env = helpers.std_env,
     };
     const iterations: usize = 50_000;
     const t0 = nowNs();
@@ -145,15 +127,8 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     }
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 
-    var warm = CountingSink{};
-    var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
-    sync.reconcile(&m, &warm_ctx, .{});
-    var bench = CountingSink{};
-    var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
-    const t1 = nowNs();
-    const iters2: usize = 5_000;
-    for (0..iters2) |_| sync.reconcile(&m, &bench_ctx, .{});
-    const reconcile_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters2));
+    // Warm, then measure the full reconcile-walk pass.
+    const reconcile_ns = helpers.benchReconcile(&m, 5_000);
 
     std.debug.print(
         "[tiling] n={d}: layout.compute={d:.1} ns/pass ({d:.1}% of reconcile), full reconcile walk={d:.1} ns/pass\n",

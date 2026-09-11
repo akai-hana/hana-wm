@@ -13,6 +13,10 @@ pub const Color = u32;
 
 // Keybinding and action types
 
+pub const Dir = enum { forward, reverse };
+pub const SwapMode = enum { normal, focus_swap };
+pub const RestoreOrder = enum { lifo, fifo };
+
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
@@ -22,22 +26,16 @@ pub const Action = union(enum) {
     /// Unconditionally re-exec hana (replaces the running binary with the
     /// one at the resolved executable path), regardless of whether it changed.
     reload_hana,
-    toggle_layout,
-    toggle_layout_reverse,
+    cycle_layout: Dir,
     toggle_bar_visibility,
     toggle_bar_position,
-    increase_master,
-    decrease_master,
-    increase_master_count,
-    decrease_master_count,
-    /// Grow the topmost stack slave's share of the column, shrinking the rest evenly (mod+n).
-    grow_stack_top,
-    /// Grow the bottommost stack slave's share of the column, shrinking the rest evenly (mod+o).
-    grow_stack_bottom,
+    set_master_width: Dir,
+    set_master_count: Dir,
+    /// Grow the topmost/bottommost stack slave's share of the column (mod+n/o).
+    grow_stack: Dir,
     toggle_floating_window,
     toggle_fullscreen,
-    swap_master,
-    swap_master_focus_swap,
+    swap_master: SwapMode,
     switch_workspace: u8,
     move_to_workspace: u8,
     toggle_tag: u8,
@@ -45,30 +43,22 @@ pub const Action = union(enum) {
     sequence: []Action,
     dump_state,
     minimize_window,
-    unminimize_lifo,
-    unminimize_fifo,
+    unminimize: RestoreOrder,
     unminimize_all,
-    cycle_layout_variants,
-    cycle_layout_variants_reverse,
+    cycle_variants: Dir,
     toggle_prompt,
     /// Shows all windows from every workspace at once; toggled on/off.
     all_workspaces,
-    /// Pin focused window to every workspace.
-    move_to_all_workspaces,
-    /// Flip between pinned-to-all and current-workspace-only.
-    toggle_tag_all,
-    /// Cycle focus forward / right.
-    focus_next_window,
-    /// Cycle focus backward / left.
-    focus_prev_window,
+    /// Pin/unpin focused window to every workspace.
+    pin_window,
+    /// Cycle focus forward/right or backward/left.
+    cycle_focus: Dir,
     /// Move focused window forward.
     move_window_next,
     /// Move focused window backward.
     move_window_prev,
-    /// Shift scroll-layout viewport left by one slot.
-    scroll_view_left,
-    /// Shift scroll-layout viewport right by one slot.
-    scroll_view_right,
+    /// Shift scroll-layout viewport left/right by one slot.
+    scroll_view: Dir,
 
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -187,9 +177,8 @@ pub fn resolveKeycodes(keybindings: []Keybind, state: *xkbcommon.XkbState) void 
 /// null when `str` is too long. Shared by the layout-name and string_map
 /// lookups; keyNameToKeysym bypasses it: the C API needs a verbatim
 /// NUL-terminated copy.
-pub inline fn lowerSlice(comptime max_len: usize, str: []const u8) ?[]const u8 {
+pub inline fn lowerSlice(comptime max_len: usize, buf: *[max_len]u8, str: []const u8) ?[]const u8 {
     if (str.len > max_len) return null;
-    var buf: [max_len]u8 = undefined;
     _ = std.ascii.lowerString(buf[0..str.len], str);
     return buf[0..str.len];
 }
@@ -199,7 +188,8 @@ pub inline fn lowerSlice(comptime max_len: usize, str: []const u8) ?[]const u8 {
 /// Returns null when `str` exceeds the buffer or the key is not found.
 pub fn enumFromString(comptime T: type, str: []const u8) ?T {
     const map = T.string_map;
-    return map.get(lowerSlice(32, str) orelse return null);
+    var buf: [32]u8 = undefined;
+    return map.get(lowerSlice(32, &buf, str) orelse return null);
 }
 
 pub const MasterSide = enum {
@@ -414,13 +404,6 @@ pub inline fn freeStrings(
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }
 
-/// Frees one heap-dup'd key/value pair, shared by every tiling.variants
-/// teardown path.
-pub inline fn freeStringPair(allocator: std.mem.Allocator, key: []const u8, value: []const u8) void {
-    allocator.free(key);
-    allocator.free(value);
-}
-
 /// Frees every heap-dup'd key/value in a tiling.variants-style string map,
 /// then either deinits or clears it depending on `retain_capacity`.
 pub fn freeStringMap(
@@ -429,8 +412,20 @@ pub fn freeStringMap(
     retain_capacity: bool,
 ) void {
     var it = map.iterator();
-    while (it.next()) |e| freeStringPair(allocator, e.key_ptr.*, e.value_ptr.*);
+    while (it.next()) |e| {
+        allocator.free(e.key_ptr.*);
+        allocator.free(e.value_ptr.*);
+    }
     if (retain_capacity) map.clearRetainingCapacity() else map.deinit(allocator);
+}
+
+pub inline fn freeBarLayouts(
+    list: *std.ArrayList(BarLayout),
+    allocator: std.mem.Allocator,
+    retain_capacity: bool,
+) void {
+    for (list.items) |*item| item.deinit(allocator);
+    if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }
 
 pub const BarConfig = struct {
@@ -498,23 +493,18 @@ pub const BarConfig = struct {
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStrings(&self.workspace_icons, allocator, false);
         freeStrings(&self.fonts, allocator, false);
-        for (self.layout.items) |*item| item.deinit(allocator);
-        self.layout.deinit(allocator);
+        freeBarLayouts(&self.layout, allocator, false);
         inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused }) |f| if (f.*) |s| allocator.free(s);
     }
 
-    fn drunColor(self: *const BarConfig, comptime color_field: []const u8, comptime fallback_field: []const u8) Color {
-        return @field(self, color_field) orelse @field(self, fallback_field);
-    }
-
     pub inline fn drunBg(self: *const BarConfig) Color {
-        return self.drunColor("drun_bg", "bg");
+        return self.drun_bg orelse self.bg;
     }
     pub inline fn drunFg(self: *const BarConfig) Color {
-        return self.drunColor("drun_fg", "fg");
+        return self.drun_fg orelse self.fg;
     }
     pub inline fn drunPromptColor(self: *const BarConfig) Color {
-        return self.drunColor("drun_prompt_color", "accent_color");
+        return self.drun_prompt_color orelse self.accent_color;
     }
 
     /// Derives horizontal segment padding from font_size.

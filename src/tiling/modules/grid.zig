@@ -6,7 +6,7 @@ const tiling = @import("tiling");
 
 /// Compute grid layout. Full gap between cells and at screen edges; u16
 /// integer-divided cells, last partial row wider in relaxed mode.
-pub fn compute(v: tiling.View, out: *tiling.List) void {
+pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const n = v.order.len;
 
     const m = v.env.margins;
@@ -21,7 +21,7 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
     const win_h = tiling.shrinkClamped(cell_h, bm, v.env.min_dim);
     const win_w = tiling.shrinkClamped(cell_w, bm, v.env.min_dim);
-    const wa_y = tiling.waY(&v);
+    const wa_y = tiling.waY(v);
 
     // In relaxed mode a partial last row shares the full screen width.
     // Core variant index -> relaxed (variant 1 of "rigid"/"relaxed").
@@ -32,19 +32,21 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
         cell_w;
     const partial_win_w: u16 = tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
 
-    var col: u16 = 0;
-    var row: u16 = 0;
-    for (v.order) |win| {
+    for (v.order, 0..) |win, i| {
+        const col: u16 = @intCast(i % grid.cols);
+        const row: u16 = @intCast(i / grid.cols);
         const is_partial_row = last_row_count != 0 and row == grid.rows - 1;
         // Partial-row columns are spaced by the wider partial cell so the
         // relaxed cells don't overlap each other.
         const cell_w_here: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
-        tiling.emitView(&v, out, win, .{ .x = @intCast(m.gap +| col *| (cell_w_here +| m.gap)), .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
-            .width = if (is_partial_row) partial_win_w else win_w, .height = win_h }, true);
-
-        col += 1;
-        if (col == grid.cols) { col = 0; row += 1; }
+        const rect = utils.Rect{
+            .x = @intCast(m.gap +| col *| (cell_w_here +| m.gap)),
+            .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
+            .width = if (is_partial_row) partial_win_w else win_w,
+            .height = win_h,
+        };
+        tiling.emitView(v, out, win, rect, true);
     }
 }
 

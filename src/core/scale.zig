@@ -75,7 +75,7 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
 fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     // Resolve the atom from the shared cache; a property request with atom 0
     // just comes back empty, so a cache miss reads as "no Xft.dpi".
-    const atom = utils.getAtomCached("RESOURCE_MANAGER") catch 0;
+    const atom = utils.getAtomOrZero("RESOURCE_MANAGER");
     const root = screen.*.root;
 
     // Xft.dpi is almost always near the start; a smaller first fetch is

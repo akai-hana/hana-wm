@@ -1,16 +1,24 @@
 //! TOML-subset parser tests: the deterministic in-memory Document layer that
 //! config.zig/schema.zig consume. These exercise the raw parser (parse,
 //! mergeDocumentsInto, parseColor) without touching config loading, keeping
-//! them hermetic and fast.
+//! them hermetic and fast. Every parse lives in a per-test arena, matching
+//! the load-scoped arena the real config pipeline uses.
 
 const std = @import("std");
 const testing = std.testing;
 
 const parser = @import("parser");
 
+/// Parses into the caller's arena (like the load-scoped arena the real config
+/// pipeline uses); the caller owns the arena and frees it after use.
+fn parse(a: std.mem.Allocator, src: []const u8) !parser.Document {
+    return parser.parse(a, src);
+}
+
 test "parses root + named sections into a flat Document" {
-    const alloc = testing.allocator;
-    const src =
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
         \\str_key = "hello"
         \\num = 42
         \\flag = true
@@ -19,9 +27,7 @@ test "parses root + named sections into a flat Document" {
         \\name = "hana"
         \\[general]
         \\extra = 1.5
-    ;
-    var doc = try parser.parse(alloc, src);
-    defer doc.deinit();
+    );
 
     // Root-level keys land on the root section.
     try testing.expectEqualStrings("hello", doc.root.get("str_key").?.asScalar([]const u8).?);
@@ -39,10 +45,9 @@ test "parses root + named sections into a flat Document" {
 }
 
 test "double-quoted strings resolve escapes; single-quoted pass through" {
-    const alloc = testing.allocator;
-    const src = "a = \"line1\\nline2\\ttab\"\n" ++ "b = 'raw\\nnot-an-escape'\n";
-    var doc = try parser.parse(alloc, src);
-    defer doc.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(), "a = \"line1\\nline2\\ttab\"\n" ++ "b = 'raw\\nnot-an-escape'\n");
 
     try testing.expectEqualStrings("line1\nline2\ttab", doc.root.get("a").?.asScalar([]const u8).?);
     // TOML literal strings keep backslashes verbatim.
@@ -50,9 +55,9 @@ test "double-quoted strings resolve escapes; single-quoted pass through" {
 }
 
 test "missing key / missing section yield absent, not panic" {
-    const alloc = testing.allocator;
-    var doc = try parser.parse(alloc, "present = 1\n");
-    defer doc.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(), "present = 1\n");
     try testing.expect(doc.root.get("absent") == null);
     try testing.expect(doc.sections.getPtr("nope") == null);
 }
@@ -69,13 +74,13 @@ test "parseColor accepts forms and rejects out-of-range" {
 }
 
 test "mergeDocumentsInto: later document wins for scalars" {
-    const alloc = testing.allocator;
-    var base = try parser.parse(alloc, "theme = \"dark\"\n[bar]\nheight = 24\n");
-    defer base.deinit();
-    var overlay = try parser.parse(alloc, "theme = \"light\"\n[bar]\nheight = 32\n");
-    defer overlay.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var base = try parser.parse(a, "theme = \"dark\"\n[bar]\nheight = 24\n");
+    var overlay = try parser.parse(a, "theme = \"light\"\n[bar]\nheight = 32\n");
 
-    try parser.mergeDocumentsInto(alloc, &base, &overlay);
+    try parser.mergeDocumentsInto(a, &base, &overlay);
 
     try testing.expectEqualStrings("light", base.root.get("theme").?.asScalar([]const u8).?);
     const bar = base.sections.getPtr("bar").?;
@@ -83,17 +88,16 @@ test "mergeDocumentsInto: later document wins for scalars" {
 }
 
 test "malformed lines are skipped without aborting the parse" {
-    const alloc = testing.allocator;
     // A bad section header and a bad value don't poison the documents; the
     // parser recovers by skipping to the next line.
-    const src =
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
         \\[broken header
         \\good = "value"
         \\[sane]
         \\kept = 7
-    ;
-    var doc = try parser.parse(alloc, src);
-    defer doc.deinit();
+    );
 
     try testing.expectEqualStrings("value", doc.root.get("good").?.asScalar([]const u8).?);
     const sane = doc.sections.getPtr("sane").?;

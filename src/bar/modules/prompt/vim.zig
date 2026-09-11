@@ -45,12 +45,13 @@ const MotionResult = struct {
     range_start_override: ?usize = null,
 };
 
-fn resetPendingCmd(_: *EditorState) void {
+fn resetPendingCmd() void {
     pending = .{};
 }
 
 pub fn onDeactivate(vs: *EditorState) void {
-    resetPendingCmd(vs);
+    _ = vs;
+    resetPendingCmd();
 }
 
 fn enterInsert(vs: *EditorState) void {
@@ -66,9 +67,9 @@ pub fn handleCtrl(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
 
 pub fn handleInsert(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     if (sym == xk_escape) {
-        clampCursorForNormal(vs);
+        clampCursorForMode(vs);
         vs.mode = .normal;
-        resetPendingCmd(vs);
+        resetPendingCmd();
         return .none;
     }
     return prompt.insertChar(vs, sym);
@@ -87,7 +88,7 @@ fn handleOperatorArm(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     if (pending.op == op) {
         applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
     }
-    resetPendingCmd(vs);
+    resetPendingCmd();
     return .none;
 }
 
@@ -95,12 +96,12 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
     switch (sym) {
         xk_escape => {
             const act: Action = if (pending.op == 0 and pending.count == 0) .deactivate else .none;
-            resetPendingCmd(vs);
+            resetPendingCmd();
             return act;
         },
 
         xk_return => {
-            resetPendingCmd(vs);
+            resetPendingCmd();
             return .spawn;
         },
 
@@ -112,7 +113,10 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
 
         '~' => for (0..cnt) |_| toggleCaseOnce(vs),
 
-        'S' => { clearAndYankAll(vs); enterInsert(vs); },
+        'S' => {
+            clearAndYankAll(vs);
+            enterInsert(vs);
+        },
 
         'i', 'I', 'a', 'A' => {
             vs.cursor = if (sym == 'I') firstNonBlank(vs) else if (sym == 'a') @min(vs.cursor + 1, vs.len) else if (sym == 'A') vs.len else vs.cursor;
@@ -122,7 +126,7 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
         else => {},
     }
 
-    resetPendingCmd(vs);
+    resetPendingCmd();
     return .none;
 }
 
@@ -144,8 +148,9 @@ pub fn handleNormal(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
 }
 
 /// Clamp cursor to the last valid position for normal mode.
-inline fn clampCursorForNormal(vs: *EditorState) void {
-    if (vs.cursor >= vs.len) vs.cursor = vs.len -| 1;
+inline fn clampCursorForMode(vs: *EditorState) void {
+    if (vs.len == 0) return;
+    if (vs.cursor >= vs.len) vs.cursor = vs.len - 1;
 }
 
 fn tryAccumulateDigit(sym: xcb.xcb_keysym_t) bool {
@@ -183,8 +188,9 @@ const MotionKeyResult = struct {
 };
 
 inline fn commitMotion(vs: *EditorState, mr: MotionResult) MotionKeyResult {
+    _ = vs;
     const op = pending.op;
-    resetPendingCmd(vs);
+    resetPendingCmd();
     return .{ .mr = mr, .op = op };
 }
 
@@ -202,7 +208,7 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
             const kind = if (sym == ',') reverseFindKind(last_find_kind) else last_find_kind;
             return commitMotion(vs, motionFind(vs, kind, last_find_ch, cnt));
         }
-        resetPendingCmd(vs);
+        resetPendingCmd();
         return .{};
     }
 
@@ -217,7 +223,7 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 
 fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     if (!prompt.isPrintableAscii(sym)) {
-        resetPendingCmd(vs);
+        resetPendingCmd();
         return .{};
     }
     const ch: u8 = @truncate(sym);
@@ -230,7 +236,7 @@ fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyRes
 
 fn resolvePendingGPrefix(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     const pos = resolveGPrefixPos(vs, sym, effectiveCount()) orelse {
-        resetPendingCmd(vs);
+        resetPendingCmd();
         return .{};
     };
     const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
@@ -322,8 +328,14 @@ fn applyOperator(vs: *EditorState, op: u8, mr: MotionResult) void {
     if (from >= to) return;
 
     switch (op) {
-        'd', 'c' => { deleteAndYank(vs, from, to); if (op == 'c') enterInsert(vs); },
-        'y' => { yankRange(vs, from, to); vs.cursor = from; },
+        'd', 'c' => {
+            deleteAndYank(vs, from, to);
+            if (op == 'c') enterInsert(vs);
+        },
+        'y' => {
+            yankRange(vs, from, to);
+            vs.cursor = from;
+        },
         else => {},
     }
 }

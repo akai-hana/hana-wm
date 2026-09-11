@@ -132,33 +132,23 @@ fn writeLiteral(fd: std.posix.fd_t, s: []const u8) void {
 /// Async-signal-safe single-frame line: "  #<depth> 0x<16 hex>\n". Purely
 /// stack-local formatting plus one raw write(2); symbols are resolved offline.
 fn writePcLine(fd: std.posix.fd_t, depth: usize, addr: usize) void {
-    var buf: [4 + 2 + 2 + 1 + 16 + 1]u8 = undefined;
-    var n: usize = 0;
-    buf[n] = ' ';
-    n += 1;
-    buf[n] = ' ';
-    n += 1;
-    buf[n] = '#';
-    n += 1;
-    buf[n] = @as(u8, '0') + @as(u8, @intCast(depth / 10));
-    n += 1;
-    buf[n] = @as(u8, '0') + @as(u8, @intCast(depth % 10));
-    n += 1;
-    buf[n] = ' ';
-    n += 1;
-    buf[n] = '0';
-    n += 1;
-    buf[n] = 'x';
-    n += 1;
+    const hex = "0123456789abcdef";
+    var buf: [8 + 16 + 1]u8 = undefined;
+    buf[0] = ' ';
+    buf[1] = ' ';
+    buf[2] = '#';
+    buf[3] = @as(u8, '0') + @as(u8, @intCast(depth / 10));
+    buf[4] = @as(u8, '0') + @as(u8, @intCast(depth % 10));
+    buf[5] = ' ';
+    buf[6] = '0';
+    buf[7] = 'x';
     var rest = addr;
-    var i = n + 15;
-    while (i >= n) : (i -= 1) {
-        buf[i] = "0123456789abcdef"[rest & 0xf];
+    var i = buf.len - 2;
+    while (i >= 8) : (i -= 1) {
+        buf[i] = hex[rest & 0xf];
         rest >>= 4;
     }
-    n += 16;
-    buf[n] = '\n';
-    n += 1;
+    buf[buf.len - 1] = '\n';
     _ = std.os.linux.write(fd, &buf, buf.len);
 }
 

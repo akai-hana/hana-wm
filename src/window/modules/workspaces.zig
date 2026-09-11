@@ -45,18 +45,17 @@ pub fn applyWorkspaceOverrides(
 ) void {
     const max_ws = constants.max_workspaces;
 
-    // Last-wins (loop-overwrite) lookups, shared with the core seed path;
-    // the rules live on TilingConfig.
-    const layout_lookup = cfg_tiling.workspaceLayoutLookup();
-    const master_count_lookup = cfg_tiling.masterCountLookup();
+    // Last-wins override lookups, shared with the model-seed path in
+    // actions.seedParamsFromConfig (the rules live on TilingConfig).
+    const lookups = @import("actions").seedLookups(cfg_tiling);
 
     for (wss) |*ws| {
         const id = ws.id;
         ws.variants = if (id < max_ws)
-            if (layout_lookup[id]) |oi| cfg_tiling.workspace_layout_overrides.items[oi].variant else null
+            if (lookups.layout[id]) |oi| cfg_tiling.workspace_layout_overrides.items[oi].variant else null
         else
             null;
-        ws.master_count = if (id < max_ws) master_count_lookup[id] else null;
+        ws.master_count = if (id < max_ws) lookups.master_count[id] else null;
     }
 }
 
@@ -90,6 +89,7 @@ pub fn deinit() void {
     tracking.setWorkspaceCount(0);
 }
 
+/// Test-only; the production switch path is `actions.switchTo`.
 pub fn switchTo(m: *model.Model, ws: model.WSId) void {
     m.current = ws;
 }

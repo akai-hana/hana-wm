@@ -27,7 +27,7 @@ pub fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
 
 /// Compute scroll layout: half-screen slots, full gap at screen edges and
 /// half-gap at interior boundaries. Off-viewport slots hidden; offset clamped.
-pub fn compute(v: tiling.View, out: *tiling.List) void {
+pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
 
     const m = v.env.margins;
@@ -45,8 +45,8 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
     const scroll: i32 = @max(0, @min(v.params.viewport_offset, max_off));
 
     // Border subtracted here (once); emitView's applyHints never touches it.
-    const content_h: u16 = tiling.shrinkClamped(screen_h, m.gap *| 2 +| m.border *| 2, v.env.min_dim);
-    const win_y: i32 = @as(i32, @intCast(tiling.waY(&v))) + @as(i32, @intCast(m.gap));
+    const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.fullInset(m), v.env.min_dim);
+    const win_y: i32 = @as(i32, @intCast(tiling.waY(v))) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
     // adjacent windows together share exactly one full gap.
@@ -65,15 +65,18 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
 
         const x: i32 = slot_left + left_inset;
         const avail: i32 = slot_w - left_inset - right_inset - border2;
-        const content_w: u16 = if (avail > v.env.min_dim) @intCast(avail) else v.env.min_dim;
+        const content_w: u16 = @intCast(@max(avail, @as(i32, v.env.min_dim)));
 
         const right: i32 = x + avail + border2;
 
         // Slots entirely off-viewport are parked by the algorithm itself
         // (visibility modeled; sync owns the actual parking geometry).
         // The computed x can exceed i16 range, hence this check BEFORE casting.
-        if (x >= sw_i32 or right <= 0) { tiling.emitHidden(out, win); continue; }
-        tiling.emitView(&v, out, win, .{ .x = @intCast(x), .y = @intCast(win_y), .width = content_w, .height = content_h }, true);
+        if (x >= sw_i32 or right <= 0) {
+            tiling.emitHidden(out, win);
+            continue;
+        }
+        tiling.emitView(v, out, win, .{ .x = @intCast(x), .y = @intCast(win_y), .width = content_w, .height = content_h }, true);
     }
 }
 

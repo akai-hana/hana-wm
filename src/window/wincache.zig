@@ -44,8 +44,8 @@ pub const CacheMap = std.AutoHashMap(u32, WindowData);
 /// Hard upper bound on cached windows.  A normal desktop never exceeds a
 /// few dozen managed windows; 512 is a generous ceiling that prevents
 /// unbounded heap growth from a runaway client without impacting
-/// legitimate use.
-const max_entries = 512;
+/// legitimate use. Shared with icccm's focus-property cache.
+const max_entries = @import("icccm").max_window_cache;
 
 // Module-level singleton
 
@@ -75,10 +75,9 @@ pub fn init(alloc: std.mem.Allocator) void {
 
 pub fn deinit() void {
     if (cache) |*c| {
-        if (title_alloc) |a| {
-            var it = c.iterator();
-            while (it.next()) |e| freeTitle(a, e.value_ptr.title);
-        }
+        const a = title_alloc.?;
+        var it = c.iterator();
+        while (it.next()) |e| freeTitle(a, e.value_ptr.title);
         c.deinit();
     }
     cache = null;
@@ -108,13 +107,18 @@ pub fn cacheSizeHints(win: u32, hints: SizeHints) void {
     wd.hints = hints;
 }
 
+/// Read-only pointer to a live cache entry, or null when the cache is
+/// unavailable or the window is uncached. Shared by the peek* accessors.
+fn dataFor(win: u32) ?*const WindowData {
+    if (getOpt()) |c| return c.getPtr(win);
+    return null;
+}
+
 /// PIPELINE bridge: read-back accessor so actions can copy cached hints into
 /// the model entry at registration time. Defaults when absent.
 pub fn peekHints(win: u32) SizeHints {
-    if (getOpt()) |c| {
-        if (c.get(win)) |wd| return wd.hints;
-    }
-    return .{};
+    const wd = dataFor(win) orelse return .{};
+    return wd.hints;
 }
 
 /// Record `w` as the BORDER_WIDTH last sent to `win`. Returns true when the
@@ -122,7 +126,6 @@ pub fn peekHints(win: u32) SizeHints {
 /// configure_window. Windows without a cache entry always report "changed"
 /// (and gain one) so the first apply after registration is never skipped.
 pub fn cacheBorderWidth(win: u32, w: u16) bool {
-    _ = getOpt() orelse return false;
     const wd = getOrPutDefault(win) catch return false;
     if (wd.applied_border_width) |applied| {
         if (applied == w) return true;
@@ -137,7 +140,8 @@ pub fn cacheBorderWidth(win: u32, w: u16) bool {
 pub fn removeWindow(window_id: u32) void {
     const c = live();
     if (c.getPtr(window_id)) |wd| {
-        if (title_alloc) |a| freeTitle(a, wd.title);
+        const a = title_alloc.?;
+        freeTitle(a, wd.title);
         _ = c.remove(window_id);
     }
 }
@@ -146,15 +150,11 @@ fn updateBorderColor(
     conn: core.Connection,
     win: u32,
     color: u32,
-    comptime create_if_missing: bool,
 ) bool {
-    const wd = if (create_if_missing)
-        // Bounded by max_entries like every other writer: refuse to grow past
-        // the ceiling so WM-churn of distinct windows can't bloat the cache
-        // (the caller falls back to an unconditional send in that case).
-        getOrPutDefault(win) catch return false
-    else
-        live().getPtr(win) orelse return false;
+    // Bounded by max_entries like every other writer: refuse to grow past
+    // the ceiling so WM-churn of distinct windows can't bloat the cache
+    // (the caller falls back to an unconditional send in that case).
+    const wd = getOrPutDefault(win) catch return false;
     if (wd.border == color) return true;
     wd.border = color;
     utils.setBorderPixel(conn, win, color);
@@ -171,7 +171,7 @@ fn updateBorderColor(
 /// back to an unconditional send.
 pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
     const conn = core.getState().conn;
-    return updateBorderColor(conn, win, color, true);
+    return updateBorderColor(conn, win, color);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,11 +247,11 @@ pub fn collectTitleCookies(conn: core.Connection, win: u32, cookies: TitleCookie
     var buf: [title_fetch_len]u8 = undefined;
 
     var title: ?[]const u8 = null;
-    if (net_wm_name) |na| {
-        title = takePropertyReply(conn, cookies.net_wm, na, utf_type, &buf);
+    if (net_wm_name != null) {
+        title = takePropertyReply(conn, cookies.net_wm, utf_type, &buf);
     }
     if (title == null or title.?.len == 0) {
-        title = takePropertyReply(conn, cookies.wm_name, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, &buf);
+        title = takePropertyReply(conn, cookies.wm_name, xcb.XCB_ATOM_STRING, &buf);
     }
     storeTitle(win, title orelse "");
 }
@@ -270,11 +270,9 @@ pub fn refreshTitle(conn: core.Connection, win: u32) void {
 fn takePropertyReply(
     conn: core.Connection,
     cookie: xcb.xcb_get_property_cookie_t,
-    atom: u32,
     atom_type: u32,
     buf: []u8,
 ) ?[]const u8 {
-    _ = atom;
     const reply = utils.collectPropertyReply(conn, cookie) orelse return null;
     defer std.c.free(reply);
     const r = reply.*;
@@ -290,33 +288,28 @@ fn takePropertyReply(
 /// copy (if any). A full cache drops a NEW window's title rather than evicting
 /// an existing one (overwrites of already-cached windows still work).
 fn storeTitle(win: u32, title: []const u8) void {
-    const c = live();
     const alloc = title_alloc orelse return;
+    const c = live();
     const owned = alloc.dupe(u8, title) catch return;
     if (c.getPtr(win)) |wd| {
         freeTitle(alloc, wd.title);
         wd.title = owned;
         return;
     }
-    if (c.count() >= max_entries) {
-        alloc.free(owned);
-        return;
-    }
-    const gop = c.getOrPut(win) catch {
+    // New entry: the shared getOrPutDefault path enforces the at-capacity
+    // drop; overwrites above stay exempt from the ceiling.
+    const wd = getOrPutDefault(win) catch {
         alloc.free(owned);
         return;
     };
-    if (!gop.found_existing) gop.value_ptr.* = .{};
-    gop.value_ptr.title = owned;
+    wd.title = owned;
 }
 
 /// The bar's read path: the cached title for `win`, or "" when absent.
 /// Pure cache hit -- never touches the wire.
 pub fn peekTitle(win: u32) []const u8 {
-    if (getOpt()) |c| {
-        if (c.get(win)) |wd| return wd.title;
-    }
-    return "";
+    const wd = dataFor(win) orelse return "";
+    return wd.title;
 }
 
 test "peekTitle returns cached OR-set title" {

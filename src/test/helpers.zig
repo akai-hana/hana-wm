@@ -2,13 +2,10 @@ const std = @import("std");
 const model = @import("model");
 const utils = @import("utils");
 const sync = @import("sync");
-const linux = std.os.linux;
 
-pub fn nowNs() i128 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
-}
+/// Standard 800x600 test geometry (screen == workarea), shared by the sync
+/// and tiling fixtures so no caller threads it through every init.
+pub const std_wa: utils.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 
 pub fn makeModel() model.Model {
     return .{};
@@ -33,8 +30,22 @@ pub fn makeCtx(
         .workarea = screen,
         .cfg_bw = 2,
         .color_of = color_of,
-        .env = .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 50 },
+        .env = std_env,
     };
+}
+
+/// Warms the sync ledger with one steady-state pass, then times `iterations`
+/// reconcile passes and returns nanoseconds per pass. Shared by the latency
+/// benchmarks (the identical warm+bench pattern in the latency tests).
+pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
+    var warm = TestSink(.count){};
+    var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
+    sync.reconcile(m, &warm_ctx, .{});
+    var bench = TestSink(.count){};
+    var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
+    const t0 = utils.monotonicNs();
+    for (0..iterations) |_| sync.reconcile(m, &bench_ctx, .{});
+    return @as(f64, @floatFromInt(utils.monotonicNs() - t0)) / @as(f64, @floatFromInt(iterations));
 }
 
 pub const TestOp = union(enum) {
@@ -48,10 +59,19 @@ pub const TestOp = union(enum) {
 
 pub const SinkMode = enum {
     count,
-    parks,
     category,
     record,
+    none,
 };
+
+/// Standard test margin/min_dim tuning shared by the sync/tiling fixtures.
+pub const std_env: @FieldType(sync.Ctx, "env") = .{
+    .margins = .{ .gap = 8, .border = 2 },
+    .min_dim = 50,
+};
+
+/// Default config-order layout cycle, used by the model and tiling tests.
+pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci" };
 
 pub fn TestSink(comptime mode: SinkMode) type {
     return struct {
@@ -63,73 +83,44 @@ pub fn TestSink(comptime mode: SinkMode) type {
         geom: usize = 0,
         bw: usize = 0,
         pixel: usize = 0,
-        grab: usize = 0,
         total: usize = 0,
         ops: std.ArrayList(TestOp) = .empty,
 
-        fn mapShim(self_ptr: *anyopaque, win: model.WindowId) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
+        fn bump(self: *Self, comptime tag: std.meta.Tag(TestOp), payload: TestOp) void {
             switch (mode) {
-                .record => self.ops.append(std.testing.allocator, .{ .map = win }) catch unreachable,
+                .record => self.ops.append(std.testing.allocator, payload) catch unreachable,
                 .count => self.count += 1,
                 .category => {
-                    self.map += 1;
+                    @field(self, @tagName(tag)) += 1;
                     self.total += 1;
                 },
-                .parks => {},
+                .none => {},
             }
+        }
+
+        fn mapShim(self_ptr: *anyopaque, win: model.WindowId) void {
+            const self: *Self = @ptrCast(@alignCast(self_ptr));
+            self.bump(.map, .{ .map = win });
         }
 
         fn geomShim(self_ptr: *anyopaque, win: model.WindowId, rect: utils.Rect, stack: ?sync.Stack) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            switch (mode) {
-                .record => self.ops.append(std.testing.allocator, .{ .geom = .{ .win = win, .rect = rect, .stack = stack } }) catch unreachable,
-                .count => self.count += 1,
-                .category => {
-                    self.geom += 1;
-                    self.total += 1;
-                },
-                .parks => {},
-            }
+            self.bump(.geom, .{ .geom = .{ .win = win, .rect = rect, .stack = stack } });
         }
 
         fn bwShim(self_ptr: *anyopaque, win: model.WindowId, w: u16) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            switch (mode) {
-                .record => self.ops.append(std.testing.allocator, .{ .bw = .{ .win = win, .w = w } }) catch unreachable,
-                .count => self.count += 1,
-                .category => {
-                    self.bw += 1;
-                    self.total += 1;
-                },
-                .parks => {},
-            }
+            self.bump(.bw, .{ .bw = .{ .win = win, .w = w } });
         }
 
         fn pixelShim(self_ptr: *anyopaque, win: model.WindowId, p: u32) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            switch (mode) {
-                .record => self.ops.append(std.testing.allocator, .{ .pixel = .{ .win = win, .p = p } }) catch unreachable,
-                .count => self.count += 1,
-                .category => {
-                    self.pixel += 1;
-                    self.total += 1;
-                },
-                .parks => {},
-            }
+            self.bump(.pixel, .{ .pixel = .{ .win = win, .p = p } });
         }
 
         fn parkShim(self_ptr: *anyopaque, win: model.WindowId) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            switch (mode) {
-                .record => self.ops.append(std.testing.allocator, .{ .park = win }) catch unreachable,
-                .count => self.count += 1,
-                .category => {
-                    self.park += 1;
-                    self.total += 1;
-                },
-                .parks => self.count += 1,
-            }
+            self.bump(.park, .{ .park = win });
         }
 
         fn stackShim(self_ptr: *anyopaque, win: model.WindowId, s: sync.Stack) void {
@@ -141,10 +132,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
 
         fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
         fn flushShim(_: *anyopaque) void {}
-        fn grabShim(self_ptr: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
-            if (mode == .category) self.grab += 1;
-        }
+        fn grabShim(_: *anyopaque) void {}
         fn ungrabShim(_: *anyopaque) void {}
 
         pub fn sink(self: *Self) sync.Sink {
@@ -167,10 +155,6 @@ pub fn TestSink(comptime mode: SinkMode) type {
 
         pub fn clear(self: *Self) void {
             if (mode == .record) self.ops.clearRetainingCapacity();
-        }
-
-        pub fn reset(self: *Self) void {
-            self.* = .{};
         }
 
         pub fn deinit(self: *Self) void {

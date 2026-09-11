@@ -1,5 +1,14 @@
 //! Configuration parser.
 //! Parses hana's TOML-inspired configuration format into structured values.
+//!
+//! Ownership model: every document produced by one load borrows from a single
+//! load-scoped arena (the caller's `allocator`). String values are slices into
+//! the source `content` where possible, and cross-document merging SHARES
+//! keys and values rather than deep-copying them, because all documents in a
+//! load share one allocator. This is only sound when every `parse`/`merge` in
+//! a load is called with the same arena-backed allocator; the arena reset at
+//! the end of the load reclaims everything, so Document/Section/Value own
+//! nothing and have no deinit.
 
 const std = @import("std");
 const debug = @import("debug");
@@ -17,14 +26,6 @@ pub const ScalableValue = struct {
         return .{ .value = val, .is_percentage = true };
     }
 };
-
-/// Frees every owned value in `arr` (its elements' strings/arrays) and then
-/// the array's backing storage, in that order. Shared by Value.deinit and the
-/// errdefer teardown of the partially built arrays in merging and parsing.
-pub fn deinitValues(arr: *std.ArrayList(Value), allocator: std.mem.Allocator) void {
-    for (arr.items) |*item| item.deinit(allocator);
-    arr.deinit(allocator);
-}
 
 pub const Value = union(enum) {
     integer: i64,
@@ -84,14 +85,6 @@ pub const Value = union(enum) {
             else => null,
         };
     }
-
-    pub fn deinit(self: *Value, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .string => |s| allocator.free(s),
-            .array => |*arr| deinitValues(arr, allocator),
-            else => {},
-        }
-    }
 };
 
 pub const Section = struct {
@@ -112,18 +105,6 @@ pub const Section = struct {
         var consumed = std.StringHashMap(void).init(allocator);
         consumed.ensureTotalCapacity(4) catch {};
         return .{ .pairs = map, .consumed = consumed };
-    }
-
-    pub fn deinit(self: *Section, allocator: std.mem.Allocator) void {
-        self.keys_in_order.deinit(allocator);
-        var iter = self.pairs.iterator();
-        while (iter.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            var val = entry.value_ptr.*;
-            val.deinit(allocator);
-        }
-        self.pairs.deinit();
-        self.consumed.deinit();
     }
 
     // Records `key` as the newest document-order key. Best-effort: an OOM
@@ -206,17 +187,6 @@ pub const Document = struct {
         return .{ .allocator = allocator, .sections = sections, .root = Section.init(allocator) };
     }
 
-    pub fn deinit(self: *Document) void {
-        self.root.deinit(self.allocator);
-
-        var section_iter = self.sections.iterator();
-        while (section_iter.next()) |section_entry| {
-            self.allocator.free(section_entry.key_ptr.*);
-            section_entry.value_ptr.deinit(self.allocator);
-        }
-        self.sections.deinit();
-    }
-
     pub fn getSection(self: *Document, name: []const u8) ?*Section {
         return self.sections.getPtr(name);
     }
@@ -228,75 +198,30 @@ pub const Document = struct {
 
 // Document merging
 
-// Deep-copies a Value; string and array contents are newly allocated.
-// Integer, boolean, color, and scalable values are plain copies.
-fn deepCopyValue(allocator: std.mem.Allocator, val: Value) std.mem.Allocator.Error!Value {
-    return switch (val) {
-        .string => |s| .{ .string = try allocator.dupe(u8, s) },
-        .array => |arr| blk: {
-            var new_arr = try std.ArrayList(Value).initCapacity(allocator, arr.items.len);
-            errdefer deinitValues(&new_arr, allocator);
-            for (arr.items) |item| new_arr.appendAssumeCapacity(try deepCopyValue(allocator, item));
-            break :blk .{ .array = new_arr };
-        },
-        else => val,
-    };
-}
-
 // Wraps `old_val` in a fresh array if it isn't one already, so callers can
-// append into it. On error, `old_val` is left untouched.
+// append into it.
 fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
     if (old_val.* == .array) return;
     var arr = try std.ArrayList(Value).initCapacity(allocator, 1);
-    errdefer deinitValues(&arr, allocator);
     arr.appendAssumeCapacity(old_val.*);
     old_val.* = .{ .array = arr };
 }
 
-// Accumulates `incoming` into `old_val`. When `do_copy` is true elements are
-// deep-copied (for cross-document merging); when false they transfer by
-// ownership (for within-file duplicate keys). An array-valued `incoming` is
-// flattened. Scalar getters resolve to the LAST element (later files win);
-// asArray sees the full accumulation so keybinds, `include`, `layouts`, etc.
-// chain.
+// Accumulates `incoming` into `old_val`. An array-valued `incoming` is
+// flattened. Values are SHARED, never copied: all documents in a load share
+// one arena, so pointers stay valid until the load's arena reset. Scalar
+// getters resolve to the LAST element (later files win); asArray sees the
+// full accumulation so keybinds, `include`, `layouts`, etc. chain.
 fn accumulate(
     allocator: std.mem.Allocator,
     old_val: *Value,
     incoming: Value,
-    comptime do_copy: bool,
 ) !void {
     try ensureArray(allocator, old_val);
     if (incoming == .array) {
-        var inc = incoming;
-        const start = old_val.array.items.len;
-        for (inc.array.items) |item| {
-            const v = if (do_copy) try deepCopyValue(allocator, item) else item;
-            old_val.array.append(allocator, v) catch |err| {
-                // OOM mid-merge: release everything this call acquired so a
-                // failed accumulate leaks nothing on either path. `tail` is
-                // the deep copies already appended (do_copy only; captured as
-                // a slice header BEFORE the shrink, since the shrink resets
-                // items.len and would make re-indexing stale), and `inc` owns
-                // all its elements in both modes (transferred values on
-                // do_copy=false, source values on do_copy=true).
-                const tail = old_val.array.items[start..];
-                for (tail) |*owned| if (do_copy) owned.deinit(allocator);
-                old_val.array.shrinkRetainingCapacity(start);
-                for (inc.array.items) |*owned| owned.deinit(allocator);
-                inc.array.deinit(allocator);
-                return err;
-            };
-        }
-        if (do_copy) {
-            for (inc.array.items) |*item| item.deinit(allocator);
-        }
-        inc.array.deinit(allocator);
+        const inc = incoming;
+        try old_val.array.appendSlice(allocator, inc.array.items);
     } else {
-        // do_copy=true: `incoming` is already a fresh deep copy owned by the
-        // caller (freed by its errdefer on error), so take it by ownership
-        // rather than copying again -- re-copying leaked the original for the
-        // scalar duplicate-key path. do_copy=false transfers the parser's own
-        // value the same way.
         try old_val.array.append(allocator, incoming);
     }
 }
@@ -304,7 +229,8 @@ fn accumulate(
 // Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
 // exactly as within one file: a keybind in two files runs both actions.
 // Scalar reads resolve to the last declaration (later file wins); array
-// reads see the full accumulation; `src` is unmodified.
+// reads see the full accumulation; `src` is unmodified. Keys and values are
+// shared (arena), so nothing is copied or freed.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
     var iter = src.orderedIterator();
     while (iter.next()) |entry| {
@@ -314,17 +240,10 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
             // Duplicate key: accumulate into an array, flattening an
             // array-valued `incoming` so two files declaring an array produce
             // one flat array rather than an array-of-arrays.
-            const incoming = try deepCopyValue(allocator, src_val);
-            errdefer {
-                var v = incoming;
-                v.deinit(allocator);
-            }
-            try accumulate(allocator, old_val, incoming, true);
+            try accumulate(allocator, old_val, src_val);
         } else {
-            const key_copy = try allocator.dupe(u8, src_key);
-            errdefer allocator.free(key_copy);
-            try dst.pairs.put(key_copy, try deepCopyValue(allocator, src_val));
-            dst.recordKey(allocator, key_copy);
+            try dst.pairs.put(src_key, src_val);
+            dst.recordKey(allocator, src_key);
         }
     }
 }
@@ -346,12 +265,9 @@ pub fn mergeDocumentsInto(
         if (dst.sections.getPtr(name)) |dst_sec| {
             try mergeSectionsInto(allocator, dst_sec, entry.value_ptr);
         } else {
-            var new_sec = Section.init(allocator);
-            errdefer new_sec.deinit(allocator);
-            try mergeSectionsInto(allocator, &new_sec, entry.value_ptr);
-            const name_copy = try allocator.dupe(u8, name);
-            errdefer allocator.free(name_copy);
-            try dst.sections.put(name_copy, new_sec);
+            // Share the section (and its name) as-is: both documents live in
+            // the same arena, and nothing is freed until the load's reset.
+            try dst.sections.put(name, entry.value_ptr.*);
         }
     }
 }
@@ -459,7 +375,7 @@ const Parser = struct {
         _ = self.consume();
 
         const name = std.mem.trim(u8, self.content[start .. self.pos - 1], " \t");
-        return if (name.len > 0) try self.allocator.dupe(u8, name) else ParseError.InvalidSection;
+        return if (name.len > 0) name else ParseError.InvalidSection;
     }
 
     fn parseKey(self: *Parser) ParseError![]const u8 {
@@ -471,8 +387,10 @@ const Parser = struct {
                 else => self.pos += 1,
             }
         }
+        // A slice into `content` (arena-backed by the caller), like every
+        // parsed string: nothing is duped or freed.
         const key = self.content[start..self.pos];
-        return if (key.len > 0) try self.allocator.dupe(u8, key) else ParseError.InvalidSyntax;
+        return if (key.len > 0) key else ParseError.InvalidSyntax;
     }
 
     fn parseString(self: *Parser) ParseError![]const u8 {
@@ -481,7 +399,6 @@ const Parser = struct {
             self.allocator,
             32,
         ) catch return ParseError.OutOfMemory;
-        errdefer result.deinit(self.allocator);
         while (self.peek()) |c| {
             if (c == quote) {
                 _ = self.consume();
@@ -526,7 +443,6 @@ const Parser = struct {
 
         _ = self.consume();
         var array = try std.ArrayList(Value).initCapacity(self.allocator, 8);
-        errdefer deinitValues(&array, self.allocator);
 
         while (true) {
             self.skipWhitespaceAndNewlines();
@@ -589,7 +505,7 @@ const Parser = struct {
     // Interprets a single bare token as a Value. Every scalar form a bare
     // token can take is handled here: boolean, percentage, decimal, color,
     // integer, with the unrecognised-token string fallback last.
-    fn parseBareTokenValue(self: *Parser, raw: []const u8) ParseError!Value {
+    fn parseBareTokenValue(_: *Parser, raw: []const u8) ParseError!Value {
         if (std.mem.eql(u8, raw, "true")) return .{ .boolean = true };
         if (std.mem.eql(u8, raw, "false")) return .{ .boolean = false };
 
@@ -621,7 +537,8 @@ const Parser = struct {
         if (std.fmt.parseInt(i64, raw, 10)) |int_val| return .{ .integer = int_val } else |_| {
             // Not a color/integer/boolean/percentage: an unquoted bare string,
             // so layout or action names without quotes parse without error.
-            return .{ .string = try self.allocator.dupe(u8, raw) };
+            // `raw` is a slice into `content`; nothing is duped.
+            return .{ .string = raw };
         }
     }
 
@@ -632,7 +549,6 @@ const Parser = struct {
     // belong to parseArray); semicolons are likewise left to the pair parser.
     fn parseBareValues(self: *Parser) ParseError!Value {
         var items: std.ArrayList(Value) = .empty;
-        errdefer deinitValues(&items, self.allocator);
 
         while (true) {
             self.skipWhitespace();
@@ -650,9 +566,7 @@ const Parser = struct {
 
         if (items.items.len == 0) return ParseError.InvalidValue;
         if (items.items.len == 1) {
-            const single = items.swapRemove(0);
-            items.deinit(self.allocator);
-            return single;
+            return items.swapRemove(0);
         }
         return .{ .array = items };
     }
@@ -680,7 +594,6 @@ const Parser = struct {
     // Workspace rule entries like `Navigator` rely on the bare-key shorthand.
     fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
         const key = try self.parseKey();
-        errdefer self.allocator.free(key);
         self.skipWhitespace();
 
         if (self.peek() == '=') {
@@ -696,16 +609,11 @@ const Parser = struct {
     // into arrays so a repeated keybind or include runs all declarations.
     fn parsePairs(self: *Parser, section: *Section) ParseError!void {
         while (true) {
-            var kv = self.parseKeyValuePair() catch |err| {
+            const kv = self.parseKeyValuePair() catch |err| {
                 debug.warn("Invalid key-value at line {}: {}", .{ self.line, err });
                 self.skipToNewline();
                 continue;
             };
-
-            errdefer {
-                self.allocator.free(kv[0]);
-                kv[1].deinit(self.allocator);
-            }
 
             if (section.pairs.getPtr(kv[0])) |old| {
                 // Duplicate key: accumulate both values into an array rather
@@ -716,8 +624,7 @@ const Parser = struct {
                 //
                 // parseKeybindings treats array values as sequences; scalar
                 // reads of a repeated key resolve to the last declaration.
-                try accumulate(self.allocator, old, kv[1], false);
-                self.allocator.free(kv[0]);
+                try accumulate(self.allocator, old, kv[1]);
             } else {
                 try section.pairs.put(kv[0], kv[1]);
                 section.recordKey(self.allocator, kv[0]);
@@ -746,9 +653,14 @@ const Parser = struct {
     }
 };
 
+/// Parses `content` into a Document. The caller must back `allocator` with a
+/// load-scoped arena: string values alias `content` (and the arena for
+/// escaped strings/arrays), merging shares values across documents, and a
+/// parse/merge error abandons the partial document to the arena reset. The
+/// Document owns nothing; `content` must stay alive (arena-backed) until the
+/// arena reset.
 pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
     var doc = Document.init(allocator);
-    errdefer doc.deinit();
 
     var p = Parser.init(allocator, content);
     var current_section: *Section = &doc.root;
@@ -777,13 +689,11 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
                 p.skipToNewline();
                 continue;
             };
-            errdefer allocator.free(section_name);
 
             if (doc.sections.getPtr(section_name)) |existing| {
                 // Duplicate section header: keep filling the existing section
                 // so duplicate keys accumulate as if the blocks were one
                 // section, consistent with the cross-file merge path.
-                allocator.free(section_name);
                 current_section = existing;
             } else {
                 try doc.sections.put(section_name, Section.init(allocator));

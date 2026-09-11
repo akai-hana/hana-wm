@@ -28,7 +28,7 @@ test "focus: property-less window is passive; apply lands input focus" {
     fx.flush();
 
     try std.testing.expectEqual(win, fx.inputFocus());
-    try std.testing.expect(m.focused != null and m.focused.? == win);
+    try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expectEqual(win, (fx.rootActiveWindow() orelse return error.MissingActiveWindow));
 
     // Already-applied window: a repeated prepare is a pure dedup no-op.
@@ -48,7 +48,7 @@ test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
     fx.flush();
 
     try std.testing.expectEqual(win, fx.inputFocus());
-    try std.testing.expect(m.focused != null and m.focused.? == win);
+    try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expect(focus.prepareFocus(win, .user_command, null) == .none);
 }
 
@@ -63,7 +63,7 @@ test "focus: no_input window refuses focus (none transition)" {
 
     const t = focus.prepareFocus(win, .user_command, null);
     try std.testing.expect(t == .none);
-    try std.testing.expect(m.focused != null and m.focused.? == win); // model untouched
+    try std.testing.expectEqual(win, m.focused.?); // model untouched
 }
 
 test "focus: switching to an empty workspace clears input focus to root" {

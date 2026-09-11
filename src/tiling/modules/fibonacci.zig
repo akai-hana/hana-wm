@@ -4,6 +4,7 @@
 const utils = @import("utils");
 const model = @import("model");
 const tiling = @import("tiling");
+const Region = tiling.Region;
 
 // Counter-clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
@@ -35,14 +36,14 @@ const SpiralDirection = enum(u2) {
 };
 
 /// Compute Fibonacci spiral layout. Outer gap stripped first; each split
-/// halves the remaining dimension with one gap at the seam. Drawn by value;
-/// helpers take a pointer to avoid copies in the recursive path.
-pub fn compute(v: tiling.View, out: *tiling.List) void {
+/// halves the remaining dimension with one gap at the seam. Drawn by pointer;
+/// helpers take the pointer to avoid copies in the recursive path.
+pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     const border2 = utils.doubledBorder(m);
 
     const outer = tiling.outerArea(v.workarea, m.gap);
-    var cur = Cursor{
+    var cur = Region{
         .x = outer.x,
         .y = outer.y,
         .w = outer.w,
@@ -52,39 +53,18 @@ pub fn compute(v: tiling.View, out: *tiling.List) void {
 
     const windows = v.order;
     for (windows, 0..) |win, i| {
-        // Too small to split: raise a window and push the rest offscreen.
-        if (cur.w < m.gap * 2 + border2 or cur.h < m.gap * 2 + border2) {
-            const top_rect = tiling.insetRect(cur.x, cur.y, cur.w, cur.h, border2, v.env.min_dim);
-            // Raise focusedElse's pick among the overflow set and park the rest.
-            const top = tiling.focusedElse(&v, windows[i..], windows[i]);
-            tiling.emitView(&v, out, top, top_rect, true);
-            tiling.showOneHideRest(out, windows[i..], top);
+        const last = i == windows.len - 1;
+        if (last or cur.w < m.gap * 2 + border2 or cur.h < m.gap * 2 + border2) {
+            const top = if (last) win else tiling.focusedElse(v, windows[i..], windows[i]);
+            tiling.emitView(v, out, top, tiling.insetRect(cur.x, cur.y, cur.w, cur.h, border2, v.env.min_dim), true);
+            if (!last) tiling.showOneHideRest(out, windows[i..], top);
             return;
         }
 
-        if (i == windows.len - 1) {
-            const rect = utils.Rect{
-                .x = @intCast(cur.x),
-                .y = @intCast(cur.y),
-                .width = cur.w -| border2,
-                .height = cur.h -| border2,
-            };
-            tiling.emitView(&v, out, win, rect, true);
-            return;
-        }
-
-        splitAndAdvance(&v, out, win, dir, border2, m.gap, &cur);
+        splitAndAdvance(v, out, win, dir, border2, m.gap, &cur);
         dir = dir.next();
     }
 }
-
-// Mutable cursor tracking the remaining screen area as windows are placed.
-const Cursor = struct {
-    x: i32,
-    y: i32,
-    w: u16,
-    h: u16,
-};
 
 inline fn splitAndAdvance(
     v: *const tiling.View,
@@ -93,7 +73,7 @@ inline fn splitAndAdvance(
     dir: SpiralDirection,
     border2: u16,
     gap: u16,
-    cur: *Cursor,
+    cur: *Region,
 ) void {
     const step = dir.step();
     const split_x = step.split_x;

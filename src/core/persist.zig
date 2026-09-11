@@ -142,18 +142,21 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     // mid-loop dupe failure only the already-filled records are freed.
     var workspaces: [MAX_WS]WsRecord = undefined;
     var ws_filled: usize = 0;
+    for (&m.ws, 0..) |*s, i| {
+        const tiled = try allocator.dupe(u32, s.tiled_order.constSlice());
+        errdefer allocator.free(tiled);
+        const mru = try allocator.dupe(u32, s.focus_mru.constSlice());
+        workspaces[i] = .{
+            .params = s.params,
+            .tiled = tiled,
+            .mru = mru,
+        };
+        ws_filled = i + 1;
+    }
     defer for (workspaces[0..ws_filled]) |r| {
         allocator.free(r.tiled);
         allocator.free(r.mru);
     };
-    for (&m.ws, 0..) |*s, i| {
-        workspaces[i] = .{
-            .params = s.params,
-            .tiled = try allocator.dupe(u32, s.tiled_order.constSlice()),
-            .mru = try allocator.dupe(u32, s.focus_mru.constSlice()),
-        };
-        ws_filled = i + 1;
-    }
 
     const state = StateFile{
         .version = persist_version,

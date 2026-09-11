@@ -1,5 +1,3 @@
-//! The plugin interface contract.
-//!
 //! The pluggable-composition contract for the self-containment architecture.
 //! This file defines the TYPES that optional subsystems bind to; it names no
 //! subsystem by module name. Registration lives in build-GENERATED modules
@@ -8,27 +6,23 @@
 //!
 //! `Surfaces` is the interface the chrome-surface module (today: the bar)
 //! binds to. It stays the sole export of the build-generated `plugins` module
-//! (`plugins.Surfaces`), which is injected into every module, so chrome-
-//! surface consumers never name the bar module directly and the bar family
-//! stays byte-identical.
+//! (`plugins.Surfaces`), injected into every module, so chrome-surface
+//! consumers never name the bar module directly.
 //!
 //! `WindowModule` is the flat, all-optional-hook interface every module under
-//! a window-owner's `modules/` directory binds to (see build.zig's per-owner
-//! `modules` registry generation). Sub-system registration is build-time, not
-//! merged here: build.zig scans each owner's `modules/` and emits an array of
-//! every discovered module's `module` value in a generated `<owner>_modules`
-//! module, which core tiers iterate with uniform dispatch loops. No merged
-//! single struct, no per-sub-system partial types; just one hook set with
-//! `null` for hooks a module doesn't own.
+//! a window-owner's `modules/` directory binds to. Registration is build-time:
+//! build.zig scans each owner's `modules/` and emits a generated
+//! `<owner>_modules` module, which core tiers iterate with uniform dispatch
+//! loops — no merged struct, no per-sub-system partial types, `null` for hooks
+//! a module doesn't own.
 //!
 //! Key seams:
 //!   - `serializeWindow(m-const, win, alloc)` -- returns an opaque per-window
 //!     blob for restart persistence, or null. The model is passed as a
-//!     READ-ONLY `*const model.Model` (serialization never mutates; writing
-//!     through it is a compile error), cast from persist's const handle --
-//!     no `@constCast`. Each module decides from the model state whether it
-//!     owns the window's blob (presence-driven), so at most one blob exists
-//!     per window.
+//!     READ-ONLY `*const model.Model` (writing through it is a compile error),
+//!     cast from persist's const handle -- no `@constCast`. Each module
+//!     decides from the model state whether it owns the window's blob
+//!     (presence-driven), so at most one blob exists per window.
 //!   - `deserializeWindow(win, blob, m-as-*anyopaque)` -- returns a "claimed"
 //!     bool. Hooks self-identify via a format tag (magic byte) inside the
 //!     blob, so the registry adoption loop can't mis-claim another module's
@@ -42,6 +36,11 @@ const xcb = core.xcb;
 const types = @import("types");
 const utils = @import("utils");
 const model = @import("model");
+
+/// Casts the `*anyopaque` blob handle from the deserialize seam to the model.
+pub inline fn modelPtrOf(ptr: *anyopaque) *model.Model {
+    return @ptrCast(@alignCast(ptr));
+}
 
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
@@ -88,12 +87,8 @@ pub const Surfaces = struct {
 
 /// The window sub-system hook set. Every module under a window-owner's
 /// `modules/` directory binds its `pub const module` value to this type,
-/// binding only the hooks it owns (everything else stays `null`). Core tiers
-/// reach the compiled-in sub-systems by iterating the build-generated
-/// `window_modules.modules` array with uniform dispatch loops (each loop
-/// calls the hook on every module that provides it and the absent ones are
-/// simply skipped, so nothing is merged and none of these is ever a no-op
-/// stub. Dispatch order == the array's order == deterministic filesystem scan
+/// binding only the hooks it owns (everything else stays `null`). Dispatch
+/// order == the generated registry's order == deterministic filesystem scan
 /// order.
 pub const WindowModule = struct {
     // Lifecycle. Uniform `anyerror!void` so the dispatch loop can `try` each.
@@ -117,11 +112,7 @@ pub const WindowModule = struct {
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
     armPendingBarHide: ?*const fn (u32) void = null,
     armPendingBarShow: ?*const fn (u32) void = null,
-    // ----------------------------------------------------------------
-    // Hide/restore family (bound by the minimize module; the module's own
-    // file keeps its "minimize" words; the contract uses model vocabulary
-    // for the seam — "hide" / "restore" / "hidden").
-    // ----------------------------------------------------------------
+    // ---------- Hide/restore family (minimize module; model vocabulary) ----------
     /// Hide a window (minimize): parks the model entry and stashes the
     /// tiled slot. At most one module binds this.
     hideWindow: ?*const fn (*model.Model, model.WindowId) anyerror!void = null,
@@ -153,12 +144,7 @@ pub const WindowModule = struct {
         std.mem.Allocator,
     ) void = null,
 
-    // ----------------------------------------------------------------
-    // Screen-covering family (bound by the fullscreen module; contract
-    // uses the model's own pattern vocabulary — the model doc names the
-    // pattern `covering` for "owns the screen on some workspace"; the
-    // module file keeps its "fullscreen" words).
-    // ----------------------------------------------------------------
+    // ---------- Screen-covering family (fullscreen module; model vocabulary) ----------
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
     toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
@@ -176,10 +162,7 @@ pub const WindowModule = struct {
     /// this.
     coveringOccupantOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
 
-    // ----------------------------------------------------------------
-    // Workspaces family (bound by the workspaces module; contract uses
-    // model's `WSId` vocabulary).
-    // ----------------------------------------------------------------
+    // ---------- Workspaces family (workspaces module) ----------
     /// Move `win` to a single tag `ws` (mask replaces; home-list
     /// follows). At most one module binds this.
     sendToWs: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
@@ -194,10 +177,7 @@ pub const WindowModule = struct {
     /// Toggle all-view mode; returns true when entering.
     toggleAllView: ?*const fn (*model.Model) bool = null,
 
-    // ----------------------------------------------------------------
-    // Floating family (bound by the floating module; "floating" IS model
-    // vocabulary — model.BaseMode.floating — so these names are fine).
-    // ----------------------------------------------------------------
+    // ---------- Floating family (floating module; "floating" is model vocabulary) ----------
     /// Update a floating window's rect on the model (no-op for
     /// tiled/unknown).
     setFloatingRect: ?*const fn (*model.Model, model.WindowId, utils.Rect) void = null,
@@ -220,8 +200,9 @@ pub const WindowModule = struct {
     cancelDragForWindow: ?*const fn (u32) void = null,
 };
 
-/// First module in `registry` that binds the hook `field`, in the registry's
-/// deterministic scan order. Returns null when no compiled-in module provides
+/// The single canonical registry-lookup entry: the first module in `registry`
+/// that binds the hook `field`, in the registry's deterministic scan order.
+/// Returns null when no compiled-in module provides
 /// the hook (the "no owner" fallback). Core callers use this to reach a
 /// window subsystem through the build-generated registry, never by naming a
 /// module. The registry is passed in (not captured) so the contract module
@@ -335,16 +316,16 @@ pub const Segment = struct {
 /// this contract, so adding a layout is a drop-in file and removing one just
 /// shortens the registry (kind restore falls back to the first entry).
 ///
-/// Type-free seams: `view`/`out` are `*const View`/`*List` (the interchange
-/// vocabulary defined next to this contract below); the cast happens inside
-/// each module. `params` is `*model.LayoutParams` for the per-layout
-/// pre-reconcile duty (scroll viewport snapping).
+/// `compute` receives the interchange vocabulary typed directly: `view` is
+/// `*const View` and `out` a `*List` to append placements to (both defined
+/// next to this contract below). `params` is `*model.LayoutParams` for the
+/// per-layout pre-reconcile duty (scroll viewport snapping).
 pub const Layout = struct {
     /// Canonical name ("master", "monocle", ...). Config text resolves to the
     /// module by name; names also drive the cycle order (config order wins).
     name: []const u8 = "",
     /// Placement computation; must append exactly one placement per window.
-    compute: ?*const fn (*const anyopaque, *anyopaque) void = null,
+    compute: ?*const fn (*const View, *List) void = null,
     /// Number of variants this layout exposes for cycle_variant actions.
     variant_count: u8 = 1,
     /// Variant index that toggles "fifo" spawn behavior (master-stack), if any.
@@ -424,7 +405,7 @@ pub const HintsView = struct {
 /// per-layout booleans that each new layout would grow. Resolved from config
 /// by the reconciler's caller; the core carries no layout-feature booleans.
 pub const Env = struct {
-    margins: utils.Margins = .{ .gap = 0, .border = 0 },
+    margins: utils.Margins = .{},
     min_dim: u16 = 0,
     primary_on_right: bool = false,
     variant_idx: u8 = 0,
