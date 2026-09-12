@@ -261,6 +261,14 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
         kind == .switch_,
     );
 
+    // Deterministic fullscreen-exit reaction: the model no longer has a
+    // covering occupant the moment the toggle lands, so bump the fact now.
+    // The deferred bar-show arm waits for a non-fullscreen ConfigureNotify,
+    // which never arrives when a window's restored anchor IS the screen size
+    // (the model just restores it in place) -- the bar would stay hidden
+    // until some unrelated event happened to bubble the fact.
+    if (kind == .exit) core.fullscreen.bump();
+
     // Completion of the transition is synchronous: run time elapsed
     // already covers the reconcile + immediate bar hide (enter) and the
     // ungrabAndFlush, i.e. the visual-completion point.
