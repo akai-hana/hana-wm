@@ -16,10 +16,16 @@
 //! never be selected from config, so the bar never asks it for width or a
 //! draw; its hooks are real, copy-pasteable code that neither claims a slot
 //! nor paints anything. Drop it into `src/bar/modules/` and `zig build test`
-//! stays identical (110/110) — that is the contract's litmus test.
+//! stays identical — that is the contract's litmus test. `zig build check`
+//! additionally compiles every file here against the real modules (the
+//! `check-plugin-template` step in build.zig), so contract drift self-fails.
 //!
-//! The shared bar vocabulary (Frame, Env, DrawCtx, title snapshot
-//! types) lives in src/bar/segment.zig — import it with `@import("segment")`.
+//! The shared bar vocabulary (Frame, Env, DrawCtx, BarHandlers, title
+//! snapshot types) lives in src/bar/segment.zig — import it with
+//! `@import("segment")`. Note the names collide on purpose: the template
+//! also binds the NAME "segment" in the registry samples below. Mirror the
+//! shipped segments (clock.zig is the reference) rather than this template
+//! alone.
 
 const std = @import("std");
 
@@ -99,8 +105,8 @@ pub fn invalidate() void {
 // so none of these fire until you set configurable=true and add a name).
 // ---------------------------------------------------------------------------
 
-/// Reserved row width probe (only the clock segment provides this; the bar
-/// reserves the measured string's width in the row).
+/// Reserved row width probe (clock's measure string; the bar reserves the
+/// measured string's width in the row).
 pub fn measureString() []const u8 {
     return ""; // TODO: your display string when reserved at row width.
 }
@@ -150,7 +156,6 @@ pub fn onClick(
 // normal segment.
 // ---------------------------------------------------------------------------
 //   pub fn handleKeypress(event: *const xcb.xcb_key_press_event_t, bound: ?*const types.Action) bool { ... }
-//   pub fn isActive() bool { ... }                       // prompt visible?
 //   pub fn consumeRedrawRequest() bool { ... }
 //   pub fn invalidateReloadCaches() void { ... }
 
@@ -159,6 +164,13 @@ pub fn onClick(
 // exact export. Only the fields you set are dispatched. `configurable=false`
 // keeps an in-progress segment out of the config surface (the prompt is the
 // shipped non-configurable segment; everything else must be selectable).
+// Role capabilities (all default to false / .{} / true; set only as needed —
+// each "at most one": first-match wins, name-free):
+//   .self_ticking = true,          // drive your own refresh cadence (clock)
+//   .center_slot = true,           // claim the reserved center slot (title)
+//   .dirty_sources = .{ .focus = true, .frame = true }, // repaint on fact-revs
+//   .clickable = false,            // skip click-hit bounds (clock)
+//   .needsRepaint = needsRepaint,  // "repaint me every draw while active"
 // ---------------------------------------------------------------------------
 pub const module: @import("plugin").Segment = .{
     .name = "template", // TODO: unique config identity, e.g. "clock"
@@ -169,12 +181,6 @@ pub const module: @import("plugin").Segment = .{
     .onPollWakeup = onPollWakeup,
     .secondsElapsed = secondsElapsed,
     .invalidate = invalidate,
-    // Role capabilities (all default to false / .{} / true; set only as
-    // needed — each "at most one": first-match wins, name-free):
-    //   .self_ticking = true,          // drive your own refresh cadence (clock)
-    //   .center_slot = true,           // claim the reserved center slot (title)
-    //   .dirty_sources = .{ .focus = true, .frame = true }, // repaint on fact-revs
-    //   .clickable = false,            // skip click-hit bounds (clock)
     // Configured-segment hooks — bind + set configurable=true when ready:
     //   .measureString = measureString,   // (clock convention) reserved width
     //   .naturalWidth = naturalWidth,
@@ -182,7 +188,6 @@ pub const module: @import("plugin").Segment = .{
     //   .onClick = onClick,
     // Prompt extras — bind only for a chrome-surface overlay:
     //   .handleKeypress = handleKeypress,
-    //   .isActive = isActive,
     //   .consumeRedrawRequest = consumeRedrawRequest,
     //   .invalidateReloadCaches = invalidateReloadCaches,
 };

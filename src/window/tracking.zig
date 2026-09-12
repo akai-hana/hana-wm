@@ -10,11 +10,15 @@ const wincache = @import("wincache");
 const utils = @import("utils");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
+const debug = @import("debug");
 
-// Transition-layer gate: the only way to obtain a MUTABLE model handle.
-// Declared here once and aliased by actions/window/focus, the other
-// transition-owning modules; every other access here is a read-only query.
-pub const gate: pipeline.Gate = .{};
+// Transition-layer gate for THIS facade's own model writes only. The single
+// entry-drop transition (removeWindow) and the focus-MRU clear in
+// init/deinit go through it. It is deliberately NOT pub: external model
+// mutation is the job of the transition owners (actions/window/focus), and
+// each of those declares its OWN private gate instead of aliasing this one,
+// so no shared writable token leaks through the read facade.
+const gate: pipeline.Gate = .{};
 
 /// True once pipeline.init ran; every model access is gated on this so boot
 /// order never touches the undefined global instance.
@@ -113,10 +117,12 @@ pub fn deinit() void {
 }
 
 /// Called by workspaces.init: tells tracking how many workspaces exist.
-/// Count must not exceed 64; the workspace bitmask (u64) cannot represent more.
+/// The workspace bitmask is a u64, so more than 64 workspaces cannot be
+/// represented; clamp (never crash) so a corrupt boot count can't overflow the
+/// mask in ReleaseFast.
 pub fn setWorkspaceCount(count: usize) void {
-    std.debug.assert(count <= 64);
-    state.workspace_count = count;
+    if (count > 64) debug.warn("setWorkspaceCount: {d} workspaces requested; clamping to 64", .{count});
+    state.workspace_count = @min(count, 64);
 }
 
 /// Read-through facade over `model.current`, the single source of truth:
@@ -147,7 +153,7 @@ pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
 
 /// Returns a u64 bitmask with only the bit for `ws_idx` set.
 pub inline fn workspaceBit(ws_idx: anytype) u64 {
-    std.debug.assert(ws_idx < 64);
+    if (ws_idx >= 64) return 0; // out-of-range → no windows in that mask
     return model_mod.bit(@intCast(ws_idx));
 }
 

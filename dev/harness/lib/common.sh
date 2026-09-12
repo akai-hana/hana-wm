@@ -12,8 +12,12 @@
 HW_SETTLE_MS="${HW_SETTLE_MS:-350}"
 
 # Press a key chord on the harness display, e.g. `key super+t`.
+# Fail-loud: a dead display or dropped grab must never pass silently.
 key() {
-	DISPLAY="$HW_DISPLAY" xdotool key --clearmodifiers --delay 40 "$@" >/dev/null
+	DISPLAY="$HW_DISPLAY" xdotool key --clearmodifiers --delay 40 "$@" >/dev/null || {
+		echo "key: xdotool key $* failed on $HW_DISPLAY" >&2
+		exit 1
+	}
 	settle 120
 }
 
@@ -47,25 +51,19 @@ wait_named() {
 	done
 }
 
-# Window-id lists scoped to the harness display. `client_id NAME` resolves a
-# named client; multiple matches take the newest.
-xwin_ids() {
-	DISPLAY="$HW_DISPLAY" xdotool search --onlyvisible --class "${1:-XClient}"
-}
-newest_win() { xwin_ids "$@" | tail -1; }
-oldest_win() { xwin_ids "$@" | head -1; }
+# Resolves a named client to its window id (multiple matches take the newest).
 client_id() {
 	DISPLAY="$HW_DISPLAY" xdotool search --onlyvisible --name "^$1\$" | tail -1
 }
 
+# Fractional-second sleep; ms input matches the scenario idiom (`settle 300`).
 settle() {
-	sleep "${1:-$HW_SETTLE_MS}e-3" 2>/dev/null || sleep "$(awk "BEGIN{print ${1:-$HW_SETTLE_MS}/1000}")"
+	sleep "$(awk "BEGIN{print ${1:-$HW_SETTLE_MS}/1000}")"
 }
 
 # Trigger hana's dump_state action; output lands in $HW_LOG.
 state_dump() {
 	key super+q
-	settle 200
 }
 
 # Snapshot X truth into the scenario out dir:
@@ -75,6 +73,32 @@ dump() {
 	_label="$1"
 	DISPLAY="$HW_DISPLAY" xwininfo -root -tree >"$HW_OUT/snap-$_label.tree.raw" 2>&1
 	DISPLAY="$HW_DISPLAY" xprop -root >"$HW_OUT/snap-$_label.props.raw" 2>&1
+}
+
+# The server's own border width for a window, via the same xwininfo -stats
+# query S13's reload gate uses. This is X truth, not the WM's bookkeeping.
+server_border_width() {
+	_win="$1"
+	DISPLAY="$HW_DISPLAY" xwininfo -stats -id "$_win" | awk '/Border width:/ {print $3; exit}'
+}
+
+# T10 server-truth gate: assert the SERVER-reported border width of every
+# named tiled client equals the expectation (default: the harness config's
+# border_width = 4). Catches WM-side bookkeeping regressions that a golden
+# hana.log snapshot could mask. Fail-loud: any mismatch aborts the scenario.
+check_borders() {
+	_exp="${1:-4}"; shift
+	_fail=0
+	for _n in "$@"; do
+		_id=$(client_id "$_n")
+		[ -n "$_id" ] || { echo "FAIL: check_borders: no window '$_n'" >&2; _fail=1; continue; }
+		_bw=$(server_border_width "$_id")
+		[ "$_bw" = "$_exp" ] || {
+			echo "FAIL: $_n server border width is '$_bw', expected $_exp" >&2
+			_fail=1
+		}
+	done
+	[ "$_fail" = "0" ] || return 1
 }
 
 compile_tool() {

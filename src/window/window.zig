@@ -21,7 +21,9 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const persist = @import("persist");
 
-const gate = tracking.gate;
+// Private transition-layer gate for mutable model access (tracking no longer
+// exports a shared one; each transition owner declares its own token).
+const gate: pipeline.Gate = .{};
 
 /// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
 /// no module binds it; shared by the window layer (actions/borders alias this).
@@ -114,13 +116,10 @@ const p_aspect: u32 = 0x80;
 
 const wm_normal_hints_long_length: u32 = 18; // flags + 17 fields (up to base_size/win_gravity)
 
-const max_property_length = constants.property_max_length;
-const property_no_delete = constants.property_no_delete;
-
 const max_window_tree_depth = constants.max_window_tree_depth;
 
 // Spawn queue: pending (workspace, pid) assignments for newly-mapped windows,
-// consumed by resolveTargetWorkspace. Capped at spawn_queue_cap; overflow logs
+// consumed by resolveTargetWorkspace. Capped at max_spawn_queue; overflow logs
 // and drops the entry rather than growing unbounded.
 
 const SpawnEntry = struct {
@@ -130,7 +129,7 @@ const SpawnEntry = struct {
 };
 
 // Bounds pending spawns awaiting their first map, not the tiled-window pool.
-const spawn_queue_cap: usize = 64;
+const max_spawn_queue: usize = 64;
 
 // All mutable window-module state is grouped into a single State struct
 // (mirroring the pattern focus.zig uses) so init()/deinit() each reset
@@ -149,7 +148,7 @@ const State = struct {
     rules_map: std.StringHashMapUnmanaged(u8) = .{},
 
     // Child XID -> managed toplevel XID (see "Child window resolution").
-    child_cache: utils.BoundedList(ChildEntry, child_cache_cap) = .{},
+    child_cache: utils.BoundedList(ChildEntry, max_child_cache) = .{},
 
     // True when a grab-flush path already swept floating borders this batch,
     // so the event loop can skip the redundant second sweep. Reset at the
@@ -190,7 +189,7 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
 // evicted when their toplevel is unmanaged (evictChildCache). A fixed flat
 // array is enough: Electron nests at most 3-5 children per app.
 
-const child_cache_cap: usize = 64;
+const max_child_cache: usize = 64;
 
 const ChildEntry = struct { id: u32, managed: u32 };
 
@@ -273,7 +272,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
-        std.log.warn(
+        debug.warn(
             "window: spawn queue pre-allocation failed ({s}); will grow on demand",
             .{@errorName(err)},
         );
@@ -327,7 +326,7 @@ inline fn isOnCurrentWorkspace(win: u32) bool {
 // Button grab management is owned by focus.zig (a focus-protocol concern).
 // Off-workspace windows that need initial grab setup call focus.initWindowGrabs.
 
-inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core.WorkspaceId {
+pub inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core.WorkspaceId {
     return if (target < tracking.getWorkspaceCount())
         core.WorkspaceId.fromIndex(target)
     else
@@ -404,13 +403,13 @@ fn findSpawnQueueWorkspace(
     // consuming items[0] would mis-route it to the oldest pending spawn's
     // workspace, so return null and let handleMapRequest fall back to current_ws.
     if (state.?.spawn_queue.items.len != 1) {
-        std.log.debug(
+        debug.debug(
             "spawn: no exact PID match for pid={d}, {d} pending; ambiguous, routing to current ws",
             .{ win_pid, state.?.spawn_queue.items.len },
         );
         return null;
     }
-    std.log.debug(
+    debug.debug(
         "spawn: no exact PID match for pid={d}, sole entry ws={d}, using heuristic",
         .{ win_pid, state.?.spawn_queue.items[0].workspace },
     );
@@ -442,10 +441,10 @@ fn resolveTargetWorkspace(
 
 pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     const alloc = state.?.alloc orelse return;
-    if (state.?.spawn_queue.items.len >= spawn_queue_cap) {
+    if (state.?.spawn_queue.items.len >= max_spawn_queue) {
         debug.warn(
             "registerSpawn: spawn queue full ({d} entries); entry dropped",
-            .{spawn_queue_cap},
+            .{max_spawn_queue},
         );
         return;
     }
@@ -493,7 +492,7 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     // Property cookies (always fired).
     const normal_hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, wm_normal_hints_long_length);
     const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
-        icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, max_property_length);
+        icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, constants.property_max_length);
     const hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, icccm.wm_hints_long_length);
 
     return .{
@@ -1127,8 +1126,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // does no title property fetching at all.
     const net_wm_name = utils.getAtomOrZero("_NET_WM_NAME");
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        wincache.refreshTitle(conn, event.window);
-        core.window.bump();
+        if (wincache.refreshTitle(conn, event.window)) core.window.bump();
         return;
     }
 
@@ -1174,7 +1172,7 @@ fn refreshSizeHints(win: u32) void {
     const conn = core.getState().conn;
     const cookie = xcb.xcb_get_property(
         conn,
-        property_no_delete,
+        constants.property_no_delete,
         win,
         xcb.XCB_ATOM_WM_NORMAL_HINTS,
         xcb.XCB_ATOM_WM_SIZE_HINTS,

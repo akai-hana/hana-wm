@@ -143,12 +143,17 @@ pub fn build(b: *std.Build) !void {
     // toolchains already provide the real locations.
     finalizeModule(root_mod, optimize, has_usr);
     // Wire & link
-    Module.wireAll(root_mod, &discovery.modules, shared_ctx);
+    Module.wireAll(b, root_mod, &discovery.modules, &discovery.source_paths, shared_ctx);
     SystemLibraries.link(root_mod);
     // Discovered modules don't inherit root_mod's include/library paths, so
     // give each one the same system paths for its @cImport / link work.
     var mod_it = discovery.modules.valueIterator();
     while (mod_it.next()) |mod| {
+        // All discovered modules are compiled into the libc-linked `hana`
+        // binary, and several of them call libc directly (fallback.zig's
+        // getenv, window/floating's free). Precise-edge wiring no longer drags
+        // in a link_libc test root, so declare libc explicitly per module.
+        mod.*.link_libc = true;
         finalizeModule(mod.*, optimize, has_usr);
     }
 
@@ -168,20 +173,22 @@ pub fn build(b: *std.Build) !void {
     // Tests whose modules only exist when their feature's source file is
     // present; the gate is the same has_* bool that guards the feature.
     // x_gated marks the X-dependent integration tests that serialize on the
-    // shared display. Every x_gated entry also has link_system=true, so
-    // linkage is applied once in the link_system block below.
-    const test_gates = [_]struct { name: []const u8, gate: bool, link_system: bool, x_gated: bool }{
-        .{ .name = "actions_test", .gate = has_tiling, .link_system = true, .x_gated = true },
-        .{ .name = "focus_test", .gate = has_tiling, .link_system = true, .x_gated = true },
-        .{ .name = "pipeline_test", .gate = has_tiling, .link_system = true, .x_gated = true },
-        .{ .name = "clock_test", .gate = has_seg_clock, .link_system = false, .x_gated = false },
-        .{ .name = "carousel_test", .gate = has_seg_carousel, .link_system = false, .x_gated = false },
-        .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces, .link_system = false, .x_gated = false },
-        .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces, .link_system = false, .x_gated = false },
-        .{ .name = "schema_test", .gate = true, .link_system = true, .x_gated = false },
-        .{ .name = "tiling_test", .gate = has_tiling, .link_system = false, .x_gated = false },
-        .{ .name = "sync_test", .gate = has_tiling and has_minimize and has_fullscreen, .link_system = false, .x_gated = false },
-        .{ .name = "workspaces_test", .gate = has_workspaces, .link_system = false, .x_gated = false },
+    // shared display. Every test root links the full system-library set: with
+    // precise edge wiring a test root no longer reaches the gated feature
+    // roots that used to bleed their linkage into every test exe, so each
+    // root declares its (potentially needed) libc-adjacent libraries itself.
+    const test_gates = [_]struct { name: []const u8, gate: bool, x_gated: bool }{
+        .{ .name = "actions_test", .gate = has_tiling, .x_gated = true },
+        .{ .name = "focus_test", .gate = has_tiling, .x_gated = true },
+        .{ .name = "pipeline_test", .gate = has_tiling, .x_gated = true },
+        .{ .name = "clock_test", .gate = has_seg_clock, .x_gated = false },
+        .{ .name = "carousel_test", .gate = has_seg_carousel, .x_gated = false },
+        .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces, .x_gated = false },
+        .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces, .x_gated = false },
+        .{ .name = "schema_test", .gate = true, .x_gated = false },
+        .{ .name = "tiling_test", .gate = has_tiling, .x_gated = false },
+        .{ .name = "sync_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
+        .{ .name = "workspaces_test", .gate = has_workspaces, .x_gated = false },
     };
     {
         var test_it = discovery.modules.iterator();
@@ -194,11 +201,12 @@ pub fn build(b: *std.Build) !void {
             } else null;
             if (spec) |s| {
                 if (!s.gate) continue :test_loop;
-                if (s.link_system) {
-                    entry.value_ptr.*.link_libc = true;
-                    SystemLibraries.link(entry.value_ptr.*);
-                }
             }
+            // Every test root links the same system libraries as the main
+            // exe: the modules reached from a test graph may call X11/cairo
+            // directly (window, drawing, ...) and no longer inherit linkage
+            // second-hand from a blanket cross-wire.
+            SystemLibraries.link(entry.value_ptr.*);
             const t = b.addTest(.{ .root_module = entry.value_ptr.* });
             const run = b.addRunArtifact(t);
             unit_test_step.dependOn(&run.step);
@@ -219,6 +227,17 @@ pub fn build(b: *std.Build) !void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
+    // Plugin-template compile gate: dev/plugin-template/** is compiled against
+    // the real discovered modules (cross-wired like an in-tree module), so the
+    // drop-in templates can't drift from current contracts without
+    // `zig build check-plugin-template` (and by extension `zig build check`)
+    // failing. Each template is only compiled when its imports are present.
+    const plugin_template_specs = [_]PluginTemplateSpec{
+        .{ .path = "dev/plugin-template/layout.zig", .import = "layout", .present = has_tiling },
+        .{ .path = "dev/plugin-template/provider.zig", .import = "provider", .present = true },
+        .{ .path = "dev/plugin-template/segment.zig", .import = "segment", .present = has_bar },
+    };
+    const plugin_template_check = try buildPluginTemplateCheck(b, &discovery.modules, shared_ctx, has_usr, target, optimize, &plugin_template_specs);
     // Layer guards: `zig build check` type-checks AND enforces the
     // sync-owned wire rules.
     const check_step = b.step("check", "Type-check + layer guards");
@@ -226,6 +245,7 @@ pub fn build(b: *std.Build) !void {
     const layers = b.addSystemCommand(&.{"./dev/scripts/check-layers.sh"});
     layers.step.dependOn(&exe.step);
     check_step.dependOn(&layers.step);
+    check_step.dependOn(plugin_template_check);
 }
 
 // Shared context
@@ -512,6 +532,93 @@ fn buildOwnerRegistryModule(
     return mod;
 }
 
+/// Input to `buildPluginTemplateCheck`: one dev/plugin-template file to
+/// compile against the real modules, the import name to expose it under in
+/// the generated wrapper, and whether the current tree provides its
+/// dependencies (a skipped entry is left out of the wrapper entirely).
+const PluginTemplateSpec = struct {
+    path: []const u8,
+    import: []const u8,
+    present: bool,
+};
+
+/// Compiles every `dev/plugin-template/` file against the REAL discovered
+/// modules (cross-wired exactly like an in-tree module, shared artefacts
+/// included) and registers a `check-plugin-template` step, so contract drift
+/// self-fails on `zig build check`. Compile-only: the wrapper test binary is
+/// built, never run. Importing each template and referencing its `module`
+/// decl forces container analysis and contract-binding type-checking — an
+/// import that no longer resolves, or a hook bound to a stale signature or
+/// a deleted/renamed field (e.g. the pre-Round-3 opaque-cast `computeHook`,
+/// `.has_variants`, `.coverageOn`), becomes a compile error here.
+///
+/// `specs` lists the template files with the import name the generated
+/// wrapper exposes them under and whether the current tree provides their
+/// dependencies (`present`); a skipped template is simply left out of the
+/// wrapper source. Residual gap (by design): a template function body whose
+/// called helper was renamed (rather than its signature/field changed) is
+/// analyzed lazily, so it is flagged only once the tree's own modules use
+/// the new name — the templates mirror those modules, which are themselves
+/// compiled in-tree.
+fn buildPluginTemplateCheck(
+    b: *std.Build,
+    discovered: *std.StringHashMap(*std.Build.Module),
+    ctx: SharedBuildContext,
+    has_usr: UsrDirs,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    specs: []const PluginTemplateSpec,
+) !*std.Build.Step {
+    var template_mods = std.StringHashMapUnmanaged(*std.Build.Module){};
+    defer template_mods.deinit(b.allocator);
+
+    for (specs) |spec| {
+        if (!spec.present) continue;
+        const mod = b.createModule(.{
+            .root_source_file = b.path(spec.path),
+            .target = target,
+            .optimize = optimize,
+        });
+        mod.link_libc = true; // satisfy @cImport in imported core modules
+        finalizeModule(mod, optimize, has_usr);
+        injectShared(mod, ctx);
+        var it = discovered.iterator();
+        while (it.next()) |entry| {
+            mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        try template_mods.put(b.allocator, spec.import, mod);
+    }
+
+    // Generated wrapper: force container + registry-binding analysis of every
+    // present template, then hand the module graph to an addTest built but not
+    // executed (compiling a test is the established "type-check" primitive
+    // here; `check` itself depends on the exe step the same way).
+    var src = std.ArrayList(u8).empty;
+    try src.appendSlice(b.allocator, "// Generated by build.zig; part of check-plugin-template.\n");
+    try src.appendSlice(b.allocator, "comptime {\n");
+    for (specs) |spec| {
+        if (!spec.present) continue;
+        try src.print(b.allocator, "    _ = @import(\"{s}\");\n", .{spec.import});
+    }
+    for (specs) |spec| {
+        if (!spec.present) continue;
+        try src.print(b.allocator, "    _ = @import(\"{s}\").module;\n", .{spec.import});
+    }
+    try src.appendSlice(b.allocator, "}\n");
+
+    const wrapper = makeGeneratedModule(b, target, optimize, "plugin_templates.zig", src.items, &.{});
+    wrapper.link_libc = true;
+    finalizeModule(wrapper, optimize, has_usr);
+    for (specs) |spec| {
+        if (template_mods.get(spec.import)) |m| wrapper.addImport(spec.import, m);
+    }
+
+    const t = b.addTest(.{ .root_module = wrapper });
+    const step = b.step("check-plugin-template", "Type-check dev/plugin-template/*.zig against current contracts");
+    step.dependOn(&t.step);
+    return step;
+}
+
 /// Enables symbol stripping for release builds to reduce binary size.
 ///
 /// Has no effect on Debug or ReleaseSafe builds.
@@ -608,13 +715,22 @@ const Module = struct {
             entry_point: []const u8,
         ) !DiscoveryContext {
             var ctx = init(b, target, optimize, entry_point);
-            try ctx.discoverAll(dir_path);
+            try ctx.discoverAll(dir_path, null, false);
             return ctx;
         }
 
         /// Recursively walks `dir_path` and registers every `.zig` file as a
         /// named module, except the entry point itself (`ctx.entry_point_path`).
-        fn discoverAll(ctx: *DiscoveryContext, dir_path: []const u8) !void {
+        ///
+        /// `owner`/`in_modules_root` carry the owner-stem context so the
+        /// `modules/` dirs are captured during this SAME walk (no second
+        /// iteration): once the walk is inside a `<owner>/modules/` tree,
+        /// every `.zig` file is a registry-stem candidate — directly in the
+        /// modules dir all files count, in a deeper subdirectory only the one
+        /// sharing its directory's name (see addOwnerStem). `owner` is a
+        /// b.allocator-backed slice (a basename into an ancestor `dir_path`
+        /// dupe), valid for the whole build.
+        fn discoverAll(ctx: *DiscoveryContext, dir_path: []const u8, owner: ?[]const u8, in_modules_root: bool) !void {
             const b = ctx.b;
             var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
             defer dir.close(b.graph.io);
@@ -629,13 +745,19 @@ const Module = struct {
                         const subdir_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
 
                         if (std.mem.eql(u8, entry.name, "modules")) {
-                            const owner = std.fs.path.basename(dir_path);
-                            if (owner.len != 0) {
-                                try ctx.collectOwnerStems(subdir_path, true, owner);
+                            const modules_owner = std.fs.path.basename(dir_path);
+                            if (modules_owner.len != 0) {
+                                try ctx.ensureOwnerStems(modules_owner);
+                                try ctx.discoverAll(b.allocator.dupe(u8, subdir_path) catch unreachable, modules_owner, true);
+                                continue;
                             }
                         }
 
-                        try ctx.discoverAll(b.allocator.dupe(u8, subdir_path) catch unreachable);
+                        try ctx.discoverAll(
+                            b.allocator.dupe(u8, subdir_path) catch unreachable,
+                            owner,
+                            false,
+                        );
                     },
 
                     .file => {
@@ -645,6 +767,12 @@ const Module = struct {
                         if (std.mem.eql(u8, rel_path, ctx.entry_point_path)) continue;
 
                         try ctx.registerModule(b.allocator.dupe(u8, rel_path) catch unreachable);
+
+                        if (owner) |o| {
+                            if (in_modules_root or std.mem.eql(u8, std.fs.path.stem(entry.name), std.fs.path.basename(dir_path))) {
+                                try ctx.addOwnerStem(o, std.fs.path.stem(entry.name));
+                            }
+                        }
                     },
 
                     else => {},
@@ -688,74 +816,113 @@ const Module = struct {
             }));
         }
 
-        fn collectOwnerStems(
-            ctx: *DiscoveryContext,
-            dir_path: []const u8,
-            is_root: bool,
-            owner: []const u8,
-        ) !void {
+        /// Prepares `owner`'s stem list (deduped, unsorted; `OwnerRegistry.run`
+        /// sorts for deterministic dispatch order). Called the first time the
+        /// walk enters a `<owner>/modules/` tree.
+        fn ensureOwnerStems(ctx: *DiscoveryContext, owner: []const u8) !void {
             const b = ctx.b;
-            const dir_name = std.fs.path.basename(dir_path);
-            var dir = try b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true });
-            defer dir.close(b.graph.io);
-
             const gop = try ctx.owner_stems.getOrPut(try b.allocator.dupe(u8, owner));
             if (!gop.found_existing) gop.value_ptr.* = .empty;
+        }
 
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            var iter = dir.iterate();
-            while (try iter.next(b.graph.io)) |entry| {
-                switch (entry.kind) {
-                    .directory => {
-                        if (isHiddenDirectory(entry.name)) continue;
-                        const sub_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
-                        const dup_path = try b.allocator.dupe(u8, sub_path);
-                        try ctx.collectOwnerStems(dup_path, false, owner);
-                    },
-                    .file => {
-                        if (!isZigSource(entry.name)) continue;
-                        const rel_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
-                        if (std.mem.eql(u8, rel_path, ctx.entry_point_path)) continue;
-
-                        const stem = try b.allocator.dupe(u8, std.fs.path.stem(entry.name));
-                        if (!is_root and !std.mem.eql(u8, stem, dir_name)) continue;
-
-                        for (gop.value_ptr.items) |existing| {
-                            if (std.mem.eql(u8, existing, stem)) break;
-                        } else {
-                            try gop.value_ptr.append(b.allocator, stem);
-                        }
-                    },
-                    else => {},
-                }
+        /// Appends `stem` to `owner`'s list unless already present. Called
+        /// from `discoverAll`'s file case (the single walk), never from a
+        /// second directory iteration.
+        fn addOwnerStem(ctx: *DiscoveryContext, owner: []const u8, stem: []const u8) !void {
+            const gop = ctx.owner_stems.getPtr(owner) orelse return;
+            for (gop.items) |existing| {
+                if (std.mem.eql(u8, existing, stem)) return;
             }
+            const dup_stem = try ctx.b.allocator.dupe(u8, stem);
+            try gop.append(ctx.b.allocator, dup_stem);
         }
     };
+
+    /// Maximum bytes read from a source file while scanning import edges. A
+    /// source file this large would be a different problem; the limit just
+    /// keeps pathological inputs from pinning the build process.
+    const max_scan_source_bytes = 4 * 1024 * 1024;
+
+    /// Scans a module's source for `@import("name")` literals and appends
+    /// every name that corresponds to a discovered module to `out` (each name
+    /// is dupe'd for the caller, which must free it). Imports that are NOT
+    /// discovered modules — `std`, `builtin`, and the shared-injected names
+    /// from `injectShared` (build_options, fallback_toml, plugins,
+    /// `<owner>_modules`) — are skipped: they either need no wiring or are
+    /// already present in the module's import_table.
+    ///
+    /// Precise edges are what rescue the compile CACHE from the old blanket
+    /// cross-wire. With every module importing every module, any one file's
+    /// churn invalidated every module's cached compilation — O(n²) in module
+    /// count, paid on every incremental rebuild even though the compiler
+    /// elides unused imports at analysis time. Wiring only the edges a module
+    /// actually declares makes cache invalidation follow real dependencies.
+    fn importEdgesOf(
+        b: *std.Build,
+        rel_path: []const u8,
+        modules: *std.StringHashMap(*std.Build.Module),
+        out: *std.ArrayListUnmanaged([]const u8),
+    ) !void {
+        const src = try b.build_root.handle.readFileAlloc(
+            b.graph.io,
+            rel_path,
+            b.allocator,
+            .limited(max_scan_source_bytes),
+        );
+        defer b.allocator.free(src);
+
+        const needle = "@import(\"";
+        var i: usize = 0;
+        while (i + needle.len <= src.len) {
+            if (!std.mem.startsWith(u8, src[i..], needle)) {
+                i += 1;
+                continue;
+            }
+            i += needle.len;
+            const name_start = i;
+            while (i < src.len and src[i] != '"') : (i += 1) {}
+            if (i >= src.len) break;
+            const name = src[name_start..i];
+            if (!std.mem.eql(u8, name, "std") and
+                !std.mem.eql(u8, name, "builtin") and
+                modules.contains(name))
+            {
+                try out.append(b.allocator, try b.allocator.dupe(u8, name));
+            }
+            i += 1; // move past the closing quote
+        }
+    }
 
     /// Wires up all discovered modules together.
     ///
     /// Injects shared imports into `root` itself, then into every discovered
-    /// module, before cross-wiring all discovered modules with each other and
-    /// exposing them to `root`. This gives every module access to every other
-    /// module by name; because unused imports are elided by the compiler,
-    /// this blanket approach keeps the build script simple without affecting
-    /// compile time or binary size. Note that it also means there is
-    /// currently no encapsulation boundary between modules -- worth
-    /// revisiting with an opt-out mechanism if that coupling becomes a
-    /// problem as the module tree grows. It also means every module's cached
-    /// compilation is invalidated by a change to *any* module, not just the
-    /// ones it actually uses -- a cost worth keeping in mind alongside compile
-    /// time and binary size as the module count grows.
+    /// module, before cross-wiring each discovered module with every other
+    /// module it actually `@import`s, then exposing them all to `root`. This
+    /// gives every module access to every other module by name without
+    /// hand-maintained dependency lists.
+    ///
+    /// The wiring follows REAL dependency edges (see `importEdgesOf`) rather
+    /// than a blanket every-module-imports-every-module cross-wire. The two
+    /// approaches are functionally identical — a module can only use symbols
+    /// it imports with an `@import`, and unused blanket edges are elided at
+    /// analysis time — but they diverge on the compile CACHE: blanket wiring
+    /// keyed every module on every other module's hash, so a change to *any*
+    /// file invalidated every module's cached compilation (O(n²) in module
+    /// count, paid on every incremental rebuild). Edge-based wiring keeps
+    /// invalidation proportional to real dependencies.
     fn wireAll(
+        b: *std.Build,
         root: *std.Build.Module,
         all: *std.StringHashMap(*std.Build.Module),
+        source_paths: *std.StringHashMap([]const u8),
         ctx: SharedBuildContext,
     ) void {
-        // NOTE: Cross-wiring is blanket O(n²). Layer purity (model/tiling
-        // xcb-free, sync sole wire writer) is enforced by dev/scripts/check-layers.sh
-        // at zig build check time, NOT at the module level. If a module accidentally
-        // imports a forbidden dependency, the build succeeds but check-layers catches
-        // the xcb leak. Future improvement: add per-layer import assertions.
+        // NOTE: Wiring follows declared `@import` edges, NOT a per-layer
+        // allowlist at build time. Layer purity (model/tiling xcb-free, sync
+        // sole wire writer) is enforced by dev/scripts/check-layers.sh at
+        // `zig build check` time. If a module accidentally imports a forbidden
+        // dependency, the build succeeds but check-layers catches the xcb
+        // leak. Future improvement: add per-layer import assertions.
         injectShared(root, ctx);
 
         var outer = all.iterator();
@@ -765,13 +932,26 @@ const Module = struct {
 
             injectShared(mod, ctx);
 
-            // Cross-wire modules: O(n²) in module count, but n is small and
-            // comptime-eligible. Skip wiring if the import already exists to
-            // avoid redundant table updates.
-            var inner = all.iterator();
-            while (inner.next()) |dep| {
-                if (!std.mem.eql(u8, dep.key_ptr.*, name) and !mod.import_table.contains(dep.key_ptr.*))
-                    mod.addImport(dep.key_ptr.*, dep.value_ptr.*);
+            // Precise cross-wiring: an import edge is added only for every
+            // discovered module the source actually `@import`s. Edges the scan
+            // can't see (generated registries, shared-injected names) are
+            // already in the import_table via injectShared. Read failures are
+            // logged and skipped — the module's own compile would fail anyway,
+            // and a missing edge surfaces a clear "no module named" error.
+            var edges = std.ArrayListUnmanaged([]const u8).empty;
+            defer edges.deinit(b.allocator);
+            if (source_paths.get(name)) |rel_path| {
+                importEdgesOf(b, rel_path, all, &edges) catch |err| {
+                    std.debug.print(
+                        "Error: could not scan {s} for import edges: {s}\n",
+                        .{ rel_path, @errorName(err) },
+                    );
+                };
+            }
+            for (edges.items) |dep_name| {
+                if (mod.import_table.contains(dep_name)) continue;
+                if (all.get(dep_name)) |dep_mod| mod.addImport(dep_name, dep_mod);
+                b.allocator.free(dep_name);
             }
 
             root.addImport(name, mod);
@@ -793,23 +973,26 @@ const Module = struct {
 ///
 /// Helps keep `build()` clean.
 const SystemLibraries = struct {
+    /// System libraries hana links against, by name. This is the code-side
+    /// single source of truth for what gets linked on every module that asks
+    /// (`link`, below). It deliberately mirrors build.zig.zon's `.links`
+    /// table, which is the package-side declaration of the same set — a
+    /// consumer depending on hana as a package gets `.links` applied on its
+    /// own build, duplicating these calls (idempotent, but the two lists
+    /// must stay in sync manually).
+    const linked_libs = [_][]const u8{
+        // Core X11 libraries.
+        "xcb-keysyms", // keycode -> keysym map
+        "xkbcommon-x11", // XKB-to-X11 transport
+        "xcb-xkb", // Provides xcb_xkb_id (XKB extension opcode lookup) for detectable auto-repeat.
+        "xcb-cursor", // Makes hana's root window respect custom cursor settings.
+        "xcb-randr", // Monitor refresh-rate detection for the carousel.
+        // Bar libraries.
+        "pangocairo-1.0", // Cairo/Pango text rendering.
+    };
+
     /// Links system libraries depended on by hana.
     fn link(root: *std.Build.Module) void {
-        linkXcb(root);
-        linkCairoPango(root);
-    }
-
-    // Core libraries
-    fn linkXcb(root: *std.Build.Module) void {
-        root.linkSystemLibrary("xcb-keysyms", .{});
-        root.linkSystemLibrary("xkbcommon-x11", .{});
-        root.linkSystemLibrary("xcb-xkb", .{}); // Provides xcb_xkb_id (XKB extension opcode lookup) for detectable auto-repeat.
-        root.linkSystemLibrary("xcb-cursor", .{}); // Makes hana's root window respect custom cursor settings.
-        root.linkSystemLibrary("xcb-randr", .{}); // Monitor refresh-rate detection for the carousel.
-    }
-
-    // Bar libraries
-    fn linkCairoPango(root: *std.Build.Module) void {
-        root.linkSystemLibrary("pangocairo-1.0", .{});
+        for (linked_libs) |lib| root.linkSystemLibrary(lib, .{});
     }
 };

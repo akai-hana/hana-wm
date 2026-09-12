@@ -1,63 +1,17 @@
-//! Complete workspaces feature: tag membership transitions + per-workspace
-//! config-override types.
+//! Complete workspaces feature: tag membership transitions + the workspace
+//! count for the tracking facade.
 //! A self-contained plugin over the model: switching, tagging, and moving are
-//! model transitions (tag mask + tiled_order moves), and the workspace list
-//! with its per-ws config overrides applied once at boot is held here.
-
-const std = @import("std");
+//! model transitions (tag mask + tiled_order moves), and the workspace count
+//! (config-driven) is forwarded to tracking at init. The per-workspace
+//! config-override store once held here was dead weight (never read in
+//! production) and is gone; config overrides seed the model params directly
+//! through actions.seedParamsFromConfig.
 
 const core = @import("core");
-const types = @import("types");
-const constants = @import("constants");
 
 const tracking = @import("tracking");
 const model = @import("model");
 const build_options = @import("build_options");
-
-pub const Workspace = struct {
-    id: u8,
-    /// Per-workspace layout-variant value-string override from config;
-    /// null = global default. Borrows the owning config override's dupe.
-    variants: ?[]const u8 = null,
-    /// Master-count override for master-stack layout; null = global default.
-    master_count: ?u8 = null,
-
-    pub fn init(id: u8) Workspace {
-        return .{ .id = id };
-    }
-};
-
-pub const State = struct {
-    workspaces: []Workspace,
-    allocator: std.mem.Allocator,
-};
-
-var g_state: ?State = null;
-
-/// Applies per-workspace master-count/variant overrides from `cfg_tiling`.
-///
-/// `primary_width` and `secondary_balance` have no config-file representation;
-/// they are pure runtime state living only in the model's per-ws params, so
-/// nothing here touches them.
-pub fn applyWorkspaceOverrides(
-    wss: []Workspace,
-    cfg_tiling: *const types.TilingConfig,
-) void {
-    const max_ws = constants.max_workspaces;
-
-    // Last-wins override lookups, shared with the model-seed path in
-    // actions.seedParamsFromConfig (the rules live on TilingConfig).
-    const lookups = @import("actions").seedLookups(cfg_tiling);
-
-    for (wss) |*ws| {
-        const id = ws.id;
-        ws.variants = if (id < max_ws)
-            if (lookups.layout[id]) |oi| cfg_tiling.workspace_layout_overrides.items[oi].variant else null
-        else
-            null;
-        ws.master_count = if (id < max_ws) lookups.master_count[id] else null;
-    }
-}
 
 /// Initializes global workspace state. Workspaces-disabled collapses to a
 /// single implicit workspace; every switch/tag/move action already no-ops on
@@ -65,27 +19,10 @@ pub fn applyWorkspaceOverrides(
 pub fn init() !void {
     const cs = core.getState();
     const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
-    const wss = try cs.alloc.alloc(Workspace, count);
-
-    for (wss, 0..) |*ws, i| {
-        const id: u8 = @intCast(i);
-        ws.* = Workspace.init(id);
-    }
-    applyWorkspaceOverrides(wss, &cs.config.tiling);
-
     tracking.setWorkspaceCount(count);
-
-    g_state = .{
-        .workspaces = wss,
-        .allocator = cs.alloc,
-    };
 }
 
 pub fn deinit() void {
-    if (g_state) |*s| {
-        s.allocator.free(s.workspaces);
-    }
-    g_state = null;
     tracking.setWorkspaceCount(0);
 }
 
@@ -96,6 +33,7 @@ pub fn switchTo(m: *model.Model, ws: model.WSId) void {
 
 pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     const e = m.store.getPtr(win) orelse return;
+    if (ws >= m.ws.len) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
     if (e.mask == model.ALL_MASK) return; // pinned stays everywhere-visible
 
     // Refuse-before-mutate: full destination list cancels the move.

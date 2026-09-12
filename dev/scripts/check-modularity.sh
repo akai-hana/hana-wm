@@ -71,6 +71,7 @@ setup_copy() {
         --exclude='zig-out/' \
         --exclude='dev/harness/out/' \
         --exclude='dev/harness/.cache/' \
+        --exclude='dev/demonstration.gif' \
         "$PROJECT_ROOT/" "$dest/"
 }
 
@@ -96,9 +97,9 @@ try_build() {
     (
         cd "$root"
         if [[ "$VERBOSE" -eq 1 ]]; then
-            zig build 2>&1
+            zig build -j "$JOBS" 2>&1
         else
-            zig build >"$log" 2>&1
+            zig build -j "$JOBS" >"$log" 2>&1
         fi
     )
 }
@@ -113,6 +114,7 @@ run_scenario() {
 
     # Apply pattern filter
     if [[ -n "$PATTERN" && "$name" != *"$PATTERN"* ]]; then
+        ((SKIP_COUNT++)) || true
         return 0
     fi
 

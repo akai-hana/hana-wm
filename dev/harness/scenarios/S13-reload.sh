@@ -23,6 +23,6 @@ while read -r _n _pair; do
 	_bw=${_pair#*=}
 	[ "$_bw" = "7" ] || {
 		echo "FAIL: $_n border width is '$_bw', expected 7 after reload" >&2
-		exit 1
+		return 1
 	}
 done <"$HW_OUT/borders-after-reload.norm"

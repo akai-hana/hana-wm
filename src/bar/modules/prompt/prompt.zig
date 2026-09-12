@@ -198,6 +198,9 @@ const max_completions: usize = 1024;
 const max_completion_len: usize = 64;
 const max_history: usize = 128;
 const max_history_line: usize = default_max_input;
+// History-file path scratch size (HOME + suffix); shared by the append and
+// load paths so the two buffers can't drift apart.
+const history_path_buf_len = 512;
 
 const PromptState = struct {
     is_active: bool = false,
@@ -732,7 +735,7 @@ fn histAppendToFile(cmd: []const u8) void {
     if (cmd.len == 0) return;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
-    var path_buf: [512:0]u8 = undefined;
+    var path_buf: [history_path_buf_len:0]u8 = undefined;
     const file_path = std.fmt.bufPrintZ(
         &path_buf,
         "{s}/.local/share/drun/history",
@@ -858,7 +861,7 @@ fn loadHistory() void {
     g.is_hist_loaded = true;
     if (g.hist_entries.len == 0) return; // ensureAlloc failed
 
-    var path_buf: [512]u8 = undefined;
+    var path_buf: [history_path_buf_len]u8 = undefined;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
     const history_suffixes = [_][]const u8{
@@ -1030,7 +1033,9 @@ fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
         // The caret's top is the baseline less the ascent: vertical-centering
         // math identical to drawing.baselineY's (top_pad + asc), so derive it
         // from there instead of re-rolling the (height -| font_h) / 2 formula.
-        g.cached_caret_top = dc.baselineY(height) -| @as(u16, @intCast(asc));
+        // Clamp a possibly-negative ascent before the u16 cast.
+        const asc_u: u16 = @intCast(@max(0, @as(i32, asc)));
+        g.cached_caret_top = dc.baselineY(height) -| asc_u;
         g.cached_caret_h = @min(font_h, height);
     }
 }

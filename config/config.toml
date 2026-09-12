@@ -18,6 +18,9 @@ enabled = true
 # When true,  changing the layout on one workspace changes it everywhere.
 global_layout = false
 
+# Minimum tiled window dimension in pixels [1..]
+min_window_dim   = 50
+
 # Available layouts, in cycle order.
 # - Layouts not listed here are unavailable at runtime.
 # - Omitting the array entirely enables every layout in src/tiling/layouts/.
@@ -75,7 +78,6 @@ variants = "relaxed" # "rigid" (strict grid) | "relaxed" (last window expands)
 # border_width     = 2px   # Window border width [0%-200%] or [0-N]px
 # border_focused   = "#5294E2"
 # border_unfocused = "#383C4A"
-# min_window_dim   = 50    # Minimum tiled window dimension in pixels [1..]
 
 # -- Drag & drop --
 [drag]
@@ -200,15 +202,17 @@ Mod+5 = "all_workspaces"
 # -- Workspace window sending --
 Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
 Mod+Alt+{1-4,Q,W,E,R}   = "toggle_tag"
-Mod+Shift+5 = "move_to_all_workspaces"
+Mod+Shift+5 = "pin_window"            # Pin/unpin focused window to every workspace
 
 # -- Bar --
 Mod+B       = "toggle_bar_visibility"  # Show / hide
 Mod+Shift+B = "toggle_bar_position"    # Top / bottom
 
 # -- Emergency --
-# Disables tiling, clears fullscreen, unmaps all windows, stops drag.
-Mod+Shift+Escape = "emergency_recover"
+# Unconditionally re-exec hana, replacing the running binary at its resolved
+# executable path (for after a rebuild). reload_config (Mod+Shift+R elsewhere)
+# hot-reloads the config instead.
+Mod+Shift+Escape = "reload_hana"
 
 # ---------------------------------------------------------------------------
 # Workspace rules

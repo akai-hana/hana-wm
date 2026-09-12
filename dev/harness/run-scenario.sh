@@ -71,7 +71,7 @@ run_one() {
 	[ -f "$sc_file" ] || { echo "SKIP $sc (no such scenario)"; return 1; }
 
 	out="$HARNESS_ROOT/out/$sc"
-	rm -rf "$out"; mkdir -p "$out"
+	rm -rf "$out"; mkdir -p "$out" "$out/run"
 
 	# Private config tree so scenario runs never touch the repo copy.
 	cp -R "$HARNESS_ROOT/config-home" "$out/config-home"
@@ -99,10 +99,13 @@ run_one() {
 		sleep 0.2
 	done
 
-	# Boot hana with an isolated environment.
+	# Boot hana with an isolated environment. A per-run XDG_RUNTIME_DIR
+	# keeps any runtime socket/state path private to THIS scenario, and
+	# HANA_PID is exported so scenarios can kill/reload hana directly.
 	DISPLAY="$HW_DISPLAY" \
 	XDG_CONFIG_HOME="$out/config-home" \
 	HOME="$out/config-home" \
+	XDG_RUNTIME_DIR="$out/run" \
 	setsid nohup "$HANA_BIN" >"$out/hana.log" 2>&1 &
 	hana_pid=$!
 
@@ -125,7 +128,7 @@ run_one() {
 	# EXPORT the harness vars. A VAR=val prefix on the `.` command
 	# expires when sourcing returns, so helpers called afterwards
 	# (state_dump_final -> dump/state_dump) saw unbound HW_OUT/HW_LOG.
-	export HW_DISPLAY HW_OUT="$out" HW_LOG="$out/hana.log" HARNESS_ROOT="$HARNESS_ROOT"
+	export HW_DISPLAY HW_OUT="$out" HW_LOG="$out/hana.log" HARNESS_ROOT="$HARNESS_ROOT" HANA_PID="$hana_pid"
 	. "$sc_file"
 	rc=$?
 

@@ -258,9 +258,22 @@ pub fn collectTitleCookies(conn: core.Connection, win: u32, cookies: TitleCookie
 
 /// Standalone refresh for one renamed window (PropertyNotify path). Blocking,
 /// but single-window and rare -- never in the draw path.
-pub fn refreshTitle(conn: core.Connection, win: u32) void {
+pub fn refreshTitle(conn: core.Connection, win: u32) bool {
     const cookies = fireTitleCookies(conn, win);
-    collectTitleCookies(conn, win, cookies);
+    ensureAtoms();
+    const utf = utf8_string orelse xcb.XCB_ATOM_STRING;
+    var buf: [title_fetch_len]u8 = undefined;
+
+    var title: []const u8 = "";
+    if (net_wm_name != null) {
+        if (takePropertyReply(conn, cookies.net_wm, utf, &buf)) |t| title = t;
+    }
+    if (title.len == 0) {
+        if (takePropertyReply(conn, cookies.wm_name, xcb.XCB_ATOM_STRING, &buf)) |t| title = t;
+    }
+    if (std.mem.eql(u8, title, peekTitle(win))) return false;
+    storeTitle(win, title);
+    return true;
 }
 
 /// Reads a single in-batch get_property reply into `buf`. Mirrors

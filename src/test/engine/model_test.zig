@@ -30,7 +30,10 @@ const WSId = model.WSId;
 const max_minimized = constants.max_minimized;
 const SmallStore = model.Store(u32, u8, 2);
 
-const makeModel = helpers.makeModel;
+/// Resetting fixture: a fresh model on deterministically re-armed module
+/// stores (minimize/fullscreen), so tests pass in any order regardless of
+/// what records an earlier test left behind (F-20).
+const makeModel = helpers.setUpModel;
 
 /// init/deinit for the two module stores (minimize + fullscreen) most tests
 /// pair together.
@@ -742,12 +745,12 @@ test "identical operation sequences produce identical models" {
         }
     };
     var a = makeModel();
-    var b = makeModel();
     seq.run(&a);
-    // The module stores are process-global, so the replay needs clean
-    // lifetimes (else the second toggleFullscreen turns OFF instead of ON).
-    deinitModules();
-    try initModules();
+    // b's fresh stores (setUpModel resets the process-global minimize and
+    // fullscreen state at construction) must be created AFTER a's run: the
+    // toggle in `seq` flips OFF for a window that still has a fullscreen
+    // record, so the replay needs the same clean stores a's run started with.
+    var b = makeModel();
     seq.run(&b);
     try testing.expect(eqModel(&a, &b));
     try assertSingleMembership(&a);
@@ -1311,7 +1314,6 @@ test "move/tag retarget tracks covering_ws to the new ws" {
 // on its target ws but does NOT take focus (mirrors actions.mapRequest).
 test "spawn admission tiles (on-current focused; off-current target-only)" {
     var m = makeModel();
-
 
     // On-current spawn: register(m, win, null) + setFocus (mirrors
     // actions.mapRequest's on_current=true path).

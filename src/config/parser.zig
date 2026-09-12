@@ -98,19 +98,62 @@ pub const Section = struct {
     // `orderedIterator` gives deterministic, first-in-file-wins resolution
     // for `[binds]`, `[workspace.rules]`, etc. Holds `pairs`' allocations.
     keys_in_order: std.ArrayListUnmanaged([]const u8) = .empty,
+    // Per-key source line, kept in parallel with `keys_in_order` for the
+    // unrecognized-key / duplicate-key diagnostics (C5/C6/C14). Best-effort.
+    lines_in_order: std.ArrayListUnmanaged(usize) = .empty,
+    // Keys that were declared more than once in this section (across the
+    // duplicate / cross-file merge paths). Distinct from a single literal
+    // array value like `layouts = [...]`: only genuine duplicate declarations
+    // accumulate, and only those warn when read as a scalar (C14).
+    duplicated_keys: std.StringHashMap(void),
+    // Keys already warned about for scalar-duplicate reads (C14), so each
+    // section+key pair warns at most once.
+    scalar_dup_warned: std.StringHashMap(void),
+    // The section header this Section belongs to ("" for the root pairs that
+    // have no header). Filled by parse() when a section is created; merged
+    // sections carry their source name through the shared-value merge.
+    name: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator) Section {
         var map = std.StringHashMap(Value).init(allocator);
-        map.ensureTotalCapacity(4) catch {};
+        map.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section pair map reserve");
         var consumed = std.StringHashMap(void).init(allocator);
-        consumed.ensureTotalCapacity(4) catch {};
-        return .{ .pairs = map, .consumed = consumed };
+        consumed.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section consumed-set reserve");
+        var duplicated = std.StringHashMap(void).init(allocator);
+        duplicated.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section duplicate tracking reserve");
+        var dup_warned = std.StringHashMap(void).init(allocator);
+        dup_warned.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section duplicate-diagnostic reserve");
+        return .{ .pairs = map, .consumed = consumed, .duplicated_keys = duplicated, .scalar_dup_warned = dup_warned };
     }
 
     // Records `key` as the newest document-order key. Best-effort: an OOM
     // here just loses deterministic ordering for this section, never data.
     fn recordKey(self: *Section, allocator: std.mem.Allocator, key: []const u8) void {
         self.keys_in_order.append(allocator, key) catch {};
+    }
+
+    // Records `key` as the newest document-order key together with the source
+    // line it was declared on. Best-effort on both halves (C5/C6 diagnostics).
+    fn recordLine(self: *Section, allocator: std.mem.Allocator, key: []const u8, line: usize) void {
+        self.recordKey(allocator, key);
+        self.lines_in_order.append(allocator, line) catch {};
+    }
+
+    // Returns the source line `key` was first declared on in this section.
+    pub fn lineOfKey(self: *const Section, key: []const u8) ?usize {
+        for (self.keys_in_order.items, 0..) |k, i| {
+            if (std.mem.eql(u8, k, key)) {
+                if (i < self.lines_in_order.items.len) return self.lines_in_order.items[i];
+                return null;
+            }
+        }
+        return null;
+    }
+
+    // Records `key` as declared more than once (calling `accumulate` path);
+    // these are the only keys that can trigger C14's scalar-duplicate warn.
+    fn markDuplicated(self: *Section, key: []const u8) void {
+        self.duplicated_keys.put(key, {}) catch {};
     }
 
     // Iterates pairs in document (insertion) order; deterministic, unlike
@@ -124,19 +167,20 @@ pub const Section = struct {
     // `[workspace.rules]`, `[tiling.layouts.master-stack.counts]`) rather
     // than the typed getters.
     pub fn markConsumed(self: *Section, key: []const u8) void {
-        self.consumed.put(key, {}) catch {};
+        self.consumed.put(key, {}) catch |err| debug.warnOnErr(err, "marking key consumed");
     }
 
     // Warns about every key in the section that was never examined via
     // get()/getAs()/markConsumed(); typically a typo in the key name, since
-    // the parser otherwise accepts it silently.
+    // the parser otherwise accepts it silently. Names the source line so a
+    // large config's typos are findable (C6).
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
         var iter = self.pairs.iterator();
         while (iter.next()) |entry| {
             if (!self.consumed.contains(entry.key_ptr.*)) {
                 debug.warn(
-                    "Unrecognized key '{s}' in section [{s}]; ignoring",
-                    .{ entry.key_ptr.*, section_name },
+                    "Unrecognized key '{s}' in section [{s}] (line {d}); ignoring",
+                    .{ entry.key_ptr.*, section_name, self.lineOfKey(entry.key_ptr.*) orelse 0 },
                 );
             }
         }
@@ -144,7 +188,39 @@ pub const Section = struct {
 
     pub fn get(self: *Section, key: []const u8) ?Value {
         self.markConsumed(key);
-        return self.pairs.get(key);
+        const val = self.pairs.get(key);
+        if (val) |v| self.warnScalarDuplicate(key, v);
+        return val;
+    }
+
+    // C14: a key that accumulated duplicate declarations reads as an array,
+    // but a scalar request resolves to the last declaration. Warn once (per
+    // section+key) so silent last-wins isn't a surprise -- except in the
+    // sections where accumulated arrays ARE the point: [binds], rule tables
+    // ([workspace.rules]/[rules]), the root `include` key, and the [tiling]
+    // `layouts` list.
+    fn warnScalarDuplicate(self: *Section, key: []const u8, val: Value) void {
+        if (val != .array) return;
+        if (!self.duplicated_keys.contains(key)) return;
+        if (self.scalar_dup_warned.contains(key)) return;
+        const exempt = std.mem.eql(u8, self.name, "binds") or
+            std.mem.eql(u8, self.name, "workspace.rules") or
+            std.mem.eql(u8, self.name, "rules") or
+            (self.name.len == 0 and std.mem.eql(u8, key, "include")) or
+            (std.mem.eql(u8, self.name, "tiling") and std.mem.eql(u8, key, "layouts"));
+        if (exempt) return;
+        self.scalar_dup_warned.put(key, {}) catch {};
+        const decls: usize = val.array.items.len;
+        if (self.name.len == 0)
+            debug.warn(
+                "Duplicate key '{s}' accumulates into an array ({d} declarations); scalar reads use the last value",
+                .{ key, decls },
+            )
+        else
+            debug.warn(
+                "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations); scalar reads use the last value",
+                .{ key, self.name, decls },
+            );
     }
 
     // Generic typed getter: dispatches to the matching `Value.asScalar`
@@ -160,7 +236,48 @@ pub const Section = struct {
             else => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
         };
     }
+
+    // C4: `getAs` that also diagnoses a present-but-wrong-typed value, so a
+    // knob silently keeping its default is never a surprise. Fires once per
+    // read (schema.applyAll reads each knob's key exactly once). The
+    // accumulated-duplicate case is already covered by get's
+    // warnScalarDuplicate; a single literal array at a scalar knob warns
+    // here as a wrong type.
+    pub fn getAsOrWarn(self: *Section, comptime T: type, key: []const u8) ?T {
+        const out = self.getAs(T, key);
+        if (out == null) {
+            if (self.pairs.get(key)) |v| {
+                debug.warn(
+                    "Key '{s}' in section [{s}] expects {s}, got {s}; ignoring (keeping default)",
+                    .{ key, self.name, typeLabel(T), valueTypeLabel(v) },
+                );
+            }
+        }
+        return out;
+    }
 };
+
+fn typeLabel(comptime T: type) []const u8 {
+    return switch (T) {
+        i64 => "a number",
+        bool => "a boolean",
+        []const u8 => "a string",
+        u32 => "a color",
+        ScalableValue => "a size or percentage",
+        else => "a different type",
+    };
+}
+
+fn valueTypeLabel(val: Value) []const u8 {
+    return switch (val) {
+        .integer => "a number",
+        .boolean => "a boolean",
+        .string => "a string",
+        .array => "an array",
+        .color => "a color",
+        .scalable => "a size or percentage",
+    };
+}
 
 // Iterates a section's pairs in document (insertion) order. Values are
 // looked up live from `pairs` so accumulated duplicates are seen in full.
@@ -180,10 +297,19 @@ pub const Document = struct {
     allocator: std.mem.Allocator,
     sections: std.StringHashMap(Section),
     root: Section,
+    /// Set when any line in this document was warn-and-skipped, or when a
+    /// whole file it represents was skipped during the load's merge.
+    /// config.zig turns a had_errors merged document into
+    /// error.ConfigParseFailed so a broken config can't silently partial-load
+    /// (C1); keeps its existing per-line/file warns either way.
+    had_errors: bool = false,
+    /// Path of the TOML file this document was parsed from ("" for in-memory
+    /// / embedded inputs). Named in every per-line diagnostic (C5).
+    source_path: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
-        sections.ensureTotalCapacity(8) catch {};
+        sections.ensureTotalCapacity(8) catch |err| debug.warnOnErr(err, "document section map reserve");
         return .{ .allocator = allocator, .sections = sections, .root = Section.init(allocator) };
     }
 
@@ -241,9 +367,10 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
             // array-valued `incoming` so two files declaring an array produce
             // one flat array rather than an array-of-arrays.
             try accumulate(allocator, old_val, src_val);
+            dst.markDuplicated(src_key);
         } else {
             try dst.pairs.put(src_key, src_val);
-            dst.recordKey(allocator, src_key);
+            dst.recordLine(allocator, src_key, src.lineOfKey(src_key) orelse 0);
         }
     }
 }
@@ -251,13 +378,15 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
 // Merges `src` into `dst`; duplicate keys accumulate into arrays rather than
 // overwriting, equivalent to writing all pairs in one file. Scalar reads
 // resolve to the last element (later files win); array reads see every
-// declaration.
+// declaration. Parse-error state propagates so a merged document reports a
+// failure (error.ConfigParseFailed) when ANY contributing file had errors.
 pub fn mergeDocumentsInto(
     allocator: std.mem.Allocator,
     dst: *Document,
     src: *const Document,
 ) !void {
     try mergeSectionsInto(allocator, &dst.root, &src.root);
+    dst.had_errors = dst.had_errors or src.had_errors;
 
     var iter = src.sections.iterator();
     while (iter.next()) |entry| {
@@ -305,6 +434,18 @@ const Parser = struct {
     content: []const u8,
     pos: usize,
     line: usize,
+    /// Position of the first byte of the current line, so diagnostics can
+    // report a column (`pos - line_start`). Reset whenever a newline is
+    // consumed by any scanner.
+    line_start: usize = 0,
+    /// Last key parsed by parseKeyValuePair, named in line-level diagnostics
+    // when a pair fails mid-parse.
+    last_key: []const u8 = "",
+    /// Owning Document's had_errors flag; set whenever a line is warn-and-
+    // skipped so the load can fail on broken configs (C1).
+    had_errors: *bool,
+    /// File path named in every per-line diagnostic (C5); "" = in-memory input.
+    source_path: []const u8 = "",
     // Current nested-array depth, checked against max_array_depth so a
     // pathologically deep literal (`[[[[[...]]]]]`) can't exhaust the stack.
     // Config is locally authored and trusted, so this is a defensive
@@ -316,8 +457,23 @@ const Parser = struct {
     // gathered greedily into one nested array.
     in_array: bool = false,
 
-    fn init(allocator: std.mem.Allocator, content: []const u8) Parser {
-        return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1 };
+    fn init(allocator: std.mem.Allocator, content: []const u8, had_errors: *bool) Parser {
+        return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1, .had_errors = had_errors };
+    }
+
+    // Zero-based column of the current scan position within its line.
+    inline fn column(self: *const Parser) usize {
+        return self.pos - self.line_start;
+    }
+
+    // "<input>" when no source file is named (in-memory/embedded inputs).
+    fn sourceLabel(self: *const Parser) []const u8 {
+        return if (self.source_path.len == 0) "<input>" else self.source_path;
+    }
+
+    // Per-line diagnostic prefixed with file:line:column (C5).
+    fn warnLine(self: *const Parser, comptime fmt: []const u8, args: anytype) void {
+        debug.warn("{s}:{d}:{d}: " ++ fmt, .{ self.sourceLabel(), self.line, self.column() } ++ args);
     }
 
     fn skip(self: *Parser, comptime include_newlines: bool, comptime include_comments: bool) void {
@@ -327,6 +483,7 @@ const Parser = struct {
                 '\n' => if (include_newlines) {
                     self.pos += 1;
                     self.line += 1;
+                    self.line_start = self.pos;
                 } else break,
                 '#' => if (include_comments) self.skipToNewline() else break,
                 else => break,
@@ -339,6 +496,7 @@ const Parser = struct {
         if (self.pos < self.content.len) {
             self.pos += 1;
             self.line += 1;
+            self.line_start = self.pos;
         }
     }
 
@@ -356,7 +514,10 @@ const Parser = struct {
     inline fn consume(self: *Parser) ?u8 {
         const c = self.peek() orelse return null;
         self.pos += 1;
-        if (c == '\n') self.line += 1;
+        if (c == '\n') {
+            self.line += 1;
+            self.line_start = self.pos;
+        }
         return c;
     }
 
@@ -593,7 +754,9 @@ const Parser = struct {
     // Parses one `key = value` pair, or a bare `key` (treated as `key = true`).
     // Workspace rule entries like `Navigator` rely on the bare-key shorthand.
     fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
+        self.last_key = "";
         const key = try self.parseKey();
+        self.last_key = key;
         self.skipWhitespace();
 
         if (self.peek() == '=') {
@@ -610,7 +773,11 @@ const Parser = struct {
     fn parsePairs(self: *Parser, section: *Section) ParseError!void {
         while (true) {
             const kv = self.parseKeyValuePair() catch |err| {
-                debug.warn("Invalid key-value at line {}: {}", .{ self.line, err });
+                self.had_errors.* = true;
+                if (self.last_key.len > 0)
+                    self.warnLine("invalid key-value (key '{s}'): {}", .{ self.last_key, err })
+                else
+                    self.warnLine("invalid key-value: {}", .{err});
                 self.skipToNewline();
                 continue;
             };
@@ -625,9 +792,10 @@ const Parser = struct {
                 // parseKeybindings treats array values as sequences; scalar
                 // reads of a repeated key resolve to the last declaration.
                 try accumulate(self.allocator, old, kv[1]);
+                section.markDuplicated(kv[0]);
             } else {
                 try section.pairs.put(kv[0], kv[1]);
-                section.recordKey(self.allocator, kv[0]);
+                section.recordLine(self.allocator, kv[0], self.line);
             }
 
             self.skipWhitespace();
@@ -647,7 +815,8 @@ const Parser = struct {
             self.skipLineEnd(trail);
             return false;
         }
-        debug.warn("Unexpected character at line {}", .{self.line});
+        self.had_errors.* = true;
+        self.warnLine("unexpected character after pair (key '{s}')", .{self.last_key});
         self.skipToNewline();
         return false;
     }
@@ -658,11 +827,14 @@ const Parser = struct {
 /// escaped strings/arrays), merging shares values across documents, and a
 /// parse/merge error abandons the partial document to the arena reset. The
 /// Document owns nothing; `content` must stay alive (arena-backed) until the
-/// arena reset.
-pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
+/// arena reset. `source_path` is the file this content came from, named in
+/// every per-line diagnostic ("" for in-memory/embedded inputs).
+pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []const u8) !Document {
     var doc = Document.init(allocator);
+    doc.source_path = source_path;
 
-    var p = Parser.init(allocator, content);
+    var p = Parser.init(allocator, content, &doc.had_errors);
+    p.source_path = source_path;
     var current_section: *Section = &doc.root;
 
     while (p.pos < p.content.len) {
@@ -680,12 +852,14 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             // plain [name] section and then misparsing the trailing ']' as a
             // key (parseSection consumes just one '[').
             if (p.pos + 1 < p.content.len and p.content[p.pos + 1] == '[') {
-                debug.warn("Array-of-tables header '[[...]]' unsupported at line {}", .{p.line});
+                p.had_errors.* = true;
+                p.warnLine("array-of-tables header '[[...]]' unsupported", .{});
                 p.skipToNewline();
                 continue;
             }
             const section_name = p.parseSection() catch |err| {
-                debug.warn("Invalid section at line {}: {}", .{ p.line, err });
+                p.had_errors.* = true;
+                p.warnLine("invalid section: {}", .{err});
                 p.skipToNewline();
                 continue;
             };
@@ -698,6 +872,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) !Document {
             } else {
                 try doc.sections.put(section_name, Section.init(allocator));
                 current_section = doc.sections.getPtr(section_name).?;
+                current_section.name = section_name;
             }
 
             continue;

@@ -72,3 +72,221 @@ test "readFileAlloc growth path handles stat-less files (/proc)" {
     try testing.expect(got.len > 0);
     try testing.expect(std.mem.startsWith(u8, got, "Name:"));
 }
+
+// -- Config-load pipeline tests (loadToml -> buildConfigFromDoc) --
+
+const types = @import("types");
+
+fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !types.Config {
+    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", name);
+    defer alloc.free(path);
+    try scratch.writeScratchFile(path, content);
+    defer scratch.cleanupScratch(path);
+    return try config.loadConfig(alloc, path);
+}
+
+test "S1a: plain {kill} bind substitutes before parseAction" {
+    var cfg = try loadToml(testing.allocator, "s1a",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\kill = "pkill -9"
+        \\Mod+D = "{kill} ghostty"
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
+    const kb = &cfg.keybindings.items[0];
+    try testing.expect(kb.action == .exec);
+    try testing.expectEqualStrings("pkill -9 ghostty", kb.action.exec);
+}
+
+test "S1b: workspace/_N actions still resolve after the substitution hoist" {
+    var cfg = try loadToml(testing.allocator, "s1b",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\kill = "pkill -9"
+        \\mod+ctrl+{1-4} = "workspace"
+        \\mod+alt+{1-4} = "move_to_workspace"
+        \\mod+shift+{1-4} = "toggle_tag"
+        \\mod+{1-4} = "{kill} term"
+        \\Mod+X = "workspace_1"
+    );
+    defer cfg.deinit(testing.allocator);
+
+    // 12 glob workspace binds + 4 glob exec binds + 1 direct _N bind.
+    try testing.expectEqual(@as(usize, 17), cfg.keybindings.items.len);
+    // The 4 exec binds carry the substituted payload, not a literal {kill}.
+    for (cfg.keybindings.items[12..16]) |kb| {
+        try testing.expect(kb.action == .exec);
+        try testing.expectEqualStrings("pkill -9 term", kb.action.exec);
+    }
+    // Direct workspace_1 form resolves to 0-indexed switch_workspace 0.
+    try testing.expectEqual(types.Action{ .switch_workspace = 0 }, cfg.keybindings.items[16].action);
+}
+
+test "S1c: sequence array elements containing {kill} substitute" {
+    var cfg = try loadToml(testing.allocator, "s1c",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\kill = "pkill -9"
+        \\Mod+A = ["{kill} alpha", "close", "kill"]
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
+    const seq = cfg.keybindings.items[0].action.sequence;
+    try testing.expectEqual(@as(usize, 3), seq.len);
+    try testing.expect(seq[0] == .exec);
+    try testing.expectEqualStrings("pkill -9 alpha", seq[0].exec);
+    try testing.expectEqual(types.Action.close_window, seq[1]);
+    try testing.expectEqual(types.Action.close_window, seq[2]);
+}
+
+test "S4: array filtering to zero actions yields no binding" {
+    var cfg = try loadToml(testing.allocator, "s4",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\Mod+S = [1, 2, 3]
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), cfg.keybindings.items.len);
+}
+
+test "C1: a document with skipped (broken) lines fails the load" {
+    // "[broken header" is warn-and-skipped; buildConfigFromDoc must refuse to
+    // build a partial config from a flagged Document, so reload keeps the
+    // live config instead of half-applying a broken one.
+    try testing.expectError(error.ConfigParseFailed, loadToml(testing.allocator, "c1",
+        \\[broken header
+        \\[tiling]
+        \\enabled = true
+    ));
+}
+
+// -- lowerSlice out-buffer safety (F-16b regression) --
+
+test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
+    var buf8: [8]u8 = undefined;
+
+    const out = types.lowerSlice(8, &buf8, "HeLLo").?;
+    try testing.expectEqualStrings("hello", out);
+    // The returned slice aliases the caller's buffer (no hidden allocation):
+    // the out-buffer signature exists precisely to make this safe.
+    try testing.expect(out.ptr == buf8[0..].ptr);
+
+    // Over-length input returns null -- the fixed buffer must never be
+    // written past its bound.
+    var buf4: [4]u8 = undefined;
+    try testing.expect(types.lowerSlice(4, &buf4, "hello") == null);
+    // Exact-fit boundary still accepted.
+    var buf5: [5]u8 = undefined;
+    try testing.expect(types.lowerSlice(5, &buf5, "Hello") != null);
+
+    var buf2: [2]u8 = undefined;
+    const empty = types.lowerSlice(2, &buf2, "").?;
+    try testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+// -- Config reload change detection deltas (F-05) --
+
+test "detectChanges: identical configs report no subsystem changes" {
+    var a = types.Config{};
+    var b = types.Config{};
+    defer a.deinit(testing.allocator);
+    defer b.deinit(testing.allocator);
+
+    const changes = config.detectChanges(&a, &b);
+    try testing.expect(!changes.bar);
+    try testing.expect(!changes.tiling);
+    try testing.expect(!changes.keys);
+}
+
+test "detectChanges: a bar color tweak flags only bar" {
+    var a = types.Config{};
+    var b = types.Config{};
+    defer a.deinit(testing.allocator);
+    defer b.deinit(testing.allocator);
+    b.bar.bg = a.bar.bg + 1;
+
+    const changes = config.detectChanges(&a, &b);
+    try testing.expect(changes.bar);
+    try testing.expect(!changes.tiling);
+    try testing.expect(!changes.keys);
+}
+
+test "detectChanges: master count and workspaces count fold into tiling only" {
+    var a = types.Config{};
+    defer a.deinit(testing.allocator);
+
+    // The tiling subsystem hash covers tiling params, workspaces, and the
+    // fullscreen/drag/snap gates as one hot-reload unit.
+    var b = types.Config{};
+    defer b.deinit(testing.allocator);
+    b.tiling.master_count = 2;
+    const bc = config.detectChanges(&a, &b);
+    try testing.expect(!bc.bar);
+    try testing.expect(bc.tiling);
+    try testing.expect(!bc.keys);
+
+    var c = types.Config{};
+    defer c.deinit(testing.allocator);
+    c.workspaces.count = 7;
+    const cc = config.detectChanges(&a, &c);
+    try testing.expect(cc.tiling);
+    try testing.expect(!cc.bar);
+    try testing.expect(!cc.keys);
+}
+
+test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
+    var base = types.Config{};
+    defer base.deinit(testing.allocator);
+    try base.keybindings.append(testing.allocator, .{
+        .modifiers = 5,
+        .keysym = 0x1002,
+        .action = .close_window,
+    });
+
+    // Same mods/keysym, different action: keys must NOT be reported changed,
+    // so a hot-reload that only rebinds an action skips the regrab.
+    var action_only = types.Config{};
+    defer action_only.deinit(testing.allocator);
+    try action_only.keybindings.append(testing.allocator, .{
+        .modifiers = 5,
+        .keysym = 0x1002,
+        .action = .toggle_prompt,
+    });
+    const ac = config.detectChanges(&base, &action_only);
+    try testing.expect(!ac.keys);
+    try testing.expect(!ac.bar);
+    try testing.expect(!ac.tiling);
+
+    // Same modifiers, different keysym: keys DID change.
+    var moved = types.Config{};
+    defer moved.deinit(testing.allocator);
+    try moved.keybindings.append(testing.allocator, .{
+        .modifiers = 5,
+        .keysym = 0x1003,
+        .action = .close_window,
+    });
+    const mc = config.detectChanges(&base, &moved);
+    try testing.expect(mc.keys);
+    try testing.expect(!mc.bar);
+    try testing.expect(!mc.tiling);
+
+    // A keybinding added: keys changed.
+    var added = types.Config{};
+    defer added.deinit(testing.allocator);
+    try added.keybindings.append(testing.allocator, .{
+        .modifiers = 5,
+        .keysym = 0x1002,
+        .action = .close_window,
+    });
+    try added.keybindings.append(testing.allocator, .{
+        .modifiers = 5,
+        .keysym = 0x1004,
+        .action = .dump_state,
+    });
+    const ec = config.detectChanges(&base, &added);
+    try testing.expect(ec.keys);
+}

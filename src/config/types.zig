@@ -244,9 +244,9 @@ pub const TilingConfig = struct {
     min_window_dim: u16 = constants.min_window_dim,
 
     // Per-layout variant preferences, stored generically as a canonical
-    // layout-name -> VALUE-STRING map. The value-strings are never freed here
-    // (they alias strings parsed by the `parser` Document, or literals), so
-    // deinit only releases the hashmap storage itself.
+    // layout-name -> VALUE-STRING map. Both the key and the value-string are
+    // heap-duped at parse time (setTilingVariant) so they outlive the parsed
+    // document; deinit frees every key and value via freeStringMap.
     variants: std.StringHashMapUnmanaged([]const u8) = .empty,
 
     /// Per-workspace layout assignments parsed from the layouts array.
@@ -363,6 +363,13 @@ pub const IndicatorLocation = enum {
 pub const BarScreenPosition = enum {
     top,
     bottom,
+
+    // Case-insensitive alias map for types.enumFromString, so `bar.position`
+    // accepts any-case "top"/"bottom" (C8).
+    const string_map = std.StaticStringMap(BarScreenPosition).initComptime(.{
+        .{ "top", .top },
+        .{ "bottom", .bottom },
+    });
 };
 
 /// Horizontal anchor for a BarLayout column within the bar.

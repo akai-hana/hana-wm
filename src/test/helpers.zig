@@ -2,6 +2,7 @@ const std = @import("std");
 const model = @import("model");
 const utils = @import("utils");
 const sync = @import("sync");
+const build_options = @import("build_options");
 
 /// Standard 800x600 test geometry (screen == workarea), shared by the sync
 /// and tiling fixtures so no caller threads it through every init.
@@ -9,6 +10,32 @@ pub const std_wa: utils.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 
 pub fn makeModel() model.Model {
     return .{};
+}
+
+/// Deterministically re-arms the process-global module stores (minimize,
+/// fullscreen) that back the model transitions, so a test's first assertions
+/// never depend on which earlier tests left records behind ("pass in any
+/// order", F-20). Both modules' init()/deinit() are idempotent resets (they
+/// only clear their static stores), so calling this redundantly is harmless.
+/// No-ops for modules absent from this build.
+pub fn testReset() void {
+    if (build_options.has_minimize) {
+        @import("minimize").deinit();
+        @import("minimize").init() catch unreachable;
+    }
+    if (build_options.has_fullscreen) {
+        @import("fullscreen").deinit();
+        @import("fullscreen").init() catch unreachable;
+    }
+}
+
+/// Fresh model on deterministically reset module stores. The canonical
+/// fixture entry for state-machine tests that touch module-backed transitions
+/// (minimize/fullscreen): frees them from a shared static store seeded by an
+/// unrelated earlier test.
+pub fn setUpModel() model.Model {
+    testReset();
+    return makeModel();
 }
 
 pub fn regCur(m: *model.Model, win: model.WindowId) void {

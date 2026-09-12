@@ -72,7 +72,7 @@ fn statIdentity(path_z: [*:0]const u8) ?FileIdentity {
         std.os.linux.STATX.BASIC_STATS,
         &stx,
     );
-    if (std.posix.errno(rc) != .SUCCESS) return null;
+    if (std.os.linux.errno(rc) != .SUCCESS) return null;
     return .{
         .dev_major = stx.dev_major,
         .dev_minor = stx.dev_minor,

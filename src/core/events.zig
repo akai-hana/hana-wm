@@ -262,6 +262,69 @@ pub fn grabKeybindings() void {
     _ = xcb.xcb_flush(cs.conn);
 }
 
+// True when `dir_path` holds at least one loadable .toml (the config loader
+// classes a directory with zero .toml files as "no config"). Mirrors the
+// filter in config.loadConfigFromDir.
+fn dirHasToml(io: std.Io, dir_path: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch return false) |entry| {
+        if (entry.kind == .directory) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
+        if (std.mem.eql(u8, entry.name, "fallback.toml")) continue;
+        return true;
+    }
+    return false;
+}
+
+// True when `path` exists with content (an empty single config file is "no
+// config" to the loader, which falls back on it; see config.loadConfig).
+fn fileHasContent(io: std.Io, path: []const u8) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    defer file.close(io);
+    const st = file.stat(io) catch return true; // untrustworthy stat => assume content, as readFileAlloc does
+    return st.size > 0;
+}
+
+// C2 probe: whether a user config exists at all. Duplicates config.
+// loadConfigDefault's documented search order (XDG dir, cwd config dir, XDG
+// config.toml, cwd config.toml) so the reload path can tell "loaded the user
+// config" from "fell back to the embedded fallback" -- loadConfigDefault
+// returns both as a successful load. Every probe failure mode is safe-side:
+// a wrong answer only ever keeps the old config, never swaps in the fallback.
+fn userConfigFound(alloc: std.mem.Allocator) bool {
+    const io = std.Options.debug_io;
+    const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
+    const xdg_conf = if (std.c.getenv("XDG_CONFIG_HOME")) |ch| std.mem.span(ch) else null;
+
+    const config_home = if (xdg_conf) |ch|
+        alloc.dupe(u8, ch) catch return false
+    else
+        std.fmt.allocPrint(alloc, "{s}/.config", .{home}) catch return false;
+    defer alloc.free(config_home);
+
+    const xdg_dir = std.fs.path.join(alloc, &.{ config_home, "hana" }) catch return false;
+    defer alloc.free(xdg_dir);
+    if (dirHasToml(io, xdg_dir)) return true;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return false;
+    const cwd = std.mem.sliceTo(&cwd_buf, 0);
+
+    const local_dir = std.fs.path.join(alloc, &.{ cwd, "config" }) catch return false;
+    defer alloc.free(local_dir);
+    if (dirHasToml(io, local_dir)) return true;
+
+    const xdg_path = std.fs.path.join(alloc, &.{ xdg_dir, "config.toml" }) catch return false;
+    defer alloc.free(xdg_path);
+    if (fileHasContent(io, xdg_path)) return true;
+
+    const local = std.fs.path.join(alloc, &.{ cwd, "config.toml" }) catch return false;
+    defer alloc.free(local);
+    return fileHasContent(io, local);
+}
+
 // Loads and validates a new config, then applies it atomically via pointer
 // swap. On failure the old config remains active.
 //
@@ -280,6 +343,19 @@ fn handleConfigReload() !void {
     const cs = core.getState();
 
     const new_config = config.loadConfigDefault(cs.alloc) catch |err| {
+        // C1: a TOML parse error already reported per-line warnings; treat it
+        // as a hard failure and keep the live config rather than swapping in a
+        // partially-merged one. Nothing to deinit here: the load failed before
+        // new_ptr existed, and the load path's own errdefers released its
+        // internals. The early return also skips keybind regrabbing.
+        if (err == error.ConfigParseFailed) {
+            debug.err(
+                "Config reload rejected: parse error in a config file. " ++
+                    "Keeping current config; fix the file, reload again",
+                .{},
+            );
+            return err;
+        }
         debug.err("Failed to load: {}, keeping old", .{err});
         return err;
     };
@@ -288,6 +364,21 @@ fn handleConfigReload() !void {
     const new_ptr = try cs.alloc.create(@TypeOf(new_config));
     new_ptr.* = new_config;
     errdefer new_ptr.deinit(cs.alloc);
+
+    // C2: loadConfigDefault collapses the "no user config found" case into a
+    // successful embedded-fallback load with no distinguishing signal. Boot
+    // keeps that fallback; on RELOAD a missing user config must NOT silently
+    // swap in the fallback. Distinguish the two by probing the same locations
+    // loadConfigDefault searches (see userConfigFound). The errdefer above
+    // frees the fallback Config on this early return.
+    if (!userConfigFound(cs.alloc)) {
+        debug.err(
+            "Config reload rejected: no user config file found. " ++
+                "Keeping current config (the embedded fallback is boot-only)",
+            .{},
+        );
+        return;
+    }
 
     try config.validate(new_ptr);
     const xkb_state = input.getXkbState() orelse {
@@ -382,6 +473,13 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
 
+    // P5: snapshot the border-relevant fact revisions so the batch-end border
+    // sweep can be skipped when nothing that affects borders changed this
+    // batch (focus/workspace/tiling/fullscreen). Any bump during dispatch OR
+    // the post-batch drains below (pending focus confirm, tiling settle)
+    // counts, so the comparison runs after the drains.
+    const facts_before = core.getState().facts;
+
     // Cap the number of events dispatched per batch so a chatty client
     // flooding PropertyNotify/ConfigureNotify can't starve the signal pipe and
     // timer paths (clock, cursor blink). Unread events stay in the
@@ -454,7 +552,18 @@ fn handleXcbEvents() void {
     // since suppression is still active) before this lifts suppression.
     // See beginTilingOpSettle's doc comment in focus.zig.
     focus.drainTilingOpSettle();
-    window.updateWorkspaceBordersIfNeeded();
+    // P5: run the per-batch border sweep only when a border-relevant fact
+    // actually changed this batch; a motion/expose-only batch skips the
+    // unconditional O(N) walk. Wire sends are unchanged either way (the sweep
+    // is CacheMap-dedup'd), so steady-state output is identical.
+    const facts = core.getState().facts;
+    if (facts_before.focus_rev != facts.focus_rev or
+        facts_before.window_rev != facts.window_rev or
+        facts_before.fullscreen_rev != facts.fullscreen_rev or
+        facts_before.layout_rev != facts.layout_rev)
+    {
+        window.updateWorkspaceBordersIfNeeded();
+    }
 
     _ = xcb.xcb_flush(conn);
 }

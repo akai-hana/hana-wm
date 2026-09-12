@@ -193,9 +193,13 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         pub const Item = struct { key: K, val: *const V };
 
         /// seq must be < count(). Iterates in sorted-key order.
+        /// seq beyond count() clamps to the last stored row (real check, not a
+        /// debug-only assert), so an off-by-one index can't OOB the backing
+        /// arrays in ReleaseFast. Empty map → row 0 of the fixed-capacity
+        /// storage (always addressable, capacity >= 1).
         pub fn at(self: *const Self, seq: usize) Item {
-            std.debug.assert(seq < self.len);
-            return .{ .key = self.keys[seq], .val = &self.vals[seq] };
+            const idx = @min(seq, self.len -| 1);
+            return .{ .key = self.keys[idx], .val = &self.vals[idx] };
         }
 
         pub fn count(self: *const Self) usize {

@@ -171,7 +171,8 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     defer aw.deinit();
     try std.json.Stringify.value(state, .{ .whitespace = .indent_2 }, &aw.writer);
     try aw.writer.flush();
-    const al = aw.toArrayList();
+    var al = aw.toArrayList();
+    defer al.deinit(allocator);
 
     const io = std.Options.debug_io;
     const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});

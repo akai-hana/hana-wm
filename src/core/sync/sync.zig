@@ -39,13 +39,15 @@ const utils = @import("utils");
 const constants = @import("constants");
 const build_options = @import("build_options");
 const model = @import("model");
+const debug = @import("debug");
 
 /// When tiling is absent, provide a compute stub so the rest of sync
 /// compiles. The interchange TYPES (View/List/Placement/Env/HintsView/
 /// parked_rect) come from the tiling contract (plugin.zig), which both the
 /// tiling and this reconciler reference — so there is no mirrored duplicate
 /// to keep in lockstep. The reconcile path still runs (park/map/stack), but
-/// the layout computation block is skipped and findPlacement is null.
+/// the layout computation block is skipped and the placement lookup table
+/// stays empty.
 const plugin = @import("plugin");
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {
     pub const Env = plugin.Env;
@@ -270,12 +272,26 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
     var placements: tiling.List = .{};
+    // Per-window placement lookup (P1): `pl_of_slot[i]` is the index into
+    // `placements` of the placement for store slot `i`, or null when that
+    // window has no placement this pass. Built alongside the layout compute
+    // below (one write per ordered window), then the fused store pass below
+    // -- which already knows each window's slot via m.store.at(i) -- resolves
+    // its placement in O(1) instead of an O(N) scan per window. Stack scratch,
+    // no allocation, matching the file's fixed-capacity style.
+    var pl_of_slot: [model.store_capacity]?usize = [_]?usize{null} ** model.store_capacity;
     if (build_options.has_tiling and fs_win == null) {
         var n: usize = 0;
         const tiled = &m.ws[m.current].tiled_order;
         for (tiled.constSlice()) |w| {
             const e = m.store.get(w) orelse continue;
             if (e.mask & model.bit(m.current) == 0) continue;
+            // First write wins, mirroring the removed findPlacement's
+            // first-match semantics; the store holds each id once so this is
+            // just defensive.
+            if (storeSlotOf(m, w)) |slot| {
+                if (pl_of_slot[slot] == null) pl_of_slot[slot] = n;
+            }
             order_buf[n] = w;
             hints_buf[n] = e.size_hints;
             n += 1;
@@ -296,7 +312,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         if (fe.presence == .present and model.visibleOn(m, f, m.current)) {
             switch (fe.anchor) {
                 .floating => winner = f,
-                .tiled => if (findPlacement(&placements, f)) |p| {
+                .tiled => if (placementOf(m, &placements, &pl_of_slot, f)) |p| {
                     if (p.visible) winner = f;
                 },
             }
@@ -341,7 +357,13 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const definitely_parked_desire = e.presence == .parked or !on_current;
         if (!is_fs and definitely_parked_desire and ledger.parked) continue;
 
-        const desire = computeDesire(m, ctx, e, win, fs_win, &placements, &winner, ledger);
+        // Resolve this tiled window's placement in O(1): the lookup table is
+        // indexed by store slot, which this store iteration already provides.
+        const placement = if (e.anchor == .tiled)
+            placementOfSlot(&placements, &pl_of_slot, i)
+        else
+            null;
+        const desire = computeDesire(m, ctx, e, win, fs_win, placement, &winner, ledger);
         const rect = desire.rect;
         const bw = desire.bw;
         const pixel = desire.pixel;
@@ -374,7 +396,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // previous record's rect/has_rect; an unpark overwrites wholesale.
         if (gop) |g| {
             if (parked) g.parked = true else markSentVisible(g, win, rect, bw, pixel);
-        } else std.log.err("sync.reconcile: ledger full; sends applied, record lost", .{});
+        } else debug.err("sync.reconcile: ledger full; sends applied, record lost", .{});
     }
 
     // force_restack additionally raises bar/top.
@@ -427,7 +449,7 @@ fn computeDesire(
     e: *const model.Entry,
     win: model.WindowId,
     fs_win: ?model.WindowId,
-    placements: *const tiling.List,
+    placement: ?tiling.Placement,
     winner: *?model.WindowId,
     ledger: SentEntry,
 ) Desire {
@@ -449,7 +471,7 @@ fn computeDesire(
             rect = r;
             parked = !model.visibleOn(m, win, m.current);
         },
-        .tiled => if (findPlacement(placements, win)) |p| {
+        .tiled => if (placement) |p| {
             rect = p.rect;
             parked = !p.visible;
         } else if (model.visibleOn(m, win, m.current)) {
@@ -465,10 +487,47 @@ fn computeDesire(
     return .{ .rect = rect, .bw = bw, .pixel = pixel, .parked = parked, .is_winner = is_winner };
 }
 
-fn findPlacement(placements: *const tiling.List, win: model.WindowId) ?tiling.Placement {
-    // Linear scan: the list holds one placement per window in placement order.
-    for (placements.constSlice()) |p| {
-        if (p.win == win) return p;
+/// O(1) placement lookup: placement for store slot `slot`, or null when the window
+/// has no placement this pass (multi-tag orphan, off-workspace, no-tiling
+/// build). `slot` must be < m.store.count(); the table was built alongside
+/// placements in reconcile. Indexes into a copy-cached slice so a module that
+/// emits fewer placements than ordered windows degrades to null (same as the
+/// removed linear scan) instead of indexing out of bounds.
+fn placementOfSlot(
+    placements: *const tiling.List,
+    pl_of_slot: *const [model.store_capacity]?usize,
+    slot: usize,
+) ?tiling.Placement {
+    const idx = pl_of_slot[slot] orelse return null;
+    const slice = placements.constSlice();
+    if (idx >= slice.len) return null;
+    return slice[idx];
+}
+
+/// Placement for `win`, resolved id -> store slot -> O(1) table. Only used on
+/// the cold winner-seed path; the hot fused pass passes its known slot.
+fn placementOf(
+    m: *const model.Model,
+    placements: *const tiling.List,
+    pl_of_slot: *const [model.store_capacity]?usize,
+    win: model.WindowId,
+) ?tiling.Placement {
+    const slot = storeSlotOf(m, win) orelse return null;
+    return placementOfSlot(placements, pl_of_slot, slot);
+}
+
+/// Binary-search the store (keys sorted ascending by id, model.Store's
+/// sorted-put invariant) for `win`'s slot. Mirrors model.Store.exactAt, which
+/// is private; querying through the public at() keeps this in sync without
+/// touching the model.
+fn storeSlotOf(m: *const model.Model, win: model.WindowId) ?usize {
+    var lo: usize = 0;
+    var hi: usize = m.store.count();
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const key = m.store.at(mid).key;
+        if (key == win) return mid;
+        if (key < win) lo = mid + 1 else hi = mid;
     }
     return null;
 }

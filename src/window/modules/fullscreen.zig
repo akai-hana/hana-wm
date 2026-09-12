@@ -22,7 +22,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const bounded = @import("bounded");
 const utils = @import("utils");
 const model = @import("model");
 const plugin = @import("plugin");
@@ -40,7 +39,7 @@ const MAX_FULLSCREEN = model.store_capacity;
 
 /// Self-contained fullscreen store: static, allocation-free, linear scans.
 /// No model bookkeeping backs it (the model only mirrors `.covering`).
-var g_recs: bounded.RecStore(Rec, MAX_FULLSCREEN) = .{};
+var g_recs: utils.BoundedList(Rec, MAX_FULLSCREEN) = .{};
 
 /// Window configured fullscreen but awaiting ConfigureNotify confirmation.
 /// Zero when none pending. Set by armPendingBarHide; cleared in
@@ -60,7 +59,7 @@ var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
 // Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
-    g_recs.reset();
+    g_recs.clear();
     g_pending_bar_hide_win = 0;
     g_pending_bar_show_win = 0;
     g_net_wm_state = 0;
@@ -97,14 +96,18 @@ pub fn deinit() void {
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     if (build_options.has_minimize and @import("minimize").isMinimized(m, win)) return false;
     const e = m.store.getPtr(win) orelse return false;
-    if (g_recs.remove(win)) {
+    if (g_recs.removeWhere(win, struct {
+        fn match(key: u32, item: Rec) bool {
+            return item.win == key;
+        }
+    }.match)) {
         // OFF: leave fullscreen; restore the pre-fullscreen anchor to the model.
         releaseCovering(m, win);
         return true;
     }
     // ON: capacity guard BEFORE any mutation — a full store refuses the
     // toggle (returns false, model untouched).
-    if (g_recs.len() >= MAX_FULLSCREEN) return false;
+    if (g_recs.len >= MAX_FULLSCREEN) return false;
 
     // Covering SWITCH: claiming the screen while another window already
     // owns it on this workspace releases the previous occupant's claim
@@ -118,7 +121,11 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
         while (presentVisibleRecOnWs(m, m.current, win)) |occupant| {
-            _ = g_recs.remove(occupant);
+            _ = g_recs.removeWhere(occupant, struct {
+                fn match(key: u32, item: Rec) bool {
+                    return item.win == key;
+                }
+            }.match);
             releaseCovering(m, occupant);
         }
     }
@@ -162,7 +169,7 @@ pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
 /// pre-toggle classification and was-fullscreen captures. Reads the model's
 /// `covering_ws` intent (kept in lockstep with the record).
 pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WSId) bool {
-    if (g_recs.find(win) == null) return false;
+    if (g_recs.indexOfByIdField(.win, win) == null) return false;
     return fullscreenWsOf(m, win) == ws;
 }
 
@@ -215,7 +222,7 @@ pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: mode
 /// `covering_ws` — the single authority on the capture target. The caller has
 /// already confirmed the destination is not occupied.
 pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WSId) void {
-    if (g_recs.find(win) == null) return;
+    if (g_recs.indexOfByIdField(.win, win) == null) return;
     const eptr = @constCast(m).store.getPtr(win) orelse return;
     eptr.covering_ws = ws;
 }
@@ -268,7 +275,7 @@ fn readLE(comptime T: type, bytes: []const u8, off: usize) T {
 /// minimized blob wins (design §6). The returned slice is allocator-owned;
 /// persist frees it after writing.
 fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const Rec, model.Entry } {
-    const idx = g_recs.find(win) orelse return null;
+    const idx = g_recs.indexOfByIdField(.win, win) orelse return null;
     const rec = &g_recs.slice()[idx];
     const e = m.store.get(win) orelse return null;
     if (e.presence == .parked) return null; // parked window: minimize owns the blob
@@ -310,7 +317,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
     if (bytes.len < 1 or bytes[0] != FS_MAGIC) return null; // not ours
     const m: *model.Model = plugin.modelPtrOf(ptr);
-    if (g_recs.find(win) != null) return .{ m, null }; // already adopted; idempotent
+    if (g_recs.indexOfByIdField(.win, win) != null) return .{ m, null }; // already adopted; idempotent
     const e = m.store.getPtr(win) orelse return null;
     return .{ m, e };
 }
@@ -320,6 +327,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const e = p[1] orelse return true;
     if (bytes.len < 4) return false;
     const ws: model.WSId = readLE(u16, bytes, 1);
+    if (ws >= p[0].ws.len) return false; // corrupt/oversized capture target: reject before writing
     const tag = bytes[3];
     var anchor: model.BaseMode = undefined;
     switch (tag) {
@@ -346,7 +354,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     }
     // This hook is only dispatched for non-parked windows (fullscreen blob
     // only exists for non-parked), so we can safely mark the window covering.
-    if (g_recs.len() >= MAX_FULLSCREEN) return false;
+    if (g_recs.len >= MAX_FULLSCREEN) return false;
     _ = g_recs.append(.{ .win = win, .anchor = anchor });
     e.presence = .covering;
     e.covering_ws = ws; // model stays the single authority on the capture target
@@ -423,7 +431,11 @@ pub fn armPendingBarShow(win: u32) void {
 /// unmanage) after removing the store entry. Also clears any pending deferred
 /// bar op so the bar doesn't stay stuck (both show and hide cases).
 pub fn onWindowGone(win: u32) void {
-    _ = g_recs.remove(win);
+    _ = g_recs.removeWhere(win, struct {
+        fn match(key: u32, item: Rec) bool {
+            return item.win == key;
+        }
+    }.match);
     if (g_pending_bar_show_win == win) resolvePendingBarShow();
     if (g_pending_bar_hide_win == win) g_pending_bar_hide_win = 0;
 }

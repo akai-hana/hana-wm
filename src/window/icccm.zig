@@ -12,9 +12,6 @@ const utils = @import("utils");
 const debug = @import("debug");
 const constants = @import("constants");
 
-const max_property_length = constants.property_max_length;
-const property_no_delete = constants.property_no_delete;
-
 // WM_HINTS constants (ICCCM 4.1.2.4)
 const wm_hints_input_flag: u32 = 1 << 0;
 const wm_hints_flags_field: usize = 0;
@@ -101,7 +98,7 @@ pub fn populateFocusCacheFromCookies(
 pub fn firePropQuery(conn: core.Connection, win: u32, prop: u32, comptime prop_type: u32, comptime length: u32) xcb.xcb_get_property_cookie_t {
     return xcb.xcb_get_property(
         conn,
-        property_no_delete,
+        constants.property_no_delete,
         win,
         prop,
         prop_type,
@@ -120,7 +117,7 @@ pub fn fireWMProtocolsQuery(
     win: u32,
 ) ?xcb.xcb_get_property_cookie_t {
     const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return null;
-    return firePropQuery(conn, win, protocols_atom, xcb.XCB_ATOM_ATOM, max_property_length);
+    return firePropQuery(conn, win, protocols_atom, xcb.XCB_ATOM_ATOM, constants.property_max_length);
 }
 
 /// Drains the WM_HINTS cookie and returns the ICCCM input flag. Returns true
@@ -410,7 +407,7 @@ pub fn discardProtocolCookie(conn: core.Connection, opt: anytype) void {
 fn queryWMHintsAcceptsInput(conn: core.Connection, win: u32) bool {
     return extractWMHintsInput(conn, xcb.xcb_get_property(
         conn,
-        property_no_delete,
+        constants.property_no_delete,
         win,
         xcb.XCB_ATOM_WM_HINTS,
         xcb.XCB_ATOM_WM_HINTS,

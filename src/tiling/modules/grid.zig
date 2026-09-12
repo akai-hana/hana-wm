@@ -41,8 +41,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         const cell_w_here: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
         const rect = utils.Rect{
-            .x = @intCast(m.gap +| col *| (cell_w_here +| m.gap)),
-            .y = @intCast(wa_y +| m.gap +| row *| (cell_h + m.gap)),
+            .x = tiling.satI16(@intCast(m.gap +| col *| (cell_w_here +| m.gap))),
+            .y = tiling.satI16(@intCast(wa_y +| m.gap +| row *| (cell_h +| m.gap))),
             .width = if (is_partial_row) partial_win_w else win_w,
             .height = win_h,
         };

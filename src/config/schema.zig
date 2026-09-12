@@ -25,7 +25,6 @@ fn place(section: []const u8, key: []const u8) Placement {
 /// wiring), so each `knobs` entry reads as a compact one-liner. Every entry
 /// keeps its exact `places`, `target`, `kind`, `requires`, and
 /// `copy_when_absent` values.
-
 /// Plain knob with no `requires` gate.
 fn knob(places: []const Placement, target: []const u8, kind: Kind) Knob {
     return .{ .places = places, .target = target, .kind = kind };
@@ -39,15 +38,13 @@ fn knobGated(places: []const Placement, target: []const u8, kind: Kind, requires
 /// The [tiling.aesthetics]/flat [tiling] quartet: same key spells both,
 /// target is tiling.<key>, gated on "tiling" (mirrors parseTiling's gate).
 fn tilingAesthetics(key: []const u8, kind: Kind) Knob {
-    return .{ .places = &.{ place("tiling.aesthetics", key), place("tiling", key) },
-        .target = "tiling." ++ key, .kind = kind, .requires = "tiling" };
+    return .{ .places = &.{ place("tiling.aesthetics", key), place("tiling", key) }, .target = "tiling." ++ key, .kind = kind, .requires = "tiling" };
 }
 
 /// Master-stack trio: dedicated-section short spelling wins over the flat
 /// [tiling] spelling (section presence, not key presence, picks the spelling).
 fn masterStack(dedicated_key: []const u8, flat_key: []const u8, kind: Kind) Knob {
-    return .{ .places = &.{ place("tiling.layouts.master-stack", dedicated_key), place("tiling", flat_key) },
-        .target = "tiling." ++ flat_key, .kind = kind, .requires = "tiling" };
+    return .{ .places = &.{ place("tiling.layouts.master-stack", dedicated_key), place("tiling", flat_key) }, .target = "tiling." ++ flat_key, .kind = kind, .requires = "tiling" };
 }
 
 /// Plain [bar] boolean.
@@ -66,10 +63,21 @@ fn barPlainColor(key: []const u8) Knob {
 }
 
 /// [bar.colors] color_from chain: reads a sibling bar field as fallback,
-/// gated on "bar"; `copy` also assigns the fallback when [bar.colors] is absent.
-fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy: bool) Knob {
-    return .{ .places = &.{place("bar.colors", key)}, .target = target,
-        .kind = .{ .color_from = sibling }, .requires = "bar", .copy_when_absent = copy };
+/// gated on "bar". `copy_when_absent` (title variant) also assigns the
+/// fallback when [bar.colors] is absent; the drun variant keeps null so the
+/// read-time fallbacks in BarConfig apply (R2).
+fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) Knob {
+    return .{ .places = &.{place("bar.colors", key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = "bar", .copy_when_absent = copy_when_absent };
+}
+
+/// Title accent color: copies `sibling` when [bar.colors] is absent (R2).
+fn barTitleColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
+    return barColor(key, target, sibling, true);
+}
+
+/// Drun accent color: stays null when [bar.colors] is absent (R2).
+fn barDrunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
+    return barColor(key, target, sibling, false);
 }
 
 /// Every scalar knob, exactly once. ORDER MATTERS twice: workspaces.count
@@ -84,17 +92,14 @@ pub const knobs = [_]Knob{
     knob(&.{place("fullscreen", "enabled")}, "fullscreen_enabled", .b),
 
     // [bar.modules.workspaces] | [workspaces]
-    knob(&.{ place("bar.modules.workspaces", "count"), place("workspaces", "count") },
-        "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
-    knob(&.{ place("bar.modules.workspaces", "enabled"), place("workspaces", "enabled") },
-        "workspaces.enabled", .b),
+    knob(&.{ place("bar.modules.workspaces", "count"), place("workspaces", "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
+    knob(&.{ place("bar.modules.workspaces", "enabled"), place("workspaces", "enabled") }, "workspaces.enabled", .b),
 
     // [tiling]: gated on the section exactly as parseTiling always was --
     // a lone [tiling.aesthetics] without [tiling] never fed these knobs.
     knobGated(&.{place("tiling", "enabled")}, "tiling.enabled", .b, "tiling"),
     knobGated(&.{place("tiling", "global_layout")}, "tiling.global_layout", .b, "tiling"),
-    knobGated(&.{place("tiling", "min_window_dim")}, "tiling.min_window_dim",
-        .{ .int = .{ .T = u16, .min = 1 } }, "tiling"),
+    knobGated(&.{place("tiling", "min_window_dim")}, "tiling.min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, "tiling"),
 
     // Aesthetics quartet: [tiling.aesthetics] preferred, flat [tiling]
     // fallback (same key spellings in both).
@@ -121,11 +126,10 @@ pub const knobs = [_]Knob{
     barScalable("workspace_tag_width", "bar.workspace_tag_width"),
     // height: null = auto-calculate from font metrics alone.
     knob(&.{place("bar", "height")}, "bar.height", .auto_scalable),
-    // Exact-case enum; an unrecognized spelling silently keeps .top.
-    knob(&.{place("bar", "position")}, "bar.bar_position",
-        .{ .enum_read = .{ .T = types.BarScreenPosition } }),
-    knob(&.{place("bar", "carousel_speed_px_s")}, "bar.carousel_speed_px_s",
-        .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
+    // Case-insensitive enum (types.enumFromString over BarScreenPosition's
+    // string_map); unrecognized spellings warn and keep .top (C8).
+    knob(&.{place("bar", "position")}, "bar.bar_position", .{ .enum_read = .{ .T = types.BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }),
+    knob(&.{place("bar", "carousel_speed_px_s")}, "bar.carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
 
     // Base palette: read before every color_from consumer below.
     barPlainColor("bg"),
@@ -136,8 +140,7 @@ pub const knobs = [_]Knob{
 
     knob(&.{place("bar", "clock_format")}, "bar.clock_format", .str),
     knob(&.{place("bar", "drun_prompt")}, "bar.drun_prompt", .str),
-    knob(&.{place("bar", "indicator_location")}, "bar.indicator_location",
-        .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
+    knob(&.{place("bar", "indicator_location")}, "bar.indicator_location", .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
     knob(&.{place("bar", "indicator_padding")}, "bar.indicator_padding", .ratio),
     knob(&.{place("bar", "transparency")}, "bar.transparency", .ratio),
     // Falls back to the bar-wide fg (its historical default) -- but only
@@ -149,12 +152,12 @@ pub const knobs = [_]Knob{
     // title accents additionally COPY their fallback when [bar.colors] is
     // absent (they were unconditionally assigned); the drun trio stay null
     // so the read-time fallbacks in BarConfig apply.
-    barColor("title", "bar.title_accent_color", "accent_color", true),
-    barColor("title_unfocused", "bar.title_unfocused_accent", "bg", true),
-    barColor("title_minimized", "bar.title_minimized_accent", "accent_color", true),
-    barColor("drun_bg", "bar.drun_bg", "bg", false),
-    barColor("drun_fg", "bar.drun_fg", "fg", false),
-    barColor("drun_prompt_color", "bar.drun_prompt_color", "accent_color", false),
+    barTitleColor("title", "bar.title_accent_color", "accent_color"),
+    barTitleColor("title_unfocused", "bar.title_unfocused_accent", "bg"),
+    barTitleColor("title_minimized", "bar.title_minimized_accent", "accent_color"),
+    barDrunColor("drun_bg", "bar.drun_bg", "bg"),
+    barDrunColor("drun_fg", "bar.drun_fg", "fg"),
+    barDrunColor("drun_prompt_color", "bar.drun_prompt_color", "accent_color"),
 };
 
 /// How an enum-valued knob is parsed.
@@ -216,7 +219,6 @@ pub const Knob = struct {
     copy_when_absent: bool = false,
 };
 
-
 // Type-level access into Config by dotted path.
 
 /// Resolves a dotted "group.leaf" (or bare root-level) target path to its
@@ -275,10 +277,10 @@ pub fn getInRange(
     comptime max: ?T,
 ) T {
     const val = switch (T) {
-        bool => section.getAs(bool, key) orelse return default,
-        []const u8 => section.getAs([]const u8, key) orelse return default,
+        bool => section.getAsOrWarn(bool, key) orelse return default,
+        []const u8 => section.getAsOrWarn([]const u8, key) orelse return default,
         u8, u16, u32, usize => blk: {
-            const i = section.getAs(i64, key) orelse return default;
+            const i = section.getAsOrWarn(i64, key) orelse return default;
             // A negative int would trap on the @intCast below; warn-and-default
             // it here so the out-of-range contract holds for negatives too.
             if (i < 0) return reject(i64, key, i, "below minimum", 0, default);
@@ -304,6 +306,9 @@ fn getColorFromValue(key: []const u8, val: parser.Value, default: u32) u32 {
         return default;
     };
     if (val.asScalar(i64)) |i| if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
+    // C4: unresolvable value (boolean, size, bare float, out-of-range int, ...)
+    // would otherwise silently use the default without a trace.
+    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', or an integer), using default", .{key});
     return default;
 }
 
@@ -320,7 +325,7 @@ fn getScalableInRange(
     min: f32,
     comptime fallback_label: []const u8,
 ) ?parser.ScalableValue {
-    const val = section.getAs(parser.ScalableValue, key) orelse return default;
+    const val = section.getAsOrWarn(parser.ScalableValue, key) orelse return default;
     if (val.value < min) {
         debug.warn(
             "Value for '{s}' ({d}) below minimum ({d}), using {s}",
@@ -367,6 +372,11 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
         debug.warn(
             "{s} value '{s}' is quoted; write it unquoted (e.g. {s} = 0.5), using default",
             .{ key, str, key },
+        )
+    else if (val != .array) // C4: something else entirely (boolean, ...)
+        debug.warn(
+            "{s} expects a number or ratio, got a union/other value; using default",
+            .{key},
         );
     return default;
 }
@@ -403,17 +413,17 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
         }
         const p = ptr(cfg, k.target);
         switch (k.kind) {
-            .b => if (hit) |h| { p.* = h.sec.getAs(bool, h.key) orelse p.*; },
+            .b => if (hit) |h| {
+                p.* = h.sec.getAsOrWarn(bool, h.key) orelse p.*;
+            },
             .int => |spec| if (hit) |h| {
-                p.* = getInRange(spec.T, h.sec, h.key, p.*,
-                    if (spec.min) |m| @as(spec.T, m) else null,
-                    if (spec.max) |m| @as(spec.T, m) else null);
+                p.* = getInRange(spec.T, h.sec, h.key, p.*, if (spec.min) |m| @as(spec.T, m) else null, if (spec.max) |m| @as(spec.T, m) else null);
             },
             .scalable => |min| if (hit) |h| {
                 p.* = getScalableInRange(h.sec, h.key, p.*, min, "default") orelse p.*;
             },
             .scalable_free => if (hit) |h| {
-                if (h.sec.getAs(parser.ScalableValue, h.key)) |v| p.* = v;
+                if (h.sec.getAsOrWarn(parser.ScalableValue, h.key)) |v| p.* = v;
             },
             .auto_scalable => if (hit) |h| {
                 p.* = getScalableInRange(h.sec, h.key, null, 0, "auto");
@@ -437,12 +447,14 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
                 if (h.sec.get(h.key)) |val|
                     p.* = getColorFromValue(h.key, val, @field(cfg.bar, sibling));
             },
-            .ratio => if (hit) |h| { p.* = getRatio(h.sec, h.key, p.*); },
+            .ratio => if (hit) |h| {
+                p.* = getRatio(h.sec, h.key, p.*);
+            },
             .str => if (hit) |h| {
-                if (h.sec.getAs([]const u8, h.key)) |val| try assignStr(allocator, p, val);
+                if (h.sec.getAsOrWarn([]const u8, h.key)) |val| try assignStr(allocator, p, val);
             },
             .enum_read => |er| if (hit) |h| {
-                if (h.sec.getAs([]const u8, h.key)) |s| {
+                if (h.sec.getAsOrWarn([]const u8, h.key)) |s| {
                     const parsed = if (er.ci)
                         types.enumFromString(er.T, s)
                     else

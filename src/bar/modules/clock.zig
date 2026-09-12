@@ -118,7 +118,6 @@ pub const module = segdraw.module(
     "clock",
     draw,
     null,
-    false,
     .{
         .self_ticking = true,
         .clickable = false,
