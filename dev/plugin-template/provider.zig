@@ -13,18 +13,24 @@
 //!
 //! This file is INTENTIONALLY inert. It implements the full seam mechanics
 //! around a trivial per-window "flagged" bit so every hook is real,
-//! copy-pasteable code, but nothing in the WM ever sets the bit: coverageOn
-//! returns null (no claim), serializeWindow returns null (no blob), and the
-//! boot/tests are byte-identical with and without the file. Drop it into
-//! src/window/modules/ and `zig build test` stays green — that is the
-//! contract's litmus test.
+//! copy-pasteable code, but nothing in the WM ever sets the bit:
+//! serializeWindow returns null (no blob), coveringOccupantOnWs returns null
+//! (no claim), and boot/tests are byte-identical with and without the file.
+//! Drop it into src/window/modules/ and `zig build test` stays green — that
+//! is the contract's litmus test. `zig build check` additionally compiles
+//! every file here against the real modules (the `check-plugin-template`
+//! step in build.zig), so contract drift self-fails.
 //!
+//! Mirror the shipped modules (fullscreen.zig and minimize.zig are the two
+//! reference implementations) rather than this template alone: the template
+//! must always compile against the same `plugin.WindowModule` contract they
+//! bind.
 
 const std = @import("std");
 const constants = @import("constants");
 const utils = @import("utils");
 const model = @import("model");
-const build_options = @import("build_options");
+const plugin = @import("plugin");
 
 // ---------------------------------------------------------------------------
 // Module-owned state. Every sub-system is allocation-free: a fixed,
@@ -47,13 +53,14 @@ const Rec = struct {
     seq: u32,
 };
 
-var g_recs: [MAX_FLAGGED]Rec = undefined;
-var g_len: usize = 0;
+/// Self-contained flagged store: static, allocation-free, linear scans. No
+/// model bookkeeping backs it (the bounded-list idiom matches minimize.zig).
+var g_recs: utils.BoundedList(Rec, MAX_FLAGGED) = .{};
 var g_seq: u32 = 0;
 
 fn findRec(win: model.WindowId) ?usize {
-    for (0..g_len) |i| {
-        if (g_recs[i].win == win) return i;
+    for (g_recs.constSlice(), 0..) |rec, i| {
+        if (rec.win == win) return i;
     }
     return null;
 }
@@ -71,7 +78,7 @@ fn findRec(win: model.WindowId) ?usize {
 /// re-init (restart). Deinit must perform the same reset so a run ends
 /// state-free and tests can init/deinit per fixture.
 pub fn init() anyerror!void {
-    g_len = 0;
+    g_recs.clear();
     g_seq = 0;
 }
 
@@ -79,7 +86,7 @@ pub fn init() anyerror!void {
 /// allocator, no OS handles in this template — free those here if your
 /// module owns any).
 pub fn deinit() void {
-    g_len = 0;
+    g_recs.clear();
     g_seq = 0;
 }
 
@@ -88,10 +95,11 @@ pub fn deinit() void {
 /// every record for `win` here — a dangling record is how recycled XIDs
 /// inherit stale state.
 pub fn onWindowGone(win: u32) void {
-    if (findRec(win)) |idx| {
-        g_recs[idx] = g_recs[g_len - 1];
-        g_len -= 1;
-    }
+    _ = g_recs.removeWhere(win, struct {
+        fn match(key: u32, item: Rec) bool {
+            return item.win == key;
+        }
+    }.match);
 }
 
 /// Persistence — write side (plugin.WindowModule.serializeWindow).
@@ -122,10 +130,11 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
     // The adoption loop dispatches every non-null blob through every module's
     // deserializeWindow; the magic byte is what prevents mis-claims. Pick a
     // distinct tag; 0x5A ('Z') and 0x46 ('F') are taken.
+    const rec = g_recs.slice()[idx];
     const held = alloc.alloc(u8, 6) catch return null;
     held[0] = 0x50; // 'P' — your module's magic tag
-    held[1] = if (g_recs[idx].flag) 1 else 0;
-    std.mem.writeInt(u32, held[2..6], g_recs[idx].seq, .little);
+    held[1] = if (rec.flag) 1 else 0;
+    std.mem.writeInt(u32, held[2..6], rec.seq, .little);
     return held;
 }
 
@@ -142,19 +151,19 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 /// Replay your state against the LIVE model: the entry is already registered
 /// (present + tiled + home_ws set); flip presence/geometry as your feature
 /// requires. Idempotent: never crash on a double-claim (findRec check).
+/// The model handle arrives as `*anyopaque` (the seam casts it with
+/// `plugin.modelPtrOf`), keeping the contract free of model types.
 pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
-    if (bytes.len < 1 or bytes[0] != 0x50) return false; // not ours
-    if (bytes.len != 6) return false;
+    if (bytes.len != 6 or bytes[0] != 0x50) return false; // not ours
     if (findRec(win) != null) return true; // already adopted
-    if (g_len >= MAX_FLAGGED) return false; // capacity BEFORE mutation
-    const m: *model.Model = @ptrCast(@alignCast(ptr));
+    if (g_recs.len >= MAX_FLAGGED) return false; // capacity BEFORE mutation
+    const m: *model.Model = plugin.modelPtrOf(ptr);
     const e = m.store.getPtr(win) orelse return false;
     // TODO: apply whatever this blob means to e (anchor/presence/mask...).
     // Example — a feature that hides the window tunes presence to .parked:
     //   e.presence = .parked;
     _ = e;
-    g_recs[g_len] = .{ .win = win, .flag = bytes[1] != 0, .seq = std.mem.readInt(u32, bytes[2..6], .little) };
-    g_len += 1;
+    _ = g_recs.append(.{ .win = win, .flag = bytes[1] != 0, .seq = std.mem.readInt(u32, bytes[2..6], .little) });
     return true;
 }
 
@@ -163,23 +172,27 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
 // null and every dispatch loop skips this module for that hook.
 // ---------------------------------------------------------------------------
 
-/// Coverage seam (plugin.WindowModule.coverageOn): "which window owns the
-/// screen on `ws`, if any". sync calls it once per reconcile, through the
-/// registry, INSTEAD of scanning the model for fullscreen state. Rules:
+/// Screen-cover seam (plugin.WindowModule.coveringOccupantOnWs): "which
+/// window owns the screen on `ws`, if any". sync calls it once per
+/// reconcile, through the registry, INSTEAD of scanning the model for
+/// fullscreen state. Rules:
 ///   - first module in registry order that returns non-null claims the ws;
 ///   - a STOPPED (parked) window must never claim (returns null) — this is
 ///     how minimize-from-fullscreen ghosts correctly release the screen;
 ///   - the winning window is placed at the full screen rect, and every other
 ///     covering window is parked by sync (no per-module wire traffic).
 ///
-/// A module that never claims a screen leaves this null.
-pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
-    for (0..g_len) |i| {
-        const rec = &g_recs[i];
+/// A module that never claims a screen leaves this null. (The pre-Round-3
+/// `coverageOn` hook is gone; the covering family is now
+/// toggleCovering/isCoveringMode/coveringWsOf/isCoveringOnWs/
+/// coveringOccupantOnWs — fullscreen.zig binds the family.)
+pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
+    for (g_recs.constSlice()) |rec| {
         if (!rec.flag) continue; // TODO: your "claims the screen" predicate
         const e = m.store.get(rec.win) orelse continue;
         if (e.presence == .parked) continue; // never claim for hidden windows
-        // TODO: your visibility rule, e.g. `rec.ws == ws or model.visibleOn(...)`.
+        // TODO: your visibility rule, e.g. `e.covering_ws == ws or
+        // model.visibleOn(m, rec.win, ws)`, mirroring fullscreen.
         _ = ws;
         return rec.win;
     }
@@ -203,22 +216,27 @@ pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
 // ---------------------------------------------------------------------------
 // This module's window sub-system contribution: the build-generated registry
 // reads this exact export. Only the fields you set are dispatched; changing
-// signatures here breaks EVERY module, so keep them verbatim.
+// signatures here breaks EVERY module, so keep them verbatim. The remaining
+// hook families (all optional, bind + delete the ones you don't need):
+//
+//   // Hide/restore family (minimize.zig): the model `.parked` presence.
+//   .hideWindow / .restoreWindow / .restoreCandidateOn / .restoreOnWs /
+//   .latestHiddenOnWs / .isWindowHidden / .collectHiddenSet
+//   // Covering family (fullscreen.zig): toggle + ws/anchor queries.
+//   .toggleCovering / .isCoveringMode / .coveringWsOf / .isCoveringOnWs
+//   // Workspaces family (workspaces.zig): tag/mask mutations.
+//   .sendToWs / .addToWs / .removeFromWs / .togglePin / .toggleAllView
+//   // Floating + pointer drag family (floating.zig).
+//   .setFloatingRect / .honorConfigureRequest / .startDrag ... .cancelDragForWindow
+//   // Protocol-side EWMH/deferred-bar hooks (fullscreen.zig).
+//   .setEwmhFullscreenState / .armPendingBarHide / .armPendingBarShow /
+//   .notifyConfigureIfPending
+// ---------------------------------------------------------------------------
 pub const module: @import("plugin").WindowModule = .{
     .init = init,
     .deinit = deinit,
     .onWindowGone = onWindowGone,
     .serializeWindow = serializeWindow,
     .deserializeWindow = deserializeWindow,
-    .coverageOn = coverageOn,
-
-    // The following hooks exist for feature classes that need them; bind the
-    // ones you implement and DELETE the ones you don't (a leaner binding is
-    // clearer than ten nulls):
-    //
-    //   .setEwmhFullscreenState = setEwmhFullscreenState, // EWMH property write
-    //   .armPendingBarHide / .armPendingBarShow           // deferred bar hide/show
-    //   .notifyConfigureIfPending                         // ConfigureNotify follow-up
-    //   .startDrag / .stopDrag / .updateDrag / .isDragging / .isResizingWindow
-    //   .getDragLastRect / .cancelDragForWindow           // pointer drag/resize cmd set
+    .coveringOccupantOnWs = coveringOccupantOnWs,
 };

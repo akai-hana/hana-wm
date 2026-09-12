@@ -68,6 +68,30 @@ wire_allowed() {
         # the wrapper NAME here, so this is the same definition-vs-call caveat.
         src/core/utils/utils.zig) ;;
 
+        # Tiled border-width application: borders.zig's xcb_configure_window
+        # sets XCB_CONFIG_WINDOW_BORDER_WIDTH on tiled windows (the per-frame
+        # border sweep). A width-only configure is NOT a geometry/map
+        # mutation and runs outside reconcile by design; the wincache
+        # cacheBorderWidth dedup keeps it from spamming the server.
+        src/window/borders.zig) ;;
+
+        # ICCCM client-message sends (pat1's xcb_send_event): WM_TAKE_FOCUS
+        # (icccm.zig hands focus to windows that advertise the protocol),
+        # the synthetic ConfigureNotify (window.zig reports back the geometry
+        # it actually applied after honoring a ConfigureRequest), and
+        # WM_DELETE_WINDOW (input.zig closes a client gracefully, ICCCM
+        # §4.1.2.7). These are client protocol text, not sync-bound wire
+        # mutations. window.zig/input.zig were already allowlisted above;
+        # icccm.zig joins them here for this family.
+        src/window/icccm.zig) ;;
+
+        # src/test/window/fixture.zig is a TEST DOUBLE: it drives a real X
+        # connection owned by the X-gated harness to destroy leftover windows
+        # during reset, flush, and write WM_PROTOCOLS / WM_HINTS properties on
+        # synthetic override-redirect windows (setWmTakeFocus/setNoInput). Test
+        # setup is not WM wire traffic and never routes through sync.
+        src/test/window/fixture.zig) ;;
+
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
         # buffer after others' queued requests). refresh.zig/events.zig are core
@@ -117,7 +141,7 @@ grab_allowed() {
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
-pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_flush|raiseWindow'
+pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|raiseWindow'
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue

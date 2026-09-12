@@ -9,8 +9,11 @@ const constants = @import("constants");
 const utils = @import("utils");
 const window = @import("window");
 const tracking = @import("tracking");
+const debug = @import("debug");
 
-const gate = tracking.gate;
+// Private transition-layer gate for mutable model access (tracking no longer
+// exports a shared one; each transition owner declares its own token).
+const gate: @import("pipeline").Gate = .{};
 
 // Module state
 //
@@ -499,7 +502,7 @@ pub fn drainPendingConfirm() void {
 
     // Log the retry so failed confirmations are visible in debug sessions
     // rather than silently degrading into an unresponsive window.
-    std.log.debug(
+    debug.debug(
         "focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once",
         .{ win, c.*.focus },
     );

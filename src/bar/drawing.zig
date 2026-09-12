@@ -435,9 +435,12 @@ pub const DrawContext = struct {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
         if (self.sized_font_desc == null or self.sized_font_px != size_px) {
-            if (self.sized_font_desc) |old| pango_font_description_free(old);
+            // Copy FIRST, then free the old descriptor: freeing before the copy
+            // leaves a dangling `sized_font_desc` if the copy fails, which a
+            // later call would free again.
             const temp = pango_font_description_copy(desc) orelse
                 return error.PangoDescCopyFailed;
+            if (self.sized_font_desc) |old| pango_font_description_free(old);
             pango_font_description_set_absolute_size(temp, pxToPango(size_px));
             self.sized_font_desc = temp;
             self.sized_font_px = size_px;

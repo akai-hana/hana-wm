@@ -109,6 +109,14 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
 }
 
+/// Saturating i16 coordinate clamp: narrows an i32 tiling coordinate into the
+/// i16 `Rect` range, clamping instead of wrapping so a single pathological
+/// layout can't cross the whole screen in ReleaseFast. Shared by every module
+/// that builds `utils.Rect` from computed geometry.
+pub inline fn satI16(v: i32) i16 {
+    return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
+}
+
 /// Full-rect inset by `margin` (shrinkClamped width/height at fixed origin).
 pub inline fn insetRect(x: i32, y: i32, w: u16, h: u16, margin: u16, min_dim: u16) utils.Rect {
     return .{
@@ -149,9 +157,11 @@ pub inline fn waY(v: *const View) u16 {
     return clampYToU16(v.workarea.y);
 }
 
-/// Append one placement (shared append + overflow-assert tail of every emit).
+/// Append one placement. If the list is already at capacity this is a silent
+/// skip (drop the new placement) rather than an overflow — ReleaseFast never
+/// traps, and a full list means we're already showing the outer edges.
 inline fn appendPlacement(out: *List, win: model.WindowId, rect: utils.Rect, visible: bool) void {
-    std.debug.assert(out.append(.{ .win = win, .rect = rect, .visible = visible }));
+    if (!out.append(.{ .win = win, .rect = rect, .visible = visible })) return;
 }
 
 /// Emit a placement with the window's size hints applied to `rect`.

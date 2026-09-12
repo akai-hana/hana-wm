@@ -6,6 +6,7 @@ spawn_client A
 spawn_client B
 spawn_client C
 dump three-tiled
+check_borders 4 A B C  # T10: server-truth border widths at the storm baseline
 
 key super+space      # toggle_layout forward
 settle 300

@@ -54,7 +54,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     for (windows, 0..) |win, i| {
         const last = i == windows.len - 1;
-        if (last or cur.w < m.gap * 2 + border2 or cur.h < m.gap * 2 + border2) {
+        if (last or cur.w < m.gap *| 2 + border2 or cur.h < m.gap *| 2 + border2) {
             const top = if (last) win else tiling.focusedElse(v, windows[i..], windows[i]);
             tiling.emitView(v, out, top, tiling.insetRect(cur.x, cur.y, cur.w, cur.h, border2, v.env.min_dim), true);
             if (!last) tiling.showOneHideRest(out, windows[i..], top);
@@ -88,8 +88,8 @@ inline fn splitAndAdvance(
     const advance: i32 = if (forward) @intCast(win_dim + gap) else 0;
 
     const rect = utils.Rect{
-        .x = @intCast(cur.x + off_x),
-        .y = @intCast(cur.y + off_y),
+        .x = tiling.satI16(cur.x + off_x),
+        .y = tiling.satI16(cur.y + off_y),
         .width = (if (split_x) win_dim else cur.w) -| border2,
         .height = (if (split_x) cur.h else win_dim) -| border2,
     };

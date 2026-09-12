@@ -30,15 +30,15 @@ const Fixture = struct {
     ctx: sync.Ctx,
 
     fn init(self: *Fixture) void {
+        // setUpModel resets the minimize/fullscreen module stores, so
+        // capacity/seq bookkeeping never leaks across scenarios and the
+        // tests pass in any order (F-20).
         self.* = .{
-            .m = .{},
+            .m = helpers.setUpModel(),
             .rec = .{},
             .ctx = undefined,
         };
         sync.init();
-        // Reset the minimize module's static store so capacity/seq bookkeeping
-        // never leaks across scenarios (sync drives it via minimize.minimize).
-        minimize.init() catch unreachable;
         self.ctx = .{
             .sink = self.rec.sink(),
             .screen = helpers.std_wa,

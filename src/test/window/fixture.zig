@@ -35,8 +35,16 @@ pub const max_order = constants.Limits.max_tiled_windows;
 
 /// Connects the per-process fixture, self-skipping when no X display is
 /// reachable. `name` names the test in the SKIP message.
+///
+/// HANA_REQUIRE_X flips the skip into a hard failure: any environment set
+/// (e.g. `HANA_REQUIRE_X=1`) makes a headless run abort with a panic instead
+/// of silently self-passing, so a CI that believes it runs the integration
+/// layer can't be green while those tests actually skipped (F-18).
 pub fn setUp(name: []const u8) ?*Fx {
     const fx = Fx.connect(std.testing.allocator) orelse {
+        if (std.c.getenv("HANA_REQUIRE_X") != null) {
+            std.debug.panic("HANA_REQUIRE_X is set but no X display is reachable; {s} REQUIRED, not skipped", .{name});
+        }
         std.debug.print("SKIP: no X display; {s} skipped\n", .{name});
         return null;
     };

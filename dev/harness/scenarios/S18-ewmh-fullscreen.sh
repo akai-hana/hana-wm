@@ -7,7 +7,7 @@ spawn_client B
 settle 300
 
 _id=$(client_id B)
-[ -n "$_id" ] || { echo "S18: cannot resolve client B" >&2; exit 1; }
+[ -n "$_id" ] || { echo "S18: cannot resolve client B" >&2; return 1; }
 
 ewmh_fs "$_id" add      # ADD: window fullscreens (screen rect, bw=0)
 settle 450

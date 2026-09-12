@@ -3,7 +3,20 @@
     .fingerprint = 0x5708b600455b58f3,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
+    // Wired system libraries. Keep this list in sync with the
+    // `SystemLibraries.linked_libs` array in build.zig (the code side that
+    // actually calls linkSystemLibrary); nothing enforces equality, so a lib
+    // added on one side must be added to the other. CAVEAT: a consumer that
+    // depends on hana as a package gets this `.links` table applied on ITS
+    // build, i.e. the plain `linkSystemLibrary` calls a local `zig build`
+    // already performs -- a benign duplicate, since system-library linking is
+    // idempotent, but it means the package's link surface is declared here
+    // and mirrored in build.zig.
     .paths = .{ "build.zig", "build.zig.zon", "src", "config" },
+    // dev/ is excluded by design: it holds local-only tooling (the
+    // check-layers.sh layer guards that `zig build check` shells out to),
+    // which is not meaningful package-consumer surface and would only bloat
+    // a published package.
     .links = .{
         "xcb-keysyms",
         "xkbcommon-x11",

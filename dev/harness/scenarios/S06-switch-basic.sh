@@ -11,3 +11,4 @@ key super+1          # back to ws1
 settle 400
 dump ws1-back        # fast replay or full retile must yield same geometry
 state_dump
+check_borders 4 A B  # T10: borders survive the switch cycle

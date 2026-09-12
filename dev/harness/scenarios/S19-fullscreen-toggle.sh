@@ -7,18 +7,18 @@ spawn_client A
 spawn_client B
 awid=$(client_id A) || true
 fwid=$(client_id B) || true
-[ -n "$awid" ] && [ -n "$fwid" ] || { echo "S19: cannot resolve client windows" >&2; exit 1; }
+[ -n "$awid" ] && [ -n "$fwid" ] || { echo "S19: cannot resolve client windows" >&2; return 1; }
 
 key super+f          # fullscreen B (newest focused)
 settle 400
 dump fs-entered      # screen-size rect for B; A parked offscreen
 state_dump
 
-client_geom "$awid" 100 100 200 150 5 || { echo "S19: setgeom tool unavailable" >&2; exit 1; }
+client_geom "$awid" 100 100 200 150 5 || { echo "S19: setgeom tool unavailable" >&2; return 1; }
 settle 300
 dump req-while-fs    # request against the parked tiled sibling must not un-park it
 
-client_bw "$fwid" 7 || { echo "S19: setbw tool unavailable" >&2; exit 1; }
+client_bw "$fwid" 7 || { echo "S19: setbw tool unavailable" >&2; return 1; }
 settle 300
 dump bw-while-fs     # border-only request vs fullscreen window: denied (bw stays 0)
 

@@ -9,6 +9,8 @@
 
 const std = @import("std");
 
+const debug = @import("debug");
+
 /// Generic fixed-capacity, allocation-free collection backed by a plain
 /// array. Linear scan is the right tool at the counts these call sites deal
 /// with (tens to low hundreds of entries): cache-local, branch-predictor-
@@ -79,7 +81,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         pub fn append(self: *Self, item: T) bool {
             if (self.len >= capacity) {
                 if (std.debug.runtime_safety) {
-                    std.log.warn("BoundedList overflow: capacity={d}", .{capacity});
+                    debug.warn("BoundedList overflow: capacity={d}", .{capacity});
                 }
                 return false;
             }

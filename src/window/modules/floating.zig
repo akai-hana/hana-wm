@@ -27,7 +27,7 @@ pub const DragMode = enum { move, resize };
 /// wraps the resize to grow the opposite way instead of collapsing.
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
-const WorkArea = struct { left: i32, right: i32, top: i32, bottom: i32 };
+const WaEdges = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
 pub const DragState = struct {
     active: bool = false,
@@ -48,7 +48,7 @@ pub const DragState = struct {
     /// the work-area edges used for snapping. Both are constant for the whole
     /// drag, so re-resolving them on every motion event would be wasted work.
     snap_px: i32 = 0,
-    work_area: WorkArea = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+    workarea: WaEdges = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
 };
 
 /// Snap distance from config, resolved to pixels (0 = disabled).
@@ -64,7 +64,7 @@ fn snapDistance() i32 {
 /// Work-area edges, accounting for the bar and border width. X positions a
 /// window's content area, so far edges are pulled in by 2*border_width to
 /// keep the outer border flush with the screen edge.
-fn workArea() WorkArea {
+fn workarea() WaEdges {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
     const bw2: i32 = @as(i32, borders.width()) * 2;
@@ -183,8 +183,8 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .start_win_width = geom.width,
             .start_win_height = geom.height,
             .snap_px = snap_px,
-            .work_area = if (snap_px > 0)
-                workArea()
+            .workarea = if (snap_px > 0)
+                workarea()
             else
                 .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
         },
@@ -207,7 +207,7 @@ fn computeMoveRect(
     drag: DragState,
     dx: i32,
     dy: i32,
-    wa: WorkArea,
+    wa: WaEdges,
     was_pending_float: bool,
 ) utils.Rect {
     const snap = drag.snap_px;
@@ -234,7 +234,7 @@ fn computeMoveRect(
     };
 }
 
-fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WorkArea) utils.Rect {
+fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect {
     const snap = drag.snap_px;
     // Anchor = corner opposite the grabbed one, fixed; the moving
     // corner follows the cursor. min/max(anchor, moving) per axis
@@ -298,7 +298,7 @@ pub fn updateDrag(x: i16, y: i16) void {
     // the delta is computed in the wider type.
     const dx: i32 = @as(i32, x) - @as(i32, drag.start_x);
     const dy: i32 = @as(i32, y) - @as(i32, drag.start_y);
-    const wa = drag.work_area;
+    const wa = drag.workarea;
 
     const rect = switch (drag.mode) {
         .move => computeMoveRect(drag.*, dx, dy, wa, was_pending_float),

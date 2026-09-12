@@ -277,8 +277,9 @@ pub inline fn reconcileNow() void {
 
 /// Run pre-reconcile duties and return the pipeline context for the caller
 /// to manage a manual server grab. The caller MUST call
-/// ctx.sink.ungrabAndFlush() when done (typically via defer). Used by
-/// switchTo where a pointer query must land inside the grab body.
+/// ctx.sink.ungrabAndFlush() when done (typically via defer). A manual-grab
+/// seam for callers needing a bespoke grab body: switchTo and the fullscreen
+/// EWMH write.
 pub fn grabCtx() *sync.Ctx {
     preReconcileDuties();
     return ctx();

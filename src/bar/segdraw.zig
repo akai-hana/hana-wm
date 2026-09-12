@@ -56,6 +56,9 @@ const OnClick = *const fn (
 /// Optional bindings for the segment, one field per plugin.Segment hook the
 /// icon-ish modules can set. Unset fields keep the builder defaults.
 pub const Opts = struct {
+    /// Wires the collapse/expand redraw-request path (variants collapses to
+    /// zero width on a layout transition and must re-lay the row that batch).
+    with_collapse: bool = false,
     self_ticking: bool = false,
     center_slot: bool = false,
     clickable: bool = true,
@@ -102,13 +105,12 @@ fn passthroughWidth(_: *const anyopaque, clock_width: u16) u16 {
 }
 
 /// The Segment binding for an icon-ish module with a cached-width draw +
-/// optional direction-click action. `with_collapse` additionally wires the
-/// redraw-request path.
+/// optional direction-click action. `opts.with_collapse` additionally wires
+/// the redraw-request path.
 pub fn module(
     comptime name: []const u8,
     comptime draw: anytype,
     comptime action: anytype,
-    comptime with_collapse: bool,
     comptime opts: Opts,
 ) plugin.Segment {
     const W = widthState(name);
@@ -123,7 +125,7 @@ pub fn module(
         .onPollWakeup = opts.onPollWakeup,
         .secondsElapsed = opts.secondsElapsed,
         .invalidate = opts.invalidate orelse W.invalidate,
-        .consumeRedrawRequest = if (with_collapse) W.consumeRedrawRequest else null,
+        .consumeRedrawRequest = if (opts.with_collapse) W.consumeRedrawRequest else null,
         .measureString = opts.measureString,
         .naturalWidth = opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),
         .draw = drawHook(draw),

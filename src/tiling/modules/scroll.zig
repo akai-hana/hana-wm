@@ -76,7 +76,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             tiling.emitHidden(out, win);
             continue;
         }
-        tiling.emitView(v, out, win, .{ .x = @intCast(x), .y = @intCast(win_y), .width = content_w, .height = content_h }, true);
+        tiling.emitView(v, out, win, .{ .x = tiling.satI16(x), .y = tiling.satI16(win_y), .width = content_w, .height = content_h }, true);
     }
 }
 

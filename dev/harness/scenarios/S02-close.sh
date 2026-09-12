@@ -11,3 +11,4 @@ dump two
 key super+shift+f    # close again
 settle 400
 dump one
+check_borders 4 C    # T10: surviving window keeps the config border width

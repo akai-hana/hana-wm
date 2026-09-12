@@ -139,13 +139,21 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?parser.Document {
     const raw = try readFileAlloc(allocator, path);
     if (raw.len == 0) return null;
-    return try parser.parse(allocator, raw);
+    return try parser.parse(allocator, raw, path);
 }
 
 /// warn-and-skip wrapper around parseTomlFile, the "never crash on bad
 /// config" path shared by the directory loader and `include` resolution.
-fn tryParseTomlFile(allocator: std.mem.Allocator, path: []const u8) ?parser.Document {
+/// On read or parse failure, marks the destination merged document's
+/// `had_errors` so the caller can propagate error.ConfigParseFailed (C1).
+/// An empty file returns null without setting `had_errors`.
+fn tryParseTomlFile(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    dst: *parser.Document,
+) ?parser.Document {
     const doc = parseTomlFile(allocator, path) catch |err| {
+        dst.had_errors = true;
         debug.warn("Skipping '{s}': {}", .{ path, err });
         return null;
     };
@@ -164,7 +172,7 @@ fn mergeOneFile(
     name: []const u8,
 ) !void {
     const path = try std.fs.path.join(allocator, &.{ dir_path, name });
-    var doc = tryParseTomlFile(allocator, path) orelse return;
+    var doc = tryParseTomlFile(allocator, path, dst) orelse return;
     try parser.mergeDocumentsInto(allocator, dst, &doc);
     debug.info("Merged: {s}", .{path});
     try mergeIncludes(allocator, dst, &doc, dir_path);
@@ -193,7 +201,7 @@ fn mergeIncludes(
             continue;
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
-        var inc_doc = tryParseTomlFile(allocator, abs) orelse continue;
+        var inc_doc = tryParseTomlFile(allocator, abs, dst) orelse continue;
         try parser.mergeDocumentsInto(allocator, dst, &inc_doc);
         debug.info("Merged (include): {s}", .{abs});
     }
@@ -352,7 +360,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var doc = try parser.parse(a, fallback_toml);
+    var doc = try parser.parse(a, fallback_toml, "<embedded fallback>");
     var cfg = try buildConfigFromDoc(allocator, &doc);
     // If the terminal detection/dupe below errors, free the built config
     // rather than leaking it (the `try` above means buildConfigFromDoc's own
@@ -395,6 +403,14 @@ fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
 }
 
 fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !types.Config {
+    // A broken TOML (warn-and-skipped line, or a whole file skipped during
+    // the merge) must not silently produce a partially-applied config: fail
+    // the load so reload keeps the live config (C1). Boot falls through to
+    // the embedded fallback via loadConfigDefault's warn-and-skip.
+    if (doc.had_errors) return error.ConfigParseFailed;
+    // Mis-cased KNOWN section headers ([Bar], [TILING], ...) are otherwise
+    // silently dropped; call them out once each (C6).
+    warnMisCasedSections(doc);
     var cfg = try getDefaultConfig(allocator);
     // If any parse step below errors (OOM), free the partial Config so the
     // half-applied section doesn't leak. Only armed after getDefaultConfig
@@ -407,6 +423,9 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     // table-driven pass; must precede parseBar so icon padding sees the
     // freshly parsed workspaces.count.
     try schema.applyAll(doc, allocator, &cfg);
+    // A `tiling.*`/`bar.colors` family without its parent section is inert
+    // (applyAll and the parse functions both gate on it); warn once (C9).
+    warnInertSectionFamilies(doc);
     try parseBar(allocator, doc, &cfg);
     try parseRules(allocator, doc, &cfg);
     doc.root.warnUnconsumed("<root>");
@@ -414,6 +433,63 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     while (iter.next()) |entry|
         entry.value_ptr.warnUnconsumed(entry.key_ptr.*);
     return cfg;
+}
+
+/// Known section names hana recognizes (case-sensitively) at their exact
+/// spelling. A section header that differs from one of these only by case is
+/// almost certainly a typo that silently drops the whole section (C6).
+const known_sections = std.StaticStringMap(void).initComptime(.{
+    .{ "binds", {} },                       .{ "Keybindings", {} },
+    .{ "workspace.rules", {} },             .{ "rules", {} },
+    .{ "drag", {} },                        .{ "fullscreen", {} },
+    .{ "tiling", {} },                      .{ "workspaces", {} },
+    .{ "bar", {} },                         .{ "bar.colors", {} },
+    .{ "bar.layout.left", {} },             .{ "bar.layout.center", {} },
+    .{ "bar.layout.right", {} },            .{ "bar.modules.workspaces", {} },
+    .{ "tiling.aesthetics", {} },           .{ "tiling.layouts.master-stack", {} },
+    .{ "tiling.layouts.master_stack", {} },
+});
+
+/// Section families whose parent section must exist for their knobs to do
+/// anything; a mis-cased or missing parent leaves them inert (C9).
+const known_section_prefixes = [_][]const u8{ "tiling.layouts.", "workspace.rules.", "rules." };
+
+fn warnMisCasedSections(doc: *parser.Document) void {
+    var iter = doc.sections.iterator();
+    while (iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (known_sections.has(name)) continue;
+        var buf: [64]u8 = undefined;
+        const lowered = types.lowerSlice(buf.len, &buf, name) orelse continue;
+        if (!std.mem.eql(u8, lowered, name) and known_sections.has(lowered)) {
+            debug.warn("Section [{s}] is mis-cased; hana recognizes [{s}], ignoring the section", .{ name, lowered });
+            continue;
+        }
+        for (known_section_prefixes) |pfx| {
+            if (name.len > pfx.len and std.ascii.startsWithIgnoreCase(name, pfx) and
+                !std.mem.startsWith(u8, name, pfx))
+            {
+                debug.warn("Section [{s}] is mis-cased; hana recognizes the [{s}...] family (all lowercase), ignoring", .{ name, pfx });
+                break;
+            }
+        }
+    }
+}
+
+/// Warns once when a section family that requires a parent section is present
+/// without it, which leaves its knobs silently inert (C9).
+fn warnInertSectionFamilies(doc: *parser.Document) void {
+    if (doc.getSection("tiling") == null) {
+        var iter = doc.sections.iterator();
+        while (iter.next()) |entry| {
+            if (std.mem.startsWith(u8, entry.key_ptr.*, "tiling.")) {
+                debug.warn("[tiling.*] sections present but bare [tiling] is missing; their knobs are inert", .{});
+                break;
+            }
+        }
+    }
+    if (doc.getSection("bar") == null and doc.getSection("bar.colors") != null)
+        debug.warn("[bar.colors] present but [bar] is missing; its knobs are inert", .{});
 }
 
 const mod_map = std.StaticStringMap(u16).initComptime(.{
@@ -627,19 +703,23 @@ fn resolveAndParseAction(
     ws_idx: u16,
     kill_placeholder: ?[]const u8,
 ) !types.Action {
-    if (ws_idx > 0 and workspace_action_bases.has(cmd)) {
-        const ws_str = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ cmd, ws_idx });
+    // S1: substitute {kill} FIRST, for ANY action string, before the
+    // workspace-branch check and before parseAction. Previously the
+    // substitution only ran for glob-expanded workspace actions, so every
+    // ordinary `{kill} foo` bind exec'd a literal, broken shell command.
+    const effective: []const u8 = if (kill_placeholder) |kp| blk: {
+        if (std.mem.indexOf(u8, cmd, "{kill}") != null)
+            break :blk try std.mem.replaceOwned(u8, allocator, cmd, "{kill}", kp);
+        break :blk cmd;
+    } else cmd;
+    // Free only our own substitution; `cmd` is caller-owned when unchanged.
+    defer if (effective.ptr != cmd.ptr) allocator.free(effective);
+    if (ws_idx > 0 and workspace_action_bases.has(effective)) {
+        const ws_str = try std.fmt.allocPrint(allocator, "{s}_{d}", .{ effective, ws_idx });
         defer allocator.free(ws_str);
-        if (kill_placeholder) |kp| {
-            if (std.mem.indexOf(u8, ws_str, "{kill}") != null) {
-                const final = try std.mem.replaceOwned(u8, allocator, ws_str, "{kill}", kp);
-                defer allocator.free(final);
-                return parseAction(allocator, final);
-            }
-        }
         return parseAction(allocator, ws_str);
     }
-    return parseAction(allocator, cmd);
+    return parseAction(allocator, effective);
 }
 
 /// Resolves one `binds` value into a single Action, or null when the entry
@@ -663,6 +743,13 @@ fn actionFromValue(
             for (arr.items) |elem|
                 if (elem.asScalar([]const u8)) |cmd|
                     try acts.append(allocator, try resolveAndParseAction(allocator, cmd, ws_idx, kill));
+            // S4: a non-empty array whose elements were all non-strings
+            // filters down to zero actions; return null (no binding) instead
+            // of a dead empty sequence.
+            if (acts.items.len == 0) {
+                acts.deinit(allocator);
+                return null;
+            }
             if (acts.items.len == 1) {
                 const only = acts.items[0];
                 acts.deinit(allocator);
@@ -809,6 +896,16 @@ fn looksLikeActionWord(cmd: []const u8) bool {
     return false;
 }
 
+/// True when `cmd` still carries a `{kill}` token or a `{...}` placeholder
+/// fragment. After S1's hoisted substitution this should never be true for a
+/// config action; it is a defensive guard so an unresolved placeholder can
+/// never be handed to the shell verbatim (C7).
+fn hasPlaceholderFragment(cmd: []const u8) bool {
+    if (std.mem.indexOf(u8, cmd, "{kill}") != null) return true;
+    const lbrace = std.mem.indexOfScalar(u8, cmd, '{') orelse return false;
+    return std.mem.indexOfScalarPos(u8, cmd, lbrace + 1, '}') != null;
+}
+
 fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     if (action_map.get(cmd)) |a| return a;
     inline for (workspace_action_specs) |spec| {
@@ -820,6 +917,9 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     if (looksLikeActionWord(cmd))
         debug.warn("Unrecognized action '{s}': running it as an exec command: " ++
             "check the spelling (action names are matched exactly)", .{cmd});
+    // Never let an unresolved `{...}` placeholder reach the shell verbatim.
+    if (hasPlaceholderFragment(cmd))
+        debug.warn("Action '{s}' still contains a '{{...}}' placeholder; executing it verbatim", .{cmd});
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
@@ -1053,6 +1153,11 @@ fn parseWorkspaceListInto(
     }
 }
 
+/// Hard ceiling on the number of distinct layouts the cycle ring can hold:
+/// WorkspaceLayoutOverride.layout_idx is u8, so a 256th entry would trap on
+/// the @intCast below in ReleaseFast. Names past the cap warn-and-skip.
+const max_layouts = 256;
+
 /// Parses the `layouts` TOML array. A layout name (any string; registry
 /// resolution happens at seed time) starts a new group; the optional next
 /// element is a variants word or a workspace list ("1,3,5"); a third may
@@ -1085,7 +1190,14 @@ fn parseLayoutsArray(
         }
         // Stored canonical (config.canonicalLayoutName) so every downstream
         // resolution -- the global default, per-workspace overrides, and the
-        // cycle ring -- sees the registry's canonical spelling.
+        // cycle ring -- sees the registry's canonical spelling. The cycle
+        // ring is capped at max_layouts (the overrides index into it via a
+        // u8), checked BEFORE the cast so an overlong config can't trap in
+        // ReleaseFast (S2).
+        if (cfg.tiling.layouts.items.len >= max_layouts) {
+            debug.warn("layouts array: maximum of {d} unique layouts reached, skipping '{s}'", .{ max_layouts, raw_name });
+            continue;
+        }
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(name_lower)));
 

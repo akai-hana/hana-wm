@@ -17,7 +17,10 @@ const debug = @import("debug");
 const utils = @import("utils");
 const tracking = @import("tracking");
 
-const gate = tracking.gate;
+// Private transition-layer gate for mutable model access: this module owns
+// model transitions, so it declares its own capability token (tracking no
+// longer exports a shared one, see tracking.gate).
+const gate: pipeline.Gate = .{};
 
 /// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
@@ -645,9 +648,9 @@ pub fn applyRestoredLevel() void {
 }
 
 /// Per-workspace seed overrides resolved from `cfg` (built via the shared
-/// last-wins lookup rules on TilingConfig). One labeled bundle shared by the
-/// model seeding here and workspaces.applyWorkspaceOverrides so both sites
-/// agree on what counts as an override.
+/// last-wins lookup rules on TilingConfig). The one labeled bundle driving
+/// per-workspace param seeding here (the separate workspaces override store
+/// was dead and is gone, C12).
 pub const SeedOverrides = struct {
     /// Override index into `cfg.workspace_layout_overrides` per ws, or null.
     layout: [constants.max_workspaces]?usize,
@@ -875,7 +878,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
     // A defined refusal (store or home-list full) leaves the window
     // unmanaged.
     model_mod.register(m, win, if (on_current) null else target_ws) catch {
-        std.log.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
+        debug.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
         return;
     };
     // Bridge the cached WM_NORMAL_HINTS into the model entry at registration.
@@ -885,7 +888,13 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
     // is SPAWN policy, not membership policy): a new window takes the
     // primary-column head slot, and the previous head window drops one slot.
     {
-        const home: model_mod.WSId = if (on_current) m.current else @intCast(target_ws);
+        // Clamp the requested home workspace so a misconfigured target can't
+        // index past the ws array in ReleaseFast (defense in depth; the
+        // MapRequest front-end already resolves/clamps the target).
+        const home: model_mod.WSId = if (on_current)
+            m.current
+        else
+            window.clampToValidWorkspace(target_ws, core.WorkspaceId.fromIndex(@intCast(m.current))).index;
         const p = &m.ws[home].params;
         // Same policy restated at the spawn site: driven by the active
         // module's fifo_variant metadata (the head slot binds variant

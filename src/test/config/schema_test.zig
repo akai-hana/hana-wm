@@ -266,7 +266,7 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     try testing.expectEqual(@as(u8, 9), cfg.workspaces.count);
 }
 
-test "bar.position parses exactly; unknown spellings keep .top" {
+test "bar.position is case-insensitive; unknown spellings keep .top" {
     var bottom = try loadToml(testing.allocator, "pos-bottom",
         \\[bar]
         \\position = "bottom"
@@ -275,8 +275,8 @@ test "bar.position parses exactly; unknown spellings keep .top" {
     defer bottom.deinit(testing.allocator);
     try testing.expectEqual(types.BarScreenPosition.bottom, bottom.bar.bar_position);
 
-    // Exact-case enum: "TOP" is not recognized and silently keeps .top --
-    // no warning, unlike indicator_location's ci+warn flavor.
+    // C8: now any-case, via BarScreenPosition.string_map through
+    // types.enumFromString; "TOP" resolves to .top (not .bottom).
     var shouty = try loadToml(testing.allocator, "pos-shouty",
         \\[bar]
         \\position = "TOP"
@@ -284,6 +284,53 @@ test "bar.position parses exactly; unknown spellings keep .top" {
     );
     defer shouty.deinit(testing.allocator);
     try testing.expectEqual(types.BarScreenPosition.top, shouty.bar.bar_position);
+
+    var mixed = try loadToml(testing.allocator, "pos-mixed",
+        \\[bar]
+        \\position = "Bottom"
+        \\
+    );
+    defer mixed.deinit(testing.allocator);
+    try testing.expectEqual(types.BarScreenPosition.bottom, mixed.bar.bar_position);
+}
+
+test "S2: layouts array caps at 256 entries" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    // Each layout name takes an optional workspace-list ("1") group slot, so
+    // every name + list forms one group of two array elements. 300 names ->
+    // 600 elements; the cap check must stop the 257th captured name, not the
+    // downstream seed-time registry.
+    try buf.appendSlice(testing.allocator, "[tiling]\nlayouts = [");
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        const entry = try std.fmt.allocPrint(testing.allocator, "{s}\"l{d}\", \"1\"", .{ if (i > 0) ", " else "", i });
+        defer testing.allocator.free(entry);
+        try buf.appendSlice(testing.allocator, entry);
+    }
+    try buf.appendSlice(testing.allocator, "]\n");
+
+    var cfg = try loadToml(testing.allocator, "layouts-cap", buf.items);
+    defer cfg.deinit(testing.allocator);
+
+    // The 256th name is kept ("l255"), the 257th onward ("l256"...) skipped.
+    try testing.expectEqual(@as(usize, 256), cfg.tiling.layouts.items.len);
+    try testing.expectEqualStrings("l0", cfg.tiling.layouts.items[0]);
+    try testing.expectEqualStrings("l255", cfg.tiling.layouts.items[255]);
+}
+
+test "C11: config/fallback.toml loads cleanly through the real pipeline" {
+    // The shipped fallback doubles as a fixture: it must parse and apply with
+    // no skipped lines (no source_path/fallback drift) and produce sane values.
+    const io = std.Options.debug_io;
+    const repo_path = try std.Io.Dir.cwd().realPathFileAlloc(io, "config/fallback.toml", testing.allocator);
+    defer testing.allocator.free(repo_path);
+    var cfg = try config.loadConfig(testing.allocator, repo_path);
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u16, 50), cfg.tiling.min_window_dim);
+    try testing.expect(cfg.tiling.enabled);
+    try testing.expectEqual(types.BarScreenPosition.bottom, cfg.bar.bar_position);
 }
 
 test "getRatio: bare 1 means 1 percent (ambiguity rule)" {

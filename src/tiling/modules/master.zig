@@ -120,7 +120,7 @@ fn tileColumn(
     var y: u16 = y_offset +| ctx.m.gap +| pad_top;
     const row_pitch = rowPitch(ctx.m);
     for (windows, 0..) |win, i| {
-        const rect = utils.Rect{ .x = @intCast(x), .y = @intCast(y), .width = inner_w, .height = heights[i] };
+        const rect = utils.Rect{ .x = tiling.satI16(@intCast(x)), .y = tiling.satI16(@intCast(y)), .width = inner_w, .height = heights[i] };
         tiling.emitView(ctx.v, ctx.out, win, rect, true);
         y = y +| heights[i] +| row_pitch;
     }
@@ -283,8 +283,8 @@ fn tileStackExtra(
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
             const rect = utils.Rect{
-                .x = @intCast(x +| ctx.m.gap / 2 +| col *| (col_w +| ctx.m.gap)),
-                .y = @intCast(y_pos),
+                .x = tiling.satI16(@intCast(x +| ctx.m.gap / 2 +| col *| (col_w +| ctx.m.gap))),
+                .y = tiling.satI16(@intCast(y_pos)),
                 .width = col_inner_w,
                 .height = row_h,
             };

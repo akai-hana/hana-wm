@@ -8,3 +8,4 @@ dump right-after
 settle 400
 dump settled
 state_dump
+check_borders 4 A B  # T10: border widths unchanged by the atomic move

@@ -120,7 +120,14 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
         @as(f32, @floatFromInt(trial_pt));
     const max_size_pt = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
     const cfg_pct = cs.config.bar.font_size.value / 100.0;
-    return @max(1, @as(u16, @intFromFloat(@round(max_size_pt * cfg_pct))));
+    // Clamp before casting, mirroring types.scaleToU16: a large font_size
+    // percentage must not wrap the u16 cast into UB in ReleaseFast.
+    const clamped = std.math.clamp(
+        max_size_pt * cfg_pct,
+        1.0,
+        @as(f32, std.math.maxInt(u16)),
+    );
+    return @as(u16, @intFromFloat(@round(clamped)));
 }
 
 fn calcBarHeightAndFontSize() !u16 {
@@ -262,6 +269,11 @@ const max_click_bounds: usize = 8;
 /// falls back to re-measuring at draw time (layout math identical, no win).
 const max_right_segments: usize = 16;
 
+/// Cap on updateIfDirty's re-request redraw loop: a module that keeps
+/// re-requesting a full redraw past this many iterations is treated as a
+/// stall (logged), keeping a rogue module from busy-spinning the batch.
+const max_update_draws: u8 = 4;
+
 /// Right-aligned cluster bookkeeping for one draw frame. Measures every
 /// right-position segment once up front, deriving both the reserved width
 /// (which left/center placement shrinks around) and the per-segment widths
@@ -281,16 +293,20 @@ const RightCluster = struct {
 
     /// Measures all right segments across the bar's layouts.
     fn measure(self: *RightCluster, s: *State, frame: *const segmod.Frame, scaled_spacing: u16) void {
+        // Accumulate the reservation in u32 (segment widths + gaps could push
+        // past u16 on a very wide desktop) and clamp into the u16 field.
+        var total: u32 = 0;
         for (s.render.config.layout.items) |lay| {
             if (lay.position != .right) continue;
             for (lay.segments.items) |seg| {
                 const w = s.measureSegmentWidth(frame, seg);
                 if (self.count < max_right_segments) self.widths[self.count] = w;
                 self.count += 1;
-                self.total += w + scaled_spacing;
+                total += @as(u32, w) + scaled_spacing;
             }
-            if (lay.segments.items.len > 0) self.total -= scaled_spacing;
+            if (lay.segments.items.len > 0) total -= scaled_spacing;
         }
+        self.total = @intCast(@min(total, std.math.maxInt(u16)));
     }
 
     /// Slices out the measured widths for one right layout's segments,
@@ -492,14 +508,22 @@ const State = struct {
     /// the region that actually changed.
     inline fn extendDirtySpan(self: *State, x: u16, w: u16) void {
         if (w == 0) return;
+        // Accumulate the span arithmetic in u32 so a large segment stack can't
+        // wrap span_x/span_w past 65535; clamp on the way back into the u16
+        // fields. Identical results for sane values.
+        const x32: u32 = x;
+        const w32: u32 = w;
         if (self.dirty.span_w == 0) {
             self.dirty.span_x = x;
             self.dirty.span_w = w;
         } else {
-            const end = self.dirty.span_x + self.dirty.span_w;
-            const new_end = x + w;
+            const end: u32 = @as(u32, self.dirty.span_x) + self.dirty.span_w;
+            const new_end: u32 = x32 + w32;
             if (x < self.dirty.span_x) self.dirty.span_x = x;
-            if (new_end > end) self.dirty.span_w = new_end - self.dirty.span_x;
+            if (new_end > end) {
+                const new_w: u32 = new_end - @as(u32, self.dirty.span_x);
+                self.dirty.span_w = @intCast(@min(new_w, std.math.maxInt(u16)));
+            }
         }
     }
 
@@ -545,6 +569,20 @@ const State = struct {
             if (!d) return false;
         }
         return true;
+    }
+
+    /// True when the next draw would repaint at least one layout-rendered
+    /// segment: a dirty flag or a live needsRepaint hook (the title marquee).
+    /// Iterates only segments that actually render — the overlay-only prompt
+    /// slot's dirty flag is never cleared, so a registry-wide scan would
+    /// always report work and defeat the P2 draw early-exit.
+    fn hasPendingRepaintWork(self: *const State) bool {
+        for (self.render.config.layout.items) |lay| {
+            for (lay.segments.items) |seg| {
+                if (self.isSegmentRepaintable(seg)) return true;
+            }
+        }
+        return false;
     }
 
     /// Records the on-screen bounds of a clickable segment as the layout pass
@@ -757,8 +795,10 @@ const State = struct {
             // right cluster exceeds the scratch buffer, which falls back to the
             // original measure-at-draw re-measurement below).
             const seg_w = if (widths) |ws| ws[i] else self.measureSegmentWidth(frame, names[i]);
-            right_x -= seg_w;
-            if (pending_gap) right_x -= scaled_spacing;
+            // Saturating subtraction: a pathological width sum must clamp at 0,
+            // not underflow into a wrap-around rightward paint.
+            right_x = right_x -| seg_w;
+            if (pending_gap) right_x = right_x -| scaled_spacing;
 
             if (isRole(names[i], self_ticking_role)) self.clock.x = right_x;
             self.recordClickBound(names[i], right_x, seg_w);
@@ -912,6 +952,16 @@ fn frameCtx(s: *State) segmod.DrawCtx {
 fn performDraw() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
+    // Fold any queued module redraw request into the force flag (the same
+    // gate the poll-wakeup and X-batch paths use) so a direct submitDraw can
+    // never drop it; the onPollWakeup / updateIfDirty callers have typically
+    // already consumed, in which case this is a false no-op.
+    if (!gBar.force and barModsConsumeRedrawRequest()) gBar.force = true;
+    // P2: a timer-only wake with zero repaint work (nothing forced, nothing
+    // whole-bar dirty, no segment dirty or needsRepaint) must not run the full
+    // scan + measure pass. The clock's own repaint on the same wake is handled
+    // separately by the region-scoped updateClock blit.
+    if (!gBar.force and !s.dirty.flag and !s.hasPendingRepaintWork()) return;
     if (gBar.force) s.markAllSegmentsDirty();
     s.scanLiveFrame();
 
@@ -1376,7 +1426,10 @@ pub fn updateIfDirty() !void {
     // end-of-batch flush, so the gap closes seamlessly rather than waiting on
     // the next unrelated event). Each iteration clears the request it
     // consumed, so the loop terminates unless a module genuinely re-requests.
-    while (true) {
+    // Cap the iterations so a misbehaving module that re-requests forever
+    // can't busy-spin this batch.
+    var redraw_iter: u8 = 0;
+    while (redraw_iter < max_update_draws) : (redraw_iter += 1) {
         if (barModsConsumeRedrawRequest()) {
             requestFullRedraw();
         }
@@ -1384,6 +1437,8 @@ pub fn updateIfDirty() !void {
         s.dirty.flag = false;
         submitDraw();
     }
+    if (redraw_iter == max_update_draws)
+        debug.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
 }
 
 /// Asks each module whether it queued a redraw request the bar should honour
