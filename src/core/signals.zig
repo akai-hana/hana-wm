@@ -206,11 +206,10 @@ pub fn readFd() std.posix.fd_t {
 fn dispatchSignal(byte: u8) void {
     switch (@as(std.posix.SIG, @enumFromInt(byte))) {
         .HUP => utils.reload(),
-        // Unified reload trigger, same semantics as the reload keybind:
-        // unconditional in-place re-exec of the current binary
-        // (restart.requestReload decides). Dispatch runs on the event loop,
-        // NOT in the signal handler, so flag work is safe.
-        .USR1 => restart.requestReload(),
+        // Unconditional in-place re-exec of the current binary (no change
+        // check). Dispatch runs on the event loop, NOT in the signal
+        // handler, so flag work is safe.
+        .USR1 => restart.requestReexec(),
         .TERM, .INT => utils.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.
         // Reap it with WNOHANG, then immediately drain the spawn pipes so
