@@ -11,7 +11,11 @@
 //! the resolved exec path right now (the freshly built binary). There is no
 //! binary-change check -- comparing the running image against the file is
 //! pointless when the intent is "run the current file", and a stale
-//! comparison could silently keep the old code running (see requestReload).
+//! comparison could silently keep the old code running.
+//!
+//! This is the *re-exec* coordinator only. Config-only reloads (the
+//! `reload_config` keybind, SIGHUP) stay in proc.zig's flag surface and never
+//! re-exec the process.
 
 const std = @import("std");
 
@@ -33,9 +37,8 @@ const c = @cImport({
 /// process-lifetime: never freed.
 var exec_path_z: ?[*:0]const u8 = null;
 
-/// Re-exec request flag. Set by `requestReexec` / `requestReload` (both
-/// trigger the hand-off unconditionally), consumed by `consumeReexec` in the
-/// main event loop.
+/// Re-exec request flag. Set by `requestReexec` (the `reload_hana` action and
+/// SIGUSR1), consumed by `consumeReexec` in the main event loop.
 var should_reexec = std.atomic.Value(bool).init(false);
 
 /// Resolves the binary to exec on re-exec: the readLink of `/proc/self/exe`
@@ -63,15 +66,8 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     }
 }
 
-/// The unified entry: everything the `reload` keybind (and SIGUSR1) means.
-/// Always re-execs the binary at the exec path, unconditionally — no
-/// identity check, so a rebuild is picked up on the very first reload.
-pub fn requestReload() void {
-    requestReexec();
-}
-
-/// Unconditional re-exec (`reload_hana` action / `reload_config` alike):
-/// re-exec the current in-place binary, skipping any change check.
+/// Unconditional re-exec (`reload_hana` action / SIGUSR1): re-exec the
+/// current in-place binary, skipping any change check.
 pub fn requestReexec() void {
     should_reexec.store(true, .release);
     utils.wake();

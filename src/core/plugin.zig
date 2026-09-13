@@ -65,6 +65,10 @@ pub const Surfaces = struct {
     onPollWakeup: *const fn () void,
     updateClock: *const fn () bool,
     onReload: *const fn () void,
+    /// Re-points the bar's config copy at the live config without rebuilding
+    /// the surface. Called on config reloads that leave the bar untouched
+    /// (changes.bar == false); see bar.zig `reload`.
+    refreshConfig: *const fn () void,
     // Input routing. The chrome overlay pre-empts key handling (returns true
     // when it consumed the key), button presses on the surface window are
     // routed to it, and the three surface config actions mutate chrome state.

@@ -320,7 +320,7 @@ fn executeAction(action: *const types.Action) void {
     switch (action.*) {
         // Core
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
-        .reload_config => restart.requestReload(),
+        .reload_config => utils.reload(),
         .reload_hana => restart.requestReexec(),
         .dump_state => dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|

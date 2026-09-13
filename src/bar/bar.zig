@@ -1051,8 +1051,11 @@ pub fn init() !void {
     const bar = try createBar(height, barwin.calcBarYPos(height));
     gBar.state = bar.state;
     screen.setSurfaceWindow(bar.setup.win_id);
-    submitDraw();
+    // Map before the first draw (same rationale as applyVisibility: a blit to
+    // an unmapped window is discarded, and compositors start remapped windows
+    // blank until first damage).
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
+    submitDraw();
     _ = xcb.xcb_flush(cs.conn);
     // Uniform lifecycle: every registered mechanism segment (incl. the prompt,
     // whose init owns the vim addon lifecycle) is initialised with the
@@ -1101,6 +1104,18 @@ pub fn reload() void {
     applyReload(old, height) catch |err| {
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
+}
+
+/// Re-points the bar's config copy at the LIVE config's bar section.
+/// handleConfigReload only rebuilds the bar when changes.bar is set; a reload
+/// that lands elsewhere in the config leaves render.config borrowing slices of
+/// the OLD config, which the caller frees right after these hooks return -- the
+/// next draw would read freed memory. Same re-point as the applyReload failure
+/// path, just for the no-rebuild path.
+pub fn refreshConfig() void {
+    const s = gBar.state orelse return;
+    s.render.config = core.getState().config.bar;
+    requestFullRedraw();
 }
 
 fn applyReload(old: *State, height: u16) !void {
@@ -1279,13 +1294,14 @@ pub fn raiseBar() void {
 pub fn presentForPrompt() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) {
-        // The bar is hidden; draw fresh content into it before mapping
-        // (same ordering setBarState's show path uses) so the compositor
-        // never shows a blank or stale bar for a frame.
+        // The bar is hidden; map it before drawing so the blit lands in a
+        // mapped window (a draw queued while unmapped is discarded by the
+        // server, leaving a blank bar until the next unrelated redraw) and a
+        // compositor never presents an empty frame.
         gBar.prompt_forced_visible = true;
         s.vis.shown = true;
-        submitDrawBlockingFull();
         _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
+        submitDrawBlockingFull();
     }
     raiseBar();
     _ = xcb.xcb_flush(s.win.conn);
@@ -1336,12 +1352,19 @@ pub fn setBarState(action: types.Action) void {
 /// it just stopped covering.
 fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
     s.vis.shown = should_be_visible;
-    if (should_be_visible) {
-        submitDrawBlockingFull();
-    }
     const conn = core.getState().conn;
     if (do_reconcile) utils.grabServer(conn);
     _ = if (should_be_visible) xcb.xcb_map_window(conn, s.win.win_id) else xcb.xcb_unmap_window(conn, s.win.win_id);
+    // Draw AFTER the map request so the blit lands in an already-mapped
+    // window. A copy queued to an unmapped window is discarded by the server
+    // (and, under a compositor, the view of a freshly remapped window starts
+    // blank until the first damage), which is what left the bar invisible --
+    // a bare gap in the shelf -- until an unrelated later redraw happened to
+    // repaint it. Ordering the map before the draw in this same flush closes
+    // that gap on every show (boot, workspace switch, fullscreen exit, Mod+B).
+    if (should_be_visible) {
+        submitDrawBlockingFull();
+    }
     syncScreenClaim();
     if (do_reconcile) {
         pipeline.reconcileNow();
@@ -1579,6 +1602,7 @@ pub const surfaces = @import("plugin").Surfaces{
     .onPollWakeup = onPollWakeup,
     .updateClock = updateClock,
     .onReload = reload,
+    .refreshConfig = refreshConfig,
     .chromeHandleKeypress = chromeHandleKeypress,
     .isBarWindow = isBarWindow,
     .handleButtonPress = handleButtonPress,

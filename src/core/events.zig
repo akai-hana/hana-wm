@@ -403,7 +403,16 @@ fn handleConfigReload() !void {
     // rebuild the bar.
     const changes = config.detectChanges(old_ptr, new_ptr);
 
-    if (build_options.has_bar and changes.bar) surfaces.onReload();
+    if (build_options.has_bar) {
+        if (changes.bar) {
+            surfaces.onReload();
+        } else {
+            // The bar survives this reload, so re-point its config copy at the
+            // live config before the old one is freed below (same reason the
+            // applyReload failure path re-points).
+            surfaces.refreshConfig();
+        }
+    }
     if (changes.tiling) {
         actions.applyConfigReload();
         // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
@@ -604,9 +613,9 @@ pub fn run() !void {
         };
 
         // Drain signals BEFORE the reload/reexec flags are consumed below. A
-        // signal byte (SIGUSR1/SIGHUP) dispatches requestReload, which sets a
-        // flag AND writes a wake byte into this same pipe; consuming flags
-        // first let the byte be drained-and-discarded in the same poll
+        // signal byte (SIGUSR1/SIGHUP) dispatches the matching request, which
+        // sets a flag AND writes a wake byte into this same pipe; consuming
+        // flags first let the byte be drained-and-discarded in the same poll
         // iteration, leaving the flag set but nothing to wake the loop again
         // (poll sleeps until unrelated X traffic or a timer). Draining first
         // makes the consumption below see the flag it just set.

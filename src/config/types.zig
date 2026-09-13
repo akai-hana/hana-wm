@@ -20,11 +20,12 @@ pub const RestoreOrder = enum { lifo, fifo };
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
-    /// Unconditional in-place re-exec: reloads whatever binary is at the
-    /// resolved executable path (see restart.requestReload).
+    /// In-place config reload: re-reads config.toml and applies the diff to
+    /// the live model, without restarting the process (proc.reload flag).
     reload_config,
-    /// Same unconditional in-place re-exec as reload_config, kept as a distinct
-    /// action so existing keybindings keep working.
+    /// Unconditional in-place re-exec of the current binary at the resolved
+    /// executable path (restart.requestReexec): reloads the whole process,
+    /// no binary-change check.
     reload_hana,
     cycle_layout: Dir,
     toggle_bar_visibility,
