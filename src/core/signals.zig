@@ -207,9 +207,9 @@ fn dispatchSignal(byte: u8) void {
     switch (@as(std.posix.SIG, @enumFromInt(byte))) {
         .HUP => utils.reload(),
         // Unified reload trigger, same semantics as the reload keybind:
-        // re-exec the current binary if it changed since boot, else hot-reload
-        // the config (restart.requestReload decides). Dispatch runs on the
-        // event loop, NOT in the signal handler, so statx/flag work is safe.
+        // unconditional in-place re-exec of the current binary
+        // (restart.requestReload decides). Dispatch runs on the event loop,
+        // NOT in the signal handler, so flag work is safe.
         .USR1 => restart.requestReload(),
         .TERM, .INT => utils.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.

@@ -20,11 +20,11 @@ pub const RestoreOrder = enum { lifo, fifo };
 pub const Action = union(enum) {
     exec: []const u8,
     close_window,
-    /// Unified reload: re-exec the current binary if it changed since boot,
-    /// otherwise hot-reload the config (see restart.requestReload).
+    /// Unconditional in-place re-exec: reloads whatever binary is at the
+    /// resolved executable path (see restart.requestReload).
     reload_config,
-    /// Unconditionally re-exec hana (replaces the running binary with the
-    /// one at the resolved executable path), regardless of whether it changed.
+    /// Same unconditional in-place re-exec as reload_config, kept as a distinct
+    /// action so existing keybindings keep working.
     reload_hana,
     cycle_layout: Dir,
     toggle_bar_visibility,
