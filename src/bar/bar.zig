@@ -1328,7 +1328,12 @@ pub fn setBarState(action: types.Action) void {
 /// shown, maps/unmaps, and re-derives the screen claim. `do_reconcile`
 /// additionally grabs the server, reconciles (the usable area changed with
 /// the claim) and flushes -- used by the fullscreen-fact reaction path, not
-/// by the workspace-switch path whose caller runs its own reconcile.
+/// by the workspace-switch path whose caller runs its own reconcile. The
+/// reconcile-show path also re-raises the bar LAST (inside the same flush,
+/// after the reconcile's geometry sends), so a moved winner that got raised
+/// above it (sync raises a placing winner on motion even without
+/// force_restack) cannot leave a freshly shown bar buried under the window
+/// it just stopped covering.
 fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
     s.vis.shown = should_be_visible;
     if (should_be_visible) {
@@ -1340,6 +1345,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
     syncScreenClaim();
     if (do_reconcile) {
         pipeline.reconcileNow();
+        if (should_be_visible) raiseBar();
         ungrabAndFlush();
     }
 }
