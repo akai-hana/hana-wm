@@ -613,16 +613,14 @@ pub fn run() !void {
         if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
             signals.drainAndDispatch(signal_fd);
 
-        // The reload flag is also set directly by the reload_config keybinding
-        // (which writes a wake byte to the pipe, but the byte can be dropped if
-        // the pipe is full). Consume it every iteration, BEFORE the ready split:
-        // confining it to the ready>0 branch let a flag-only request stall on
-        // timeout wakeups until unrelated X traffic arrived.
+        // The reload flag is set only by SIGHUP (a pure config reload via
+        // proc.reload, which writes a wake byte to the pipe; the byte can be
+        // dropped if the pipe is full). Consume it every iteration, BEFORE the
+        // ready split: confining it to the ready>0 branch let a flag-only
+        // request stall on timeout wakeups until unrelated X traffic arrived.
         //
-        // Re-exec supersedes config reload: consumed first so a request that
-        // decided "binary changed" turns into the process hand-off instead of
-        // a config-only reload (the request paths are mutually exclusive, but
-        // a hand-off must never be deferred behind an in-flight reload).
+        // Re-exec supersedes config reload: consumed first so a hand-off is
+        // never deferred behind an in-flight reload.
         if (restart.consumeReexec())
             handleReexec() catch |err| debug.err("Re-exec failed: {}", .{err});
 

@@ -1,19 +1,17 @@
 //! Unified WM reload coordinator.
 //!
-//! Owns the *decision* (binary changed since boot? then re-exec, else config
-//! reload) and the *process hand-off* (in-place exec of the new binary).
-//! xcb-free and model-free: it never touches the X connection or the model.
-//! The event loop performs the actual re-exec sequence (save state, close the
-//! X connection, then execNext) so this module stays a pure decision/flag
-//! surface, mirroring how proc.zig owns the reload flag but events.zig
-//! consumes it.
+//! Owns the *process hand-off* (in-place exec of the current binary) and the
+//! event-loop trigger flag. xcb-free and model-free: it never touches the X
+//! connection or the model. The event loop performs the actual re-exec
+//! sequence (save state, close the X connection, then execNext) so this
+//! module stays a pure flag surface, mirroring how proc.zig owns the reload
+//! flag but events.zig consumes it.
 //!
-//! The binary-change check exploits an /proc asymmetry: `/proc/self/exe`
-//! always resolves to the ORIGINAL file the running image was exec'd from,
-//! even after the filesystem path has been replaced. So the check compares
-//! the running image (captured at init) against the current file at the
-//! resolved exec path (an atomic `mv new bin` shows up as an inode/device
-//! change, a truncate-plus-rewrite-in-place shows up as an mtime/size change.
+//! The reload is UNCONDITIONAL: every request re-execs whatever image is at
+//! the resolved exec path right now (the freshly built binary). There is no
+//! binary-change check -- comparing the running image against the file is
+//! pointless when the intent is "run the current file", and a stale
+//! comparison could silently keep the old code running (see requestReload).
 
 const std = @import("std");
 
@@ -30,71 +28,24 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-/// Identity tuple of a stat'd binary: enough to tell "same file" from
-/// "different file or rewritten file" across a filesystem.
-const FileIdentity = struct {
-    dev_major: u32,
-    dev_minor: u32,
-    ino: u64,
-    mtime_sec: i64,
-    mtime_nsec: u32,
-    size: u64,
-};
-
-/// Boot-time identity of the running image (stat of `/proc/self/exe`).
-/// Null if the stat failed, in which case no change can ever be detected.
-var boot_identity: ?FileIdentity = null;
-
 /// Null-terminated absolute path to exec on re-exec (readLink of
 /// `/proc/self/exe`, or the override passed to init()). c_allocator-owned,
 /// process-lifetime: never freed.
 var exec_path_z: ?[*:0]const u8 = null;
 
-/// Re-exec request flag, mirroring proc.should_reload. Set by
-/// `requestReexec` / `requestReload` (binary changed), consumed by
-/// `consumeReexec` in the main event loop.
+/// Re-exec request flag. Set by `requestReexec` / `requestReload` (both
+/// trigger the hand-off unconditionally), consumed by `consumeReexec` in the
+/// main event loop.
 var should_reexec = std.atomic.Value(bool).init(false);
 
-/// stats `path_z` (following symlinks, like stat(2)), returns null on any
-/// error so callers degrade to the config-reload fallback instead of
-/// re-exec'ing into a missing or unreadable binary.
-///
-/// Uses statx(2) because Zig 0.16 vetoes the libc stat structs on Linux and
-/// std's own file IO buries `dev`; statx returns dev+ino+mtime+size in one
-/// syscall, which is exactly the (dev, ino, mtime_ns, size) tuple the change
-/// check needs.
-fn statIdentity(path_z: [*:0]const u8) ?FileIdentity {
-    var stx: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
-    const rc = std.os.linux.statx(
-        std.os.linux.AT.FDCWD,
-        path_z,
-        std.os.linux.AT.NO_AUTOMOUNT,
-        std.os.linux.STATX.BASIC_STATS,
-        &stx,
-    );
-    if (std.os.linux.errno(rc) != .SUCCESS) return null;
-    return .{
-        .dev_major = stx.dev_major,
-        .dev_minor = stx.dev_minor,
-        .ino = stx.ino,
-        .mtime_sec = stx.mtime.sec,
-        .mtime_nsec = stx.mtime.nsec,
-        .size = stx.size,
-    };
-}
-
-/// Captures the running image's identity (stat of `/proc/self/exe`) and
-/// stashes the optional override for the path to exec on re-exec.
+/// Resolves the binary to exec on re-exec: the readLink of `/proc/self/exe`
+/// (or the override passed in). One-shot at startup, before any reload/reexec
+/// request can arrive.
 ///
 /// `binary_path_override` names the binary to exec when the running image
 /// can't be resolved via /proc (e.g. tests); when null, the resolved
-/// readLink of `/proc/self/exe` is used. Must be called once at startup,
-/// before any reload/reexec request can arrive.
+/// readLink of `/proc/self/exe` is used.
 pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
-    boot_identity = statIdentity("/proc/self/exe");
-    if (boot_identity == null)
-        debug.warn("restart: could not stat /proc/self/exe; binary-change re-exec disabled", .{});
-
     if (binary_path_override) |override| {
         exec_path_z = alloc.dupeZ(u8, override) catch null;
         return;
@@ -103,7 +54,7 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
     if (std.posix.errno(n) != .SUCCESS) {
         debug.warn(
-            "restart: readlink /proc/self/exe failed; binary-change re-exec disabled",
+            "restart: readlink /proc/self/exe failed; in-place re-exec disabled",
             .{},
         );
         exec_path_z = null;
@@ -112,35 +63,15 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     }
 }
 
-/// Whether the file at the resolved exec path differs from the image
-/// captured at init(). True on both atomic-replace (device/inode change) and
-/// truncate-and-rewrite-in-place (mtime/size change).
-///
-/// If the boot capture or the stat of the current path fails (file missing),
-/// returns false: never re-exec into nothing; the config-reload fallback
-/// still runs.
-pub fn binaryChanged() bool {
-    const boot = boot_identity orelse return false;
-    const exec_path = exec_path_z orelse return false;
-    const now = statIdentity(exec_path) orelse return false;
-    return !std.meta.eql(now, boot);
-}
-
 /// The unified entry: everything the `reload` keybind (and SIGUSR1) means.
-/// If the binary changed, request re-exec; otherwise fall back to the
-/// existing config-reload path (proc flag + wake byte).
+/// Always re-execs the binary at the exec path, unconditionally — no
+/// identity check, so a rebuild is picked up on the very first reload.
 pub fn requestReload() void {
-    if (binaryChanged()) {
-        debug.info("restart: binary changed since boot, re-exec", .{});
-        should_reexec.store(true, .release);
-        utils.wake();
-    } else {
-        debug.info("restart: binary unchanged, reloading config", .{});
-        utils.reload();
-    }
+    requestReexec();
 }
 
-/// Unconditional re-exec (`reload_hana` action): skip the binary check.
+/// Unconditional re-exec (`reload_hana` action / `reload_config` alike):
+/// re-exec the current in-place binary, skipping any change check.
 pub fn requestReexec() void {
     should_reexec.store(true, .release);
     utils.wake();

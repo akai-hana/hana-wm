@@ -72,9 +72,8 @@ pub fn main() !void {
     // core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, config_ptr);
 
-    // Arm the unified reload: capture the running image's identity before any
-    // reload/reexec request can arrive. Binary-change detection is a no-op
-    // (config-reload fallback always taken) until this runs.
+    // Arm the unified reload: resolve the exec path before any reload/reexec
+    // request can arrive (restart.init).
     restart.init(alloc, null);
 
     // Config.deinit tears the keybind_resolver down internally, before
