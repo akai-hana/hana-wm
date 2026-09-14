@@ -43,6 +43,7 @@ const carousel = segmod.ifEnabled(build_options.has_seg_carousel, @import("carou
         _ = now_ms;
         return 0;
     }
+    pub fn resetForShow() void {}
 });
 // The prompt overlays this slot when active: this module delegates its
 // draw/click to it rather than the bar adapting the title slot.
@@ -248,12 +249,17 @@ fn drawSegmentedTitles(
     snapshot: segmod.TitleSnapshot,
 ) !void {
     const windows = snapshot.current_ws_wins;
-    if (windows.len > constants.max_rendered_title_windows)
+    // Bound by the frame/scratch constant, not the older 128-window cap:
+    // windows can never contain more than max_tiled_windows, so guarding and
+    // clamping to 128 was dead code that would also let win_count exceed the
+    // gather scratch buffer (max_visible_windows) and overflow it.
+    const max_title_windows = constants.Limits.max_tiled_windows;
+    if (windows.len > max_title_windows)
         debug.warn(
             "Workspace has {} windows; only the first {} are rendered in split-view",
-            .{ windows.len, constants.max_rendered_title_windows },
+            .{ windows.len, max_title_windows },
         );
-    const win_count = @min(windows.len, constants.max_rendered_title_windows);
+    const win_count = @min(windows.len, max_title_windows);
 
     var scratch: segmod.GatherScratch = .{};
     const sorted = (try scratch.gather(snapshot, windows, win_count)) orelse return;
@@ -355,6 +361,13 @@ fn needsRepaintHook() bool {
     return carousel.scrollingActive();
 }
 
+/// The bar fires this on every show (map). A marquee that was scrolling when
+/// the bar hid must resume from its last shown offset rather than catching
+/// the whole hidden gap in one frame (which would land it mid-cycle).
+fn onBarShownHook() void {
+    carousel.resetForShow();
+}
+
 /// This module's bar-segment contribution (registry binding).
 pub const module: @import("plugin").Segment = .{
     .name = "title",
@@ -365,4 +378,5 @@ pub const module: @import("plugin").Segment = .{
     .naturalWidth = naturalWidthHook,
     .draw = drawHook,
     .onClick = onClickHook,
+    .onBarShown = onBarShownHook,
 };

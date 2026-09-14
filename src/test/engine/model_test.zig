@@ -1,6 +1,10 @@
 //! Unit tests for the model layer.
 const std = @import("std");
 const testing = std.testing;
+
+// Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
+// warn-level overflow diagnostic; src/core/utils/debug.zig silences all
+// std.log diagnostics in test binaries, so this stays quiet on success.
 const model = @import("model");
 const constants = @import("constants");
 const utils = @import("utils");

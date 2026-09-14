@@ -3,8 +3,11 @@
 //! src/test/engine/pipeline_test.zig).
 //!
 //! Each test process connects to the running X server ($DISPLAY). When no
-//! server is reachable `connect()` returns null and the test prints "SKIP"
-//! and self-passes, so `zig build test` stays green on headless machines.
+//! server is reachable, or when a live window manager owns the display,
+//! `connect()` returns null and the test self-passes as a silent skip (a
+//! banner is only printed when stdout is a real terminal), so `zig build
+//! test` stays green on headless machines and never draws onto a running
+//! session.
 //! Everything here goes through the real public boot entry points
 //! (wire.initAtomCache / core.init / window.init / pipeline.init) -- this
 //! fixture adds no test-only behavior to src/*.
@@ -33,19 +36,57 @@ const tiling = if (build_options.has_tiling) @import("tiling") else @import("std
 /// Bounded placement buffer width, mirroring the engine's own cap.
 pub const max_order = constants.Limits.max_tiled_windows;
 
+/// Why the fixture refused to connect, so setUp can pick the right banner.
+const SkipReason = enum { no_x, live_wm };
+
+/// Set by Fx.connect before it returns null; kept per-process.
+var g_skip_reason: SkipReason = .no_x;
+
+/// Best-effort stdout write for skip banners. Goes to stdout rather than
+/// stderr on purpose: Zig's build runner prints `failed command: <cmd>` for
+/// any test that writes to stderr, even when it passes. When the runner
+/// drives this binary, stdout is a `--listen=-` protocol pipe rather than a
+/// terminal, and writing banner text into it would corrupt that stream (the
+/// harness stalls waiting for its protocol reply), so the write only happens
+/// for a manually-run binary attached to a real terminal.
+fn printStdout(comptime fmt: []const u8, args: anytype) void {
+    const io = std.Options.debug_io;
+    if (!(std.Io.File.isTty(std.Io.File.stdout(), io) catch false)) return;
+    var buf: [512]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    w.interface.print(fmt, args) catch {};
+    w.flush() catch {};
+}
+
 /// Connects the per-process fixture, self-skipping when no X display is
-/// reachable. `name` names the test in the SKIP message.
+/// reachable — or when a live window manager owns the display (the fixture's
+/// real top-level windows would flicker as garbage on that WM's screen, so it
+/// refuses to draw onto a running session). `name` names the test in the SKIP
+/// message, when one is printed.
 ///
 /// HANA_REQUIRE_X flips the skip into a hard failure: any environment set
-/// (e.g. `HANA_REQUIRE_X=1`) makes a headless run abort with a panic instead
-/// of silently self-passing, so a CI that believes it runs the integration
-/// layer can't be green while those tests actually skipped (F-18).
+/// (e.g. `HANA_REQUIRE_X=1`) makes a headless or WM-owned run abort with a
+/// panic instead of silently self-passing, so a CI that believes it runs the
+/// integration layer can't be green while those tests actually skipped (F-18).
 pub fn setUp(name: []const u8) ?*Fx {
     const fx = Fx.connect(std.testing.allocator) orelse {
-        if (std.c.getenv("HANA_REQUIRE_X") != null) {
-            std.debug.panic("HANA_REQUIRE_X is set but no X display is reachable; {s} REQUIRED, not skipped", .{name});
+        switch (g_skip_reason) {
+            .live_wm => {
+                if (std.c.getenv("HANA_REQUIRE_X") != null) {
+                    std.debug.panic("HANA_REQUIRE_X is set but {s} found a live window manager on $DISPLAY (run it under dev/scripts/xtest.sh's Xvfb instead); {s} REQUIRED, not skipped", .{ name, name });
+                }
+                printStdout(
+                    "SKIP: {s}: $DISPLAY is owned by a live window manager. These tests create real top-level windows, which would flicker on-screen garbage on your running session. Run them isolated: dev/scripts/xtest.sh zig build test\n",
+                    .{name},
+                );
+            },
+            .no_x => {
+                if (std.c.getenv("HANA_REQUIRE_X") != null) {
+                    std.debug.panic("HANA_REQUIRE_X is set but no X display is reachable; {s} REQUIRED, not skipped", .{name});
+                }
+                printStdout("WARN: skipping X-gated test '{s}' (no display) -- set HANA_REQUIRE_X to fail instead of skipping\n", .{name});
+            },
         }
-        std.debug.print("WARN: skipping X-gated test '{s}' (no display) -- set HANA_REQUIRE_X to fail instead of skipping\n", .{name});
         return null;
     };
     return fx;
@@ -68,6 +109,33 @@ pub const Geometry = struct {
     height: u16,
     border_width: u16,
 };
+
+/// Reads the `_NET_SUPPORTING_WM_CHECK` property of `win` as a window id, or
+/// null when the property is absent/empty.
+fn wmCheckWindow(conn: core.Connection, win: u32) ?u32 {
+    const atom = wire.getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return null;
+    const reply = xcb.xcb_get_property_reply(
+        conn,
+        xcb.xcb_get_property(conn, 0, win, atom, 0, 0, 1),
+        null,
+    ) orelse return null;
+    defer std.c.free(reply);
+    if (reply.*.format != 32 or reply.*.value_len == 0) return null;
+    const vals: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    return vals[0];
+}
+
+/// True when a live window manager owns this display. Per the EWMH spec a WM
+/// points the root's `_NET_SUPPORTING_WM_CHECK` at a check window that echoes
+/// the SAME value back; that self-confirmation is what tells a live WM from a
+/// stale property a crashed WM left behind. Under a bare Xvfb (xtest.sh) the
+/// property is absent, so tests proceed.
+fn liveWmOwningDisplay(conn: core.Connection, root: u32) bool {
+    const check_win = (wmCheckWindow(conn, root) orelse return false);
+    if (check_win == 0) return false;
+    const echo = (wmCheckWindow(conn, check_win) orelse return false);
+    return echo == check_win;
+}
 
 /// A connected, boot-wired test environment over a live X server.
 ///
@@ -117,6 +185,17 @@ pub const Fx = struct {
         wire.initAtomCache(conn) catch {
             return null;
         };
+
+        // Refuse to draw onto a live WM's screen: the fixture's top-levels are
+        // real mapped windows, so running against the user's own session (a
+        // second copy of hana, or any other WM) would flash them as on-screen
+        // garbage. The repo's harness isolates these tests under its own Xvfb
+        // (dev/scripts/xtest.sh); skip with a banner when a WM owns the
+        // display instead.
+        if (liveWmOwningDisplay(conn, scr.*.root)) {
+            g_skip_reason = .live_wm;
+            return null;
+        }
 
         const fx = std.heap.page_allocator.create(Fx) catch {
             return null;

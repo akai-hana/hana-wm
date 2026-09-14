@@ -15,12 +15,16 @@ const tiling_mods = @import("plugin").tiling_mods;
 
 const W = segdraw.widthState("layout");
 
+/// Fallback glyph when no tiling layout is resolvable (tiling disabled or the
+/// tiling subsystem absent: all windows float by definition).
+const fallback_icon = "><>";
+
 /// Resolves the active layout's bar icon from metadata; "><>" when tiling is
 /// disabled or the tiling subsystem is absent (all windows float by
 /// definition).
 fn getIcon() []const u8 {
-    const kind = segmod.currentLayoutKind() orelse return "><>";
-    return tiling_mods[kind].icon orelse "><>";
+    const kind = segmod.currentLayoutKind() orelse return fallback_icon;
+    return tiling_mods[kind].icon orelse fallback_icon;
 }
 
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {

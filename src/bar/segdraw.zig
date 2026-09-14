@@ -22,7 +22,12 @@ pub fn widthState(comptime tag: []const u8) type {
             return cached;
         }
         pub fn invalidate() void {
-            cached = 0;
+            // Keep the last measured width as the row reservation instead of
+            // zeroing it: zero would make the FIRST measure after a reload
+            // (which runs before this segment's draw re-primes the cache)
+            // reserve a 0-width slot and push downstream segments out of place
+            // for a frame. The reload's own full redraw re-measures the width
+            // (store) immediately afterward.
         }
         pub fn consumeRedrawRequest() bool {
             const pending = redraw_pending;

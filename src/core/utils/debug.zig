@@ -22,6 +22,11 @@ inline fn log(
     module: []const u8,
     args: anytype,
 ) void {
+    // Silence diagnostics inside test binaries: the 0.16 test runner treats
+    // any stderr from a passing test step as a failure ("failed command:"),
+    // and our tests deliberately exercise recoverable, warn-inducing paths.
+    // Production builds are unaffected (is_test == false).
+    if (@import("builtin").is_test) return;
     log_fn("[{s}] " ++ fmt, .{module} ++ args);
 }
 

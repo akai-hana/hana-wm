@@ -17,6 +17,13 @@ const utils = @import("utils");
 const sync = @import("sync");
 const tiling = @import("tiling");
 const helpers = @import("helpers");
+const build_options = @import("build_options");
+
+// Latency instrumentation only runs its full loops + timing output under
+// `-Dbench`; the default suite keeps a silent single-pass smoke so `zig build
+// test` never writes to stderr (the runner flags test stderr as `failed
+// command:` even on success).
+const bench = build_options.bench;
 
 const WindowId = model.WindowId;
 
@@ -42,7 +49,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
 
         // Warm: seed steady-state ledger, then measure one steady-state reconcile
         // pass (all desire compute + ledger scans; sends mostly elided).
-        const per_pass_ns = helpers.benchReconcile(&m, 5_000);
+        const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
         // What a single CHANGED pass costs: flip the layout kind so every
         // rect changes -> geometry requests sent for every visible window.
@@ -53,10 +60,11 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         sync.reconcile(&m, &move_ctx, .{});
         const move_ns: f64 = @floatFromInt(nowNs() - t1);
 
-        std.debug.print(
-            "[tiling] n={d} (1ws): steady reconcile={d:.1} ns/pass, layout-change reconcile={d:.1} ns, requests on change={d} (geom={d},map={d})\n",
-            .{ n, per_pass_ns, move_ns, move.total, move.geom, move.map },
-        );
+        if (bench)
+            std.debug.print(
+                "[tiling] n={d} (1ws): steady reconcile={d:.1} ns/pass, layout-change reconcile={d:.1} ns, requests on change={d} (geom={d},map={d})\n",
+                .{ n, per_pass_ns, move_ns, move.total, move.geom, move.map },
+            );
     }
 }
 
@@ -80,12 +88,13 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         defer sync.deinit();
 
         // Warm, then measure one steady-state reconcile pass.
-        const per_pass_ns = helpers.benchReconcile(&m, 5_000);
+        const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
-        std.debug.print(
-            "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass (current ws has only {d} windows)\n",
-            .{ total, per_ws, per_pass_ns, per_ws },
-        );
+        if (bench)
+            std.debug.print(
+                "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass (current ws has only {d} windows)\n",
+                .{ total, per_ws, per_pass_ns, per_ws },
+            );
     }
 }
 
@@ -120,7 +129,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
         .focused = m.focused,
         .env = helpers.std_env,
     };
-    const iterations: usize = 50_000;
+    const iterations: usize = if (bench) 50_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         tiling.compute(m.ws[m.current].params.kind, view, &placements);
@@ -128,12 +137,13 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 
     // Warm, then measure the full reconcile-walk pass.
-    const reconcile_ns = helpers.benchReconcile(&m, 5_000);
+    const reconcile_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
-    std.debug.print(
-        "[tiling] n={d}: layout.compute={d:.1} ns/pass ({d:.1}% of reconcile), full reconcile walk={d:.1} ns/pass\n",
-        .{ n, compute_ns, 100.0 * compute_ns / reconcile_ns, reconcile_ns },
-    );
+    if (bench)
+        std.debug.print(
+            "[tiling] n={d}: layout.compute={d:.1} ns/pass ({d:.1}% of reconcile), full reconcile walk={d:.1} ns/pass\n",
+            .{ n, compute_ns, 100.0 * compute_ns / reconcile_ns, reconcile_ns },
+        );
 }
 
 // A *change* pass (e.g. every tiling op) sends geometry for every visible
@@ -159,9 +169,10 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         sync.reconcile(&m, &ctx, .{});
         ctx.sink.ungrabAndFlush();
 
-        std.debug.print(
-            "[tiling] layout switch n={d}: {d} XCB requests queued in grab (geom={d}, map={d}, park={d}, bw={d}, pixel={d})\n",
-            .{ n, sink.total, sink.geom, sink.map, sink.park, sink.bw, sink.pixel },
-        );
+        if (bench)
+            std.debug.print(
+                "[tiling] layout switch n={d}: {d} XCB requests queued in grab (geom={d}, map={d}, park={d}, bw={d}, pixel={d})\n",
+                .{ n, sink.total, sink.geom, sink.map, sink.park, sink.bw, sink.pixel },
+            );
     }
 }

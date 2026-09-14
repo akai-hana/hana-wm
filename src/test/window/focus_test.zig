@@ -63,7 +63,9 @@ test "focus: no_input window refuses focus (none transition)" {
 
     const t = focus.prepareFocus(win, .user_command, null);
     try std.testing.expect(t == .none);
-    try std.testing.expectEqual(win, m.focused.?); // model untouched
+    // A no_input window can never hold X input focus, so it must not take
+    // model focus either (model focus is one store with the protocol).
+    try std.testing.expect(@as(?u32, null) == m.focused); // model untouched
 }
 
 test "focus: switching to an empty workspace clears input focus to root" {

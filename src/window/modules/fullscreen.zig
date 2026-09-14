@@ -96,13 +96,15 @@ pub fn deinit() void {
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     if (build_options.has_minimize and @import("minimize").isMinimized(m, win)) return false;
     const e = m.store.getPtr(win) orelse return false;
-    if (g_recs.removeWhere(win, struct {
-        fn match(key: u32, item: Rec) bool {
-            return item.win == key;
-        }
-    }.match)) {
-        // OFF: leave fullscreen; restore the pre-fullscreen anchor to the model.
+    if (g_recs.indexOfByIdField(.win, win) != null) {
+        // OFF: leave fullscreen; releaseCovering replays the recorded
+        // pre-fullscreen anchor into the model, then the rec is dropped.
         releaseCovering(m, win);
+        _ = g_recs.removeWhere(win, struct {
+            fn match(key: u32, item: Rec) bool {
+                return item.win == key;
+            }
+        }.match);
         return true;
     }
     // ON: capacity guard BEFORE any mutation — a full store refuses the
@@ -121,12 +123,12 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
         while (presentVisibleRecOnWs(m, m.current, win)) |occupant| {
+            releaseCovering(m, occupant); // replays the anchor before the rec drops
             _ = g_recs.removeWhere(occupant, struct {
                 fn match(key: u32, item: Rec) bool {
                     return item.win == key;
                 }
             }.match);
-            releaseCovering(m, occupant);
         }
     }
 
@@ -174,9 +176,14 @@ pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WS
 }
 
 /// Drops `win`'s core covering intent, restoring the window to plain
-/// presence. Shared by the toggle-offs and the occupant-eviction loop.
+/// presence. Replays the recorded pre-fullscreen anchor into the model so
+/// the window returns to the geometry/placement it held when the capture
+/// began (the ON branch snapshots that anchor into the rec). Shared by the
+/// toggle-offs and the occupant-eviction loop; must be called BEFORE the
+/// rec is removed, since it reads the anchor back out of it.
 fn releaseCovering(m: *model.Model, win: model.WindowId) void {
     const e = m.store.getPtr(win) orelse return;
+    if (g_recs.indexOfByIdField(.win, win)) |i| e.anchor = g_recs.slice()[i].anchor;
     e.presence = .present;
     e.covering_ws = null; // release the core covering intent
 }

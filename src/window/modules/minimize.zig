@@ -65,12 +65,15 @@ pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     // Capacity check BEFORE any mutation.
     if (g_recs.len >= MAX_MINIMIZED) return error.CapacityFull;
     var slot: ?usize = null;
+    const e = m.store.getPtr(win) orelse return;
     if (model.findHome(m, win)) |h| {
         slot = m.ws[h].tiled_order.indexOfScalar(win);
         model.removeValue(&m.ws[h].tiled_order, win);
+        // Only a tiled-anchor window held a home-list seat; a float-anchored
+        // window (floating minimize) keeps its home so restore can still
+        // resolve a placement for it.
+        if (e.anchor == .tiled) e.home_ws = null; // no longer in any tiled_order
     }
-    const e = m.store.getPtr(win) orelse return;
-    e.home_ws = null; // no longer in any tiled_order
     e.presence = .parked; // mode stays unchanged (base/fullscreen)
     const appended = g_recs.append(.{ .win = win, .slot = slot, .seq = g_seq });
     std.debug.assert(appended); // cannot fail: capacity pre-checked above
@@ -90,7 +93,14 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
         .tiled => true,
         .floating => false,
     }) {
-        const h = model.lowestBit(e.mask) orelse return; // follows tag-moves made while hidden
+        // Restore toward the CURRENT workspace when the window is tagged to
+        // it -- a restore act is aimed at where the user is looking, not at
+        // the lowest tagged workspace of a possibly distant workspace list.
+        // Falls back to the lowest tagged workspace otherwise.
+        const h: model.WSId = blk: {
+            if (e.mask & model.bit(m.current) != 0) break :blk m.current;
+            break :blk model.lowestBit(e.mask) orelse return;
+        };
         const list = &m.ws[h].tiled_order;
         // Refuse-before-mutate: a full home list leaves the window parked
         // rather than half-restoring it.
@@ -267,8 +277,12 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const seq = raw.seq;
     // Replay the minimize park: drop the tiled slot, mark parked. `mode`
     // comes from the model (already persisted), the blob restores the rec.
-    if (model.findHome(m, win)) |h| model.removeValue(&m.ws[h].tiled_order, win);
-    e.home_ws = null;
+    // Mirror minimize(): a float-anchored window keeps its home so its later
+    // restore resolves a placement.
+    if (model.findHome(m, win)) |h| {
+        model.removeValue(&m.ws[h].tiled_order, win);
+        if (e.anchor == .tiled) e.home_ws = null; // no longer in any tiled_order
+    }
     e.presence = .parked;
     if (g_seq <= seq) g_seq = seq +| 1; // keep the monotonic counter ahead (saturating, see g_seq)
     _ = g_recs.append(.{ .win = win, .slot = slot, .seq = seq });

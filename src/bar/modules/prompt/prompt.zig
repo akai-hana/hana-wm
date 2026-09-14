@@ -316,7 +316,8 @@ pub fn consumeRedrawRequest() bool {
 
 /// Initialises prompt state that is needed regardless of whether the prompt
 /// is ever opened: the bar service handles, vim engine, and key-symbol table.
-/// Completion / history buffers are deferred to `ensureAlloc` (~512 KB total)
+/// Completion / history buffers are deferred to `ensureAlloc` (~97 KiB total:
+/// 66,560 B completions + 64 B ghost + 32,896 B history)
 /// and allocated lazily on the first activation.
 pub fn init(
     allocator: std.mem.Allocator,
@@ -337,7 +338,7 @@ pub fn init(
 
 /// Lazily allocate the completion, ghost-text and history buffers on first
 /// activation.  Each sub-allocation is independently guarded so a partial
-/// OOM on a previous attempt is retried.  ~512 KB total.
+/// OOM on a previous attempt is retried.  ~97 KiB total.
 fn ensureAlloc() void {
     if (g.comp_names.len == 0)
         g.comp_names = g.allocator.alloc(
@@ -447,9 +448,11 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // one key on each side, none of which are valid editing keys.
     if (sym >= masks.modifier_keysym_lo and sym <= masks.modifier_keysym_hi) return true;
 
-    // Ctrl-modified keys
+    // Ctrl-modified keys. Route EVERY Ctrl key through the mode handler,
+    // not just in vim mode: otherwise Ctrl-C (and Ctrl-W with vim on) is
+    // swallowed by the `.none` fallback and can't cancel the prompt.
     if (ctrl_held) {
-        const action = if (vim_mode) handlers.handle_ctrl(&g.vim_state, sym) else .none;
+        const action = handlers.handle_ctrl(&g.vim_state, sym);
         // handleCtrl may have deleted text (Ctrl-W / Ctrl-U), so the ghost is
         // recomputed in the shared tail.  The blink phase is left untouched.
         return finishKeyPress(action, false);
@@ -723,6 +726,9 @@ fn updateGhost() void {
 /// Silently no-ops when cmd is empty or exceeds max_history_line.
 fn histPrepend(cmd: []const u8) void {
     if (cmd.len == 0 or cmd.len > max_history_line) return;
+    // Skip consecutive duplicates (shell convention): when the newest entry
+    // already equals this command, re-running it must not stack the ring.
+    if (g.hist_count > 0 and std.mem.eql(u8, histEntry(0), cmd)) return;
 
     g.hist_head = if (g.hist_head == 0) max_history - 1 else g.hist_head - 1;
     const slot = g.hist_head * (max_history_line + 1);

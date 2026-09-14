@@ -38,6 +38,10 @@ var last_frame_ms: i64 = 0;
 var active_win: u32 = 0;
 var active_hash: u64 = 0;
 var scrolling: bool = false;
+/// Set when the bar re-appears after a hide (see resetForShow): consumed by the
+/// next offsetFor call so the first frame after a show continues from the last
+/// shown offset instead of advancing across the whole hidden gap.
+var bar_shown: bool = false;
 
 /// True while the last offsetFor() call produced an active scroll. The title
 /// segment forwards this through its Segment needsRepaint hook, which the
@@ -72,6 +76,14 @@ pub fn offsetFor(
     scrolling = enabled and text_w > avail_w;
     active_win = win;
     active_hash = hash;
+    if (bar_shown) {
+        // The bar was hidden between frames: dt would span the entire hidden
+        // gap and teleport the marquee to an arbitrary point of its cycle.
+        // Pivot this frame at "now" so motion resumes from the last shown
+        // offset (a continuation, not a jump).
+        bar_shown = false;
+        last_frame_ms = now_ms;
+    }
     const dt_ms = now_ms - last_frame_ms;
     last_frame_ms = now_ms;
 
@@ -101,6 +113,13 @@ pub fn pollDeadlineMs(now_ms: i64, enabled: bool, hz: f64) i32 {
     return @intCast(@max(1, until_next));
 }
 
+/// Called by the bar on show (map). Flags the next offsetFor call to pivot its
+/// elapsed-time base at that frame, so resuming a scroll across a hidden gap
+/// continues from the last shown offset instead of teleporting.
+pub fn resetForShow() void {
+    bar_shown = true;
+}
+
 /// Clears all marquee state. Test hook: the vars are module-global by
 /// design (single bar, main thread only).
 pub fn resetForTesting() void {
@@ -109,4 +128,5 @@ pub fn resetForTesting() void {
     active_win = 0;
     active_hash = 0;
     scrolling = false;
+    bar_shown = false;
 }

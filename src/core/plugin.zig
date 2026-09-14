@@ -310,6 +310,9 @@ pub const Segment = struct {
     handleKeypress: ?*const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool = null,
     consumeRedrawRequest: ?*const fn () bool = null,
     invalidateReloadCaches: ?*const fn () void = null,
+    /// Fired by the bar on every show (map). Lets continuous-motion segments
+    /// (the title marquee) resume without teleporting across the hidden gap.
+    onBarShown: ?*const fn () void = null,
 };
 
 /// The tiling-layout hook set. Every module under the tiling owner's `modules/`

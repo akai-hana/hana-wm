@@ -283,6 +283,12 @@ pub const DrawContext = struct {
     // indicator-glyph draw when the requested size matches the previous call.
     sized_font_desc: ?*PangoFontDescription = null,
     sized_font_px: u16 = 0,
+    /// The base font description the sized copy was derived from. Keying the
+    /// cache on this pointer too keeps it correct across a font reload that
+    /// reuses this DrawContext (the failed-reload path keeps the old bar
+    /// live); each loadFont allocates a fresh description, so pointer identity
+    /// is a sufficient change signal.
+    sized_font_base: ?*PangoFontDescription = null,
     /// Tracks the font description currently set on the Pango layout so
     /// drawTextSized can skip the set/restore pair when reusing the same sized font.
     layout_font: ?*PangoFontDescription = null,
@@ -421,9 +427,10 @@ pub const DrawContext = struct {
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.offscreen_pixmap, self.gc, 1, &rect);
     }
 
-    /// Cached sized font description; rebuilt whenever `size_px` changes.
-    /// Derived from font.current_font_desc, so it is stale after a font reload;
-    /// DrawContexts are created fresh per reload, which keeps it consistent today.
+    /// Cached sized font description; rebuilt when the requested `size_px` or
+    /// the base font description changes. Keying on the base pointer keeps the
+    /// cache consistent even when a font reload reuses this DrawContext (the
+    /// failed-reload path keeps the old bar, and thus its dc, alive).
     pub fn drawTextSized(
         self: *DrawContext,
         x: u16,
@@ -434,7 +441,7 @@ pub const DrawContext = struct {
     ) !void {
         const desc = self.font.current_font_desc orelse return error.NoFont;
 
-        if (self.sized_font_desc == null or self.sized_font_px != size_px) {
+        if (self.sized_font_desc == null or self.sized_font_px != size_px or self.sized_font_base != desc) {
             // Copy FIRST, then free the old descriptor: freeing before the copy
             // leaves a dangling `sized_font_desc` if the copy fails, which a
             // later call would free again.
@@ -443,6 +450,7 @@ pub const DrawContext = struct {
             if (self.sized_font_desc) |old| pango_font_description_free(old);
             pango_font_description_set_absolute_size(temp, pxToPango(size_px));
             self.sized_font_desc = temp;
+            self.sized_font_base = desc;
             self.sized_font_px = size_px;
         }
         const sized = self.sized_font_desc.?;

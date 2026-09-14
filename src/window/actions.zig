@@ -140,11 +140,28 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
     // Tier policy lives in the model layer so tests can exercise it without
     // linking the protocol side (see model.fallbackFocusCandidate).
     if (model_mod.fallbackFocusCandidate(m, m.current)) |winner| {
-        model_mod.setFocus(m, winner);
-        return focus.prepareFocus(winner, .tiling_operation, null);
+        // Prepare BEFORE the model write: prepareFocus resolves the input
+        // model (round trip) and can re-raise an already-applied window.
+        // The model write is conditional on a real `.set` intent, so a
+        // no_input candidate never takes model focus.
+        const prep = focus.prepareFocus(winner, .tiling_operation, null);
+        if (prep == .none and focus.lastRejectWasNoInput()) {
+            // A no_input fallback candidate can never hold X focus. If it is
+            // the only visible window here, hand X focus to the root so a
+            // just-hidden or closed predecessor can't keep the keyboard
+            // captive.
+            model_mod.clearFocus(m);
+            if (focus.isOnlyVisibleOnCurrentWs(winner)) focus.refocusRoot();
+        } else if (prep != .none) {
+            model_mod.setFocus(m, winner);
+        }
+        return prep;
     } else {
+        // prepareClearFocus reads MODEL focus as its decision source, so it
+        // runs BEFORE the model clear.
+        const prep = focus.prepareClearFocus();
         model_mod.clearFocus(m);
-        return focus.prepareClearFocus();
+        return prep;
     }
 }
 
@@ -155,9 +172,12 @@ fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 }
 
 fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
-    model_mod.setFocus(m, win);
-    const ft = focus.prepareFocus(win, .window_spawn, null);
-    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, ft);
+    // Prepare before the model write (same rule as focusFallback): a
+    // no_input restore never takes model focus, but the reconcile still runs
+    // so the restored window is mapped and placed.
+    const prep = focus.prepareFocus(win, .window_spawn, null);
+    if (prep != .none) model_mod.setFocus(m, win);
+    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, prep);
 }
 
 fn armFullscreenBarHideIfNeeded(
@@ -531,8 +551,11 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
     model_mod.swapPrimary(m);
     var ft: focus.FocusTransition = .none;
     if (focus_swap and (m.focused orelse displaced) != displaced) {
-        model_mod.setFocus(m, displaced);
-        ft = focus.prepareFocus(displaced, .tiling_operation, null);
+        // Prepare before the model write (same rule as focusFallback): a
+        // no_input displaced head must not take model focus.
+        const prep = focus.prepareFocus(displaced, .tiling_operation, null);
+        if (prep != .none) model_mod.setFocus(m, displaced);
+        ft = prep;
     }
     pipeline.reconcileUnderGrabNowWithFocus(.{}, ft);
 }
@@ -802,10 +825,12 @@ pub fn switchTo(ws_idx: u8) void {
     // workspace, retiling Discord's geometry twice and causing a flicker.
     if (build_options.has_bar)
         @import("plugins").Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
-    // Bump the core fullscreen fact; the bar's reactive path in updateIfDirty
-    // will no-op since the claim is already applied, but keeping the fact in
-    // sync avoids any stale-revision edge.
-    core.fullscreen.bump();
+    // Bump the core fullscreen fact only when the target workspace actually
+    // carries a covering occupant: the bar's reactive path derives its claim
+    // from the fact, so spuriously bumping it on every switch would churn a
+    // bar-redraw for workspaces with no fullscreen window (the claim for the
+    // new ws was already applied by updateBarVisibilityForWorkspace above).
+    if (model_mod.coveringOccupantOnWs(m, m.current) != null) core.fullscreen.bump();
 
     const t1 = utils.monotonicNs();
 
@@ -837,12 +862,24 @@ pub fn switchTo(ws_idx: u8) void {
         null;
 
     const ft: focus.FocusTransition = if (target) |t| blk: {
-        model_mod.setFocus(m, t);
-        break :blk focus.prepareFocus(t, .workspace_switch, pre_protocols_cookie);
+        // Prepare BEFORE the model write: a no_input target must not take
+        // model focus, and a lone no_input target leaves X focus on the
+        // root rather than captive on the departed workspace.
+        const prep = focus.prepareFocus(t, .workspace_switch, pre_protocols_cookie);
+        if (prep == .none and focus.lastRejectWasNoInput()) {
+            model_mod.clearFocus(m);
+            if (focus.isOnlyVisibleOnCurrentWs(t)) focus.refocusRoot();
+        } else if (prep != .none) {
+            model_mod.setFocus(m, t);
+        }
+        break :blk prep;
     } else blk: {
         window.discardProtocolCookie(cs.conn, pre_protocols_cookie);
+        // prepareClearFocus reads MODEL focus as its decision source, so it
+        // runs BEFORE the model clear.
+        const prep = focus.prepareClearFocus();
         model_mod.clearFocus(m);
-        break :blk focus.prepareClearFocus();
+        break :blk prep;
     };
 
     const t2 = utils.monotonicNs();
@@ -920,12 +957,15 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
 
     if (!on_current) return;
 
-    // Model focus first so the reconcile below colors/stacks with the new
-    // focus. X input focus AFTER reconcile (inside the same grab): the
-    // window must be mapped before xcb_set_input_focus, and the map happens
-    // during reconcile. Both map+focus land under one grab (Gap 3 fix).
-    model_mod.setFocus(m, win);
+    // Focus prep before the model write (same rule as focusFallback): a
+    // spawned no_input window must never take model focus -- its focus
+    // protocol can't land, so marking it focused would leave borders and
+    // stacking claiming a focus X will never deliver. X input focus lands
+    // AFTER the reconcile, inside the same grab: the window must be mapped
+    // before xcb_set_input_focus, and both map+focus land under one grab
+    // (Gap 3 fix).
     const ft = focus.prepareFocus(win, .window_spawn, null);
+    if (ft != .none) model_mod.setFocus(m, win);
     pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
 }
 

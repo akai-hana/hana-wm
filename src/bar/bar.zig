@@ -261,7 +261,7 @@ const max_frame_windows: usize = constants.Limits.max_tiled_windows;
 /// Upper bound on recorded click bounds: one slot per clickable segment in
 /// the configured layout. Configs with more clickable segments than this
 /// simply lose clickability on the extras (rendering is unaffected).
-const max_click_bounds: usize = 8;
+const max_click_bounds: usize = bar_mods.len;
 
 /// Scratch bound for the per-draw right-cluster segment widths. Right segments
 /// are measured once into this buffer and reused for both the total-width
@@ -761,7 +761,12 @@ const State = struct {
             // drawRightSegments' failed-draw handling.
             return advancedX(drew_x, x_before, w, scaled_spacing);
         }
-        return drew_x;
+        // Omit-gap (title) path: a draw failure must still consume the full
+        // reserved slot so the next segment leftward starts where the layout
+        // pass expects -- leaving x unchanged would paint that segment over
+        // this failed slot and desync the center cluster, the same trap the
+        // non-omit-gap failure branch above guards against.
+        return if (drew) drew_x else x_before + w;
     }
 
     /// Slot + trailing-gap accounting for a draw that may have failed: on
@@ -783,10 +788,15 @@ const State = struct {
         names: []const []const u8,
         widths: ?[]const u16,
         is_full_redraw: bool,
+        right_x: *u16,
     ) void {
         const frame = &ctx.frame;
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
-        var right_x = self.render.width;
+        // Runs across the whole right cluster, NOT per layout: multiple right
+        // layouts butt against each other (no inter-layout spacing, matching
+        // RightCluster.measure) instead of each restarting from the bar's
+        // right edge and overlapping the previous layout's pixels.
+        var cur_x = right_x.*;
         var pending_gap = false;
         var i = names.len;
         while (i > 0) {
@@ -797,22 +807,22 @@ const State = struct {
             const seg_w = if (widths) |ws| ws[i] else self.measureSegmentWidth(frame, names[i]);
             // Saturating subtraction: a pathological width sum must clamp at 0,
             // not underflow into a wrap-around rightward paint.
-            right_x = right_x -| seg_w;
-            if (pending_gap) right_x = right_x -| scaled_spacing;
+            cur_x = cur_x -| seg_w;
+            if (pending_gap) cur_x = cur_x -| scaled_spacing;
 
-            if (isRole(names[i], self_ticking_role)) self.clock.x = right_x;
-            self.recordClickBound(names[i], right_x, seg_w);
+            if (isRole(names[i], self_ticking_role)) self.clock.x = cur_x;
+            self.recordClickBound(names[i], cur_x, seg_w);
 
             if (self.isSegmentRepaintable(names[i])) {
                 if (!is_full_redraw) {
-                    self.clearRegion(right_x, seg_w);
+                    self.clearRegion(cur_x, seg_w);
                 }
-                const drew = self.drawSegmentSafe(ctx, names[i], right_x, null) != right_x;
+                const drew = self.drawSegmentSafe(ctx, names[i], cur_x, null) != cur_x;
                 if (drew) {
-                    self.extendDirtySpan(right_x, seg_w);
+                    self.extendDirtySpan(cur_x, seg_w);
                     if (pending_gap) {
-                        self.extendDirtySpan(right_x + seg_w, scaled_spacing);
-                        self.paintGap(right_x + seg_w, scaled_spacing);
+                        self.extendDirtySpan(cur_x + seg_w, scaled_spacing);
+                        self.paintGap(cur_x + seg_w, scaled_spacing);
                     }
                 }
                 // A failed draw still occupies its reserved slot as empty
@@ -826,6 +836,7 @@ const State = struct {
                 pending_gap = true;
             }
         }
+        right_x.* = cur_x;
     }
 
     /// Repaints the bar into the off-screen pixmap. When every segment is
@@ -849,20 +860,33 @@ const State = struct {
 
         self.clicks.len = 0;
         var x: u16 = 0;
+        // Continuation cursor for the right cluster. Shared across ALL right
+        // layouts so they lay out back-to-back (measure reserves one span for
+        // the whole cluster); see drawRightSegments.
+        var right_x = r.width;
         for (r.config.layout.items) |lay| {
             switch (lay.position) {
                 .left, .center => {
                     // Available horizontal space before the right cluster.
                     const avail = r.width -| x -| right.total;
-                    const remaining = if (lay.position == .center)
-                        // Clamp to available space so a tight right+left row
-                        // can't overflow into the right-segment area.
-                        @min(
+                    var remaining: u16 = 0;
+                    if (lay.position == .center) {
+                        // Reserve the layout's own non-center segments (their
+                        // widths plus trailing gaps) before the center-slot
+                        // budget, so a center row that also carries a clock or
+                        // workspaces slot can't spill into the right cluster.
+                        const clamped = @min(
                             @max(segmod.title_min_width, avail -| scaled_spacing),
                             avail,
-                        )
-                    else
-                        0;
+                        );
+                        var claim: u16 = 0;
+                        for (lay.segments.items) |s| {
+                            if (isRole(s, center_slot_role)) continue;
+                            claim +|= self.measureSegmentWidth(frame, s);
+                            claim +|= scaled_spacing;
+                        }
+                        remaining = clamped -| claim;
+                    }
                     for (lay.segments.items) |seg| {
                         const is_center = isRole(seg, center_slot_role);
                         const omit_gap = (lay.position == .center) and is_center;
@@ -895,10 +919,15 @@ const State = struct {
                             x += w;
                             if (!omit_gap) x += scaled_spacing;
                         }
+                        // A center-slot segment consumes the whole remaining
+                        // budget; later center-slot segments in the same row
+                        // get whatever is left (typically zero -> invisible)
+                        // so duplicates can't overlap the right cluster.
+                        if (is_center) remaining -|= w;
                     }
                 },
                 .right => {
-                    self.drawRightSegments(ctx, lay.segments.items, right.take(lay.segments.items), is_full_redraw);
+                    self.drawRightSegments(ctx, lay.segments.items, right.take(lay.segments.items), is_full_redraw, &right_x);
                 },
             }
         }
@@ -1300,6 +1329,7 @@ pub fn presentForPrompt() void {
         // compositor never presents an empty frame.
         gBar.prompt_forced_visible = true;
         s.vis.shown = true;
+        runVoidHook("onBarShown");
         _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
         submitDrawBlockingFull();
     }
@@ -1363,6 +1393,10 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
     // repaint it. Ordering the map before the draw in this same flush closes
     // that gap on every show (boot, workspace switch, fullscreen exit, Mod+B).
     if (should_be_visible) {
+        // Tell continuous-motion segments the bar is (re)appearing, so the
+        // title marquee resumes from its last shown offset instead of
+        // teleporting across the whole hidden gap on this first frame.
+        runVoidHook("onBarShown");
         submitDrawBlockingFull();
     }
     syncScreenClaim();

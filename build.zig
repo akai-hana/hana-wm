@@ -44,6 +44,11 @@ pub fn build(b: *std.Build) !void {
     // Build options
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "profile_key", b.option(bool, "profile-key", "Instrument the key dispatch path to log receive->action latency") orelse false);
+    // Latency/benchmark tests print their timings and run their full loops
+    // only when `-Dbench` is passed; the default suite keeps them as cheap
+    // smoke runs so a passing `zig build test` never writes to stderr (the
+    // build runner flags any test stderr as `failed command:` even on success).
+    build_opts.addOption(bool, "bench", b.option(bool, "bench", "Run latency/benchmark tests with full iteration counts and timing output (opt-in; off by default)") orelse false);
 
     // Module discovery — runs before has_* probes so file-existence flags can
     // be derived from the discovered module set instead of re-probing the

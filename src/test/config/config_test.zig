@@ -10,6 +10,9 @@
 const std = @import("std");
 const testing = std.testing;
 
+// The tests deliberately exercise warn-level diagnostics (bad configs);
+// src/core/utils/debug.zig silences all std.log diagnostics in test binaries,
+// so this stays quiet on success.
 const config = @import("config");
 const scratch = @import("scratch");
 

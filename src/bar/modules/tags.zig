@@ -78,7 +78,10 @@ fn indicatorPos(
     const cw: f32 = @floatFromInt(cell_w);
     const bh: f32 = @floatFromInt(bar_height);
 
-    // [x, y] anchoring fractions, one per indicator location.
+    // [x, y] anchoring fractions, one per indicator location. The two slots
+    // are the horizontal and vertical anchoring axes respectively.
+    const corner_x_axis: u8 = 0;
+    const corner_y_axis: u8 = 1;
     const corner: [2]f32 = switch (location) {
         .left => .{ 0.0, 0.5 },
         .right => .{ 1.0, 0.5 },
@@ -90,8 +93,8 @@ fn indicatorPos(
         .down_right => .{ 1.0, 1.0 },
     };
 
-    const ax: f32 = corner[0] + padding * (0.5 - corner[0]);
-    const ay: f32 = corner[1] + padding * (0.5 - corner[1]);
+    const ax: f32 = corner[corner_x_axis] + padding * (0.5 - corner[corner_x_axis]);
+    const ay: f32 = corner[corner_y_axis] + padding * (0.5 - corner[corner_y_axis]);
 
     const iw: f32 = @floatFromInt(item_w);
     const ih: f32 = @floatFromInt(item_h);

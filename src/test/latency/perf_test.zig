@@ -1,7 +1,8 @@
 //! Micro-benchmarks for model/sync hot paths.
 //!
-//! Run: zig build test --summary all (these are test blocks, so they run
-//! alongside correctness tests). Check stderr for timing output.
+//! Run: zig build test -Dbench --summary all (timing goes to stdout/stderr
+//! only under -Dbench; the default suite runs these as silent single-pass
+//! smokes so `zig build test` stays quiet).
 
 const std = @import("std");
 const testing = std.testing;
@@ -11,6 +12,10 @@ const sync = @import("sync");
 const utils = @import("utils");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
+
+// Bench marks only run (full iterations + timing output) under `-Dbench`; the
+// default suite runs them as single-pass smokes and stays silent on stderr.
+const bench = build_options.bench;
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -46,7 +51,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
         }
     }
 
-    const iterations: usize = 10_000;
+    const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..10) |ws| {
@@ -56,7 +61,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 10));
-    std.debug.print("[bench] findHome (100 wins, 10 ws): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) std.debug.print("[bench] findHome (100 wins, 10 ws): {d:.1} ns/call\n", .{per_call_ns});
 
     for (0..100) |i| {
         const e = m.store.get(@intCast(i + 1)).?;
@@ -71,21 +76,21 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
     }
     _ = fullscreen.toggleFullscreen(&m, 25);
 
-    const iterations: usize = 10_000;
+    const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         _ = fullscreen.fullscreenOccupantOnWs(&m, 0);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    std.debug.print("[bench] fullscreenOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) std.debug.print("[bench] fullscreenOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: moveWindowToWs round-trip (50 wins)" {
     var m = makeModel();
     fill(&m, 50);
 
-    const iterations: usize = 10_000;
+    const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..50) |i| {
@@ -97,7 +102,7 @@ test "bench: moveWindowToWs round-trip (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 100));
-    std.debug.print("[bench] moveWindowToWs round-trip (50 wins): {d:.1} ns/op\n", .{per_op_ns});
+    if (bench) std.debug.print("[bench] moveWindowToWs round-trip (50 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
 test "bench: minimize/restore cycle (32 wins, max budget)" {
@@ -106,7 +111,7 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
     defer minimize.deinit();
     fill(&m, 32);
 
-    const iterations: usize = 5_000;
+    const iterations: usize = if (bench) 5_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..32) |i| {
@@ -118,14 +123,14 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 64));
-    std.debug.print("[bench] minimize/restore cycle (32 wins): {d:.1} ns/op\n", .{per_op_ns});
+    if (bench) std.debug.print("[bench] minimize/restore cycle (32 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
 test "bench: reorderTiled (50 wins)" {
     var m = makeModel();
     fill(&m, 50);
 
-    const iterations: usize = 10_000;
+    const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         model.reorderTiled(&m, 50, 0);
@@ -133,7 +138,7 @@ test "bench: reorderTiled (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 2));
-    std.debug.print("[bench] reorderTiled (50 wins): {d:.1} ns/op\n", .{per_op_ns});
+    if (bench) std.debug.print("[bench] reorderTiled (50 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
 fn testColor(_: model.WindowId, _: *const model.Model) u32 {
@@ -152,12 +157,12 @@ test "bench: reconcile pass (50 windows)" {
 
     var ctx = makeCtx(recorder.sink(), testColor);
 
-    const iterations: usize = 1_000;
+    const iterations: usize = if (bench) 1_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| sync.reconcile(&m, &ctx, .{});
     const elapsed_ns = nowNs() - t0;
     const per_pass_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    std.debug.print("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
+    if (bench) std.debug.print("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
 }
 
 test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
@@ -182,7 +187,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     // Warm once so the sent ledger is seeded (steady-state drag).
     sync.reconcile(&m, &ctx, .{});
 
-    const iterations: usize = 100_000;
+    const iterations: usize = if (bench) 100_000 else 1;
 
     // AFTER: targeted reconcileDragTick
     const t2 = nowNs();
@@ -216,14 +221,15 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     const elapsed1 = nowNs() - t1;
     const per_full_ns = @as(f64, @floatFromInt(elapsed1)) / @as(f64, @floatFromInt(iterations));
 
-    std.debug.print(
-        "[drag] full reconcile (50 wins): {d:.1} ns/tick; targeted reconcileDragTick: {d:.1} ns/tick; speedup {d:.1}x\n",
-        .{ per_full_ns, per_tick_ns, per_full_ns / per_tick_ns },
-    );
+    if (bench)
+        std.debug.print(
+            "[drag] full reconcile (50 wins): {d:.1} ns/tick; targeted reconcileDragTick: {d:.1} ns/tick; speedup {d:.1}x\n",
+            .{ per_full_ns, per_tick_ns, per_full_ns / per_tick_ns },
+        );
 }
 
 test "bench: register (50 wins, home_ws cache setup)" {
-    const iterations: usize = 10_000;
+    const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         var m = makeModel();
@@ -231,7 +237,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_reg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 50));
-    std.debug.print("[bench] register (50 wins): {d:.1} ns/reg\n", .{per_reg_ns});
+    if (bench) std.debug.print("[bench] register (50 wins): {d:.1} ns/reg\n", .{per_reg_ns});
 }
 
 test "bench: fallbackFocusCandidate (50 wins)" {
@@ -241,14 +247,14 @@ test "bench: fallbackFocusCandidate (50 wins)" {
         model.setFocus(&m, @intCast(i + 1));
     }
 
-    const iterations: usize = 10_000;
+    const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         _ = model.fallbackFocusCandidate(&m, 0);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    std.debug.print("[bench] fallbackFocusCandidate (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) std.debug.print("[bench] fallbackFocusCandidate (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {
@@ -256,14 +262,14 @@ test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     const n = constants.Limits.max_tiled_windows;
     fill(&m, n);
 
-    const iterations: usize = 50_000;
+    const iterations: usize = if (bench) 50_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         _ = m.store.get(@intCast(n));
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    std.debug.print("[bench] store.get ({d} wins, worst case): {d:.1} ns/call\n", .{ n, per_call_ns });
+    if (bench) std.debug.print("[bench] store.get ({d} wins, worst case): {d:.1} ns/call\n", .{ n, per_call_ns });
 }
 
 test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
@@ -277,7 +283,7 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
 
     const n: usize = 64;
 
-    const it_cold: usize = 20_000;
+    const it_cold: usize = if (bench) 20_000 else 1;
     const t0 = nowNs();
     for (0..it_cold) |_| {
         sync.init();
@@ -288,7 +294,7 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
 
     sync.init();
     for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001)) catch unreachable;
-    const it_warm: usize = 20_000;
+    const it_warm: usize = if (bench) 20_000 else 1;
     const t1 = nowNs();
     for (0..it_warm) |_| {
         for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001)) catch unreachable;
@@ -296,8 +302,9 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     const warm_ns = nowNs() - t1;
     const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));
 
-    std.debug.print(
-        "[bench] sent ledger ({d} wins): cold {d:.1} ns/op; warm {d:.1} ns/op ({d:.2} us/sweep)\n",
-        .{ n, per_cold_ns, per_warm_ns, per_warm_ns * @as(f64, @floatFromInt(n)) / 1000.0 },
-    );
+    if (bench)
+        std.debug.print(
+            "[bench] sent ledger ({d} wins): cold {d:.1} ns/op; warm {d:.1} ns/op ({d:.2} us/sweep)\n",
+            .{ n, per_cold_ns, per_warm_ns, per_warm_ns * @as(f64, @floatFromInt(n)) / 1000.0 },
+        );
 }
