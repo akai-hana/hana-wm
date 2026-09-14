@@ -12,6 +12,10 @@
     // already performs -- a benign duplicate, since system-library linking is
     // idempotent, but it means the package's link surface is declared here
     // and mirrored in build.zig.
+    // TODO: nothing enforces this mirror today, so a lib added to one side
+    // does not automatically land on the other; a FUTURE mechanical check
+    // (build step diffing the two lists) would catch a drift that is
+    // currently silent.
     .paths = .{ "build.zig", "build.zig.zon", "src", "config" },
     // dev/ is excluded by design: it holds local-only tooling (the
     // check-layers.sh layer guards that `zig build check` shells out to),

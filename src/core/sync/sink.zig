@@ -10,6 +10,7 @@
 //!   setEwmhFullscreen ~ xcb_change_property (_NET_WM_STATE_FULLSCREEN)
 //!   flush/grab    ~ conn.flush / utils.grabServer / ungrabAndFlush
 
+const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
@@ -76,10 +77,11 @@ pub const XcbSink = struct {
         utils.raiseWindow(XcbSink.fromPtr(ptr).conn, win);
     }
 
-    /// Set/clear an EWMH atom property (used for _NET_WM_STATE_FULLSCREEN).
-    /// state_atom is the property (e.g. _NET_WM_STATE), fs_atom the value
-    /// (e.g. _NET_WM_STATE_FULLSCREEN); `is_fullscreen` selects REPLACE with
-    /// that value or an empty one.
+    /// Set/clear `fs_atom` in the `_NET_WM_STATE` list on `win` while PRESERVING
+    /// any other atoms already listed (a REPLACE that writes only the fullscreen
+    /// atom would nuke e.g. _NET_WM_STATE_ABOVE/_STICKY the client set). One
+    /// blocking get_property round-trip then one replace-mode change_property;
+    /// only reachable from a fullscreen toggle, so the round-trip is acceptable.
     fn setEwmhFullscreenShim(
         ptr: *anyopaque,
         win: u32,
@@ -87,16 +89,38 @@ pub const XcbSink = struct {
         fs_atom: u32,
         is_fullscreen: bool,
     ) void {
-        const count: u32 = if (is_fullscreen) 1 else 0;
+        const conn = XcbSink.fromPtr(ptr).conn;
+
+        var atoms: [32]u32 = undefined;
+        var count: usize = 0;
+        const get_cookie = xcb.xcb_get_property(conn, 0, win, state_atom, xcb.XCB_ATOM_ATOM, 0, atoms.len);
+        if (xcb.xcb_get_property_reply(conn, get_cookie, null)) |reply| {
+            defer std.c.free(reply);
+            if (reply.*.format == 32 and reply.*.type == xcb.XCB_ATOM_ATOM) {
+                const raw = xcb.xcb_get_property_value(reply) orelse return;
+                const n: usize = @intCast(reply.*.value_len);
+                const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, atoms.len)];
+                for (existing) |a| {
+                    if (a == fs_atom or a == 0) continue;
+                    atoms[count] = a;
+                    count += 1;
+                }
+            }
+        }
+        if (is_fullscreen) {
+            atoms[count] = fs_atom;
+            count += 1;
+        }
+
         _ = xcb.xcb_change_property(
-            XcbSink.fromPtr(ptr).conn,
+            conn,
             xcb.XCB_PROP_MODE_REPLACE,
             win,
             state_atom,
             xcb.XCB_ATOM_ATOM,
             32,
-            count,
-            if (is_fullscreen) &fs_atom else null,
+            @intCast(count),
+            if (count > 0) &atoms else null,
         );
     }
 

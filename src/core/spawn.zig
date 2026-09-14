@@ -63,7 +63,16 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     var msg: [pid_msg_len]u8 = undefined;
     msg[0] = tag_pid;
     @memcpy(msg[1..], std.mem.asBytes(&gp));
-    _ = c.write(pipe_write, &msg, msg.len);
+    // C5: a short/failed write (e.g. EPIPE after the WM closed the read end
+    // on shutdown) would leave the WM waiting on a conversation that never
+    // delivers a pid. In that case declare the spawn failed and exit
+    // non-zero; the grandchild (if any) still runs, just unrouted.
+    if (c.write(pipe_write, &msg, msg.len) != pid_msg_len) {
+        const failed_msg = [1]u8{tag_failed};
+        _ = c.write(pipe_write, &failed_msg, failed_msg.len);
+        _ = c.close(pipe_write);
+        std.process.exit(1);
+    }
     _ = c.close(pipe_write);
     std.process.exit(0);
 }
@@ -113,8 +122,14 @@ pub fn executeShellCommand(cmd: []const u8) !void {
         break :blk heap_cmd_z.?.ptr;
     };
 
-    if (g_pending.len >= max_pending_spawns)
-        debug.warn("spawn: pending table full, spawning '{s}' without workspace routing", .{cmd});
+    // C5: refuse up front instead of fork-then-discover-the-table-is-full. The
+    // old path logged past the append and, once the table filled, fell back
+    // to a synchronous waitpid on the event loop and silently dropped
+    // workspace routing for the spawn.
+    if (g_pending.len >= max_pending_spawns) {
+        debug.err("spawn: pending spawn table full, rejecting '{s}'", .{cmd});
+        return error.SpawnQueueFull;
+    }
 
     const pipe_fds = utils.makePipe() catch {
         debug.err("pipe2() failed (spawn pipe): {s}", .{cmd});

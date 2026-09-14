@@ -4,6 +4,9 @@
 const utils = @import("utils");
 const tiling = @import("tiling");
 
+// Variant index of the "relaxed" variant; must match variantParse order below.
+const variant_relaxed = 1;
+
 /// Compute grid layout. Full gap between cells and at screen edges; u16
 /// integer-divided cells, last partial row wider in relaxed mode.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
@@ -24,9 +27,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const wa_y = tiling.waY(v);
 
     // In relaxed mode a partial last row shares the full screen width.
-    // Core variant index -> relaxed (variant 1 of "rigid"/"relaxed").
     const last_row_count = n % grid.cols;
-    const partial_cell_w: u16 = if (v.env.variant_idx == 1 and last_row_count != 0)
+    const partial_cell_w: u16 = if (v.env.variant_idx == variant_relaxed and last_row_count != 0)
         widenedLastRowCellWidth(screen_w, last_row_count, m.gap)
     else
         cell_w;

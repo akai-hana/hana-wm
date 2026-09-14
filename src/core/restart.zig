@@ -55,9 +55,13 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
-    if (std.posix.errno(n) != .SUCCESS) {
+    // C6: readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
+    // path fills the buffer -- truncated, no NUL. The old code then dupeZ'd
+    // the truncated bytes as the exec path. Treat a full buffer as
+    // unresolvable so a re-exec can never hand execv a cut-off path.
+    if (std.posix.errno(n) != .SUCCESS or n == buf.len) {
         debug.warn(
-            "restart: readlink /proc/self/exe failed; in-place re-exec disabled",
+            "restart: readlink /proc/self/exe failed or truncated; in-place re-exec disabled",
             .{},
         );
         exec_path_z = null;

@@ -144,6 +144,16 @@ var cached_mode_count: usize = 0;
 /// Precomputes the refresh rate for every mode in the resources reply and
 /// stores it in the cache (capped at max_cached_modes).
 fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
+    if (modes.len > max_cached_modes) {
+        // C8: the CRTC-change fast path can only resolve mode ids held in the
+        // cache, and RandR has no targeted per-mode rate request to fetch one
+        // on demand. Overflowed modes therefore always fall back to a full
+        // re-detect when they become active; surface it rather than stall it.
+        debug.warn(
+            "refresh: {} modes exceed the {}-mode cache; extra modes fall back to full re-detection",
+            .{ modes.len, max_cached_modes },
+        );
+    }
     cached_mode_count = @min(modes.len, max_cached_modes);
     for (modes[0..cached_mode_count], 0..) |mode, i| {
         cached_modes[i] = .{

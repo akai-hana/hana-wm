@@ -379,7 +379,10 @@ pub fn fetchPropertyToBuffer(
     defer std.c.free(reply);
     const r = reply.*;
     if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
-    if (r.value_len == max_property_length)
+    // C9: key truncation off the reply's bytes_after, not on value_len hitting
+    // the cap: a property of exactly cap length with no remainder is complete,
+    // while value_len==cap with bytes pending is genuinely truncated.
+    if (r.bytes_after > 0)
         debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
 
     const len: usize = @intCast(r.value_len);

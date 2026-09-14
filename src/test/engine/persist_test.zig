@@ -8,13 +8,12 @@
 //! the module-held parse is then untracked by the per-test leak check (it is
 //! intentionally held for the whole process in production).
 //!
-//! `save` is called with page_allocator (not the leak-checking testing
-//! allocator) because core/persist.zig:170-174 lets `toArrayList()` transfer
-//! the JSON buffer out of its Allocating writer and never frees it -- a
-//! process-lifetime leak in the production save path, surfaced as an S-F
-//! finding. Passing the tracking allocator here would fail every test with
-//! `[DebugAllocator] (err): ... leaked` until that one-line fix lands
-//! (`defer al.deinit()`).
+//! `save` is called with the leak-checking `testing` allocator: the
+//! core/persist.zig save path used to transfer the JSON buffer out of its
+//! Allocating writer and never free it (an S-F finding, surfaced as leaked
+//! bytes here), and the one-line fix that lands in core/persist.zig frees it
+//! (`defer al.deinit()`), so the tracking allocator now doubles as a
+//! regression guard for that class of leak.
 
 const std = @import("std");
 const testing = std.testing;
@@ -62,7 +61,7 @@ test "F10: save/load keeps every window record and workspace field" {
 
     const path = try scratch.scratchPath(testing.allocator, "hana-persist-", "roundtrip");
     defer testing.allocator.free(path);
-    try persist.save(page_alloc, &src, path);
+    try persist.save(testing.allocator, &src, path);
     defer scratch.cleanupScratch(path);
 
     try testing.expect(try persist.loadToGlobal(page_alloc, path));
@@ -130,7 +129,7 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 
     const path = try scratch.scratchPath(testing.allocator, "hana-persist-", "apply");
     defer testing.allocator.free(path);
-    try persist.save(page_alloc, &src, path);
+    try persist.save(testing.allocator, &src, path);
     defer scratch.cleanupScratch(path);
     try testing.expect(try persist.loadToGlobal(page_alloc, path));
 

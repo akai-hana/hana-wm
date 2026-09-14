@@ -535,7 +535,7 @@ const Parser = struct {
         if (self.peek() != ']') return ParseError.InvalidSection;
         _ = self.consume();
 
-        const name = std.mem.trim(u8, self.content[start .. self.pos - 1], " \t");
+        const name = std.mem.trim(u8, self.content[start .. self.pos - 1], " \t\r");
         return if (name.len > 0) name else ParseError.InvalidSection;
     }
 
@@ -544,7 +544,10 @@ const Parser = struct {
         const start = self.pos;
         while (self.pos < self.content.len) {
             switch (self.content[self.pos]) {
-                '=', ' ', '\t', '\n' => break,
+                // '\r' joins the break set so a bare key on a CRLF file (e.g.
+                // a `[workspace.rules]` class name) can't soak up the
+                // carriage return and silently mismatch rule targets.
+                '=', ' ', '\t', '\n', '\r' => break,
                 else => self.pos += 1,
             }
         }

@@ -19,6 +19,13 @@ const drain_buf_size: usize = 16;
 
 var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
+// Alternate-signal-stack backing store for the SIGUSR2 backtrace handler,
+// which runs with SA.ONSTACK. 64 KiB is ~8x SIGSTKSZ (8 KiB on x86_64) so the
+// handler never reaches the top of a tiny kernel-given area; static so no
+// allocator is touched in signal context. align(16) so the stack pointer the
+// kernel installs is ABI-aligned for a pushed frame.
+var alt_stack_mem: [64 * 1024]u8 align(16) = undefined;
+
 // Async-signal-safe handler: writes the signal number as a byte to the pipe.
 fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
     const byte: u8 = @intCast(@intFromEnum(signo));
@@ -183,6 +190,27 @@ pub fn setup() !void {
     }) |sig| {
         std.posix.sigaction(sig, &sa, null);
     }
+
+    // SIGPIPE: ignore it. The spawn engine deliberately writes into an
+    // early-closed pipe end (forkIntermediate's tag_pid handoff); with the
+    // default disposition a raced write would SIGPIPE-kill the WM instead of
+    // failing the write.
+    std.posix.sigaction(std.posix.SIG.PIPE, &.{
+        .handler = .{ .handler = @ptrFromInt(1) }, // SIG_IGN
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    }, null);
+
+    // C4: the backtrace handler arms SA.ONSTACK, but no alternate stack was
+    // ever installed -- without one the handler would run on the (possibly
+    // corrupted) interrupted stack it exists to diagnose. Install it before
+    // arming any ONSTACK handler.
+    const ss: std.posix.stack_t = .{
+        .sp = &alt_stack_mem,
+        .flags = 0,
+        .size = alt_stack_mem.len,
+    };
+    try std.posix.sigaltstack(&ss, null);
 
     setupBacktraceHandler();
 }

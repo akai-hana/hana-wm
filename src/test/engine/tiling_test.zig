@@ -12,7 +12,16 @@ const helpers = @import("helpers");
 
 const build_options = @import("build_options");
 const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
-const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {};
+// Scroll-only tests runtime-skip below, but the stub must still expose the
+// two members their bodies reference so a scroll-less tree compiles.
+const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {
+    fn slotWidth(_: i32) i32 {
+        return 0;
+    }
+    fn maxOffset(_: i32, _: i32, _: i32) i32 {
+        return 0;
+    }
+};
 
 const List = tiling.List;
 const Placement = tiling.Placement;
@@ -256,6 +265,7 @@ test "leaf balanced splits" {
 
 // scroll strip: caller pre-clamps offset; off-viewport slots parked.
 test "scroll strip and parking" {
+    if (!build_options.has_layout_scroll) return error.SkipZigTest;
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14, 15 });
 
@@ -383,7 +393,12 @@ test "n=0 emits nothing across all layouts" {
     var fx: Fixture = undefined;
     fx.init(&.{});
 
-    const kinds = [_]u8{ K_MASTER, K_MONOCLE, K_FIB, K_GRID, K_LEAF, K_SCROLL };
+    // Scroll is a removeable addon: absent it, its registry entries collapse
+    // to the same index as another layout, so prune it from the sweep.
+    const kinds = if (comptime build_options.has_layout_scroll)
+        [_]u8{ K_MASTER, K_MONOCLE, K_FIB, K_GRID, K_LEAF, K_SCROLL }
+    else
+        [_]u8{ K_MASTER, K_MONOCLE, K_FIB, K_GRID, K_LEAF };
     for (kinds) |kind| {
         const out = computeOf(kind, tuned(&fx));
         try testing.expectEqual(@as(usize, 0), out.len);
@@ -398,6 +413,7 @@ test "n=0 emits nothing across all layouts" {
 //     correct but no longer required for correctness;
 //   - the shrink case (n drops, old offset exceeds the new max) clamps to 0.
 test "scroll orphan keep-last invariant" {
+    if (!build_options.has_layout_scroll) return error.SkipZigTest;
     var fx: Fixture = undefined;
     fx.init(&.{ 11, 12, 13, 14 });
 
@@ -443,7 +459,12 @@ test "emission order pin across layouts" {
     model.setFocus(&fx.m, 12);
 
     // Every input-order layout emits exactly the tiled_order sequence.
-    const in_order_kinds = [_]u8{ K_MASTER, K_FIB, K_GRID, K_LEAF, K_SCROLL };
+    // Scroll is a removeable addon, so prune it when absent (its registry
+    // entry then collapses to another layout's index and would re-test it).
+    const in_order_kinds = if (comptime build_options.has_layout_scroll)
+        [_]u8{ K_MASTER, K_FIB, K_GRID, K_LEAF, K_SCROLL }
+    else
+        [_]u8{ K_MASTER, K_FIB, K_GRID, K_LEAF };
     for (in_order_kinds) |kind| {
         const out = computeOf(kind, tuned(&fx));
         try testing.expectEqual(@as(usize, 3), out.len);

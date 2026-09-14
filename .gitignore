@@ -10,7 +10,10 @@ zig-out/
 *.rej
 
 # vim garbage
-*.sw*
+# .swp: swap file for the file itself; .*.sw[a-p]: swaps for hidden files
+# (vim mangles the name, prefixing a dot) plus the .swa-.swp recovery range.
+.swp
+.*.sw[a-p]
 
 # other garbage
 *.xml

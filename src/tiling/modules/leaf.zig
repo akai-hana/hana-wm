@@ -22,16 +22,6 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     tileRegion(ctx, v.order, .{ .x = area.x, .y = area.y, .w = area.w, .h = area.h });
 }
 
-// Splits `dim` into two halves separated by `gap`, each clamped to `min_dim`.
-// When `dim < 2*min_dim + gap` the halves can't both fit and the pair overflows
-// the parent region; that degrades more gracefully than rendering sub-min_dim
-// halves that would overlap each other in the seam.
-inline fn halveWithMin(dim: u16, gap: u16, min_dim: u16) struct { first: u16, second: u16 } {
-    const first: u16 = @max(min_dim, if (dim > gap) (dim - gap) / 2 else 0);
-    const second: u16 = @max(min_dim, if (dim > first +| gap) dim - first - gap else 0);
-    return .{ .first = first, .second = second };
-}
-
 /// Recursively tile `windows` into the region, splitting the longer axis
 /// 50/50 with one gap per seam (border at leaf nodes; ties favour vertical).
 fn tileRegion(
@@ -52,7 +42,9 @@ fn tileRegion(
     const gap = ctx.m.gap;
 
     const horizontal = r.w >= r.h;
-    const split = halveWithMin(if (horizontal) r.w else r.h, gap, ctx.min_dim);
+    // bisectRegion keeps the pair inside the parent: `first + gap + second`
+    // never exceeds `dim`, so a tight pane can't push a child past it.
+    const split = tiling.bisectRegion(if (horizontal) r.w else r.h, gap);
     const split_offset: i32 = @as(i32, @intCast(split.first +| gap));
 
     const first = Region{ .x = r.x, .y = r.y, .w = if (horizontal) split.first else r.w, .h = if (horizontal) r.h else split.first };

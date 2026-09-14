@@ -79,6 +79,10 @@ pub fn build(b: *std.Build) !void {
     const has_seg_carousel = discovery.modules.contains("carousel");
     build_opts.addOption(bool, "has_seg_carousel", has_seg_carousel);
 
+    // The vim-modal prompt engine: gate table + addOption share the flag, so
+    // it lives here rather than only inside the optional_features loop.
+    const has_vim = discovery.modules.contains("vim");
+
     // Remaining has_* options: derived from the discovered module set.
     const optional_features = [_]struct { option: []const u8, stem: []const u8 }{
         .{ .option = "has_vim", .stem = "vim" },
@@ -189,6 +193,15 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "tiling_test", .gate = has_tiling, .x_gated = false },
         .{ .name = "sync_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
         .{ .name = "workspaces_test", .gate = has_workspaces, .x_gated = false },
+        .{ .name = "config_test", .gate = true, .x_gated = false },
+        .{ .name = "parser_test", .gate = true, .x_gated = false },
+        .{ .name = "persist_test", .gate = true, .x_gated = false },
+        .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
+        .{ .name = "masks_test", .gate = true, .x_gated = false },
+        .{ .name = "borders_test", .gate = true, .x_gated = true },
+        .{ .name = "vim_test", .gate = has_vim, .x_gated = false },
+        .{ .name = "focus_latency_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
+        .{ .name = "tiling_latency_test", .gate = has_tiling, .x_gated = false },
     };
     {
         var test_it = discovery.modules.iterator();

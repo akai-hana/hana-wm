@@ -39,7 +39,10 @@ pub const std_options: std.Options = .{
 
 pub fn main() !void {
     const x = try connectToX();
-    defer xcb.xcb_disconnect(x.conn);
+    // C15: only disconnect when the connection never errored. A dropped X
+    // server has already torn the stream down; xcb_disconnect on an errored
+    // connection can crash inside libxcb's teardown.
+    defer if (xcb.xcb_connection_has_error(x.conn) == 0) xcb.xcb_disconnect(x.conn);
 
     const alloc = std.heap.c_allocator;
 
@@ -85,7 +88,14 @@ pub fn main() !void {
     // Without the identity check this defer would free it a second time at
     // shutdown, the GP fault seen in reload-then-quit runs.
     const initial_config = core.getState().config;
-    defer if (core.getState().config == initial_config) initial_config.deinit(alloc);
+    // C3: drop the Config INTERNALS and the heap box core.init() owns (both
+    // were allocated with alloc). The identity guard still holds: the reload
+    // path now deinits AND destroys the displaced boot config itself, so this
+    // safely no-ops after a swap.
+    defer if (core.getState().config == initial_config) {
+        initial_config.deinit(alloc);
+        alloc.destroy(initial_config);
+    };
 
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 

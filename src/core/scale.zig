@@ -39,7 +39,14 @@ const resource_manager_retry_len: u32 = 4096;
 /// Result of probing RESOURCE_MANAGER. `.got_string` is true when a
 /// structurally valid string came back (regardless of whether it held an
 /// entry), so callers can tell "entry not in this window" from "unreadable".
-const XftProbe = struct { got_string: bool = false, dpi: ?f32 = null };
+const XftProbe = struct {
+    got_string: bool = false,
+    dpi: ?f32 = null,
+    /// True when the fetch was cut short (reply.bytes_after > 0). Lets the
+    /// caller distinguish "Xft.dpi genuinely absent from this window of the
+    /// resource string" from "the probe window was too small to see it".
+    possibly_truncated: bool = false,
+};
 
 /// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
 fn parseXftDpi(resource_str: []const u8) ?f32 {
@@ -67,7 +74,13 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
 
     const value_ptr = xcb.xcb_get_property_value(prop_reply);
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
-    return .{ .got_string = true, .dpi = parseXftDpi(resource_str) };
+    return .{
+        .got_string = true,
+        .dpi = parseXftDpi(resource_str),
+        // C7: truncation is `bytes_after > 0`, not the value_len hitting the
+        // requested cap (a string of exactly cap length is complete).
+        .possibly_truncated = prop_reply.*.bytes_after > 0,
+    };
 }
 
 /// Reads the Xft.dpi value from the X RESOURCE_MANAGER property, if present.
@@ -83,9 +96,11 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     const first = probeXftDpi(conn, root, atom, resource_manager_max_len);
     if (first.dpi) |dpi| return dpi;
 
-    // Xft.dpi was not in the first resource_manager_max_len bytes; retry with
-    // a larger fetch, but only when the first reply was actually a string.
-    if (!first.got_string) return null;
+    // Xft.dpi was not in the first resource_manager_max_len bytes; retry with a
+    // larger fetch ONLY when the reply was a string AND was cut short
+    // (bytes_after > 0). An untruncated fetch that lacks Xft.dpi genuinely
+    // lacks it; a bigger fetch would return the same bytes (C7).
+    if (!first.got_string or !first.possibly_truncated) return null;
     return probeXftDpi(conn, root, atom, resource_manager_retry_len).dpi;
 }
 

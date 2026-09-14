@@ -40,6 +40,14 @@ pub const SizeHints = struct {
     }
 };
 
+/// Hard ceiling on the number of distinct layouts the cycle ring can hold.
+/// The canonical value lives here because it bounds the u8 `kind` registry
+/// index (LayoutParams.kind) and the u8 `layout_idx` in workspace layout
+/// overrides alike; config side imports it and enforces the cap at parse time
+/// (a 256th entry would trap on the config-side `@intCast` in ReleaseFast,
+/// so names past the cap warn-and-skip).
+pub const max_layouts = 256;
+
 pub const LayoutParams = struct {
     /// Index into the build-generated `tiling_modules` registry (dispatch
     /// order == deterministic scan order). Resolved from config at seed time;
@@ -283,6 +291,14 @@ pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
     if (e.presence == .parked) return false;
     if (m.all_view_active) return true;
     return e.mask & bit(ws) != 0;
+}
+
+/// Whether `e` is pinned: its mask carries the soft all-workspaces sentinel
+/// (every conceivable ws bit set), making it visible everywhere and immune
+/// to tag edits. Feature modules test this predicate instead of spelling out
+/// `mask == ALL_MASK`, keeping the sentinel's meaning in one place.
+pub inline fn isPinned(e: Entry) bool {
+    return e.mask == ALL_MASK;
 }
 
 /// Number of windows placed in tiled slots of `ws`: entries of `ws`'s

@@ -363,20 +363,28 @@ fn handleConfigReload() !void {
     // errdefer frees the allocation if anything fails before the swap.
     const new_ptr = try cs.alloc.create(@TypeOf(new_config));
     new_ptr.* = new_config;
-    errdefer new_ptr.deinit(cs.alloc);
+    // C3: errdefer owns BOTH the Config internals and the box itself, so a
+    // pre-swap failure (e.g. validate below) frees the whole allocation.
+    errdefer {
+        new_ptr.deinit(cs.alloc);
+        cs.alloc.destroy(new_ptr);
+    }
 
     // C2: loadConfigDefault collapses the "no user config found" case into a
     // successful embedded-fallback load with no distinguishing signal. Boot
     // keeps that fallback; on RELOAD a missing user config must NOT silently
     // swap in the fallback. Distinguish the two by probing the same locations
-    // loadConfigDefault searches (see userConfigFound). The errdefer above
-    // frees the fallback Config on this early return.
+    // loadConfigDefault searches (see userConfigFound). This plain return is
+    // NOT an error, so the errdefer above stays dormant: free the short-lived
+    // fallback allocation explicitly here.
     if (!userConfigFound(cs.alloc)) {
         debug.err(
             "Config reload rejected: no user config file found. " ++
                 "Keeping current config (the embedded fallback is boot-only)",
             .{},
         );
+        new_ptr.deinit(cs.alloc);
+        cs.alloc.destroy(new_ptr);
         return;
     }
 
@@ -388,6 +396,7 @@ fn handleConfigReload() !void {
         // the errdefer above owned.
         debug.warn("Config reload before XKB init; keeping old config", .{});
         new_ptr.deinit(cs.alloc);
+        cs.alloc.destroy(new_ptr);
         return;
     };
     new_ptr.keybind_resolver.build(new_ptr.keybindings.items, xkb_state, cs.alloc);
@@ -424,8 +433,10 @@ fn handleConfigReload() !void {
         window.buildRulesMap();
     }
 
-    // Free the displaced old config after subsystem reloads have moved on.
+    // Free the displaced old config after subsystem reloads have moved on
+    // (C3: the pointer box too; core.init() allocated it with alloc.create).
     old_ptr.deinit(cs.alloc);
+    cs.alloc.destroy(old_ptr);
 
     if (changes.keys) grabKeybindings();
 
@@ -447,6 +458,10 @@ fn handleReexec() !void {
     debug.info("Re-executing new binary", .{});
 
     const path = try persist.defaultStatePath(cs.alloc);
+    // C15: the path is allocator-owned; execNext never returns so this only
+    // ever runs on the error/abort exits below, where the leak would else
+    // live for the rest of the process lifetime.
+    defer cs.alloc.free(path);
     try persist.save(cs.alloc, pipeline.model(), path);
 
     xcb.xcb_disconnect(cs.conn);
@@ -503,8 +518,13 @@ fn handleXcbEvents() void {
     var pending: ?*xcb.xcb_generic_event_t = null;
 
     var dispatched: usize = 0;
-    while (dispatched < max_events_per_batch) : (dispatched += 1) {
+    while (dispatched < max_events_per_batch) {
         var event = takeEvent(&pending, conn) orelse break;
+        // C15: charge each pulled event exactly when it is pulled. The old
+        // `: (dispatched += 1)` continue-expression ran on top of the inner
+        // motion loop's own increment, so a motion run let the counter reach
+        // cap+1 and dispatch one extra event per batch.
+        dispatched += 1;
         if (isMotion(event)) {
             // Coalesce the run, but charge every drained motion against the
             // batch budget: an endless motion stream must not starve the

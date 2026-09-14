@@ -153,6 +153,34 @@ const SentEntry = struct {
 pub const State = struct {
     /// Ledger of sent state (see SentEntry), keyed by `.id`.
     sent: utils.BoundedList(SentEntry, model.store_capacity) = .{},
+    /// O(1) index from a window id to its `sent` slot (see SentIndex).
+    sent_index: SentIndex = .{},
+};
+
+/// Id -> ledger-slot index capacity: 2x the ledger keeps the load factor at
+/// <= 0.5 so probes are short; a power of two so wrapping is a mask on the
+/// low id bits.
+const sent_index_capacity: usize = model.store_capacity * 2;
+
+/// Cell of the O(1) id -> ledger-slot index. `kind` distinguishes occupied,
+/// retired (tombstone), and never-used entries so lookups keep probing past
+/// removals without resurrecting stale ids.
+const SentIndexCell = struct {
+    kind: enum { empty, live, tombstone } = .empty,
+    id: model.WindowId = 0,
+    slot: usize = 0,
+};
+
+/// Open-addressing index: window id -> ledger slot, so the get-or-put /
+/// forget paths resolve a record in O(1) instead of scanning the ledger
+/// (up to store_capacity entries). Wrapped in its own struct so `st = .{}`
+/// resets the whole table (array fields take no such default on `.{}`).
+const SentIndex = struct {
+    cells: [sent_index_capacity]SentIndexCell = blk: {
+        var cells: [sent_index_capacity]SentIndexCell = undefined;
+        for (&cells) |*c| c.* = .{};
+        break :blk cells;
+    },
 };
 
 /// Owned by the compositor process; re-init() on reconnect.
@@ -166,10 +194,90 @@ pub fn deinit() void {
     init();
 }
 
-/// Slot holding `win` in the ledger, or null when absent. Linear scan;
-/// sub-microsecond at 128 entries max.
+/// Ledger slot holding `win`, resolved through the O(1) index; null when absent.
 fn sentFind(win: model.WindowId) ?usize {
-    return st.sent.indexOfById(win);
+    return sentIndexOf(win);
+}
+
+/// Slot for `win` in the ledger, or null when absent. Open-addressing probe
+/// from the id's hash bucket, skipping tombstones to the first empty cell
+/// (C13: replaces the former O(N) ledger scan with an O(1) lookup).
+fn sentIndexOf(win: model.WindowId) ?usize {
+    var h = sentHash(win);
+    while (true) {
+        const cell = &st.sent_index.cells[h];
+        switch (cell.kind) {
+            .empty => return null,
+            .live => if (cell.id == win) return cell.slot,
+            .tombstone => {},
+        }
+        h = (h + 1) & (sent_index_capacity - 1);
+    }
+}
+
+/// Where `win`'s index entry lives: the low bits of the id (a power-of-two
+/// capacity makes the wrap a mask).
+inline fn sentHash(win: model.WindowId) usize {
+    return @intCast(win & (sent_index_capacity - 1));
+}
+
+/// Inserts `win -> slot`, reusing the first tombstone on the probe path so
+/// retired entries do not lengthen later probes. Callers must have verified
+/// the id is absent first (sentGetOrPut does); a live re-insert is a no-op.
+fn sentIndexInsert(win: model.WindowId, slot: usize) void {
+    var h = sentHash(win);
+    var first_tombstone: ?usize = null;
+    while (true) {
+        const cell = &st.sent_index.cells[h];
+        switch (cell.kind) {
+            .live => if (cell.id == win) return,
+            .tombstone => {
+                if (first_tombstone == null) first_tombstone = h;
+            },
+            .empty => {
+                const dst = if (first_tombstone) |t| &st.sent_index.cells[t] else cell;
+                dst.* = .{ .kind = .live, .id = win, .slot = slot };
+                return;
+            },
+        }
+        h = (h + 1) & (sent_index_capacity - 1);
+    }
+}
+
+/// Retires `win`'s index entry (tombstone; it no longer matches lookups).
+fn sentIndexRemove(win: model.WindowId) void {
+    var h = sentHash(win);
+    while (true) {
+        const cell = &st.sent_index.cells[h];
+        switch (cell.kind) {
+            .empty => return,
+            .live => if (cell.id == win) {
+                cell.kind = .tombstone;
+                return;
+            },
+            .tombstone => {},
+        }
+        h = (h + 1) & (sent_index_capacity - 1);
+    }
+}
+
+/// Repoints `id`'s index entry at `new_slot`. Swap-remove relocates the last
+/// ledger record into the vacated slot, so the id stays put but its slot
+/// number changes.
+fn sentIndexMove(id: model.WindowId, new_slot: usize) void {
+    var h = sentHash(id);
+    while (true) {
+        const cell = &st.sent_index.cells[h];
+        switch (cell.kind) {
+            .empty => return,
+            .live => if (cell.id == id) {
+                cell.slot = new_slot;
+                return;
+            },
+            .tombstone => {},
+        }
+        h = (h + 1) & (sent_index_capacity - 1);
+    }
 }
 
 pub fn sentGet(win: model.WindowId) ?SentEntry {
@@ -187,12 +295,18 @@ pub fn sentGetOrPut(win: model.WindowId) !?*SentEntry {
     const idx = st.sent.len;
     st.sent.len += 1;
     st.sent.items[idx] = .{ .id = win };
+    sentIndexInsert(win, idx);
     return &st.sent.items[idx];
 }
 
 pub fn sentSwapRemove(win: model.WindowId) void {
     const slot = sentFind(win) orelse return;
     st.sent.swapRemove(slot);
+    // C13: keep ledger and index in lockstep. Swap-remove moves the LAST
+    // record into this slot; its id is unchanged but its slot number moved,
+    // so retire the removed id's entry then repoint the moved one.
+    sentIndexRemove(win);
+    if (slot < st.sent.len) sentIndexMove(st.sent.items[slot].id, slot);
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -201,6 +315,16 @@ pub fn sentSwapRemove(win: model.WindowId) void {
 /// Called from actions.unmanage.
 pub fn forget(win: model.WindowId) void {
     sentSwapRemove(win);
+}
+
+/// Record a border width sent for `win` without disturbing the ledger's
+/// geometry/park state. Called by the border-detail path (win.zig) after a
+/// width-only send so the next full reconcile's need_bw check
+/// (`!last.has_rect or last.bw != bw`) elides the redundant resend. No-op
+/// when the ledger is full or the get-or-put errors (sentGetOrPut contract).
+pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
+    const gop = sentGetOrPut(win) catch return;
+    if (gop) |e| e.bw = w;
 }
 
 /// Record a visible (non-parked) send in the ledger. Shared by the full
@@ -256,8 +380,12 @@ pub fn reconcileDragTick(m: *const model.Model, sink: Sink, win: model.WindowId)
     sink.geom(win, rect, null);
 
     // Update sent ledger so lastRectFor / toggleFloating see the live position.
+    // C12: carry the last real border width/pixel across the drag. Writing
+    // 0,0 here would revert them, and the next full reconcile would resend a
+    // border the server already has -- a visible repaint flash on the
+    // dragged window every tick.
     const gop = (sentGetOrPut(win) catch return) orelse return;
-    markSentVisible(gop, win, rect, 0, 0);
+    markSentVisible(gop, win, rect, gop.bw, gop.pixel);
 }
 
 pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {

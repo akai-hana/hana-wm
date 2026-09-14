@@ -29,7 +29,7 @@ Mod+Shift+C = "nixGL nixVulkanIntel steam"
 
 # -- Media --
 Mod+V       = "nixGL pear-desktop"
-Mod+Shift+V = "distrobox enter aur -- stremio-enhanced"
+Mod+Shift+V = "nixGL nixVulkanIntel stremio-enhanced"
 
 # -- File manager --
 Mod+Y       = "thunar"

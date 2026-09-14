@@ -30,13 +30,17 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
         const fh: f32 = @floatFromInt(height);
         // Clamp to u16 range before narrowing so a huge aspect ratio caps.
         if (fw > fh * h.max_aspect) {
-            width = clampAspectDim(fh, h.max_aspect, h.inc_width, h.max_width);
+            width = @min(clampAspectDim(fh, h.max_aspect, h.inc_width, h.max_width), width);
         } else if (fh > fw * h.min_aspect) {
-            height = clampAspectDim(fw, h.min_aspect, h.inc_height, h.max_height);
+            height = @min(clampAspectDim(fw, h.min_aspect, h.inc_height, h.max_height), height);
         }
     }
 
-    // Centre the (possibly shrunk) window inside its allocated slot.
+    // Centre the (possibly shrunk) window inside its allocated slot. A positive
+    // slot must never resolve to 0: the aspect re-snap can round a dimension
+    // out entirely, so floor both dims after every clamp/snap.
+    if (width == 0 and rect.width > 0) width = 1;
+    if (height == 0 and rect.height > 0) height = 1;
     const dx: i16 = @intCast((rect.width -| width) / 2);
     const dy: i16 = @intCast((rect.height -| height) / 2);
     return .{
@@ -59,7 +63,10 @@ inline fn clampAspectDim(other: f32, ratio: f32, inc: u16, max_dim: u16) u16 {
 /// Snap `dim` down to the nearest multiple of `inc`.
 inline fn snapDimToIncrement(dim: u16, inc: u16) u16 {
     if (inc == 0) return dim;
-    return (dim / inc) * inc;
+    // Floor the result so a positive slot never snaps to a 0 dimension
+    // (sub-increment leftover collapses to 1 instead).
+    const snapped = (dim / inc) * inc;
+    return if (snapped == 0 and dim > 0) 1 else snapped;
 }
 
 // The layout interchange vocabulary lives on the tiling CONTRACT (plugin.zig)
@@ -150,6 +157,15 @@ pub inline fn outerArea(wa: utils.Rect, gap: u16) Region {
         .w = wa.width -| gap *| 2,
         .h = wa.height -| gap *| 2,
     };
+}
+
+/// Split `dim` into two halves separated by `gap` at the seam. Both halves are
+/// saturating so `first + gap + second <= dim`: the pair never overflows the
+/// parent region. Shared by leaf (BSP) and fibonacci (spiral).
+pub inline fn bisectRegion(dim: u16, gap: u16) struct { first: u16, second: u16 } {
+    const first = (dim -| gap) / 2;
+    const second = dim -| (first +| gap);
+    return .{ .first = first, .second = second };
 }
 
 /// Work-area origin y clamped to >= 0, as u16.
