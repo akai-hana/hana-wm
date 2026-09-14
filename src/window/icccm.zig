@@ -388,12 +388,16 @@ fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
 fn drainWMProtocolsReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) WMProtocolsProps {
     const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return .{};
     defer std.c.free(reply);
-    const at = focusAtoms() orelse return .{};
-    return protocolPropsFromReply(
-        reply,
-        at.take_focus,
-        utils.getAtomOrZero("WM_DELETE_WINDOW"),
-    );
+    // WM_DELETE_WINDOW resolves independently of the focus-atom cache, so a
+    // client that advertises it still gets wm_delete detection during the
+    // narrow startup window where focusAtoms() (and its take_focus atom) are
+    // not yet available. take_focus atom 0 can never match a real client
+    // atom, keeping the miss path's take_focus verdict as correct as the
+    // old early-return-empty.
+    const wm_delete = utils.getAtomOrZero("WM_DELETE_WINDOW");
+    const at = focusAtoms() orelse
+        return protocolPropsFromReply(reply, 0, wm_delete);
+    return protocolPropsFromReply(reply, at.take_focus, wm_delete);
 }
 
 /// Discards a pre-fired WM_PROTOCOLS cookie without draining it. Used when a

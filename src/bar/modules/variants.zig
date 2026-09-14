@@ -14,14 +14,18 @@ const tiling_mods = @import("plugin").tiling_mods;
 
 const W = segdraw.widthState("variants");
 
+/// Empty-indicator sentinel: a layout with no variant indicator reserves no
+/// row width (the segment draws nothing and contributes a 0-width slot).
+const no_variant_icon = "";
+
 /// Resolves the active layout's variant indicator from metadata, by the
 /// current workspace's variant_idx.
 fn getIndicator() []const u8 {
-    const kind = segmod.currentLayoutKind() orelse return "";
+    const kind = segmod.currentLayoutKind() orelse return no_variant_icon;
     const mod = tiling_mods[kind];
-    const inds = mod.indicators orelse return "";
+    const inds = mod.indicators orelse return no_variant_icon;
     const idx = pipeline.model().ws[pipeline.model().current].params.variant_idx;
-    if (idx >= inds.len) return "";
+    if (idx >= inds.len) return no_variant_icon;
     return inds[idx];
 }
 

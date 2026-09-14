@@ -30,6 +30,11 @@ const State = struct {
     /// bookkeeping). Not a second store; readers go through getFocused().
     last_applied: ?u32 = null,
     suppress_reason: core.FocusSuppressReason = .none,
+    /// True when the most recent prepareFocus returned `.none` because the
+    /// target resolved to a no_input input model (as opposed to the
+    /// already-applied dedup). Call sites that mutate the model themselves
+    /// read `lastRejectWasNoInput()` synchronously after prepareFocus.
+    no_input_reject: bool = false,
 
     // Most recent X event timestamp, maintained for external consumers that
     // need it for protocol ordering. focus.zig itself always uses CurrentTime
@@ -102,6 +107,42 @@ pub inline fn getSuppressReason() core.FocusSuppressReason {
 /// identically.
 pub inline fn isLastApplied(win: u32) bool {
     return state.?.last_applied == win;
+}
+
+/// True when the most recent prepareFocus returned `.none` because the
+/// target resolved to a no_input input model. prepareFocus returns `.none`
+/// for both the no_input verdict and the already-applied dedup; call sites
+/// that write the model on their own read this right after prepareFocus to
+/// tell the two apart (a no_input target must never take model focus).
+pub inline fn lastRejectWasNoInput() bool {
+    return state.?.no_input_reject;
+}
+
+/// Sets X input focus to the root window (CurrentTime, see "Timestamp
+/// handling"). Used when a no_input window is the only focus candidate on
+/// the visible workspace, so keyboard focus is never left on a hidden or
+/// departed window.
+pub fn refocusRoot() void {
+    const cs = core.getState();
+    focusNow(cs.conn, cs.root);
+}
+
+/// True when `win` is the ONLY visible window on the current workspace.
+/// Guards the refocus-to-root fallback: when a rejected (no_input) target
+/// would otherwise leave nothing focusable on the viewed workspace, X focus
+/// falls to the root; when other visible windows exist, root-focus would be
+/// wrong.
+pub fn isOnlyVisibleOnCurrentWs(win: u32) bool {
+    const m = pipeline.model();
+    if (!model_mod.visibleOn(m, win, m.current)) return false;
+    var count: usize = 0;
+    for (tracking.allWindows()) |e| {
+        if (model_mod.visibleOn(m, e.win, m.current)) {
+            count += 1;
+            if (count > 1) return false;
+        }
+    }
+    return count == 1;
 }
 
 /// True when an incoming EnterNotify should be silently ignored.
@@ -352,19 +393,43 @@ pub fn prepareFocus(
     pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t,
 ) FocusTransition {
     const conn = core.getState().conn;
+    state.?.no_input_reject = false;
     if (window.isInvalidWindow(win)) return noneWithDiscard(conn, pre_protocols_cookie);
-    if (state.?.last_applied == win) return noneWithDiscard(conn, pre_protocols_cookie);
 
-    // Liveness guard: same as setFocus (mouse_click must not focus a
-    // destroyed window).
+    // Liveness guard first: a destroyed window must never be re-focused or
+    // raised, even when it was the last_applied window (mouse_click paths).
     // .user_command is excluded: collectVisibleWindows already confirmed the
     // window is on the current workspace and visible, so the blocking
     // xcb_get_window_attributes round-trip is redundant.
     if (reason == .mouse_click and !isWindowMapped(conn, win))
         return noneWithDiscard(conn, pre_protocols_cookie);
 
+    // Dedup: the same window already owns applied focus. A no-op for most
+    // reasons, but a user-driven click still expects its raise side effect,
+    // so an already-focused window re-raises instead of being swallowed by
+    // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
+    // re-grab of that same window's buttons (a button-regrab flash).
+    if (state.?.last_applied == win) {
+        if (!shouldRaise(reason, win)) return noneWithDiscard(conn, pre_protocols_cookie);
+        const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
+        if (resolved.model == .no_input) return .none;
+        resetPendingFocusState();
+        return setIntent(win, null, resolved, .{
+            .raise = shouldRaise(reason, win),
+            .new_suppress = suppressionFor(reason, state.?.suppress_reason),
+        });
+    }
+
     const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
-    if (resolved.model == .no_input) return .none;
+    if (resolved.model == .no_input) {
+        // Expose the no_input verdict to call sites: it returns the same
+        // `.none` as the dedup above, and callers that mutate the model on
+        // their own need to tell them apart (a no_input target must never
+        // take model focus, and a lone no_input window should leave X focus
+        // on the root rather than anywhere it can't be reached).
+        state.?.no_input_reject = true;
+        return .none;
+    }
 
     // Cancel any stale confirm cookie (client-side, no round trip).
     resetPendingFocusState();
@@ -376,11 +441,34 @@ pub fn prepareFocus(
 }
 
 /// Phase 1: prepare a focus-clear transition (outside grab).
-/// Returns .none when there is no X focus to clear.
+/// Returns .none when there is no focused window to clear.
+///
+/// The clear target derives from the protocol cache (last_applied), and the
+/// MODEL is the truth source for callers. A window teardown legitimately
+/// clears model.focused while last_applied still holds the (now-removed)
+/// window, so `m.focused == null` is a normal reason to clear, not a
+/// divergence. Only a live model.focused that disagrees with last_applied is
+/// worth a diagnostic; it still proceeds -- every clear caller nulls
+/// model.focused right after, and skipping would strand X input focus on a
+/// stale window the model no longer claims. Callers MUST run model.clearFocus
+/// after this call.
 pub fn prepareClearFocus() FocusTransition {
-    if (state.?.last_applied == null) return .none;
+    const m = pipeline.model();
+    const applied = state.?.last_applied;
+    const focused: ?u32 = if (m.focused) |w| @as(u32, @intCast(w)) else null;
+
+    if (applied == null) return .none; // model-only focus (none) -- nothing applied to clear
+    if (focused) |f| {
+        if (f != applied) {
+            debug.warn(
+                "focus: clear divergence last_applied=0x{x} model.focused=0x{x}; clearing applied",
+                .{ applied.?, f },
+            );
+        }
+    }
+
     cancelPendingConfirm();
-    return .{ .clear = .{ .old = state.?.last_applied } };
+    return .{ .clear = .{ .old = applied } };
 }
 
 /// Shared shutdown tail of the focus-clear paths (applyPendingFocus's `.clear`
@@ -546,7 +634,10 @@ pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
 /// under one grab with a reconcile (grabFocusClear, `reconcile_on_none`).
 fn applyClear(reconcile_on_none: bool) void {
     const pl = @import("pipeline");
+    // prepareClearFocus reads the MODEL as the focus truth, so it must run
+    // BEFORE model.clearFocus clears that decision source.
     const ft = prepareClearFocus();
+    if (pl.initialized) @import("model").clearFocus(pl.mut(&gate));
     if (ft == .none) {
         if (reconcile_on_none) {
             // last_applied already null: no X focus to clear, but still
@@ -564,12 +655,6 @@ fn applyClear(reconcile_on_none: bool) void {
 }
 
 pub fn clearFocus() void {
-    // Model is truth; clear it here so every clearFocus caller gets
-    // one-store semantics without a separate model call.
-    {
-        const pl = @import("pipeline");
-        if (pl.initialized) @import("model").clearFocus(pl.mut(&gate));
-    }
     applyClear(false);
 }
 
@@ -630,8 +715,6 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 /// Atomically clear focus to root. Model clear + focus protocol + borders
 /// + geometry all land inside one grab.
 pub fn grabFocusClear() void {
-    const pl = @import("pipeline");
-    @import("model").clearFocus(pl.mut(&gate));
     applyClear(true);
 }
 
@@ -719,10 +802,20 @@ inline fn appendVisible(w: u32, len: *usize) void {
 
 /// Build an ordered list of currently-visible windows for cycling.
 ///
-/// All visible windows in tracking-table order; the pool list is never fed.
-/// Emits only windows that are on the current workspace and not minimized.
+/// A covering (fullscreen) occupant owns the viewed workspace's screen: it
+/// is the only window actually on screen, so the cycle pool collapses to it.
+/// Cycling then re-focuses/re-raises the occupant instead of fading focus
+/// into windows parked behind fullscreen.
+/// Otherwise, all visible windows in tracking-table order; the pool list is
+/// never fed. Emits only windows that are on the current workspace and not
+/// minimized.
 /// Returns the count written into `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {
+    const m = pipeline.model();
+    if (model_mod.coveringOccupantOnWs(m, m.current)) |occ| {
+        cycle_buf[0] = occ;
+        return 1;
+    }
     var len: usize = 0;
     for (tracking.allWindows()) |entry| appendVisible(entry.win, &len);
     return len;
@@ -740,6 +833,15 @@ fn focusCycle(forward: bool) void {
     const len = collectVisibleWindows();
     if (len == 0) return;
     const wins = cycle_buf[0..len];
+    // Single visible window: the only sensible cycle step is to focus it
+    // when it isn't focused already; the modulo wrap below would otherwise
+    // spin a redundant grabFocus against the same id.
+    if (len == 1) {
+        const only = wins[0];
+        if (getFocused() == only) return;
+        grabFocus(only, .user_command);
+        return;
+    }
     // When the focused window isn't in the visible list, wrap so the very next
     // step lands on wins[0] (forward) or wins[len-1] (backward).
     const sentinel: usize = if (forward) len - 1 else 0;

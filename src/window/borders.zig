@@ -4,6 +4,7 @@
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
+const model = @import("model");
 const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
@@ -19,6 +20,24 @@ pub fn color(win: u32) u32 {
     // sync; this predicate covers callers outside reconcile.
     if (callHookBool(.isCoveringMode, .{ pipeline.model(), win })) return 0;
     const cfg = &core.getState().config.tiling;
+    // A window that shares a workspace with a covering (fullscreen) occupant
+    // is hidden behind it, so it must render borderless too -- otherwise the
+    // barless fullscreen view leaks colored edges. This resolves the member's
+    // real workspace from its covering state or (re)place home; a stray or
+    // unfindable window falls back to whether the CURRENT workspace has a
+    // covering occupant.
+    const m = pipeline.model();
+    const e = m.store.get(win);
+    const ws: ?model.WSId = blk: {
+        if (build_options.has_fullscreen and e.?.presence == .covering) break :blk e.?.covering_ws;
+        break :blk model.findHome(m, win);
+    };
+    if (ws) |w| {
+        if (model.coveringOccupantOnWs(m, w) != null) return 0;
+    } else {
+        if (build_options.has_fullscreen and
+            model.coveringOccupantOnWs(m, m.current) != null) return 0;
+    }
     return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
 }
 

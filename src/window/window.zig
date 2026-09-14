@@ -998,6 +998,7 @@ fn handleManagedConfigureRequest(
                     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
                     &[_]u32{event.border_width},
                 );
+            if (build_options.has_tiling) @import("sync").markSentBorderWidth(win, event.border_width);
         },
         .ignored => {},
     }

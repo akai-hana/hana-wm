@@ -19,6 +19,13 @@ const model = @import("model");
 const sync = @import("sync");
 const utils = @import("utils");
 const helpers = @import("helpers");
+const build_options = @import("build_options");
+
+// Latency instrumentation only runs its full loops + timing output under
+// `-Dbench`; the default suite keeps a silent single-pass smoke so `zig build
+// test` never writes to stderr (the runner flags test stderr as `failed
+// command:` even on success).
+const bench = build_options.bench;
 
 const nowNs = utils.monotonicNs;
 
@@ -44,17 +51,18 @@ test "latency: reconcile cost + request count at focus change" {
 
         // Warm once (a live counter seeds the ledger), then measure the CPU
         // cost of one reconcile pass.
-        const per_pass_ns = helpers.benchReconcile(&m, 5_000);
+        const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
         // Count requests in one representative pass (fresh sink).
         var probe = CountingSink{};
         var probe_ctx = makeCtx(probe.sink(), colorOfFocused);
         sync.reconcile(&m, &probe_ctx, .{});
 
-        std.debug.print(
-            "[latency] reconcile n={d}: {d:.1} ns/pass, requests/pass={d}\n",
-            .{ n, per_pass_ns, probe.count },
-        );
+        if (bench)
+            std.debug.print(
+                "[latency] reconcile n={d}: {d:.1} ns/pass, requests/pass={d}\n",
+                .{ n, per_pass_ns, probe.count },
+            );
     }
 }
 
@@ -80,7 +88,7 @@ test "latency: Mod+k focus + redundant viewport-snap reconcile" {
     var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
     sync.reconcile(&m, &warm_ctx, .{});
 
-    const iters: usize = 5_000;
+    const iters: usize = if (bench) 5_000 else 1;
 
     // Phase 1: the focus transition reconcile.
     var s1 = CountingSink{};
@@ -103,8 +111,9 @@ test "latency: Mod+k focus + redundant viewport-snap reconcile" {
     for (0..iters) |_| sync.reconcile(&m, &c2, .{});
     const snap_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters));
 
-    std.debug.print(
-        "[latency] Mod+k n={d}: focus reconcile={d:.1} ns, redundant snap reconcile={d:.1} ns (snap would add {d:.1}% on top; now skipped when viewport unchanged)\n",
-        .{ n, focus_ns, snap_ns, @as(f64, 100.0) * snap_ns / focus_ns },
-    );
+    if (bench)
+        std.debug.print(
+            "[latency] Mod+k n={d}: focus reconcile={d:.1} ns, redundant snap reconcile={d:.1} ns (snap would add {d:.1}% on top; now skipped when viewport unchanged)\n",
+            .{ n, focus_ns, snap_ns, @as(f64, 100.0) * snap_ns / focus_ns },
+        );
 }

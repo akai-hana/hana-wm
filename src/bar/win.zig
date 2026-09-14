@@ -141,7 +141,8 @@ pub fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
     const value_mask = xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_BORDER_PIXEL |
         xcb.XCB_CW_OVERRIDE_REDIRECT | xcb.XCB_CW_EVENT_MASK |
         if (want_transparency) xcb.XCB_CW_COLORMAP else 0;
-    const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS;
+    const base_events = xcb.XCB_EVENT_MASK_EXPOSURE | xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+        xcb.XCB_EVENT_MASK_BUTTON_RELEASE;
     // value_list slot order must match the CW_* bit order in value_mask above.
     const value_list = [5]u32{ 0, 0, 1, base_events, colormap };
     _ = xcb.xcb_create_window(

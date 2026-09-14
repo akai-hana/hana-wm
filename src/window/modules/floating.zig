@@ -234,8 +234,29 @@ fn computeMoveRect(
     };
 }
 
+/// Max outer size for `win` from its PMaxSize hints (drag-resize ceiling).
+/// An X11 configured width/height excludes the frame, so the outer limit is
+/// the client-declared max plus both border widths. A zero hint means no
+/// constraint and yields the u16 wire-width ceiling.
+fn sizeHintLimits(win: u32) struct { max_w: i32, max_h: i32 } {
+    const hints = pipeline.model().store.get(win).?.size_hints;
+    const bw2: i32 = @as(i32, borders.width()) * 2;
+    const unbounded: i32 = @as(i32, std.math.maxInt(u16));
+    return .{
+        .max_w = if (hints.max_width == 0) unbounded else @as(i32, hints.max_width) + bw2,
+        .max_h = if (hints.max_height == 0) unbounded else @as(i32, hints.max_height) + bw2,
+    };
+}
+
 fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect {
     const snap = drag.snap_px;
+    // Max outer size from the window's PMaxSize hints. X11 configure
+    // width/height excludes the frame, so the outer ceiling is the hint
+    // plus the border on both sides. A drag resize that ignored these
+    // would let the user grow a hint-constrained window past what its
+    // client declared, then fight the client's own configure-request
+    // reduction on every later drag tick.
+    const limits = sizeHintLimits(drag.window);
     // Anchor = corner opposite the grabbed one, fixed; the moving
     // corner follows the cursor. min/max(anchor, moving) per axis
     // makes crossing the anchor flip growth automatically.
@@ -265,10 +286,12 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect 
     const new_bottom: i32 = @max(anchor_y, moving_y);
 
     // Clamp size first, then re-pin position off the anchor so the
-    // anchor edge never drifts when the minimum size is hit.
+    // anchor edge never drifts when the minimum size is hit. The upper
+    // clamp never exceeds the hint ceiling (max() keeps min_dim > ceiling
+    // from ever producing an inverted clamp range).
     const min_dim: i32 = core.getState().config.tiling.min_window_dim;
-    const clamped_w: i32 = std.math.clamp(new_right - new_left, min_dim, std.math.maxInt(u16));
-    const clamped_h: i32 = std.math.clamp(new_bottom - new_top, min_dim, std.math.maxInt(u16));
+    const clamped_w: i32 = std.math.clamp(new_right - new_left, min_dim, @max(min_dim, limits.max_w));
+    const clamped_h: i32 = std.math.clamp(new_bottom - new_top, min_dim, @max(min_dim, limits.max_h));
     const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
