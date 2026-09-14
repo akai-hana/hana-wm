@@ -4,13 +4,15 @@
 const utils = @import("utils");
 const tiling = @import("tiling");
 
+// Variant index of the "gaps" variant; must match variantParse order below.
+const variant_gaps = 1;
+
 /// Compute monocle layout. Origin top-left, y-down. Gaps: full gap on each
 /// screen edge when gaps enabled, else zero. All dimensions are u16 and
 /// shrunk via shrinkClamped (floor clamped to min_dim).
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
-    const gaps = v.env.variant_idx == 1;
-    // Core variant index -> gaps-enabled (variant 1 of "gapless"/"gaps").
+    const gaps = v.env.variant_idx == variant_gaps;
     const inset: u16 = if (gaps) m.gap else 0;
     const total_margin = tiling.totalInset(inset, m);
 

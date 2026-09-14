@@ -6,6 +6,7 @@ const constants = @import("constants");
 const core = @import("core");
 const debug = @import("debug");
 const masks = @import("masks");
+const model = @import("model");
 const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
@@ -76,13 +77,16 @@ const default_tiling_layout = (types.TilingConfig{}).layout;
 /// (loading is arena-backed, so all ownership is released together by the
 /// arena reset; a bare caller's free of the slice frees the whole buffer).
 ///
-/// Two paths: a size-known fast path (stat reliably reports a positive
-/// regular-file size) that allocates exactly that much and reads once; and a
-/// growth path for stat-less or zero-sized sources (procfs/sysfs/pipes),
-/// allocating `read_growth_initial_bytes` and doubling until EOF. A stat
-/// result of 0 is as untrustworthy as a failed stat, so both take the growth
-/// path. The growth path reallocs down to the exact size before handing
-/// ownership to the caller.
+/// One read loop for both the size-known fast path and the stat-less/zero
+/// growth path (procfs/sysfs/pipes): the initial buffer is the positive
+/// stat-reported size when there is one (allocating exactly that much and
+/// reading once), otherwise `read_growth_initial_bytes` with doubling until
+/// EOF. A stat result of 0 is as untrustworthy as a failed stat, so both
+/// take the growth path. Routing the stat'd case through the same loop also
+/// closes the stat-then-read race: if the file grew after stat, the overflow
+/// beyond the first known_size bytes is picked up by the growth machinery
+/// instead of being silently dropped. The buffer is realloc'd down to the
+/// exact size before ownership is handed to the caller.
 pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
@@ -92,7 +96,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     defer file.close(io);
     // A successful stat reporting size 0 is as untrustworthy as a failed one:
     // procfs/sysfs/pipes report 0 while carrying content, so they take the
-    // same read-with-growth path (pinned by C5 in the config test suite).
+    // same read-with-growth path (pinned by config_test).
     const stat: ?std.Io.File.Stat = file.stat(io) catch null;
     const known_size: usize = if (stat) |st| size: {
         if (st.size > max_file_bytes) return error.FileTooLarge;
@@ -100,19 +104,11 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         break :size @intCast(st.size);
     } else 0;
 
-    if (stat != null and known_size > 0) {
-        // Direct path: allocate the reported size, read, hand ownership to
-        // the caller.
-        const buf = try allocator.alloc(u8, known_size);
-        errdefer allocator.free(buf);
-        const n = try file.readPositionalAll(io, buf, 0);
-        if (n == buf.len) return buf;
-        return allocator.realloc(buf, n);
-    }
-    // Growth path (stat failed or reported zero). Single ownership throughout:
-    // the armed errdefer frees the whole buffer exactly once on every error
-    // path, and the success path hands ownership to the caller.
-    var buf = try allocator.alloc(u8, read_growth_initial_bytes);
+    const initial: usize = if (stat != null and known_size > 0) known_size else read_growth_initial_bytes;
+    // Single ownership throughout: the armed errdefer frees the whole buffer
+    // exactly once on every error path, and the success path hands ownership
+    // (possibly after a shrinking realloc) to the caller.
+    var buf = try allocator.alloc(u8, initial);
     errdefer allocator.free(buf);
     var total: usize = 0;
     while (true) {
@@ -1102,10 +1098,24 @@ const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
     .{ "leaf", {} },    .{ "scroll", {} },
 });
 
+/// Maximum bytes a config layout name may occupy after normalization. Longer
+/// names are warned-and-skipped by the layouts-array and variants-word parses
+/// below.
+const max_layout_name = 32;
+
+/// Layout-name normalization shared by isLayoutName, parseLayoutVariant and
+/// parseLayoutsArray: lowercases `name` into `buf`, returning null when it
+/// exceeds `max_layout_name` bytes so the caller can warn-and-skip (mirroring
+/// types.lowerSlice's caller-buffer semantics). Canonicalization of the
+/// master-stack aliases stays with the storage sites, which need it.
+fn normalizeLayoutName(buf: *[max_layout_name]u8, name: []const u8) ?[]const u8 {
+    return types.lowerSlice(max_layout_name, buf, name);
+}
+
 /// Whether `name` is one of the known layout-name spellings (grammar test).
 fn isLayoutName(name: []const u8) bool {
-    var buf: [32]u8 = undefined;
-    const lowered = types.lowerSlice(32, &buf, name) orelse return false;
+    var buf: [max_layout_name]u8 = undefined;
+    const lowered = normalizeLayoutName(&buf, name) orelse return false;
     return layout_name_grammar.has(lowered);
 }
 
@@ -1121,8 +1131,8 @@ fn parseLayoutVariant(
     layout_name: []const u8,
     variants_str: []const u8,
 ) !?[]const u8 {
-    var lowered_buf: [32]u8 = undefined;
-    const lowered = types.lowerSlice(32, &lowered_buf, layout_name) orelse {
+    var buf: [max_layout_name]u8 = undefined;
+    const lowered = normalizeLayoutName(&buf, layout_name) orelse {
         debug.warn("layouts array: layout name '{s}' too long to match against a " ++
             "variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
         return null;
@@ -1153,10 +1163,12 @@ fn parseWorkspaceListInto(
     }
 }
 
-/// Hard ceiling on the number of distinct layouts the cycle ring can hold:
-/// WorkspaceLayoutOverride.layout_idx is u8, so a 256th entry would trap on
-/// the @intCast below in ReleaseFast. Names past the cap warn-and-skip.
-const max_layouts = 256;
+/// Hard ceiling on the number of distinct layouts the cycle ring can hold.
+/// The canonical value lives in the model (it bounds the u8 registry `kind`
+/// index and WorkspaceLayoutOverride.layout_idx alike); the @intCast below
+/// relies on it so a 256th entry can't trap in ReleaseFast. Names past the
+/// cap warn-and-skip.
+const max_layouts = model.max_layouts;
 
 /// Parses the `layouts` TOML array. A layout name (any string; registry
 /// resolution happens at seed time) starts a new group; the optional next
@@ -1176,9 +1188,9 @@ fn parseLayoutsArray(
             debug.warn("layouts array: expected a string at index {}, skipping", .{i});
             continue;
         };
-        var name_lower_buf: [32]u8 = undefined;
-        const name_lower = types.lowerSlice(32, &name_lower_buf, raw_name) orelse {
-            debug.warn("layouts array: layout name '{s}' at index {} is longer than the 32-byte limit, skipping", .{ raw_name, i });
+        var name_lower_buf: [max_layout_name]u8 = undefined;
+        const name_lower = normalizeLayoutName(&name_lower_buf, raw_name) orelse {
+            debug.warn("layouts array: layout name '{s}' at index {} is longer than the {d}-byte limit, skipping", .{ raw_name, i, max_layout_name });
             continue;
         };
         const is_dup = for (cfg.tiling.layouts.items) |existing| {
@@ -1226,18 +1238,31 @@ fn parseLayoutsArray(
     }
 }
 
-/// Dupe-appends every string element of `items` into `dst`;
-/// non-string entries are skipped (`warn` if set).
+/// Dupe-appends every string element of `items` into `dst`; non-string
+/// entries are skipped silently (the fonts list, where a stray non-string
+/// is simply ignored).
 fn appendDupedStrings(
     allocator: std.mem.Allocator,
     items: []const parser.Value,
     dst: *std.ArrayList([]const u8),
-    comptime warn: bool,
+) !void {
+    for (items) |item| {
+        if (item.asScalar([]const u8)) |s|
+            try dst.append(allocator, try allocator.dupe(u8, s));
+    }
+}
+
+/// Dupe-appends every string element of `items` into `dst`, warning on
+/// non-string entries (the bar segment list, where a typo should surface).
+fn appendDupedStringsWarned(
+    allocator: std.mem.Allocator,
+    items: []const parser.Value,
+    dst: *std.ArrayList([]const u8),
 ) !void {
     for (items) |item| {
         if (item.asScalar([]const u8)) |s| {
             try dst.append(allocator, try allocator.dupe(u8, s));
-        } else if (comptime warn) {
+        } else {
             debug.warn("Non-string entry in bar segment list, skipping", .{});
         }
     }
@@ -1252,7 +1277,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     const section = doc.getSection("bar") orelse return;
     if (section.getAs([]const parser.Value, "fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, true);
-        try appendDupedStrings(allocator, arr, &cfg.bar.fonts, false);
+        try appendDupedStrings(allocator, arr, &cfg.bar.fonts);
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
@@ -1276,8 +1301,7 @@ fn padWorkspaceIcons(allocator: std.mem.Allocator, cfg: *types.Config) !void {
 /// Formats integer `n` as decimal and dupes it to a string, the "int ->
 /// string icon" step shared by parseWorkspaceIcons and padWorkspaceIcons.
 fn dupeNum(allocator: std.mem.Allocator, n: anytype) ![]u8 {
-    var buf: [24]u8 = undefined;
-    return allocator.dupe(u8, try std.fmt.bufPrint(&buf, "{}", .{n}));
+    return std.fmt.allocPrint(allocator, "{}", .{n});
 }
 
 fn parseWorkspaceIcons(
@@ -1315,7 +1339,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
         const layout_section = doc.getSection(p.name) orelse continue;
         var bar_layout = types.BarLayout{ .position = p.pos, .segments = .empty };
         if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
-            try appendDupedStrings(allocator, seg_arr, &bar_layout.segments, true);
+            try appendDupedStringsWarned(allocator, seg_arr, &bar_layout.segments);
         if (bar_layout.segments.items.len > 0) try cfg.bar.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
     }
 
@@ -1372,8 +1396,20 @@ fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name:
         try addRule(allocator, cfg, class_name, @intCast(ws_num));
 }
 
+/// Length of the leading run of ASCII digits in `s` (0 when it starts with
+/// any other character).
+fn countLeadingDigits(s: []const u8) usize {
+    var n: usize = 0;
+    while (n < s.len and std.ascii.isDigit(s[n])) n += 1;
+    return n;
+}
+
 /// Handle the [workspace.rules] section where the key may be a class name
 /// (integer value -> workspace) or a workspace number (array value -> classes).
+/// Distinguish by the LEADING NUMERIC RUN, not by an all-key parseInt: a
+/// numeric-prefixed class like "12x" is parsed as a probability-1 class rule
+/// (warned), never silently coerced by a catch; only all-digit keys are
+/// workspace numbers.
 fn parseWorkspaceRuleSection(
     allocator: std.mem.Allocator,
     cfg: *types.Config,
@@ -1382,8 +1418,21 @@ fn parseWorkspaceRuleSection(
     var iter = rules_section.orderedIterator();
     while (iter.next()) |entry| {
         rules_section.markConsumed(entry.key);
-        const ws_num = std.fmt.parseInt(usize, entry.key, 10) catch {
+        const digit_run = countLeadingDigits(entry.key);
+        if (digit_run == 0) {
             try tryAddClassRule(allocator, cfg, entry.key, entry.value);
+            continue;
+        }
+        if (digit_run != entry.key.len) {
+            debug.warn("[workspace.rules]: key '{s}' starts with a digit but isn't a workspace number, treating it as a class name", .{entry.key});
+            try tryAddClassRule(allocator, cfg, entry.key, entry.value);
+            continue;
+        }
+        // All-digits: an oversized value is a genuine parse error (never a
+        // plausible workspace number), so warn-and-skip rather than coerce
+        // into a class rule.
+        const ws_num = std.fmt.parseInt(usize, entry.key, 10) catch {
+            debug.warn("[workspace.rules]: workspace number '{s}' is too large, skipping", .{entry.key});
             continue;
         };
         if (!checkWorkspaceBound(ws_num, entry.key, cfg.workspaces.count)) continue;
@@ -1394,78 +1443,79 @@ fn parseWorkspaceRuleSection(
 }
 
 // ── Per-subsystem change detection ──────────────────────────────────
-// Uses Wyhash to fingerprint each subsystem's relevant config fields so
-// handleConfigReload can skip teardown/rebuild work when a subsystem
-// didn't actually change (e.g. a bar color tweak should not regrab keys).
+// Content-based comparisons for handleConfigReload so it can skip
+// teardown/rebuild work when a subsystem didn't actually change (e.g. a bar
+// color tweak should not regrab keybindings). std containers are compared
+// through their logical items/entries -- never their internal capacity/
+// bookkeeping bytes, which would make a reload comparison depend on append
+// history, and never by pointer identity.
 
-const Hash = std.hash.Wyhash;
+fn eqlStrings(a: []const []const u8, b: []const []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
+}
 
-// Recursive logical-value hasher for the reload-change detectors (C1):
-// dispatches on @typeInfo so the three per-subsystem functions reduce to a
-// few hashes each. Hashes by CONTENT: std containers (ArrayList,
-// StringHashMap) are recognised by shape and hashed through their logical
-// items/entries -- never their internal capacity/allocator bytes, which
-// would make reload comparison depend on append history. Raw byte slices
-// hash verbatim under a length prefix; optionals carry a discriminator byte;
-// hashing a raw non-slice pointer is a compile error.
-fn hashValue(h: *Hash, v: anytype) void {
-    const T = @TypeOf(v);
-    switch (@typeInfo(T)) {
-        .int, .float, .bool, .@"enum" => h.update(std.mem.asBytes(&v)),
-        .optional => {
-            if (v) |inner| {
-                h.update(&[_]u8{1});
-                hashValue(h, inner);
-            } else {
-                h.update(&[_]u8{0});
-            }
-        },
-        .pointer => |p| switch (p.size) {
-            .slice => {
-                const len: u32 = @intCast(v.len);
-                h.update(std.mem.asBytes(&len));
-                if (p.child == u8) {
-                    h.update(v);
-                } else {
-                    for (v) |item| hashValue(h, item);
-                }
-            },
-            else => @compileError("hashValue: refused to hash raw pointer " ++ @typeName(T)),
-        },
-        .@"struct" => {
-            const list = comptime listLike(T);
-            const map = comptime mapLike(T);
-            if (list) {
-                hashValue(h, v.items);
-                return;
-            }
-            if (map) {
-                const count: u32 = @intCast(v.count());
-                h.update(std.mem.asBytes(&count));
-                var it = v.iterator();
-                while (it.next()) |entry| {
-                    hashValue(h, entry.key_ptr.*);
-                    hashValue(h, entry.value_ptr.*);
-                }
-                return;
-            }
-            inline for (std.meta.fields(T)) |f| hashValue(h, @field(v, f.name));
-        },
-        else => @compileError("hashValue: can't hash " ++ @typeName(T)),
+fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |x| return if (b) |y| std.mem.eql(u8, x, y) else false;
+    return b == null;
+}
+
+fn eqlScalableOpt(a: ?parser.ScalableValue, b: ?parser.ScalableValue) bool {
+    if (a) |x| return if (b) |y| eqlScalable(x, y) else false;
+    return b == null;
+}
+
+/// ScalableValue is a bare struct (no `==` operator), so compare its fields.
+fn eqlScalable(a: parser.ScalableValue, b: parser.ScalableValue) bool {
+    return a.value == b.value and a.is_percentage == b.is_percentage;
+}
+
+fn eqlBarLayouts(a: []const types.BarLayout, b: []const types.BarLayout) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.position != y.position) return false;
+        if (!eqlStrings(x.segments.items, y.segments.items)) return false;
     }
+    return true;
 }
 
-// std.ArrayList-family: a struct carrying a slice `items` plus `capacity`
-// bookkeeping. The plain value structs in these configs never do.
-fn listLike(comptime T: type) bool {
-    return @hasField(T, "items") and @hasField(T, "capacity") and
-        @typeInfo(@FieldType(T, "items")) == .pointer;
+fn eqlLayoutOverrides(a: []const types.WorkspaceLayoutOverride, b: []const types.WorkspaceLayoutOverride) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.workspace_idx != y.workspace_idx or x.layout_idx != y.layout_idx) return false;
+        if (!eqlOptionalString(x.variant, y.variant)) return false;
+    }
+    return true;
 }
 
-// std.StringHashMap-family: carries `size`/`available`/`metadata`
-// bookkeeping alongside the keys/values slots.
-fn mapLike(comptime T: type) bool {
-    return @hasField(T, "size") and @hasField(T, "available") and @hasField(T, "metadata");
+fn eqlMasterCountOverrides(a: []const types.WorkspaceMasterCountOverride, b: []const types.WorkspaceMasterCountOverride) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.workspace_idx != y.workspace_idx or x.count != y.count) return false;
+    }
+    return true;
+}
+
+/// Variant maps are compared by (key, value) content, unordered: append
+/// history must never make two identical maps read as different.
+fn eqlVariantMap(a: *const std.StringHashMapUnmanaged([]const u8), b: *const std.StringHashMapUnmanaged([]const u8)) bool {
+    if (a.count() != b.count()) return false;
+    var it = a.iterator();
+    while (it.next()) |entry| {
+        const v = b.get(entry.key_ptr.*) orelse return false;
+        if (!std.mem.eql(u8, entry.value_ptr.*, v)) return false;
+    }
+    return true;
+}
+
+fn eqlRules(a: []const types.Rule, b: []const types.Rule) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.workspace != y.workspace) return false;
+        if (!std.mem.eql(u8, x.class_name, y.class_name)) return false;
+    }
+    return true;
 }
 
 pub const ConfigChanges = struct {
@@ -1474,47 +1524,93 @@ pub const ConfigChanges = struct {
     keys: bool = false,
 };
 
+/// Bar-subsystem content: every field of BarConfig compared logically
+/// (arrays by items, optionals by inner value, strings by contents).
+fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
+    return old.enabled != new.enabled or
+        old.vim_mode != new.vim_mode or
+        old.bar_position != new.bar_position or
+        !eqlScalableOpt(old.height, new.height) or
+        !eqlStrings(old.fonts.items, new.fonts.items) or
+        !eqlScalable(old.font_size, new.font_size) or
+        old.scaled_font_size != new.scaled_font_size or
+        !eqlScalable(old.spacing, new.spacing) or
+        old.bg != new.bg or
+        old.fg != new.fg or
+        old.selected_bg != new.selected_bg or
+        old.selected_fg != new.selected_fg or
+        old.accent_color != new.accent_color or
+        old.title_accent_color != new.title_accent_color or
+        old.title_unfocused_accent != new.title_unfocused_accent or
+        old.title_minimized_accent != new.title_minimized_accent or
+        !eqlStrings(old.workspace_icons.items, new.workspace_icons.items) or
+        !eqlScalable(old.indicator_size, new.indicator_size) or
+        !eqlScalable(old.workspace_tag_width, new.workspace_tag_width) or
+        old.indicator_location != new.indicator_location or
+        old.indicator_padding != new.indicator_padding or
+        !eqlOptionalString(old.indicator_focused, new.indicator_focused) or
+        !eqlOptionalString(old.indicator_unfocused, new.indicator_unfocused) or
+        old.indicator_color != new.indicator_color or
+        !eqlOptionalString(old.clock_format, new.clock_format) or
+        old.carousel_enabled != new.carousel_enabled or
+        old.carousel_speed_px_s != new.carousel_speed_px_s or
+        old.drun_bg != new.drun_bg or
+        old.drun_fg != new.drun_fg or
+        old.drun_prompt_color != new.drun_prompt_color or
+        !eqlOptionalString(old.drun_prompt, new.drun_prompt) or
+        !eqlBarLayouts(old.layout.items, new.layout.items) or
+        old.transparency != new.transparency;
+}
+
+/// Tiling-subsystem content: TilingConfig, plus the workspaces/fullscreen/
+/// drag/snap gates the reload handler rebuilds together with tiling state.
+fn tilingChanged(old: *const types.Config, new: *const types.Config) bool {
+    return old.tiling.enabled != new.tiling.enabled or
+        !std.mem.eql(u8, old.tiling.layout, new.tiling.layout) or
+        !eqlStrings(old.tiling.layouts.items, new.tiling.layouts.items) or
+        old.tiling.master_side != new.tiling.master_side or
+        !eqlScalable(old.tiling.master_width, new.tiling.master_width) or
+        old.tiling.master_count != new.tiling.master_count or
+        !eqlScalable(old.tiling.gap_width, new.tiling.gap_width) or
+        !eqlScalable(old.tiling.border_width, new.tiling.border_width) or
+        old.tiling.border_focused != new.tiling.border_focused or
+        old.tiling.border_unfocused != new.tiling.border_unfocused or
+        old.tiling.min_window_dim != new.tiling.min_window_dim or
+        !eqlVariantMap(&old.tiling.variants, &new.tiling.variants) or
+        !eqlLayoutOverrides(old.tiling.workspace_layout_overrides.items, new.tiling.workspace_layout_overrides.items) or
+        !eqlMasterCountOverrides(old.tiling.workspace_master_count_overrides.items, new.tiling.workspace_master_count_overrides.items) or
+        old.tiling.global_layout != new.tiling.global_layout or
+        old.workspaces.enabled != new.workspaces.enabled or
+        old.workspaces.count != new.workspaces.count or
+        !eqlRules(old.workspaces.rules.items, new.workspaces.rules.items) or
+        old.fullscreen_enabled != new.fullscreen_enabled or
+        old.drag_enabled != new.drag_enabled or
+        !eqlScalable(old.snap_distance, new.snap_distance);
+}
+
+/// Keys-subsystem content: the pair layout — (modifiers, keysym) per keyboard
+/// binding and (modifiers, button) per mouse binding. Action is deliberately
+/// excluded: two keybinds that differ only in their action (e.g. a changed
+/// command string) still share a pair, so no regrab is needed.
+fn keysChanged(old: *const types.Config, new: *const types.Config) bool {
+    if (old.keybindings.items.len != new.keybindings.items.len) return true;
+    for (old.keybindings.items, new.keybindings.items) |a, b| {
+        if (a.modifiers != b.modifiers or a.keysym != b.keysym) return true;
+    }
+    if (old.mouse_bindings.items.len != new.mouse_bindings.items.len) return true;
+    for (old.mouse_bindings.items, new.mouse_bindings.items) |a, b| {
+        if (a.modifiers != b.modifiers or a.button != b.button) return true;
+    }
+    return false;
+}
+
 /// Compares old and new configs at a coarse per-subsystem level, returning
 /// which subsystems changed. Gate each reload step on its flag so, e.g.,
 /// a color tweak doesn't regrab keybindings.
 pub fn detectChanges(old: *const types.Config, new: *const types.Config) ConfigChanges {
     return .{
-        .bar = hashBarSubsystem(&old.bar) != hashBarSubsystem(&new.bar),
-        .tiling = hashTilingSubsystem(old) != hashTilingSubsystem(new),
-        .keys = hashKeysSubsystem(old) != hashKeysSubsystem(new),
+        .bar = barChanged(&old.bar, &new.bar),
+        .tiling = tilingChanged(old, new),
+        .keys = keysChanged(old, new),
     };
-}
-
-fn hashBarSubsystem(bar: *const types.BarConfig) u64 {
-    var h = Hash.init(0x626172);
-    hashValue(&h, bar.*);
-    return h.final();
-}
-
-fn hashTilingSubsystem(cfg: *const types.Config) u64 {
-    var h = Hash.init(0x74696c);
-    hashValue(&h, cfg.tiling);
-    hashValue(&h, cfg.workspaces);
-    hashValue(&h, cfg.fullscreen_enabled);
-    hashValue(&h, cfg.drag_enabled);
-    hashValue(&h, cfg.snap_distance);
-    return h.final();
-}
-
-fn hashKeysSubsystem(cfg: *const types.Config) u64 {
-    var h = Hash.init(0x6b6579);
-    // Action is deliberately excluded: two keybinds that differ only in their
-    // action (e.g. a changed command string) still share a keysym/modifiers
-    // pair, so the explicit loop keeps the pair layout part of the hash.
-    hashValue(&h, cfg.keybindings.items.len);
-    for (cfg.keybindings.items) |kb| {
-        hashValue(&h, kb.modifiers);
-        hashValue(&h, kb.keysym);
-    }
-    hashValue(&h, cfg.mouse_bindings.items.len);
-    for (cfg.mouse_bindings.items) |mb| {
-        hashValue(&h, mb.modifiers);
-        hashValue(&h, mb.button);
-    }
-    return h.final();
 }

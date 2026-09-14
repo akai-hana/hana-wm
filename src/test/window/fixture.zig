@@ -45,7 +45,7 @@ pub fn setUp(name: []const u8) ?*Fx {
         if (std.c.getenv("HANA_REQUIRE_X") != null) {
             std.debug.panic("HANA_REQUIRE_X is set but no X display is reachable; {s} REQUIRED, not skipped", .{name});
         }
-        std.debug.print("SKIP: no X display; {s} skipped\n", .{name});
+        std.debug.print("WARN: skipping X-gated test '{s}' (no display) -- set HANA_REQUIRE_X to fail instead of skipping\n", .{name});
         return null;
     };
     return fx;

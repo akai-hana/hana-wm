@@ -19,7 +19,11 @@ pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
 const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
 
-const max_attempts: u8 = 3;
+/// The detectable-ARP request itself is sent once after setup; these retries
+/// cover the surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
+/// get_core_keyboard_device_id, keymap creation), whose X server it still being
+/// established.
+const max_xkb_retries: u8 = 3;
 
 /// Detectable auto-repeat (XKBproto.h, XkbSetDetectableAutoRepeat = 34).
 /// Enabling it makes the server emit a held key's repeat as repeated KeyPress
@@ -136,7 +140,7 @@ pub const XkbState = struct {
     keysym_by_keycode: [256]u32,
 
     /// Initialises an XKB context and builds the keysym table from the live
-    /// X connection. Retries up to max_attempts times to handle early-startup
+    /// X connection. Retries up to max_xkb_retries times to handle early-startup
     /// races.
     ///
     /// No xkb_state/keymap handles are retained; nothing ever read them
@@ -232,7 +236,7 @@ const xkb_retry_delay_ms = constants.xkb_retry_delay_ms;
 /// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
 /// shorten the delay.
 fn retryDelay(attempt: u8) void {
-    if (attempt >= max_attempts - 1) return;
+    if (attempt >= max_xkb_retries - 1) return;
     const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
     var req = std.os.linux.timespec{
         .sec = @intCast(ns / std.time.ns_per_s),
@@ -246,19 +250,19 @@ fn retryDelay(attempt: u8) void {
     }
 }
 
-/// Runs `op.call()` up to max_attempts times, sleeping retryDelay between
+/// Runs `op.call()` up to max_xkb_retries times, sleeping retryDelay between
 /// tries, and returns the first non-null result (null = that attempt failed).
 /// `op` is a value-capturing struct with a `call(self) ?T` method so each
 /// retrying wrapper passes the args its attempt needs without a closure.
 fn retryPoll(comptime T: type, op: anytype) ?T {
-    for (0..max_attempts) |i| {
+    for (0..max_xkb_retries) |i| {
         if (op.call()) |result| return result;
         retryDelay(@intCast(i));
     }
     return null;
 }
 
-/// Runs a conn-bound `op` through retryPoll up to max_attempts times and
+/// Runs a conn-bound `op` through retryPoll up to max_xkb_retries times and
 /// converts exhaustion into `err`. `op` is a comptime `fn (*anyopaque) ?T`;
 /// the two retried XKB calls (retrySetup/retryDeviceId) differ only in it.
 fn retryXkb(comptime T: type, comptime err: anyerror, xcb_conn: *anyopaque, comptime op: anytype) !T {
@@ -286,7 +290,7 @@ fn setupXkb(conn: *anyopaque) ?c_int {
     return if (ok != 0) ok else null;
 }
 
-/// Retries xkb_x11_setup_xkb_extension up to max_attempts times; the
+/// Retries xkb_x11_setup_xkb_extension up to max_xkb_retries times; the
 /// extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: *anyopaque) !void {
     _ = try retryXkb(c_int, error.XkbSetupFailed, xcb_conn, setupXkb);
@@ -298,7 +302,7 @@ fn coreKeyboardDeviceId(conn: *anyopaque) ?i32 {
     return if (device_id != -1) device_id else null;
 }
 
-/// Retries xkb_x11_get_core_keyboard_device_id up to max_attempts times;
+/// Retries xkb_x11_get_core_keyboard_device_id up to max_xkb_retries times;
 /// the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
@@ -321,7 +325,7 @@ fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
     return valid_keys >= min_keymap_symbols;
 }
 
-/// Retries keymap creation up to max_attempts times, accepting only a
+/// Retries keymap creation up to max_xkb_retries times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
 fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
     return retryPoll(*xkb_keymap, struct {

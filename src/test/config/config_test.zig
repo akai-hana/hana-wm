@@ -3,8 +3,9 @@
 //! growth path is exercised via /proc (stat.size == 0 but non-empty
 //! content) - linux-only by nature, like the WM itself.
 //!
-//! Scratch files live under /tmp/opencode (pre-approved temp area); each
-//! test uses a unique name and cleans up after itself.
+//! Scratch files live in a per-process, uniquely-named directory under the
+//! system temp area (see scratch.zig); each test uses a unique name and
+//! cleans up after itself.
 
 const std = @import("std");
 const testing = std.testing;

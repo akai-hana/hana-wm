@@ -138,6 +138,15 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
         };
     }
 
+    // C1: the feature blobs are allocator-owned by contract (each module's
+    // serializeWindow allocates them; there is no deinit hook to call). Free
+    // them once the flat snapshot is complete, on EVERY exit path. Registered
+    // after the `defer allocator.free(windows)` above, so defers run LIFO:
+    // blobs go first, then the window array.
+    defer for (windows) |r| {
+        if (r.ext) |blob| allocator.free(blob);
+    };
+
     // Workspaces: every slot, ids copied out of the bounded lists. On a
     // mid-loop dupe failure only the already-filled records are freed.
     var workspaces: [MAX_WS]WsRecord = undefined;

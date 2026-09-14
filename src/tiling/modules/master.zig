@@ -263,8 +263,9 @@ fn tileStackExtra(
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
-        // Cap each column to a min_dim+border window so neighbors never
-        // overlap; surplus spills to the next row, bounded by the max_fit loop.
+        // Cap each column to a min_dim+border window so a column's origin never
+        // leaves the stack pane; surplus (a row narrower than the column count)
+        // has no free row to spill into and is parked instead.
         const cols_by_count: u16 = (stack_n - row + max_fit - 1) / max_fit;
         const cols_by_width: u16 = @max(1, (w +| ctx.m.gap) / (min_col_w +| ctx.m.gap));
         const cols_in_row: u16 = @max(1, @min(cols_by_count, cols_by_width));
@@ -282,6 +283,12 @@ fn tileStackExtra(
         var win_idx: u16 = row;
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
+            // Columns past the width cap would start outside the pane; park
+            // them (no in-pane row remains for a true spill).
+            if (col >= cols_in_row) {
+                tiling.emitHidden(ctx.out, windows[win_idx]);
+                continue;
+            }
             const rect = utils.Rect{
                 .x = tiling.satI16(@intCast(x +| ctx.m.gap / 2 +| col *| (col_w +| ctx.m.gap))),
                 .y = tiling.satI16(@intCast(y_pos)),
@@ -297,7 +304,7 @@ fn tileStackExtra(
 /// Falls back to count * min_dim when margins exceed total_h.
 inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins, min_dim: u16) u16 {
     const overhead = m.gap *| (count + 1) +| m.border *| 2 *| count;
-    return if (total_h > overhead) total_h - overhead else count *| min_dim;
+    return if (total_h > overhead) total_h - overhead else @min(count *| min_dim, total_h);
 }
 
 /// Height of window `i` out of `count`, distributing `available` pixels via

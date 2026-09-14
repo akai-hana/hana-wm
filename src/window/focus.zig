@@ -10,6 +10,8 @@ const utils = @import("utils");
 const window = @import("window");
 const tracking = @import("tracking");
 const debug = @import("debug");
+const pipeline = @import("pipeline");
+const model_mod = @import("model");
 
 // Private transition-layer gate for mutable model access (tracking no longer
 // exports a shared one; each transition owner declares its own token).
@@ -92,6 +94,14 @@ pub inline fn getFocused() ?u32 {
 
 pub inline fn getSuppressReason() core.FocusSuppressReason {
     return state.?.suppress_reason;
+}
+
+/// True when `win` is the last window X input focus was applied to. Lets a
+/// workspace-switch caller tell the already-applied dedup apart from a
+/// genuine `.none` verdict (a no_input target), which prepareFocus returns
+/// identically.
+pub inline fn isLastApplied(win: u32) bool {
+    return state.?.last_applied == win;
 }
 
 /// True when an incoming EnterNotify should be silently ignored.
@@ -692,10 +702,11 @@ pub fn drainTilingOpSettle() void {
 // Window focus cycling
 //
 // Scratch buffer for collectVisibleWindows, module-level so it isn't
-// stack-allocated on every key press. Sized to the max tiled windows across
-// the whole WM (not per workspace).
+// stack-allocated on every key press. Sized to the model store capacity: the
+// cycle pool is not restricted to tiled slots (floating windows are admitted
+// too), so sizing by max_tiled_windows dropped a floating tail above 64.
 
-var cycle_buf: [constants.Limits.max_tiled_windows]u32 = undefined;
+var cycle_buf: [model_mod.store_capacity]u32 = undefined;
 
 /// Append `w` to cycle_buf if there is room and it is on the current workspace
 /// and visible (not minimised).  Shared by both paths in collectVisibleWindows.

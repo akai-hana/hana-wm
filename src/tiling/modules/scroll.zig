@@ -65,7 +65,9 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
         const x: i32 = slot_left + left_inset;
         const avail: i32 = slot_w - left_inset - right_inset - border2;
-        const content_w: u16 = @intCast(@max(avail, @as(i32, v.env.min_dim)));
+        // Clamp the width to the slot so a min_dim floor can't flare a window
+        // over its neighbor; floor at 1 so a degenerate slot stays positive.
+        const content_w: u16 = @intCast(@max(avail, 1));
 
         const right: i32 = x + avail + border2;
 

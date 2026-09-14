@@ -81,7 +81,7 @@ inline fn splitAndAdvance(
     // forward (right/down) places the window at the leading edge; backward
     // (left/up) keeps the origin put and only shrinks the remaining dimension.
     const dim: u16 = if (split_x) cur.w else cur.h;
-    const win_dim = (dim -| gap) / 2;
+    const win_dim = tiling.bisectRegion(dim, gap).first;
     const off: u16 = if (forward) 0 else dim - win_dim;
     const off_x: i32 = if (split_x) @intCast(off) else 0;
     const off_y: i32 = if (split_x) 0 else @intCast(off);

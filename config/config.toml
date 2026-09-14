@@ -1,5 +1,16 @@
 ### hana WM configuration ###
 
+# ---------------------------------------------------------------------------------------- #
+
+# In here lies all of hana's functional behavior.
+# See `binds.toml` for the bind list, and `themes/akai.toml` for visual behavior.
+
+# Files can be structured however the user wants; I decided on this structure in order
+# to make quick theme swapping viable, and functional behavior swappable without affecting
+# the user's personal program binds list.
+
+# ---------------------------------------------------------------------------------------- #
+
 # TOML config files to load.
 # - Files placed in the main config directory are auto-loaded (alphabetically).
 # - Files placed in subdirectories must be added here manually.
@@ -8,9 +19,8 @@
 # See config/README.md for value format details (ScalableValue, glob expansion, etc.)
 include = ["themes/akai.toml"]
 
-# ---------------------------------------------------------------------------
-# Tiling
-# ---------------------------------------------------------------------------
+# TILING #
+
 [tiling]
 enabled = true
 
@@ -160,7 +170,6 @@ kill  = "pkill -9" # Replaced where {kill} appears in action values
 # -- Window management --
 Mod+F       = "toggle_fullscreen"
 Mod+Shift+F = "close_window"
-Mod+Shift+Y = "reload"                 # Hot-reload config
 
 Mod+T           = "minimize_window"
 Mod+Shift+T     = "unminimize_lifo"
@@ -212,6 +221,7 @@ Mod+Shift+B = "toggle_bar_position"    # Top / bottom
 # Unconditionally re-exec hana, replacing the running binary at its resolved
 # executable path (for after a rebuild). reload_config (Mod+Shift+R elsewhere)
 # hot-reloads the config instead.
+Mod+Shift+R = "reload"                 # Hot-reload config
 Mod+Shift+Escape = "reload_hana"
 
 # ---------------------------------------------------------------------------
