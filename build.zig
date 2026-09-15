@@ -81,6 +81,7 @@ pub fn build(b: *std.Build) !void {
     build_opts.addOption(bool, "has_bar", has_bar);
 
     const has_seg_clock = discovery.modules.contains("clock");
+    build_opts.addOption(bool, "has_seg_clock", has_seg_clock);
     const has_seg_carousel = discovery.modules.contains("carousel");
     build_opts.addOption(bool, "has_seg_carousel", has_seg_carousel);
 
@@ -93,6 +94,8 @@ pub fn build(b: *std.Build) !void {
         .{ .option = "has_vim", .stem = "vim" },
         .{ .option = "has_layout_scroll", .stem = "scroll" },
         .{ .option = "has_seg_prompt", .stem = "prompt" },
+        .{ .option = "has_seg_volume", .stem = "volume" },
+        .{ .option = "has_seg_status", .stem = "status" },
     };
     for (optional_features) |feature| {
         build_opts.addOption(bool, feature.option, discovery.modules.contains(feature.stem));

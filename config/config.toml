@@ -109,7 +109,8 @@ position = "bottom" # "top" / "bottom" — can be toggled at runtime
 
 # -- Bar layout --
 # Segments are placed into left/center/right anchor groups.
-# Available segments: "workspaces", "title", "clock", "layout", "variants"
+# Available segments: "workspaces", "title", "clock", "layout", "variants",
+#                     "volume", "status"
 [bar.layout.left]
 segments = ["workspaces", "layout", "variants"]
 
@@ -117,7 +118,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["clock"]
+segments = ["status", "volume", "clock"]
 
 # -- Bar appearance --
 # Defaults below; the theme file typically overrides these.
@@ -141,6 +142,12 @@ segments = ["clock"]
 #
 # clock_format        = auto   # strftime format string; absent = default
 # drun_prompt         = auto   # Command runner prompt; absent = "run: "
+#
+# volume_format       = auto   # Volume widget text; "{pct}" = level 0-100,
+#                              # "{state}" = "mute"/"unmute". Absent = "VOL {pct}%"
+# volume_muted_format = auto   # Shown instead while the sink is muted;
+#                              # "{pct}"/{state}". Absent = "MUTE"
+# status_items        = ["mem", "batt", "cpu"] # System-status items, in render order
 #
 # bg          = "#222222"  # Background color
 # fg          = "#BBBBBB"  # Foreground color

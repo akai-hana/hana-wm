@@ -75,6 +75,14 @@ pub const Surfaces = struct {
     chromeHandleKeypress: *const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool,
     isBarWindow: *const fn (u32) bool,
     handleButtonPress: *const fn (*const xcb.xcb_button_press_event_t) void,
+    /// Press-hold motion over the surface: X's implicit grab keeps delivering
+    /// motion to the surface window while a button is held, so a scrub-drag
+    /// (e.g. the volume segment) can track the pointer even past the bar's
+    /// edge. The surface decides whether a segment drag is live and routes it.
+    handleButtonMotion: *const fn (*const xcb.xcb_motion_notify_event_t) void,
+    /// Releases end a press-hold scrub on the surface; the surface clears its
+    /// drag anchor here.
+    handleButtonRelease: *const fn (*const xcb.xcb_button_release_event_t) void,
     setBarState: *const fn (types.Action) void,
     /// Pre-computes and applies bar visibility for `ws` (X-free, no
     /// reconcile) so the workspace-switch path gets the correct workarea on
@@ -305,6 +313,16 @@ pub const Segment = struct {
         *const fn (*anyopaque, u16) void,
         *const fn () void,
     ) bool = null,
+    /// Scroll-wheel dispatch for recorded bounds (buttons 4/5, positive =
+    /// wheel up; the bar maps button 4 -> +1, button 5 -> -1). Receives the
+    /// scroll direction and the bar's redraw hook.
+    onScroll: ?*const fn (i8, *const fn () void) bool = null,
+    /// Press-hold motion dispatch for recorded bounds: a clickable segment
+    /// that claims this hook is scrubbed while button 1 is held (the bar
+    /// delivers every motion during the press, offset relative to the
+    /// segment's recorded origin; X's implicit grab covers motion past the
+    /// bar's edge). Null for every segment that only needs click semantics.
+    onDragMotion: ?*const fn (u16, *const fn () void) bool = null,
     // Chrome-overlay extras (bound into the chrome `Surfaces` hooks and polled
     // uniformly; the overlay segment is the only one that sets them).
     handleKeypress: ?*const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool = null,

@@ -260,6 +260,12 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 /// Stops any active drag and updates the last event timestamp.
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
+    // Releases on the bar window terminate a segment scrub (the bar clears
+    // its drag anchor). Routed before the managed-window path, as clicks are.
+    if (build_options.has_bar and surfaces.isBarWindow(event.event)) {
+        surfaces.handleButtonRelease(event);
+        return;
+    }
     if (build_options.has_floating and actions.isDragging()) actions.stopDrag();
 }
 
@@ -268,6 +274,14 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
 /// runs to the last event), so this runs at most once per poll wakeup.
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
+
+    // Press-hold motion on the bar window feeds the scrub-drag path: it is
+    // routed before the managed-window drag engine, which targets a client
+    // window grab, never the bar.
+    if (build_options.has_bar and surfaces.isBarWindow(event.event)) {
+        surfaces.handleButtonMotion(event);
+        return;
+    }
 
     if (build_options.has_floating and actions.isDragging()) {
         actions.updateDrag(event.root_x, event.root_y);
