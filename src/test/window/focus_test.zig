@@ -12,7 +12,7 @@ const fixture = @import("fixture");
 const actions = @import("actions");
 
 fn admit(win: u32) !void {
-    actions.mapRequest(win, 0, true); // takes its own mutable model via pipeline.mut
+    actions.mapRequest(win, 0, true, null); // takes its own mutable model via pipeline.mut
 }
 
 test "focus: property-less window is passive; apply lands input focus" {

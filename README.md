@@ -14,9 +14,14 @@
 
 ### Quick anchors
 
-- [Installation](#Installation)
-
-`TODO: documentation section`
+- [About 花](#about-花)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Features](#features)
+- [Installation](#installation)
+- [Dependencies](#dependencies)
+- [Roadmap](#roadmap)
+- [Development](#development)
 
 ---
 
@@ -44,17 +49,20 @@ By default, hana's codebase is categorized into directories and sub-directories,
 
 The main subsystems are `bar`, `config`, `core`, `input`, `tiling` and `window`, with a `test` suite for unit testing.
 
-`core`, `window` and `config` are hana's main subsystems. `bar` contains the code for hana's bar, which is optional to compilation, so it can be removed if the user wants to use another bar, or none at all. `tiling` and `input` hold the tiling engine and key input handling respectively. `TODO: improve support with external bars`
+`core`, `window` and `config` are hana's main subsystems. `bar` contains the code for hana's bar, which is optional to compilation, so it can be removed if the user wants to use another bar, or none at all. `tiling` and `input` hold the tiling engine and key input handling respectively.
 
 By default, hana's codebase is organized so that any optional code which extends a particular sub-system lives beside its peers (e.g. bar modules beside the bar, window modules beside the window layer), modularly coded so that each individual addition has its own file, or set of files if needed (e.g. a title segment with its carousel helper). This is to make a clear hierarchy, as to which files are mandatory and which ones are optional, and what does every module add onto.
 
 `tiling` and `floating` are both included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
 
-`TODO: mention codebase encapsulation`
+The subsystems are layered: components only depend on their own layer and the ones below it (`core` → `window` → `bar`/`tiling`/`input`), which `dev/scripts/check-layers.sh` enforces at build time. Optional modules extend one subsystem and live beside their peers (bar modules under `bar/modules/`, window modules under `window/modules/`, layouts under `tiling/modules/`), each as a self-contained file that can be deleted to drop the feature from the build.
 
 ## Configuration
 
 hana has dedicated, hot-reloadable config files, written in TOML.
+
+> See [`config/README.md`](config/README.md) for the section reference and value
+> format details (percent vs pixel sizes, color spellings, file joining).
 
 Configuration can be self-contained on any arrangement of one or more `config/<any-name>.toml` file(s), but by default, hana provides a configuration split into two categories: **functional** and **visual**.
 
@@ -75,18 +83,23 @@ Since this is all an arbitrary design choice, it is optional and re-categorizabl
 Here's the full set of features/characteristics hana offers by default.
 
 - Various window layouts by default: master-stack, monocle, grid, fibonacci, floating
-- Per-window tiling/floating _(togglable AND configurable)_ `TODO: configurable pending; togglable ready`
+- Per-window tiling/floating _(togglable AND configurable via float window rules)_
 - Fullscreening/Minimizing
 - Workspaces _(window tags, multi-workspace tagging)_
-- Per-program window rules `TODO: not entirely done yet`
-- Per-workspace configurations & window rules `TODO: no workspace-specific window rules yet`
+- Per-program window rules _(class → workspace, and class → float admission)_
+- Per-workspace configurations & window rules _(numbered `[workspace.rules.N]` sub-tables)_
 - Modular bar _(inspired by dwm)_
-- Various bar widgets _(workspace/layout indicators, window status, clock)_ `TODO: Add system status, volume display & manager widgets`
+- Various bar widgets _(workspace/layout indicators, window status, clock, volume manager, system status)_
 - Carousel 
 - Inline bar command prompt, vim-modal motions
 - TOML Config file & file joining _(split config across multiple files)_
-- Advanced binding: Ranged-key & array bindings, multi-action keybindings, keybind nesting
-- WM scaling across any display resolution `TODO: working, but pending to finish/polish`
+- Advanced binding: Ranged-key & array bindings, multi-action keybindings, keybind nesting, bind glob expansion
+- WM scaling across any display resolution
+- Drag-and-drop window placement with snapping
+- Window persistence across restarts, and a clean re-exec (`reload_hana`)
+- EWMH/ICCCM cooperation _(window class, `_NET_WM_PID`, fullscreen hints, …)_
+- Crash diagnostics: alternate-signal-stack backtrace dump on SIGUSR2
+- Monitor refresh-rate detection via RandR (carousel timing)
 
 ---
 
@@ -103,17 +116,49 @@ zig build
 - xcb-util-cursor (for custom cursor support)
 - xkbcommon + xkbcommon-x11 (keyboard input handling)
 - xcb-keysyms (prompt key handling)
-- xcb-randr (monitor detection)
+- xcb-randr (monitor refresh-rate detection)
 - cairo + pango (bar rendering)
 
 ### Ubuntu/Debian-based
 ```sh
-apt install libxcb1-dev libxcb-cursor-dev libxcb-keysyms1-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
+apt install libxcb1-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev
 ```
 
 *more distros later :)*
 
 ---
+
+# Roadmap
+
+Planned, not-yet-shipped items:
+
+- **External bar support** — hana currently ships its own integrated bar;
+  driving an external bar (dwm-style `setstatus`) is not implemented yet.
+- **Ratio `%N` spelling** — the config parser accepts `N%` but not the
+  reversed `%N` form yet.
+- **Finer window rules** — rules today cover class → workspace and class →
+  float; rule-driven properties (border color, gaps, …) are future work.
+- **Scaling polish** — cross-display scaling works, but per-monitor fine-tuning
+  is still being refined.
+
+---
+
+# Development
+
+```sh
+# format check, build with layer checks, then the full test suite
+zig fmt --check .
+zig build check
+dev/scripts/xtest.sh zig build test   # runs under Xvfb; headless `zig build test` skips X-gated tests
+```
+
+- `dev/scripts/check-layers.sh` (invoked by `zig build check`) enforces the
+  subsystem layering described under [Architecture](#architecture).
+- Unit tests live in `src/test/` alongside the code they cover; X-gated window
+  tests print a `SKIP:` banner and self-pass when no display is available
+  (set `HANA_REQUIRE_X=1` to turn a skip into a hard failure).
+- Feature TODO markers inside the codebase are searchable with
+  `rg -n "TODO" src/`.
 
 <div align="center">
 

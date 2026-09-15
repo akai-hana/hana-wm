@@ -51,6 +51,16 @@ fn addRule(
     });
 }
 
+/// "float" class rule: windows whose WM_CLASS matches `class_name` are
+/// admitted floating on the current workspace. `workspace` is left 0 (unused).
+fn addFloatRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8) !void {
+    try cfg.workspaces.rules.append(allocator, .{
+        .class_name = try allocator.dupe(u8, class_name),
+        .workspace = 0,
+        .float = true,
+    });
+}
+
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void {
     const defaults = [_]struct { pos: types.BarSegmentAnchor, seg: []const u8 }{
         .{ .pos = .left, .seg = "workspaces" },
@@ -1280,6 +1290,12 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
         try appendDupedStrings(allocator, arr, &cfg.bar.fonts);
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
+    // status_items: the system-status widget's item whitelist (render order);
+    // unknown items are left to the segment to skip silently.
+    if (section.getAs([]const parser.Value, "status_items")) |arr| {
+        types.freeStrings(&cfg.bar.status_items, allocator, true);
+        try appendDupedStrings(allocator, arr, &cfg.bar.status_items);
+    }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
     // A pair interaction, so it stays bespoke rather than joining the table.
     const raw_focused = section.getAs([]const u8, "indicator_focused");
@@ -1382,10 +1398,18 @@ fn parseNumberedRuleSections(
     }
 }
 
-/// Parses `value` as a workspace int and, if valid, adds a rule mapping
-/// `class_name` to that workspace. Shared by the class-keyed direction of
-/// [workspace.rules] and by [rules], which is always class-keyed.
+/// Parses `value` as a workspace int or the "float" marker and, if valid, adds
+/// a rule mapping `class_name` accordingly. Shared by the class-keyed
+/// direction of [workspace.rules] and by [rules], which are always class-keyed.
 fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8, value: parser.Value) !void {
+    if (value.asScalar([]const u8)) |s| {
+        if (std.mem.eql(u8, s, "float")) {
+            try addFloatRule(allocator, cfg, class_name);
+            return;
+        }
+        debug.warn("Rule for '{s}' has string value '{s}', only integer or \"float\" supported, skipping", .{ class_name, s });
+        return;
+    }
     const ws_num = value.asScalar(i64) orelse {
         debug.warn("Rule for '{s}' has non-integer value, skipping", .{class_name});
         return;
@@ -1552,6 +1576,9 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         !eqlOptionalString(old.indicator_unfocused, new.indicator_unfocused) or
         old.indicator_color != new.indicator_color or
         !eqlOptionalString(old.clock_format, new.clock_format) or
+        !eqlOptionalString(old.volume_format, new.volume_format) or
+        !eqlOptionalString(old.volume_muted_format, new.volume_muted_format) or
+        !eqlStrings(old.status_items.items, new.status_items.items) or
         old.carousel_enabled != new.carousel_enabled or
         old.carousel_speed_px_s != new.carousel_speed_px_s or
         old.drun_bg != new.drun_bg or
