@@ -297,6 +297,13 @@ pub const Document = struct {
     allocator: std.mem.Allocator,
     sections: std.StringHashMap(Section),
     root: Section,
+    /// Document-global color palette: the reserved palette variable names
+    /// (see `palette_var_names`) declared anywhere in the load, parsed as
+    /// literal colors. Any color-valued knob may reference them by bare name
+    /// (`border_focused = primary`) from any section. Populated by
+    /// `collectPalette` once all includes are merged, so "later declaration
+    /// wins" matches every other knob.
+    palette: std.StringHashMap(u32),
     /// Set when any line in this document was warn-and-skipped, or when a
     /// whole file it represents was skipped during the load's merge.
     /// config.zig turns a had_errors merged document into
@@ -310,7 +317,9 @@ pub const Document = struct {
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
         sections.ensureTotalCapacity(8) catch |err| debug.warnOnErr(err, "document section map reserve");
-        return .{ .allocator = allocator, .sections = sections, .root = Section.init(allocator) };
+        var palette = std.StringHashMap(u32).init(allocator);
+        palette.ensureTotalCapacity(palette_var_names.len) catch |err| debug.warnOnErr(err, "document palette reserve");
+        return .{ .allocator = allocator, .sections = sections, .root = Section.init(allocator), .palette = palette };
     }
 
     pub fn getSection(self: *Document, name: []const u8) ?*Section {
@@ -321,6 +330,61 @@ pub const Document = struct {
         return self.root.get(key);
     }
 };
+
+/// The named color-palette slots a theme declares once and any color-valued
+/// knob may reference by bare name (`border_focused = primary`,
+/// `title = secondary`, ...). `primary_color` doubles as the bar's default
+/// accent knob (the former `accent_color`); the other three are pure palette
+/// declarations currently consumed by the fallback chain and the theme's
+/// `[bar.colors]` entries.
+pub const palette_var_names = [_][]const u8{
+    "primary_color",
+    "secondary_color",
+    "alternative_color",
+    "text_color",
+};
+
+/// Resolves a palette-declaration Value to a color: `.color` literals, hex
+/// strings (quoted `"#RRGGBB"`), and in-range integers. Anything else is
+/// ignored so a duplicated/non-color declaration can't poison the palette.
+fn paletteColorOf(val: Value) ?u32 {
+    if (val.asScalar(u32)) |c| return c;
+    if (val.asScalar(i64)) |i| {
+        if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
+    }
+    if (val.asScalar([]const u8)) |s| {
+        return parseColor(s) catch null;
+    }
+    return null;
+}
+
+/// Scans every section (and the root) for palette-variable declarations,
+/// resolving each to its color value and storing the last declaration into
+/// `doc.palette` under BOTH the full knob name ("primary_color") and its
+/// reference alias ("primary", i.e. the name with a trailing "_color"
+/// stripped). Also marks the keys consumed so they never appear as
+/// unrecognized. Call once per merged Document, before knobs are applied.
+pub fn collectPalette(self: *Document) void {
+    for (palette_var_names) |name| {
+        var best: ?u32 = null;
+        var iter = self.sections.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.get(name)) |val| {
+                if (paletteColorOf(val)) |c| best = c;
+            }
+        }
+        if (self.root.get(name)) |val| {
+            if (paletteColorOf(val)) |c| best = c;
+        }
+        if (best) |c| {
+            self.palette.put(name, c) catch {};
+            const suffix = "_color";
+            if (std.mem.endsWith(u8, name, suffix) and name.len > suffix.len) {
+                self.palette.put(name[0 .. name.len - suffix.len], c) catch {};
+            }
+        }
+    }
+}
 
 // Document merging
 

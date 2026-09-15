@@ -131,12 +131,19 @@ pub const knobs = [_]Knob{
     knob(&.{place("bar", "position")}, "bar.bar_position", .{ .enum_read = .{ .T = types.BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }),
     knob(&.{place("bar", "carousel_speed_px_s")}, "bar.carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
 
-    // Base palette: read before every color_from consumer below.
+    // Base palette: read before every color_from consumer below. The three
+    // window-state colors (primary/secondary/alternative) plus text_color are
+    // also the document-global palette variables: color knobs may name them
+    // by bare reference from any section (resolved from parser.Document's
+    // collected palette in getColorFromValue).
     barPlainColor("bg"),
     barPlainColor("fg"),
     barPlainColor("selected_bg"),
     barPlainColor("selected_fg"),
-    barPlainColor("accent_color"),
+    barPlainColor("primary_color"),
+    barPlainColor("secondary_color"),
+    barPlainColor("alternative_color"),
+    barPlainColor("text_color"),
 
     knob(&.{place("bar", "clock_format")}, "bar.clock_format", .str),
     knob(&.{place("bar", "drun_prompt")}, "bar.drun_prompt", .str),
@@ -154,12 +161,12 @@ pub const knobs = [_]Knob{
     // title accents additionally COPY their fallback when [bar.colors] is
     // absent (they were unconditionally assigned); the drun trio stay null
     // so the read-time fallbacks in BarConfig apply.
-    barTitleColor("title", "bar.title_accent_color", "accent_color"),
-    barTitleColor("title_unfocused", "bar.title_unfocused_accent", "bg"),
-    barTitleColor("title_minimized", "bar.title_minimized_accent", "accent_color"),
+    barTitleColor("title", "bar.title_accent_color", "primary_color"),
+    barTitleColor("title_unfocused", "bar.title_unfocused_accent", "secondary_color"),
+    barTitleColor("title_minimized", "bar.title_minimized_accent", "alternative_color"),
     barDrunColor("drun_bg", "bar.drun_bg", "bg"),
     barDrunColor("drun_fg", "bar.drun_fg", "fg"),
-    barDrunColor("drun_prompt_color", "bar.drun_prompt_color", "accent_color"),
+    barDrunColor("drun_prompt_color", "bar.drun_prompt_color", "primary_color"),
 };
 
 /// How an enum-valued knob is parsed.
@@ -193,7 +200,7 @@ pub const Kind = union(enum) {
     /// Color accepting #RRGGBB / 0xRRGGBB / integer.
     color,
     /// Color defaulting to the CURRENT value of a named cfg.bar sibling
-    /// field (e.g. drun_bg->bg, title->accent_color); `copy_when_absent`
+    /// field (e.g. drun_bg->bg, title->primary_color); `copy_when_absent`
     /// also assigns it when the knob's section is absent.
     color_from: []const u8,
     /// Like color_from, but assigned only when the KEY itself exists.
@@ -300,17 +307,27 @@ pub fn getInRange(
     return val;
 }
 
-/// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`, `0xRRGGBB`, or an integer.
-fn getColorFromValue(key: []const u8, val: parser.Value, default: u32) u32 {
+/// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
+/// `0xRRGGBB`, an integer, or a bare reference to a collected palette
+/// variable (e.g. `border_focused = primary`).
+fn getColorFromValue(
+    key: []const u8,
+    val: parser.Value,
+    default: u32,
+    palette: *const std.StringHashMap(u32),
+) u32 {
     if (val.asScalar(u32)) |c| return c;
-    if (val.asScalar([]const u8)) |s| return parser.parseColor(s) catch {
-        debug.warn("Invalid color for {s}: '{s}'", .{ key, s });
-        return default;
-    };
+    if (val.asScalar([]const u8)) |s| {
+        if (parser.parseColor(s)) |c| return c else |_| {
+            if (palette.get(s)) |c| return c;
+            debug.warn("Invalid color for {s}: '{s}' (not a hex code or palette reference)", .{ key, s });
+            return default;
+        }
+    }
     if (val.asScalar(i64)) |i| if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
     // C4: unresolvable value (boolean, size, bare float, out-of-range int, ...)
     // would otherwise silently use the default without a trace.
-    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', or an integer), using default", .{key});
+    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', an integer, or a palette reference), using default", .{key});
     return default;
 }
 
@@ -399,6 +416,10 @@ pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const 
 /// parseBar's scalar reads, parseBarColors). OOM from string dupes
 /// propagates; everything else warns-and-reverts in place.
 pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types.Config) !void {
+    // Resolve the document-global palette (four reserved variable names)
+    // before the knobs read: color knobs may reference them by bare name.
+    parser.collectPalette(doc);
+    const palette: *const std.StringHashMap(u32) = &doc.palette;
     inline for (knobs) |k| knob: {
         if (comptime k.requires.len > 0) {
             if (doc.getSection(k.requires) == null) break :knob;
@@ -432,13 +453,13 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             },
             .color => if (hit) |h| {
                 if (h.sec.get(h.key)) |val|
-                    p.* = getColorFromValue(h.key, val, p.*);
+                    p.* = getColorFromValue(h.key, val, p.*, palette);
             },
             .color_from => |sibling| {
                 const fallback = @field(cfg.bar, sibling);
                 if (hit) |h| {
                     p.* = if (h.sec.get(h.key)) |val|
-                        getColorFromValue(h.key, val, fallback)
+                        getColorFromValue(h.key, val, fallback, palette)
                     else
                         fallback;
                 } else if (comptime k.copy_when_absent) {
@@ -447,7 +468,7 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             },
             .color_opt => |sibling| if (hit) |h| {
                 if (h.sec.get(h.key)) |val|
-                    p.* = getColorFromValue(h.key, val, @field(cfg.bar, sibling));
+                    p.* = getColorFromValue(h.key, val, @field(cfg.bar, sibling), palette);
             },
             .ratio => if (hit) |h| {
                 p.* = getRatio(h.sec, h.key, p.*);
