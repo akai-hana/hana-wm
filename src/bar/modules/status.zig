@@ -2,7 +2,8 @@
 //! Shows configured readouts from /proc and /sys, refreshed on a 2 s poll:
 //!   - "mem":   used memory % (MemTotal vs MemAvailable from /proc/meminfo)
 //!   - "cpu":   aggregate core utilization % (delta of the first /proc/stat
-//!              line; the first read only establishes the baseline)
+//!              line; the very first read reports the boot-cumulative average
+//!              while also establishing the delta baseline)
 //!   - "batt":  charge % of the first /sys/class/power_supply/BAT* found,
 //!              shown only while at least one battery is present
 //! Item order follows `[bar] status_items`; when the array is empty the
@@ -31,8 +32,8 @@ var g_slot_width: u16 = 0;
 var g_last: [128]u8 = undefined;
 var g_len: usize = 0;
 
-// CPU delta state: the first read only records the baseline, so the segment
-// starts without a CPU readout and gains one on the first poll.
+// CPU delta state: the first read both records the baseline and reports the
+// boot-cumulative utilization, so the segment never draws without a CPU value.
 var cpu_prev_idle: u64 = 0;
 var cpu_prev_total: u64 = 0;
 var cpu_has_baseline: bool = false;
@@ -68,8 +69,9 @@ fn memPercent() ?u8 {
     return @intCast(@min((used * 100) / total, 100));
 }
 
-/// Aggregate CPU % from the last two /proc/stat samples. Null until a
-/// baseline exists.
+/// Aggregate CPU % from the last two /proc/stat samples. On the baseline or
+/// reset read there is no delta, so the boot-cumulative utilization (busy
+/// since boot over total) is reported instead -- never null.
 fn cpuPercent() ?u8 {
     const io = std.Options.debug_io;
     var f = std.Io.Dir.openFileAbsolute(io, "/proc/stat", .{}) catch return null;
@@ -96,7 +98,9 @@ fn cpuPercent() ?u8 {
         cpu_prev_total = total;
         cpu_prev_idle = idle;
         cpu_has_baseline = true;
-        return null;
+        if (total == 0) return 0;
+        const busy = (total -| idle) * 100 / total;
+        return @intCast(@min(busy, 100));
     }
     const d_total = total - cpu_prev_total;
     const d_idle = idle -| cpu_prev_idle;
