@@ -140,6 +140,8 @@ pub const knobs = [_]Knob{
 
     knob(&.{place("bar", "clock_format")}, "bar.clock_format", .str),
     knob(&.{place("bar", "drun_prompt")}, "bar.drun_prompt", .str),
+    knob(&.{place("bar", "volume_format")}, "bar.volume_format", .str),
+    knob(&.{place("bar", "volume_muted_format")}, "bar.volume_muted_format", .str),
     knob(&.{place("bar", "indicator_location")}, "bar.indicator_location", .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
     knob(&.{place("bar", "indicator_padding")}, "bar.indicator_padding", .ratio),
     knob(&.{place("bar", "transparency")}, "bar.transparency", .ratio),

@@ -62,6 +62,10 @@ indicator_size = 4
 
 icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
+# volume_format        = "VOL {pct}%"  # "{pct}" = level, "{state}" = mute/unmute
+# volume_muted_format  = "MUTE"        # shown instead while the sink is muted
+# status_items         = ["mem", "batt", "cpu"]  # system-status readouts
+
 [bar.layout.left]
 segments = ["workspaces", "layout"]
 

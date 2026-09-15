@@ -438,6 +438,12 @@ const State = struct {
     dirty: Dirty = .{},
     clock: Clock = .{},
     clicks: Clicks = .{},
+    /// Segment id whose recorded bound owns an in-flight button-1 scrub
+    /// (drag motion on a clickable segment). Set on a left press and cleared
+    /// on release; while set, every surface motion routes to that segment's
+    /// `onDragMotion` hook (X's implicit grab keeps motion flowing even past
+    /// the bar's edge).
+    drag_segment: ?usize = null,
     frame: FrameState = .{},
     title_data: TitleScratch = .{},
     facts: Facts = .{},
@@ -1563,22 +1569,68 @@ pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t) void {}
 /// Left/right-clicking the layout indicator cycles the tiling layout
 /// forward/backward; left/right-clicking the layout variants indicator
 /// cycles the current layout's variant forward/backward the same way.
+/// Scroll-wheel over a segment (buttons 4/5) routes to its `onScroll` hook
+/// (the volume segment's ±step); a left press on a clickable segment arms
+/// its `onDragMotion` hook for the duration of the press-hold.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
     if (event.event_x < 0) return;
     const x: u16 = @intCast(event.event_x);
 
-    const left = event.detail == constants.mouse_button_left;
-    const right = event.detail == constants.mouse_button_right;
-    if (!left and !right) return;
-
     const h = for (s.clicks.bounds[0..s.clicks.len]) |b| {
         if (b.contains(x)) break b;
     } else return;
     const id = segId(h.name) orelse return;
-    if (bar_mods[id].onClick == null) return;
-    _ = bar_mods[id].onClick.?(x - h.x, left, right, s, titleClickTrampoline, redrawInsideGrab);
+
+    const detail = event.detail;
+    if (detail == constants.mouse_button_left) {
+        s.drag_segment = id;
+        if (bar_mods[id].onClick != null)
+            _ = bar_mods[id].onClick.?(x - h.x, true, false, s, titleClickTrampoline, redrawInsideGrab);
+        return;
+    }
+    if (detail == constants.mouse_button_right) {
+        if (bar_mods[id].onClick != null)
+            _ = bar_mods[id].onClick.?(x - h.x, false, true, s, titleClickTrampoline, redrawInsideGrab);
+        return;
+    }
+    // Scroll buttons 4/5: no click semantics, no drag anchor.
+    s.drag_segment = null;
+    if (detail == constants.mouse_button_scroll_up or
+        detail == constants.mouse_button_scroll_down)
+    {
+        if (bar_mods[id].onScroll) |scroll| {
+            const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
+            _ = scroll(dir, redrawInsideGrab);
+            return;
+        }
+    }
+}
+
+/// Routes press-hold motion over the bar to the segment that owns the
+/// in-flight button-1 scrub (`drag_segment`), if it declares `onDragMotion`.
+/// X's implicit grab delivers motion to the grabbing (bar) window even when
+/// the pointer leaves the bar, so the offset can span outside the segment;
+/// segments clamp their own state. No drag owner -> no-op.
+pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
+    const s = gBar.state orelse return;
+    const id = s.drag_segment orelse return;
+    if (s.vis.shown == false) return;
+    if (bar_mods[id].onDragMotion) |drag| {
+        const tb = s.recordedBound(bar_mods[id].name) orelse return;
+        const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
+        const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
+        _ = drag(offset, redrawInsideGrab);
+    }
+}
+
+/// Ends a press-hold scrub: clears the drag anchor. The segment's action was
+/// already applied on the press and on every motion; the release commits
+/// only the anchoring bookkeeping.
+pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
+    const s = gBar.state orelse return;
+    s.drag_segment = null;
 }
 
 /// `offset` is the click position relative to the title segment's start.
@@ -1640,6 +1692,8 @@ pub const surfaces = @import("plugin").Surfaces{
     .chromeHandleKeypress = chromeHandleKeypress,
     .isBarWindow = isBarWindow,
     .handleButtonPress = handleButtonPress,
+    .handleButtonMotion = handleButtonMotion,
+    .handleButtonRelease = handleButtonRelease,
     .setBarState = setBarState,
     .hideBarForFullscreen = hideBarForFullscreen,
     .updateBarVisibilityForWorkspace = updateBarVisibilityForWorkspace,

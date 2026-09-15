@@ -362,3 +362,44 @@ test "validate accepts pixel master_width above the ratio ceiling" {
     try config.validate(&px);
     try testing.expectEqual(parser.ScalableValue.absolute(600.0), px.tiling.master_width);
 }
+
+test "workspace and float rules parse from TOML" {
+    var cfg = try loadToml(testing.allocator, "rules-float",
+        \\[workspace.rules]
+        \\terminal  = 3
+        \\firefox   = "float"
+        \\member    = 7
+        \\utils     = "float"
+        \\
+        \\[rules]
+        \\browser = 2
+        \\magnet   = "float"
+        \\
+        \\[workspace.rules.1]
+        \\one-app = 1
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+
+    var float_count: usize = 0;
+    var ws_sum: usize = 0;
+    var seen_float: usize = 0;
+    var n: usize = 0;
+    for (cfg.workspaces.rules.items) |rule| {
+        if (rule.float) {
+            float_count += 1;
+            if (std.mem.eql(u8, rule.class_name, "firefox") or
+                std.mem.eql(u8, rule.class_name, "utils") or
+                std.mem.eql(u8, rule.class_name, "magnet")) seen_float += 1;
+        } else {
+            ws_sum += rule.workspace;
+            n += 1;
+        }
+    }
+    // 3 float rules (firefox, utils, magnet); workspace rules: terminal->2,
+    // member->6, browser->1, one-app->0 (1-based input, 0-based storage).
+    try testing.expectEqual(@as(usize, 3), float_count);
+    try testing.expectEqual(@as(usize, 3), seen_float);
+    try testing.expectEqual(@as(usize, 4), n);
+    try testing.expectEqual(@as(u32, 2 + 6 + 1 + 0), @as(u32, @intCast(ws_sum)));
+}
