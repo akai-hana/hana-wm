@@ -1307,6 +1307,36 @@ pub fn redrawInsideGrab() void {
     s.dirty.flag = false;
 }
 
+/// Phase-1 repaint of ONLY the segment being scrubbed, at its last recorded
+/// bound. A press-hold drag mutates a single segment's pixels every motion; a
+/// full performDraw would also relayout + repaint every segment (and, for a
+/// subprocess-bound segment like volume, stall the whole bar). Mirrors
+/// redrawInsideGrab's contract: render to the off-screen pixmap and queueBlit
+/// (no flush); the event-loop's end-of-batch xcb_flush ships it to the server
+/// in one composite frame. The top-left clear + blit cover the reserved slot
+/// even when the draw ran narrow.
+fn redrawDraggedSegment() void {
+    const s = gBar.state orelse return;
+    if (!s.vis.shown) return;
+    const id = s.drag_segment orelse return;
+    if (bar_mods[id].draw == null) return;
+    if (gBar.force) {
+        s.markDirty();
+        return;
+    }
+    const tb = s.recordedBound(bar_mods[id].name) orelse return;
+    s.clearRegion(tb.x, tb.w);
+    var ctx = frameCtx(s);
+    // Pin the reserved width into the shared ctx exactly like a layout pass
+    // draw (`drawSegment` with the measured width), so dragging a segment
+    // whose reserved and painted widths differ still repaints the slot.
+    const drawn_end = s.drawSegmentSafe(&ctx, bar_mods[id].name, tb.x, tb.w);
+    if (drawn_end == tb.x) return;
+    const drawn_w: u16 = drawn_end -| tb.x;
+    s.render.dc.queueBlit(tb.x, @max(tb.w, drawn_w));
+    s.clearSegmentDirty(bar_mods[id].name);
+}
+
 pub fn raiseBar() void {
     if (gBar.state) |s|
         _ = xcb.xcb_configure_window(
@@ -1621,16 +1651,23 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
         const tb = s.recordedBound(bar_mods[id].name) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
         const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
-        _ = drag(offset, redrawInsideGrab);
+        // Scoped repaint, not redrawInsideGrab: a scrub only mutates the
+        // dragged segment's slot, and a full-bar redraw per motion is the
+        // frame-rate killer for subprocess-bound segments.
+        _ = drag(offset, redrawDraggedSegment);
     }
 }
 
-/// Ends a press-hold scrub: clears the drag anchor. The segment's action was
-/// already applied on the press and on every motion; the release commits
-/// only the anchoring bookkeeping.
+/// Ends a press-hold scrub: clears the drag anchor and lets the segment
+/// settle the drag (flush a throttled commit, leave its drag render mode).
 pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
     const s = gBar.state orelse return;
+    const id = s.drag_segment orelse {
+        s.drag_segment = null;
+        return;
+    };
     s.drag_segment = null;
+    if (bar_mods[id].onDragEnd) |end| end(redrawInsideGrab);
 }
 
 /// `offset` is the click position relative to the title segment's start.

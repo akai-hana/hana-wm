@@ -3,7 +3,9 @@
 //!   - wheel up/down (buttons 4/5): +/- 2 %
 //!   - left press / press-hold drag: set the level from the horizontal
 //!     position (the whole reserved slot is the slider; x/width maps linearly
-//!     to 0-100 %)
+//!     to 0-100 %). While the press is held the segment renders as an
+//!     accent-filled loading bar; backend commits are throttled to keep the
+//!     drag frame rate up and the style reverts to the label on release.
 //!   - right press: toggle mute
 //! Reads happen once per 5 s poll cadence (plus an immediate first read at
 //! first draw and a re-read after every apply). The backend is auto-detected
@@ -25,6 +27,11 @@ const c = @cImport({
 
 const read_interval_ms: i64 = 5000;
 const probe_natural_width: u16 = 56;
+/// Drag-throttle: subprocess commits apply at most this often while the
+/// pointer moves (a sink set is one spawn; a full setPct adds two more for the
+/// re-read, so committing every motion would push the WM's event loop into
+/// spawn latency and visibly stall the bar/carousel frame rate).
+const commit_throttle_ms: i64 = 80;
 
 const default_format = "VOL {pct}%";
 const default_muted_format = "MUTE";
@@ -38,6 +45,14 @@ var g_has_value: bool = false;
 var g_armed: bool = false;
 var g_next_read_ms: i64 = 0;
 var g_pending_redraw: bool = false;
+/// True while a press-hold scrub is active: the draw switches to the
+/// drag-mode loading bar (reserved-slot width) instead of the text, and the
+/// reserved text width is left untouched so the slot never reflows mid-drag.
+var g_dragging: bool = false;
+var g_last_commit_ms: i64 = 0;
+/// Set when a committed drag value is still owed to the backend (a motion
+/// arrived inside the throttle window); flushed on drag end.
+var g_commit_pending: bool = false;
 /// Reserved slot width from the last draw; the bar records the same width as
 /// the click bound, so it doubles as the slider denominator.
 var g_slot_width: u16 = 0;
@@ -128,22 +143,32 @@ fn readVolume() bool {
     return !had_value or g_pct != old_pct or g_muted != old_muted;
 }
 
-/// Applies a state change, then re-reads so the display follows the sink
-/// immediately rather than on the next 5 s tick.
-fn setPct(v: u8) void {
+/// Applies a level to the backend WITHOUT the follow-up re-read: the
+/// drag-throttle path. The clamp is the single guard for every caller's value
+/// (slider, scroll, config): 0-100 % is all the backend ever receives.
+fn commitPct(v: u8) void {
+    const pct = @min(v, 100);
     switch (g_backend) {
         .pulse => {
             var buf: [64]u8 = undefined;
-            const cmd = std.fmt.bufPrint(&buf, "pactl set-sink-volume @DEFAULT_SINK@ {d}%", .{v}) catch return;
+            const cmd = std.fmt.bufPrint(&buf, "pactl set-sink-volume @DEFAULT_SINK@ {d}%", .{pct}) catch return;
             runReap(cmd);
         },
         .alsa => {
             var buf: [64]u8 = undefined;
-            const cmd = std.fmt.bufPrint(&buf, "amixer set Master {d}%", .{v}) catch return;
+            const cmd = std.fmt.bufPrint(&buf, "amixer set Master {d}%", .{pct}) catch return;
             runReap(cmd);
         },
         .unknown => return,
     }
+    g_last_commit_ms = nowMs();
+    g_commit_pending = false;
+}
+
+/// Applies a state change, then re-reads so the display follows the sink
+/// immediately rather than on the next 5 s tick.
+fn setPct(v: u8) void {
+    commitPct(v);
     _ = readVolume();
 }
 
@@ -232,6 +257,33 @@ fn naturalWidthHook(_: *const anyopaque, _: u16) u16 {
     return if (g_slot_width != 0) g_slot_width else probe_natural_width;
 }
 
+/// Drag-mode loading bar: paints the whole reserved slot with a background
+/// strip plus a fill (the title segment's minimized accent, the WM's "muted
+/// recently" tone) proportional to the level, and overlays the live
+/// percentage centered in the slot. Returns the slot's far edge WITHOUT
+/// feeding `g_slot_width`: the text width must survive the scrub so the
+/// drag-end redraw re-renders the label in place.
+fn drawDragBar(dc: *segmod.DrawCtx, x: u16) u16 {
+    // `dc.width` is the reserved slot the bar measured (also the click bound,
+    // set before every draw in bar.zig:drawSegment), so the region is stable.
+    const slot = if (dc.width != 0) dc.width else g_slot_width;
+    const height = dc.height;
+    dc.dc.fillRect(x, 0, slot, height, dc.config.bg);
+    const pad = @max(@as(u16, 1), dc.config.scaledSegmentPadding(height) / 2);
+    const inner_w = slot -| pad * 2;
+    const inner_h = height -| pad * 2;
+    const fill_w: u16 = @intCast(@as(u32, inner_w) * g_pct / 100);
+    if (fill_w != 0 and inner_h != 0)
+        dc.dc.fillRect(x + pad, pad, fill_w, inner_h, dc.config.title_minimized_accent);
+
+    var b: [8]u8 = undefined;
+    if (std.fmt.bufPrint(&b, "{d}", .{g_pct})) |pct| {
+        const tw = dc.dc.measureTextWidth(pct);
+        dc.dc.drawText(x +| slot / 2 -| tw / 2, dc.dc.baselineY(height), pct, dc.config.fg) catch {};
+    } else |_| {}
+    return x + slot;
+}
+
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     const dc = segmod.castDraw(ctx);
     // First draw is the arming read: fill the segment before its 5 s cadence.
@@ -240,6 +292,10 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
         g_armed = true;
         g_next_read_ms = nowMs() + read_interval_ms;
     }
+
+    // While scrubbed the segment is a loading bar; the label resumes on the
+    // drag-end redraw.
+    if (g_dragging) return drawDragBar(dc, x);
 
     const display = renderDisplay(dc.config, g_muted);
     const end_x = try drawing.drawPaddedSegment(dc.dc, dc.config, dc.height, x, display);
@@ -268,7 +324,12 @@ fn onClickHook(
 ) bool {
     if (!g_has_value) return false;
     if (left) {
+        // Enter drag mode immediately: the press shows the loading bar, and
+        // the throttle's commit clock starts after this press's set so the
+        // first motion doesn't double-send.
+        g_dragging = true;
         setPct(pctFromOffset(offset));
+        g_last_commit_ms = nowMs();
     } else if (right) {
         toggleMute();
     } else {
@@ -289,12 +350,38 @@ fn onScrollHook(dir: i8, redraw: *const fn () void) bool {
     return true;
 }
 
+/// Press-hold scrub: updates the display immediately and commits to the
+/// backend at most every `commit_throttle_ms` (a commit is a subprocess
+/// spawn; the pre-fix design ran one set + two re-read spawns per motion,
+/// which throttled the whole WM under a fast drag). A value owed inside the
+/// throttle window is flushed by `onDragEndHook` on release.
+///
+/// Deliberately does NOT raise `g_pending_redraw`: bar.zig's post-batch
+/// `updateIfDirty` folds that flag into a FULL-bar redraw, defeating the
+/// scoped `redraw` callback every motion. The bar passes the segment-scoped
+/// repaint here, so the display is updated without re-laying the whole bar.
 fn onDragMotionHook(offset: u16, redraw: *const fn () void) bool {
     if (!g_has_value) return false;
-    setPct(pctFromOffset(offset));
-    g_pending_redraw = true;
+    g_pct = pctFromOffset(offset);
+    if (nowMs() -| g_last_commit_ms >= commit_throttle_ms) {
+        commitPct(g_pct);
+    } else {
+        g_commit_pending = true;
+    }
     redraw();
     return true;
+}
+
+/// Scrub end (button-1 release): flush any throttled commit, re-read the sink
+/// so the label shows its truth, and repaint back to text mode.
+fn onDragEndHook(redraw: *const fn () void) void {
+    if (g_commit_pending) commitPct(g_pct);
+    if (g_dragging) {
+        g_dragging = false;
+        _ = readVolume();
+        g_pending_redraw = true;
+        redraw();
+    }
 }
 
 pub const module: @import("plugin").Segment = .{
@@ -309,6 +396,7 @@ pub const module: @import("plugin").Segment = .{
     .onClick = onClickHook,
     .onScroll = onScrollHook,
     .onDragMotion = onDragMotionHook,
+    .onDragEnd = onDragEndHook,
 };
 
 // Tests exercise the pure, subprocess-free geometry and formatting helpers.

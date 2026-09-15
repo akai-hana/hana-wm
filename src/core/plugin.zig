@@ -323,6 +323,12 @@ pub const Segment = struct {
     /// segment's recorded origin; X's implicit grab covers motion past the
     /// bar's edge). Null for every segment that only needs click semantics.
     onDragMotion: ?*const fn (u16, *const fn () void) bool = null,
+    /// Fired when a press-hold scrub ends (button-1 release): lets a module
+    /// that defers work during the scrub (the volume segment throttles its
+    /// subprocess commits to every few motions) flush its final value and
+    /// leave its drag render mode. Receives the bar's full redraw hook. Null
+    /// for every segment that needs only click semantics.
+    onDragEnd: ?*const fn (*const fn () void) void = null,
     // Chrome-overlay extras (bound into the chrome `Surfaces` hooks and polled
     // uniformly; the overlay segment is the only one that sets them).
     handleKeypress: ?*const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool = null,

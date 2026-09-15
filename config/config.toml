@@ -118,7 +118,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["status", "volume", "clock"]
+segments = ["volume", "status", "clock"]
 
 # -- Bar appearance --
 # Defaults below; the theme file typically overrides these.
