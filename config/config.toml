@@ -118,7 +118,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["volume", "status", "clock"]
+segments = ["status", "volume", "clock"]
 
 # -- Bar appearance --
 # Defaults below; the theme file typically overrides these.
@@ -153,18 +153,25 @@ segments = ["volume", "status", "clock"]
 # fg          = "#BBBBBB"  # Foreground color
 # selected_bg = "#005577"  # Active workspace indicator background
 # selected_fg = "#EEEEEE"  # Active workspace indicator foreground
-# accent_color = auto      # Default accent; falls back to selected_bg
+#
+# The palette variables below are the theme's source of truth: color knobs
+# reference them by bare name (e.g. `selected_bg = primary`) from any
+# section, so changing one variable recolors the whole bar.
+# primary_color     = "#ac3232"  # Focused title / active border / selected_bg default
+# secondary_color   = "#52263e"  # Unfocused titles
+# alternative_color = "#007373"  # Minimized titles
+# text_color        = "#ebd9bc"  # Bar text (matches fg)
 #
 # fonts  = ["monospace"]   # Font list; first is primary, others fill missing glyphs
 # icons  = ["1".."9"]      # Workspace labels; array or single string (split into chars)
 #
 # [bar.colors]
-# title           = auto  # Title segment accent (fallback: accent_color)
-# title_unfocused = auto  # Unfocused title accent (fallback: bar bg)
-# title_minimized = auto  # Minimized title accent (fallback: accent_color)
+# title           = auto  # Title segment accent (fallback: primary_color)
+# title_unfocused = auto  # Unfocused title accent (fallback: secondary_color)
+# title_minimized = auto  # Minimized title accent (fallback: alternative_color)
 # drun_bg           = auto  # Command runner background (fallback: bar bg)
 # drun_fg           = auto  # Command runner text (fallback: bar fg)
-# drun_prompt_color = auto  # Command runner prompt (fallback: accent_color)
+# drun_prompt_color = auto  # Command runner prompt (fallback: primary_color)
 
 # ---------------------------------------------------------------------------
 # Keybindings

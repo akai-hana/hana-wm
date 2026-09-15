@@ -1563,7 +1563,10 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         old.fg != new.fg or
         old.selected_bg != new.selected_bg or
         old.selected_fg != new.selected_fg or
-        old.accent_color != new.accent_color or
+        old.primary_color != new.primary_color or
+        old.secondary_color != new.secondary_color or
+        old.alternative_color != new.alternative_color or
+        old.text_color != new.text_color or
         old.title_accent_color != new.title_accent_color or
         old.title_unfocused_accent != new.title_unfocused_accent or
         old.title_minimized_accent != new.title_minimized_accent or

@@ -10,8 +10,9 @@ gap_width        = 2%
 border_width     = 1% #TODO: 100% doesn't cover 100% of the display.
 #TODO: make config parser accept both N% and %N values (currently %N doesn't work).
 
-border_focused   = "#ac3232"
-border_unfocused = "#52263e"
+# Borders follow the focus palette variables (from [bar] below)
+border_focused   = primary
+border_unfocused = secondary
 
 [bar]
 # Font
@@ -61,25 +62,29 @@ drun_prompt = "$ "
 carousel_enabled = true
 
 # Main color palette
+## Core palette: the editable colors. Every accent below inherits from
+## these four; change one here and the whole bar follows.
+primary_color     = "#ac3232" # focused title / selected workspace / active border
+secondary_color   = "#52263e" # unfocused title / inactive border
+alternative_color = "#007373" # minimized title
+text_color        = "#ebd9bc" # bar text (matches fg)
+
 ## Bar
+## Colors that don't fit the palette stay hardcoded
 bg = "#0d0d14"
 fg = "#ebd9bc"
 
 ## Workspace tag indicators
-selected_bg = "#ac3232"
+selected_bg = primary  # follows primary_color
 selected_fg = "#eeeeee"
 
-# Accent colors for bar segments
-# Default accent for all segments
-accent_color = "#ac3232"
-
-# Per-segment accent colors (overrides default accent_color)
+# Per-segment accent colors inherit from the palette by reference
 [bar.colors]
-title           = "#ac3232"  # Custom accent for title segment
-title_unfocused = "#52263e"
-title_minimized = "#007373"
+title           = primary     # focused title = primary_color
+title_unfocused = secondary   # unfocused title = secondary_color
+title_minimized = alternative # minimized title = alternative_color
 
 # drun command runner colors (all optional; omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)
  # drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)
- # drun_prompt_color = "#ac3232"  # prompt text + cursor (default: title accent)
+ # drun_prompt_color = primary    # prompt text + cursor (default: primary_color)

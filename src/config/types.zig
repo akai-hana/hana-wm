@@ -462,7 +462,14 @@ pub const BarConfig = struct {
     selected_bg: Color = default_bar_selected_bg,
     selected_fg: Color = default_bar_selected_fg,
 
-    accent_color: Color = default_accent,
+    // Palette canon (the former `accent_color` renamed primary). Declared in
+    // the theme's palette section; the other three exist so the palette is
+    // first-class config even though rendering consumes them through the
+    // title/drun chains below.
+    primary_color: Color = default_accent,
+    secondary_color: Color = default_accent,
+    alternative_color: Color = default_accent,
+    text_color: Color = default_accent,
     title_accent_color: Color = default_accent,
     title_unfocused_accent: Color = default_bar_bg,
     title_minimized_accent: Color = default_accent,
@@ -501,7 +508,7 @@ pub const BarConfig = struct {
     // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
     drun_bg: ?Color = null, // Background; falls back to bg
     drun_fg: ?Color = null, // Typed text color; falls back to fg
-    drun_prompt_color: ?Color = null, // Prompt text color; falls back to accent_color
+    drun_prompt_color: ?Color = null, // Prompt text color; falls back to primary_color
     drun_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
 
     layout: std.ArrayList(BarLayout) = .empty,
@@ -526,7 +533,7 @@ pub const BarConfig = struct {
         return self.drun_fg orelse self.fg;
     }
     pub inline fn drunPromptColor(self: *const BarConfig) Color {
-        return self.drun_prompt_color orelse self.accent_color;
+        return self.drun_prompt_color orelse self.primary_color;
     }
 
     /// Derives horizontal segment padding from font_size.

@@ -62,7 +62,7 @@ test "types.Config{} carries sensible field initializers" {
     try testing.expect(proto.fullscreen_enabled);
     try testing.expectEqual(@as(u8, 9), proto.workspaces.count);
     try testing.expectEqual(@as(u32, 0x222222), proto.bar.bg);
-    try testing.expectEqual(@as(u32, 0x61AFEF), proto.bar.accent_color);
+    try testing.expectEqual(@as(u32, 0x61AFEF), proto.bar.primary_color);
     try testing.expectEqual(types.MasterSide.left, proto.tiling.master_side);
     try testing.expectEqual(types.BarScreenPosition.top, proto.bar.bar_position);
     try testing.expectEqual(parser.ScalableValue.percentage(50.0), proto.tiling.master_width);
@@ -203,21 +203,24 @@ test "segment_spacing feeds BarConfig.spacing; workspaces count pads icons" {
 
 test "fallback chains: title/drun colors follow their siblings" {
     // Regime 1: no [bar.colors] at all. The accent trio was UNCONDITIONALLY
-    // assigned its fallback sibling; the drun trio were left untouched
-    // (null), deferring to BarConfig's read-time fallbacks.
+    // assigned its fallback sibling (now the palette canon: primary /
+    // secondary / alternative); the drun trio were left untouched (null),
+    // deferring to BarConfig's read-time fallbacks.
     var no_colors = try loadToml(testing.allocator, "chains-nocolors",
         \\[bar]
-        \\accent_color = "#010203"
-        \\bg = "#040506"
-        \\fg = "#070809"
+        \\primary_color     = "#010203"
+        \\secondary_color   = "#040506"
+        \\alternative_color = "#050607"
+        \\bg = "#0a0b0c"
         \\
     );
     defer no_colors.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x040506), no_colors.bar.title_unfocused_accent);
-    try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.title_minimized_accent);
+    try testing.expectEqual(@as(u32, 0x050607), no_colors.bar.title_minimized_accent);
     try testing.expectEqual(@as(?u32, null), no_colors.bar.drun_bg);
     try testing.expectEqual(@as(?u32, null), no_colors.bar.drun_prompt_color);
+    try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.drunPromptColor());
 
     // Regime 2: [bar.colors] present with only `title`. The accent trio now
     // reads per-key (absent keys copy their sibling); the drun trio are also
@@ -225,8 +228,10 @@ test "fallback chains: title/drun colors follow their siblings" {
     // like the old `if (colors)` block.
     var with_title = try loadToml(testing.allocator, "chains-title",
         \\[bar]
-        \\accent_color = "#010203"
-        \\bg = "#040506"
+        \\primary_color     = "#010203"
+        \\secondary_color   = "#040506"
+        \\alternative_color = "#050607"
+        \\bg = "#0a0b0c"
         \\fg = "#070809"
         \\
         \\[bar.colors]
@@ -236,12 +241,54 @@ test "fallback chains: title/drun colors follow their siblings" {
     defer with_title.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x040506), with_title.bar.title_unfocused_accent);
-    try testing.expectEqual(@as(u32, 0x010203), with_title.bar.title_minimized_accent);
-    try testing.expectEqual(@as(?u32, 0x040506), with_title.bar.drun_bg);
+    try testing.expectEqual(@as(u32, 0x050607), with_title.bar.title_minimized_accent);
+    try testing.expectEqual(@as(?u32, 0x0a0b0c), with_title.bar.drun_bg);
     try testing.expectEqual(@as(?u32, 0x070809), with_title.bar.drun_fg);
     try testing.expectEqual(@as(?u32, 0x010203), with_title.bar.drun_prompt_color);
-    try testing.expectEqual(@as(u32, 0x040506), with_title.bar.drunBg());
+    try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.drunBg());
     try testing.expectEqual(@as(?u32, null), with_title.bar.indicator_color);
+}
+
+test "palette references resolve by bare name cross-section" {
+    // The four palette vars are the source of truth; color knobs reference
+    // them by bare name from ANY section, and changing one variable updates
+    // the whole color set.
+    var refs = try loadToml(testing.allocator, "palette-refs",
+        \\[tiling]
+        \\[tiling.aesthetics]
+        \\border_focused   = primary
+        \\border_unfocused = secondary
+        \\
+        \\[bar]
+        \\primary_color     = "#aa0000"
+        \\secondary_color   = "#00bb00"
+        \\alternative_color = "#0000cc"
+        \\text_color        = "#eeeeee"
+        \\bg = "#0a0b0c"
+        \\fg = "#070809"
+        \\selected_bg = primary
+        \\
+        \\[bar.colors]
+        \\title           = primary
+        \\title_unfocused = secondary
+        \\title_minimized = alternative
+        \\
+    );
+    defer refs.deinit(testing.allocator);
+
+    // tiling borders resolve from the palette.
+    try testing.expectEqual(@as(u32, 0xAA0000), refs.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0x00BB00), refs.tiling.border_unfocused);
+    // bar-wide palette knobs resolve their literal colors.
+    try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.primary_color);
+    try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.secondary_color);
+    try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.alternative_color);
+    try testing.expectEqual(@as(u32, 0xEEEEEE), refs.bar.text_color);
+    // [bar.colors] and selected_bg inherit through bare references.
+    try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.selected_bg);
+    try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.title_accent_color);
+    try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.title_unfocused_accent);
+    try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.title_minimized_accent);
 }
 
 test "warn-and-revert: out-of-range scalars revert to defaults" {
