@@ -17,8 +17,8 @@ const fixture = @import("fixture");
 fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true);
-    actions.mapRequest(w2, 0, true);
+    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w2, 0, true, null);
     fx.flush();
     return .{ w1, w2 };
 }

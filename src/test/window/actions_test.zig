@@ -14,6 +14,7 @@ const sync = @import("sync");
 const actions = @import("actions");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
+const utils = @import("utils");
 
 test "actions: mapRequest admits, maps, and focuses a window" {
     var fx = fixture.setUp("actions_test") orelse return;
@@ -23,8 +24,8 @@ test "actions: mapRequest admits, maps, and focuses a window" {
     const win = fx.createWindow();
     try std.testing.expect(!m.store.has(win));
 
-    actions.mapRequest(win, 0, true);
-    actions.mapRequest(win, 0, true); // double-manage guard: no-op
+    actions.mapRequest(win, 0, true, null);
+    actions.mapRequest(win, 0, true, null); // double-manage guard: no-op
     fx.flush();
 
     try std.testing.expect(m.store.has(win));
@@ -35,13 +36,40 @@ test "actions: mapRequest admits, maps, and focuses a window" {
     try fx.expectTiledGeometry(win);
 }
 
+test "actions: mapRequest admits a float-rule window floating at its rect" {
+    var fx = fixture.setUp("actions_float") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    const win = fx.createWindow();
+    const rect = utils.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
+    actions.mapRequest(win, 0, true, rect);
+    fx.flush();
+
+    const e = m.store.get(win) orelse return error.ExpectedManaged;
+    try std.testing.expect(e.anchor == .floating);
+    try std.testing.expectEqual(rect.x, e.anchor.floating.x);
+    try std.testing.expectEqual(rect.y, e.anchor.floating.y);
+    try std.testing.expectEqual(rect.width, e.anchor.floating.width);
+    try std.testing.expectEqual(rect.height, e.anchor.floating.height);
+    try std.testing.expectEqual(@as(?model.WSId, null), e.home_ws);
+    try std.testing.expectEqual(@as(usize, 0), model.tiledCountOnWs(m, m.current));
+
+    const g = fx.geometry(win) orelse return error.ClosedWindow;
+    try std.testing.expectEqual(rect.width, g.width);
+    try std.testing.expectEqual(rect.height, g.height);
+    try std.testing.expectEqual(rect.x, @as(i16, @intCast(g.x)));
+    try std.testing.expectEqual(rect.y, @as(i16, @intCast(g.y)));
+    try std.testing.expect(fx.isViewable(win));
+}
+
 test "actions: moveWindowTo transfers membership and parks off-screen" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true);
+    actions.mapRequest(win, 0, true, null);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
 
@@ -63,7 +91,7 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     const ws0: u8 = @intCast(m.current);
 
     const w1 = fx.createWindow();
-    actions.mapRequest(w1, 0, true);
+    actions.mapRequest(w1, 0, true, null);
     fx.flush();
 
     // Multi-tag: add tag 2, protecting the current tag.
@@ -107,7 +135,7 @@ test "actions: minimize parks, restore unmaps-and-redraws" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true);
+    actions.mapRequest(win, 0, true, null);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
 
@@ -131,7 +159,7 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true);
+    actions.mapRequest(win, 0, true, null);
     fx.flush();
     const before = fx.geometry(win) orelse return error.ClosedWindow;
 
@@ -161,8 +189,8 @@ test "actions: unmanage drops the window and re-focuses" {
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true);
-    actions.mapRequest(w2, 0, true);
+    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w2, 0, true, null);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
 
@@ -195,9 +223,9 @@ test "actions: swapPrimary and moveFocused rotate the tiled order" {
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
     const w3 = fx.createWindow();
-    actions.mapRequest(w1, 0, true);
-    actions.mapRequest(w2, 0, true);
-    actions.mapRequest(w3, 0, true);
+    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w2, 0, true, null);
+    actions.mapRequest(w3, 0, true, null);
     fx.flush();
     try std.testing.expect(order.len == 3);
     try std.testing.expectEqual(w3, m.focused.?);

@@ -914,7 +914,13 @@ pub fn switchTo(ws_idx: u8) void {
 /// on-current spawns. Off-current spawns park by construction; sync sends
 /// their border width at first show instead of immediately (invisible either
 /// way; one less request).
-pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void {
+///
+/// `float_rect` admits the window already floating: the entry is registered
+/// tiled (core membership is tiled-only) and then immediately detached to the
+/// given rect with no home-list membership, mirroring detachTiledToFloating's
+/// anchor/home_ws state. The reconcile tail then sizes it floating in one
+/// pass, so a float-rule spawn never flashes a tiled slot.
+pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?utils.Rect) void {
     const wincache = @import("wincache");
 
     const m = pipeline.mut(&gate);
@@ -929,26 +935,40 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool) void
     // Bridge the cached WM_NORMAL_HINTS into the model entry at registration.
     const e = m.store.getPtr(win);
     if (e) |ep| ep.size_hints = wincache.peekHints(win);
-    // Primary-fifo variant spawn placement (moved out of model.register; it
-    // is SPAWN policy, not membership policy): a new window takes the
-    // primary-column head slot, and the previous head window drops one slot.
-    {
-        // Clamp the requested home workspace so a misconfigured target can't
-        // index past the ws array in ReleaseFast (defense in depth; the
-        // MapRequest front-end already resolves/clamps the target).
-        const home: model_mod.WSId = if (on_current)
-            m.current
-        else
-            window.clampToValidWorkspace(target_ws, core.WorkspaceId.fromIndex(@intCast(m.current))).index;
-        const p = &m.ws[home].params;
-        // Same policy restated at the spawn site: driven by the active
-        // module's fifo_variant metadata (the head slot binds variant
-        // index 1).
-        if (p.kind < tiling_mods.len) {
-            const fv = tiling_mods[p.kind].fifo_variant;
-            if (fv) |v| {
-                if (p.variant_idx == v and m.ws[home].tiled_order.len > 1)
-                    model_mod.reorderTiled(m, win, 0);
+
+    // Float-rule admission: detach the entry from its tiled slot before the
+    // fifo placement runs (which assumes a home slot, nonsensical for a
+    // floating window). The anchor/home_ws state mirrors toggleFloating's
+    // detach, and the reconcile tail applies the rect in the same pass.
+    if (float_rect) |rect| {
+        if (e) |ep| {
+            if (ep.home_ws) |home| model_mod.removeValue(&m.ws[home].tiled_order, win);
+            ep.anchor = .{ .floating = rect };
+            ep.home_ws = null;
+        }
+    } else {
+        // Primary-fifo variant spawn placement (moved out of model.register;
+        // it is SPAWN policy, not membership policy): a new window takes the
+        // primary-column head slot, and the previous head window drops one
+        // slot.
+        {
+            // Clamp the requested home workspace so a misconfigured target
+            // can't index past the ws array in ReleaseFast (defense in depth;
+            // the MapRequest front-end already resolves/clamps the target).
+            const home: model_mod.WSId = if (on_current)
+                m.current
+            else
+                window.clampToValidWorkspace(target_ws, core.WorkspaceId.fromIndex(@intCast(m.current))).index;
+            const p = &m.ws[home].params;
+            // Same policy restated at the spawn site: driven by the active
+            // module's fifo_variant metadata (the head slot binds variant
+            // index 1).
+            if (p.kind < tiling_mods.len) {
+                const fv = tiling_mods[p.kind].fifo_variant;
+                if (fv) |v| {
+                    if (p.variant_idx == v and m.ws[home].tiled_order.len > 1)
+                        model_mod.reorderTiled(m, win, 0);
+                }
             }
         }
     }

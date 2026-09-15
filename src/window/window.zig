@@ -147,6 +147,12 @@ const State = struct {
     // Keys borrow slices from the config, valid until the next rebuild.
     rules_map: std.StringHashMapUnmanaged(u8) = .{},
 
+    // Float-rule fast-lookup map: WM_CLASS name -> float, rebuilt from the
+    // same config rules (entries whose `float` bit is set). First rule wins;
+    // a name lives in exactly one of the two maps. Keys borrow slices from the
+    // config, valid until the next rebuild.
+    float_rules: std.StringHashMapUnmanaged(void) = .{},
+
     // Child XID -> managed toplevel XID (see "Child window resolution").
     child_cache: utils.BoundedList(ChildEntry, max_child_cache) = .{},
 
@@ -246,14 +252,29 @@ pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn 
 
 /// Keys are borrowed slices into the config's allocations, valid until the
 /// next rebuild. If a class name appears in multiple rules, the first rule
-/// wins, matching a plain linear scan through the rule list.
+/// wins, matching a plain linear scan through the rule list. Float rules land
+/// in `float_rules` (workspace rules in `rules_map`); a name can only ever be
+/// one or the other, never both.
 pub fn buildRulesMap() void {
     const alloc = state.?.alloc orelse return;
     state.?.rules_map.clearRetainingCapacity();
+    state.?.float_rules.clearRetainingCapacity();
     for (core.getState().config.workspaces.rules.items) |rule| {
-        // putNoClobber: first occurrence wins. On OOM the entry is silently
-        // dropped, the window is routed to the current workspace instead.
-        state.?.rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
+        if (rule.float) {
+            // A workspace rule for this name already won; never promote it to
+            // floating after the fact.
+            if (state.?.rules_map.contains(rule.class_name)) continue;
+            // getOrPut: first occurrence wins. On OOM the entry is silently
+            // dropped, the window behaves as if unruled.
+            _ = state.?.float_rules.getOrPut(alloc, rule.class_name) catch {};
+        } else {
+            // A float rule for this name already won; never tile it after the
+            // fact.
+            if (state.?.float_rules.contains(rule.class_name)) continue;
+            // putNoClobber: first occurrence wins. On OOM the entry is silently
+            // dropped, the window is routed to the current workspace instead.
+            state.?.rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
+        }
     }
 }
 
@@ -291,6 +312,7 @@ pub fn deinit() void {
     if (state.?.alloc) |a| {
         state.?.spawn_queue.deinit(a);
         state.?.rules_map.deinit(a);
+        state.?.float_rules.deinit(a);
     }
     // Clear the focus-property cache before focus/tracking deinit, whose
     // managed-window sweeps must not encounter a partially-valid cache.
@@ -333,12 +355,19 @@ pub inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core
         fallback;
 }
 
-/// Resolves a pre-fired WM_CLASS property cookie against workspace rules.
-/// Parses the WM_CLASS reply inline (no allocation), then does two O(1) hash
-/// lookups in state.rules_map (class, then instance). The map is built at
-/// init() and after every config reload, so no linear rule scan runs at
-/// spawn time.
-fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
+/// A matched class rule: either a workspace target or the float marker. The
+/// float bit is set for "float" rules, in which case `workspace` is null and
+/// the window is admitted floating on the current workspace.
+pub const AdmissionRule = struct {
+    workspace: ?u8,
+    float: bool,
+};
+
+/// Resolves a pre-fired WM_CLASS property cookie against workspace and float
+/// rules. Parses the WM_CLASS reply inline (no allocation), then does two O(1)
+/// hash lookups per map (class, then instance). The maps are built at init()
+/// and after every config reload, so no linear rule scan runs at spawn time.
+fn findAdmissionRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?AdmissionRule {
     const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return null;
     defer std.c.free(reply);
     if (reply.*.format != 8 or reply.*.value_len == 0) return null;
@@ -360,10 +389,12 @@ fn findWorkspaceRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?u8 {
 
     // O(1) hash lookups: class first (when non-empty), then instance.
     if (class.len > 0) {
-        if (state.?.rules_map.get(class)) |ws| return ws;
+        if (state.?.float_rules.contains(class)) return .{ .workspace = null, .float = true };
+        if (state.?.rules_map.get(class)) |ws| return .{ .workspace = ws, .float = false };
     }
     if (instance.len > 0) {
-        if (state.?.rules_map.get(instance)) |ws| return ws;
+        if (state.?.float_rules.contains(instance)) return .{ .workspace = null, .float = true };
+        if (state.?.rules_map.get(instance)) |ws| return .{ .workspace = ws, .float = false };
     }
     return null;
 }
@@ -418,25 +449,40 @@ fn findSpawnQueueWorkspace(
     return ws;
 }
 
-/// Drains pre-fired WM_CLASS / _NET_WM_PID cookies to resolve the target
-/// workspace. Cookies are fired by the caller (handleMapRequest) together with
+/// The admission policy for a brand-new spawn: the target workspace (class
+/// rule, then spawn-queue PID rule, else current) plus whether the class rule
+/// floats the window.
+pub const AdmissionDecision = struct {
+    workspace: core.WorkspaceId,
+    float: bool,
+};
+
+/// Drains pre-fired WM_CLASS / _NET_WM_PID cookies to resolve the admission
+/// decision. Cookies are fired by the caller (handleMapRequest) together with
 /// the other three property queries so the X server can process all five in
 /// parallel; this function only drains the two workspace-resolution replies.
-fn resolveTargetWorkspace(
+fn resolveAdmissionDecision(
     current_ws: core.WorkspaceId,
     c_wm_class: ?xcb.xcb_get_property_cookie_t,
     c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
-) core.WorkspaceId {
+) AdmissionDecision {
     const cs = core.getState();
 
     // Drain replies: WM_CLASS first, then _NET_WM_PID.
-    if (c_wm_class) |cookie| if (findWorkspaceRuleByClass(cookie)) |target| {
+    if (c_wm_class) |cookie| if (findAdmissionRuleByClass(cookie)) |rule| {
         discardProtocolCookie(cs.conn, c_net_wm_pid);
-        return clampToValidWorkspace(target, current_ws);
+        const ws = if (rule.workspace) |target|
+            clampToValidWorkspace(target, current_ws)
+        else
+            current_ws;
+        return .{ .workspace = ws, .float = rule.float };
     };
     if (c_net_wm_pid) |cookie| if (findSpawnQueueWorkspace(cookie)) |spawn_ws|
-        return clampToValidWorkspace(spawn_ws, current_ws);
-    return current_ws;
+        return .{
+            .workspace = clampToValidWorkspace(spawn_ws, current_ws),
+            .float = false,
+        };
+    return .{ .workspace = current_ws, .float = false };
 }
 
 pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
@@ -580,7 +626,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const t_fire: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
     // ----- Drain replies sequentially -----
-    const target_ws = resolveTargetWorkspace(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
+    const decision = resolveAdmissionDecision(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
+    const target_ws = decision.workspace;
     const on_current = target_ws.eql(current_ws);
 
     drainAdmissionCookies(conn, win, cookies, false);
@@ -590,7 +637,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // specific to the MapRequest event source; everything from here on (the
     // model registration + grabs + child-cache seeding) is identical to the
     // boot-time adoption path, so it lives in admitWindow.
-    admitWindow(win, target_ws.index, on_current);
+    admitWindow(win, target_ws.index, on_current, decision.float);
 
     if (build_options.profile_key) {
         const t_map = utils.monotonicNs();
@@ -616,9 +663,15 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 /// is no map-request event), so both paths funnel through the same cache write,
 /// an entry keyed on the (now-managed) toplevel itself, which
 /// findManagedWindow's direct `is_managed` hit short-circuits anyway.
-fn admitWindow(win: u32, target_ws: u8, on_current: bool) void {
+/// target workspace + float flag (mirror of resolveTargetWorkspace's role at
+/// the MapRequest site). The float seed's geometry is fetched here: at
+/// admission there is no LastSent entry yet (no reconcile has run), so
+/// detachTiledToFloating's `sync.lastRectFor` would find nothing; the one
+/// extra xcb_get_geometry round-trip supplies the window's natural rect.
+fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool) void {
     const cs = core.getState();
-    actions.mapRequest(win, target_ws, on_current);
+    const float_rect: ?utils.Rect = if (float) getGeometry(cs.conn, win) else null;
+    actions.mapRequest(win, target_ws, on_current, float_rect);
     cacheChildWindow(win, cs.root);
 }
 
@@ -630,6 +683,15 @@ fn findWindowRecord(windows: []const persist.WindowRecord, win: u32) ?*const per
         if (r.win == win) return r;
     }
     return null;
+}
+
+/// Resolves only the float bit of a class rule (adoption never relocates a
+/// pre-existing window's workspace, so a workspace match is deliberately
+/// ignored here). Drains the WM_CLASS reply.
+fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
+    const c = cookie orelse return false;
+    const rule = findAdmissionRuleByClass(c) orelse return false;
+    return rule.float;
 }
 
 /// Target workspace for an adopted window: the restore record's home
@@ -809,14 +871,18 @@ pub fn adoptRootWindows() !usize {
         // Adoption never resolves the target workspace from these cookies
         // (restored-or-current wins, not spawn rules), so the two
         // conditionally-fired replies are discarded to keep the XCB queue
-        // from accumulating unconsumed results.
+        // from accumulating unconsumed results. A persisted restore record
+        // wins over the float rule too (it carries the window's exact
+        // pre-restart anchor); record-less windows still honor a class float
+        // rule, matching the MapRequest admission policy.
+        const float = if (entry.record == null) resolveClassFloat(entry.cookies.c_wm_class) else false;
         drainAdmissionCookies(conn, win, entry.cookies, true);
 
         // Register on the restored-or-current workspace. on_current=false so
         // actions.mapRequest does NOT reconcile per-window (the caller owns
         // the single end-of-adoption reconcile) or steal model focus before
         // applyModelLevel restores the session's focus.
-        admitWindow(win, restoredOrCurrent(entry.record), false);
+        admitWindow(win, restoredOrCurrent(entry.record), false, float);
 
         if (entry.record) |r| applyRestoredRecord(win, r);
 

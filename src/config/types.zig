@@ -479,6 +479,19 @@ pub const BarConfig = struct {
 
     clock_format: ?[]const u8 = null,
 
+    /// Volume segment display templates (bar.modules... the volume segment
+    /// falls back to its built-in strings when null). `{pct}` is replaced by
+    /// the 0-100 level; `{state}` by the mute glyph ("mute"/"unmute" words by
+    /// default -- override just the format to restyle). When the sink is
+    /// muted the volume_muted_format wins.
+    volume_format: ?[]const u8 = null,
+    volume_muted_format: ?[]const u8 = null,
+    /// System-status segment item whitelist, in render order. Valid items:
+    /// "mem" (used/total + %), "batt" (charge % when a battery is present),
+    /// "cpu" (utilization %). Empty list = default set, which is every
+    /// present-capable item.
+    status_items: std.ArrayList([]const u8) = .empty,
+
     /// Scroll the focused window's title through its slot when it overflows
     /// (marquee) instead of truncating it with an ellipsis.
     carousel_enabled: bool = true,
@@ -501,8 +514,9 @@ pub const BarConfig = struct {
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStrings(&self.workspace_icons, allocator, false);
         freeStrings(&self.fonts, allocator, false);
+        freeStrings(&self.status_items, allocator, false);
         freeBarLayouts(&self.layout, allocator, false);
-        inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused }) |f| if (f.*) |s| allocator.free(s);
+        inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format }) |f| if (f.*) |s| allocator.free(s);
     }
 
     pub inline fn drunBg(self: *const BarConfig) Color {
@@ -558,7 +572,11 @@ pub const BarConfig = struct {
 
 pub const Rule = struct {
     class_name: []const u8,
+    /// Target workspace (0-based) for workspace rules; unused when `float`.
     workspace: u8,
+    /// "float" class rules: windows matching `class_name` are admitted
+    /// floating on the current workspace instead of being tiled on `workspace`.
+    float: bool = false,
 };
 
 pub const WorkspaceConfig = struct {
