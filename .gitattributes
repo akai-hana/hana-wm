@@ -1,1 +1,1 @@
-dev/demonstration.gif filter=lfs diff=lfs merge=lfs -text
+dev/demonstration.gif -filter -diff -merge -text
