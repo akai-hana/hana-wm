@@ -45,7 +45,7 @@ However, no feature is required for hana to work, and the user can add/remove th
 
 ---
 
-The highest priority of this window manager is to be as **modular** as possible, and it achieves this by making all features that aren't strictly necessary to hana working **optional**, by isolating their specific logic on their own codefile(s) (following the open-closed principle), and making hana's core **adapt** to the presence/absence of new sub-systems/modules.  
+The highest priority of this window manager is to be as **modular** as possible, and it achieves this by making all features that aren't strictly necessary to hana working **optional**, by isolating their specific logic on their own codefile(s) (following the open-closed principle), and making hana's core **adapt** automatically to the presence/absence of new sub-systems/modules.  
 
 Basically, sub-systems (e.g. tiling), as well as their modules (e.g. tiling layouts), act as addons to hana. They can be removed, hana re-compiled, and a new binary is produced, fruit of a different codebase. 
 
