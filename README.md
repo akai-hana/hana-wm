@@ -4,7 +4,7 @@
 ###### A comfy X11 Window Manager written in Zig.
 
 
-![](https://raw.githubusercontent.com/hana-wm/hana/dev/dev/demonstration.gif)
+![](dev/demonstration.gif)
 
 </div>
 
