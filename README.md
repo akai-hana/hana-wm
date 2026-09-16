@@ -41,7 +41,7 @@
 **hana** is a dynamic X window manager (+ status bar) written in Zig, focused on modularity, flexibility and comfort.
 
 It includes both tiling and floating window management paradigms, as well as its own native bar, integrated to the WM. \
-However, no feature is required for **hana** to work, and the user can add/remove them at will. 
+However, no feature is required for hana to work, and the user can add/remove them at will. 
 
 ---
 
@@ -76,11 +76,11 @@ On that note, **hana's entire BINARY can be hot-reloaded**; if one decides on ad
 Finally, I wanted foundational source code **cleanness** and **flexibility**, both of which are tied to hana's modular architecture. \
 - **On cleanness**, sub-systems and modules should not only be handled properly as detachables, but hana's source code should also NOT reference any of the removed module's code. \
   This means no dummy stubs, but rather closed cores that allow open modules through general interfaces. \
-  Concretely: hana's core never imports an optional sub-system by name — it only knows the open contracts declared in `src/core/plugin.zig` (`Surfaces`, `WindowModule`, `Segment`, `Layout`), and iterates the modules that are actually compiled in through build-GENERATED registries (`window_modules`, `tiling_modules`, `bar_modules`) populated from the files found on disk. Deleting a module therefore just shortens an array — no `if` chains, no dead stubs, and nothing in the core that ever needs patching back in.
+  Concretely: hana's core never imports an optional sub-system by name: it only knows the open contracts declared in `src/core/plugin.zig` (`Surfaces`, `WindowModule`, `Segment`, `Layout`), and iterates the modules that are actually compiled in through build-GENERATED registries (`window_modules`, `tiling_modules`, `bar_modules`) populated from the files found on disk. Deleting a module therefore just shortens an array — no `if` chains, no dead stubs, and nothing in the core that ever needs patching back in.
   
 - **On flexibility**, the ability for users to extend hana by their own modules should be the bestest possible. \
   The general interfaces that keep cores closed to modules _also_ allow new modules to be created under those same interfaces. \
-  This means that community extendability is first-class: drop-in module templates ship in [`dev/plugin-template/`](dev/plugin-template/) — [`layout.zig`](dev/plugin-template/layout.zig) for a new tiling layout, [`provider.zig`](dev/plugin-template/provider.zig) for a new window sub-system, and [`segment.zig`](dev/plugin-template/segment.zig) for a new bar segment. They are real, copy-paste modules that `zig build check` keeps compiling against the live contracts (`check-plugin-template`), so they cannot drift out of tree without failing the check. 
+  This means that community extendability is first-class (also including drop-in module templates over at [`dev/plugin-template/`](dev/plugin-template/): [`layout.zig`](dev/plugin-template/layout.zig) for a new tiling layout, [`provider.zig`](dev/plugin-template/provider.zig) for a new window sub-system, and [`segment.zig`](dev/plugin-template/segment.zig) for a new bar segment. These are also enforced by `zig build check` compiling them against the contracts (`check-plugin-template`). 
 
 ---
 
