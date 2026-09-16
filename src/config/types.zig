@@ -493,11 +493,12 @@ pub const BarConfig = struct {
     /// muted the volume_muted_format wins.
     volume_format: ?[]const u8 = null,
     volume_muted_format: ?[]const u8 = null,
-    /// System-status segment item whitelist, in render order. Valid items:
-    /// "mem" (used/total + %), "batt" (charge % when a battery is present),
-    /// "cpu" (utilization %). Empty list = default set, which is every
-    /// present-capable item.
-    status_items: std.ArrayList([]const u8) = .empty,
+    /// Systatus segment readout list, in render order. Valid items: "mem"
+    /// (used/total + %), "cpu" (utilization %), "batt" (charge % when a
+    /// battery is present). Absent (null) = the default set, which is every
+    /// present-capable readout; an EMPTY list = none (the segment renders
+    /// nothing); a non-empty list = exactly those readouts, in that order.
+    systatus_items: ?std.ArrayList([]const u8) = null,
 
     /// Scroll the focused window's title through its slot when it overflows
     /// (marquee) instead of truncating it with an ellipsis.
@@ -521,7 +522,7 @@ pub const BarConfig = struct {
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStrings(&self.workspace_icons, allocator, false);
         freeStrings(&self.fonts, allocator, false);
-        freeStrings(&self.status_items, allocator, false);
+        if (self.systatus_items) |*list| freeStrings(list, allocator, false);
         freeBarLayouts(&self.layout, allocator, false);
         inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format }) |f| if (f.*) |s| allocator.free(s);
     }

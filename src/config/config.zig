@@ -1290,11 +1290,18 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
         try appendDupedStrings(allocator, arr, &cfg.bar.fonts);
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
-    // status_items: the system-status widget's item whitelist (render order);
-    // unknown items are left to the segment to skip silently.
-    if (section.getAs([]const parser.Value, "status_items")) |arr| {
-        types.freeStrings(&cfg.bar.status_items, allocator, true);
-        try appendDupedStrings(allocator, arr, &cfg.bar.status_items);
+    // systatus_items: the systatus segment's readout whitelist (subset +
+    // render order). Absent = default set; an empty list = none; unknown
+    // items are left to the segment to skip silently.
+    if (section.getAs([]const parser.Value, "systatus_items")) |arr| {
+        if (cfg.bar.systatus_items) |*items| {
+            types.freeStrings(items, allocator, true);
+            try appendDupedStrings(allocator, arr, items);
+        } else {
+            var items: std.ArrayList([]const u8) = .empty;
+            try appendDupedStrings(allocator, arr, &items);
+            cfg.bar.systatus_items = items;
+        }
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
     // A pair interaction, so it stays bespoke rather than joining the table.
@@ -1485,6 +1492,12 @@ fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
     return b == null;
 }
 
+fn eqlOptionalStrings(a: ?std.ArrayList([]const u8), b: ?std.ArrayList([]const u8)) bool {
+    if ((a == null) != (b == null)) return false;
+    if (a == null) return true;
+    return eqlStrings(a.?.items, b.?.items);
+}
+
 fn eqlScalableOpt(a: ?parser.ScalableValue, b: ?parser.ScalableValue) bool {
     if (a) |x| return if (b) |y| eqlScalable(x, y) else false;
     return b == null;
@@ -1581,7 +1594,7 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         !eqlOptionalString(old.clock_format, new.clock_format) or
         !eqlOptionalString(old.volume_format, new.volume_format) or
         !eqlOptionalString(old.volume_muted_format, new.volume_muted_format) or
-        !eqlStrings(old.status_items.items, new.status_items.items) or
+        !eqlOptionalStrings(old.systatus_items, new.systatus_items) or
         old.carousel_enabled != new.carousel_enabled or
         old.carousel_speed_px_s != new.carousel_speed_px_s or
         old.drun_bg != new.drun_bg or

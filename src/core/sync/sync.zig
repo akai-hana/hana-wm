@@ -41,23 +41,16 @@ const build_options = @import("build_options");
 const model = @import("model");
 const debug = @import("debug");
 
-/// When tiling is absent, provide a compute stub so the rest of sync
-/// compiles. The interchange TYPES (View/List/Placement/Env/HintsView/
-/// parked_rect) come from the tiling contract (plugin.zig), which both the
-/// tiling and this reconciler reference — so there is no mirrored duplicate
-/// to keep in lockstep. The reconcile path still runs (park/map/stack), but
-/// the layout computation block is skipped and the placement lookup table
-/// stays empty.
+/// The tiling engine is reached through the build-generated `tiling_seam`:
+/// when no tiling subsystem is present the seam is an empty struct, and every
+/// `tiling.*` member use below sits behind a `has_tiling` gate, so the
+/// reconcile path still runs (park/map/stack) with the layout-computation
+/// block skipped and the placement lookup table left empty. The interchange
+/// TYPES (View/List/Placement/Env/HintsView/parked_rect) come from the tiling
+/// contract (plugin.zig), which both the tiling engine and this reconciler
+/// reference — no mirrored duplicate to keep in lockstep, and no local stub.
 const plugin = @import("plugin");
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {
-    pub const Env = plugin.Env;
-    pub const parked_rect = plugin.parked_rect;
-    pub const Placement = plugin.Placement;
-    pub const List = plugin.List;
-    pub const HintsView = plugin.HintsView;
-    pub const View = plugin.View;
-    pub fn compute(_: anytype, _: anytype, _: anytype) void {}
-};
+const tiling = @import("tiling_seam").tiling;
 
 pub const Stack = enum { above };
 
@@ -122,7 +115,7 @@ pub const Ctx = struct {
     workarea: utils.Rect,
     /// config.tiling.border_width, already scaled at load.
     cfg_bw: u16,
-    env: tiling.Env = .{},
+    env: plugin.Env = .{},
     /// Focus/mode border color; ported from borders.color minus its
     /// fullscreen check (fullscreen zeroes via bw/pixel policy instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
@@ -143,7 +136,7 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 ///   - pixel: the last border pixel sent for a visible window (0 while parked/never).
 const SentEntry = struct {
     id: model.WindowId = 0,
-    rect: utils.Rect = tiling.parked_rect,
+    rect: utils.Rect = plugin.parked_rect,
     has_rect: bool = false,
     parked: bool = false,
     bw: u16 = 0,
@@ -399,7 +392,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // owns the screen, or when the tiling subsystem is absent).
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
-    var placements: tiling.List = .{};
+    var placements: plugin.List = .{};
     // Per-window placement lookup (P1): `pl_of_slot[i]` is the index into
     // `placements` of the placement for store slot `i`, or null when that
     // window has no placement this pass. Built alongside the layout compute
@@ -424,7 +417,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             hints_buf[n] = e.size_hints;
             n += 1;
         }
-        const hv = tiling.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
+        const hv = plugin.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
         const params = &m.ws[m.current].params;
         const view: plugin.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
         if (n > 0) {
@@ -577,11 +570,11 @@ fn computeDesire(
     e: *const model.Entry,
     win: model.WindowId,
     fs_win: ?model.WindowId,
-    placement: ?tiling.Placement,
+    placement: ?plugin.Placement,
     winner: *?model.WindowId,
     ledger: SentEntry,
 ) Desire {
-    var rect: utils.Rect = tiling.parked_rect;
+    var rect: utils.Rect = plugin.parked_rect;
     var bw: u16 = ctx.cfg_bw;
     var pixel: u32 = ctx.color_of(win, m);
     var parked = false;
@@ -622,10 +615,10 @@ fn computeDesire(
 /// emits fewer placements than ordered windows degrades to null (same as the
 /// removed linear scan) instead of indexing out of bounds.
 fn placementOfSlot(
-    placements: *const tiling.List,
+    placements: *const plugin.List,
     pl_of_slot: *const [model.store_capacity]?usize,
     slot: usize,
-) ?tiling.Placement {
+) ?plugin.Placement {
     const idx = pl_of_slot[slot] orelse return null;
     const slice = placements.constSlice();
     if (idx >= slice.len) return null;
@@ -636,10 +629,10 @@ fn placementOfSlot(
 /// the cold winner-seed path; the hot fused pass passes its known slot.
 fn placementOf(
     m: *const model.Model,
-    placements: *const tiling.List,
+    placements: *const plugin.List,
     pl_of_slot: *const [model.store_capacity]?usize,
     win: model.WindowId,
-) ?tiling.Placement {
+) ?plugin.Placement {
     const slot = storeSlotOf(m, win) orelse return null;
     return placementOfSlot(placements, pl_of_slot, slot);
 }

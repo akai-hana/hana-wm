@@ -15,47 +15,37 @@ const constants = @import("constants");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const build_options = @import("build_options");
 const segmod = @import("segment");
-const carousel = segmod.ifEnabled(build_options.has_seg_carousel, @import("carousel"), struct {
-    pub const gap_px: u16 = 0;
-    pub fn cyclePx(text_w: u16) f32 {
-        return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(gap_px));
-    }
-    pub fn scrollingActive() bool {
-        return false;
-    }
-    pub fn offsetFor(
-        win: u32,
-        title: []const u8,
-        text_w: u16,
-        avail_w: u16,
-        enabled: bool,
-        speed_px_s: u16,
-        now_ms: i64,
-    ) f32 {
-        _ = win;
-        _ = title;
-        _ = text_w;
-        _ = avail_w;
-        _ = enabled;
-        _ = speed_px_s;
-        _ = now_ms;
-        return 0;
-    }
-    pub fn resetForShow() void {}
-});
-// The prompt overlays this slot when active: this module delegates its
-// draw/click to it rather than the bar adapting the title slot.
-const prompt = segmod.ifEnabled(build_options.has_seg_prompt, @import("prompt"), struct {
-    pub fn isActive() bool {
-        return false;
-    }
-    pub fn toggle() void {}
-    pub fn draw(_: *segmod.DrawCtx, x: u16) !u16 {
-        return x;
-    }
-});
+const plugin = @import("plugin");
+// The scrolling title addon (the carousel) binds its motion, cycle and
+// frame-pacing hooks to this contract; membership in the generated
+// `title_subs` registry is driven by file presence alone, so this module
+// never names it. Dropping carousel.zig just shortens `addons` and the title
+// falls back to its real built-in static (ellipsis) rendering -- no stub.
+pub const Scroller = struct {
+    cyclePx: *const fn (text_w: u16) f32,
+    scrollingActive: *const fn () bool,
+    offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, now_ms: i64) f32,
+    resetForShow: *const fn () void,
+    pollDeadlineMs: *const fn (now_ms: i64, enabled: bool, hz: f64) i32,
+};
+const scroller: ?Scroller = if (@import("title_subs").addons.len != 0)
+    @import("title_subs").addons[0]
+else
+    null;
+// The prompt overlays this slot when active: it binds a runtime-overlay
+// value (plugin.BarOverlay) on its Segment, which this module finds through
+// the generated bar segment registry -- name-free, like every other registry
+// capability. Nothing in the closed core names the overlay module.
+const bar_mods = @import("bar_modules").modules;
+const overlay: ?plugin.BarOverlay = for (bar_mods) |m| {
+    if (m.overlay) |o| break o;
+} else null;
+
+fn overlayActive() bool {
+    return if (overlay) |o| o.is_active() else false;
+}
+
 // The minimized-state service (set synthesis + per-window checks) is provided
 // by the window module registry and forwarded through the shared DrawCtx by
 // the bar; the title segment just reads `snapshot.minimized_set`.
@@ -156,31 +146,35 @@ fn drawMarqueeCell(
     fg: u32,
     now: i64,
 ) !void {
-    const off = carousel.offsetFor(
-        win,
-        txt,
-        text_w,
-        geom.avail_w,
-        ctx.config.carousel_enabled,
-        ctx.config.carousel_speed_px_s,
-        now,
-    );
-    if (!carousel.scrollingActive()) {
-        try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
+    if (scroller) |s| {
+        const off = s.offsetFor(
+            win,
+            txt,
+            text_w,
+            geom.avail_w,
+            ctx.config.carousel_enabled,
+            ctx.config.carousel_speed_px_s,
+            now,
+        );
+        if (!s.scrollingActive()) {
+            try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
+            return;
+        }
+        const cycle = s.cyclePx(text_w);
+        // Anchor the scroll at the padded text start (same spot static mode uses),
+        // so enabling the carousel continues seamlessly from where the head sat.
+        const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
+        try ctx.dc.drawTextScrolled(
+            geom.seg_x,
+            geom.seg_w,
+            baseline_y,
+            .{ x0, x0 + cycle },
+            txt,
+            fg,
+        );
         return;
     }
-    const cycle = carousel.cyclePx(text_w);
-    // Anchor the scroll at the padded text start (same spot static mode uses),
-    // so enabling the carousel continues seamlessly from where the head sat.
-    const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
-    try ctx.dc.drawTextScrolled(
-        geom.seg_x,
-        geom.seg_w,
-        baseline_y,
-        .{ x0, x0 + cycle },
-        txt,
-        fg,
-    );
+    try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
 }
 
 /// Pixel-perfect tiling: segment i of `count` spans [i*W/count, (i+1)*W/count).
@@ -234,7 +228,7 @@ fn drawFittedTitle(
         // Unfocused cells never touch the carousel: it tracks exactly one
         // cell per frame, the focused one.
         if (scroll_enabled) {
-            _ = carousel.offsetFor(window, title, text_w, geom.avail_w, false, 0, now);
+            if (scroller) |s| _ = s.offsetFor(window, title, text_w, geom.avail_w, false, 0, now);
         }
         try ctx.dc.drawText(geom.text_x, baseline_y, title, text_fg);
     } else if (scroll_enabled)
@@ -309,7 +303,7 @@ inline fn emptyWorkspace(ctx: segmod.TitleRenderContext, count: usize) ?u16 {
 
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     const c = segmod.castDraw(ctx);
-    if (prompt.isActive()) return prompt.draw(c, x);
+    if (overlay) |o| if (o.is_active()) return o.draw(ctx, x);
     return renderTitle(c, x);
 }
 
@@ -323,9 +317,10 @@ fn onClickHook(
 ) bool {
     _ = left;
     _ = redraw;
+    const active = overlayActive();
     if (right) {
-        if (!prompt.isActive()) prompt.toggle();
-    } else if (!prompt.isActive()) {
+        if (!active) if (overlay) |o| o.toggle();
+    } else if (!active) {
         title_click(state_ptr, offset);
     }
     return true;
@@ -336,17 +331,19 @@ fn naturalWidthHook(_: *const anyopaque, _: u16) u16 {
 }
 
 fn pollTimeoutMsHook() i32 {
-    // The prompt covers the whole title slot (draw delegates to prompt), so
-    // no marquee is visible; contribute no wakeup instead of leaving the
-    // carousel polling hidden pixels. The next visible draw re-arms motion
-    // via offsetFor. Title owns this decision, so prompt never reaches into
-    // the carousel to pause it.
-    if (prompt.isActive()) return -1;
-    return carousel.pollDeadlineMs(
-        utils.monotonicMs(),
-        core.getState().config.bar.carousel_enabled,
-        refresh.detectedHz(),
-    );
+    // The prompt overlay covers the whole title slot while open (draw
+    // delegates to it), so no scroller is visible; contribute no wakeup
+    // instead of leaving it polling hidden pixels. The next visible draw
+    // re-arms motion via offsetFor. The title owns this decision, so the
+    // overlay never reaches into the scroller to pause it.
+    if (overlayActive()) return -1;
+    if (scroller) |s|
+        return s.pollDeadlineMs(
+            utils.monotonicMs(),
+            core.getState().config.bar.carousel_enabled,
+            refresh.detectedHz(),
+        );
+    return -1;
 }
 
 /// Marquee repaint query for the bar's uniform frame loop (the Segment
@@ -357,15 +354,15 @@ fn pollTimeoutMsHook() i32 {
 /// inactive then (the overlay owns the repaint; the draw delegation already
 /// routes around the carousel).
 fn needsRepaintHook() bool {
-    if (prompt.isActive()) return false;
-    return carousel.scrollingActive();
+    if (overlayActive()) return false;
+    return if (scroller) |s| s.scrollingActive() else false;
 }
 
 /// The bar fires this on every show (map). A marquee that was scrolling when
 /// the bar hid must resume from its last shown offset rather than catching
 /// the whole hidden gap in one frame (which would land it mid-cycle).
 fn onBarShownHook() void {
-    carousel.resetForShow();
+    if (scroller) |s| s.resetForShow();
 }
 
 /// This module's bar-segment contribution (registry binding).

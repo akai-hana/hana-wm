@@ -16,7 +16,11 @@ const constants = @import("constants");
 const utils = @import("utils");
 const model = @import("model");
 const plugin = @import("plugin");
-const build_options = @import("build_options");
+const window = @import("window");
+// Peers reach each other's hooks through the generated window registry,
+// never by naming a sibling module: deleting a sibling only shortens the
+// registry, and capabilities stay provider-agnostic.
+const providerOf = window.providerOf;
 
 fn resetState() void {
     g_recs.clear();
@@ -121,7 +125,11 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // through the minimize — minimize only remapped presence to `.parked`), so
     // core's model-based coverage read (`coveringOccupantOnWs`) recognizes it
     // again as the screen owner. Plain windows restore to `.present`.
-    e.presence = if (build_options.has_fullscreen and @import("fullscreen").isFullscreenMode(m, win)) .covering else .present;
+    const covering = if (providerOf(.isCoveringMode)) |wm|
+        wm.isCoveringMode.?(m, win)
+    else
+        false;
+    e.presence = if (covering) .covering else .present;
     _ = g_recs.orderedRemove(idx);
 }
 
@@ -156,8 +164,11 @@ fn bestSeq(
     var best_seq: u32 = 0;
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
-        if (skip_covering and build_options.has_fullscreen and
-            @import("fullscreen").isFullscreenMode(m, rec.win)) continue;
+        if (skip_covering) {
+            if (providerOf(.isCoveringMode)) |wm| {
+                if (wm.isCoveringMode.?(m, rec.win)) continue;
+            }
+        }
         const better = switch (order) {
             .fifo => best == null or rec.seq < best_seq,
             .lifo => best == null or rec.seq > best_seq,

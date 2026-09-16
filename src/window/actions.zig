@@ -57,7 +57,7 @@ fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it, never a closed enum. Empty when the tiling subsystem is absent.
 const tiling_mods = @import("plugin").tiling_mods;
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+const tiling = @import("tiling_seam").tiling;
 
 /// Withdrawal facts for actions.unmanage. The sole caller (window.
 /// unmanageWindow) removes the model entry BEFORE the action runs, so both

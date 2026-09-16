@@ -11,7 +11,11 @@ const core = @import("core");
 
 const tracking = @import("tracking");
 const model = @import("model");
-const build_options = @import("build_options");
+const window = @import("window");
+// Peers reach each other's hooks through the generated window registry,
+// never by naming a sibling module: deleting a sibling only shortens the
+// registry, and capabilities stay provider-agnostic.
+const providerOf = window.providerOf;
 
 /// Initializes global workspace state. Workspaces-disabled collapses to a
 /// single implicit workspace; every switch/tag/move action already no-ops on
@@ -40,7 +44,9 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     const h: ?model.WSId = e.home_ws;
     if (h) |old_h| if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) return;
 
-    if (build_options.has_minimize and @import("minimize").isMinimized(m, win)) e.mask = model.bit(ws); // record follows the move
+    if (providerOf(.isWindowHidden)) |wm| {
+        if (wm.isWindowHidden.?(m, win)) e.mask = model.bit(ws); // record follows the move
+    }
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
     if (h) |old_h| {
@@ -53,11 +59,16 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 }
 
 fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
-    const fmod = @import("fullscreen");
-    if (fmod.fullscreenOccupied(m, win, dest)) {
-        _ = fmod.toggleFullscreen(m, win);
-    } else {
-        fmod.moveFullscreenTo(m, win, dest);
+    const occupant = if (providerOf(.coveringOccupantOnWs)) |wm|
+        wm.coveringOccupantOnWs.?(m, dest)
+    else
+        null;
+    if (occupant != null and occupant != win) {
+        if (providerOf(.toggleCovering)) |wm| {
+            _ = wm.toggleCovering.?(m, win);
+        }
+    } else if (providerOf(.moveCoveringTo)) |wm| {
+        wm.moveCoveringTo.?(m, win, dest);
     }
 }
 
@@ -65,10 +76,10 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 /// into de-fullscreen rather than clobbering the resident. Ghost records
 /// (minimized-from-fullscreen) move their ws too, following the parked mask.
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
-    if (!build_options.has_fullscreen) return;
-    const fmod = @import("fullscreen");
-    if (!fmod.isFullscreenMode(m, win)) return;
-    const fws = fmod.fullscreenWsOf(m, win).?;
+    const covering_mode = providerOf(.isCoveringMode) orelse return;
+    const covering_ws = providerOf(.coveringWsOf) orelse return;
+    if (!covering_mode.isCoveringMode.?(m, win)) return;
+    const fws = covering_ws.coveringWsOf.?(m, win) orelse return;
     if (fws == ws) return;
     retargetOrDropFullscreen(m, win, ws);
 }
@@ -80,9 +91,11 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
     e.mask &= ~model.bit(ws);
-    if (build_options.has_fullscreen and @import("fullscreen").isFullscreenOnWs(m, win, ws)) {
-        const dest = model.lowestBit(e.mask) orelse unreachable;
-        retargetOrDropFullscreen(m, win, dest);
+    if (providerOf(.isCoveringOnWs)) |wm| {
+        if (wm.isCoveringOnWs.?(m, win, ws)) {
+            const dest = model.lowestBit(e.mask) orelse unreachable;
+            retargetOrDropFullscreen(m, win, dest);
+        }
     }
     return true;
 }

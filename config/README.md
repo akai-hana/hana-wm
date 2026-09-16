@@ -87,7 +87,7 @@ segments = ["clock"]
 ```
 
 Available segments: `workspaces`, `title`, `clock`, `layout`, `variants`,
-`volume`, `status`. A segment is compiled in only when its `src/bar/modules/*`
+`volume`, `systatus`. A segment is compiled in only when its `src/bar/modules/*`
 file is present; the above list is the full stock set.
 
 Segment behavior knobs:
@@ -95,9 +95,14 @@ Segment behavior knobs:
 - `volume_format` / `volume_muted_format` — the volume widget's text.
   `{pct}` is the sink level (0–100); `{state}` is `mute`/`unmute`. Defaults:
   `"VOL {pct}%"` and `"MUTE"`.
-- `status_items` — the system-status widget's readouts, in render order.
-  Valid items: `"mem"` (used/total + %), `"batt"` (charge % when a battery is
-  present), `"cpu"` (utilization %). Empty = every present-capable item.
+- `systatus_items` — the systatus widget's readouts, in render order. Valid
+  items: `"mem"` (used/total + %), `"cpu"` (utilization %), `"batt"` (charge %
+  when a battery is present). Absent = every present-capable readout in
+  alphabetical registry order (`batt`, `cpu`, `mem`; `batt` only when a battery
+  is present), `[]` = none (renders nothing), otherwise exactly those readouts
+  in that order. Readout membership is generated from file presence: dropping a
+  readout's `.zig` file in `src/bar/modules/systatus/` both removes it from the
+  bar and from the accepted `systatus_items` names, with no other edits.
 - `clock_format` (strftime), `drun_prompt`, `carousel_enabled`,
   `carousel_speed_px_s`, `indicator_*` and the appearance/color knobs
   (usually themed).

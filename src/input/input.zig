@@ -20,9 +20,10 @@ const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
-// Layout-name resolution for diagnostics (registry-driven; gated so a
-// tiling-less build still compiles).
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+// Layout-name resolution for diagnostics. Reached through the build-generated
+// `tiling_seam` (empty struct when tiling is absent); every member use is
+// gated on has_tiling, so the tiling-less build still compiles.
+const tiling = @import("tiling_seam").tiling;
 // The bar's hook set is reached through the core-owned `surfaces` composition
 // root, never by importing the bar module here. When the bar is absent it is
 // the comptime `null` type, so every `if (build_options.has_bar)` call below
