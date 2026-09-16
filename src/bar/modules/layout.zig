@@ -23,6 +23,7 @@ const fallback_icon = "><>";
 /// disabled or the tiling subsystem is absent (all windows float by
 /// definition).
 fn getIcon() []const u8 {
+    if (tiling_mods.len == 0) return fallback_icon;
     const kind = segmod.currentLayoutKind() orelse return fallback_icon;
     return tiling_mods[kind].icon orelse fallback_icon;
 }

@@ -475,3 +475,13 @@ pub fn register() void {
         .mode_label = modeLabel,
     });
 }
+
+/// This module's prompt-addon binding. Membership in `prompt_subs.addons`
+/// comes from file presence alone (build.zig's sub-registry generation), so
+/// dropping this file silently reverts the prompt to its basic editor with no
+/// core edits.
+pub const addon: prompt.Addon = .{
+    .register = register,
+    .init = init,
+    .deinit = deinit,
+};

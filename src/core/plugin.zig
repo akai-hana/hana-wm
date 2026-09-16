@@ -173,6 +173,11 @@ pub const WindowModule = struct {
     /// present-not-parked AND visibleOn. At most one module binds
     /// this.
     coveringOccupantOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
+    /// Retarget `win`'s covering intent to `ws` without dropping it (a
+    /// covering window stays covering across a workspace move/tag change).
+    /// Peer-service seam for the workspaces module; the binding module owns
+    /// its record guard. At most one module binds this.
+    moveCoveringTo: ?*const fn (*const model.Model, model.WindowId, model.WSId) void = null,
 
     // ---------- Workspaces family (workspaces module) ----------
     /// Move `win` to a single tag `ws` (mask replaces; home-list
@@ -249,6 +254,21 @@ pub const DirtySources = packed struct(u2) {
     focus: bool = false,
     /// A frame change (window/workspace scan diff) repaints this segment.
     frame: bool = false,
+};
+
+/// A bar-segment runtime overlay value: a segment that owns a slot can bind
+/// itself as an overlay provider (the prompt over the title slot), and the
+/// slot's core (the title segment) finds it through the generated segment
+/// registry rather than naming the overlay module. The draw fn shares the
+/// opaque `*anyopaque` convention of `Segment.draw`; the overlay's own draw
+/// adapter performs the same cast to the bar vocabulary it imports.
+pub const BarOverlay = struct {
+    /// True while the overlay is actively covering the slot.
+    is_active: *const fn () bool,
+    /// Toggle the overlay open/closed.
+    toggle: *const fn () void,
+    /// Render the overlay across the slot at `x`, returning the advanced `x`.
+    draw: *const fn (ctx: *anyopaque, x: u16) anyerror!u16,
 };
 
 pub const Segment = struct {
@@ -337,6 +357,12 @@ pub const Segment = struct {
     /// Fired by the bar on every show (map). Lets continuous-motion segments
     /// (the title marquee) resume without teleporting across the hidden gap.
     onBarShown: ?*const fn () void = null,
+    /// Runtime-overlay binding: when set, this segment overlays ANOTHER
+    /// segment's slot (the prompt over the title). The slot's core finds the
+    /// value through the segment registry (never by naming this module) and
+    /// delegates its draw/click/poll duty to it while `is_active`. At most
+    /// one module binds this.
+    overlay: ?BarOverlay = null,
 };
 
 /// The tiling-layout hook set. Every module under the tiling owner's `modules/`
@@ -387,9 +413,9 @@ pub const Layout = struct {
 /// reconciler (sync) and any layout module's `compute`. These live on the
 /// CONTRACT (not the engine module) so the always-compiled reconciler can
 /// reference them even when no tiling modules are present — the engine
-/// re-exports them and every module refers to them as `engine.List` etc.
-/// Keeping this single owned definition (instead of sync mirroring the
-/// engine) removes a must-stay-in-lockstep duplicate.
+/// re-exports them (the tiling seam points at it) while sync and the layout
+/// modules refer to them through the single owned definition, removing a
+/// must-stay-in-lockstep duplicate.
 pub const View = struct {
     order: []const model.WindowId,
     params: *const model.LayoutParams,

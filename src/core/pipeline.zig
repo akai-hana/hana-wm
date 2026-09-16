@@ -29,7 +29,7 @@ const window_mods = @import("window_modules").modules;
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile.
 const tiling_mods = @import("plugin").tiling_mods;
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+const tiling = @import("tiling_seam").tiling;
 
 /// True after init(); tracking's facade gates every model access on this so
 /// boot order never touches the undefined global instance.

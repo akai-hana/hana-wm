@@ -17,6 +17,19 @@
 //!     restarts from its beginning.
 
 const std = @import("std");
+const title_mod = @import("title");
+
+/// This module's title-scroller addon binding. Membership in
+/// `title_subs.addons` comes from file presence alone (build.zig's
+/// sub-registry generation), so dropping this file degrades the title to its
+/// built-in static (ellipsis) rendering with zero core edits.
+pub const addon: title_mod.Scroller = .{
+    .cyclePx = cyclePx,
+    .scrollingActive = scrollingActive,
+    .offsetFor = offsetFor,
+    .resetForShow = resetForShow,
+    .pollDeadlineMs = pollDeadlineMs,
+};
 
 /// Horizontal gap between the repeating copies of a title, in pixels.
 pub const gap_px: u16 = 48;

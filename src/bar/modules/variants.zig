@@ -21,6 +21,7 @@ const no_variant_icon = "";
 /// Resolves the active layout's variant indicator from metadata, by the
 /// current workspace's variant_idx.
 fn getIndicator() []const u8 {
+    if (tiling_mods.len == 0) return no_variant_icon;
     const kind = segmod.currentLayoutKind() orelse return no_variant_icon;
     const mod = tiling_mods[kind];
     const inds = mod.indicators orelse return no_variant_icon;

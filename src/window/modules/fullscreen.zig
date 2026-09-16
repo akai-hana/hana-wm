@@ -25,7 +25,11 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const model = @import("model");
 const plugin = @import("plugin");
-const build_options = @import("build_options");
+const window = @import("window");
+// Peers reach each other's hooks through the generated window registry,
+// never by naming a sibling module: deleting a sibling only shortens the
+// registry, and capabilities stay provider-agnostic.
+const providerOf = window.providerOf;
 
 /// One fullscreen window's record. `anchor` is the *pre-fullscreen* base mode
 /// (the geometry/placement the window returns to on exit). The capture target
@@ -94,7 +98,9 @@ pub fn deinit() void {
 /// BEFORE any mutation, so a full store refuses the toggle without side
 /// effects).
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
-    if (build_options.has_minimize and @import("minimize").isMinimized(m, win)) return false;
+    if (providerOf(.isWindowHidden)) |wm| {
+        if (wm.isWindowHidden.?(m, win)) return false;
+    }
     const e = m.store.getPtr(win) orelse return false;
     if (g_recs.indexOfByIdField(.win, win) != null) {
         // OFF: leave fullscreen; releaseCovering replays the recorded
@@ -464,4 +470,5 @@ pub const module: @import("plugin").WindowModule = .{
     .coveringWsOf = fullscreenWsOf,
     .isCoveringOnWs = isFullscreenOnWs,
     .coveringOccupantOnWs = fullscreenOccupantOnWs,
+    .moveCoveringTo = moveFullscreenTo,
 };
