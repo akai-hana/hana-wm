@@ -97,9 +97,9 @@ try_build() {
     (
         cd "$root"
         if [[ "$VERBOSE" -eq 1 ]]; then
-            zig build -j "$JOBS" 2>&1
+            zig build -j"$JOBS" 2>&1
         else
-            zig build -j "$JOBS" >"$log" 2>&1
+            zig build -j"$JOBS" >"$log" 2>&1
         fi
     )
 }
@@ -191,16 +191,9 @@ run_scenarios() {
         "src/bar" \
         "src/window/modules/floating.zig"
 
-    run_scenario \
-        "tiling + floating" \
-        "src/tiling" \
-        "src/window/modules/floating.zig"
-
-    run_scenario \
-        "everything optional (bar+tiling+floating)" \
-        "src/bar" \
-        "src/tiling" \
-        "src/window/modules/floating.zig"
+    # NOTE: no "both paradigms removed" scenario: build.zig rejects a tree
+    # without at least one of src/tiling/ or floating.zig (a WM must manage
+    # windows), so such a configuration is invalid by contract, not modular.
 
     # Tier 2: Window behaviors
     echo ""

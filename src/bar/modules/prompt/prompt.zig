@@ -10,17 +10,19 @@ const debug = @import("debug");
 const types = @import("types");
 
 const drawing = @import("drawing");
-const build_options = @import("build_options");
 const masks = @import("masks");
 const paths = @import("paths");
 const segmod = @import("segment");
-// The vim modal-editing engine registers its handlers into this module on
-// init: the vim lifecycle lives here, gated on has_vim.
-const vim = segmod.ifEnabled(build_options.has_vim, @import("vim"), struct {
-    pub fn register() void {}
-    pub fn init(_: std.mem.Allocator, _: usize) !void {}
-    pub fn deinit(_: std.mem.Allocator) void {}
-});
+// The vim modal-editing engine is a prompt addon: its lifecycle (and mode
+// UI) rides the generated `prompt_subs` registry, so this module never names
+// it. Dropping vim.zig just shortens the `addons` array and leaves the basic
+// editor handlers in force -- no dead stub, no core edit.
+pub const Addon = struct {
+    register: *const fn () void,
+    init: *const fn (std.mem.Allocator, usize) anyerror!void,
+    deinit: *const fn (std.mem.Allocator) void,
+};
+pub const addons = @import("prompt_subs").addons;
 pub const XK = core.XK;
 pub const xk_back_space = @intFromEnum(XK.BackSpace);
 pub const xk_return = @intFromEnum(XK.Return);
@@ -331,9 +333,12 @@ pub fn init(
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
         debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
-    // The vim engine is a prompt addon: its lifecycle lives here.
-    vim.register();
-    try vim.init(allocator, default_max_input);
+    // The addon lifecycle lives here: each registered engine binds its
+    // handlers into this module's state on init and tears down on deinit.
+    inline for (addons) |a| {
+        a.register();
+        try a.init(allocator, default_max_input);
+    }
 }
 
 /// Lazily allocate the completion, ghost-text and history buffers on first
@@ -354,7 +359,7 @@ fn ensureAlloc() void {
 /// Releases all prompt resources including the keyboard grab, vim state,
 /// completion and history buffers.
 pub fn deinit(allocator: std.mem.Allocator) void {
-    vim.deinit(allocator);
+    inline for (addons) |a| a.deinit(allocator);
     if (g.key_syms) |ks| {
         xcb_key_symbols_free(ks);
         g.key_syms = null;
@@ -1308,4 +1313,5 @@ pub const module: @import("plugin").Segment = .{
     .handleKeypress = handlePromptKeypress,
     .consumeRedrawRequest = consumeRedrawRequest,
     .invalidateReloadCaches = invalidateReloadCaches,
+    .overlay = .{ .is_active = isActive, .toggle = toggle, .draw = drawHook },
 };

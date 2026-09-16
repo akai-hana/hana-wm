@@ -35,15 +35,6 @@ pub const BarHandlers = struct {
     isBarWindow: *const fn (u32) bool,
 };
 
-/// Comptime feature switch for optional segment modules: `real` when the
-/// build option is on, else `stub` (an inline stand-in exposing the same
-/// members, so importing call sites still type-check). Takes three args
-/// because the real module and its stub expose *different* members; a
-/// two-argument form could not synthesize a usable substitution.
-pub fn ifEnabled(comptime on: bool, comptime real: type, comptime stub: type) type {
-    return if (on) real else stub;
-}
-
 /// Live workspace state for one bar frame, collected fresh by bar.zig every
 /// draw. The only segment-visible slice of WM state (besides what a segment
 /// reads directly from core).

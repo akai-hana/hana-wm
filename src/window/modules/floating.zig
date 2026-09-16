@@ -18,7 +18,10 @@ const actions = @import("actions");
 const screen = @import("screen");
 
 const model = @import("model");
-const build_options = @import("build_options");
+// Peers reach each other's hooks through the generated window registry,
+// never by naming a sibling module: deleting a sibling only shortens the
+// registry, and capabilities stay provider-agnostic.
+const providerOf = window.providerOf;
 
 pub const DragMode = enum { move, resize };
 
@@ -153,7 +156,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (screen.isSurfaceWindow(win)) return;
-    if (build_options.has_fullscreen and @import("fullscreen").isFullscreenMode(pipeline.model(), win)) return;
+    if (providerOf(.isCoveringMode)) |wm| {
+        if (wm.isCoveringMode.?(pipeline.model(), win)) return;
+    }
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
@@ -375,8 +380,8 @@ pub fn honorConfigureRequest(
     win: model.WindowId,
     req: model.ConfigureReq,
 ) model.HonorDecision {
-    if (build_options.has_minimize) {
-        if (@import("minimize").isMinimized(m, win)) return .ignored;
+    if (providerOf(.isWindowHidden)) |wm| {
+        if (wm.isWindowHidden.?(m, win)) return .ignored;
     }
     const e = m.store.getPtr(win) orelse return .ignored;
     if (e.presence == .covering) return .ignored; // fullscreen owns geometry
