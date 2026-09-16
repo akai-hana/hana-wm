@@ -3,21 +3,28 @@
 # hana【花】
 ###### A comfy X11 Window Manager written in Zig.
 
+
 ![](https://raw.githubusercontent.com/hana-wm/hana/dev/dev/demonstration.gif)
 
 </div>
 
 > [!NOTE]
-> hana is on a very early development phase. it is already fully functioning, but some of the details mentioned in this `README.md` may only be planned features for now; a "`TODO`" comment will be visible on such cases.
+> hana-wm is on an early development phase.
+> 
+> Once I finish polishing everything, I'll release the stable source code on a new `main` branch, and maintain the latest bleeding-edge development on `dev`.
 
 ---
 
 ### Quick anchors
 
-- [About 花](#about-花)
-- [Architecture](#architecture)
-- [Configuration](#configuration)
-- [Features](#features)
+_(TODO: solve quick anchors; they're disorganized and unsorted)_
+
+- [Introduction](#introduction)
+    - [About 花](#about-花)
+    - 
+    - [Architecture](#architecture)
+    - [Configuration](#configuration)
+    - [Features](#features)
 - [Installation](#installation)
 - [Dependencies](#dependencies)
 - [Roadmap](#roadmap)
@@ -25,21 +32,128 @@
 
 ---
 
-# About 花
+# Introduction
 
-**hana** is an _(optionally)_ dynamic window manager for X11, written in Zig.
+## About 花
 
-It supports tiling/floating window management, and includes its own bar, integrated to the WM.
+**hana** is a dynamic X window manager (+ status bar) written in Zig, focused on modularity, flexibility and comfort.
 
-It is designed with the objective to be comfortable to use, highly configurable and easily modifiable.
+It includes both tiling and floating window management paradigms, as well as its own native bar, integrated to the WM. \
+However, no feature is required for **hana** to work, and the user can add/remove them at will. 
 
 ---
 
-hana's biggest strength is its ability to be molded like Play-Doh™ (not sponsored).
+The highest priority of this window manager is to be as **modular** as possible, and it achieves this by making all features that aren't strictly necessary to hana working **optional**, by isolating their specific logic on their own codefile(s) (following the open-closed principle), and making hana's core **adapt** to the presence/absence of new sub-systems/modules.  
 
-In particular, hana's main offerings are the following:
+Basically, sub-systems (e.g. tiling), as well as their modules (e.g. tiling layouts), act as addons to hana. They can be removed, hana re-compiled, and a new binary is produced, fruit of a different codebase. 
+
+This way, the user can achieve two things:
+1. Features are removed by deleting their source code and re-compiling. \
+   This produces a new binary that stems from a codebase that simply doesn't include the logic for certain features
+3. Features _within_ each sub-system can be added/removed in order to extend _that_ particular sub-system _(e.g. `src/tiling/modules/master.zig`; the master-slave layout)_.
+
+> For a more thorough explanation, see [hana's architecture section](#architecture).
+
+Beyond modularity and its extendability benefits, hana focuses on **comfort** of configurability and usage, as well as the **flexibility** to alter its source code in the most clean and seamless possible way.
+
+For example, a user could remove either the tiling or floating paradigm, can remove the one they don't want to use, 
+
+## Motivations
+
+**hana** was initially born by my love of [dwm](https://dwm.suckless.org/), and discontent of its patch **extendability** system.
+
+I wanted a window manager with three places: one for the core logic, another for the optional sub-systems, and then a place for modules to exist that extend each sub-system; the latter would act as the "patches" that extend hana's behavior. \
+This way, extensions can be managed as codefile plugins, with no addon being permanent, and no patching utilities being required: no patch conflicts, no "tainted" source code, no "patching orders"... Drag'n'drop _(n're-compile)_, baby. 
+
+I also wanted a more... **comfortable** usage experience.
+
+For example, having to re-compile the entire WM on each change, even if it was a minor config adjustment, didn't sit right with me. \
+I understand dwm's reasoning, but I wanted my own WM's config to suck more. That's why hana uses a **TOML config** _(custom-parsed btw)_, and then allows the user for **config hot-reloading**. \
+On that note, **hana's entire BINARY can be hot-reloaded**; if one decides on adding/removing any sub-system or module _on the fly_, they can re-compile hana and hot-reload the binary, preserving their existing X session's windows. _Pretty neat, huh?_  
+
+Finally, I wanted foundational source code **cleanness** and **flexibility**, both of which are tied to hana's modular architecture. \
+- **On cleanness**, sub-systems and modules should not only be handled properly as detachables, but hana's source code should also NOT reference any of the removed module's code. \
+  This means no dummy stubs, but rather closed cores that allow open modules through general interfaces. \
+  _(TODO: write more into detail about this.)_
+  
+- **On flexibility**, the ability for users to extend hana by their own modules should be the bestest possible. \
+  The general interfaces that keep cores closed to modules _also_ allw new modules to be created under those same interfaces. \
+  This means that community extendability should be first-class _(module template examples are also provided!)_. \
+  _(TODO: point to these templates more specifically)_ 
+
+---
+
+# Installation
+```sh
+zig build
+# yeah... that's pretty much it
+```
+
+## Showcase
+
+(video showcase)
+
+<details>
+<summary><b>For a textual showcase, click here for the full set of features/characteristics hana offers (optionally :-) ).</b></summary>
+**On features**
+**On window management:**
+**On customizability:**
+**On hana's bar:**
+
+- Various tiling layouts by default: master-stack, monocle, grid, fibonacci, floating. \
+> (Some layouts include variants!; alternatives that are slightly differing in behavior, but otherwise the same layout.)
+- Per-window tiling/floating _(toggleable AND configurable via float window rules)_
+- Fullscreening/Minimizing
+- Workspaces _(window tags, multi-workspace tagging)_
+- Per-program window rules _(class → workspace, and class → float admission)_
+- Per-workspace configurations & window rules _(numbered `[workspace.rules.N]` sub-tables)_
+- Modular bar _(inspired by dwm)_
+- Various bar widgets _(workspace/layout indicators, window status, clock, volume manager, system status)_
+- Carousel 
+- Inline bar command prompt, vim-modal motions
+- TOML Config file & file joining _(split config across multiple files)_
+- Advanced binding: Ranged-key & array bindings, multi-action keybindings, keybind nesting, bind glob expansion
+- WM scaling across any display resolution
+- Drag-and-drop window placement with snapping
+- Window persistence across restarts, and a clean re-exec (`reload_hana`)
+- EWMH/ICCCM cooperation _(window class, `_NET_WM_PID`, fullscreen hints, …)_
+- Crash diagnostics: alternate-signal-stack backtrace dump on SIGUSR2
+- Monitor refresh-rate detection via RandR (carousel timing)
+</details>
+
+_(TODO: revise the feature list and make sure everything is described completely)_
+_(TODO: sort all the features on the described groups; make more groups if necessary, but don't over-group and make things too verbose)_
+
+## Dependencies
+- Zig 0.16.0 (`build.zig.zon` pins `minimum_zig_version = "0.16.0"`)
+- X server (xorg/xlibre)
+- libxcb (for, well, everything)
+- xcb-util-cursor (for custom cursor support)
+- xkbcommon + xkbcommon-x11 (keyboard input handling)
+- xcb-keysyms (prompt key handling)
+- xcb-randr (monitor refresh-rate detection)
+- cairo + pango (bar rendering)
+_(TODO: make sure these are all system dependencies the user needs to have installed)_
+
+### Ubuntu/Debian-based
+```sh
+apt install libxcb1-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev
+```
+
+*more distros later :)*
+
+_(TODO: add more instructions for other distros' dependency installations)_
+
+---
+
+# Body
+> Going deeper into detail in hana's internals
 
 ## Architecture 
+
+_(TODO: revise everything below)_
+
+<img alt="hana's architecture; onion layers diagram" src="https://github.com/user-attachments/assets/54937208-8dd1-4525-b8f1-1cc00996fde0" />
 
 hana counts with a modular codebase architecture, split into single-responsibility code files, written with the goal of making the codebase tidy and easily modifiable by any user. Any file or directory that isn't essential to this WM working/booting up can be just removed, and hana will recompile just fine. 
 
@@ -78,54 +192,6 @@ Since this is all an arbitrary design choice, it is optional and re-categorizabl
 
 > BTW, pull requests with custom themes are very much welcome. :-)
 
-## Features
-
-Here's the full set of features/characteristics hana offers by default.
-
-- Various window layouts by default: master-stack, monocle, grid, fibonacci, floating
-- Per-window tiling/floating _(togglable AND configurable via float window rules)_
-- Fullscreening/Minimizing
-- Workspaces _(window tags, multi-workspace tagging)_
-- Per-program window rules _(class → workspace, and class → float admission)_
-- Per-workspace configurations & window rules _(numbered `[workspace.rules.N]` sub-tables)_
-- Modular bar _(inspired by dwm)_
-- Various bar widgets _(workspace/layout indicators, window status, clock, volume manager, system status)_
-- Carousel 
-- Inline bar command prompt, vim-modal motions
-- TOML Config file & file joining _(split config across multiple files)_
-- Advanced binding: Ranged-key & array bindings, multi-action keybindings, keybind nesting, bind glob expansion
-- WM scaling across any display resolution
-- Drag-and-drop window placement with snapping
-- Window persistence across restarts, and a clean re-exec (`reload_hana`)
-- EWMH/ICCCM cooperation _(window class, `_NET_WM_PID`, fullscreen hints, …)_
-- Crash diagnostics: alternate-signal-stack backtrace dump on SIGUSR2
-- Monitor refresh-rate detection via RandR (carousel timing)
-
----
-
-# Installation
-```sh
-zig build
-# yeah... that's pretty much it
-```
-
-## Dependencies
-- Zig 0.16.0 (`build.zig.zon` pins `minimum_zig_version = "0.16.0"`)
-- X server (xorg/xlibre)
-- libxcb (for, well, everything)
-- xcb-util-cursor (for custom cursor support)
-- xkbcommon + xkbcommon-x11 (keyboard input handling)
-- xcb-keysyms (prompt key handling)
-- xcb-randr (monitor refresh-rate detection)
-- cairo + pango (bar rendering)
-
-### Ubuntu/Debian-based
-```sh
-apt install libxcb1-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev
-```
-
-*more distros later :)*
-
 ---
 
 # Roadmap
@@ -159,6 +225,8 @@ dev/scripts/xtest.sh zig build test   # runs under Xvfb; headless `zig build tes
   (set `HANA_REQUIRE_X=1` to turn a skip into a hard failure).
 - Feature TODO markers inside the codebase are searchable with
   `rg -n "TODO" src/`.
+
+---
 
 <div align="center">
 
