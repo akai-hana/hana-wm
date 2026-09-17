@@ -134,7 +134,7 @@ pub const knobs = [_]Knob{
     // Base palette: read before every color_from consumer below. The three
     // window-state colors (primary/secondary/alternative) plus text_color are
     // also the document-global palette variables: color knobs may name them
-    // by bare reference from any section (resolved from parser.Document's
+    // by full reference from any section (resolved from parser.Document's
     // collected palette in getColorFromValue).
     barPlainColor("bg"),
     barPlainColor("fg"),
@@ -308,8 +308,8 @@ pub fn getInRange(
 }
 
 /// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
-/// `0xRRGGBB`, an integer, or a bare reference to a collected palette
-/// variable (e.g. `border_focused = primary`).
+/// `0xRRGGBB`, an integer, or a full-name reference to a collected palette
+/// variable (e.g. `border_focused = primary_color`).
 fn getColorFromValue(
     key: []const u8,
     val: parser.Value,
@@ -417,7 +417,7 @@ pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const 
 /// propagates; everything else warns-and-reverts in place.
 pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types.Config) !void {
     // Resolve the document-global palette (four reserved variable names)
-    // before the knobs read: color knobs may reference them by bare name.
+    // before the knobs read: color knobs may reference them by full name.
     parser.collectPalette(doc);
     const palette: *const std.StringHashMap(u32) = &doc.palette;
     inline for (knobs) |k| knob: {

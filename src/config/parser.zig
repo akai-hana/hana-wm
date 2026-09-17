@@ -299,10 +299,10 @@ pub const Document = struct {
     root: Section,
     /// Document-global color palette: the reserved palette variable names
     /// (see `palette_var_names`) declared anywhere in the load, parsed as
-    /// literal colors. Any color-valued knob may reference them by bare name
-    /// (`border_focused = primary`) from any section. Populated by
-    /// `collectPalette` once all includes are merged, so "later declaration
-    /// wins" matches every other knob.
+    /// literal colors. Any color-valued knob may reference them by their
+    /// full knob name (e.g. `border_focused = primary_color`) from any
+    /// section. Populated by `collectPalette` once all includes are merged,
+    /// so "later declaration wins" matches every other knob.
     palette: std.StringHashMap(u32),
     /// Set when any line in this document was warn-and-skipped, or when a
     /// whole file it represents was skipped during the load's merge.
@@ -332,11 +332,11 @@ pub const Document = struct {
 };
 
 /// The named color-palette slots a theme declares once and any color-valued
-/// knob may reference by bare name (`border_focused = primary`,
-/// `title = secondary`, ...). `primary_color` doubles as the bar's default
-/// accent knob (the former `accent_color`); the other three are pure palette
-/// declarations currently consumed by the fallback chain and the theme's
-/// `[bar.colors]` entries.
+/// knob may reference by full name (`border_focused = primary_color`,
+/// `title = secondary_color`, ...). `primary_color` doubles as the bar's
+/// default accent knob (the former `accent_color`); the other three are pure
+/// palette declarations currently consumed by the fallback chain and the
+/// theme's `[bar.colors]` entries.
 pub const palette_var_names = [_][]const u8{
     "primary_color",
     "secondary_color",
@@ -360,9 +360,7 @@ fn paletteColorOf(val: Value) ?u32 {
 
 /// Scans every section (and the root) for palette-variable declarations,
 /// resolving each to its color value and storing the last declaration into
-/// `doc.palette` under BOTH the full knob name ("primary_color") and its
-/// reference alias ("primary", i.e. the name with a trailing "_color"
-/// stripped). Also marks the keys consumed so they never appear as
+/// `doc.palette`. Also marks the keys consumed so they never appear as
 /// unrecognized. Call once per merged Document, before knobs are applied.
 pub fn collectPalette(self: *Document) void {
     for (palette_var_names) |name| {
@@ -378,10 +376,6 @@ pub fn collectPalette(self: *Document) void {
         }
         if (best) |c| {
             self.palette.put(name, c) catch {};
-            const suffix = "_color";
-            if (std.mem.endsWith(u8, name, suffix) and name.len > suffix.len) {
-                self.palette.put(name[0 .. name.len - suffix.len], c) catch {};
-            }
         }
     }
 }

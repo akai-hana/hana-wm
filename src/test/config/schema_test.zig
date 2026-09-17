@@ -203,8 +203,8 @@ test "segment_spacing feeds BarConfig.spacing; workspaces count pads icons" {
 
 test "fallback chains: title/drun colors follow their siblings" {
     // Regime 1: no [bar.colors] at all. The accent trio was UNCONDITIONALLY
-    // assigned its fallback sibling (now the palette canon: primary /
-    // secondary / alternative); the drun trio were left untouched (null),
+    // assigned its fallback sibling (now the palette canon: primary_color /
+    // secondary_color / alternative_color); the drun trio were left untouched (null),
     // deferring to BarConfig's read-time fallbacks.
     var no_colors = try loadToml(testing.allocator, "chains-nocolors",
         \\[bar]
@@ -249,15 +249,15 @@ test "fallback chains: title/drun colors follow their siblings" {
     try testing.expectEqual(@as(?u32, null), with_title.bar.indicator_color);
 }
 
-test "palette references resolve by bare name cross-section" {
+test "palette references resolve by full name cross-section" {
     // The four palette vars are the source of truth; color knobs reference
-    // them by bare name from ANY section, and changing one variable updates
+    // them by full name from ANY section, and changing one variable updates
     // the whole color set.
     var refs = try loadToml(testing.allocator, "palette-refs",
         \\[tiling]
         \\[tiling.aesthetics]
-        \\border_focused   = primary
-        \\border_unfocused = secondary
+        \\border_focused   = primary_color
+        \\border_unfocused = secondary_color
         \\
         \\[bar]
         \\primary_color     = "#aa0000"
@@ -266,12 +266,12 @@ test "palette references resolve by bare name cross-section" {
         \\text_color        = "#eeeeee"
         \\bg = "#0a0b0c"
         \\fg = "#070809"
-        \\selected_bg = primary
+        \\selected_bg = primary_color
         \\
         \\[bar.colors]
-        \\title           = primary
-        \\title_unfocused = secondary
-        \\title_minimized = alternative
+        \\title           = primary_color
+        \\title_unfocused = secondary_color
+        \\title_minimized = alternative_color
         \\
     );
     defer refs.deinit(testing.allocator);
@@ -284,7 +284,7 @@ test "palette references resolve by bare name cross-section" {
     try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.secondary_color);
     try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.alternative_color);
     try testing.expectEqual(@as(u32, 0xEEEEEE), refs.bar.text_color);
-    // [bar.colors] and selected_bg inherit through bare references.
+    // [bar.colors] and selected_bg inherit through full-name references.
     try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.selected_bg);
     try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.title_unfocused_accent);

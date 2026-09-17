@@ -158,7 +158,7 @@ segments = ["systatus", "volume", "clock"]
 # selected_fg = "#EEEEEE"  # Active workspace indicator foreground
 #
 # The palette variables below are the theme's source of truth: color knobs
-# reference them by bare name (e.g. `selected_bg = primary`) from any
+# reference them by full name (e.g. `selected_bg = primary_color`) from any
 # section, so changing one variable recolors the whole bar.
 # primary_color     = "#ac3232"  # Focused title / active border / selected_bg default
 # secondary_color   = "#52263e"  # Unfocused titles
