@@ -17,10 +17,10 @@ kill -0 "$HANA_PID" 2>/dev/null || {
 	return 1
 }
 
-[ -f "$HW_OUT/config-home/hana-crash.log" ] && {
+if [ -f "$HW_OUT/config-home/hana-crash.log" ]; then
 	echo "FAIL: crash marker appeared during reload" >&2
 	return 1
-}
+fi
 
 kill -TERM "$HANA_PID"
 _deadline=$(( $(date +%s) + 5 ))
@@ -36,7 +36,8 @@ grep -q "Shutting down gracefully..." "$HW_LOG" || {
 	echo "FAIL: missing graceful-shutdown log line" >&2
 	return 1
 }
-[ -f "$HW_OUT/config-home/hana-crash.log" ] && {
+if [ -f "$HW_OUT/config-home/hana-crash.log" ]; then
 	echo "FAIL: crash marker present after SIGTERM quit" >&2
 	return 1
-}
+fi
+return 0

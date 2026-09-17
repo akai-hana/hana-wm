@@ -1239,6 +1239,10 @@ pub fn toggleBarSegmentAnchor() void {
         xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{utils.toXcbCoord(new_y)},
     );
+    // B3: publish the new edge BEFORE any early return. The bar window has
+    // already moved and bar_position changed, so bailing out below without
+    // syncing would leave core.screen claiming the old edge.
+    syncScreenClaim();
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         window.markBordersFlushed();
@@ -1246,11 +1250,8 @@ pub fn toggleBarSegmentAnchor() void {
         return;
     };
     const no_fullscreen = !visibility.barForcedHiddenByFullscreen(current_ws);
-    // The bar's edge changed; update its claim so the reconcile below
+    // The bar's edge changed (claim synced above); the reconcile below
     // re-derives every placement from the new usable area.
-    syncScreenClaim();
-    // The work area changed with the bar's new edge; one model reconcile
-    // re-derives every placement from it.
     // LAYERING NOTE: The bar triggers reconciliation after visibility/position
     // changes because the work area geometry changed, affecting all window
     // placements. This is a write-path side effect from a rendering module,

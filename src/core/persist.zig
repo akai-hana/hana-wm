@@ -193,10 +193,10 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     // name, so we never write through a planted entry. A stale temp left by a
     // crashed run is the one legitimate occupant; remove it and retry once.
     const file = blk: {
-        const attempt = std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true }) catch |err| switch (err) {
+        const attempt = std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true, .permissions = @enumFromInt(0o600) }) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 std.Io.Dir.deleteFileAbsolute(io, tmp) catch {};
-                break :blk try std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true });
+                break :blk try std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true, .permissions = @enumFromInt(0o600) });
             },
             else => return err,
         };

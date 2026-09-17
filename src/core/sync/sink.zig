@@ -16,6 +16,7 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
 const sync = @import("sync");
+const debug = @import("debug");
 
 pub const XcbSink = struct {
     conn: core.Connection,
@@ -73,8 +74,9 @@ pub const XcbSink = struct {
     }
 
     fn stackOnlyShim(ptr: *anyopaque, win: u32, s: sync.Stack) void {
-        _ = s;
-        utils.raiseWindow(XcbSink.fromPtr(ptr).conn, win);
+        switch (s) {
+            .above => utils.raiseWindow(XcbSink.fromPtr(ptr).conn, win),
+        }
     }
 
     /// Set/clear `fs_atom` in the `_NET_WM_STATE` list on `win` while PRESERVING
@@ -82,6 +84,13 @@ pub const XcbSink = struct {
     /// atom would nuke e.g. _NET_WM_STATE_ABOVE/_STICKY the client set). One
     /// blocking get_property round-trip then one replace-mode change_property;
     /// only reachable from a fullscreen toggle, so the round-trip is acceptable.
+    ///
+    /// C6: the read buffer is bounded, so a list longer than `max_ewmh_states`
+    /// would be silently TRUNCATED by the REPLACE (dropping the client's other
+    /// state atoms). We detect that via `bytes_after != 0` and bail out without
+    /// touching the property rather than corrupting it.
+    const max_ewmh_states = 64;
+
     fn setEwmhFullscreenShim(
         ptr: *anyopaque,
         win: u32,
@@ -91,23 +100,30 @@ pub const XcbSink = struct {
     ) void {
         const conn = XcbSink.fromPtr(ptr).conn;
 
-        var atoms: [32]u32 = undefined;
+        var atoms: [max_ewmh_states]u32 = undefined;
         var count: usize = 0;
         const get_cookie = xcb.xcb_get_property(conn, 0, win, state_atom, xcb.XCB_ATOM_ATOM, 0, atoms.len);
         if (xcb.xcb_get_property_reply(conn, get_cookie, null)) |reply| {
             defer std.c.free(reply);
             if (reply.*.format == 32 and reply.*.type == xcb.XCB_ATOM_ATOM) {
+                // More atoms on the wire than we can preserve: rewriting would
+                // drop them. Leave the property alone.
+                if (reply.*.bytes_after != 0) {
+                    debug.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping fullscreen update", .{ win, max_ewmh_states });
+                    return;
+                }
                 const raw = xcb.xcb_get_property_value(reply) orelse return;
                 const n: usize = @intCast(reply.*.value_len);
                 const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, atoms.len)];
                 for (existing) |a| {
                     if (a == fs_atom or a == 0) continue;
+                    if (count == atoms.len) break;
                     atoms[count] = a;
                     count += 1;
                 }
             }
         }
-        if (is_fullscreen) {
+        if (is_fullscreen and count < atoms.len) {
             atoms[count] = fs_atom;
             count += 1;
         }

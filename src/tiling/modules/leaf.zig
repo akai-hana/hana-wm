@@ -42,9 +42,21 @@ fn tileRegion(
     const gap = ctx.m.gap;
 
     const horizontal = r.w >= r.h;
+    const dim: u32 = if (horizontal) r.w else r.h;
+    // The pane cannot hold two min-dim children plus the seam gap: the leaf
+    // inset would floor both halves to min_dim and push the second past the
+    // parent (overlapping its neighbor). Hand the whole region to the focused
+    // window and park the rest, the same overflow-share shape fibonacci uses.
+    if (dim < @as(@TypeOf(dim), ctx.min_dim) * 2 +| @as(@TypeOf(dim), gap)) {
+        const top = tiling.focusedElse(ctx.v, windows, windows[0]);
+        tiling.emitView(ctx.v, ctx.out, top, tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim), true);
+        tiling.showOneHideRest(ctx.out, windows, top);
+        return;
+    }
+
     // bisectRegion keeps the pair inside the parent: `first + gap + second`
     // never exceeds `dim`, so a tight pane can't push a child past it.
-    const split = tiling.bisectRegion(if (horizontal) r.w else r.h, gap);
+    const split = tiling.bisectRegion(@intCast(dim), gap);
     const split_offset: i32 = @as(i32, @intCast(split.first +| gap));
 
     const first = Region{ .x = r.x, .y = r.y, .w = if (horizontal) split.first else r.w, .h = if (horizontal) r.h else split.first };

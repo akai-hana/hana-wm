@@ -42,16 +42,6 @@ const max_events_per_batch: usize = 128;
 // loop in handleXcbEvents); a chatty client cannot fill it beyond this.
 const max_queued_drain: usize = 256;
 
-// Module-level carry for the non-motion event stashed while coalescing the
-// LAST batch's motions but not yet dispatched when the batch cap hit. It is
-// owned here (NOT in a stack-local `pending`) so it survives the gap between
-// one handleXcbEvents return and the next poll round; a stack-local `pending`
-// would have to free it at cap exit, silently DROPPING a real event (e.g. a
-// KeyPress or ConfigureNotify) that had already been charged against—and
-// skipped within—that batch. Sizing is exact: at most one event is ever
-// stashed (motion coalescing holds only the newest motion and one non-motion).
-var stashed_event: ?*xcb.xcb_generic_event_t = null;
-
 const EventHandler = *const fn (event: *anyopaque) void;
 
 // Casts a `fn(*T) void` event handler to the generic `EventHandler` pointer
@@ -468,18 +458,12 @@ fn handleReexec() !void {
     restart.execNext(self_path, path);
 }
 
-// Returns a pending stashed event if one exists, otherwise polls for the next
-// XCB event. `pending` holds the non-motion event stashed during motion
-// coalescing so ordering is preserved across batch iterations.
+// Returns a pending coalesced non-motion event if one exists, otherwise polls
+// for the next XCB event. `pending` holds the non-motion event stashed during
+// motion coalescing so ordering is preserved across batch iterations.
 fn takeEvent(pending: *?*xcb.xcb_generic_event_t, conn: core.Connection) ?*xcb.xcb_generic_event_t {
     if (pending.*) |p| {
         pending.* = null;
-        return p;
-    }
-    // Carry from a prior cap-exit batch first, so a stashed event that was
-    // charged against the previous batch's budget is not lost.
-    if (stashed_event) |p| {
-        stashed_event = null;
         return p;
     }
     return xcb.xcb_poll_for_event(conn);
@@ -544,12 +528,11 @@ fn handleXcbEvents() void {
     }
 
     // A cap exit can leave a non-motion event held in `pending` (stashed
-    // during motion coalescing). It was already skipped this batch, so carry
-    // it to the next batch's `takeEvent` rather than dropping it — it's a
-    // real event that the batch budget had already accounted for. On the
-    // normal (socket-empty) exit path `pending` is always null and nothing is
-    // carried.
-    if (pending) |p| stashed_event = p;
+    // during motion coalescing). It was pulled BEFORE anything the queued
+    // drain below will read, so dispatch it now to preserve order: carrying it
+    // to the next batch dispatched it after the (hundreds of) later events the
+    // drain surfaces. On the normal (socket-empty) exit path `pending` is null.
+    if (pending) |p| dispatchOwned(p);
 
     // Drain remaining events from XCB's internal event queue. When the
     // batch cap is hit above, events already buffered inside XCB (but not
@@ -560,10 +543,27 @@ fn handleXcbEvents() void {
     // events immediately.
     {
         var extra: usize = 0;
+        // Coalesce motion runs here too: a motion-heavy read-ahead buffer
+        // (the very stream that cap-exited the batch above) must collapse to
+        // its newest member instead of dispatching up to 256 individual
+        // reconciles. The newest motion is held and flushed only when a
+        // non-motion event (or the queue's end) forces it, preserving order.
+        var held: ?*xcb.xcb_generic_event_t = null;
         while (extra < max_queued_drain) : (extra += 1) {
             const event = xcb.xcb_poll_for_queued_event(conn) orelse break;
+            if (isMotion(event)) {
+                if (held) |h| std.c.free(h);
+                held = event;
+                continue;
+            }
+            if (held) |h| {
+                const m = h;
+                held = null;
+                dispatchOwned(m);
+            }
             dispatchOwned(event);
         }
+        if (held) |h| dispatchOwned(h);
     }
 
     // Drain any spawn pipes that became readable during this event batch.

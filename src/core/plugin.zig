@@ -269,6 +269,12 @@ pub const BarOverlay = struct {
     toggle: *const fn () void,
     /// Render the overlay across the slot at `x`, returning the advanced `x`.
     draw: *const fn (ctx: *anyopaque, x: u16) anyerror!u16,
+    /// Runtime "repaint me" query, mirroring `Segment.needsRepaint`: true while
+    /// the overlay holds visual state (a caret-blink toggle) that only reaches
+    /// the screen when its draw runs. The host slot's `needsRepaint` forwards
+    /// this, so the bar repaints just that slot instead of forcing a whole-bar
+    /// redraw. The overlay clears the state inside its own draw.
+    needsRepaint: *const fn () bool,
 };
 
 pub const Segment = struct {
