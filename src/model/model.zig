@@ -26,6 +26,11 @@ pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
 /// Single canonical size-hints record. Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
+    /// PMinSize / PBaseSize floor. Tiling deliberately ignores this (the layout
+    /// engine owns tiled dimensions), but the floating drag-resize path honours
+    /// it as a user-facing floor.
+    min_width: u16 = 0,
+    min_height: u16 = 0,
     max_width: u16 = 0, // PMaxSize limit
     max_height: u16 = 0,
     inc_width: u16 = 0, // PResizeInc: w = base_width + N * inc_width
@@ -35,8 +40,10 @@ pub const SizeHints = struct {
 
     /// True when every field is zero (no constraints declared).
     pub fn isEmpty(self: SizeHints) bool {
-        return self.max_width == 0 and self.max_height == 0 and self.inc_width == 0 and
-            self.inc_height == 0 and self.min_aspect == 0.0 and self.max_aspect == 0.0;
+        return self.min_width == 0 and self.min_height == 0 and
+            self.max_width == 0 and self.max_height == 0 and
+            self.inc_width == 0 and self.inc_height == 0 and
+            self.min_aspect == 0.0 and self.max_aspect == 0.0;
     }
 };
 
@@ -383,13 +390,17 @@ pub fn clearFocus(m: *Model) void {
 ///   2. reversed tiled_order,
 ///   3. any visible floating-base window not in tiled_order.
 /// First visibleOn(ws) candidate wins; null when nothing qualifies.
-pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
+/// `excluded` is a candidate the caller already rejected (e.g. a no_input
+/// window that can never hold X focus) — it is skipped across all tiers so
+/// the caller can re-scan for the next focusable window.
+pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?WindowId {
     // 1. focus MRU, NEWEST first: mru[0] is the MOST RECENT focus,
     //    so minimizing the focused window falls back to the previously
     //    focused one. visibleOn rejects parked entries, including the
     //    just-parked window itself.
     const mru = &m.ws[ws].focus_mru;
     for (mru.constSlice()) |cand| {
+        if (cand == excluded) continue;
         if (visibleOn(m, cand, ws)) return cand;
     }
     // 2. reversed tiled_order of the workspace.
@@ -397,6 +408,7 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
     while (j > 0) {
         j -= 1;
         const cand = m.ws[ws].tiled_order.items[j];
+        if (cand == excluded) continue;
         if (visibleOn(m, cand, ws)) return cand;
     }
     // 3. any floating window on ws (base geometry, not in tiled_order).
@@ -406,6 +418,7 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId) ?WindowId {
     for (0..m.store.count()) |k| {
         const it = m.store.at(k);
         if (it.val.anchor != .floating or it.val.presence == .covering) continue;
+        if (it.key == excluded) continue;
         if (!visibleOn(m, it.key, ws)) continue;
         if (m.ws[ws].tiled_order.indexOfScalar(it.key) == null) return it.key;
     }

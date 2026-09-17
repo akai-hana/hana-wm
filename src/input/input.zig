@@ -175,11 +175,13 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // inside it (input flows in, true = consumed, before keybinding dispatch).
     if (build_options.has_bar) if (surfaces.chromeHandleKeypress(event, matched)) return;
 
-    // A held binding key makes the server replay KeyPress (autorepeat). The
-    // release WAS captured by the passive grab, but without tracking we would
-    // re-fire toggle actions on every repeat. Suppress re-dispatch while the
-    // keycode is already held. Only keycodes this WM's grabs intercepted ever
-    // reach here, so the set stays small.
+    // A held binding key emits repeated KeyPress events: either the server
+    // replays KeyPress (detectable auto-repeat, enabled in xkbcommon.zig) or it
+    // interleaves a deactivating KeyRelease with each repeat. The real
+    // KeyRelease clears the ledger, but an autorepeat KeyPress must not re-fire
+    // the action, so suppress re-dispatch while the keycode is already held.
+    // Only keycodes this WM's grabs intercepted ever reach here, so the set
+    // stays small.
     if (keyHeld(event.detail)) return;
     setKeyHeld(event.detail);
 
@@ -359,11 +361,13 @@ fn executeAction(action: *const types.Action) void {
         .move_window_prev => actions.moveFocused(-1),
         .scroll_view => |dir| actions.viewportStep(if (dir == .forward) @as(i32, 1) else -1),
 
-        // Cycle focus: focus forward or backward, then snap viewport to the
-        // newly focused window so it is always visible on screen.
+        // Cycle focus forward/backward. The viewport snap runs as a duty
+        // inside the focus transition's single grab (see
+        // actions.snapViewportFocusedDuty), so a cycle that scrolls the
+        // viewport is still one grab+reconcile, not focus-then-snap's two.
         .cycle_focus => |dir| {
-            if (dir == .forward) focus.focusNext() else focus.focusPrev();
-            actions.snapViewportToFocused();
+            if (focus.cycleTarget(dir == .forward)) |target|
+                focus.grabFocusWithDuty(target, .user_command, &actions.snapViewportFocusedDuty);
         },
 
         // Workspaces. workspaces.zig self-gates to a single implicit
@@ -438,8 +442,9 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
     // Linear scan is intentional: mouse bindings are few (~5-10), hash overhead not worth it.
     for (core.getState().config.mouse_bindings.items) |*mb|
         if (mb.modifiers == mods and mb.button == button) {
-            // Mouse binds act on the clicked window rather than the
-            // keyboard-focused one (e.g. toggle_floating_window).
+            // Most mouse binds execute against the keyboard-focused window
+            // (executeAction); toggle_floating_window is inherently per-window
+            // and so targets the CLICKED window instead.
             switch (mb.action) {
                 .toggle_floating_window => tilingOp(actions.toggleFloating, win),
                 else => executeAction(&mb.action),

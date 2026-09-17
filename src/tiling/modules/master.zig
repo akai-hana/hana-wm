@@ -135,6 +135,11 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
 
     var capped: [constants.Limits.max_tiled_windows]bool = undefined;
     @memset(capped[0..windows.len], false);
+    // Snapshot each window's max_height ONCE: the water-fill below re-reads
+    // the hint inside its pinning passes, and hoisting it keeps those passes
+    // O(n) plain u16 compares instead of re-resolving the hint each time.
+    var max_h: [constants.Limits.max_tiled_windows]u16 = undefined;
+    for (windows, 0..) |win, i| max_h[i] = ctx.v.hints.forWin(win).max_height;
     var rem_avail = avail;
     var rem_weight: f32 = @as(f32, @floatFromInt(n)) + boost.top + boost.bottom;
     var rem_count = n;
@@ -142,16 +147,15 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     var pinned = true;
     while (pinned and rem_count > 0) {
         pinned = false;
-        for (windows, 0..) |win, i| {
+        for (windows, 0..) |_, i| {
             if (capped[i]) continue;
             const w_i: f32 = if (zero_boost) 1.0 else windowWeight(@intCast(i), n, boost);
             const fair: u16 = if (rem_weight > 0)
                 @intFromFloat(@as(f32, @floatFromInt(rem_avail)) * w_i / rem_weight)
             else
                 0;
-            const max_h = ctx.v.hints.forWin(win).max_height;
-            if (max_h > 0 and max_h <= fair) {
-                out[i] = @max(ctx.min_dim, max_h);
+            if (max_h[i] > 0 and max_h[i] <= fair) {
+                out[i] = @max(ctx.min_dim, max_h[i]);
                 capped[i] = true;
                 rem_avail -|= out[i];
                 rem_weight -= w_i;

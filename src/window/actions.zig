@@ -138,31 +138,29 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
 /// before the grab, the protocol commit runs inside it.
 fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
     // Tier policy lives in the model layer so tests can exercise it without
-    // linking the protocol side (see model.fallbackFocusCandidate).
-    if (model_mod.fallbackFocusCandidate(m, m.current)) |winner| {
+    // linking the protocol side (see model.fallbackFocusCandidate). A
+    // no_input candidate can never hold X focus, so it is excluded and the
+    // scan continues to the next focusable window; only when nothing
+    // focusable remains is model focus cleared and X focus handed to root.
+    var excluded: ?model_mod.WindowId = null;
+    while (model_mod.fallbackFocusCandidate(m, m.current, excluded)) |winner| {
         // Prepare BEFORE the model write: prepareFocus resolves the input
         // model (round trip) and can re-raise an already-applied window.
         // The model write is conditional on a real `.set` intent, so a
         // no_input candidate never takes model focus.
         const prep = focus.prepareFocus(winner, .tiling_operation, null);
         if (prep == .none and focus.lastRejectWasNoInput()) {
-            // A no_input fallback candidate can never hold X focus. If it is
-            // the only visible window here, hand X focus to the root so a
-            // just-hidden or closed predecessor can't keep the keyboard
-            // captive.
-            model_mod.clearFocus(m);
-            if (focus.isOnlyVisibleOnCurrentWs(winner)) focus.refocusRoot();
-        } else if (prep != .none) {
-            model_mod.setFocus(m, winner);
+            excluded = winner;
+            continue;
         }
-        return prep;
-    } else {
-        // prepareClearFocus reads MODEL focus as its decision source, so it
-        // runs BEFORE the model clear.
-        const prep = focus.prepareClearFocus();
-        model_mod.clearFocus(m);
+        if (prep != .none) model_mod.setFocus(m, winner);
         return prep;
     }
+    // prepareClearFocus reads MODEL focus as its decision source, so it
+    // runs BEFORE the model clear.
+    const prep = focus.prepareClearFocus();
+    model_mod.clearFocus(m);
+    return prep;
 }
 
 // --------------------------------------------------------- restore (unpark)
@@ -582,19 +580,19 @@ pub fn viewportStep(dir: i32) void {
 }
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
-/// window's slot is fully on-screen. When the focused window is already fully
-/// on-screen (the common case during focus cycling), the desired viewport
-/// offset and tiled count are unchanged, so the reconcile is skipped entirely:
-/// the focus transition's own grab-reconcile already handled borders, and an
-/// unchanged viewport needs no geometry reposition. This avoids a second
-/// full grab+reconcile+flush per Mod+k/Mod+j when nothing about the viewport
-/// actually moved.
-pub fn snapViewportToFocused() void {
-    const vp = activeViewport() orelse return;
+/// window's slot is fully on-screen. Pure model/param mutation (no grab, no
+/// reconcile); returns whether the offset or tiled count actually changed.
+/// When the focused window is already fully on-screen (the common case during
+/// focus cycling) both are unchanged and the caller can skip all geometry
+/// work. The focus-cycle path runs this as a duty INSIDE the focus transition's
+/// grab, so a Mod+k/Mod+j that scrolls the viewport still lands focus + geometry
+/// in one grab+reconcile rather than two.
+fn snapViewportParamsToFocused() bool {
+    const vp = activeViewport() orelse return false;
     const m = vp.m;
     const p = vp.p;
     const sc = vp.sc;
-    const win = m.focused orelse return;
+    const win = m.focused orelse return false;
 
     var idx: ?usize = null;
     var n: usize = 0;
@@ -604,7 +602,7 @@ pub fn snapViewportToFocused() void {
         if (w == win) idx = n;
         n += 1;
     }
-    const i = idx orelse return;
+    const i = idx orelse return false;
 
     const wa = screen.workArea(core.getState().screen);
     const i64_slot_w: i64 = sc.slot_w;
@@ -620,8 +618,15 @@ pub fn snapViewportToFocused() void {
     p.viewport_offset = std.math.clamp(p.viewport_offset, 0, sc.max_off);
     const old_count = p.viewport_prev_count;
     p.viewport_prev_count = @intCast(n);
-    if (p.viewport_offset == old_offset and p.viewport_prev_count == old_count) return;
-    pipeline.reconcileUnderGrabNow(.{});
+    return p.viewport_offset != old_offset or p.viewport_prev_count != old_count;
+}
+
+/// Focus-cycle duty (see focus.grabFocusWithDuty): recompute the viewport for
+/// the freshly focused window and let the enclosing reconcile pick it up.
+/// Signature is void to match the pipeline duty pointer; the change signal is
+/// not needed because the transition's reconcile always runs.
+pub fn snapViewportFocusedDuty() void {
+    _ = snapViewportParamsToFocused();
 }
 
 const ViewportContext = struct {
@@ -849,32 +854,28 @@ pub fn switchTo(ws_idx: u8) void {
     // (Super+2 immediately after Super+1) waits behind that stall, which is
     // exactly the "quick workspace switches sometimes don't register" symptom.
     // A keyboard switch has no pointer gesture to honor, so focus is decided
-    // purely from the model with zero X round trips.
-    const target: ?model_mod.WindowId = model_mod.fallbackFocusCandidate(m, ws_idx);
-
-    // Pre-fire the fallback's WM_PROTOCOLS query only on a take_focus cache
-    // miss; the common path is cache-backed (see window.zig's "ICCCM focus
-    // property cache" note) so nothing is wasted, and the miss case overlaps
-    // the FocusTransition prep below instead of blocking inline.
-    const pre_protocols_cookie = if (target) |t|
-        (if (window.isInputModelCached(t)) null else window.fireWMProtocolsQuery(cs.conn, t))
-    else
-        null;
-
-    const ft: focus.FocusTransition = if (target) |t| blk: {
-        // Prepare BEFORE the model write: a no_input target must not take
-        // model focus, and a lone no_input target leaves X focus on the
-        // root rather than captive on the departed workspace.
-        const prep = focus.prepareFocus(t, .workspace_switch, pre_protocols_cookie);
-        if (prep == .none and focus.lastRejectWasNoInput()) {
-            model_mod.clearFocus(m);
-            if (focus.isOnlyVisibleOnCurrentWs(t)) focus.refocusRoot();
-        } else if (prep != .none) {
-            model_mod.setFocus(m, t);
+    // purely from the model with zero X round trips. A no_input candidate can
+    // never hold X focus, so it is skipped and the scan continues; only when
+    // nothing focusable remains is X focus cleared to root.
+    const ft: focus.FocusTransition = blk: {
+        var excluded: ?model_mod.WindowId = null;
+        while (model_mod.fallbackFocusCandidate(m, ws_idx, excluded)) |t| {
+            // Pre-fire the WM_PROTOCOLS query only on a take_focus cache
+            // miss; the common path is cache-backed (see window.zig's "ICCCM
+            // focus property cache" note), and the miss case overlaps the
+            // prepareFocus round trip below instead of blocking inline.
+            const cookie = if (window.isInputModelCached(t)) null else window.fireWMProtocolsQuery(cs.conn, t);
+            // Prepare BEFORE the model write: a no_input target must not
+            // take model focus, and a lone no_input target leaves X focus
+            // on the root rather than captive on the departed workspace.
+            const prep = focus.prepareFocus(t, .workspace_switch, cookie);
+            if (prep == .none and focus.lastRejectWasNoInput()) {
+                excluded = t;
+                continue;
+            }
+            if (prep != .none) model_mod.setFocus(m, t);
+            break :blk prep;
         }
-        break :blk prep;
-    } else blk: {
-        window.discardProtocolCookie(cs.conn, pre_protocols_cookie);
         // prepareClearFocus reads MODEL focus as its decision source, so it
         // runs BEFORE the model clear.
         const prep = focus.prepareClearFocus();

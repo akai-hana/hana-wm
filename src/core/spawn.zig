@@ -156,17 +156,12 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     // in window.handleMapRequest when the MapRequest arrives; MapRequest fires
     // once per window, so the round-trip isn't worth pipelining here.
 
-    const queued = g_pending.append(.{
+    // The capacity pre-check above guarantees room, so append cannot fail.
+    std.debug.assert(g_pending.append(.{
         .pid = pid,
         .spawn_fd = pipe_fds[0],
         .spawn_ws = spawn_ws,
-    });
-    if (!queued) {
-        // Table full: close the read end we won't track; reap `pid`
-        // synchronously; it exits almost instantly and isn't tracked (no zombie).
-        _ = c.close(pipe_fds[0]);
-        _ = c.waitpid(pid, null, 0);
-    }
+    }));
 }
 
 /// Drains pending spawn entries non-blockingly (every event batch and on
@@ -200,6 +195,15 @@ pub fn drainPendingSpawns() void {
         if (entry.spawn_fd != null) {
             i += 1;
             continue;
+        }
+
+        // The intermediate child wrote EOF (or its fd errored closed), so it
+        // has already exited; reap it eagerly here rather than leaving a
+        // zombie until SIGCHLD is next delivered. Same WNOHANG/WNOHANG-only
+        // policy as reapPendingChildren: never blocks the event loop.
+        if (entry.pid > 0) {
+            _ = c.waitpid(entry.pid, null, c.WNOHANG);
+            entry.pid = -1;
         }
 
         finishSpawn(entry);

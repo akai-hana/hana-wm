@@ -342,6 +342,9 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const ws: model.WSId = readLE(u16, bytes, 1);
     if (ws >= p[0].ws.len) return false; // corrupt/oversized capture target: reject before writing
     const tag = bytes[3];
+    // W6: check capacity BEFORE mutating e.anchor below; the old placement
+    // left the floating restore applied on a rejected (growth-capped) blob.
+    if (g_recs.len >= MAX_FULLSCREEN) return false;
     var anchor: model.BaseMode = undefined;
     switch (tag) {
         TAG_TILED => {
@@ -367,7 +370,6 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     }
     // This hook is only dispatched for non-parked windows (fullscreen blob
     // only exists for non-parked), so we can safely mark the window covering.
-    if (g_recs.len >= MAX_FULLSCREEN) return false;
     _ = g_recs.append(.{ .win = win, .anchor = anchor });
     e.presence = .covering;
     e.covering_ws = ws; // model stays the single authority on the capture target

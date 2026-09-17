@@ -18,7 +18,10 @@
 #
 # ENV
 #   XTEST_DISPLAY_RANGE  space-separated display numbers to probe (default "99 100 ... 199")
-#   HANA_REQUIRE_X        passed straight through to the child (fixture fail-mode)
+#   HANA_REQUIRE_X        forced to 1 by default here (fixture fail-mode): the
+#                         whole point of this wrapper is that X IS available, so
+#                         X-gated tests must not silently skip and pass. Set it
+#                         to 0 to override.
 #
 # Exit code is the child's exit code.
 set -u
@@ -38,21 +41,43 @@ free_display() {
 
 display="$(free_display)" || { echo "xtest: no free display in range '$DISPLAYS'" >&2; exit 1; }
 
-Xvfb ":$display" -screen 0 1280x800x24 -nolisten tcp -ac >"/tmp/opencode/xvfb_${display}.log" 2>&1 &
+XTEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/hana-xtest.XXXXXX")" || { echo "xtest: mktemp failed" >&2; exit 1; }
+
+Xvfb ":$display" -screen 0 1280x800x24 -nolisten tcp -ac >"$XTEST_TMP/xvfb_${display}.log" 2>&1 &
 xvfb_pid=$!
 
 cleanup() {
     kill "$xvfb_pid" 2>/dev/null
     wait "$xvfb_pid" 2>/dev/null
+    rm -rf "$XTEST_TMP"
 }
 trap cleanup EXIT INT TERM
 
-# Wait until the socket is ready (bounded wait).
-for _ in $(seq 1 50); do
-    [ -e "/tmp/.X11-unix/X${display}" ] && break
+# Wait until the server is actually ANSWERING, not merely socket-present: the
+# socket file can appear before the server accepts connections, and a child
+# that connects too early fails -- or silently skips its X-gated tests. Poll
+# `xset q`, fail hard on timeout, and bail early (with the log) if Xvfb died.
+ready=0
+for _ in $(seq 1 100); do
+    if DISPLAY=":$display" xset q >/dev/null 2>&1; then
+        ready=1
+        break
+    fi
+    if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+        echo "xtest: Xvfb :$display exited during startup" >&2
+        cat "$XTEST_TMP/xvfb_${display}.log" >&2
+        exit 1
+    fi
     sleep 0.1
 done
+if [ "$ready" != "1" ]; then
+    echo "xtest: Xvfb :$display did not become ready in time" >&2
+    cat "$XTEST_TMP/xvfb_${display}.log" >&2
+    exit 1
+fi
 
 export DISPLAY=":$display"
+# X is guaranteed up: make X-gated tests assert rather than skip.
+export HANA_REQUIRE_X="${HANA_REQUIRE_X:-1}"
 "$@"
 exit $?

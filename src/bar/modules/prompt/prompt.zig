@@ -240,11 +240,23 @@ const PromptState = struct {
     hist_count: usize = 0,
     hist_head: usize = 0,
     is_hist_loaded: bool = false,
+    // Tracks whether the $PATH scan has run at all, separate from comp_count:
+    // a legitimately empty result (or an ensureAlloc failure) leaves
+    // comp_count at 0, and gating on that would re-scan $PATH on every
+    // activation.
+    is_completions_loaded: bool = false,
 
     // Set by key handlers, `activate`, and `deactivate` to notify the bar
     // that the prompt area needs to be redrawn.  Consumed (read + cleared)
     // by `consumeRedrawRequest` to avoid a circular import between prompt <-> bar.
     redraw_pending: bool = false,
+
+    // Caret-blink scoped repaint: set by `blinkTick`, cleared in `draw`.
+    // Unlike `redraw_pending` (which forces a full-bar redraw because it
+    // accompanies layout-affecting changes), this only asks the host title
+    // slot to repaint, so a caret toggle costs one title-region blit rather
+    // than a whole-bar repaint.
+    blink_repaint: bool = false,
 
     // Layout cache: pixel width of the pre-caret text, the block-caret width,
     // and the scroll offset keeping the caret visible.  Recomputed in
@@ -299,13 +311,25 @@ pub fn blinkPollTimeoutMs() i32 {
 }
 
 /// Toggle cursor blink visibility; called by the bar's blink timer.  Flags a
-/// redraw as well: while the prompt covers the title slot, the title's
-/// needsRepaint hook reports inactive, so the toggled caret would otherwise
-/// never reach the screen (the overlay owns its repaints, as documented on
-/// the title module).
+/// scoped repaint as well: while the prompt covers the title slot, the title's
+/// needsRepaint hook forwards the overlay's query, and an inactive overlay
+/// reports inactive, so the toggled caret reaches the screen without forcing a
+/// whole-bar redraw.
+///
+/// The bar runs every onPollWakeup hook on any timer wakeup (the clock tick,
+/// not just the blink), so this guard (matching blinkPollTimeoutMs) keeps a
+/// non-blinking prompt from toggling invisible state and queuing repaints off
+/// the clock's cadence.
 pub fn blinkTick() void {
+    if (!g.is_active or g.vim_state.mode != .insert) return;
     g.is_blink_visible = !g.is_blink_visible;
-    g.redraw_pending = true;
+    g.blink_repaint = true;
+}
+
+/// Overlay repaint query (plugin.BarOverlay.needsRepaint): true while a caret
+/// toggle is waiting to be drawn. Cleared inside `draw`.
+pub fn overlayNeedsRepaint() bool {
+    return g.blink_repaint;
 }
 
 /// Returns true and clears the flag if a prompt-driven redraw is outstanding.
@@ -508,6 +532,9 @@ fn acceptGhost() bool {
 /// whole title slot. Returns the right edge (start_x + width). Only invoked by
 /// the title segment's draw delegation while the prompt is open.
 pub fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
+    // Clearing before the draw (not after) means a draw error still consumes
+    // the request, so a persistently failing overlay can't re-request forever.
+    g.blink_repaint = false;
     // While covered, title's pollTimeoutMsHook contributes no marquee wakeup
     // (title owns that decision), so no explicit carousel pause is needed here.
     return drawActive(ctx.dc, ctx.config, ctx.height, x, ctx.width);
@@ -544,7 +571,7 @@ fn activate() void {
     ensureAlloc();
     resetPromptEditing();
     // Load completions and history on first activation.
-    if (g.comp_count == 0 and g.comp_names.len > 0) loadCompletions();
+    if (!g.is_completions_loaded and g.comp_names.len > 0) loadCompletions();
     if (!g.is_hist_loaded and g.hist_entries.len > 0) loadHistory();
     g.is_blink_visible = true;
 
@@ -600,6 +627,9 @@ fn deactivate() void {
 fn loadCompletions() void {
     g.comp_count = 0;
     if (g.comp_names.len == 0) return; // ensureAlloc failed
+    // Mark attempted up front: a missing $PATH or an empty result must not
+    // re-trigger the scan on the next activation.
+    g.is_completions_loaded = true;
     const path_env_ptr = c.getenv("PATH") orelse return;
     const path_env = std.mem.span(path_env_ptr);
 
@@ -682,6 +712,12 @@ fn histEntry(i: usize) []const u8 {
 /// Clamps `suffix` into g.ghost_buf/g.ghost_len.  Shared by both updateGhost
 /// branches, which only differ in how they find the match.
 inline fn setGhost(suffix: []const u8) void {
+    // B1: ghost_buf is empty when its one-time allocation failed (partial OOM
+    // in ensureAlloc). Slicing it for a non-empty suffix is then an OOB write.
+    if (g.ghost_buf.len == 0) {
+        g.ghost_len = 0;
+        return;
+    }
     const n = @min(suffix.len, max_completion_len);
     @memcpy(g.ghost_buf[0..n], suffix[0..n]);
     g.ghost_len = n;
@@ -731,6 +767,9 @@ fn updateGhost() void {
 /// Silently no-ops when cmd is empty or exceeds max_history_line.
 fn histPrepend(cmd: []const u8) void {
     if (cmd.len == 0 or cmd.len > max_history_line) return;
+    // B1: hist_entries is empty when its one-time allocation failed (partial
+    // OOM in ensureAlloc); don't index into it (OOB write at slot + cmd.len).
+    if (g.hist_entries.len == 0) return;
     // Skip consecutive duplicates (shell convention): when the newest entry
     // already equals this command, re-running it must not stack the ring.
     if (g.hist_count > 0 and std.mem.eql(u8, histEntry(0), cmd)) return;
@@ -1148,10 +1187,11 @@ fn drawPill(
     const pill_fits = text_end_x >= pill_w;
 
     // Reserve the pill width on the right; the scrollable region ends here.
+    // When the label cannot fit we drop the pill but still give the text the
+    // whole region: blanking the prompt because the mode pill didn't fit hid
+    // the user's typing (B2).
     const scroll_end_x: u16 = if (show_pill and pill_fits)
         text_end_x - pill_w
-    else if (show_pill)
-        text_left_x
     else
         text_end_x;
     if (text_left_x >= scroll_end_x) return null;
@@ -1313,5 +1353,10 @@ pub const module: @import("plugin").Segment = .{
     .handleKeypress = handlePromptKeypress,
     .consumeRedrawRequest = consumeRedrawRequest,
     .invalidateReloadCaches = invalidateReloadCaches,
-    .overlay = .{ .is_active = isActive, .toggle = toggle, .draw = drawHook },
+    .overlay = .{
+        .is_active = isActive,
+        .toggle = toggle,
+        .draw = drawHook,
+        .needsRepaint = overlayNeedsRepaint,
+    },
 };

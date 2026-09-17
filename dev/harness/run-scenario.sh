@@ -41,7 +41,7 @@ done
 
 [ $# -ge 1 ] || { sed -n '2,22p' "$0"; exit 2; }
 [ -x "$HANA_BIN" ] || {
-	echo "hana binary missing at $HANA_BIN (build with: zig build -Doptimize=Debug)" >&2
+	echo "hana binary missing at $HANA_BIN (build with: zig build; Debug is the default)" >&2
 	exit 1
 }
 for tool in xdotool xprop xwininfo perl; do

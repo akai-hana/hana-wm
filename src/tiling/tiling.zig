@@ -127,8 +127,8 @@ pub inline fn satI16(v: i32) i16 {
 /// Full-rect inset by `margin` (shrinkClamped width/height at fixed origin).
 pub inline fn insetRect(x: i32, y: i32, w: u16, h: u16, margin: u16, min_dim: u16) utils.Rect {
     return .{
-        .x = @intCast(x),
-        .y = @intCast(y),
+        .x = satI16(x),
+        .y = satI16(y),
         .width = shrinkClamped(w, margin, min_dim),
         .height = shrinkClamped(h, margin, min_dim),
     };

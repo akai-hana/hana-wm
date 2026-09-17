@@ -705,11 +705,22 @@ inline fn suppressionFor(
 /// happen outside the grab; focus protocol, borders, and geometry land
 /// inside one grab+reconcile+flush. Drop-in for the old setFocus path.
 pub fn grabFocus(win: u32, reason: Reason) void {
+    grabFocusWithDuty(win, reason, null);
+}
+
+/// Focus `win` with an optional `duty` that runs inside the SAME grab, after
+/// the focus protocol but before the reconcile. Used by the focus-cycle path
+/// to apply the viewport snap to the freshly focused window, so a Mod+k/Mod+j
+/// that scrolls the viewport lands focus + geometry in one grab+reconcile
+/// instead of focus-then-snap's two. The duty is skipped whenever the
+/// transition resolves to `.none`, so a rejected target (no_input) never
+/// leaves a stray viewport move.
+pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) void {
     const ft = prepareFocus(win, reason, null);
     if (ft == .none) return;
     const pl = @import("pipeline");
     @import("model").setFocus(pl.mut(&gate), win);
-    pl.reconcileUnderGrabNowWithFocus(.{}, ft);
+    pl.reconcileUnderGrabNowWithFocusDuty(.{}, ft, duty);
 }
 
 /// Atomically clear focus to root. Model clear + focus protocol + borders
@@ -738,7 +749,12 @@ pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
 
     resetPendingFocusState();
 
-    const ft = setIntent(prev, state.?.last_applied, resolved, .{
+    // W2: when the window we're re-asserting on is already `last_applied`,
+    // passing it as `old` makes applyPendingFocus grab its buttons then
+    // immediately ungrab them again, leaving them UNGRABBED. Treat it as no
+    // previous window (same as the prepareFocus dedup path).
+    const old = if (state.?.last_applied == prev) null else state.?.last_applied;
+    const ft = setIntent(prev, old, resolved, .{
         .raise = false,
         .new_suppress = .none,
     });
@@ -827,20 +843,21 @@ inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
     return if (forward) (idx + 1) % len else (idx + len - 1) % len;
 }
 
-/// Shared implementation for focus cycling.
-/// forward=true -> next (Mod+k, ascending), forward=false -> prev (Mod+j).
-fn focusCycle(forward: bool) void {
+/// Resolve the visible window a focus-cycle step would land on, or null when
+/// the step is a no-op (no visible windows, or the only visible window is
+/// already focused). Pure read: no focus change, no grab. The Mod+k/Mod+j
+/// input path folds the target's viewport snap into the SAME grab as the
+/// focus transition (one grab+reconcile instead of focus-then-snap).
+pub fn cycleTarget(forward: bool) ?u32 {
     const len = collectVisibleWindows();
-    if (len == 0) return;
+    if (len == 0) return null;
     const wins = cycle_buf[0..len];
     // Single visible window: the only sensible cycle step is to focus it
     // when it isn't focused already; the modulo wrap below would otherwise
     // spin a redundant grabFocus against the same id.
     if (len == 1) {
         const only = wins[0];
-        if (getFocused() == only) return;
-        grabFocus(only, .user_command);
-        return;
+        return if (getFocused() == only) null else only;
     }
     // When the focused window isn't in the visible list, wrap so the very next
     // step lands on wins[0] (forward) or wins[len-1] (backward).
@@ -849,12 +866,5 @@ fn focusCycle(forward: bool) void {
         std.mem.indexOfScalar(u32, wins, w) orelse sentinel
     else
         sentinel;
-    grabFocus(wins[cycleIndex(forward, idx, len)], .user_command);
-}
-
-pub fn focusNext() void {
-    focusCycle(true);
-}
-pub fn focusPrev() void {
-    focusCycle(false);
+    return wins[cycleIndex(forward, idx, len)];
 }

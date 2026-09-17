@@ -7,6 +7,7 @@
 //! the rendering of the title slot and the prompt overlay.
 
 const core = @import("core");
+const std = @import("std");
 const utils = @import("utils");
 const refresh = @import("refresh");
 const debug = @import("debug");
@@ -44,6 +45,46 @@ const overlay: ?plugin.BarOverlay = for (bar_mods) |m| {
 
 fn overlayActive() bool {
     return if (overlay) |o| o.is_active() else false;
+}
+
+/// Memoized width of the focused title. While the carousel scrolls, the title
+/// segment redraws every frame, and each frame would otherwise run a full
+/// Pango shape pass over the (unchanged) focused title. Keyed on window,
+/// buffer identity, length and bar height; the buffer contents are compared on
+/// a hit so a reused allocation (X id + address reuse) can't return a stale
+/// width. `invalidateReloadCaches` clears it when the font changes.
+const TitleWidthMemo = struct {
+    win: u32 = 0,
+    ptr: [*]const u8 = undefined,
+    len: usize = 0,
+    height: u16 = 0,
+    width: u16 = 0,
+};
+var focused_title_memo: TitleWidthMemo = .{};
+
+fn focusedTitleWidth(
+    dc: *drawing.DrawContext,
+    height: u16,
+    win: u32,
+    txt: []const u8,
+) u16 {
+    if (focused_title_memo.win == win and
+        focused_title_memo.len == txt.len and
+        focused_title_memo.height == height and
+        focused_title_memo.ptr == txt.ptr and
+        std.mem.eql(u8, focused_title_memo.ptr[0..focused_title_memo.len], txt))
+    {
+        return focused_title_memo.width;
+    }
+    const w = dc.measureTextWidth(txt);
+    focused_title_memo = .{
+        .win = win,
+        .ptr = txt.ptr,
+        .len = txt.len,
+        .height = height,
+        .width = w,
+    };
+    return w;
 }
 
 // The minimized-state service (set synthesis + per-window checks) is provided
@@ -129,7 +170,7 @@ fn drawSingleWindow(
         geom,
         single_win,
         snapshot.focused_title,
-        ctx.dc.measureTextWidth(snapshot.focused_title),
+        focusedTitleWidth(ctx.dc, ctx.height, single_win, snapshot.focused_title),
         fg,
         workspace_has_focus,
     );
@@ -279,13 +320,19 @@ fn drawSegmentedTitles(
         if (info.title.len == 0 or bounds.w <= min_cell_w) continue;
 
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
+        // Only the focused cell can scroll (the carousel tracks exactly one
+        // cell per frame), so only its width is worth memoizing across frames.
+        const text_w = if (is_focused_win)
+            focusedTitleWidth(ctx.dc, ctx.height, info.window, info.title)
+        else
+            ctx.dc.measureTextWidth(info.title);
         try drawFittedTitle(
             ctx,
             baseline_y,
             titleTextGeom(ctx, segment_x, bounds.w),
             info.window,
             info.title,
-            ctx.dc.measureTextWidth(info.title),
+            text_w,
             text_fg,
             is_focused_win,
         );
@@ -346,15 +393,16 @@ fn pollTimeoutMsHook() i32 {
     return -1;
 }
 
-/// Marquee repaint query for the bar's uniform frame loop (the Segment
-/// needsRepaint capability): while the carousel is actively scrolling its
-/// motion only advances while the title draw runs, so the bar must repaint
-/// this segment on every draw submission even when change detection marks
-/// nothing dirty. The prompt covers the whole slot while open, so it reports
-/// inactive then (the overlay owns the repaint; the draw delegation already
-/// routes around the carousel).
+/// Repaint query for the bar's uniform frame loop (the Segment needsRepaint
+/// capability). While the carousel is actively scrolling its motion only
+/// advances while the title draw runs, so the bar must repaint this segment on
+/// every draw submission even when change detection marks nothing dirty. While
+/// the prompt overlay covers the slot, the marquee is hidden (draw delegation
+/// routes around it) and the overlay's own pending repaints are forwarded
+/// instead: the bar then repaints just this slot for a caret toggle rather
+/// than forcing a whole-bar redraw.
 fn needsRepaintHook() bool {
-    if (overlayActive()) return false;
+    if (overlay) |o| if (o.is_active()) return o.needsRepaint();
     return if (scroller) |s| s.scrollingActive() else false;
 }
 
@@ -363,6 +411,12 @@ fn needsRepaintHook() bool {
 /// the whole hidden gap in one frame (which would land it mid-cycle).
 fn onBarShownHook() void {
     if (scroller) |s| s.resetForShow();
+}
+
+/// Config reload can swap the font (and with it every measured width) without
+/// changing the bar height, so the focused-title memo must be dropped here.
+fn invalidateReloadCaches() void {
+    focused_title_memo = .{};
 }
 
 /// This module's bar-segment contribution (registry binding).
@@ -376,4 +430,5 @@ pub const module: @import("plugin").Segment = .{
     .draw = drawHook,
     .onClick = onClickHook,
     .onBarShown = onBarShownHook,
+    .invalidateReloadCaches = invalidateReloadCaches,
 };

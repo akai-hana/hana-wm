@@ -26,18 +26,28 @@ var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 // kernel installs is ABI-aligned for a pushed frame.
 var alt_stack_mem: [64 * 1024]u8 align(16) = undefined;
 
-// Async-signal-safe handler: writes the signal number as a byte to the pipe.
+// Async-signal-safe pending-signal bitmap. The self-pipe byte is now only a
+// WAKE TOKEN: a full pipe forces the handler to drain its backlog, so a byte
+// can be discarded, and signal STATE must not ride on the byte. Instead the
+// handler sets a bit here with a lock-free atomic OR, and the event loop
+// consumes the whole word. A TERM/INT/reload delivered during a pipe-full
+// burst therefore can never be lost (previously it could: dispatchSignal -- the
+// only thing that sets the quit/reload flags -- ran solely off pipe bytes).
+var pending_signals: std.atomic.Value(u64) = .init(0);
+
+// Async-signal-safe handler: records the signal and wakes the loop.
 fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
+    const bit: u6 = @intCast(@intFromEnum(signo));
+    _ = pending_signals.fetchOr(@as(u64, 1) << bit, .release);
     const byte: u8 = @intCast(@intFromEnum(signo));
     writeSignalByte(byte);
 }
 
 /// Async-signal-safe, non-blocking write of one signal byte to the self-pipe,
 /// with full-pipe recovery. When the pipe is full (EAGAIN) the queued backlog
-/// is drained and the write retried so THIS signal byte is never silently
-/// dropped. Drained backlog bytes are safe to discard: the event loop polls
-/// the TERM/INT/reload flags independently of the pipe, and SIGCHLD reaping is
-/// poll-driven too, so a drained byte only defers an already-queued wake.
+/// is drained and the write retried so THIS byte lands; the drained bytes carry
+/// no state (the handler records signal state in `pending_signals`), so
+/// discarding them only coalesces wakeups.
 fn writeSignalByte(byte: u8) void {
     const rfd = signal_pipe[pipe_read];
     const wfd = signal_pipe[pipe_write];
@@ -249,7 +259,12 @@ fn dispatchSignal(byte: u8) void {
         else => {},
     }
 }
-/// Drains the non-blocking signal pipe and dispatches each signal.
+/// Drains the non-blocking signal pipe and dispatches each pending signal.
+///
+/// The pipe is read purely as a wake token; signal state lives in
+/// `pending_signals`. Reading first, then consuming the bitmap, means a signal
+/// that arrives after the swap re-arms the pipe (writeSignalByte always lands
+/// once it has drained the backlog), so the next poll drains and consumes it.
 ///
 /// std.os.linux.read returns usize; a kernel error wraps a negative value into
 /// a huge unsigned number an unsigned comparison would never catch. Bitcast to
@@ -259,12 +274,11 @@ pub fn drainAndDispatch(fd: std.posix.fd_t) void {
     while (true) {
         const rc: isize = @bitCast(std.os.linux.read(fd, &buf, buf.len));
         if (rc <= 0) break; // 0 = EOF on write-end close, negative = error/EAGAIN
-        const n: usize = @intCast(rc);
-        for (buf[0..n]) |byte| {
-            // Wake byte written by utils.reload(): poke the event loop out of
-            // poll, but don't re-dispatch it (see utils.wake_byte).
-            if (byte == utils.wake_byte) continue;
-            dispatchSignal(byte);
-        }
+    }
+    var bits = pending_signals.swap(0, .acq_rel);
+    while (bits != 0) {
+        const bit: u6 = @intCast(@ctz(bits));
+        bits &= bits - 1;
+        dispatchSignal(@intCast(bit));
     }
 }

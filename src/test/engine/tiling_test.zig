@@ -336,6 +336,16 @@ test "hints applied at emit" {
     try expectP(&out, 0, 11, 48, 48, 700, 500, true);
 }
 
+// Tiling deliberately ignores PMinSize/PBaseSize: the layout engine owns all
+// tiled dimensions, so honouring a client minimum would pin the rect and block
+// mod_h/mod_l. The same hints ARE honoured by the floating drag-resize floor
+// (floating.sizeHintLimits); this guards against min enforcement leaking into
+// the shared hint path.
+test "applyHints ignores declared minimums" {
+    const rect: utils.Rect = .{ .x = 8, .y = 8, .width = 780, .height = 580 };
+    try testing.expectEqual(rect, tiling.applyHints(rect, .{ .min_width = 1000, .min_height = 1000 }));
+}
+
 // Horizontal geometry enforcement on the master-slave axis: a slave
 // that declares a small max_width (e.g. a dialog) shrinks the stack column to
 // its natural width and the master absorbs the freed horizontal space, so the

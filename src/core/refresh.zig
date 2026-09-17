@@ -186,7 +186,9 @@ fn rateFromNotifyEvent(event: *anyopaque) ?f64 {
     // offset as subCode, so trust it only when response_type matches base + 1.
     if (randr_first_event == 0) return null;
     const notify = utils.eventCast(*xcb.xcb_randr_notify_event_t, event);
-    if (notify.*.response_type != randr_first_event + 1) return null;
+    // Widen before adding 1: an extension base of 255 would wrap the u8 add
+    // to 0 and silently disable re-detection for that server.
+    if (notify.*.response_type != @as(u16, randr_first_event) + 1) return null;
     if (notify.*.subCode != xcb.XCB_RANDR_NOTIFY_CRTC_CHANGE) return null;
     const mode_id = notify.*.u.cc.mode;
     if (mode_id == 0) return null;
@@ -209,8 +211,13 @@ fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
     const res_cookie = xcb.xcb_randr_get_screen_resources_current(conn, root);
     const primary_cookie = xcb.xcb_randr_get_output_primary(conn, root);
 
-    const res = xcb.xcb_randr_get_screen_resources_current_reply(conn, res_cookie, null) orelse
+    const res = xcb.xcb_randr_get_screen_resources_current_reply(conn, res_cookie, null) orelse {
+        // C5: the primary-output reply is already in flight; if we return now
+        // it would sit unconsumed and desync the next reply read on this
+        // connection. Discard it (no reply allocation, no blocking wait).
+        xcb.xcb_discard_reply(conn, primary_cookie.sequence);
         return;
+    };
     defer std.c.free(res);
 
     var primary: xcb.xcb_randr_output_t = 0;

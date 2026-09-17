@@ -12,8 +12,9 @@
 //!   4. Warn-and-revert range semantics and the getRatio bare-`1`
 //!      ambiguity rule behave as before.
 //!
-//! Scratch files live under /tmp/opencode (pre-approved temp area); each
-//! test uses a unique name and cleans up after itself.
+//! Scratch files are created by src/test/config/scratch.zig in a per-process
+//! uniquely-named directory under the system temp area; each test cleans up
+//! after itself.
 
 const std = @import("std");
 const testing = std.testing;
@@ -153,15 +154,16 @@ test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
     try testing.expectEqual(parser.ScalableValue.absolute(7.0), sub.tiling.gap_width);
     try testing.expectEqual(@as(u32, 0x112233), sub.tiling.border_focused);
 
-    // And without the [tiling] marker, the quartet is ignored outright --
-    // pinned here because akai.toml ships exactly that shape today.
+    // A lone [tiling.aesthetics] (no [tiling] functional marker) still feeds
+    // the quartet: the values are visual, so a theme-only file applies them --
+    // this is exactly the shape akai.toml ships today.
     var lone = try loadToml(testing.allocator, "aesthetics-lone",
         \\[tiling.aesthetics]
         \\gap_width = 7
         \\
     );
     defer lone.deinit(testing.allocator);
-    try testing.expectEqual(parser.ScalableValue.absolute(10.0), lone.tiling.gap_width);
+    try testing.expectEqual(parser.ScalableValue.absolute(7.0), lone.tiling.gap_width);
 }
 
 test "[bar.modules.workspaces] and [workspaces] agree on count/enabled" {

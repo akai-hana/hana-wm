@@ -97,8 +97,10 @@ pub const std_env: @FieldType(sync.Ctx, "env") = .{
     .min_dim = 50,
 };
 
-/// Default config-order layout cycle, used by the model and tiling tests.
-pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci" };
+/// Canonical config-order layout cycle used by the model, tiling, and window
+/// fixtures. Single source of truth so the test layouts list can't drift from
+/// the config's accepted set (src/config/config.zig canonical layout names).
+pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci", "leaf", "scroll" };
 
 pub fn TestSink(comptime mode: SinkMode) type {
     return struct {

@@ -876,22 +876,50 @@ test "fallbackFocusCandidate tiers pick the previous focus" {
     regCur(&m, 11); // tiled_order [10, 11]
     model.setFocus(&m, 11); // user focused 11 first...
     model.setFocus(&m, 10); // ...then 10; MRU now [10, 11]
-    try testing.expectEqual(@as(?WindowId, 10), model.fallbackFocusCandidate(&m, 0));
+    try testing.expectEqual(@as(?WindowId, 10), model.fallbackFocusCandidate(&m, 0, null));
 
     // Minimizing the FOCUSED window (10): the previous focus (11) wins via
     // the MRU tier even though 10 is still newest in the MRU list - visibleOn
     // rejects minimized entries.
     try minimize.minimize(&m, 10);
-    try testing.expectEqual(@as(?WindowId, 11), model.fallbackFocusCandidate(&m, 0));
+    try testing.expectEqual(@as(?WindowId, 11), model.fallbackFocusCandidate(&m, 0, null));
 
     // Both hidden: reversed tiled_order tier is exhausted by visibility too,
     // a floating window becomes the candidate, and an empty ws yields null.
     try minimize.minimize(&m, 11);
     addFloating(&m, 12, .{ .x = 0, .y = 0, .width = 50, .height = 50 });
-    try testing.expectEqual(@as(?WindowId, 12), model.fallbackFocusCandidate(&m, 0));
+    try testing.expectEqual(@as(?WindowId, 12), model.fallbackFocusCandidate(&m, 0, null));
 
     model.unregister(&m, 12);
-    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
+    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0, null));
+}
+
+// A rejected candidate (e.g. no_input, which can never hold X focus) must be
+// skippable so the fallback scan can continue to the NEXT focusable window
+// instead of giving up on the MRU head.
+test "fallbackFocusCandidate exclusion skips to the next focusable" {
+    var m = makeModel();
+
+    try minimize.init();
+    defer minimize.deinit();
+    regCur(&m, 20);
+    regCur(&m, 21); // tiled_order [20, 21]; focused 21 → MRU [21, 20]
+
+    // MRU head (21) is the excluded no_input window: the scan must skip it
+    // and still find 20, not return null.
+    try testing.expectEqual(@as(?WindowId, 20), model.fallbackFocusCandidate(&m, 0, 21));
+
+    // Excluding every candidate yields null (the caller then clears to root).
+    addFloating(&m, 22, .{ .x = 0, .y = 0, .width = 50, .height = 50 });
+    model.unregister(&m, 20);
+    model.unregister(&m, 21);
+    try testing.expectEqual(@as(?WindowId, 22), model.fallbackFocusCandidate(&m, 0, null));
+    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0, 22));
+
+    // Exclusion is not in effect returns the normal MRU head again.
+    regCur(&m, 20);
+    regCur(&m, 21);
+    try testing.expectEqual(@as(?WindowId, 21), model.fallbackFocusCandidate(&m, 0, null));
 }
 
 // minimizing-from-fullscreen KEEPS the mode, so the ghost record still
@@ -937,12 +965,12 @@ test "close-fallback candidate after unregister is the previous focus" {
     try testing.expectEqual(@as(?WindowId, null), m.focused); // cleared by unregister
 
     // The wiring must resolve the target AFTER this point via:
-    try testing.expectEqual(@as(?WindowId, 40), model.fallbackFocusCandidate(&m, 0));
+    try testing.expectEqual(@as(?WindowId, 40), model.fallbackFocusCandidate(&m, 0, null));
 
     // Closing the LAST window: no candidate remains -> caller clears focus
     // (same terminal state as minimizing everything).
     model.unregister(&m, 40);
-    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0));
+    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, 0, null));
 }
 
 // FSQ: model fullscreen semantics: mode ignores visibility, on-ws checks the

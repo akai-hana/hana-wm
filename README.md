@@ -232,11 +232,25 @@ dev/scripts/xtest.sh zig build test   # runs under Xvfb; headless `zig build tes
 
 - `dev/scripts/check-layers.sh` (invoked by `zig build check`) enforces the
   subsystem layering described under [Architecture](#architecture).
-- Unit tests live in `src/test/` alongside the code they cover; X-gated window
-  tests print a `SKIP:` banner and self-pass when no display is available
-  (set `HANA_REQUIRE_X=1` to turn a skip into a hard failure).
-- Feature TODO markers inside the codebase are searchable with
-  `rg -n "TODO" src/`.
+- `zig build check-all` additionally runs the modularity matrix
+  (`dev/scripts/check-modularity.sh`: builds each module in isolation) — kept
+  separate from `check` because it cold-builds ~25 configurations.
+- Latency benchmarks are opt-in: `zig build test -Dbench` runs the
+  `focus_latency_test`/`tiling_latency_test` full loops and prints timings
+  (off by default, so the normal suite stays fast and silent). `zig build
+  -Dprofile-key` instruments the key-dispatch path (receive → action latency).
+- End-to-end X scenarios live in `dev/harness/`. `dev/harness/run-scenario.sh
+  --golden S01-spawn-tiled …` records a baseline, and `--compare` diffs a run
+  against `dev/harness/golden/` (normalized tree/property/state-log snapshots);
+  `--compare-raw` is a byte-exact variant and `--keep` leaves the isolated
+  Xvfb + hana up for inspection.
+- Unit tests live in `src/test/` alongside the code they cover. X-gated window
+  tests self-pass when no display is available, printing `SKIP:`/`WARN:` to a
+  TTY only (interactive runs); set `HANA_REQUIRE_X=1` to turn any skip into a
+  hard failure. `dev/scripts/xtest.sh` already sets it, so that path can never
+  go green by skipping.
+- The tree carries no `TODO`/`FIXME` markers: `rg -n "TODO|FIXME" src/` is
+  empty by design (open work lives in the issue tracker, not the source).
 
 ---
 

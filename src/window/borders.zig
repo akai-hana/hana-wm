@@ -27,9 +27,12 @@ pub fn color(win: u32) u32 {
     // unfindable window falls back to whether the CURRENT workspace has a
     // covering occupant.
     const m = pipeline.model();
-    const e = m.store.get(win);
+    // A stray/unmanaged window has no workspace to resolve; fall back to the
+    // unfocused color (callers all pass managed windows today, so this is
+    // purely defensive hardening).
+    const e = m.store.get(win) orelse return cfg.border_unfocused;
     const ws: ?model.WSId = blk: {
-        if (build_options.has_fullscreen and e.?.presence == .covering) break :blk e.?.covering_ws;
+        if (build_options.has_fullscreen and e.presence == .covering) break :blk e.covering_ws;
         break :blk model.findHome(m, win);
     };
     if (ws) |w| {

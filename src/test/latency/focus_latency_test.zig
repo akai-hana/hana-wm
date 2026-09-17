@@ -9,10 +9,10 @@
 // window each pass (map + borderPixel + borderWidth + geom), which this
 // instrumentation quantifies as a function of window count.
 //
-// It also reproduces the Mod+k caller shape (`focusNext` then
-// `snapViewportToFocused`), which today performs TWO back-to-back
-// server-grab reconciles even when the focused window is already on-screen and
-// the viewport offset is unchanged.
+// The Mod+k caller shape (`focus.cycleTarget` then
+// `focus.grabFocusWithDuty`) now runs the viewport snap as a duty INSIDE the
+// focus transition's grab, so a cycle that scrolls the viewport is a single
+// grab+reconcile instead of the old focus-then-snap two.
 
 const std = @import("std");
 const model = @import("model");
@@ -66,17 +66,16 @@ test "latency: reconcile cost + request count at focus change" {
     }
 }
 
-// Mod+k caller: focusNext runs a focus-transition reconcile (borders + focus
-// protocol), then snapViewportToFocused reconciles AGAIN when the viewport
-// offset must shift. When the focused window is already fully on-screen the
-// offset is unchanged, so the snap reconcile is pure redundant work -- it
-// sends zero XCB requests (delta-apply) but still burns a full O(N) compute
-// pass plus a grab+flush. Confirmed by actions.snapViewportToFocused,
-// which now SKIPS the reconcile when the offset and tiled count are unchanged.
+// Mod+k caller: `focus.grabFocusWithDuty` commits the focus protocol and the
+// viewport snap in ONE grab+reconcile (the snap runs as a duty between
+// applyPendingFocus and sync.reconcile). Previously the cycle did a focus
+// transition (first reconcile) then snapViewportToFocused (a second
+// grab+reconcile whenever the viewport had to shift), plus a redundant second
+// pass even when the focused window was already on-screen.
 //
-// This test quantifies both phases (the focus pass and the redundant snap
-// pass) so the before-cost of the redundant second pass is explicit.
-test "latency: Mod+k focus + redundant viewport-snap reconcile" {
+// This test quantifies the single-reconcile cost the folded path now pays, so
+// the per-Mod+k compute is explicit and any regression to two passes shows up.
+test "latency: Mod+k folded focus + viewport-snap reconcile" {
     const n = 16;
     var m = makeModel();
     for (0..n) |i| regCur(&m, @intCast(i + 1));
@@ -101,10 +100,9 @@ test "latency: Mod+k focus + redundant viewport-snap reconcile" {
     }
     const focus_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iters));
 
-    // Phase 2: the (previously redundant) snapViewportToFocused reconcile when
-    // offset is unchanged. This is what produced the second grab+reconcile per
-    // Mod+k; with the snap-skip optimization the real path returns early here,
-    // so the redundant pass is zeroed out for the on-screen common case.
+    // Phase 2: a second reconcile pass, kept as the cost reference the folded
+    // path would pay IF it regressed to two grabs per Mod+k. The folded path
+    // never runs this: it reconciles once, with the snap already applied.
     var s2 = CountingSink{};
     var c2 = makeCtx(s2.sink(), colorOfFocused);
     const t1 = nowNs();
@@ -113,7 +111,7 @@ test "latency: Mod+k focus + redundant viewport-snap reconcile" {
 
     if (bench)
         std.debug.print(
-            "[latency] Mod+k n={d}: focus reconcile={d:.1} ns, redundant snap reconcile={d:.1} ns (snap would add {d:.1}% on top; now skipped when viewport unchanged)\n",
-            .{ n, focus_ns, snap_ns, @as(f64, 100.0) * snap_ns / focus_ns },
+            "[latency] Mod+k n={d}: single folded reconcile={d:.1} ns (a second grab+reconcile would add {d:.1}%)\n",
+            .{ n, focus_ns, @as(f64, 100.0) * snap_ns / focus_ns },
         );
 }

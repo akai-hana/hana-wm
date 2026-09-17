@@ -273,8 +273,14 @@ fn tryLoadOrWarn(
     path: []const u8,
     comptime err_msg: []const u8,
     comptime silent: []const anyerror,
-) ?types.Config {
+) !?types.Config {
     return loader(allocator, path) catch |err| {
+        // C1: a parse error must reach the caller. On reload it makes the
+        // swap fail so the live config is kept (see events.handleConfigReload);
+        // at boot `load` catches it and falls back to the embedded config.
+        // Swallowing it here is what silently installed the fallback over a
+        // user's typo'd config.
+        if (err == error.ConfigParseFailed) return err;
         for (silent) |e| if (err == e) return null;
         debug.warn(err_msg, .{ path, err });
         return null;
@@ -305,7 +311,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     // Try directories first (contain multiple .toml files), then single files.
     const dir_attempts = [_][]const u8{ xdg_dir, local_dir };
     for (dir_attempts) |dir|
-        if (tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| return cfg;
+        if (try tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| return cfg;
 
     const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
     defer allocator.free(xdg_path);
@@ -313,7 +319,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
     defer allocator.free(local);
     const file_attempts = [_][]const u8{ xdg_path, local };
     for (file_attempts) |path|
-        if (tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| return cfg;
+        if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| return cfg;
 
     debug.info("No config found, using fallback with auto-detection", .{});
     return try loadFallbackConfig(allocator);
@@ -807,9 +813,12 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *t
         for (glob_entries) |ge| {
             const keybind_str: []const u8 = try resolveModPlaceholder(allocator, ge.key, mod_placeholder);
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
-            const action = try actionFromValue(allocator, entry.value, ge.ws_idx, kill_placeholder) orelse continue;
+            var action = try actionFromValue(allocator, entry.value, ge.ws_idx, kill_placeholder) orelse continue;
             const bind = parseBindString(keybind_str) catch |err| {
                 debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
+                // T3: the action just built owns heap strings; it isn't stored
+                // anywhere on this path, so free it before skipping the bind.
+                action.deinit(allocator);
                 continue;
             };
             switch (bind) {
@@ -949,7 +958,16 @@ pub fn load(
     screen: core.Screen,
     xkb_state: *xkbcommon.XkbState,
 ) !types.Config {
-    var cfg = try loadConfigDefault(allocator);
+    var cfg = loadConfigDefault(allocator) catch |err| switch (err) {
+        // C1: a malformed user config at BOOT falls back to the embedded
+        // config (the WM must still start). On reload the parse error
+        // propagates instead, so the live config is kept.
+        error.ConfigParseFailed => blk: {
+            debug.warn("Config parse error at startup; using the embedded fallback", .{});
+            break :blk try loadFallbackConfig(allocator);
+        },
+        else => return err,
+    };
     errdefer cfg.deinit(allocator);
     try validate(&cfg);
     cfg.keybind_resolver.build(cfg.keybindings.items, xkb_state, allocator);
