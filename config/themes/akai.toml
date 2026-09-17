@@ -11,8 +11,8 @@ border_width     = 1% #TODO: 100% doesn't cover 100% of the display.
 #TODO: make config parser accept both N% and %N values (currently %N doesn't work).
 
 # Borders follow the focus palette variables (from [bar] below)
-border_focused   = primary
-border_unfocused = secondary
+border_focused   = primary_color
+border_unfocused = secondary_color
 
 [bar]
 # Font
@@ -75,16 +75,16 @@ bg = "#0d0d14"
 fg = "#ebd9bc"
 
 ## Workspace tag indicators
-selected_bg = primary  # follows primary_color
+selected_bg = primary_color  # follows primary_color
 selected_fg = "#eeeeee"
 
 # Per-segment accent colors inherit from the palette by reference
 [bar.colors]
-title           = primary     # focused title = primary_color
-title_unfocused = secondary   # unfocused title = secondary_color
-title_minimized = alternative # minimized title = alternative_color
+title           = primary_color    # focused title = primary_color
+title_unfocused = secondary_color  # unfocused title = secondary_color
+title_minimized = alternative_color # minimized title = alternative_color
 
 # drun command runner colors (all optional; omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)
  # drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)
- # drun_prompt_color = primary    # prompt text + cursor (default: primary_color)
+ # drun_prompt_color = primary_color  # prompt text + cursor (default: primary_color)
