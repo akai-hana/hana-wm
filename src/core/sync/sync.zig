@@ -174,6 +174,13 @@ const SentIndex = struct {
         for (&cells) |*c| c.* = .{};
         break :blk cells;
     },
+    /// Live entries: always == st.sent.len.
+    live: usize = 0,
+    /// Retired cells. A probe only terminates on `.empty`, so tombstones are
+    /// periodically flushed by a rebuild (see sentIndexRebuild); without that
+    /// the table would eventually hold zero empties and every lookup for an
+    /// absent id would spin forever.
+    tombstones: usize = 0,
 };
 
 /// Owned by the compositor process; re-init() on reconnect.
@@ -197,7 +204,11 @@ fn sentFind(win: model.WindowId) ?usize {
 /// (C13: replaces the former O(N) ledger scan with an O(1) lookup).
 fn sentIndexOf(win: model.WindowId) ?usize {
     var h = sentHash(win);
-    while (true) {
+    // Bounded probe: the rebuild below keeps at least one `.empty` cell, so the
+    // normal path always terminates before the cap; the bound is defensive
+    // insurance that a mis-tracked count can never hang the event loop.
+    var probes: usize = 0;
+    while (probes < sent_index_capacity) : (probes += 1) {
         const cell = &st.sent_index.cells[h];
         switch (cell.kind) {
             .empty => return null,
@@ -206,6 +217,7 @@ fn sentIndexOf(win: model.WindowId) ?usize {
         }
         h = (h + 1) & (sent_index_capacity - 1);
     }
+    return null;
 }
 
 /// Where `win`'s index entry lives: the low bits of the id (a power-of-two
@@ -228,8 +240,13 @@ fn sentIndexInsert(win: model.WindowId, slot: usize) void {
                 if (first_tombstone == null) first_tombstone = h;
             },
             .empty => {
-                const dst = if (first_tombstone) |t| &st.sent_index.cells[t] else cell;
-                dst.* = .{ .kind = .live, .id = win, .slot = slot };
+                if (first_tombstone) |t| {
+                    st.sent_index.cells[t] = .{ .kind = .live, .id = win, .slot = slot };
+                    st.sent_index.tombstones -= 1;
+                } else {
+                    cell.* = .{ .kind = .live, .id = win, .slot = slot };
+                }
+                st.sent_index.live += 1;
                 return;
             },
         }
@@ -246,12 +263,26 @@ fn sentIndexRemove(win: model.WindowId) void {
             .empty => return,
             .live => if (cell.id == win) {
                 cell.kind = .tombstone;
+                st.sent_index.live -= 1;
+                st.sent_index.tombstones += 1;
+                // Flush tombstones once they can crowd out the empty cells a
+                // probe needs to terminate. Rebuilding from the (bounded,
+                // <= 128-entry) ledger restores a half-empty table.
+                if (st.sent_index.tombstones * 2 >= sent_index_capacity) sentIndexRebuild();
                 return;
             },
             .tombstone => {},
         }
         h = (h + 1) & (sent_index_capacity - 1);
     }
+}
+
+/// Rebuild the index from the dense ledger, dropping all tombstones. O(n).
+fn sentIndexRebuild() void {
+    for (&st.sent_index.cells) |*c| c.* = .{};
+    st.sent_index.live = 0;
+    st.sent_index.tombstones = 0;
+    for (st.sent.items[0..st.sent.len], 0..) |e, i| sentIndexInsert(e.id, i);
 }
 
 /// Repoints `id`'s index entry at `new_slot`. Swap-remove relocates the last
@@ -534,6 +565,16 @@ pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
     const e = sentGet(win) orelse return null;
     if (!e.has_rect or e.parked) return null;
     return e.rect;
+}
+
+/// Pipeline: border width last sent for `win`, or null when never sent /
+/// currently parked. Feeds the synthetic ConfigureNotify echo so the width it
+/// reports matches the window's actual X border rather than the global config
+/// default (W3).
+pub fn lastBorderWidthFor(win: model.WindowId) ?u16 {
+    const e = sentGet(win) orelse return null;
+    if (!e.has_rect or e.parked) return null;
+    return e.bw;
 }
 
 /// Best known live geometry for `win` without a server round trip:

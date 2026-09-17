@@ -32,6 +32,7 @@ const screen = @import("screen");
 const utils = @import("utils");
 const constants = @import("constants");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
+const helpers = @import("helpers");
 
 /// Bounded placement buffer width, mirroring the engine's own cap.
 pub const max_order = constants.Limits.max_tiled_windows;
@@ -213,8 +214,7 @@ pub const Fx = struct {
         // boot's parser seeds it from config; `types.Config{}` leaves it
         // empty). page_allocator: process-lifetime config, not leak-tracked.
         if (build_options.has_tiling) {
-            const candidates = [_][]const u8{ "master", "monocle", "fibonacci", "grid", "leaf", "scroll" };
-            inline for (candidates) |c| {
+            inline for (helpers.std_layout_names) |c| {
                 if (tiling.layoutByName(c)) |_| {
                     fx.config.tiling.layouts.append(std.heap.page_allocator, c) catch {};
                 }

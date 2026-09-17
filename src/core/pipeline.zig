@@ -205,6 +205,24 @@ pub inline fn reconcileUnderGrabNowWithFocus(o: sync.ReconcileOpts, t: focus.Foc
     reconcileGrabFocus(o, t, true);
 }
 
+/// As `reconcileUnderGrabNowWithFocus`, but runs `duty` inside the grab after
+/// the focus protocol and before the reconcile. Lets a caller fold a
+/// model-derived adjustment that depends on the new focus (the viewport snap)
+/// into the same reconcile instead of opening a second grab.
+pub inline fn reconcileUnderGrabNowWithFocusDuty(
+    o: sync.ReconcileOpts,
+    t: focus.FocusTransition,
+    duty: ?*const fn () void,
+) void {
+    preReconcileDuties();
+    const c = ctx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+    focus.applyPendingFocus(t);
+    if (duty) |d| d();
+    sync.reconcile(&instance, c, o);
+}
+
 /// Focus lands after geometry, for mapRequest: the window must be mapped (by
 /// reconcile) before xcb_set_input_focus can target it without BadMatch.
 /// Both map+focus under one grab eliminates the atomicity gap where a client

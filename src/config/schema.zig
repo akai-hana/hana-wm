@@ -36,9 +36,12 @@ fn knobGated(places: []const Placement, target: []const u8, kind: Kind, requires
 }
 
 /// The [tiling.aesthetics]/flat [tiling] quartet: same key spells both,
-/// target is tiling.<key>, gated on "tiling" (mirrors parseTiling's gate).
+/// target is tiling.<key>. UNGATED: the aesthetics are visual, so a theme
+/// file may carry only `[tiling.aesthetics]` (no `[tiling]` functional
+/// marker) and still apply border/gap styling. The place probe already
+/// no-ops when neither section exists.
 fn tilingAesthetics(key: []const u8, kind: Kind) Knob {
-    return .{ .places = &.{ place("tiling.aesthetics", key), place("tiling", key) }, .target = "tiling." ++ key, .kind = kind, .requires = "tiling" };
+    return .{ .places = &.{ place("tiling.aesthetics", key), place("tiling", key) }, .target = "tiling." ++ key, .kind = kind };
 }
 
 /// Master-stack trio: dedicated-section short spelling wins over the flat
@@ -95,8 +98,10 @@ pub const knobs = [_]Knob{
     knob(&.{ place("bar.modules.workspaces", "count"), place("workspaces", "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
     knob(&.{ place("bar.modules.workspaces", "enabled"), place("workspaces", "enabled") }, "workspaces.enabled", .b),
 
-    // [tiling]: gated on the section exactly as parseTiling always was --
-    // a lone [tiling.aesthetics] without [tiling] never fed these knobs.
+    // [tiling]: functional knobs gated on the section exactly as
+    // parseTiling always was -- a lone [tiling.aesthetics] without [tiling]
+    // never fed these knobs. (The aesthetics quartet below is UNGATED: it's
+    // visual, so themes may ship it without the functional marker.)
     knobGated(&.{place("tiling", "enabled")}, "tiling.enabled", .b, "tiling"),
     knobGated(&.{place("tiling", "global_layout")}, "tiling.global_layout", .b, "tiling"),
     knobGated(&.{place("tiling", "min_window_dim")}, "tiling.min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, "tiling"),

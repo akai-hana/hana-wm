@@ -38,15 +38,12 @@ pub fn switchTo(m: *model.Model, ws: model.WSId) void {
 pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     const e = m.store.getPtr(win) orelse return;
     if (ws >= m.ws.len) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
-    if (e.mask == model.ALL_MASK) return; // pinned stays everywhere-visible
+    if (model.isPinned(e.*)) return; // pinned stays everywhere-visible
 
     // Refuse-before-mutate: full destination list cancels the move.
     const h: ?model.WSId = e.home_ws;
     if (h) |old_h| if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) return;
 
-    if (providerOf(.isWindowHidden)) |wm| {
-        if (wm.isWindowHidden.?(m, win)) e.mask = model.bit(ws); // record follows the move
-    }
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
     if (h) |old_h| {
@@ -108,7 +105,7 @@ pub fn tagAdd(m: *model.Model, win: model.WindowId, ws: model.WSId, protect_curr
 
 pub fn pinToggle(m: *model.Model, win: model.WindowId) void {
     const e = m.store.getPtr(win) orelse return;
-    e.mask = if (e.mask == model.ALL_MASK) model.bit(m.current) else model.ALL_MASK;
+    e.mask = if (model.isPinned(e.*)) model.bit(m.current) else model.ALL_MASK;
 }
 
 pub fn allViewToggle(m: *model.Model) bool {

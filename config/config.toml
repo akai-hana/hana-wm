@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------------------- #
 
 # In here lies all of hana's functional behavior.
-# See `binds.toml` for the bind list, and `themes/akai.toml` for visual behavior.
+# See the `[binds]` section below for the bind list, and `themes/akai.toml` for visual behavior.
 
 # Files can be structured however the user wants; I decided on this structure in order
 # to make quick theme swapping viable, and functional behavior swappable without affecting

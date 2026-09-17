@@ -110,9 +110,11 @@ pub const sendWMTakeFocusKnown = icccm.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
 // XSizeHints flags (ICCCM 4.1.2.3)
+const p_min_size: u32 = 0x10;
 const p_max_size: u32 = 0x20;
 const p_resize_inc: u32 = 0x40;
 const p_aspect: u32 = 0x80;
+const p_base_size: u32 = 0x100;
 
 const wm_normal_hints_long_length: u32 = 18; // flags + 17 fields (up to base_size/win_gravity)
 
@@ -992,7 +994,14 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
 fn resolveConfigureGeometry(win: u32) ?utils.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
     if (@import("sync").truthRect(pipeline.model(), win)) |rect| {
-        const border: u16 = (if (build_options.has_tiling) @import("core").borderWidth() else 0);
+        // W3: report the border width we actually last sent for this window
+        // (the ledger), not the global config default. The two differ before
+        // the first reconcile and for per-window overrides; a wrong value here
+        // makes clients mis-size themselves.
+        const border: u16 = if (!build_options.has_tiling)
+            0
+        else
+            @import("sync").lastBorderWidthFor(win) orelse @import("core").borderWidth();
         return .{
             .x = rect.x,
             .y = rect.y,
@@ -1047,13 +1056,24 @@ fn handleManagedConfigureRequest(
     const has_bw = build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0;
     switch (wm.honorConfigureRequest.?(pipeline.mut(&gate), win, req)) {
         .geometry_applied => {
-            // ICCCM 4.1.5: a border-width-only request needs the synthetic
-            // ConfigureNotify (the width isn't otherwise observable).
+            // ICCCM 4.1.5: a border-width-only request applied by the module
+            // needs the synthetic ConfigureNotify (the width isn't otherwise
+            // observable) AND the reconcile ledger updated so the next pass
+            // doesn't re-assert the WM width (reverting the honored value).
             if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
+                if (build_options.has_tiling) @import("sync").markSentBorderWidth(win, event.border_width);
+                if (has_bw) _ = wincache.cacheBorderWidth(win, event.border_width);
                 sendSyntheticConfigureNotify(win);
                 return;
             }
-            sendRequestedConfigure(win, event, mask);
+            // W1: don't teleport an off-screen window onto the visible screen.
+            // A parked (off-workspace) or non-current-workspace floating
+            // window's ConfigureRequest must update its model rect (done in the
+            // module above) but not move the X window, which would flash it
+            // onto the current workspace; it is configured when next shown.
+            const m = pipeline.model();
+            if (@import("model").visibleOn(m, win, m.current))
+                sendRequestedConfigure(win, event, mask);
             return;
         },
         .border_only => {
@@ -1152,7 +1172,10 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 /// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
-    if (!isOnCurrentWorkspace(win)) return;
+    // W4: in all-view mode every window is visible on the current workspace
+    // regardless of its tag mask, so hover must be able to focus it too; a
+    // bare membership check made all-view windows un-focusable by ENTER.
+    if (!isOnCurrentWorkspace(win) and !pipeline.model().all_view_active) return;
     if (callHookBool(.isWindowHidden, .{ pipeline.model(), win })) return;
     focus.grabFocus(win, .mouse_enter);
 }
@@ -1261,17 +1284,24 @@ fn parseSizeHintsIntoCache(
     const field_count = reply.*.value_len;
     const flags = fields[0];
 
-    // PMinSize and PBaseSize (min_width/min_height) are intentionally not
-    // cached: applyHintsToRect skips min-size clamping for tiling because the
-    // layout engine owns all dimensions. All other ICCCM constraints are
-    // forwarded so windows with max-size, resize-increment, or aspect-ratio
-    // hints behave correctly.
+    // PMinSize/PBaseSize are cached for the floating drag-resize floor only:
+    // `tiling.applyHints` still ignores declared minimums (the layout engine
+    // owns tiled dimensions, and honouring them there would pin the rect and
+    // block mod_h/mod_l). The max/increment/aspect constraints are forwarded
+    // so hint-constrained windows behave correctly in both modes.
+    const want_min = flags & p_min_size != 0;
+    const want_base = flags & p_base_size != 0;
     const want_max = flags & p_max_size != 0;
     const want_inc = flags & p_resize_inc != 0;
     const want_asp = flags & p_aspect != 0;
 
-    if (!want_max and !want_inc and !want_asp) return;
+    if (!want_min and !want_base and !want_max and !want_inc and !want_asp) return;
 
+    // PBaseSize (offset 15) is the increment base; when both are declared the
+    // effective floor is the larger, so a client can never be dragged smaller
+    // than either it or its base declares.
+    const min_pair = extractFieldPair(fields, field_count, want_min, 5);
+    const base_pair = extractFieldPair(fields, field_count, want_base, 15);
     const max_pair = extractFieldPair(fields, field_count, want_max, 7);
     const inc_pair = extractFieldPair(fields, field_count, want_inc, 9);
 
@@ -1293,6 +1323,8 @@ fn parseSizeHintsIntoCache(
     // freshly created model entry); once registered, the model write below is
     // the only truth and the wincache copy is never read again.
     const hints: @import("model").SizeHints = .{
+        .min_width = @max(min_pair.width, base_pair.width),
+        .min_height = @max(min_pair.height, base_pair.height),
         .max_width = max_pair.width,
         .max_height = max_pair.height,
         .inc_width = inc_pair.width,
@@ -1323,6 +1355,10 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & cur_bit == 0) continue;
+        // W7: parked (offscreen/minimized) windows are invisible; recoloring
+        // them is pointless XCB traffic and can race the park position. The
+        // unpark reconcile re-establishes their border color.
+        if (entry.presence == .parked) continue;
         if (comptime skip_tiled) {
             if (build_options.has_tiling and tilingActive() and tracking.isTiledMode(win)) continue;
         }

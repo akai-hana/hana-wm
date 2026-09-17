@@ -34,6 +34,7 @@ fn m() ?*const model_mod.Model {
 pub const Entry = struct {
     win: u32,
     mask: u64,
+    presence: model_mod.Presence = .present,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ pub fn allWindows() []const Entry {
     const n = @min(mm.store.count(), snapshot_buf.len);
     for (0..n) |i| {
         const it = mm.store.at(i);
-        snapshot_buf[i] = .{ .win = it.key, .mask = it.val.mask };
+        snapshot_buf[i] = .{ .win = it.key, .mask = it.val.mask, .presence = it.val.presence };
     }
     return snapshot_buf[0..n];
 }

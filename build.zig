@@ -80,23 +80,20 @@ pub fn build(b: *std.Build) !void {
     const has_bar = has_bar_dir and has_drawing and has_bar_win and has_bar_segment;
     build_opts.addOption(bool, "has_bar", has_bar);
 
+    // Segment presence flags are consumed only by the test gate table below;
+    // no Zig source reads them, so they are NOT published as build options.
     const has_seg_clock = discovery.modules.contains("clock");
-    build_opts.addOption(bool, "has_seg_clock", has_seg_clock);
     const has_seg_carousel = discovery.modules.contains("carousel");
-    build_opts.addOption(bool, "has_seg_carousel", has_seg_carousel);
     const has_seg_prompt = discovery.modules.contains("prompt");
     const has_seg_systatus = discovery.modules.contains("systatus");
-    build_opts.addOption(bool, "has_seg_systatus", has_seg_systatus);
 
-    // The vim-modal prompt engine: gate table + addOption share the flag, so
-    // it lives here rather than only inside the optional_features loop. The
+    // The vim-modal prompt engine: its presence gates the engine test; the
     // engine is a prompt addon, so its tests also require the host package.
     const has_vim = discovery.modules.contains("vim");
 
     // Remaining has_* options: derived from the discovered module set.
     const optional_features = [_]struct { option: []const u8, stem: []const u8 }{
         .{ .option = "has_layout_scroll", .stem = "scroll" },
-        .{ .option = "has_seg_volume", .stem = "volume" },
     };
     for (optional_features) |feature| {
         build_opts.addOption(bool, feature.option, discovery.modules.contains(feature.stem));
@@ -254,7 +251,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "masks_test", .gate = true, .x_gated = false },
         .{ .name = "borders_test", .gate = true, .x_gated = true },
         .{ .name = "vim_test", .gate = has_vim and has_seg_prompt, .x_gated = false },
-        .{ .name = "focus_latency_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
+        .{ .name = "focus_latency_test", .gate = has_tiling, .x_gated = false },
         .{ .name = "tiling_latency_test", .gate = has_tiling, .x_gated = false },
     };
     {
@@ -262,13 +259,20 @@ pub fn build(b: *std.Build) !void {
         test_loop: while (test_it.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.key_ptr.*, "_test")) continue;
             // Single table lookup: gate + x_gated together, so the
-            // X-gated branching needs no separate name cascade.
+            // X-gated branching needs no separate name cascade. A discovered
+            // *_test module missing from the table is a hard error: silently
+            // running it ungated hides a feature dependency and can break the
+            // deletion matrix (or let an X test race the shared display).
             const spec = for (test_gates) |g| {
                 if (std.mem.eql(u8, entry.key_ptr.*, g.name)) break g;
-            } else null;
-            if (spec) |s| {
-                if (!s.gate) continue :test_loop;
-            }
+            } else {
+                std.debug.print(
+                    "build: test module '{s}' has no test_gates entry; add it so its feature gate and X-serialization are explicit\n",
+                    .{entry.key_ptr.*},
+                );
+                return error.UngatedTestModule;
+            };
+            if (!spec.gate) continue :test_loop;
             // Every test root links the same system libraries as the main
             // exe: the modules reached from a test graph may call X11/cairo
             // directly (window, drawing, ...) and no longer inherit linkage
@@ -277,11 +281,9 @@ pub fn build(b: *std.Build) !void {
             const t = b.addTest(.{ .root_module = entry.value_ptr.* });
             const run = b.addRunArtifact(t);
             unit_test_step.dependOn(&run.step);
-            if (spec) |s| {
-                if (s.x_gated) {
-                    if (x_gated_run) |prev| run.step.dependOn(prev);
-                    x_gated_run = &run.step;
-                }
+            if (spec.x_gated) {
+                if (x_gated_run) |prev| run.step.dependOn(prev);
+                x_gated_run = &run.step;
             }
         }
     }
@@ -313,6 +315,17 @@ pub fn build(b: *std.Build) !void {
     layers.step.dependOn(&exe.step);
     check_step.dependOn(&layers.step);
     check_step.dependOn(plugin_template_check);
+
+    // Deletion-modularity: each scenario copies the tree, removes an optional
+    // subsystem, and builds it cold. That is far too heavy to fold into the
+    // frequent `check` path, so it gets its own step (plus a `check-all`
+    // aggregate) and is invoked from the pre-commit gate / CI instead.
+    const check_modularity = b.step("check-modularity", "Build each feature-deletion scenario (see dev/scripts/check-modularity.sh)");
+    check_modularity.dependOn(&b.addSystemCommand(&.{"./dev/scripts/check-modularity.sh"}).step);
+
+    const check_all = b.step("check-all", "check + check-modularity");
+    check_all.dependOn(check_step);
+    check_all.dependOn(check_modularity);
 }
 
 // Shared context
