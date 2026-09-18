@@ -93,6 +93,11 @@ pub const MouseBind = struct {
 
 // Tiling layout types
 
+/// Maximum bytes any lowered config name (layout names, string_map keys) may
+/// occupy. Single home for the 32-byte buffers that config lookups lower into;
+/// config.zig's layout-name parser derives from this so the two can't drift.
+pub const max_config_name = 32;
+
 /// Lowercases `str` into a `max_len`-byte stack buffer if it fits; returns
 /// null when `str` is too long. Shared by the layout-name and string_map
 /// lookups; keyNameToKeysym bypasses it: the C API needs a verbatim
@@ -104,12 +109,12 @@ pub inline fn lowerSlice(comptime max_len: usize, buf: *[max_len]u8, str: []cons
 }
 
 /// Case-insensitive enum lookup shared by enums that expose a `string_map` decl.
-/// Lowercases `str` into a 32-byte stack buffer and probes the map.
+/// Lowercases `str` into a stack buffer and probes the map.
 /// Returns null when `str` exceeds the buffer or the key is not found.
 pub fn enumFromString(comptime T: type, str: []const u8) ?T {
     const map = T.string_map;
-    var buf: [32]u8 = undefined;
-    return map.get(lowerSlice(32, &buf, str) orelse return null);
+    var buf: [max_config_name]u8 = undefined;
+    return map.get(lowerSlice(max_config_name, &buf, str) orelse return null);
 }
 
 pub const MasterSide = enum {
@@ -408,6 +413,15 @@ pub const BarConfig = struct {
     /// muted the volume_muted_format wins.
     volume_format: ?[]const u8 = null,
     volume_muted_format: ?[]const u8 = null,
+    /// Brightness segment display template (bar.modules... falls back to
+    /// "BRT {pct}%" when null). `{pct}` is replaced by the 0-100 level; there
+    /// is no muted-style second state so no `{state}`.
+    brightness_format: ?[]const u8 = null,
+    /// Brightness segment device pin: names a `/sys/class/backlight/*`
+    /// device, or -- with a `led:` prefix -- an LED-class device under
+    /// `/sys/class/leds/*`. Absent ("") = auto-discovery picks the first
+    /// usable backlight.
+    brightness_device: ?[]const u8 = null,
     /// Systatus segment readout list, in render order. Valid items: "mem"
     /// (used/total + %), "cpu" (utilization %), "batt" (charge % when a
     /// battery is present). Absent (null) = the default set, which is every
@@ -439,7 +453,7 @@ pub const BarConfig = struct {
         freeStrings(&self.fonts, allocator, false);
         if (self.systatus_items) |*list| freeStrings(list, allocator, false);
         freeBarLayouts(&self.layout, allocator, false);
-        inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format }) |f| if (f.*) |s| allocator.free(s);
+        inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format, &self.brightness_format, &self.brightness_device }) |f| if (f.*) |s| allocator.free(s);
     }
 
     pub inline fn drunBg(self: *const BarConfig) Color {

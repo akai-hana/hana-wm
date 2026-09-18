@@ -19,17 +19,17 @@ Status key used inline:
 Standing verification commands: `zig fmt --check .`, `zig build check`, `zig build test`, `dev/scripts/xtest.sh zig build test`, `zig build check-modularity` (or `./dev/scripts/check-before-commit.sh --modularity`). The modularity check is deliberately NOT a dependency of the default `check` (a ~25-cold-build cost); it is exposed as `check-modularity` / `check-all` and run in `check-before-commit.sh`.
 
 ### Summary by section
-- **§I Correctness/memory** — every first-pass bug fixed; only the config `include` depth-1 nit remains OPEN (all other listed nits are now FIXED or GATED).
+- **§I Correctness/memory** — every first-pass bug fixed; the config `include` depth-1 nit is now FIXED too (warn on unconsumed include), so §I has no remaining OPEN items.
 - **§II Performance** — the two majors fixed (focus-cycle fold lands focus+viewport-snap in one grab; sent-ledger lookup is O(1) and saturation-safe); `findManagedWindow` now has a child cache. Several Phase-2-lite items remain OPEN/DEFERRED.
 - **§III Architecture** — the "Phase 2" structural refactors (god-file splits, config↔input decoupling, DI) were deliberately NOT pursued; `check-modularity` is exposed but kept out of the default check.
-- **§IV–VI Simplicity/bar/window** — the reflection change-detector was replaced with explicit comparisons, the bar geometry/layout nits landed, and the dead focus-cycle paths were removed; the rest were judged not worth the churn and remain DEFERRED.
-- **§VII Tests/build/hygiene** — the build/hygiene list was completed and pure input-path tests were added; the remaining test-coverage wishlist is OPEN.
+- **§IV–VI Simplicity/bar/window** — the reflection change-detector was replaced with explicit comparisons, the bar geometry/layout nits landed, the dead focus-cycle paths were removed, the marquee/click-target/Ctrl-swallow/fibonacci/variants nits landed, and `resolveConfigureGeometry` now delegates fully to `sync.truthRect`; the rest were judged not worth the churn and remain DEFERRED.
+- **§VII Tests/build/hygiene** — the build/hygiene list was completed and pure input/bar/window-submodule tests were added (wincache, click-raise liveness, Ctrl-key editor); the remaining test-coverage wishlist is OPEN.
 
 ### Remaining OPEN items at a glance
-- §I nits: config `include` depth-1 silencing remains the only open correctness nit (DestroyNotify double-dispatch and `isRandrEvent` are GATED with documented rationale; ledger-full, XKB marshalling, CRLF, `readFileAlloc`, and the scale-retry gate are FIXED).
-- §II: `coveringOccupantOnWs` scan was measured (480.8 ns/call vs `fullscreenOccupantOnWs` 105.4 ns/call) and deliberately NOT cached — the invalidation surface outweighs the modest hot-path gain; a bench test pins both. Bar per-frame live-frame scan + marquee 60 Hz re-scan, ICCCM linear-scan prop cache, config reload double probe, per-frame sorted title list were pursued. `HintsView.forWin` scan and the grab-scope reconciliation refactor are DEFERRED (documented tradeoffs). `findManagedWindow` now has a child cache (FIXED).
+- §I nits: none remain OPEN (config `include` depth-1 is FIXED; DestroyNotify double-dispatch and `isRandrEvent` are GATED with documented rationale; ledger-full, XKB marshalling, CRLF, `readFileAlloc`, and the scale-retry gate are FIXED).
+- §II: `coveringOccupantOnWs` scan was measured (480.8 ns/call vs `fullscreenOccupantOnWs` 105.4 ns/call) and deliberately NOT cached — the invalidation surface outweighs the modest hot-path gain; a bench test pins both. The bar per-frame live-frame scan, marquee 60 Hz re-scan, ICCCM linear-scan prop cache (now O(1) IdMap), config reload double probe, and per-frame sorted title list were pursued. `HintsView.forWin` scan and the grab-scope reconciliation refactor are DEFERRED (documented tradeoffs). `findManagedWindow` now has a child cache (FIXED).
 - §III–VI: full architecture pass as listed below (all Phase 2 / DEFERRED unless tagged FIXED).
-- §VII: headless test coverage for the remaining bar/window submodules is OPEN (input modifiers/`KeybindResolver` now covered); `tiling_test` still `orelse 0`s `layoutByName`; CI is restored in-repo (test / modularity / non-gating golden-parity jobs).
+- §VII: headless test coverage for the remaining bar/window submodules is OPEN (input modifiers/`KeybindResolver`, bounded, keysyms, wincache, and the click-raise liveness ordering are now covered); CI is restored in-repo (test / modularity / non-gating golden-parity jobs).
 
 ---
 
@@ -155,7 +155,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### [nit] Parser/spawn/config misc
 - `spawn.zig` tag-message write — **FIXED** (bytes checked).
-- Config `include` depth-1 silently skipped — **OPEN** (warn on unconsumed include).
+- Config `include` depth-1 silently skipped — **FIXED** (warn on unconsumed include).
 - `refresh.zig` mode table at 256 — **GATED** — the rate path was restructured around a cached mode table + targeted get-mode fallback (`runPendingRedetect`); a truncation warning was dropped as part of that design.
 - `persist.zig` world-readable restore — **FIXED** (`0o600`).
 - `wire.zig` truncation warn false positive — **FIXED** (keyed off `bytes_after > 0`).
@@ -186,7 +186,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 ### [minor] findManagedWindow blocking tree walk on first hover into child windows — **FIXED**
 - `src/window/window.zig` keeps a bounded `child_cache` (XID → managed ancestor) so the per-level query only runs on a cache miss; capped at 64 entries so memory stays bounded.
 
-### [minor] ICCCM prop cache is a 512-slot linear-scan list — **OPEN** (overlaps icccm→wincache merge; Phase 2)
+### [minor] ICCCM prop cache is a 512-slot linear-scan list — **FIXED (partial)**
+- The cache is now an O(1) XID→entry `IdMap` (see wincache), capped at `icccm.max_window_cache` (512): lookups no longer scan. Windows overflowing the cap are closed. Headless lifecycle coverage landed in `src/test/window/wincache_test.zig` (gated, x_gated=false).
 
 ### [minor] Bar dirty frames re-etch every title: snapshot + sort + Pango measure — **GATED**
 - Title widths are memoized and the full-redraw is gated to configured layout segments; the per-frame sorted-title list is still recomputed each frame (OPEN).
@@ -292,31 +293,40 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 ### [major] Tiling snap-to-increment → zero-size — **FIXED (see §I)**
 ### [major] Master overflow grid cap — **FIXED (see §I)**
 ### [minor] Center-layout segments overlap the right cluster — **FIXED**
-### [minor] Click targets beyond the 8th silently dropped — **OPEN**
-### [minor] Marquee teleports after hide/show — **OPEN**
-### [minor] First frame after reload lays out zero-reserved segments — **OPEN**
+### [minor] Click targets beyond the 8th silently dropped — **FIXED**
+- `max_click_bounds` is sized from the registry (`bar_mods.len`), not a hardcoded 8; extra segments share the fallback region instead of being dropped.
+### [minor] Marquee teleports after hide/show — **FIXED**
+- `title.zig` drawHook latches `overlay_was_active`; when the overlay closes after being active overnight, the scroller's `resetForShow()` pivots elapsed time so a hide/show doesn't teleport the marquee.
+### [minor] First frame after reload lays out zero-reserved segments — **FIXED (verified)**
+- `segdraw` `widthState.invalidate()` keeps the last reserved width and `systatus` probes fall back, so the first post-reload frame isn't zero-width.
 ### [minor] Omit-gap failure path leaves x unadvanced — **FIXED**
 ### [minor] Multiple right layouts reserve an extra trailing spacing — **FIXED**
-### [minor] Non-vim insert swallows every Ctrl-key — **OPEN**
-### [minor] Fibonacci duplicates leaf's bisection math — **OPEN**
-### [nit] Sized-font cache stale on failed reload — **OPEN**
-### [nit] max_rendered_title_windows guard unreachable — **OPEN**
+### [minor] Non-vim insert swallows every Ctrl-key — **FIXED**
+- `prompt.handleCtrl` now implements readline-style Ctrl combos — a (home), e (end), u (clear-to-start), k (clear-to-end), w (delete word back), h (backspace), c (deactivate) — instead of swallowing the key; covered by `src/test/bar/vim_test.zig`.
+### [minor] Fibonacci duplicates leaf's bisection math — **FIXED (verified)**
+- Both layouts call the shared `tiling.bisectRegion`; no duplicated split math remains.
+### [nit] Sized-font cache stale on failed reload — **FIXED**
+- Sized-font cache invalidation now keys off the API check that actually reloads the font.
+### [nit] max_rendered_title_windows guard unreachable — **FIXED**
+- The guard was superseded by the frame-bound clamp (`Limits.max_tiled_windows`, which is also what the gather scratch is sized to); the stray `max_rendered_title_windows = 128` constant was dead and is removed.
 ### [nit] Bar window event mask omits BUTTON_RELEASE — **FIXED**
 ### [nit] History ring allows consecutive duplicates — **FIXED**
 ### [nit] Vim backward-range operators include char under cursor — **KEEP** (documented deviation)
 ### [nit] ensureAlloc comment misstates 512KB budget — **FIXED**
-### [nit] Variants/layout magic width/position indexing — **OPEN**
+### [nit] Variants/layout magic width/position indexing — **FIXED**
+- `monocle`/`grid` compare variant indexes through named consts (`variant_gaps`, `variant_relaxed`) and variant count/parse come from registry metadata; variants/layout bar modules index the registry by `currentLayoutKind()` with bounds-checked `variant_idx`.
 
 ---
 
 ## VI. Window & focus specifics
 
 - **GATED** — the §I focus/misc majors are resolved (see §0/§I): `no_input` failover, fullscreen cycle, border-width ledger, minimize/restore, floating hints.
-- `focus.zig` `cycle_buf` sized by store capacity — **OPEN**
-- dedup-before-liveness ordering in click-to-raise — **OPEN**
+- `focus.zig` `cycle_buf` sized by store capacity — **FIXED (documented)** — the pool admits floating windows too, so `store_capacity` (not `max_tiled_windows`) is the correct bound; rationale is documented above the buffer.
+- dedup-before-liveness ordering in click-to-raise — **FIXED**
 - single-window cycle still grabs — **FIXED** (early-return in `cycleTarget`)
 - `prepareClearFocus` derives from model; `m.focused == last_applied` invariant + parity test — **GATED** (model focus is the decision source; the parity assertion is part of the failover tests)
-- `resolveConfigureGeometry` delegation to `sync.truthRect` — **OPEN**
+- `resolveConfigureGeometry` delegation to `sync.truthRect` — **FIXED**
+  - The covering special case was dead: sync already seeds the covering winner's ledger rect with the screen pin, so the branch duplicated `truthRect` output. Removed; fallback remains the single `xcb_get_geometry` on a true cache miss.
 - tracking facade vs ledger visibility parity test — **OPEN**
 - three-way redundancy codified into one authority — **DEFERRED (Phase 2)**; `model.focused` is the decision source today.
 - cross-add-on queries via `window.providerOf` — **DEFERRED (Phase 2)**
@@ -341,7 +351,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - Import wiring duplication / `catch unreachable` vs `try` — **OPEN** (nits).
 
 ### Tests — **GATED/OPEN**
-- Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). `bounded` is now covered headless by `src/test/core/bounded_test.zig` (cap/evict/scan for `BoundedList` + `RecStore`) and pure keysym parsing by `src/test/input/keysyms_test.zig`. The rest of the wishlist is OPEN (borders, wincache, vim editor, config parser malformed cases).
+- Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). `bounded` is now covered headless by `src/test/core/bounded_test.zig` (cap/evict/scan for `BoundedList` + `RecStore`), pure keysym parsing by `src/test/input/keysyms_test.zig`, the ICCCM window-hint cache lifecycle by `src/test/window/wincache_test.zig` (gated, x_gated=false), and the click-raise liveness-before-dedup ordering by `focus_test.zig` (destroyed window under a `mouse_click` is never re-focused). The rest of the wishlist is OPEN (borders, config parser malformed cases).
 - Golden harness baselines — **PARTIAL**: S22/S23 recaptured and current; S01–S21 predate the current focus/stacking behavior and need recapture (the CI parity job is `continue-on-error` until then). The harness `Mod+P` bind was also corrected to the current `pin_window` action.
 - `persist_test` leak doc/re-point — **FIXED** (testing allocator, doc accurate).
 - `visibility_test` self-skip inversion — **FIXED**.
@@ -349,7 +359,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - `scratch.zig` portable temp dir (mktemp) — **FIXED**.
 - Fixture X-gated skip prints a banner, documented — **FIXED**.
 - Fixture geometry/pixel conventions shared helpers — **OPEN**.
-- `tiling_test` `layoutByName(...) orelse 0` silent master fallback — **OPEN** (should assert non-null in named-layout tests).
+- `tiling_test` `layoutByName(...) orelse 0` silent master fallback — **FIXED** (named-layout constants now `@panic` on a registry miss, so a missing layout fails loudly instead of silently testing the master).
 - Golden constraints derived from constant — **OPEN**.
 - `helpers.test_cycle_names` layout list — **FIXED** (`helpers.std_layout_names`, registry-consistent).
 - `model_test` magic ids → named constants — **OPEN**.

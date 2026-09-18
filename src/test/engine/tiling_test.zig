@@ -29,12 +29,16 @@ const Placement = tiling.Placement;
 /// Registry indices for each layout, resolved by name (instead of a closed
 /// enum) so the tests stay robust to registry ordering. Computed at
 /// compile time from the build-generated module registry.
-const K_MASTER: u8 = @intCast(tiling.layoutByName("master") orelse 0);
-const K_MONOCLE: u8 = @intCast(tiling.layoutByName("monocle") orelse 0);
-const K_GRID: u8 = @intCast(tiling.layoutByName("grid") orelse 0);
-const K_FIB: u8 = @intCast(tiling.layoutByName("fibonacci") orelse 0);
-const K_LEAF: u8 = @intCast(tiling.layoutByName("leaf") orelse 0);
-const K_SCROLL: u8 = @intCast(tiling.layoutByName("scroll") orelse 0);
+/// Panic message shared by the name→index constants below: a missing layout
+/// here is a registry bug, not a test condition, so a silent 0 would corrupt
+/// every golden rect (layout 0 is master).
+const kLayoutMissing = "tiling test: registry missing layout";
+const K_MASTER: u8 = @intCast(tiling.layoutByName("master") orelse @panic(kLayoutMissing));
+const K_MONOCLE: u8 = @intCast(tiling.layoutByName("monocle") orelse @panic(kLayoutMissing));
+const K_GRID: u8 = @intCast(tiling.layoutByName("grid") orelse @panic(kLayoutMissing));
+const K_FIB: u8 = @intCast(tiling.layoutByName("fibonacci") orelse @panic(kLayoutMissing));
+const K_LEAF: u8 = @intCast(tiling.layoutByName("leaf") orelse @panic(kLayoutMissing));
+const K_SCROLL: u8 = @intCast(tiling.layoutByName("scroll") orelse @panic(kLayoutMissing));
 
 // Variant indexes owned by each module: grid's "relaxed" is variant 1 of
 // {"rigid","relaxed"}; monocle's "gaps" is variant 1 of {"gapless","gaps"}.

@@ -981,13 +981,11 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
 
 /// Resolve the window's current geometry, cheapest source first:
 ///
-///   1. Tiling cache: zero round-trips (always current after a retile).
-///   2. Covering: geometry is pinned to the screen rect (0, 0, screen_w,
-///      screen_h, bw=0) -- sync seeds the covering winner with `ctx.screen` --
-///      so the fixed value is returned directly. Handling it here avoids a
-///      blocking xcb_get_geometry per ConfigureRequest, which matters
-///      for video players that poll their size continuously.
-///   3. True cache miss: one blocking xcb_get_geometry. Floating windows
+///   1. Model/sync truth: floating base or last-sent ledger rect. Covers
+///      covering winners too -- sync seeds the covering winner's ledger rect
+///      with the screen rect (bw 0), so the screen pin needs no special case
+///      here (a redundant covering branch would duplicate that).
+///   2. True cache miss: one blocking xcb_get_geometry. Floating windows
 ///      never retiled; a fallback, not a hot path.
 ///
 /// Returns null when even the fallback fails (window gone).
@@ -1008,17 +1006,6 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
             .width = rect.width,
             .height = rect.height,
             .border_width = border,
-        };
-    }
-
-    if (isCoveringMode(pipeline.model(), win)) {
-        const screen = core.getState().screen;
-        return .{
-            .x = 0,
-            .y = 0,
-            .width = @intCast(screen.width_in_pixels),
-            .height = @intCast(screen.height_in_pixels),
-            .border_width = 0,
         };
     }
 

@@ -207,6 +207,9 @@ fn mergeIncludes(
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
         var inc_doc = tryParseTomlFile(allocator, abs, dst) orelse continue;
+        if (inc_doc.get("include")) |_| {
+            debug.warn("{s}: nested 'include' inside an included file is not " ++ "supported; its include list is skipped", .{abs});
+        }
         try parser.mergeDocumentsInto(allocator, dst, &inc_doc);
         debug.info("Merged (include): {s}", .{abs});
     }
@@ -1179,7 +1182,7 @@ const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
 /// Maximum bytes a config layout name may occupy after normalization. Longer
 /// names are warned-and-skipped by the layouts-array and variants-word parses
 /// below.
-const max_layout_name = 32;
+const max_layout_name = types.max_config_name;
 
 /// Layout-name normalization shared by isLayoutName, parseLayoutVariant and
 /// parseLayoutsArray: lowercases `name` into `buf`, returning null when it

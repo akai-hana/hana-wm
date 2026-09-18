@@ -92,6 +92,13 @@ wire_allowed() {
         # setup is not WM wire traffic and never routes through sync.
         src/test/window/fixture.zig) ;;
 
+        # src/test/window/focus_test.zig is a TEST DOUBLE: its liveness
+        # ordering test destroys the clicked window through the X-gated
+        # harness's real connection (xcb_destroy_window) so it can assert that
+        # a mouse_click on a window destroyed mid-click is never re-focused.
+        # Same test-double carve-out as fixture.zig; never routes through sync.
+        src/test/window/focus_test.zig) ;;
+
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
         # buffer after others' queued requests). refresh.zig/events.zig are core
