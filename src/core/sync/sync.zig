@@ -183,8 +183,9 @@ const SentIndex = struct {
     tombstones: usize = 0,
 };
 
-/// Owned by the compositor process; re-init() on reconnect.
-pub var st: State = .{};
+/// Owned by the compositor process; re-init() on reconnect. Module-private:
+/// all access goes through this file's API.
+var st: State = .{};
 
 pub fn init() void {
     st = .{};
@@ -434,7 +435,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     var pl_of_slot: [model.store_capacity]?usize = [_]?usize{null} ** model.store_capacity;
     if (build_options.has_tiling and fs_win == null) {
         var n: usize = 0;
-        const tiled = &m.ws[m.current].tiled_order;
+        const tiled = &m.ws[m.current.index].tiled_order;
         for (tiled.constSlice()) |w| {
             const e = m.store.get(w) orelse continue;
             if (e.mask & model.bit(m.current) == 0) continue;
@@ -449,7 +450,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             n += 1;
         }
         const hv = plugin.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
-        const params = &m.ws[m.current].params;
+        const params = &m.ws[m.current.index].params;
         const view: plugin.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
         if (n > 0) {
             tiling.compute(params.kind, view, &placements);

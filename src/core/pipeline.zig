@@ -72,7 +72,7 @@ pub inline fn mut(g: *const Gate) *model_mod.Model {
 /// name resolution pre-init. An unresolvable config name (removed module,
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
-    if (initialized) return model().ws[model().current].params.kind;
+    if (initialized) return model().ws[model().current.index].params.kind;
     const cs = core.getState();
     if (!build_options.has_tiling) return 0;
     return defaultIndexForLayoutName(cs.config.tiling.layout);
@@ -111,7 +111,7 @@ var g_ctx: sync.Ctx = undefined;
 fn ctx() *sync.Ctx {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
-    const p = &model().ws[model().current].params;
+    const p = &model().ws[model().current.index].params;
     g_ctx = .{
         .sink = sink(),
         .screen = .{
@@ -165,7 +165,7 @@ fn preReconcileDuties() void {
     // model()/mut()) because this is the model owner applying the active
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
     // module receives a mutable pointer into the model anymore).
-    const p = &instance.ws[instance.current].params;
+    const p = &instance.ws[instance.current.index].params;
     if (p.kind >= tiling_mods.len) return;
     const md = tiling_mods[p.kind];
     if (md.preReconcile == null) return;

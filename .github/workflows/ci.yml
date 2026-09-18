@@ -57,14 +57,11 @@ jobs:
   # Behavioral parity harness: boots a private Xvfb and replays the scenarios
   # against recorded goldens. Runs on pushes to dev only (slow).
   #
-  # NON-GATING: the S01–S21 goldens predate the current focus/stacking behavior
-  # (they were last recaptured before the source-tree/layout restructure), so
-  # the compare currently reports drift. S22/S23 were recaptured and are
-  # current. This job is `continue-on-error` until the baselines are recaptured;
-  # flip it off once `dev/harness/run-scenario.sh --compare` is green locally.
+  # GATING: all S01–S23 goldens were recaptured against the current
+  # focus/stacking behavior and `./dev/harness/run-scenario.sh --compare` is
+  # green locally, so parity drift now fails CI.
   harness:
     if: github.ref == 'refs/heads/dev'
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

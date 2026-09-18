@@ -31,17 +31,17 @@ const page_alloc = std.heap.page_allocator;
 /// workspaces plus one floating window, with focus, reordered tiled order and
 /// custom workspace params and per-ws runtime viewport state.
 fn buildFixtureModel(m: *model.Model) void {
-    model.register(m, 1, 0) catch unreachable;
-    model.register(m, 2, 0) catch unreachable;
-    model.register(m, 3, 1) catch unreachable;
+    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
+    model.register(m, 2, model.WSId.fromIndex(0)) catch unreachable;
+    model.register(m, 3, model.WSId.fromIndex(1)) catch unreachable;
     model.setFocus(m, 1);
     _ = m.store.put(4, .{
-        .mask = model.bit(0),
+        .mask = model.bit(model.WSId.fromIndex(0)),
         .anchor = .{ .floating = .{ .x = 5, .y = 6, .width = 100, .height = 80 } },
     }) catch unreachable;
     model.reorderTiled(m, 2, 0); // ws 0 tiled order [2, 1]
 
-    m.current = 1;
+    m.current = model.WSId.fromIndex(1);
     m.all_view_active = true;
     m.ws[0].params.primary_width = 0.6;
     m.ws[0].params.primary_count = 2;
@@ -52,9 +52,9 @@ fn buildFixtureModel(m: *model.Model) void {
 /// re-register these after a re-exec). Window 4 floats and is deliberately
 /// absent -- like a window that did not survive the re-exec.
 fn registerSurvivors(m: *model.Model) void {
-    model.register(m, 1, 0) catch unreachable;
-    model.register(m, 2, 0) catch unreachable;
-    model.register(m, 3, 1) catch unreachable;
+    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
+    model.register(m, 2, model.WSId.fromIndex(0)) catch unreachable;
+    model.register(m, 3, model.WSId.fromIndex(1)) catch unreachable;
 }
 
 test "F10: save/load keeps every window record and workspace field" {
@@ -72,7 +72,7 @@ test "F10: save/load keeps every window record and workspace field" {
     // loadToGlobal's own version gate already rejected the wrong-version file;
     // the round-trip record must carry the (internal, non-pub) version value.
     try testing.expect(recorded.version > 0);
-    try testing.expectEqual(@as(model.WSId, 1), recorded.current);
+    try testing.expectEqual(@as(u8, 1), recorded.current);
     try testing.expectEqual(@as(?model.WindowId, 1), recorded.focused);
     try testing.expect(recorded.all_view_active);
 
@@ -80,7 +80,7 @@ test "F10: save/load keeps every window record and workspace field" {
     try testing.expectEqual(@as(usize, 4), recorded.windows.len);
     const w1 = recorded.windows[0];
     try testing.expectEqual(@as(model.WindowId, 1), w1.win);
-    try testing.expectEqual(@as(model.Mask, model.bit(0)), w1.mask);
+    try testing.expectEqual(@as(model.Mask, model.bit(model.WSId.fromIndex(0))), w1.mask);
     try testing.expect(@intFromEnum(w1.anchor) == @intFromEnum(model.BaseMode.tiled));
     try testing.expect(w1.presence == .present);
     try testing.expect(w1.covering_ws == null);
@@ -142,7 +142,7 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 
     persist.applyModelLevel(&restored);
 
-    try testing.expectEqual(@as(model.WSId, 1), restored.current);
+    try testing.expectEqual(model.WSId.fromIndex(1), restored.current);
     try testing.expectEqual(@as(?model.WindowId, 1), restored.focused);
     try testing.expect(restored.all_view_active);
     try testing.expectEqualSlices(model.WindowId, &.{ 2, 1 }, restored.ws[0].tiled_order.constSlice());
@@ -154,9 +154,9 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 
     // Membership fully reconstructed: every window has a home workspace and
     // sits in exactly one tiled order / presence list.
-    try testing.expectEqual(@as(model.WSId, 0), model.findHome(&restored, 1).?);
-    try testing.expectEqual(@as(model.WSId, 0), model.findHome(&restored, 2).?);
-    try testing.expectEqual(@as(model.WSId, 1), model.findHome(&restored, 3).?);
+    try testing.expectEqual(model.WSId.fromIndex(0), model.findHome(&restored, 1).?);
+    try testing.expectEqual(model.WSId.fromIndex(0), model.findHome(&restored, 2).?);
+    try testing.expectEqual(model.WSId.fromIndex(1), model.findHome(&restored, 3).?);
     try testing.expect(model.visibleOn(&restored, 1, model.findHome(&restored, 1).?));
     try testing.expect(model.visibleOn(&restored, 2, model.findHome(&restored, 2).?));
     try testing.expect(model.visibleOn(&restored, 3, model.findHome(&restored, 3).?));

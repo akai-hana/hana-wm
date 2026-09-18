@@ -702,7 +702,7 @@ fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
 /// describes brand-new spawns rather than pre-existing windows.
 fn restoredOrCurrent(record: ?*const persist.WindowRecord) u8 {
     if (record) |r| {
-        if (r.mask != 0) return @intCast(@import("model").lowestBit(r.mask) orelse unreachable);
+        if (r.mask != 0) return @intCast((@import("model").lowestBit(r.mask) orelse unreachable).index);
     }
     return tracking.getCurrentWorkspace() orelse 0;
 }

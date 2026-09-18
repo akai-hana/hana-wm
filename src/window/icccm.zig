@@ -24,7 +24,7 @@ pub const wm_hints_long_length: u32 = 9; // flags + 8 fields
 // take_focus (WM_TAKE_FOCUS in WM_PROTOCOLS). Safe because the mask-first
 // map ordering guarantees PropertyNotify before any post-seed change can stale.
 
-var cache_slots: utils.BoundedList(CacheSlot, max_window_cache) = .{};
+var cache_slots: utils.IdMap(CachedProps, max_window_cache) = .{};
 var cache_ready: bool = false;
 
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
@@ -45,15 +45,11 @@ const CachedProps = struct {
     take_focus: bool,
 };
 
-// At realistic window counts (<=100 typical, <=300 extreme) a linear scan over
-// u32 IDs in a flat array is cache-local and allocation-free. Windows beyond
-// max_window_cache still work; they just fall through to the live X11 path.
+// Upper bound on live cache entries. The backing IdMap is a fixed
+// allocation-free open-addressed table, so lookups are O(1) even at the cap.
+// Windows beyond max_window_cache still work; they just fall through to the
+// live X11 path.
 pub const max_window_cache: usize = 512;
-
-const CacheSlot = struct {
-    id: u32,
-    props: CachedProps,
-};
 
 /// Enables (window init) or disables (window deinit) the cache and drops all
 /// entries. Callers must not touch the cache outside the active window.
@@ -67,7 +63,7 @@ pub fn reset(active: bool) void {
 /// Removes a window's cache entry on unmanage so a reused XID can't borrow a
 /// stale focus verdict.
 pub fn evictCache(win: u32) void {
-    if (cache_slots.indexOfById(win)) |i| cache_slots.swapRemove(i);
+    _ = cache_slots.remove(win);
 }
 
 /// Called from handleMapRequest, which fires both cookies synchronously.
@@ -141,7 +137,7 @@ fn extractWMHintsInput(
 /// the live-query fallback is always correct.
 fn putCachedProps(win: u32, props: CachedProps) void {
     if (!cache_ready) return;
-    if (!cache_slots.upsertById(.id, win, .{ .id = win, .props = props })) {
+    if (!cache_slots.put(win, props)) {
         debug.warn("Focus cache full, falling back to live queries", .{});
     }
 }
@@ -151,11 +147,7 @@ fn putCachedProps(win: u32, props: CachedProps) void {
 /// since the cache seeded (or the cache is full/not ready); callers fall back
 /// to a live query or a pre-fired cookie.
 fn peekCachedProps(win: u32) ?CachedProps {
-    if (cache_ready) {
-        if (cache_slots.indexOfById(win)) |i| {
-            return cache_slots.items[i].props;
-        }
-    }
+    if (cache_ready) return cache_slots.get(win);
     return null;
 }
 
