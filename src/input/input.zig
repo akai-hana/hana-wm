@@ -11,11 +11,11 @@ const restart = @import("restart");
 const constants = @import("constants");
 const masks = @import("masks");
 const debug = @import("debug");
-const config = @import("config");
 const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const xkbcommon = @import("xkbcommon");
+const keybind = @import("keybind");
 const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
@@ -44,6 +44,12 @@ const events = @import("events");
 const mouse_buttons = [_]u8{ constants.mouse_button_left, constants.mouse_button_middle, constants.mouse_button_right, constants.mouse_button_scroll_up, constants.mouse_button_scroll_down };
 
 var xkb_state: ?xkbcommon.XkbState = null;
+
+// The (modifiers, keysym) -> Action dispatch map. Owned here, not by Config:
+// building it needs the live XKB state, which the pure config layer must not
+// depend on. Rebuilt on startup and every config reload (buildKeybinds); the
+// entries borrow `*const Action` pointers from the live config's keybindings.
+var keybind_resolver: keybind.KeybindResolver = .{};
 
 // Held binding-key ledger. A passive grab returns a bound key's KeyRelease
 // to the grabbing window only if the mask selects it; keycodes are stable
@@ -85,6 +91,28 @@ pub fn getXkbState() ?*xkbcommon.XkbState {
     return if (xkb_state) |*s| s else null;
 }
 
+/// Resolves `keybindings` against the live XKB state and rebuilds the dispatch
+/// map. Call once at startup (after `initXkb` and config load) and again on
+/// every config reload with the new config's keybindings. No-op without XKB;
+/// callers that must not run on stale XKB (the reload path) should check
+/// `getXkbState` themselves and abort first.
+pub fn buildKeybinds(keybindings: []types.Keybind) void {
+    const state = getXkbState() orelse return;
+    keybind_resolver.build(keybindings, state, core.getState().alloc);
+}
+
+/// Releases the dispatch map. Call before the config whose keybindings the
+/// entries point into is freed (shutdown).
+pub fn deinitKeybinds() void {
+    keybind_resolver.deinit(core.getState().alloc);
+}
+
+/// O(1) keybinding lookup for the hot key-press path; returns a pointer into
+/// the current config's keybindings slice, or null.
+pub inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
+    return keybind_resolver.lookup(mods, keysym);
+}
+
 /// Rebuilds the keymap/keysym table after the server changes the keyboard
 /// mapping (setxkbmap/xmodmap). Keybinding resolution is keysym-indexed, so
 /// rebuilding the flat keycode->keysym table keeps existing bindings working
@@ -102,7 +130,7 @@ pub fn handleMappingNotify() void {
     // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
     // those keycodes from the new table, then let grabKeybindings() atomically
     // ungrab all and re-grab the updated set, avoiding duplicate/leaked grabs.
-    types.resolveKeycodes(cs.config.keybindings.items, state);
+    keybind.resolveKeycodes(cs.config.keybindings.items, state);
     events.grabKeybindings();
 }
 
@@ -168,8 +196,8 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     const keysym = state.keycodeToKeysym(event.detail);
 
     // O(1) dispatch via the (modifiers << 32 | keysym) map built by
-    // config.resolveKeybindings.
-    const matched: ?*const types.Action = config.lookupKeybinding(mods, keysym);
+    // input.buildKeybinds.
+    const matched: ?*const types.Action = lookupKeybinding(mods, keysym);
 
     // The chrome overlay owns all key input while active; routing is handled
     // inside it (input flows in, true = consumed, before keybinding dispatch).

@@ -287,7 +287,7 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     _ = fullscreen.toggleFullscreen(&fx.m, 601);
     fx.rec.clear();
     fx.reconcile(.{});
-    try testing.expectEqual(@as(model.WSId, 0), model.findHome(&fx.m, 601).?);
+    try testing.expectEqual(model.WSId.fromIndex(0), model.findHome(&fx.m, 601).?);
     try fx.rec.expectLen(5);
     try fx.rec.expectPixel(0, 601, focused_pixel);
     try fx.rec.expectBw(1, 601, cfg_bw);
@@ -303,12 +303,12 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
     fx.init();
     defer fx.deinit();
 
-    model.register(&fx.m, 501, 0) catch unreachable; // stays here
-    model.register(&fx.m, 502, 1) catch unreachable; // arrives with the switch
+    model.register(&fx.m, 501, model.WSId.fromIndex(0)) catch unreachable; // stays here
+    model.register(&fx.m, 502, model.WSId.fromIndex(1)) catch unreachable; // arrives with the switch
     model.setFocus(&fx.m, 501);
     fx.reconcile(.{}); // baseline: 501 placed, 502 parked
 
-    fx.m.current = 1;
+    fx.m.current = model.WSId.fromIndex(1);
     fx.rec.clear();
     fx.reconcile(.{ .force_restack = true });
 
@@ -327,7 +327,7 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
     // the rect itself did not move. 502 parks again.
     // Delta-send elides pixel/bw: 501's focused color equals the value last
     // sent on the baseline pass, and nothing since changed it.
-    fx.m.current = 0;
+    fx.m.current = model.WSId.fromIndex(0);
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(3);
@@ -345,7 +345,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
 
     helpers.regCur(&fx.m, 701); // home ws 0
     model.setFocus(&fx.m, 701);
-    fx.m.store.getPtr(701).?.mask |= model.bit(1); // multi-tag onto ws 1
+    fx.m.store.getPtr(701).?.mask |= model.bit(model.WSId.fromIndex(1)); // multi-tag onto ws 1
     fx.reconcile(.{}); // baseline: placed at master slot on ws 0
 
     // The live rect IS what we last sent (ledger read #3 feeds assertions).
@@ -353,7 +353,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     try testing.expectEqual(@as(i32, 8), @as(i32, real_rect.x));
     try testing.expectEqual(@as(u16, 780), real_rect.width);
 
-    fx.m.current = 1;
+    fx.m.current = model.WSId.fromIndex(1);
     fx.rec.clear();
     fx.reconcile(.{});
 
@@ -370,11 +370,11 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     // History-less variant: registered here with mask bit for ws 1 but NEVER
     // reconciled on its home ws (nothing ever sent): first sighting as an
     // orphan must PARK, not materialize a bogus geometry.
-    fx.m.current = 0;
+    fx.m.current = model.WSId.fromIndex(0);
     helpers.regCur(&fx.m, 702); // home ws 0
-    fx.m.store.getPtr(702).?.mask |= model.bit(1);
+    fx.m.store.getPtr(702).?.mask |= model.bit(model.WSId.fromIndex(1));
     // deliberately no reconcile on ws 0 => 702 has no sent history
-    fx.m.current = 1;
+    fx.m.current = model.WSId.fromIndex(1);
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(1);
@@ -516,8 +516,8 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     // the X value is this constant, the stack half is BELOW (wire.zig).
     try testing.expectEqual(@as(i32, -30000), constants.offscreen_x_position);
 
-    model.register(&fx.m, 901, 0) catch unreachable;
-    model.register(&fx.m, 902, 1) catch unreachable;
+    model.register(&fx.m, 901, model.WSId.fromIndex(0)) catch unreachable;
+    model.register(&fx.m, 902, model.WSId.fromIndex(1)) catch unreachable;
     model.setFocus(&fx.m, 901);
     fx.reconcile(.{});
 

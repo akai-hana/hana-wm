@@ -12,6 +12,7 @@ const xcb_pixmap_t = xcb.xcb_pixmap_t;
 const xcb_visualtype_t = xcb.xcb_visualtype_t;
 
 const types = @import("types");
+const bar_metrics = @import("metrics");
 
 /// The clock's display format: the configured value, or the built-in default
 /// when unset. Single accessor shared by the clock segment and the bar's
@@ -661,7 +662,7 @@ pub fn probeFontMetrics(
 /// config string's pointer, which freeSizedFontList uses to free only owned copies.
 pub fn buildSizedFontList(allocator: std.mem.Allocator, size_override: ?u16) ![][]const u8 {
     const cs = core.getState();
-    const font_size: u16 = size_override orelse cs.config.bar.scaled_font_size;
+    const font_size: u16 = size_override orelse bar_metrics.getScaledFontSize();
     const fonts = cs.config.bar.fonts.items;
     const sized = try allocator.alloc([]const u8, fonts.len);
     errdefer allocator.free(sized);

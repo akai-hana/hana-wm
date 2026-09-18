@@ -101,6 +101,18 @@ pub inline fn getSuppressReason() core.FocusSuppressReason {
     return state.?.suppress_reason;
 }
 
+/// Debug/test invariant: the private protocol cache (`last_applied`) must
+/// equal focus truth (`model.focused`) once a transition has SETTLED. The two
+/// legitimately differ only while a two-phase prepare/apply is in flight
+/// (apply updates the cache before the caller's model write lands). Before
+/// pipeline.init there is no model truth, so the cache is the only record and
+/// the invariant is vacuously true.
+pub fn protocolParityHolds() bool {
+    if (!pipeline.initialized) return true;
+    const truth: ?u32 = if (pipeline.model().focused) |w| @intCast(w) else null;
+    return state.?.last_applied == truth;
+}
+
 /// True when `win` is the last window X input focus was applied to. Lets a
 /// workspace-switch caller tell the already-applied dedup apart from a
 /// genuine `.none` verdict (a no_input target), which prepareFocus returns

@@ -8,14 +8,15 @@ const utils = @import("utils");
 const constants = @import("constants");
 
 pub const WindowId = u32;
-/// Local alias so model never imports core. Core's canonical WorkspaceId is
-/// converted via `.index` at the entry-point boundary; inside the model, ws
-/// values are raw integers used directly as array indices.
-pub const WSId = u16;
+/// Alias of the canonical WorkspaceId (`@import("ids").WorkspaceId`). Model
+/// never imports core (xcb-free layer rule); inside the model, ws values are
+/// used directly as array indices via `.index`, with the integer form only at
+/// boundaries (wire formats, counters).
+pub const WSId = @import("ids").WorkspaceId;
 pub const Mask = u64;
 
 pub inline fn bit(ws: WSId) Mask {
-    return @as(Mask, 1) << @intCast(ws);
+    return @as(Mask, 1) << @intCast(ws.index);
 }
 
 /// Alias for the workspace count ceiling; the canonical value lives in
@@ -240,13 +241,13 @@ pub const StoreT = Store(WindowId, Entry, store_capacity);
 /// is zero (`@ctz(0)` = 64 is out of the [0, MAX_WS) index range).
 pub fn lowestBit(m: Mask) ?WSId {
     if (m == 0) return null;
-    return @intCast(@ctz(m));
+    return WSId.fromIndex(@intCast(@ctz(m)));
 }
 
 pub const Model = struct {
     store: StoreT = .{},
     ws: [MAX_WS]WsState = [_]WsState{.{}} ** MAX_WS,
-    current: WSId = 0,
+    current: WSId = WSId.fromIndex(0),
     focused: ?WindowId = null,
     all_view_active: bool = false,
 };
@@ -264,7 +265,7 @@ pub fn removeValue(list: anytype, win: WindowId) void {
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     if (m.store.get(win)) |e| if (e.home_ws) |h| return h;
     for (0..m.ws.len) |i| {
-        if (m.ws[i].tiled_order.indexOfScalar(win) != null) return @intCast(i);
+        if (m.ws[i].tiled_order.indexOfScalar(win) != null) return WSId.fromIndex(@intCast(i));
     }
     return null;
 }
@@ -274,7 +275,7 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
     const target: WSId = hint_ws orelse m.current;
     // Defined-capacity refusal with rollback, BEFORE any observable state change.
     const ptr = m.store.put(win, .{ .mask = bit(target), .anchor = .tiled }) catch return error.CapacityFull;
-    if (!m.ws[target].tiled_order.append(win)) {
+    if (!m.ws[target.index].tiled_order.append(win)) {
         _ = m.store.remove(win);
         return error.CapacityFull;
     }
@@ -287,7 +288,7 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
 
 pub fn unregister(m: *Model, win: WindowId) void {
     if (m.store.getPtr(win) == null) return;
-    if (findHome(m, win)) |h| removeValue(&m.ws[h].tiled_order, win);
+    if (findHome(m, win)) |h| removeValue(&m.ws[h.index].tiled_order, win);
     for (&m.ws) |*s| removeValue(&s.focus_mru, win);
     if (m.focused == win) m.focused = null;
     _ = m.store.remove(win);
@@ -315,7 +316,7 @@ pub inline fn isPinned(e: Entry) bool {
 /// windows.
 pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     var n: usize = 0;
-    for (m.ws[ws].tiled_order.constSlice()) |w| {
+    for (m.ws[ws.index].tiled_order.constSlice()) |w| {
         const e = m.store.get(w) orelse continue;
         if (e.mask & bit(ws) != 0) n += 1;
     }
@@ -331,7 +332,8 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     for (0..m.store.count()) |k| {
         const it = m.store.at(k);
         if (it.val.presence != .covering) continue;
-        if (it.val.covering_ws == ws or visibleOn(m, it.key, ws)) return it.key;
+        const anchored = if (it.val.covering_ws) |cws| cws.eql(ws) else false;
+        if (anchored or visibleOn(m, it.key, ws)) return it.key;
     }
     return null;
 }
@@ -370,7 +372,7 @@ pub const HonorDecision = enum { geometry_applied, border_only, ignored };
 pub fn setFocus(m: *Model, win: WindowId) void {
     _ = m.store.getPtr(win) orelse return;
     m.focused = win;
-    const list = &m.ws[m.current].focus_mru;
+    const list = &m.ws[m.current.index].focus_mru;
     removeValue(list, win);
     // Newest-first insert; insert only fails at capacity, so drop the OLDEST
     // (tail) entry first, keeping the newest mru_capacity wins retained.
@@ -398,16 +400,16 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?W
     //    so minimizing the focused window falls back to the previously
     //    focused one. visibleOn rejects parked entries, including the
     //    just-parked window itself.
-    const mru = &m.ws[ws].focus_mru;
+    const mru = &m.ws[ws.index].focus_mru;
     for (mru.constSlice()) |cand| {
         if (cand == excluded) continue;
         if (visibleOn(m, cand, ws)) return cand;
     }
     // 2. reversed tiled_order of the workspace.
-    var j = m.ws[ws].tiled_order.len;
+    var j = m.ws[ws.index].tiled_order.len;
     while (j > 0) {
         j -= 1;
-        const cand = m.ws[ws].tiled_order.items[j];
+        const cand = m.ws[ws.index].tiled_order.items[j];
         if (cand == excluded) continue;
         if (visibleOn(m, cand, ws)) return cand;
     }
@@ -420,14 +422,14 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?W
         if (it.val.anchor != .floating or it.val.presence == .covering) continue;
         if (it.key == excluded) continue;
         if (!visibleOn(m, it.key, ws)) continue;
-        if (m.ws[ws].tiled_order.indexOfScalar(it.key) == null) return it.key;
+        if (m.ws[ws.index].tiled_order.indexOfScalar(it.key) == null) return it.key;
     }
     return null;
 }
 
 pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
     const h = findHome(m, win) orelse return;
-    const list = &m.ws[h].tiled_order;
+    const list = &m.ws[h.index].tiled_order;
     const from = list.indexOfScalar(win) orelse return;
     const idx = @min(idx_in, list.len - 1);
     list.orderedRemove(from);
@@ -439,7 +441,7 @@ pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
 /// cycle's modulo wrap). Unknown windows and lone tiled windows are no-ops.
 pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
     const h = findHome(m, win) orelse return;
-    const list = &m.ws[h].tiled_order;
+    const list = &m.ws[h.index].tiled_order;
     const len = list.len;
     if (len < 2) return;
     const idx = list.indexOfScalar(win) orelse return;
@@ -451,7 +453,7 @@ pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
 /// (primary head and the following slot). No-op with fewer than two tiled
 /// windows.
 pub fn swapPrimary(m: *Model) void {
-    const list = &m.ws[m.current].tiled_order;
+    const list = &m.ws[m.current.index].tiled_order;
     if (list.len < 2) return;
     const tmp = list.items[0];
     list.items[0] = list.items[1];
@@ -461,7 +463,7 @@ pub fn swapPrimary(m: *Model) void {
 /// Steps the current workspace's primary-column width fraction by `delta`,
 /// clamped to the shared master-width bounds in constants.
 pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     p.primary_width = std.math.clamp(p.primary_width + delta, constants.min_master_width, constants.max_master_width);
 }
 

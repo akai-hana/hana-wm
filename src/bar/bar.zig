@@ -40,6 +40,7 @@ const wincache = @import("wincache");
 const window = @import("window");
 
 const drawing = @import("drawing");
+const metrics = @import("metrics");
 const segmod = @import("segment");
 const barwin = @import("win");
 
@@ -90,9 +91,9 @@ fn anyBoolHook(comptime hook: []const u8, args: anytype) bool {
 // Owns everything needed to decide the bar's pixel height and effective font
 // size from config + font metrics, including the percentage-font-size probe
 // (which measures through drawing.probeFontMetrics' throwaway surface, no
-// live DrawContext is touched). The documented config write in
-// calcBarHeightAndFontSize (scaled_font_size is runtime state that happens
-// to live on BarConfig) is the only side effect.
+// live DrawContext is touched). The resolved font size is published to the
+// bar-owned metrics module (metrics.zig) for drawing to read; no config is
+// mutated.
 
 const min_bar_height: u32 = scale.bar_min_height_px;
 const max_bar_height: u32 = 200;
@@ -132,11 +133,12 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
 
 fn calcBarHeightAndFontSize() !u16 {
     const cs = core.getState();
+    metrics.recompute();
     if (cs.config.bar.height) |h| {
         const height = scale.scaleBarHeight(h, cs.screen.height_in_pixels);
         if (cs.config.bar.font_size.is_percentage) {
             if (resolvePercentageFontSize(height)) |sz|
-                cs.config.bar.scaled_font_size = sz;
+                metrics.setScaledFontSize(sz);
         }
         return height;
     }
@@ -672,7 +674,7 @@ const State = struct {
         }
         if (build_options.has_workspaces) {
             self.frame.ws_count = @intCast(tracking.getWorkspaceCount());
-            self.frame.current_ws = @intCast(m.current);
+            self.frame.current_ws = @intCast(m.current.index);
             self.frame.all_view = m.all_view_active;
             @memset(&self.frame.ws_has_windows, false);
             self.frame.wins_len = 0;

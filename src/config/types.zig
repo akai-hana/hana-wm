@@ -3,9 +3,7 @@
 
 const std = @import("std");
 const constants = @import("constants");
-const debug = @import("debug");
 const parser = @import("parser");
-const xkbcommon = @import("xkbcommon");
 
 /// X11 color value packed as 0x00RRGGBB into 32 bits.
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
@@ -87,90 +85,11 @@ pub const MouseBind = struct {
     action: Action,
 };
 
-/// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
-/// Config's keybindings, plus the keycode-resolution step that feeds it.
-/// Embedded in Config (not a global) so its lifetime tracks that Config;
-/// deinit tears it down before freeing the Actions its entries point into.
-pub const KeybindResolver = struct {
-    map: std.AutoHashMapUnmanaged(u64, *const Action) = .empty,
-    /// Conflict-detection set reused across rebuilds to avoid alloc churn on config reload.
-    seen: std.AutoHashMapUnmanaged(u64, usize) = .empty,
-
-    inline fn dispatchKey(modifiers: u16, keysym: u32) u64 {
-        return (@as(u64, modifiers) << 32) | keysym;
-    }
-
-    /// Resolves each keybinding's keysym to a keycode via `xkb_state`, then
-    /// rebuilds the dispatch map (see rebuildDispatchMap). Call once at
-    /// startup (config.load) and again on every config reload
-    /// (events.applyConfig).
-    pub fn build(
-        self: *KeybindResolver,
-        keybindings: []Keybind,
-        xkb_state: *xkbcommon.XkbState,
-        allocator: std.mem.Allocator,
-    ) void {
-        resolveKeycodes(keybindings, xkb_state);
-        self.rebuildDispatchMap(keybindings, allocator);
-    }
-
-    /// Warns about conflicting bindings (same effective mods+keysym the map
-    /// is keyed on) and rebuilds the dispatch map from scratch. Split out
-    /// from `build` so it can be exercised without a live XkbState/X
-    /// connection.
-    pub fn rebuildDispatchMap(
-        self: *KeybindResolver,
-        keybindings: []Keybind,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.map.clearRetainingCapacity();
-        self.seen.clearRetainingCapacity();
-        for (keybindings, 0..) |*kb, i| {
-            const key = dispatchKey(kb.modifiers, kb.keysym);
-            if (self.seen.get(key)) |first_idx| {
-                debug.warn(
-                    "Keybinding conflict: #{} and #{} share mods=0x{x:0>4} " ++
-                        "keysym=0x{x}, second wins",
-                    .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym },
-                );
-            } else {
-                self.seen.put(allocator, key, i) catch {};
-            }
-            self.map.put(allocator, key, &kb.action) catch |e|
-                debug.warnOnErr(e, "keybind map build");
-        }
-    }
-
-    /// O(1) keybinding lookup for use on the hot key-press path.
-    /// Returns a pointer into the current config's keybindings slice, or null.
-    pub inline fn lookup(self: *const KeybindResolver, mods: u16, keysym: u32) ?*const Action {
-        return self.map.get(dispatchKey(mods, keysym));
-    }
-
-    /// Releases the dispatch map. Called from Config.deinit, before the
-    /// keybindings whose Actions this map's entries point into are freed.
-    pub fn deinit(self: *KeybindResolver, allocator: std.mem.Allocator) void {
-        inline for (.{ &self.map, &self.seen }) |m| m.deinit(allocator);
-        self.map = .empty;
-        self.seen = .empty;
-    }
-};
-
-pub fn resolveKeycodes(keybindings: []Keybind, state: *xkbcommon.XkbState) void {
-    for (keybindings) |*kb| {
-        kb.keycode = state.keysymToKeycode(kb.keysym);
-        if (kb.keycode == null) {
-            var name_buf: [64]u8 = undefined;
-            const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
-            debug.warn(
-                "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base " ++
-                    "keycode and will NOT be grabbed, shifted symbols such as \"@\" " ++
-                    "must be bound via their unshifted key name (e.g. \"2\")",
-                .{ kb.modifiers, name, kb.keysym },
-            );
-        }
-    }
-}
+// The (modifiers, keysym) -> Action dispatch map and its keysym->keycode
+// resolution live in the input layer (`input/keybind.zig`): resolving a keysym
+// needs a live XkbState, which the pure config layer must not depend on.
+// Keeping it out of this file also breaks the types -> xkbcommon -> core ->
+// types import cycle.
 
 // Tiling layout types
 
@@ -450,10 +369,6 @@ pub const BarConfig = struct {
     height: ?parser.ScalableValue = null,
     fonts: std.ArrayList([]const u8) = .empty,
     font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
-    // Resolved pixel value cached after DPI scaling, derived from font_size
-    // at startup. This is runtime state, not raw config, mixed into
-    // BarConfig for convenience.
-    scaled_font_size: u16 = 10, // Can exceed 255 on high DPI - u16 is correct
     spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
 
     // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
@@ -609,12 +524,6 @@ pub const Config = struct {
     workspaces: WorkspaceConfig = .{},
     bar: BarConfig = .{},
 
-    /// Persistent (modifiers, keysym) -> Action dispatch map, built from
-    /// `keybindings` by config.load() (startup) and events.applyConfig()
-    /// (reload). See KeybindResolver's doc comment for why this lives here
-    /// rather than as a module-level global.
-    keybind_resolver: KeybindResolver = .{},
-
     /// Each subsystem is always fully compiled in; these flags just gate
     /// whether its behavior (and keybindings/actions that drive it) is active.
     fullscreen_enabled: bool = true,
@@ -625,11 +534,6 @@ pub const Config = struct {
     snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
-        // Must precede `self.keybindings.deinit(allocator)`: the map holds
-        // `*const Action` pointers borrowed from self.keybindings' elements,
-        // so it must be torn down before those Actions are freed.
-        self.keybind_resolver.deinit(allocator);
-
         for (self.keybindings.items) |*kb| kb.action.deinit(allocator);
         self.keybindings.deinit(allocator);
 

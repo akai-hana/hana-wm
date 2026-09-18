@@ -31,7 +31,7 @@ test "pipeline: reconcile tiles to engine placements and records LastSent" {
     const w1, const w2 = seedTwo(fx);
 
     try std.testing.expectEqual(w2, m.focused.?);
-    const order = m.ws[m.current].tiled_order.items;
+    const order = m.ws[m.current.index].tiled_order.items;
     try std.testing.expectEqual(w1, order[0]);
     try std.testing.expectEqual(w2, order[1]);
 

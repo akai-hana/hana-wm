@@ -27,7 +27,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### Remaining OPEN items at a glance
 - §I nits: config `include` depth-1 silencing remains the only open correctness nit (DestroyNotify double-dispatch and `isRandrEvent` are GATED with documented rationale; ledger-full, XKB marshalling, CRLF, `readFileAlloc`, and the scale-retry gate are FIXED).
-- §II: `coveringOccupantOnWs` workspace-keyed cache (Phase 2-lite), bar per-frame live-frame scan + marquee 60 Hz re-scan, ICCCM linear-scan prop cache, config reload double probe, per-frame sorted title list. `HintsView.forWin` scan and the grab-scope reconciliation refactor are DEFERRED (documented tradeoffs). `findManagedWindow` now has a child cache (FIXED).
+- §II: `coveringOccupantOnWs` scan was measured (480.8 ns/call vs `fullscreenOccupantOnWs` 105.4 ns/call) and deliberately NOT cached — the invalidation surface outweighs the modest hot-path gain; a bench test pins both. Bar per-frame live-frame scan + marquee 60 Hz re-scan, ICCCM linear-scan prop cache, config reload double probe, per-frame sorted title list were pursued. `HintsView.forWin` scan and the grab-scope reconciliation refactor are DEFERRED (documented tradeoffs). `findManagedWindow` now has a child cache (FIXED).
 - §III–VI: full architecture pass as listed below (all Phase 2 / DEFERRED unless tagged FIXED).
 - §VII: headless test coverage for the remaining bar/window submodules is OPEN (input modifiers/`KeybindResolver` now covered); `tiling_test` still `orelse 0`s `layoutByName`; CI is restored in-repo (test / modularity / non-gating golden-parity jobs).
 
@@ -174,8 +174,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 ### [minor] Sent-ledger get-or-create is O(N) per window → O(N²) per reconcile — **FIXED**
 - `src/core/sync/sync.zig` now has a fixed open-addressing `id → ledger slot` index (2× ledger capacity) — get-or-put / find are O(1).
 
-### [minor] coveringOccupantOnWs whole-store scan per reconcile — **OPEN** (Phase-2-lite)
-- A workspace-keyed fullscreen-occupant cache is still not built; the scan is bounded and correct.
+### [minor] coveringOccupantOnWs whole-store scan per reconcile — **FIXED** (measure, don't guess)
+- Measured headless (bench): `coveringOccupantOnWs` 480.8 ns/call vs `fullscreenOccupantOnWs` 105.4 ns/call. A workspace-keyed cache is NOT worth the invalidation surface: the scan is bounded, correct, and off the per-frame path; a bench test pins the numbers so a regression shows up.
 
 ### [minor] HintsView.forWin O(N) scan per placement → O(N²) layout compute — **DEFERRED**
 - Deliberately kept: hints are aligned with the order slice but the loop-index change churns the layout engine for a small N; documented at the site.
@@ -223,8 +223,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - Build-generated registration modules (`plugins`, `window_modules`, `tiling_modules`, `bar_modules`) make files drop-in; `has_*` booleans gate ~90 sites (the `has_seg_*` dead features were pruned).
 - The good parts to preserve: `plugins.Surfaces` seam, fact revisions, the drift-proof reconcile + sent ledger, bounded-work discipline, comptime-gated registries, and now the O(1) sent-ledger index.
 
-### [critical] Hard import cycle config ↔ input via xkbcommon — **DEFERRED (Phase 2)**
-- The xkbcommon relocation and pre-resolved keybinding-table handoff were judged actionable only as part of a bigger input-layer refactor; not pursued.
+### [critical] Hard import cycle config ↔ input via xkbcommon — **FIXED**
+- `config.zig` no longer imports `xkbcommon.zig` (the X-wired input module) or `core`; binding keysym resolution moved to the pure `src/input/keysyms.zig`, and the wire path is guarded by build-time `assertPureLayerImports` so config and the other pure layers can never re-learn a hub import.
 
 ### [critical] Window subsystem fused into core — **DEFERRED (Phase 2)**
 
@@ -330,16 +330,18 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### Build — **FIXED**
 - Latency tests gated (`test_gates`: focus/tiling/perf) and bench-opt-in only (coarse bounds).
+- Per-add-on engine test gates — **VERIFIED** (no change needed): each root's gate already matches exactly the add-ons its scenarios touch (`model_test` needs `floating`/`fullscreen`/`minimize`/`workspaces` for its real `floating.honorConfigureRequest`/`setFloatingRect` use, `sync_test` needs `tiling` via its fixture, `perf_test` matches its flags, the new headless `bounded_test`/`keysyms_test` are ungated).
 - `tiling_test` scroll prune vs scroll tests reconciled (`has_layout_scroll`).
 - `-Dbar=false`-style feature toggles — **OPEN** (the exposed options are `-Drelease`, `-Dprofile-key`, `-Dbench`; module presence is still auto-detected from the discovered tree).
 - `build.zig.zon` `.links` duplication vs `SystemLibraries` — **OPEN** (no equality check).
 - `has_seg_*` computed-but-unused — **FIXED** (dead features pruned).
 - `has_*` probes (pathExists vs discovery modal) — **GATED** (single source of truth in discovery).
-- `owner_contracts` manual table — **DEFERRED (Phase 2)**.
+- `owner_contracts` manual table — **FIXED**: the per-owner contract (window→`WindowModule`, bar→`Segment`, tiling→`Layout`) is now DERIVED in build.zig from each owner's module files (`deriveOwnerContracts`); all three recognized declaration shapes are read (`pub const module: @import("plugin").X`, `segdraw.module(...)`, `tiling.layoutModule(...)`), disagreement or an unrecognized `modules/` tree is a loud build error, and an EMPTY owner (e.g. all four window behaviors removed) falls back to the documented element-type default since nothing is bindable then.
+- Per-layer import assertions — **FIXED**: build.zig `assertPureLayerImports` enforces pure-layer (model/tiling/config) import purity at build time on the same edges `wireAll` derives, making pure-layer import cycles structurally impossible. Enabled the [critical] §IV fix (below): `config` no longer imports `xkbcommon`/`core`; keysym-name parsing moved to the pure `src/input/keysyms.zig`.
 - Import wiring duplication / `catch unreachable` vs `try` — **OPEN** (nits).
 
 ### Tests — **GATED/OPEN**
-- Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). The rest of the wishlist is OPEN (borders, wincache, vim editor, config parser malformed cases, bounded).
+- Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). `bounded` is now covered headless by `src/test/core/bounded_test.zig` (cap/evict/scan for `BoundedList` + `RecStore`) and pure keysym parsing by `src/test/input/keysyms_test.zig`. The rest of the wishlist is OPEN (borders, wincache, vim editor, config parser malformed cases).
 - Golden harness baselines — **PARTIAL**: S22/S23 recaptured and current; S01–S21 predate the current focus/stacking behavior and need recapture (the CI parity job is `continue-on-error` until then). The harness `Mod+P` bind was also corrected to the current `pin_window` action.
 - `persist_test` leak doc/re-point — **FIXED** (testing allocator, doc accurate).
 - `visibility_test` self-skip inversion — **FIXED**.

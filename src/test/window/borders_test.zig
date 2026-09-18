@@ -48,8 +48,8 @@ test "borders.color resolves focused vs unfocused config colors" {
 
     var gate: pipeline.Gate = .{};
     const m = pipeline.mut(&gate);
-    model.register(m, 1, 0) catch unreachable;
-    model.register(m, 2, 0) catch unreachable;
+    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
+    model.register(m, 2, model.WSId.fromIndex(0)) catch unreachable;
 
     // Nothing focused yet: both windows take the unfocused color.
     try testing.expectEqual(@as(u32, 0x222222), borders.color(1));
@@ -73,10 +73,10 @@ test "borders.color is 0 for a screen-covering window" {
 
     var gate: pipeline.Gate = .{};
     const m = pipeline.mut(&gate);
-    model.register(m, 1, 0) catch unreachable;
+    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
     // A covering capture makes the window borderless via the bw=0/pixel=0
     // policy, mirrored here for callers outside reconcile (fullscreen).
-    m.store.getPtr(1).?.covering_ws = 0;
+    m.store.getPtr(1).?.covering_ws = model.WSId.fromIndex(0);
 
     try testing.expectEqual(@as(u32, 0), borders.color(1));
 }
