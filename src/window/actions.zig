@@ -128,7 +128,7 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
     // If the hidden window was the current workspace's screen-covering
     // occupant, its removal changed occupancy: bump the core fact and let
     // the bar (a consumer) react, instead of poking it by name.
-    retile(.{ .bump_fullscreen = if (fs_ws_before) |fs_ws| fs_ws == m.current else false, .restack = true, .with_focus = true }, ft);
+    retile(.{ .bump_fullscreen = if (fs_ws_before) |fs_ws| fs_ws.eql(m.current) else false, .restack = true, .with_focus = true }, ft);
 }
 
 /// Fallback: own-workspace scope only. Order: current ws focus_mru ->
@@ -310,11 +310,11 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
     const was_focused = m.focused == win;
     const was_fs_current = isCoveringOnWs(m, win);
 
-    wm.sendToWs.?(m, win, ws_idx);
+    wm.sendToWs.?(m, win, model_mod.WSId.fromIndex(ws_idx));
     if (m.store.get(win) == null) return; // unknown window: no-op
 
     var ft: focus.FocusTransition = .none;
-    if (ws_idx != m.current) {
+    if (ws_idx != m.current.index) {
         if (was_focused) ft = focusFallback(m);
         // Moving the current workspace's covering window away changes the
         // workspace's covering occupancy: bump the core fact; bar reacts.
@@ -333,20 +333,20 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (!canTagChange(m, win)) return;
     const e = m.store.get(win).?;
 
-    const had_bit = e.mask & model_mod.bit(ws_idx) != 0;
-    const removing_current = ws_idx == m.current;
+    const had_bit = e.mask & model_mod.bit(model_mod.WSId.fromIndex(ws_idx)) != 0;
+    const removing_current = ws_idx == m.current.index;
 
     var ft: focus.FocusTransition = .none;
     if (had_bit) {
         if (providerOf(.removeFromWs)) |rp| {
-            if (!rp.removeFromWs.?(m, win, ws_idx)) return; // last tag protected
+            if (!rp.removeFromWs.?(m, win, model_mod.WSId.fromIndex(ws_idx))) return; // last tag protected
         }
         if (removing_current and m.focused == win) ft = focusFallback(m);
     } else {
-        callHook(.addToWs, .{ m, win, ws_idx, protect_current });
+        callHook(.addToWs, .{ m, win, model_mod.WSId.fromIndex(ws_idx), protect_current });
     }
 
-    if (removing_current or (!had_bit and ws_idx == m.current)) {
+    if (removing_current or (!had_bit and ws_idx == m.current.index)) {
         // Visible-set changed on the shown workspace: atomic evict/map+retile.
         pipeline.reconcileUnderGrabNowWithFocus(.{}, ft);
     }
@@ -419,7 +419,7 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
 fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.WindowId) void {
     if (model_mod.findHome(m, win) != null) return;
     if (model_mod.lowestBit(e.mask)) |h| {
-        _ = m.ws[h].tiled_order.append(win);
+        _ = m.ws[h.index].tiled_order.append(win);
         e.home_ws = h;
     }
 }
@@ -503,7 +503,7 @@ pub fn cycleLayoutKind(dir: i32) void {
 fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     if (!build_options.has_tiling) return;
     const cfg = &core.getState().config.tiling;
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     p.kind = tiling.cycleKind(p.kind, dir, cfg.layouts.items);
     p.variant_idx = 0;
 }
@@ -511,7 +511,7 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
 pub fn stepVariantDir(dir: i32) void {
     if (!build_options.has_tiling) return;
     const m = pipeline.mut(&gate);
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     const n = tiling.variantCount(p.kind);
     p.variant_idx = @intCast(@mod(@as(i32, @intCast(p.variant_idx)) + dir, @as(i32, @intCast(n))));
     retile(.{ .full_redraw = true }, null);
@@ -525,7 +525,7 @@ pub fn adjustPrimaryWidthAction(delta: f32) void {
 
 pub fn adjustPrimaryCount(delta: i32) void {
     const m = pipeline.mut(&gate);
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, model_mod.store_capacity / 4)));
     pipeline.reconcileUnderGrabNow(.{});
 }
@@ -533,7 +533,7 @@ pub fn adjustPrimaryCount(delta: i32) void {
 pub fn adjustSecondaryBalance(delta: f32) void {
     const max_balance: f32 = 6.0; // secondary-column swing cap (see StackBoost.fromBalance)
     const m = pipeline.mut(&gate);
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     p.secondary_balance = std.math.clamp(p.secondary_balance + delta, -max_balance, max_balance);
     pipeline.reconcileUnderGrabNow(.{});
 }
@@ -543,7 +543,7 @@ pub fn adjustSecondaryBalance(delta: f32) void {
 /// head-focused layouts render the right window on the first pass.
 pub fn swapPrimaryAction(focus_swap: bool) void {
     const m = pipeline.mut(&gate);
-    const list = &m.ws[m.current].tiled_order;
+    const list = &m.ws[m.current.index].tiled_order;
     if (list.items.len < 2) return;
     const displaced = list.items[0];
     model_mod.swapPrimary(m);
@@ -596,7 +596,7 @@ fn snapViewportParamsToFocused() bool {
 
     var idx: ?usize = null;
     var n: usize = 0;
-    for (m.ws[m.current].tiled_order.constSlice()) |w| {
+    for (m.ws[m.current.index].tiled_order.constSlice()) |w| {
         const e = m.store.get(w) orelse continue;
         if (e.mask & model_mod.bit(m.current) == 0) continue;
         if (w == win) idx = n;
@@ -645,7 +645,7 @@ const viewport_inactive: ViewportContext =
 /// out-of-range kind.
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
     if (!build_options.has_tiling) return viewport_inactive;
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     const mod: ?@import("plugin").Layout =
         if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
     const md = mod orelse return viewport_inactive;
@@ -665,7 +665,7 @@ fn activeViewport() ?struct {
     if (!build_options.has_tiling) return null;
     if (!build_options.has_bar) return null;
     const m = pipeline.mut(&gate);
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
     const sc = viewportContext(m);
     if (!sc.active) return null;
     return .{ .m = m, .p = p, .sc = sc };
@@ -803,7 +803,7 @@ pub fn applyConfigReload() void {
 pub fn switchTo(ws_idx: u8) void {
     const m = pipeline.mut(&gate);
     if (ws_idx >= constants.max_workspaces) return;
-    if (m.current == ws_idx) return;
+    if (m.current.index == ws_idx) return;
 
     const t0 = utils.monotonicNs();
 
@@ -816,7 +816,7 @@ pub fn switchTo(ws_idx: u8) void {
 
     // model.current is the ONLY store for the current workspace; the
     // tracking/workspaces mirrors are deleted (read-through facades now).
-    m.current = ws_idx;
+    m.current = model_mod.WSId.fromIndex(ws_idx);
 
     // Bump the window fact: the workspace indicator always changes on switch.
     // prepareClearFocus returns .none when last_applied is null (empty-to-empty
@@ -859,7 +859,7 @@ pub fn switchTo(ws_idx: u8) void {
     // nothing focusable remains is X focus cleared to root.
     const ft: focus.FocusTransition = blk: {
         var excluded: ?model_mod.WindowId = null;
-        while (model_mod.fallbackFocusCandidate(m, ws_idx, excluded)) |t| {
+        while (model_mod.fallbackFocusCandidate(m, model_mod.WSId.fromIndex(ws_idx), excluded)) |t| {
             // Pre-fire the WM_PROTOCOLS query only on a take_focus cache
             // miss; the common path is cache-backed (see window.zig's "ICCCM
             // focus property cache" note), and the miss case overlaps the
@@ -929,7 +929,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
 
     // A defined refusal (store or home-list full) leaves the window
     // unmanaged.
-    model_mod.register(m, win, if (on_current) null else target_ws) catch {
+    model_mod.register(m, win, if (on_current) null else model_mod.WSId.fromIndex(target_ws)) catch {
         debug.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
         return;
     };
@@ -943,7 +943,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // detach, and the reconcile tail applies the rect in the same pass.
     if (float_rect) |rect| {
         if (e) |ep| {
-            if (ep.home_ws) |home| model_mod.removeValue(&m.ws[home].tiled_order, win);
+            if (ep.home_ws) |home| model_mod.removeValue(&m.ws[home.index].tiled_order, win);
             ep.anchor = .{ .floating = rect };
             ep.home_ws = null;
         }
@@ -959,15 +959,15 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
             const home: model_mod.WSId = if (on_current)
                 m.current
             else
-                window.clampToValidWorkspace(target_ws, core.WorkspaceId.fromIndex(@intCast(m.current))).index;
-            const p = &m.ws[home].params;
+                window.clampToValidWorkspace(target_ws, model_mod.WSId.fromIndex(@intCast(m.current.index)));
+            const p = &m.ws[home.index].params;
             // Same policy restated at the spawn site: driven by the active
             // module's fifo_variant metadata (the head slot binds variant
             // index 1).
             if (p.kind < tiling_mods.len) {
                 const fv = tiling_mods[p.kind].fifo_variant;
                 if (fv) |v| {
-                    if (p.variant_idx == v and m.ws[home].tiled_order.len > 1)
+                    if (p.variant_idx == v and m.ws[home.index].tiled_order.len > 1)
                         model_mod.reorderTiled(m, win, 0);
                 }
             }
@@ -1002,7 +1002,7 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     // store here could never see either; closing the covering occupant never
     // restored the bar, and the withdrawn window's focus ownership was
     // unknowable.
-    const was_fs_current = if (ctx.withdrawn_fullscreen_ws) |ws| ws == m.current else false;
+    const was_fs_current = if (ctx.withdrawn_fullscreen_ws) |ws| ws.eql(m.current) else false;
     const was_focused = ctx.withdrawn_was_focused;
 
     model_mod.unregister(m, win);

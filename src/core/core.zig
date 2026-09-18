@@ -31,20 +31,13 @@ pub const Screen = *xcb.xcb_screen_t;
 pub const WindowId = u32;
 
 /// Workspace index wrapper. The canonical type for workspace identifiers;
-/// model code uses raw integers for internal indexing, converted at the
-/// entry-point boundary. Prevents confusing indices with unrelated u8
+/// `model.WSId` is the same type (single canonical definition in
+/// core/utils/ids.zig), so workspace ids cross the core/model boundary
+/// without conversion. The `.index` member doubles as the array index for
+/// model internals; integer-typed boundaries (wire formats, counters) use
+/// `fromIndex` / `.index`. Prevents confusing indices with unrelated u8
 /// values (counts, layout indices, etc.) at call sites.
-pub const WorkspaceId = struct {
-    index: u8,
-
-    pub fn fromIndex(i: u8) WorkspaceId {
-        return .{ .index = i };
-    }
-
-    pub fn eql(self: WorkspaceId, other: WorkspaceId) bool {
-        return self.index == other.index;
-    }
-};
+pub const WorkspaceId = @import("ids").WorkspaceId;
 
 /// Why keyboard focus is temporarily withheld from a window.
 pub const FocusSuppressReason = enum {

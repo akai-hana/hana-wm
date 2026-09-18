@@ -252,69 +252,6 @@ pub fn grabKeybindings() void {
     _ = xcb.xcb_flush(cs.conn);
 }
 
-// True when `dir_path` holds at least one loadable .toml (the config loader
-// classes a directory with zero .toml files as "no config"). Mirrors the
-// filter in config.loadConfigFromDir.
-fn dirHasToml(io: std.Io, dir_path: []const u8) bool {
-    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return false;
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (it.next(io) catch return false) |entry| {
-        if (entry.kind == .directory) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
-        if (std.mem.eql(u8, entry.name, "fallback.toml")) continue;
-        return true;
-    }
-    return false;
-}
-
-// True when `path` exists with content (an empty single config file is "no
-// config" to the loader, which falls back on it; see config.loadConfig).
-fn fileHasContent(io: std.Io, path: []const u8) bool {
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
-    defer file.close(io);
-    const st = file.stat(io) catch return true; // untrustworthy stat => assume content, as readFileAlloc does
-    return st.size > 0;
-}
-
-// C2 probe: whether a user config exists at all. Duplicates config.
-// loadConfigDefault's documented search order (XDG dir, cwd config dir, XDG
-// config.toml, cwd config.toml) so the reload path can tell "loaded the user
-// config" from "fell back to the embedded fallback" -- loadConfigDefault
-// returns both as a successful load. Every probe failure mode is safe-side:
-// a wrong answer only ever keeps the old config, never swaps in the fallback.
-fn userConfigFound(alloc: std.mem.Allocator) bool {
-    const io = std.Options.debug_io;
-    const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
-    const xdg_conf = if (std.c.getenv("XDG_CONFIG_HOME")) |ch| std.mem.span(ch) else null;
-
-    const config_home = if (xdg_conf) |ch|
-        alloc.dupe(u8, ch) catch return false
-    else
-        std.fmt.allocPrint(alloc, "{s}/.config", .{home}) catch return false;
-    defer alloc.free(config_home);
-
-    const xdg_dir = std.fs.path.join(alloc, &.{ config_home, "hana" }) catch return false;
-    defer alloc.free(xdg_dir);
-    if (dirHasToml(io, xdg_dir)) return true;
-
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return false;
-    const cwd = std.mem.sliceTo(&cwd_buf, 0);
-
-    const local_dir = std.fs.path.join(alloc, &.{ cwd, "config" }) catch return false;
-    defer alloc.free(local_dir);
-    if (dirHasToml(io, local_dir)) return true;
-
-    const xdg_path = std.fs.path.join(alloc, &.{ xdg_dir, "config.toml" }) catch return false;
-    defer alloc.free(xdg_path);
-    if (fileHasContent(io, xdg_path)) return true;
-
-    const local = std.fs.path.join(alloc, &.{ cwd, "config.toml" }) catch return false;
-    defer alloc.free(local);
-    return fileHasContent(io, local);
-}
-
 // Loads and validates a new config, then applies it atomically via pointer
 // swap. On failure the old config remains active.
 //
@@ -363,11 +300,11 @@ fn handleConfigReload() !void {
     // C2: loadConfigDefault collapses the "no user config found" case into a
     // successful embedded-fallback load with no distinguishing signal. Boot
     // keeps that fallback; on RELOAD a missing user config must NOT silently
-    // swap in the fallback. Distinguish the two by probing the same locations
-    // loadConfigDefault searches (see userConfigFound). This plain return is
-    // NOT an error, so the errdefer above stays dormant: free the short-lived
+    // swap in the fallback. Distinguish the two with config.userConfigPresent,
+    // which shares loadConfigDefault's search order. This plain return is NOT
+    // an error, so the errdefer above stays dormant: free the short-lived
     // fallback allocation explicitly here.
-    if (!userConfigFound(cs.alloc)) {
+    if (!config.userConfigPresent(cs.alloc)) {
         debug.err(
             "Config reload rejected: no user config file found. " ++
                 "Keeping current config (the embedded fallback is boot-only)",
@@ -379,18 +316,17 @@ fn handleConfigReload() !void {
     }
 
     try config.validate(new_ptr);
-    const xkb_state = input.getXkbState() orelse {
+    if (input.getXkbState() == null) {
         // XKB was torn down (deinit/init window during a reload); reusing the
-        // old config here prevents the rebuilt keybind resolver / finalize
-        // from running on stale XKB. Free the not-yet-live allocation that
-        // the errdefer above owned.
+        // old config here prevents the rebuilt keybind resolver from running
+        // on stale XKB. Free the not-yet-live allocation that the errdefer
+        // above owned.
         debug.warn("Config reload before XKB init; keeping old config", .{});
         new_ptr.deinit(cs.alloc);
         cs.alloc.destroy(new_ptr);
         return;
-    };
-    new_ptr.keybind_resolver.build(new_ptr.keybindings.items, xkb_state, cs.alloc);
-    config.finalizeConfig(new_ptr, cs.screen);
+    }
+    input.buildKeybinds(new_ptr.keybindings.items);
 
     // Swap pointers: new config becomes live, old config is isolated.
     const old_ptr = cs.config;

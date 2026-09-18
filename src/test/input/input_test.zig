@@ -11,6 +11,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const types = @import("types");
+const keybind = @import("keybind");
 const utils = @import("utils");
 const masks = @import("masks");
 
@@ -32,7 +33,7 @@ test "normalizeModifiers keeps real modifiers, strips lock and button bits" {
 }
 
 test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {
-    var resolver = types.KeybindResolver{};
+    var resolver = keybind.KeybindResolver{};
     defer resolver.deinit(testing.allocator);
 
     var binds = [_]types.Keybind{
@@ -53,7 +54,7 @@ test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {
 }
 
 test "KeybindResolver: a later binding on the same key wins" {
-    var resolver = types.KeybindResolver{};
+    var resolver = keybind.KeybindResolver{};
     defer resolver.deinit(testing.allocator);
 
     var binds = [_]types.Keybind{
@@ -66,7 +67,7 @@ test "KeybindResolver: a later binding on the same key wins" {
 }
 
 test "KeybindResolver: lookup returns a pointer into the live binding slice" {
-    var resolver = types.KeybindResolver{};
+    var resolver = keybind.KeybindResolver{};
     defer resolver.deinit(testing.allocator);
 
     var binds = [_]types.Keybind{

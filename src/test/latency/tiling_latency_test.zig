@@ -55,7 +55,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         // rect changes -> geometry requests sent for every visible window.
         var move = CountingSink{};
         var move_ctx = makeCtx(move.sink(), colorOfFocused);
-        m.ws[m.current].params.kind = 1;
+        m.ws[m.current.index].params.kind = 1;
         const t1 = nowNs();
         sync.reconcile(&m, &move_ctx, .{});
         const move_ns: f64 = @floatFromInt(nowNs() - t1);
@@ -78,7 +78,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         var id: WindowId = 1;
         for (0..10) |ws| {
             for (0..per_ws) |_| {
-                _ = model.register(&m, id, @intCast(ws)) catch unreachable;
+                _ = model.register(&m, id, model.WSId.fromIndex(@intCast(ws))) catch unreachable;
                 id += 1;
             }
         }
@@ -114,7 +114,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     var hints_buf: [128]model.SizeHints = undefined;
     var placements: tiling.List = .{};
     var nn: usize = 0;
-    for (m.ws[m.current].tiled_order.constSlice()) |w| {
+    for (m.ws[m.current.index].tiled_order.constSlice()) |w| {
         const e = m.store.get(w).?;
         order_buf[nn] = w;
         hints_buf[nn] = e.size_hints;
@@ -123,7 +123,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const hv = tiling.HintsView{ .order = order_buf[0..nn], .hints = hints_buf[0..nn] };
     const view = tiling.View{
         .order = order_buf[0..nn],
-        .params = &m.ws[m.current].params,
+        .params = &m.ws[m.current.index].params,
         .workarea = screen,
         .hints = &hv,
         .focused = m.focused,
@@ -132,7 +132,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const iterations: usize = if (bench) 50_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        tiling.compute(m.ws[m.current].params.kind, view, &placements);
+        tiling.compute(m.ws[m.current.index].params.kind, view, &placements);
     }
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 
@@ -164,7 +164,7 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
 
         var sink = CountingSink{};
         var ctx = makeCtx(sink.sink(), colorOfFocused);
-        m.ws[m.current].params.kind = 1;
+        m.ws[m.current.index].params.kind = 1;
         ctx.sink.grabServer();
         sync.reconcile(&m, &ctx, .{});
         ctx.sink.ungrabAndFlush();

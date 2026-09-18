@@ -169,7 +169,7 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
 
     const state = StateFile{
         .version = persist_version,
-        .current = @intCast(m.current),
+        .current = @intCast(m.current.index),
         .focused = m.focused,
         .all_view_active = m.all_view_active,
         .workspaces = workspaces,
@@ -295,7 +295,7 @@ pub fn applyModelLevel(m: *model.Model) void {
         if (r.covering_ws) |cws| e.covering_ws = cws;
     }
 
-    if (f.current < MAX_WS) m.current = f.current;
+    if (f.current < MAX_WS) m.current = model.WSId.fromIndex(f.current);
     m.all_view_active = f.all_view_active;
     if (f.focused) |w| {
         if (m.store.has(w)) m.focused = w;
@@ -336,8 +336,8 @@ pub fn applyModelLevel(m: *model.Model) void {
         const e = it.val;
         if (e.anchor != .tiled) continue;
         const home = e.home_ws orelse continue;
-        if (m.ws[home].tiled_order.indexOfScalar(it.key) != null) continue;
-        if (m.ws[home].tiled_order.len >= model.max_tiled_per_ws) continue;
-        _ = m.ws[home].tiled_order.append(it.key);
+        if (m.ws[home.index].tiled_order.indexOfScalar(it.key) != null) continue;
+        if (m.ws[home.index].tiled_order.len >= model.max_tiled_per_ws) continue;
+        _ = m.ws[home.index].tiled_order.append(it.key);
     }
 }

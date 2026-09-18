@@ -37,19 +37,19 @@ pub fn switchTo(m: *model.Model, ws: model.WSId) void {
 
 pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     const e = m.store.getPtr(win) orelse return;
-    if (ws >= m.ws.len) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
+    if (ws.index >= m.ws.len) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
     if (model.isPinned(e.*)) return; // pinned stays everywhere-visible
 
     // Refuse-before-mutate: full destination list cancels the move.
     const h: ?model.WSId = e.home_ws;
-    if (h) |old_h| if (old_h != ws and m.ws[ws].tiled_order.len >= model.max_tiled_per_ws) return;
+    if (h) |old_h| if (!old_h.eql(ws) and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
 
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
     if (h) |old_h| {
-        if (old_h != ws) {
-            model.removeValue(&m.ws[old_h].tiled_order, win);
-            _ = m.ws[ws].tiled_order.append(win);
+        if (!old_h.eql(ws)) {
+            model.removeValue(&m.ws[old_h.index].tiled_order, win);
+            _ = m.ws[ws.index].tiled_order.append(win);
             e.home_ws = ws;
         }
     }
@@ -77,7 +77,7 @@ fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId
     const covering_ws = providerOf(.coveringWsOf) orelse return;
     if (!covering_mode.isCoveringMode.?(m, win)) return;
     const fws = covering_ws.coveringWsOf.?(m, win) orelse return;
-    if (fws == ws) return;
+    if (fws.eql(ws)) return;
     retargetOrDropFullscreen(m, win, ws);
 }
 

@@ -71,8 +71,8 @@ pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     var slot: ?usize = null;
     const e = m.store.getPtr(win) orelse return;
     if (model.findHome(m, win)) |h| {
-        slot = m.ws[h].tiled_order.indexOfScalar(win);
-        model.removeValue(&m.ws[h].tiled_order, win);
+        slot = m.ws[h.index].tiled_order.indexOfScalar(win);
+        model.removeValue(&m.ws[h.index].tiled_order, win);
         // Only a tiled-anchor window held a home-list seat; a float-anchored
         // window (floating minimize) keeps its home so restore can still
         // resolve a placement for it.
@@ -105,7 +105,7 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
             if (e.mask & model.bit(m.current) != 0) break :blk m.current;
             break :blk model.lowestBit(e.mask) orelse return;
         };
-        const list = &m.ws[h].tiled_order;
+        const list = &m.ws[h.index].tiled_order;
         // Refuse-before-mutate: a full home list leaves the window parked
         // rather than half-restoring it.
         if (!list.append(win)) return;
@@ -291,7 +291,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     // Mirror minimize(): a float-anchored window keeps its home so its later
     // restore resolves a placement.
     if (model.findHome(m, win)) |h| {
-        model.removeValue(&m.ws[h].tiled_order, win);
+        model.removeValue(&m.ws[h.index].tiled_order, win);
         if (e.anchor == .tiled) e.home_ws = null; // no longer in any tiled_order
     }
     e.presence = .parked;

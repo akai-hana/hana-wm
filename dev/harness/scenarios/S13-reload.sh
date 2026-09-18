@@ -2,8 +2,10 @@
 spawn_client A
 spawn_client B
 dump before-reload
-# Edit the run-private config copy: 4 -> 7.
-sed -i 's/^border_width = 4$/border_width = 7/' "$HW_OUT/config-home/hana/config.toml"
+# Edit the run-private config copy: 4 -> 7. Use perl -pi, not `sed -i`: GNU sed
+# wants `-i` bare while BSD/macOS sed wants `-i ''`, so `sed -i` is not portable.
+# perl is already a hard harness dependency (see run-scenario.sh).
+perl -pi -e 's/^border_width = 4$/border_width = 7/' "$HW_OUT/config-home/hana/config.toml"
 key super+shift+y    # reload
 settle 600
 dump after-reload    # every tiled border now 7; hana.log must show no double sends

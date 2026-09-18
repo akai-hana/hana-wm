@@ -382,12 +382,12 @@ pub const Fx = struct {
         const m = pipeline.model();
         const ws = m.current;
         const cs = core.getState();
-        const p = &m.ws[ws].params;
+        const p = &m.ws[ws.index].params;
 
         var order_buf: [max_order]u32 = undefined;
         var hints_buf: [max_order]model.SizeHints = undefined;
         var n: usize = 0;
-        for (m.ws[ws].tiled_order.constSlice()) |w| {
+        for (m.ws[ws.index].tiled_order.constSlice()) |w| {
             if (n >= max_order) break;
             const e = m.store.get(w) orelse continue;
             if (e.mask & model.bit(ws) == 0) continue;

@@ -57,13 +57,7 @@ pub fn main() !void {
     try input.initXkb(x.conn);
     defer input.deinitXkb();
 
-    // initXkb runs above, so the state is expected to be present; guard
-    // defensively rather than crash on the (unexpected) null case.
-    const xkb_state = input.getXkbState() orelse {
-        debug.warn("XKB state unavailable before config load; aborting", .{});
-        return error.XkbStateUnavailable;
-    };
-    const loaded_config = try config.load(alloc, x.screen, xkb_state);
+    const loaded_config = try config.load(alloc);
 
     // Heap-allocate config so core.State holds a pointer; this allows
     // atomic pointer-swap on reload instead of by-value copy aliasing.
@@ -75,13 +69,17 @@ pub fn main() !void {
     // core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, config_ptr);
 
+    // Build the key dispatch map now that both the live config and the XKB
+    // state exist. Owned by the input layer (see input/keybind.zig); rebuilt
+    // on every reload. Its entries borrow Actions from the live config.
+    input.buildKeybinds(config_ptr.keybindings.items);
+
     // Arm the unified reload: resolve the exec path before any reload/reexec
     // request can arrive (restart.init).
     restart.init(alloc, null);
 
-    // Config.deinit tears the keybind_resolver down internally, before
-    // freeing the keybindings whose Actions it points into; so a single
-    // defer on the config pointer suffices (see KeybindResolver in types.zig).
+    // Drop the Config internals and the heap box core.init() owns; the
+    // keybind resolver (input-owned) is deinited separately above.
     //
     // The guard matters: a config reload swaps cs.config and the reload path
     // (events.handleConfigReload) deinits the displaced boot config itself.
@@ -96,6 +94,9 @@ pub fn main() !void {
         initial_config.deinit(alloc);
         alloc.destroy(initial_config);
     };
+    // Registered AFTER the config-deinit defer, so (LIFO) the resolver's map
+    // is released before the keybindings its entries borrow are freed.
+    defer input.deinitKeybinds();
 
     utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
 

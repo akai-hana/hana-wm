@@ -6,16 +6,19 @@ const std = @import("std");
 const constants = @import("constants");
 const debug = @import("debug");
 const core = @import("core");
+const keysyms = @import("keysyms");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
     @cInclude("xkbcommon/xkbcommon-x11.h");
 });
 
-// Re-exports for callers that don't want to reach through `xkb.*`.
-pub const xkb_keysym_case_insensitive = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
-pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
-pub const xkb_keysym_from_name = xkb.xkb_keysym_from_name;
+// Pure name->keysym parsing lives in `keysyms` (xcb-free, importable from
+// the pure config layer); these re-exports keep legacy `xkbcommon.*` callers
+// (keybind.zig, input.zig) on the same symbols without a second home.
+pub const xkb_keysym_case_insensitive = keysyms.xkb_keysym_case_insensitive;
+pub const XKB_KEY_NoSymbol: u32 = keysyms.XKB_KEY_NoSymbol;
+pub const xkb_keysym_from_name = keysyms.keysymFromName;
 const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
 

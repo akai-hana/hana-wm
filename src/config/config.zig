@@ -3,15 +3,14 @@
 
 const std = @import("std");
 const constants = @import("constants");
-const core = @import("core");
 const debug = @import("debug");
+const keysyms = @import("keysyms");
 const masks = @import("masks");
 const model = @import("model");
 const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
 const utils = @import("utils");
-const xkbcommon = @import("xkbcommon");
 
 /// Validates a 1-based workspace number, warn-and-skip when outside 1..255 or
 /// exceeding `max` (the workspace count / constants.max_workspaces ceiling).
@@ -287,9 +286,25 @@ fn tryLoadOrWarn(
     };
 }
 
-/// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
-/// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
-pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
+/// The directory and single-file locations searched for a user config, in
+/// priority order. Single source of truth shared by the loader
+/// (loadConfigDefault) and the reload fallback probe (userConfigPresent) so
+/// the two search orders cannot drift apart.
+pub const SearchPaths = struct {
+    xdg_dir: []u8,
+    local_dir: []u8,
+    xdg_file: []u8,
+    local_file: []u8,
+
+    pub fn deinit(self: SearchPaths, allocator: std.mem.Allocator) void {
+        allocator.free(self.xdg_dir);
+        allocator.free(self.local_dir);
+        allocator.free(self.xdg_file);
+        allocator.free(self.local_file);
+    }
+};
+
+pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
     // Always dupe and always free: the arena makes the extra dupe of the
@@ -300,29 +315,82 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
         try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
     defer allocator.free(config_home);
     const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
-    defer allocator.free(xdg_dir);
+    errdefer allocator.free(xdg_dir);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.CurrentWorkingDirectoryUnlinked;
     const cwd = std.mem.sliceTo(&cwd_buf, 0);
     const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
-    defer allocator.free(local_dir);
+    errdefer allocator.free(local_dir);
+
+    const xdg_file = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
+    errdefer allocator.free(xdg_file);
+    const local_file = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
+    return .{
+        .xdg_dir = xdg_dir,
+        .local_dir = local_dir,
+        .xdg_file = xdg_file,
+        .local_file = local_file,
+    };
+}
+
+/// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
+/// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
+pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
+    const paths = try searchPaths(allocator);
+    defer paths.deinit(allocator);
 
     // Try directories first (contain multiple .toml files), then single files.
-    const dir_attempts = [_][]const u8{ xdg_dir, local_dir };
+    const dir_attempts = [_][]const u8{ paths.xdg_dir, paths.local_dir };
     for (dir_attempts) |dir|
         if (try tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| return cfg;
 
-    const xdg_path = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
-    defer allocator.free(xdg_path);
-    const local = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
-    defer allocator.free(local);
-    const file_attempts = [_][]const u8{ xdg_path, local };
+    const file_attempts = [_][]const u8{ paths.xdg_file, paths.local_file };
     for (file_attempts) |path|
         if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| return cfg;
 
     debug.info("No config found, using fallback with auto-detection", .{});
     return try loadFallbackConfig(allocator);
+}
+
+/// True when `dir_path` holds at least one loadable .toml (the loader classes
+/// a directory with zero .toml files as "no config"). Mirrors the filter in
+/// loadConfigFromDir.
+fn dirHasToml(io: std.Io, dir_path: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch return false) |entry| {
+        if (entry.kind == .directory) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
+        if (std.mem.eql(u8, entry.name, "fallback.toml")) continue;
+        return true;
+    }
+    return false;
+}
+
+/// True when `path` exists with content (an empty single config file is "no
+/// config" to the loader, which falls back on it; see loadConfig).
+fn fileHasContent(io: std.Io, path: []const u8) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    defer file.close(io);
+    const st = file.stat(io) catch return true; // untrustworthy stat => assume content, as loadConfig does
+    return st.size > 0;
+}
+
+/// Whether a user config exists at all, using the exact same search locations
+/// as the loader. The reload path uses this to tell "loaded the user config"
+/// from "fell back to the embedded fallback", which loadConfigDefault returns
+/// identically. Every probe failure mode is safe-side: a wrong answer only
+/// ever keeps the old config, never swaps in the fallback.
+pub fn userConfigPresent(allocator: std.mem.Allocator) bool {
+    const paths = searchPaths(allocator) catch return false;
+    defer paths.deinit(allocator);
+    const io = std.Options.debug_io;
+    if (dirHasToml(io, paths.xdg_dir)) return true;
+    if (dirHasToml(io, paths.local_dir)) return true;
+    if (fileHasContent(io, paths.xdg_file)) return true;
+    return fileHasContent(io, paths.local_file);
 }
 
 /// Validates domain invariants on a freshly loaded config.
@@ -871,11 +939,8 @@ fn keyNameToKeysym(name: []const u8) !u32 {
     var buf: [64]u8 = undefined;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
-    const keysym = xkbcommon.xkb_keysym_from_name(
-        @ptrCast(&buf),
-        xkbcommon.xkb_keysym_case_insensitive,
-    );
-    return if (keysym == xkbcommon.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
+    const keysym = keysyms.keysymFromName(&buf);
+    return if (keysym == keysyms.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
 }
 
 fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
@@ -938,26 +1003,13 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
-/// Scales font size and other DPI-dependent fields. Call once the screen is available.
-pub fn finalizeConfig(cfg: *types.Config, screen: core.Screen) void {
-    const scale_module = @import("scale");
-    cfg.bar.scaled_font_size = scale_module.scaleFontSize(cfg.bar.font_size, screen);
-}
-
-/// O(1) keybinding lookup for the hot key-press path; returns a pointer into
-/// the current config's keybindings slice, or null. Delegates to the config's
-/// embedded `keybind_resolver` (see KeybindResolver in types.zig) rather than
-/// a module-level global, so input.zig needn't spell out the lookup.
-pub inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
-    return core.getState().config.keybind_resolver.lookup(mods, keysym);
-}
-
-/// Canonical startup/reload entry point: load, validate, resolve keybindings, finalize.
-pub fn load(
-    allocator: std.mem.Allocator,
-    screen: core.Screen,
-    xkb_state: *xkbcommon.XkbState,
-) !types.Config {
+/// Canonical startup/reload entry point: load, validate.
+///
+/// Note: keybinding resolution (keysym -> keycode + dispatch map) is an input
+/// concern and happens separately via `input.buildKeybinds` once the config is
+/// live; see `input/keybind.zig`. DPI-scaled bar metrics are derived by the
+/// bar itself (see bar/metrics.zig) rather than stored on the config.
+pub fn load(allocator: std.mem.Allocator) !types.Config {
     var cfg = loadConfigDefault(allocator) catch |err| switch (err) {
         // C1: a malformed user config at BOOT falls back to the embedded
         // config (the WM must still start). On reload the parse error
@@ -970,8 +1022,6 @@ pub fn load(
     };
     errdefer cfg.deinit(allocator);
     try validate(&cfg);
-    cfg.keybind_resolver.build(cfg.keybindings.items, xkb_state, allocator);
-    finalizeConfig(&cfg, screen);
     return cfg;
 }
 
@@ -1588,7 +1638,6 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         !eqlScalableOpt(old.height, new.height) or
         !eqlStrings(old.fonts.items, new.fonts.items) or
         !eqlScalable(old.font_size, new.font_size) or
-        old.scaled_font_size != new.scaled_font_size or
         !eqlScalable(old.spacing, new.spacing) or
         old.bg != new.bg or
         old.fg != new.fg or

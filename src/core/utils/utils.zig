@@ -104,6 +104,7 @@ pub fn WindowedProfiler(
 
 // --- bounded collections (re-exports) ---------------------------------------
 pub const BoundedList = bounded.BoundedList;
+pub const IdMap = @import("idmap").IdMap;
 
 // --- X11 wire primitives (re-exports; xcb-dependent live in the x11 wire module) ---
 pub const initAtomCache = x11wire.initAtomCache;

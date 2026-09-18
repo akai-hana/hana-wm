@@ -123,6 +123,9 @@ pub fn build(b: *std.Build) !void {
     // since discovery runs at build.zig:54 before buildOwnerRegistries at 134).
     var registry = try OwnerRegistry.run(&discovery);
     try validateRegistryNames(b, &registry, &discovery.modules);
+    // Contract names are read from the modules' own `pub const module`
+    // declarations (typed or via segdraw), never from a hand-written table.
+    try deriveOwnerContracts(b, &discovery.source_paths, &registry);
     var owner_modules = try buildOwnerRegistries(b, &discovery.modules, target, optimize, &registry);
     // Package sub-addon registries (`<package>_subs`), generated from file
     // presence the same way the owner registries are, so a package core
@@ -197,7 +200,7 @@ pub fn build(b: *std.Build) !void {
     // toolchains already provide the real locations.
     finalizeModule(root_mod, optimize, has_usr);
     // Wire & link
-    Module.wireAll(b, root_mod, &discovery.modules, &discovery.source_paths, shared_ctx);
+    try Module.wireAll(b, root_mod, &discovery.modules, &discovery.source_paths, shared_ctx);
     SystemLibraries.link(root_mod);
     // Discovered modules don't inherit root_mod's include/library paths, so
     // give each one the same system paths for its @cImport / link work.
@@ -249,7 +252,10 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "persist_test", .gate = true, .x_gated = false },
         .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
         .{ .name = "masks_test", .gate = true, .x_gated = false },
+        .{ .name = "bounded_test", .gate = true, .x_gated = false },
+        .{ .name = "idmap_test", .gate = true, .x_gated = false },
         .{ .name = "input_test", .gate = true, .x_gated = false },
+        .{ .name = "keysyms_test", .gate = true, .x_gated = false },
         .{ .name = "borders_test", .gate = true, .x_gated = true },
         .{ .name = "vim_test", .gate = has_vim and has_seg_prompt, .x_gated = false },
         .{ .name = "focus_latency_test", .gate = has_tiling, .x_gated = false },
@@ -482,6 +488,12 @@ const OwnerRegistry = struct {
     /// (build-lifetime arena); never freed.
     owners: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{},
 
+    /// owner name -> the `plugin.*` contract its modules bind (`window` ->
+    /// WindowModule, `bar` -> Segment, `tiling` -> Layout). Derived from each
+    /// owner's module files by `deriveOwnerContracts` (no hand table to
+    /// drift from the modules' actual declarations).
+    contracts: std.StringArrayHashMapUnmanaged([]const u8) = .{},
+
     /// Populates the registry from a pre-discovered `DiscoveryContext`. The
     /// context's `owner_stems` map was filled during the single `src/` walk
     /// (`discoverAll`); this method just converts it to sorted per-owner
@@ -556,18 +568,140 @@ fn validateRegistryNames(
     }
 }
 
-/// The registry element type per owner: each <owner>/modules/ tree binds its
-/// addons to the matching contract in plugin.zig. Unknown owners are a
-/// developer error (a brand-new modules/ dir must pick its contract here or
-/// the generated registry would mis-type every module's `module` value).
-const owner_contracts = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "window", "WindowModule" },
-    .{ "bar", "Segment" },
-    .{ "tiling", "Layout" },
-});
+/// The registry element type per owner is DERIVED from each owner's module
+/// files instead of a hand-maintained table, so the generated
+/// `<owner>_modules` typing cannot drift from the contracts the modules
+/// actually bind to. Two declaration shapes are recognized, both yielding
+/// the `plugin.*` contract the file binds its `module` value to:
+///
+///   1. `pub const module: @import("plugin").<Contract> = ...` — the typed
+///      form used by the window/tiling sub-systems (floating, fullscreen,
+///      minimize, workspaces, the tiling layouts) and by the explicitly
+///      typed bar segments (prompt, systatus, tags, title, volume).
+///   2. `pub const module = segdraw.module(...)` — the bar-core convenience
+///      shim (clock, layout, variants); `segdraw.module` returns
+///      `plugin.Segment` by construction, so the contract is the same name.
+///   3. `pub const module = tiling.layoutModule(...)` — the tiling layouts;
+///      `layoutModule` returns `plugin.Layout` by construction.
+///
+/// A brand-new `modules/` tree must declare one of these shapes or it is a
+/// loud build error (the generated registry would otherwise mis-type every
+/// module's `module` value). Across one owner, all modules must agree.
+fn deriveOwnerContract(b: *std.Build, rel_path: []const u8) !?[]const u8 {
+    const src = try b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        rel_path,
+        b.allocator,
+        .limited(Module.max_scan_source_bytes),
+    );
+    defer b.allocator.free(src);
 
-fn ownerContractName(owner: []const u8) []const u8 {
-    return owner_contracts.get(owner) orelse @panic("unknown module owner contract");
+    const typed_needle = "pub const module: @import(\"plugin\").";
+    const segdraw_needle = "pub const module = segdraw.module(";
+    const layout_needle = "pub const module = tiling.layoutModule(";
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (std.mem.indexOf(u8, trimmed, typed_needle)) |at| {
+            const rest = trimmed[at + typed_needle.len ..];
+            var n: usize = 0;
+            while (n < rest.len) : (n += 1) {
+                const c = rest[n];
+                const is_name_char = (c >= 'a' and c <= 'z') or
+                    (c >= 'A' and c <= 'Z') or
+                    (c >= '0' and c <= '9');
+                if (!is_name_char) break;
+            }
+            if (n == 0) return null;
+            return try b.allocator.dupe(u8, rest[0..n]);
+        }
+        if (std.mem.indexOf(u8, trimmed, segdraw_needle) != null)
+            return try b.allocator.dupe(u8, "Segment");
+        if (std.mem.indexOf(u8, trimmed, layout_needle) != null)
+            return try b.allocator.dupe(u8, "Layout");
+    }
+    return null;
+}
+
+const empty_owner_defaults = [_]struct { owner: []const u8, contract: []const u8 }{
+    .{ .owner = "window", .contract = "WindowModule" },
+    .{ .owner = "bar", .contract = "Segment" },
+    .{ .owner = "tiling", .contract = "Layout" },
+};
+
+/// The empty-registry element type for an owner whose `modules/` tree holds
+/// zero modules; see deriveOwnerContracts for why it can't be derived.
+fn emptyOwnerDefaultContract(owner: []const u8) ?[]const u8 {
+    for (empty_owner_defaults) |d| {
+        if (std.mem.eql(u8, d.owner, owner)) return d.contract;
+    }
+    return null;
+}
+
+/// Fills `registry.contracts` (owner -> contract name) by scanning each
+/// discovered module under the owner's `modules/` tree; every module must
+/// agree on the contract, and at least one module must declare one. An owner
+/// whose `modules/` tree holds ZERO modules binds a default: an empty registry
+/// binds no module values, so its element type is consumer-binding metadata
+/// (the typed `[]const plugin.X` a core tier casts the empty array to), not a
+/// module-declared contract — nothing exists to derive it from, and only the
+/// three known owners can ever appear empty (`window` when every behavior
+/// module is removed).
+fn deriveOwnerContracts(
+    b: *std.Build,
+    source_paths: *const std.StringHashMap([]const u8),
+    registry: *OwnerRegistry,
+) !void {
+    var it = registry.owners.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.items.len == 0) {
+            const fallback = emptyOwnerDefaultContract(entry.key_ptr.*) orelse {
+                std.debug.print(
+                    "Error: owner '{s}' has an empty modules/ tree and no declared empty-registry contract.\n",
+                    .{entry.key_ptr.*},
+                );
+                return error.EmptyOwnerNoContract;
+            };
+            try registry.contracts.put(
+                b.allocator,
+                try b.allocator.dupe(u8, entry.key_ptr.*),
+                try b.allocator.dupe(u8, fallback),
+            );
+            continue;
+        }
+
+        var contract: ?[]const u8 = null;
+        var from: []const u8 = "";
+        for (entry.value_ptr.items) |stem| {
+            const rel_path = source_paths.get(stem) orelse continue;
+            const c = (try deriveOwnerContract(b, rel_path)) orelse continue;
+            if (contract) |known| {
+                if (!std.mem.eql(u8, known, c)) {
+                    std.debug.print(
+                        "Error: owner '{s}' binds mixed contracts: '{s}' (via {s}) vs '{s}' (via {s}). All modules in a <owner>/modules/ tree must bind the same plugin contract.\n",
+                        .{ entry.key_ptr.*, known, from, c, rel_path },
+                    );
+                    return error.MixedOwnerContract;
+                }
+            } else {
+                contract = c;
+                from = rel_path;
+            }
+        }
+        if (contract) |c| {
+            try registry.contracts.put(
+                b.allocator,
+                try b.allocator.dupe(u8, entry.key_ptr.*),
+                try b.allocator.dupe(u8, c),
+            );
+        } else {
+            std.debug.print(
+                "Error: could not derive the module contract for owner '{s}': no 'pub const module' declaration found under its modules/ tree.\n",
+                .{entry.key_ptr.*},
+            );
+            return error.CannotDeriveOwnerContract;
+        }
+    }
 }
 
 /// The sub-addon registries: each dir-named package under a `modules/` tree
@@ -604,13 +738,15 @@ fn buildOwnerRegistries(
     var it = registry.owners.iterator();
     while (it.next()) |entry| {
         const name = try std.fmt.allocPrint(b.allocator, "{s}_modules", .{entry.key_ptr.*});
+        const contract = registry.contracts.get(entry.key_ptr.*) orelse
+            @panic("owner contract not derived; see deriveOwnerContracts");
         const mod = try buildOwnerRegistryModule(
             b,
             discovered,
             target,
             optimize,
             name,
-            ownerContractName(entry.key_ptr.*),
+            contract,
             entry.value_ptr.*.items,
         );
         try out.put(b.allocator, name, mod);
@@ -846,6 +982,12 @@ fn finalizeModule(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode, ha
 ///
 /// Grouped here so the entry point (`build`) stays at a high level of abstraction.
 const Module = struct {
+    /// Maximum bytes read from a source file while scanning import edges or
+    /// deriving owner contracts. A source file this large would be a different
+    /// problem; the limit just keeps pathological inputs from pinning the
+    /// build process.
+    const max_scan_source_bytes = 4 * 1024 * 1024;
+
     /// Mutable state threaded through the entire discovery pass.
     ///
     /// Grouping it here means discoverAll and registerModule take only the arguments
@@ -1037,11 +1179,6 @@ const Module = struct {
         }
     };
 
-    /// Maximum bytes read from a source file while scanning import edges. A
-    /// source file this large would be a different problem; the limit just
-    /// keeps pathological inputs from pinning the build process.
-    const max_scan_source_bytes = 4 * 1024 * 1024;
-
     /// Scans a module's source for `@import("name")` literals and appends
     /// every name that corresponds to a discovered module to `out` (each name
     /// is dupe'd for the caller, which must free it). Imports that are NOT
@@ -1066,7 +1203,7 @@ const Module = struct {
             b.graph.io,
             rel_path,
             b.allocator,
-            .limited(max_scan_source_bytes),
+            .limited(Module.max_scan_source_bytes),
         );
         defer b.allocator.free(src);
 
@@ -1092,6 +1229,65 @@ const Module = struct {
         }
     }
 
+    /// Layer-purity assertion for the pure layers (model, tiling, config),
+    /// enforced on the SAME import edges wireAll already derives for
+    /// cross-wiring — one graph, so it cannot drift from a second hand-kept
+    /// dependency list. The hub layers (core, window, input, bar) may import
+    /// each other at will (hub-and-spoke); the pure layers may only depend on
+    /// the shared utility shelf and their own neighborhood. Because any
+    /// import cycle with a pure member needs the pure module to reach INTO
+    /// the hub, this makes pure-layer cycles structurally impossible and
+    /// catches regressions like the old config -> xkbcommon -> core -> config
+    /// cycle (config now parses keysym names through the pure `keysyms`).
+    fn assertPureLayerImports(
+        name: []const u8,
+        rel_path: []const u8,
+        edges: []const []const u8,
+    ) !void {
+        const layer = if (std.mem.startsWith(u8, rel_path, "src/model/"))
+            "model"
+        else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
+            "tiling"
+        else if (std.mem.startsWith(u8, rel_path, "src/config/"))
+            "config"
+        else
+            return;
+
+        for (edges) |dep| {
+            if (!pureLayerAllows(layer, dep)) {
+                std.debug.print(
+                    "Error: layer guard: pure-{s} module '{s}' imports hub module '{s}'. The pure layers may only import the shared utility shelf, `model`, and their own layer; see assertPureLayerImports in build.zig.\n",
+                    .{ layer, name, dep },
+                );
+                return error.LayerGuardViolation;
+            }
+        }
+    }
+
+    /// The allowed-import policy behind `assertPureLayerImports`. The shared
+    /// utility shelf is xcb-free by construction and safe for every layer;
+    /// `model` is the shared data model; the per-layer extras are the pure
+    /// neighborhoods each layer legitimately reaches (tiling's own seam plus
+    /// the `plugin` contract decls; config's own parsing siblings plus the
+    /// pure `keysyms`). Anything else is hub wiring and belongs behind an
+    /// interface, not an import.
+    fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
+        const shelf = [_][]const u8{
+            "constants", "debug", "ids", "masks", "utils", "paths", "proc", "bounded", "idmap",
+        };
+        for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
+        if (std.mem.eql(u8, dep, "model")) return true;
+        if (std.mem.eql(u8, layer, "model")) return false;
+        if (std.mem.eql(u8, layer, "tiling")) {
+            return std.mem.eql(u8, dep, "tiling") or std.mem.eql(u8, dep, "plugin");
+        }
+        if (std.mem.eql(u8, layer, "config")) {
+            const siblings = [_][]const u8{ "parser", "schema", "types", "fallback", "keysyms" };
+            for (siblings) |m| if (std.mem.eql(u8, m, dep)) return true;
+        }
+        return false;
+    }
+
     /// Wires up all discovered modules together.
     ///
     /// Injects shared imports into `root` itself, then into every discovered
@@ -1115,13 +1311,14 @@ const Module = struct {
         all: *std.StringHashMap(*std.Build.Module),
         source_paths: *std.StringHashMap([]const u8),
         ctx: SharedBuildContext,
-    ) void {
-        // NOTE: Wiring follows declared `@import` edges, NOT a per-layer
-        // allowlist at build time. Layer purity (model/tiling xcb-free, sync
-        // sole wire writer) is enforced by dev/scripts/check-layers.sh at
-        // `zig build check` time. If a module accidentally imports a forbidden
-        // dependency, the build succeeds but check-layers catches the xcb
-        // leak. Future improvement: add per-layer import assertions.
+    ) !void {
+        // Wiring follows declared `@import` edges. Layer purity for the pure
+        // layers (model/tiling/config) is enforced HERE, at build time, on
+        // those same edges (`assertPureLayerImports`, below): a pure module
+        // importing hub wiring fails the build instead of merely being caught
+        // later by dev/scripts/check-layers.sh at `zig build check`. That
+        // makes pure-layer import cycles structurally impossible and keeps
+        // config off the X-wired input stack.
         injectShared(root, ctx);
 
         var outer = all.iterator();
@@ -1146,6 +1343,7 @@ const Module = struct {
                         .{ rel_path, @errorName(err) },
                     );
                 };
+                try assertPureLayerImports(name, rel_path, edges.items);
             }
             for (edges.items) |dep_name| {
                 if (mod.import_table.contains(dep_name)) continue;

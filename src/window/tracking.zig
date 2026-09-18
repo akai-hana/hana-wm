@@ -131,7 +131,7 @@ pub fn setWorkspaceCount(count: usize) void {
 /// tracking query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    if (pipeline.initialized) return @intCast(pipeline.model().current);
+    if (pipeline.initialized) return @intCast(pipeline.model().current.index);
     return null;
 }
 
@@ -155,7 +155,7 @@ pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
 /// Returns a u64 bitmask with only the bit for `ws_idx` set.
 pub inline fn workspaceBit(ws_idx: anytype) u64 {
     if (ws_idx >= 64) return 0; // out-of-range → no windows in that mask
-    return model_mod.bit(@intCast(ws_idx));
+    return model_mod.bit(model_mod.WSId.fromIndex(@intCast(ws_idx)));
 }
 
 // Comptime workspace label table

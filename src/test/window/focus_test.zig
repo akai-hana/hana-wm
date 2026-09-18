@@ -30,6 +30,8 @@ test "focus: property-less window is passive; apply lands input focus" {
     try std.testing.expectEqual(win, fx.inputFocus());
     try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expectEqual(win, (fx.rootActiveWindow() orelse return error.MissingActiveWindow));
+    // Protocol cache and model truth must agree once the transition settled.
+    try std.testing.expect(focus.protocolParityHolds());
 
     // Already-applied window: a repeated prepare is a pure dedup no-op.
     try std.testing.expect(focus.prepareFocus(win, .user_command, null) == .none);
@@ -49,6 +51,7 @@ test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
 
     try std.testing.expectEqual(win, fx.inputFocus());
     try std.testing.expectEqual(win, m.focused.?);
+    try std.testing.expect(focus.protocolParityHolds());
     try std.testing.expect(focus.prepareFocus(win, .user_command, null) == .none);
 }
 
@@ -83,4 +86,6 @@ test "focus: switching to an empty workspace clears input focus to root" {
 
     try std.testing.expectEqual(fx.root, fx.inputFocus());
     try std.testing.expect(@as(?u32, null) == focus.getFocused());
+    // Both the cache and model truth are empty after the clear settled.
+    try std.testing.expect(focus.protocolParityHolds());
 }

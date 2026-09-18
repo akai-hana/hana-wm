@@ -25,7 +25,7 @@ fn getIndicator() []const u8 {
     const kind = segmod.currentLayoutKind() orelse return no_variant_icon;
     const mod = tiling_mods[kind];
     const inds = mod.indicators orelse return no_variant_icon;
-    const idx = pipeline.model().ws[pipeline.model().current].params.variant_idx;
+    const idx = pipeline.model().ws[pipeline.model().current.index].params.variant_idx;
     if (idx >= inds.len) return no_variant_icon;
     return inds[idx];
 }

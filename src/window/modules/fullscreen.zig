@@ -178,7 +178,8 @@ pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
 /// `covering_ws` intent (kept in lockstep with the record).
 pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WSId) bool {
     if (g_recs.indexOfByIdField(.win, win) == null) return false;
-    return fullscreenWsOf(m, win) == ws;
+    const fws = fullscreenWsOf(m, win) orelse return false;
+    return fws.eql(ws);
 }
 
 /// Drops `win`'s core covering intent, restoring the window to plain
@@ -202,7 +203,8 @@ fn presentVisibleRecOnWs(m: *const model.Model, ws: model.WSId, skip: ?model.Win
     for (g_recs.constSlice()) |rec| {
         if (skip) |s| if (rec.win == s) continue;
         const e = m.store.get(rec.win) orelse continue;
-        if (e.covering_ws != ws) continue;
+        const cws = e.covering_ws orelse continue;
+        if (!cws.eql(ws)) continue;
         if (e.presence == .parked or !model.visibleOn(m, rec.win, ws)) continue;
         return rec.win;
     }
@@ -245,7 +247,8 @@ pub fn coverageOn(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         const e = m.store.get(rec.win) orelse continue;
         if (e.presence == .parked) continue;
-        if (e.covering_ws == ws or model.visibleOn(m, rec.win, ws)) return rec.win;
+        const anchored = if (e.covering_ws) |cws| cws.eql(ws) else false;
+        if (anchored or model.visibleOn(m, rec.win, ws)) return rec.win;
     }
     return null;
 }
@@ -305,7 +308,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
     };
     const buf = alloc.alloc(u8, len) catch return null;
     buf[0] = FS_MAGIC;
-    writeLE(u16, buf, 1, ws);
+    writeLE(u16, buf, 1, ws.index);
     switch (rec.anchor) {
         .tiled => buf[3] = TAG_TILED,
         .floating => |r| {
@@ -339,8 +342,8 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
     const p = deserializePreamble(win, bytes, ptr) orelse return false;
     const e = p[1] orelse return true;
     if (bytes.len < 4) return false;
-    const ws: model.WSId = readLE(u16, bytes, 1);
-    if (ws >= p[0].ws.len) return false; // corrupt/oversized capture target: reject before writing
+    const ws: model.WSId = model.WSId.fromIndex(@intCast(readLE(u16, bytes, 1)));
+    if (ws.index >= p[0].ws.len) return false; // corrupt/oversized capture target: reject before writing
     const tag = bytes[3];
     // W6: check capacity BEFORE mutating e.anchor below; the old placement
     // left the floating restore applied on a rejected (growth-capped) blob.

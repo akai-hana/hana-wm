@@ -1,5 +1,3 @@
-info: [debug] [MAYBE_FOCUS] W01 -> setFocus(.mouse_enter)
-info: [debug] [MAYBE_FOCUS] W02 -> setFocus(.mouse_enter)
 info: [debug] ========== STATE DUMP ==========
 info: [debug] Focused:        W03
 info: [debug] Total windows:  2

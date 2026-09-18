@@ -51,6 +51,32 @@ wait_named() {
 	done
 }
 
+# Wait until `_n` windows named `_name` exist, whether viewable or hidden
+# (unmapped/parked). Layouts like monocle park non-shown windows, which
+# `xdotool search --onlyvisible` cannot see; waiting on existence keeps the
+# spawn deterministic instead of emitting a spurious visibility TIMEOUT.
+wait_named_any() {
+	_name="$1"; _n="${2:-1}"; _deadline=$(( $(date +%s) + ${3:-5} ))
+	while :; do
+		_c=$(DISPLAY="$HW_DISPLAY" xdotool search --name "^$_name\$" 2>/dev/null | wc -l)
+		[ "$_c" -ge "$_n" ] && return 0
+		if [ "$(date +%s)" -ge "$_deadline" ]; then
+			echo "TIMEOUT waiting for $_n x '$_name' to exist (have $_c) on $HW_DISPLAY" >&2
+			return 1
+		fi
+		sleep 0.1
+	done
+}
+
+# Spawn a named client that the active layout may immediately park hidden
+# (e.g. a non-shown monocle window). Waits for existence, not visibility.
+spawn_client_hidden() {
+	_name="$1"
+	shift
+	spawn "$HARNESS_ROOT/.cache/xclient" --name "$_name" "$@"
+	wait_named_any "$_name" 1
+}
+
 # Resolves a named client to its window id (multiple matches take the newest).
 client_id() {
 	DISPLAY="$HW_DISPLAY" xdotool search --onlyvisible --name "^$1\$" | tail -1

@@ -77,8 +77,8 @@ test "actions: moveWindowTo transfers membership and parks off-screen" {
     fx.flush();
 
     const e = m.store.get(win) orelse return error.UnknownWindow;
-    try std.testing.expectEqual(model.bit(2), e.mask);
-    try std.testing.expectEqual(@as(model.WSId, 2), e.home_ws.?);
+    try std.testing.expectEqual(model.bit(model.WSId.fromIndex(2)), e.mask);
+    try std.testing.expectEqual(model.WSId.fromIndex(2), e.home_ws.?);
     try std.testing.expect(!model.visibleOn(m, win, m.current));
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
     try fx.expectParked(win);
@@ -88,7 +88,7 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
-    const ws0: u8 = @intCast(m.current);
+    const ws0: u8 = @intCast(m.current.index);
 
     const w1 = fx.createWindow();
     actions.mapRequest(w1, 0, true, null);
@@ -97,7 +97,7 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     // Multi-tag: add tag 2, protecting the current tag.
     actions.tagToggle(w1, 2, true);
     const e1 = m.store.get(w1) orelse return error.UnknownWindow;
-    try std.testing.expect(e1.mask & model.bit(2) != 0);
+    try std.testing.expect(e1.mask & model.bit(model.WSId.fromIndex(2)) != 0);
     try std.testing.expect(e1.mask & model.bit(m.current) != 0);
 
     // Detag the current tag: evicted from the shown workspace, focus follows
@@ -218,7 +218,7 @@ test "actions: swapPrimary and moveFocused rotate the tiled order" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
-    const order = &m.ws[m.current].tiled_order;
+    const order = &m.ws[m.current.index].tiled_order;
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
@@ -253,7 +253,7 @@ test "actions: layout parameters adjust within clamps" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
 
     actions.adjustPrimaryWidthAction(0.2);
     try std.testing.expectApproxEqAbs(@as(f32, 0.7), p.primary_width, 1e-4);
@@ -275,7 +275,7 @@ test "actions: layout kind and variant step through the registry" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
-    const p = &m.ws[m.current].params;
+    const p = &m.ws[m.current.index].params;
 
     // cycleLayoutKind cycles the CONFIG layout list (seeded by the fixture in
     // canonical module order), not a per-test candidate list.

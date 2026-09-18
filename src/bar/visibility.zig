@@ -20,7 +20,7 @@ const pipeline = @import("pipeline");
 /// to live at each decision site.
 pub fn barForcedHiddenByFullscreen(ws: u8) bool {
     return if (build_options.has_fullscreen)
-        model.coveringOccupantOnWs(pipeline.model(), @intCast(ws)) != null
+        model.coveringOccupantOnWs(pipeline.model(), model.WSId.fromIndex(ws)) != null
     else
         false;
 }

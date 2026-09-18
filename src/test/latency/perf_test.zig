@@ -34,7 +34,7 @@ const makeCtx = helpers.makeCtx;
 
 /// Registers ids 1..n with home-workspace hint 0 (the fill most benchmarks use).
 fn fill(m: *Model, n: u32) void {
-    for (0..n) |i| model.register(m, @intCast(i + 1), 0) catch unreachable;
+    for (0..n) |i| model.register(m, @intCast(i + 1), model.WSId.fromIndex(0)) catch unreachable;
 }
 
 test "bench: findHome scan (100 wins, 10 ws)" {
@@ -45,7 +45,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
             regCur(&m, win_id);
             // Override home to target the specific workspace
             if (win_id != 1) {
-                workspaces.moveWindowToWs(&m, win_id, @intCast(ws));
+                workspaces.moveWindowToWs(&m, win_id, model.WSId.fromIndex(@intCast(ws)));
             }
             win_id += 1;
         }
@@ -79,11 +79,28 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = fullscreen.fullscreenOccupantOnWs(&m, 0);
+        _ = fullscreen.fullscreenOccupantOnWs(&m, model.WSId.fromIndex(0));
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
     if (bench) std.debug.print("[bench] fullscreenOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+}
+
+test "bench: coveringOccupantOnWs store scan (50 wins)" {
+    var m = makeModel();
+    for (0..50) |i| {
+        regCur(&m, @intCast(i + 1));
+    }
+    _ = fullscreen.toggleFullscreen(&m, 25);
+
+    const iterations: usize = if (bench) 10_000 else 1;
+    const t0 = nowNs();
+    for (0..iterations) |_| {
+        _ = model.coveringOccupantOnWs(&m, model.WSId.fromIndex(0));
+    }
+    const elapsed_ns = nowNs() - t0;
+    const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
+    if (bench) std.debug.print("[bench] coveringOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: moveWindowToWs round-trip (50 wins)" {
@@ -94,10 +111,10 @@ test "bench: moveWindowToWs round-trip (50 wins)" {
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..50) |i| {
-            workspaces.moveWindowToWs(&m, @intCast(i + 1), 1);
+            workspaces.moveWindowToWs(&m, @intCast(i + 1), model.WSId.fromIndex(1));
         }
         for (0..50) |i| {
-            workspaces.moveWindowToWs(&m, @intCast(i + 1), 0);
+            workspaces.moveWindowToWs(&m, @intCast(i + 1), model.WSId.fromIndex(0));
         }
     }
     const elapsed_ns = nowNs() - t0;
@@ -250,7 +267,7 @@ test "bench: fallbackFocusCandidate (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = model.fallbackFocusCandidate(&m, 0, null);
+        _ = model.fallbackFocusCandidate(&m, model.WSId.fromIndex(0), null);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
