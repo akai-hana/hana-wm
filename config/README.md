@@ -87,20 +87,29 @@ segments = ["clock"]
 ```
 
 Available segments: `workspaces`, `title`, `clock`, `layout`, `variants`,
-`volume`, `systatus`, `brightness`. A segment is compiled in only when its
+`slider`, `systatus`. A segment is compiled in only when its
 `src/bar/modules/*` file is present; the above list is the full stock set.
+`slider` aggregates every slider-style sub in `src/bar/modules/slider/`
+(volume + brightness) into one draggable belt; each sub is present only when
+its source file was dropped into that directory.
 
 Segment behavior knobs:
 
-- `volume_format` / `volume_muted_format` — the volume widget's text.
+- `volume_format` / `volume_muted_format` — the volume slider's text.
   `{pct}` is the sink level (0–100); `{state}` is `mute`/`unmute`. Defaults:
   `"VOL {pct}%"` and `"MUTE"`.
-- `brightness_format` — the brightness widget's text; `{pct}` is the level
+- `brightness_format` — the brightness slider's text; `{pct}` is the level
   (0–100). Default: `"BRT {pct}%"`.
 - `brightness_device` — optional sysfs device pin: a `backlight`-class name
   (`amdgpu_bl0`, …), or an `led:`-prefixed LED-class device (`led:kbd`).
   Default: the lexicographically smallest `backlight` device with a positive
   `max_brightness`.
+
+  Brightness writes go straight to the sysfs node; when the node is root-only
+  (no write policy), hana falls back to a throttled `brightnessctl` spawn.
+  To make every commit a native, un-throttled write, install
+  `contrib/udev/90-hana-backlight.rules` and add your user to the `video`
+  group.
 - `systatus_items` — the systatus widget's readouts, in render order. Valid
   items: `"mem"` (used/total + %), `"cpu"` (utilization %), `"batt"` (charge %
   when a battery is present). Absent = every present-capable readout in
