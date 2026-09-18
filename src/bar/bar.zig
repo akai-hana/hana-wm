@@ -1162,6 +1162,11 @@ fn applyReload(old: *State, height: u16) !void {
     // front, including on the failure path below, where the surviving bar
     // re-points at the NEW live config too.
     runVoidHook("invalidateReloadCaches");
+    // calcBarHeightAndFontSize already re-derived the scaled font size from
+    // the NEW config (percentage sizes refine against the new height); if the
+    // new bar fails to materialize, the surviving bar must keep whatever font
+    // size actually matches its own height.
+    const old_scaled_font_size = metrics.getScaledFontSize();
     const new_bar = createBar(height, barwin.calcBarYPos(height)) catch |err| {
         // The caller has already swapped cs.config to the new config and frees
         // the OLD config when this returns. The old bar survives this failed
@@ -1169,6 +1174,7 @@ fn applyReload(old: *State, height: u16) !void {
         // re-point it at the live new config before old_config.deinit() runs,
         // or the next draw reads freed memory.
         old.render.config = cs.config.bar;
+        metrics.setScaledFontSize(old_scaled_font_size);
         return err;
     };
     const new_state = new_bar.state;

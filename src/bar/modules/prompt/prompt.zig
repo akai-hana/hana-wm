@@ -93,8 +93,74 @@ pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
     return sym >= 0x20 and sym <= 0x7e;
 }
 
-pub fn handleCtrl(_: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    return if (sym == 'c') .deactivate else .none;
+/// Deletes the word immediately before the cursor (readline Ctrl-W
+/// semantics): the run of non-space chars plus the space run separating it
+/// from the previous word. No-op at the buffer head.
+fn deleteWordBack(es: *EditorState) void {
+    if (es.cursor == 0) return;
+    var start = es.cursor;
+    while (start > 0 and es.buf[start - 1] == ' ') start -= 1;
+    while (start > 0 and es.buf[start - 1] != ' ') start -= 1;
+    // Eat the inter-word space run that separated this word from the previous
+    // one, so deleting "two" out of "one two" leaves "one", not "one ".
+    while (start > 0 and es.buf[start - 1] == ' ') start -= 1;
+    if (start == es.cursor) return;
+    std.mem.copyForwards(
+        u8,
+        es.buf[start .. es.len - (es.cursor - start)],
+        es.buf[es.cursor..es.len],
+    );
+    es.len -= es.cursor - start;
+    es.cursor = start;
+}
+
+/// Deletes the text from `from` to the end of the buffer (Ctrl-K): the tail
+/// is discarded and the cursor clamps into range.
+fn clearToEnd(es: *EditorState, from: usize) void {
+    es.len = from;
+    es.cursor = @min(es.cursor, es.len);
+}
+
+/// Deletes the text from the head of the buffer to the cursor (Ctrl-U),
+/// shifting the remainder left.
+fn clearToStart(es: *EditorState) void {
+    if (es.cursor == 0) return;
+    std.mem.copyForwards(
+        u8,
+        es.buf[0 .. es.len - es.cursor],
+        es.buf[es.cursor..es.len],
+    );
+    es.len -= es.cursor;
+    es.cursor = 0;
+}
+
+fn backspace(es: *EditorState) void {
+    if (es.cursor == 0) return;
+    std.mem.copyForwards(
+        u8,
+        es.buf[es.cursor - 1 .. es.len - 1],
+        es.buf[es.cursor..es.len],
+    );
+    es.cursor -= 1;
+    es.len -= 1;
+}
+
+/// Base Ctrl-key handler (used whenever the vim overlay is absent): the
+/// readline editing set plus Ctrl-C, so a Ctrl-modified key in a bare prompt
+/// never disappears without an effect. The vim overlay layers its own keys on
+/// top of this one.
+pub fn handleCtrl(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
+    switch (sym) {
+        'c' => return .deactivate,
+        'a' => es.cursor = 0,
+        'e' => es.cursor = es.len,
+        'u' => clearToStart(es),
+        'k' => clearToEnd(es, es.cursor),
+        'w' => deleteWordBack(es),
+        'h' => backspace(es),
+        else => {},
+    }
+    return .none;
 }
 
 pub fn handleInsertBasic(es: *EditorState, sym: xcb.xcb_keysym_t) Action {

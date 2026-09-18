@@ -67,6 +67,10 @@ icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 # volume_format        = "VOL {pct}%"  # "{pct}" = level, "{state}" = mute/unmute
 # volume_muted_format  = "MUTE"        # shown instead while the sink is muted
+# brightness_format    = "BRT {pct}%"  # "{pct}" = level 0-100
+# brightness_device    = ""            # sysfs pin: "amdgpu_bl0" (backlight) or
+#                                     # "led:kbd" (LED class); absent = auto-pick
+#                                     # the lexicographically smallest backlight
 # systatus_items        = ["cpu", "mem"]  # systatus readouts; absent = every present-capable
 #                             # readout in alphabetical registry order (batt, cpu, mem), [] = none
 

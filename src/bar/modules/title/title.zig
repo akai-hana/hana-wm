@@ -348,9 +348,25 @@ inline fn emptyWorkspace(ctx: segmod.TitleRenderContext, count: usize) ?u16 {
 
 // -- Segment hooks -----------------------------------------------------------
 
+/// True while the last draw handed the slot to the prompt overlay. Latched
+/// here so the overlay close can be noticed: the scroller saw no frames for
+/// the whole session (pollTimeoutMs contributed none), so resuming without a
+/// pivot would advance `last_frame_ms` across it and teleport the marquee.
+var overlay_was_active: bool = false;
+
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     const c = segmod.castDraw(ctx);
-    if (overlay) |o| if (o.is_active()) return o.draw(ctx, x);
+    if (overlay) |o| if (o.is_active()) {
+        overlay_was_active = true;
+        return o.draw(ctx, x);
+    };
+    // Overlay just closed after at least one overlay frame: pivot the
+    // scroller's elapsed-time base so motion continues from the last shown
+    // offset instead of catching the whole session in one frame.
+    if (overlay_was_active) {
+        overlay_was_active = false;
+        if (scroller) |s| s.resetForShow();
+    }
     return renderTitle(c, x);
 }
 

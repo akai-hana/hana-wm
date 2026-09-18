@@ -256,3 +256,71 @@ test "empty buffer: every op is a no-op, no traps" {
     try testing.expectEqual(@as(usize, 0), es.len);
     try testing.expectEqual(@as(usize, 0), es.cursor);
 }
+
+test "bare-prompt Ctrl keys are readline editing, never swallowed" {
+    // The base handler (vim absent) routes Ctrl-U/A/E/K/W/H to editing.
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+
+    _ = prompt.handleInsertBasic(&es, 'o');
+    _ = prompt.handleInsertBasic(&es, 'n');
+    _ = prompt.handleInsertBasic(&es, 'e');
+    _ = prompt.handleInsertBasic(&es, ' ');
+    _ = prompt.handleInsertBasic(&es, 't');
+    _ = prompt.handleInsertBasic(&es, 'w');
+    _ = prompt.handleInsertBasic(&es, 'o');
+    try testing.expectEqual(@as(usize, 7), es.len);
+
+    // Ctrl-A / Ctrl-E jump to the ends.
+    _ = prompt.handleCtrl(&es, 'a');
+    try testing.expectEqual(@as(usize, 0), es.cursor);
+    _ = prompt.handleCtrl(&es, 'e');
+    try testing.expectEqual(@as(usize, 7), es.cursor);
+
+    // Ctrl-W deletes the word before the cursor ("two", mid-buffer cursor).
+    _ = prompt.handleCtrl(&es, 'w');
+    try testing.expectEqualStrings("one", es.buf[0..3]);
+    try testing.expectEqual(@as(usize, 3), es.len);
+    try testing.expectEqual(@as(usize, 3), es.cursor);
+
+    // Type a fresh tail, then Ctrl-U clears head-to-cursor.
+    _ = prompt.handleInsertBasic(&es, ',');
+    _ = prompt.handleInsertBasic(&es, 'x');
+    _ = prompt.handleCtrl(&es, 'u');
+    try testing.expectEqual(@as(usize, 0), es.len);
+
+    // Ctrl-K clears cursor-to-end.
+    _ = prompt.handleInsertBasic(&es, 'x');
+    _ = prompt.handleInsertBasic(&es, 'y');
+    _ = prompt.handleInsertBasic(&es, 'z');
+    _ = prompt.handleCtrl(&es, 'a');
+    _ = prompt.handleInsertBasic(&es, 'Q');
+    try testing.expectEqual(@as(usize, 1), es.cursor);
+    _ = prompt.handleCtrl(&es, 'k');
+    try testing.expectEqualStrings("Q", es.buf[0..1]);
+    try testing.expectEqual(@as(usize, 1), es.len);
+
+    // Ctrl-H is backspace before the cursor.
+    _ = prompt.handleInsertBasic(&es, 'r');
+    try testing.expectEqual(@as(usize, 2), es.cursor);
+    _ = prompt.handleCtrl(&es, 'h');
+    try testing.expectEqualStrings("Q", es.buf[0..1]);
+    try testing.expectEqual(@as(usize, 1), es.len);
+
+    // Ctrl-C still dismisses.
+    try testing.expectEqual(Action.deactivate, prompt.handleCtrl(&es, 'c'));
+}
+
+test "vim insert keeps the readline Ctrl set (single word delete)" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+
+    // Straight insert-mode typing (no escape): the shared tail.
+    for ("aa bb") |ch| _ = vim.handleInsert(&es, ch);
+    try testing.expectEqual(Mode.insert, es.mode);
+    try testing.expectEqual(@as(usize, 5), es.len);
+
+    // Ctrl-U in vim insert falls through to the base handler once, not twice.
+    _ = vim.handleCtrl(&es, 'u');
+    try testing.expectEqual(@as(usize, 0), es.len);
+}

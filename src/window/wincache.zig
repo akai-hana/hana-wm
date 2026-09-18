@@ -300,7 +300,10 @@ fn takePropertyReply(
 /// Caches `title` for `win`, duplicating the string and freeing the previous
 /// copy (if any). A full cache drops a NEW window's title rather than evicting
 /// an existing one (overwrites of already-cached windows still work).
-fn storeTitle(win: u32, title: []const u8) void {
+/// Public because it is the cache's write side (the pipelined admission path
+/// reaches it through `collectTitleCookies`), which the headless
+/// `wincache_test` exercises for the overwrite/free/cap lifecycle.
+pub fn storeTitle(win: u32, title: []const u8) void {
     const alloc = title_alloc orelse return;
     const c = live();
     const owned = alloc.dupe(u8, title) catch return;
@@ -323,18 +326,4 @@ fn storeTitle(win: u32, title: []const u8) void {
 pub fn peekTitle(win: u32) []const u8 {
     const wd = dataFor(win) orelse return "";
     return wd.title;
-}
-
-test "peekTitle returns cached OR-set title" {
-    const alloc = std.testing.allocator;
-    init(alloc);
-    defer deinit();
-
-    try std.testing.expectEqualStrings("", peekTitle(7));
-    storeTitle(7, "hello");
-    try std.testing.expectEqualStrings("hello", peekTitle(7));
-    storeTitle(7, "edited");
-    try std.testing.expectEqualStrings("edited", peekTitle(7));
-    removeWindow(7);
-    try std.testing.expectEqualStrings("", peekTitle(7));
 }

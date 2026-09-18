@@ -4,6 +4,7 @@
 //! on machines without an X server so `zig build test` stays green headless.
 
 const std = @import("std");
+const core = @import("core");
 
 const model = @import("model");
 const pipeline = @import("pipeline");
@@ -87,5 +88,26 @@ test "focus: switching to an empty workspace clears input focus to root" {
     try std.testing.expectEqual(fx.root, fx.inputFocus());
     try std.testing.expect(@as(?u32, null) == focus.getFocused());
     // Both the cache and model truth are empty after the clear settled.
+    try std.testing.expect(focus.protocolParityHolds());
+}
+
+test "focus: destroyed window under a mouse_click is never re-focused (liveness before dedup)" {
+    var fx = fixture.setUp("focus_test") orelse return;
+    defer fx.deinit();
+
+    const win = fx.createWindow();
+    try admit(win);
+    fx.flush();
+    try std.testing.expectEqual(win, fx.inputFocus());
+    try std.testing.expect(focus.protocolParityHolds());
+
+    // The window dies between the raise request and spawn-resolution. A
+    // click-to-raise on the corpse must return .none even though it was the
+    // last_applied window: the liveness guard (focus.zig prepareFocus) runs
+    // BEFORE the dedup branch, so the raise side effect cannot republish
+    // focus to a destroyed window.
+    _ = core.xcb.xcb_destroy_window(fx.conn, win);
+    fx.flush();
+    try std.testing.expect(focus.prepareFocus(win, .mouse_click, null) == .none);
     try std.testing.expect(focus.protocolParityHolds());
 }

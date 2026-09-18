@@ -120,7 +120,7 @@ zig build
 **On hana's bar:**
 
 - Modular bar _(inspired by dwm)_ — an optional sub-system, removable from the build
-- Various bar widgets _(workspaces, title, layout/variants indicators, clock, volume manager, system status)_
+- Various bar widgets _(workspaces, title, layout/variants indicators, clock, volume manager, system status, brightness via the kernel's backlight sysfs interface)_
 - Title carousel _(marquee for overflowing titles, timed by monitor refresh rate)_
 - Inline bar command prompt with vim-modal motions
 

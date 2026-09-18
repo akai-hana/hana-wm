@@ -12,3 +12,11 @@ trim_trailing_whitespace = true
 
 [*.md]
 trim_trailing_whitespace = false
+
+[*.zig]
+# Pin the zigfmt contract so editors don't fight `zig fmt` on block indents
+# or strips. zigfmt is 4-space and never tabs; these match `[*]` and exist
+# only to make the language-specific intent explicit.
+indent_style = space
+indent_size = 4
+end_of_line = lf
