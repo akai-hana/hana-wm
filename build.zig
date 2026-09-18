@@ -249,6 +249,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "persist_test", .gate = true, .x_gated = false },
         .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
         .{ .name = "masks_test", .gate = true, .x_gated = false },
+        .{ .name = "input_test", .gate = true, .x_gated = false },
         .{ .name = "borders_test", .gate = true, .x_gated = true },
         .{ .name = "vim_test", .gate = has_vim and has_seg_prompt, .x_gated = false },
         .{ .name = "focus_latency_test", .gate = has_tiling, .x_gated = false },
