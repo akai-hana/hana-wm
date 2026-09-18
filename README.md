@@ -256,6 +256,6 @@ dev/scripts/xtest.sh zig build test   # runs under Xvfb; headless `zig build tes
 
 <div align="center">
 
-</> with <3 by akai_hana
+</> with <3 by [akai_hana](https://github.com/akai-hana)
 
 </div>
