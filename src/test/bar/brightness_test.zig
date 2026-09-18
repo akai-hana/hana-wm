@@ -1,4 +1,4 @@
-//! Unit tests for the brightness segment's sysfs I/O against a fabricated
+//! Unit tests for the brightness slider sub's sysfs I/O against a fabricated
 //! `/class/backlight/<dev>/` tree in a temp dir -- no host backlight is ever
 //! touched. The pure scale/offset/format helpers live as inline tests inside
 //! brightness.zig; this module covers the file-backed read/write and device

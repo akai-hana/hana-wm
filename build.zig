@@ -137,7 +137,19 @@ pub fn build(b: *std.Build) !void {
     // import like the other registries.
     for (sub_registry_specs) |spec| {
         if (!discovery.modules.contains(spec.package)) continue;
-        const sub_stems = if (discovery.sub_stems.get(spec.package)) |s| s.items else &[_][]const u8{};
+        // A package sibling is listed as an addon only when it SELF-DECLARES
+        // the binding (`pub const <binding>`); a sibling without it (e.g. the
+        // native ALSA/PulseAudio backends beside the slider package) is a
+        // private implementation file -- still a discovered module, still
+        // importable by stem, but never bound into the generated registry.
+        var filtered = std.ArrayListUnmanaged([]const u8).empty;
+        if (discovery.sub_stems.get(spec.package)) |stems| {
+            for (stems.items) |stem| {
+                const rel_path = discovery.source_paths.get(stem) orelse continue;
+                if (try declaresBinding(b, rel_path, spec.binding))
+                    try filtered.append(b.allocator, stem);
+            }
+        }
         const registry_name = try std.fmt.allocPrint(b.allocator, "{s}_subs", .{spec.package});
         try owner_modules.put(b.allocator, registry_name, try buildSubsRegistryModule(
             b,
@@ -148,7 +160,7 @@ pub fn build(b: *std.Build) !void {
             spec.array,
             spec.binding,
             spec.contract,
-            sub_stems,
+            filtered.items,
         ));
     }
     // Tiling-engine seam: a generated `tiling_seam` module that names the
@@ -243,6 +255,10 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "systatus_test", .gate = has_seg_systatus, .x_gated = false },
         .{ .name = "carousel_test", .gate = has_seg_carousel, .x_gated = false },
         .{ .name = "brightness_test", .gate = has_seg_brightness, .x_gated = false },
+        .{ .name = "commit_test", .gate = true, .x_gated = false },
+        .{ .name = "slider_test", .gate = true, .x_gated = false },
+        .{ .name = "native_alsa_test", .gate = true, .x_gated = false },
+        .{ .name = "native_pulse_test", .gate = true, .x_gated = false },
         .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces, .x_gated = false },
         .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces, .x_gated = false },
         .{ .name = "schema_test", .gate = true, .x_gated = false },
@@ -581,7 +597,7 @@ fn validateRegistryNames(
 ///   1. `pub const module: @import("plugin").<Contract> = ...` — the typed
 ///      form used by the window/tiling sub-systems (floating, fullscreen,
 ///      minimize, workspaces, the tiling layouts) and by the explicitly
-///      typed bar segments (prompt, systatus, tags, title, volume).
+///      typed bar segments (prompt, systatus, tags, title, slider).
 ///   2. `pub const module = segdraw.module(...)` — the bar-core convenience
 ///      shim (clock, layout, variants); `segdraw.module` returns
 ///      `plugin.Segment` by construction, so the contract is the same name.
@@ -722,7 +738,39 @@ const sub_registry_specs = [_]struct {
     .{ .package = "systatus", .array = "subs", .binding = "sub", .contract = "systatus.Sub" },
     .{ .package = "prompt", .array = "addons", .binding = "addon", .contract = "prompt.Addon" },
     .{ .package = "title", .array = "addons", .binding = "addon", .contract = "title.Scroller" },
+    .{ .package = "slider", .array = "subs", .binding = "sub", .contract = "slider.Sub" },
 };
+
+/// True when `rel_path` declares the top-level binding `pub const <binding>`
+/// -- the self-declaring role marker that turns a package sibling into a
+/// bound addon. A sibling WITHOUT the declaration is a private implementation
+/// file (native_alsa.zig beside the slider package): still registered as a
+/// named module and importable by stem, but excluded from the generated
+/// `<package>_subs` registry. Mirrors deriveOwnerContract's line-scan: the
+/// declaration must be a real top-level decl of the binding name, not a
+/// doc-comment reference.
+fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bool {
+    const src = try b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        rel_path,
+        b.allocator,
+        .limited(Module.max_scan_source_bytes),
+    );
+    defer b.allocator.free(src);
+    const needle = try std.fmt.allocPrint(b.allocator, "pub const {s}", .{binding});
+    defer b.allocator.free(needle);
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        if (!std.mem.startsWith(u8, trimmed, needle)) continue;
+        const rest = trimmed[needle.len..];
+        if (rest.len == 0) continue;
+        const next = rest[0];
+        if (next == ':' or next == ' ' or next == '=') return true;
+    }
+    return false;
+}
 
 /// Generates one synthesized `<owner>_modules` registry module per discovered
 /// `modules/` dir and returns them keyed by their injectable import name.
@@ -795,15 +843,17 @@ fn buildOwnerRegistryModule(
 /// Generates a `<package>_subs` registry module for a dir-named package's
 /// private siblings (`systatus/{cpu,mem,...}.zig` beside systatus.zig,
 /// `prompt/vim.zig` beside prompt.zig, `title/carousel.zig` beside
-/// title.zig). Lists every discovered sibling as the package's addon binding
-/// value (`sub`, `addon`, ...) in the contract element `contract` (e.g.
-/// `prompt.Addon`), in deterministic alphabetical stem order. Consumed by
-/// the package core via `@import("<package>_subs")`, mirroring `bar_modules`
-/// for the bar's segments: file presence fully drives membership, so adding
-/// or removing a sibling regenerates the array with zero source edits and
-/// leaves no dead references in the closed core. The package core and its
-/// siblings may import each other; this generated module is their only
-/// name-backed seam.
+/// title.zig). Lists every discovered sibling that SELF-DECLARES the binding
+/// (`pub const <binding>`) as the package's addon binding value (`sub`,
+/// `addon`, ...) in the contract element `contract` (e.g. `prompt.Addon`),
+/// in deterministic alphabetical stem order. A sibling without the binding is
+/// a private implementation file and is left out of the registry entirely.
+/// Consumed by the package core via `@import("<package>_subs")`, mirroring
+/// `bar_modules` for the bar's segments: file presence fully drives
+/// membership, so adding or removing a sibling regenerates the array with
+/// zero source edits and leaves no dead references in the closed core. The
+/// package core and its siblings may import each other; this generated module
+/// is their only name-backed seam.
 fn buildSubsRegistryModule(
     b: *std.Build,
     discovered: *std.StringHashMap(*std.Build.Module),
@@ -826,9 +876,10 @@ fn buildSubsRegistryModule(
     try src.print(b.allocator, "const {s} = @import(\"{s}\");\n\n", .{ package, package });
     try src.print(b.allocator, "/// The auto-discovered {s} sibling add-ons, in\n", .{package});
     try src.appendSlice(b.allocator, "/// deterministic alphabetical order. Generated by build.zig;\n");
-    try src.print(b.allocator, "/// never committed. Every sibling .zig file besides {s}.zig must\n", .{package});
-    try src.print(b.allocator, "/// export `pub const {s}: {s}`; membership here is driven entirely\n", .{ binding, contract });
-    try src.appendSlice(b.allocator, "/// by file presence.\n");
+    try src.print(b.allocator, "/// never committed. A sibling must export `pub const {s}: {s}` to be\n", .{ binding, contract });
+    try src.appendSlice(b.allocator, "/// listed; a sibling without the binding is a private implementation\n");
+    try src.appendSlice(b.allocator, "/// file and is left out of the registry. Membership is driven entirely\n");
+    try src.appendSlice(b.allocator, "/// by file presence plus self-declared role.\n");
     try src.print(b.allocator, "pub const {s} = [_]{s}{{\n", .{ array_name, contract });
     for (stems) |stem| {
         try src.print(b.allocator, "    @import(\"{s}\").{s},\n", .{ stem, binding });

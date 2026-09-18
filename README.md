@@ -120,7 +120,7 @@ zig build
 **On hana's bar:**
 
 - Modular bar _(inspired by dwm)_ — an optional sub-system, removable from the build
-- Various bar widgets _(workspaces, title, layout/variants indicators, clock, volume manager, system status, brightness via the kernel's backlight sysfs interface)_
+- Various bar widgets _(workspaces, title, layout/variants indicators, clock, slider, system status)_
 - Title carousel _(marquee for overflowing titles, timed by monitor refresh rate)_
 - Inline bar command prompt with vim-modal motions
 
@@ -203,6 +203,27 @@ hana automatically reads all `.toml` files inside `config/.`, meaning the name o
 Since this is all an arbitrary design choice, it is optional and re-categorizable by the user, so one could do `config/config.toml` and `config/others/<binds.toml/rules.toml/tiling.toml>`, or whatever the heck else.
 
 > BTW, pull requests with custom themes are very much welcome. :-)
+
+## Backlight write policy
+
+The slider's brightness sub talks to the panel through the kernel's own sysfs
+interface (`/sys/class/backlight/<dev>/brightness`), so a commit is one tiny
+file write — no subprocess, applied immediately, un-throttled. That native
+path needs write permission on the node; by default the nodes are root-only,
+and hana silently falls back to a rate-limited `brightnessctl` spawn.
+
+To opt into the native, un-throttled path, install the shipped udev rules and
+add your user to the `video` group:
+
+```sh
+sudo install -m 0644 contrib/udev/90-hana-backlight.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+sudo usermod -aG video $USER   # then log out and back in
+```
+
+With no rule installed, hana still works: the brightnessctl fallback does the
+write for you (clamped, coalesced, throttled), just with a subprocess boundary
+per commit. See `config/README.md` for the `brightness_device` config knob.
 
 ---
 

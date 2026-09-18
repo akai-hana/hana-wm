@@ -110,7 +110,7 @@ position = "bottom" # "top" / "bottom" — can be toggled at runtime
 # -- Bar layout --
 # Segments are placed into left/center/right anchor groups.
 # Available segments: "workspaces", "title", "clock", "layout", "variants",
-#                     "volume", "systatus", "brightness"
+#                     "slider", "systatus"
 [bar.layout.left]
 segments = ["workspaces", "layout", "variants"]
 
@@ -118,7 +118,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["systatus", "volume", "brightness", "clock"]
+segments = ["systatus", "slider", "clock"]
 
 # -- Bar appearance --
 # Defaults below; the theme file typically overrides these.
@@ -143,11 +143,11 @@ segments = ["systatus", "volume", "brightness", "clock"]
 # clock_format        = auto   # strftime format string; absent = default
 # drun_prompt         = auto   # Command runner prompt; absent = "run: "
 #
-# volume_format       = auto   # Volume widget text; "{pct}" = level 0-100,
+# volume_format       = auto   # Volume slider text; "{pct}" = level 0-100,
 #                              # "{state}" = "mute"/"unmute". Absent = "VOL {pct}%"
 # volume_muted_format = auto   # Shown instead while the sink is muted;
 #                              # "{pct}"/{state}". Absent = "MUTE"
-# brightness_format   = auto   # Brightness widget text; "{pct}" = level 0-100.
+# brightness_format   = auto   # Brightness slider text; "{pct}" = level 0-100.
 #                              # Absent = "BRT {pct}%"
 # brightness_device   = auto   # Sysfs device pin; a backlight name
 #                              # ("amdgpu_bl0") or "led:<name>" for the LED

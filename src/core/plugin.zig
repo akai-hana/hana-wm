@@ -77,7 +77,7 @@ pub const Surfaces = struct {
     handleButtonPress: *const fn (*const xcb.xcb_button_press_event_t) void,
     /// Press-hold motion over the surface: X's implicit grab keeps delivering
     /// motion to the surface window while a button is held, so a scrub-drag
-    /// (e.g. the volume segment) can track the pointer even past the bar's
+    /// (e.g. a slider sub, volume) can track the pointer even past the bar's
     /// edge. The surface decides whether a segment drag is live and routes it.
     handleButtonMotion: *const fn (*const xcb.xcb_motion_notify_event_t) void,
     /// Releases end a press-hold scrub on the surface; the surface clears its
@@ -350,7 +350,7 @@ pub const Segment = struct {
     /// bar's edge). Null for every segment that only needs click semantics.
     onDragMotion: ?*const fn (u16, *const fn () void) bool = null,
     /// Fired when a press-hold scrub ends (button-1 release): lets a module
-    /// that defers work during the scrub (the volume segment throttles its
+    /// that defers work during the scrub (the slider sub throttles its
     /// subprocess commits to every few motions) flush its final value and
     /// leave its drag render mode. Receives the bar's full redraw hook. Null
     /// for every segment that needs only click semantics.
