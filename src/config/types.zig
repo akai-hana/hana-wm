@@ -406,18 +406,18 @@ pub const BarConfig = struct {
 
     clock_format: ?[]const u8 = null,
 
-    /// Volume segment display templates (bar.modules... the volume segment
+    /// Volume slider sub display templates (bar.modules... the volume sub
     /// falls back to its built-in strings when null). `{pct}` is replaced by
     /// the 0-100 level; `{state}` by the mute glyph ("mute"/"unmute" words by
     /// default -- override just the format to restyle). When the sink is
     /// muted the volume_muted_format wins.
     volume_format: ?[]const u8 = null,
     volume_muted_format: ?[]const u8 = null,
-    /// Brightness segment display template (bar.modules... falls back to
+    /// Brightness slider sub display template (bar.modules... falls back to
     /// "BRT {pct}%" when null). `{pct}` is replaced by the 0-100 level; there
     /// is no muted-style second state so no `{state}`.
     brightness_format: ?[]const u8 = null,
-    /// Brightness segment device pin: names a `/sys/class/backlight/*`
+    /// Brightness slider sub device pin: names a `/sys/class/backlight/*`
     /// device, or -- with a `led:` prefix -- an LED-class device under
     /// `/sys/class/leds/*`. Absent ("") = auto-discovery picks the first
     /// usable backlight.

@@ -446,6 +446,12 @@ const State = struct {
     /// `onDragMotion` hook (X's implicit grab keeps motion flowing even past
     /// the bar's edge).
     drag_segment: ?usize = null,
+    /// Segment id being serviced by a scroll `onScroll` dispatch while its
+    /// scoped repaint callback runs, so the callback repaints only the
+    /// scrolled segment's recorded bound (see redrawScrolledSegment) instead
+    /// of forcing a full-bar redraw. Set around the dispatch in
+    /// handleButtonPress and cleared before it returns.
+    scroll_segment: ?usize = null,
     frame: FrameState = .{},
     title_data: TitleScratch = .{},
     facts: Facts = .{},
@@ -1316,18 +1322,16 @@ pub fn redrawInsideGrab() void {
     s.dirty.flag = false;
 }
 
-/// Phase-1 repaint of ONLY the segment being scrubbed, at its last recorded
-/// bound. A press-hold drag mutates a single segment's pixels every motion; a
-/// full performDraw would also relayout + repaint every segment (and, for a
-/// subprocess-bound segment like volume, stall the whole bar). Mirrors
-/// redrawInsideGrab's contract: render to the off-screen pixmap and queueBlit
-/// (no flush); the event-loop's end-of-batch xcb_flush ships it to the server
-/// in one composite frame. The top-left clear + blit cover the reserved slot
-/// even when the draw ran narrow.
-fn redrawDraggedSegment() void {
-    const s = gBar.state orelse return;
+/// Phase-1 repaint of ONLY the segment `id` at its last recorded bound. A
+/// press-hold drag or a scroll sweep mutates a single segment's pixels per
+/// motion/event; a full performDraw would also relayout + repaint every
+/// segment (and, for a subprocess-bound slider sub, stall the whole
+/// bar). Mirrors redrawInsideGrab's contract: render to the off-screen pixmap
+/// and queueBlit (no flush); the event-loop's end-of-batch xcb_flush ships it
+/// to the server in one composite frame. The top-left clear + blit cover the
+/// reserved slot even when the draw ran narrow.
+fn redrawSegmentScoped(s: *State, id: usize) void {
     if (!s.vis.shown) return;
-    const id = s.drag_segment orelse return;
     if (bar_mods[id].draw == null) return;
     if (gBar.force) {
         s.markDirty();
@@ -1344,6 +1348,23 @@ fn redrawDraggedSegment() void {
     const drawn_w: u16 = drawn_end -| tb.x;
     s.render.dc.queueBlit(tb.x, @max(tb.w, drawn_w));
     s.clearSegmentDirty(bar_mods[id].name);
+}
+
+/// Scoped repaint for the in-flight button-1 scrub: repaints the segment the
+/// press anchored (`drag_segment`). Used as the drag motion `redraw` callback.
+fn redrawDraggedSegment() void {
+    const s = gBar.state orelse return;
+    const id = s.drag_segment orelse return;
+    redrawSegmentScoped(s, id);
+}
+
+/// Scoped repaint for a scroll dispatch: repaints the segment whose `onScroll`
+/// hook is being serviced (`scroll_segment`). Used as the onScroll `redraw`
+/// callback so a fast wheel sweep never forces full-bar redraws.
+fn redrawScrolledSegment() void {
+    const s = gBar.state orelse return;
+    const id = s.scroll_segment orelse return;
+    redrawSegmentScoped(s, id);
 }
 
 pub fn raiseBar() void {
@@ -1609,7 +1630,7 @@ pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t) void {}
 /// forward/backward; left/right-clicking the layout variants indicator
 /// cycles the current layout's variant forward/backward the same way.
 /// Scroll-wheel over a segment (buttons 4/5) routes to its `onScroll` hook
-/// (the volume segment's ±step); a left press on a clickable segment arms
+/// (the slider sub's clamp-step); a left press on a clickable segment arms
 /// its `onDragMotion` hook for the duration of the press-hold.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const s = gBar.state orelse return;
@@ -1634,14 +1655,18 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
             _ = bar_mods[id].onClick.?(x - h.x, false, true, s, titleClickTrampoline, redrawInsideGrab);
         return;
     }
-    // Scroll buttons 4/5: no click semantics, no drag anchor.
+    // Scroll buttons 4/5: no click semantics, no drag anchor. The repaint is
+    // segment-scoped (see redrawScrolledSegment) so a fast wheel sweep never
+    // forces full-bar redraws.
     s.drag_segment = null;
     if (detail == constants.mouse_button_scroll_up or
         detail == constants.mouse_button_scroll_down)
     {
         if (bar_mods[id].onScroll) |scroll| {
             const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
-            _ = scroll(dir, redrawInsideGrab);
+            s.scroll_segment = id;
+            _ = scroll(dir, redrawScrolledSegment);
+            s.scroll_segment = null;
             return;
         }
     }
