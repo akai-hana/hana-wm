@@ -162,6 +162,13 @@ const State = struct {
     // so the event loop can skip the redundant second sweep. Reset at the
     // end of each batch.
     borders_flushed_this_batch: bool = false,
+
+    /// Pointer root position snapshot at spawn-admission time. The first
+    /// crossing event armed by a `.window_spawn` suppress compares against
+    /// this to tell a synthetic crossing (the new window mapping under a
+    /// parked cursor) apart from a real hover that must refocus. Recorded in
+    /// handleMapRequest; consumed by suppressSpawnCrossing.
+    spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{},
 };
 
 var state: ?State = null;
@@ -595,6 +602,24 @@ fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) voi
     }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
 }
 
+/// Snapshot the pointer's root position for spawn-crossing suppression.
+///
+/// Runs once per MapRequest, synchronously, right when the spawn's window is
+/// admitted. The pointer cannot have moved relative to the keypress that
+/// triggered the spawn between here and the reconcile's map (both happen in
+/// the same event-loop batch), so this position is exactly what the synthetic
+/// crossing the map generates will carry; a real hover from a moved pointer
+/// yields different coordinates and is never masked. On a failed query the
+/// record stays untouched (defaults to {0,0} at init) rather than poisoning
+/// an established spawn's suppression.
+fn snapshotSpawnCursor(conn: core.Connection) void {
+    const reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, core.getState().root), null);
+    defer if (reply) |r| std.c.free(r);
+    if (reply) |r| {
+        state.?.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
+    }
+}
+
 /// Handles a MapRequest by firing ALL property query cookies up-front, then
 /// draining replies sequentially. Firing all five cookies before draining any
 /// lets the X server process them in parallel, saving 2-3 blocking round trips
@@ -614,6 +639,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // an unmap+remap race while the first is still processing); without it,
     // the model registration and property queries below would fire twice.
     if (tracking.isManaged(win)) return;
+
+    // Snapshot the pointer position now so the crossing the map generates can
+    // be matched against it (see snapshotSpawnCursor / suppressSpawnCrossing).
+    snapshotSpawnCursor(conn);
 
     // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
     // by the u8 return type, so no further clamping is needed.
@@ -1146,11 +1175,13 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // only when the cursor had moved would instead suppress all future
     // hover-focus events if the cursor stayed at the exact spawn pixel.
     focus.setSuppressReason(.none);
-    // `spawn_cursor` was intended to record the spawn
-    // position but was never implemented, so the (0,0) comparison only fires
-    // when the cursor is parked at the screen origin. Kept verbatim
-    // (harness-pinned: S16).
-    return root_x == 0 and root_y == 0;
+    // The spawn snapshot (state.spawn_cursor) is taken by handleMapRequest
+    // when the spawn's MapRequest arrives; a synthetic crossing caused by the
+    // new window mapping under the parked cursor carries exactly those root
+    // coordinates. A crossing at any other position means the cursor actually
+    // moved or entered a different window, so it is a genuine hover and must
+    // be allowed to refocus.
+    return root_x == state.?.spawn_cursor.x and root_y == state.?.spawn_cursor.y;
 }
 
 /// Attempt to focus `win` via the hover (EnterNotify) path.
