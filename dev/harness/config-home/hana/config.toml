@@ -51,7 +51,7 @@ Mod+Shift+Alt+T = "unminimize_all"
 Mod+{1-4} = "workspace"
 Mod+Shift+{1-4} = "move_to_workspace"
 Mod+A = "all_workspaces"
-Mod+P = "move_to_all_workspaces"
+Mod+P = "pin_window"
 
 # Tiling
 Mod+W         = "swap_master"
