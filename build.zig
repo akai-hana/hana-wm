@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) !void {
     const has_seg_carousel = discovery.modules.contains("carousel");
     const has_seg_prompt = discovery.modules.contains("prompt");
     const has_seg_systatus = discovery.modules.contains("systatus");
+    const has_seg_brightness = discovery.modules.contains("brightness");
 
     // The vim-modal prompt engine: its presence gates the engine test; the
     // engine is a prompt addon, so its tests also require the host package.
@@ -241,6 +242,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "clock_test", .gate = has_seg_clock, .x_gated = false },
         .{ .name = "systatus_test", .gate = has_seg_systatus, .x_gated = false },
         .{ .name = "carousel_test", .gate = has_seg_carousel, .x_gated = false },
+        .{ .name = "brightness_test", .gate = has_seg_brightness, .x_gated = false },
         .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces, .x_gated = false },
         .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces, .x_gated = false },
         .{ .name = "schema_test", .gate = true, .x_gated = false },
@@ -251,12 +253,14 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "parser_test", .gate = true, .x_gated = false },
         .{ .name = "persist_test", .gate = true, .x_gated = false },
         .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
+        .{ .name = "wincache_test", .gate = true, .x_gated = false },
         .{ .name = "masks_test", .gate = true, .x_gated = false },
         .{ .name = "bounded_test", .gate = true, .x_gated = false },
         .{ .name = "idmap_test", .gate = true, .x_gated = false },
         .{ .name = "input_test", .gate = true, .x_gated = false },
         .{ .name = "keysyms_test", .gate = true, .x_gated = false },
         .{ .name = "borders_test", .gate = true, .x_gated = true },
+        .{ .name = "borders_pure_test", .gate = true, .x_gated = false },
         .{ .name = "vim_test", .gate = has_vim and has_seg_prompt, .x_gated = false },
         .{ .name = "focus_latency_test", .gate = has_tiling, .x_gated = false },
         .{ .name = "tiling_latency_test", .gate = has_tiling, .x_gated = false },
@@ -1069,13 +1073,13 @@ const Module = struct {
                             const modules_owner = std.fs.path.basename(dir_path);
                             if (modules_owner.len != 0) {
                                 try ctx.ensureOwnerStems(modules_owner);
-                                try ctx.discoverAll(b.allocator.dupe(u8, subdir_path) catch unreachable, modules_owner, true);
+                                try ctx.discoverAll(try b.allocator.dupe(u8, subdir_path), modules_owner, true);
                                 continue;
                             }
                         }
 
                         try ctx.discoverAll(
-                            b.allocator.dupe(u8, subdir_path) catch unreachable,
+                            try b.allocator.dupe(u8, subdir_path),
                             owner,
                             false,
                         );
@@ -1087,7 +1091,7 @@ const Module = struct {
                         const rel_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name });
                         if (std.mem.eql(u8, rel_path, ctx.entry_point_path)) continue;
 
-                        try ctx.registerModule(b.allocator.dupe(u8, rel_path) catch unreachable);
+                        try ctx.registerModule(try b.allocator.dupe(u8, rel_path));
 
                         if (owner) |o| {
                             if (in_modules_root or std.mem.eql(u8, std.fs.path.stem(entry.name), std.fs.path.basename(dir_path))) {
@@ -1387,6 +1391,28 @@ const SystemLibraries = struct {
         // Bar libraries.
         "pangocairo-1.0", // Cairo/Pango text rendering.
     };
+
+    /// build.zig.zon `.links` mirror of `linked_libs` (same names, package
+    /// side). The comptime check below fails the build the moment the two
+    /// drift, keeping the split declaration mechanically honest instead of
+    /// asking the hand to keep them in sync.
+    const zon_links = [_][]const u8{
+        "xcb-keysyms",
+        "xkbcommon-x11",
+        "xcb-xkb",
+        "xcb-cursor",
+        "xcb-randr",
+        "pangocairo-1.0",
+    };
+
+    comptime {
+        if (zon_links.len != linked_libs.len)
+            @compileError("build.zig.zon `.links` and SystemLibraries.linked_libs drifted in length");
+        for (zon_links, linked_libs) |zon, code| {
+            if (!std.mem.eql(u8, zon, code))
+                @compileError("build.zig.zon `.links` and SystemLibraries.linked_libs drifted: '" ++ zon ++ "' vs '" ++ code ++ "'");
+        }
+    }
 
     /// Links system libraries depended on by hana.
     fn link(root: *std.Build.Module) void {

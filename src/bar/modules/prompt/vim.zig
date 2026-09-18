@@ -20,20 +20,20 @@ const xk_right = prompt.xk_right;
 const xk_home = prompt.xk_home;
 const xk_end = prompt.xk_end;
 
-const Awaiting = union(enum) {
+const Arg = union(enum) {
     none,
     find_char: u8,
     g_prefix,
 };
 
-const PendingCmd = struct {
+const Prefix = struct {
     count: u32 = 0,
     op: u8 = 0,
     op_count: u32 = 0,
-    awaiting: Awaiting = .none,
+    arg: Arg = .none,
 };
 
-var pending = PendingCmd{};
+var prefix = Prefix{};
 var last_find_kind: u8 = 0;
 var last_find_ch: u8 = 0;
 var yank_buf: []u8 = &.{};
@@ -45,23 +45,30 @@ const MotionResult = struct {
     range_start_override: ?usize = null,
 };
 
-fn resetPendingCmd() void {
-    pending = .{};
+fn resetPrefix() void {
+    prefix = .{};
 }
 
 pub fn onDeactivate(vs: *EditorState) void {
     _ = vs;
-    resetPendingCmd();
+    resetPrefix();
 }
 
 fn enterInsert(vs: *EditorState) void {
     vs.mode = .insert;
 }
 
-/// Handle a Ctrl-modified key.  Returns `.deactivate` for Ctrl+C.
+/// Handle a Ctrl-modified key.  Returns `.deactivate` for Ctrl+C. In insert
+/// mode the readline editing set (Ctrl-U/A/E/K/H) falls through to the base
+/// prompt handler so vim keeps the bare-prompt Ctrl behavior; normal mode
+/// leaves the rest untouched (no vim semantics defined for them).
 pub fn handleCtrl(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     if (sym == 'c') return .deactivate;
-    if (sym == 'w' and vs.mode == .insert) ctrlW(vs);
+    if (sym == 'w' and vs.mode == .insert) {
+        ctrlW(vs);
+        return .none;
+    }
+    if (vs.mode == .insert) return prompt.handleCtrl(vs, sym);
     return .none;
 }
 
@@ -69,7 +76,7 @@ pub fn handleInsert(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     if (sym == xk_escape) {
         clampCursorForMode(vs);
         vs.mode = .normal;
-        resetPendingCmd();
+        resetPrefix();
         return .none;
     }
     return prompt.insertChar(vs, sym);
@@ -79,29 +86,29 @@ pub fn handleInsert(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
 /// (dd/cc/yy): applies it to the whole line.
 fn handleOperatorArm(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     const op: u8 = @truncate(sym);
-    if (pending.op == 0) {
-        pending.op = op;
-        pending.op_count = pending.count;
-        pending.count = 0;
+    if (prefix.op == 0) {
+        prefix.op = op;
+        prefix.op_count = prefix.count;
+        prefix.count = 0;
         return .none;
     }
-    if (pending.op == op) {
+    if (prefix.op == op) {
         applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
     }
-    resetPendingCmd();
+    resetPrefix();
     return .none;
 }
 
 fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
     switch (sym) {
         xk_escape => {
-            const act: Action = if (pending.op == 0 and pending.count == 0) .deactivate else .none;
-            resetPendingCmd();
+            const act: Action = if (prefix.op == 0 and prefix.count == 0) .deactivate else .none;
+            resetPrefix();
             return act;
         },
 
         xk_return => {
-            resetPendingCmd();
+            resetPrefix();
             return .spawn;
         },
 
@@ -126,7 +133,7 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
         else => {},
     }
 
-    resetPendingCmd();
+    resetPrefix();
     return .none;
 }
 
@@ -154,18 +161,18 @@ inline fn clampCursorForMode(vs: *EditorState) void {
 }
 
 fn tryAccumulateDigit(sym: xcb.xcb_keysym_t) bool {
-    const digit = if (sym >= '1' and sym <= '9') @as(u32, @truncate(sym - '0')) else if (sym == '0' and pending.count > 0) 0 else return false;
-    pending.count = @min(pending.count *% 10 +% digit, 1_000_000);
+    const digit = if (sym >= '1' and sym <= '9') @as(u32, @truncate(sym - '0')) else if (sym == '0' and prefix.count > 0) 0 else return false;
+    prefix.count = @min(prefix.count *% 10 +% digit, 1_000_000);
     return true;
 }
 
 fn tryArmFindPrefix(sym: xcb.xcb_keysym_t) bool {
     if (sym == 'g') {
-        pending.awaiting = .g_prefix;
+        prefix.arg = .g_prefix;
         return true;
     }
     if (sym == 'f' or sym == 'F' or sym == 't' or sym == 'T') {
-        pending.awaiting = .{ .find_char = @truncate(sym) };
+        prefix.arg = .{ .find_char = @truncate(sym) };
         return true;
     }
     return false;
@@ -189,14 +196,14 @@ const MotionKeyResult = struct {
 
 inline fn commitMotion(vs: *EditorState, mr: MotionResult) MotionKeyResult {
     _ = vs;
-    const op = pending.op;
-    resetPendingCmd();
+    const op = prefix.op;
+    resetPrefix();
     return .{ .mr = mr, .op = op };
 }
 
 fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
-    if (pending.awaiting == .find_char) return resolvePendingFindChar(vs, sym);
-    if (pending.awaiting == .g_prefix) return resolvePendingGPrefix(vs, sym);
+    if (prefix.arg == .find_char) return resolvePendingFindChar(vs, sym);
+    if (prefix.arg == .g_prefix) return resolvePendingGPrefix(vs, sym);
 
     if (tryAccumulateDigit(sym)) return .{};
 
@@ -208,7 +215,7 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
             const kind = if (sym == ',') reverseFindKind(last_find_kind) else last_find_kind;
             return commitMotion(vs, motionFind(vs, kind, last_find_ch, cnt));
         }
-        resetPendingCmd();
+        resetPrefix();
         return .{};
     }
 
@@ -223,11 +230,11 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 
 fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     if (!prompt.isPrintableAscii(sym)) {
-        resetPendingCmd();
+        resetPrefix();
         return .{};
     }
     const ch: u8 = @truncate(sym);
-    const kind = pending.awaiting.find_char;
+    const kind = prefix.arg.find_char;
     last_find_kind = kind;
     last_find_ch = ch;
     const mr = motionFind(vs, kind, ch, effectiveCount());
@@ -236,7 +243,7 @@ fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyRes
 
 fn resolvePendingGPrefix(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     const pos = resolveGPrefixPos(vs, sym, effectiveCount()) orelse {
-        resetPendingCmd();
+        resetPrefix();
         return .{};
     };
     const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
@@ -359,7 +366,7 @@ fn effectiveCount() u32 {
     // Saturating multiply: chained count prefixes can push the product past
     // u32 max (1e6 x 1e6); consumers clamp against buffer bounds anyway, so
     // saturate instead of overflowing.
-    return resolveCount(pending.count) *| resolveCount(pending.op_count);
+    return resolveCount(prefix.count) *| resolveCount(prefix.op_count);
 }
 
 inline fn isWordChar(ch: u8) bool {

@@ -13,6 +13,34 @@ const window = @import("window");
 
 const callHookBool = window.callHookBool;
 
+/// Pure focused/unfocused pixel pick: 0 for screen-covering windows,
+/// focused or unfocused color otherwise. Headless-testable.
+pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
+    return if (focused) focused_px else unfocused_px;
+}
+
+/// Pure covering-occupant borderless rule: true when `win` must render
+/// borderless because a covering (fullscreen) occupant holds the workspace it
+/// actually lives on. `is_covering` is `win`'s own covering-mode bit (the
+/// hook result, injected so the rule needs no X state); `current` is the
+/// current workspace for the unresolvable-workspace fallback; `has_fullscreen`
+/// gates the covering-mode reads for fullscreen-absent builds.
+pub fn coveredByOccupant(
+    m: *const model.Model,
+    win: u32,
+    is_covering: bool,
+    current: model.WSId,
+    has_fullscreen: bool,
+) bool {
+    const e = m.store.get(win) orelse return false;
+    const ws: ?model.WSId = blk: {
+        if (has_fullscreen and is_covering) break :blk e.covering_ws;
+        break :blk model.findHome(m, win);
+    };
+    if (ws) |w| return model.coveringOccupantOnWs(m, w) != null;
+    return has_fullscreen and model.coveringOccupantOnWs(m, current) != null;
+}
+
 /// Returns the border color for `win`: 0 for screen-covering windows,
 /// focused or unfocused color otherwise.
 pub fn color(win: u32) u32 {
@@ -30,18 +58,9 @@ pub fn color(win: u32) u32 {
     // A stray/unmanaged window has no workspace to resolve; fall back to the
     // unfocused color (callers all pass managed windows today, so this is
     // purely defensive hardening).
-    const e = m.store.get(win) orelse return cfg.border_unfocused;
-    const ws: ?model.WSId = blk: {
-        if (build_options.has_fullscreen and e.presence == .covering) break :blk e.covering_ws;
-        break :blk model.findHome(m, win);
-    };
-    if (ws) |w| {
-        if (model.coveringOccupantOnWs(m, w) != null) return 0;
-    } else {
-        if (build_options.has_fullscreen and
-            model.coveringOccupantOnWs(m, m.current) != null) return 0;
-    }
-    return if (focus.getFocused() == win) cfg.border_focused else cfg.border_unfocused;
+    if (m.store.get(win) == null) return cfg.border_unfocused;
+    if (coveredByOccupant(m, win, false, m.current, build_options.has_fullscreen)) return 0;
+    return borderColorOf(focus.getFocused() == win, cfg.border_focused, cfg.border_unfocused);
 }
 
 /// Returns the effective border width for tiled windows.

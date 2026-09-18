@@ -116,7 +116,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     var heap_cmd_z: ?[:0]const u8 = null;
     defer if (heap_cmd_z) |h| core.getState().alloc.free(h);
     const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len)
-        std.fmt.bufPrintZ(&cmd_buf, "{s}", .{cmd}) catch unreachable
+        std.fmt.bufPrintZ(&cmd_buf, "{s}", .{cmd}) catch return error.CommandTooLong
     else blk: {
         heap_cmd_z = try core.getState().alloc.dupeZ(u8, cmd);
         break :blk heap_cmd_z.?.ptr;

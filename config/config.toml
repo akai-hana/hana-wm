@@ -110,7 +110,7 @@ position = "bottom" # "top" / "bottom" — can be toggled at runtime
 # -- Bar layout --
 # Segments are placed into left/center/right anchor groups.
 # Available segments: "workspaces", "title", "clock", "layout", "variants",
-#                     "volume", "systatus"
+#                     "volume", "systatus", "brightness"
 [bar.layout.left]
 segments = ["workspaces", "layout", "variants"]
 
@@ -118,7 +118,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["systatus", "volume", "clock"]
+segments = ["systatus", "volume", "brightness", "clock"]
 
 # -- Bar appearance --
 # Defaults below; the theme file typically overrides these.
@@ -147,6 +147,12 @@ segments = ["systatus", "volume", "clock"]
 #                              # "{state}" = "mute"/"unmute". Absent = "VOL {pct}%"
 # volume_muted_format = auto   # Shown instead while the sink is muted;
 #                              # "{pct}"/{state}". Absent = "MUTE"
+# brightness_format   = auto   # Brightness widget text; "{pct}" = level 0-100.
+#                              # Absent = "BRT {pct}%"
+# brightness_device   = auto   # Sysfs device pin; a backlight name
+#                              # ("amdgpu_bl0") or "led:<name>" for the LED
+#                              # class. Absent = auto-picked (lexicographically
+#                              # smallest backlight with max_brightness > 0)
 # systatus_items       = ["cpu", "mem"] # Systatus readouts, in render order
 #                         # absent = every present-capable readout, in
 #                         # alphabetical registry order (batt, cpu, mem);

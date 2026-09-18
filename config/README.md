@@ -87,14 +87,20 @@ segments = ["clock"]
 ```
 
 Available segments: `workspaces`, `title`, `clock`, `layout`, `variants`,
-`volume`, `systatus`. A segment is compiled in only when its `src/bar/modules/*`
-file is present; the above list is the full stock set.
+`volume`, `systatus`, `brightness`. A segment is compiled in only when its
+`src/bar/modules/*` file is present; the above list is the full stock set.
 
 Segment behavior knobs:
 
 - `volume_format` / `volume_muted_format` — the volume widget's text.
   `{pct}` is the sink level (0–100); `{state}` is `mute`/`unmute`. Defaults:
   `"VOL {pct}%"` and `"MUTE"`.
+- `brightness_format` — the brightness widget's text; `{pct}` is the level
+  (0–100). Default: `"BRT {pct}%"`.
+- `brightness_device` — optional sysfs device pin: a `backlight`-class name
+  (`amdgpu_bl0`, …), or an `led:`-prefixed LED-class device (`led:kbd`).
+  Default: the lexicographically smallest `backlight` device with a positive
+  `max_brightness`.
 - `systatus_items` — the systatus widget's readouts, in render order. Valid
   items: `"mem"` (used/total + %), `"cpu"` (utilization %), `"batt"` (charge %
   when a battery is present). Absent = every present-capable readout in
