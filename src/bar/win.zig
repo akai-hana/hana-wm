@@ -34,7 +34,7 @@ pub const BarAtoms = struct {
 };
 
 /// Module-level atom storage. Resolved once in initAtoms().
-pub var atoms: BarAtoms = .{};
+var atoms: BarAtoms = .{};
 
 pub fn initAtoms() void {
     const entries = .{

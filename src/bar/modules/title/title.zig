@@ -87,6 +87,57 @@ fn focusedTitleWidth(
     return w;
 }
 
+/// Memoized split-view gather: the sorted WindowInfo list plus the measured
+/// width of every cell. The title segment redraws every frame while the
+/// carousel scrolls, and each frame would otherwise re-sort up to
+/// `max_visible_windows` windows and re-run a Pango shape pass over every
+/// non-focused title. Cache keyed on the exact inputs the gather depends on
+/// (window ids, title identities, geoms, minimized membership, bar height);
+/// the sorting itself is a pure function of those, so a full-match key makes
+/// the cached list and widths stale-free. `invalidateReloadCaches` clears it
+/// when the font changes.
+const SegmentedTitlesMemo = struct {
+    win_count: usize = 0,
+    height: u16 = 0,
+    windows: [constants.Limits.max_tiled_windows]u32 = undefined,
+    titles: [constants.Limits.max_tiled_windows][]const u8 = undefined,
+    geoms: [constants.Limits.max_tiled_windows]?utils.Rect = undefined,
+    minimized: [constants.Limits.max_tiled_windows]bool = undefined,
+    sorted: [constants.Limits.max_tiled_windows]segmod.WindowInfo = undefined,
+    widths: [constants.Limits.max_tiled_windows]u16 = undefined,
+    sorted_len: usize = 0,
+};
+var segmented_titles_memo: SegmentedTitlesMemo = .{};
+
+/// True when the cached gathered list matches the live snapshot inputs on
+/// every dependency of the sort + width pass: same windows in the same order,
+/// same title identity, same geometry, same minimized membership, same bar
+/// height (fonts scale with height). The window ids pin the slice identity, so
+/// a title buffer reused by address+content is caught by the per-entry title
+/// compare below.
+fn segmentedTitlesCached(
+    ctx: segmod.TitleRenderContext,
+    snapshot: segmod.TitleSnapshot,
+    windows: []const u32,
+    win_count: usize,
+) bool {
+    const memo = segmented_titles_memo;
+    if (win_count != memo.win_count) return false;
+    if (ctx.height != memo.height) return false;
+    for (0..win_count) |i| {
+        if (windows[i] != memo.windows[i]) return false;
+        if (!std.mem.eql(u8, snapshot.titles[i], memo.titles[i])) return false;
+        const live_geom = snapshot.geoms[i];
+        const memo_geom = memo.geoms[i];
+        if ((live_geom == null) != (memo_geom == null)) return false;
+        if (live_geom) |lg| {
+            if (memo_geom) |mg| if (!lg.eql(mg)) return false;
+        }
+        if (snapshot.minimized_set.contains(windows[i]) != memo.minimized[i]) return false;
+    }
+    return true;
+}
+
 // The minimized-state service (set synthesis + per-window checks) is provided
 // by the window module registry and forwarded through the shared DrawCtx by
 // the bar; the title segment just reads `snapshot.minimized_set`.
@@ -279,6 +330,12 @@ fn drawFittedTitle(
 }
 
 /// Renders one title segment per window in a horizontal split-view layout.
+/// The gather (gatherAndSortWindowInfos: build + sort up to max_visible_windows
+/// entries) and the width pass (Pango measureTextWidth per non-focused cell)
+/// dominate per-frame cost while the carousel scrolls, when this redraws every
+/// frame from an unchanged snapshot. Memoize both: when the memo matches the
+/// live inputs (window ids, titles, geoms, minimized, height), reuse the cached
+/// sorted list and widths instead of re-sorting + re-shaping.
 fn drawSegmentedTitles(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
@@ -295,10 +352,36 @@ fn drawSegmentedTitles(
             .{ windows.len, max_title_windows },
         );
     const win_count = @min(windows.len, max_title_windows);
+    if (win_count == 0) return;
 
-    var scratch: segmod.GatherScratch = .{};
-    const sorted = (try scratch.gather(snapshot, windows, win_count)) orelse return;
+    if (!segmentedTitlesCached(ctx, snapshot, windows, win_count)) {
+        var scratch: segmod.GatherScratch = .{};
+        const sorted = (try scratch.gather(snapshot, windows, win_count)) orelse return;
+        // Cache is keyed on the input-order slices (windows/titles/geoms/
+        // minimized come from the snapshot in input order); the sorted list and
+        // measured widths are stored in sorted order, aligned to `sorted`.
+        var next: SegmentedTitlesMemo = .{
+            .win_count = win_count,
+            .height = ctx.height,
+            .sorted_len = sorted.len,
+        };
+        for (0..win_count) |i| {
+            next.windows[i] = windows[i];
+            next.titles[i] = snapshot.titles[i];
+            next.geoms[i] = snapshot.geoms[i];
+            next.minimized[i] = snapshot.minimized_set.contains(windows[i]);
+        }
+        @memcpy(next.sorted[0..sorted.len], sorted);
+        for (sorted, 0..) |info, i| {
+            next.widths[i] = if (snapshot.focused_window == info.window)
+                focusedTitleWidth(ctx.dc, ctx.height, info.window, info.title)
+            else
+                ctx.dc.measureTextWidth(info.title);
+        }
+        segmented_titles_memo = next;
+    }
 
+    const sorted = segmented_titles_memo.sorted[0..segmented_titles_memo.sorted_len];
     const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
     const min_cell_w = ctx.config.scaledSegmentPadding(ctx.height) *| 2;
@@ -320,19 +403,16 @@ fn drawSegmentedTitles(
         if (info.title.len == 0 or bounds.w <= min_cell_w) continue;
 
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
-        // Only the focused cell can scroll (the carousel tracks exactly one
-        // cell per frame), so only its width is worth memoizing across frames.
-        const text_w = if (is_focused_win)
-            focusedTitleWidth(ctx.dc, ctx.height, info.window, info.title)
-        else
-            ctx.dc.measureTextWidth(info.title);
+        // Widths ride the memoized sorted list (reused verbatim on a memo hit);
+        // the focused cell's width also flows through focusedTitleWidth's own
+        // cross-frame memo, so the shape pass never repeats on an unchanged cell.
         try drawFittedTitle(
             ctx,
             baseline_y,
             titleTextGeom(ctx, segment_x, bounds.w),
             info.window,
             info.title,
-            text_w,
+            segmented_titles_memo.widths[i],
             text_fg,
             is_focused_win,
         );
@@ -433,6 +513,7 @@ fn onBarShownHook() void {
 /// changing the bar height, so the focused-title memo must be dropped here.
 fn invalidateReloadCaches() void {
     focused_title_memo = .{};
+    segmented_titles_memo = .{};
 }
 
 /// This module's bar-segment contribution (registry binding).

@@ -105,9 +105,9 @@ pub fn firePropQuery(conn: core.Connection, win: u32, prop: u32, comptime prop_t
 
 /// Fires (but does not drain) a WM_PROTOCOLS query for `win`, so a caller can
 /// pipeline it with other round trips and consume the reply later via
-/// getInputModelResolvedConsume / queryWMProtocolsPropsConsume. Returns null
-/// when the WM_PROTOCOLS atom is not yet interned (the caller then falls back
-/// to the live query path). Fire-and-forget; the caller owns the cookie.
+/// queryWMProtocolsProps. Returns null when the WM_PROTOCOLS atom is not yet
+/// interned (the caller then falls back to the live query path).
+/// Fire-and-forget; the caller owns the cookie.
 pub fn fireWMProtocolsQuery(
     conn: core.Connection,
     win: u32,
@@ -151,19 +151,12 @@ fn peekCachedProps(win: u32) ?CachedProps {
     return null;
 }
 
-/// Returns cached props if available, otherwise queries (consuming an optional
-/// pre-fired WM_PROTOCOLS cookie on a miss), caches the result, and returns it.
-/// Used by the input-model resolve paths so the populate logic lives in one
-/// place; a pre-fired cookie is discarded on a cache hit.
-fn getOrQueryCachedProps(conn: core.Connection, win: u32, pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t) CachedProps {
-    if (peekCachedProps(win)) |p| {
-        discardProtocolCookie(conn, pre_protocols_cookie);
-        return p;
-    }
-    const protocols = if (pre_protocols_cookie) |ck|
-        drainWMProtocolsReply(conn, ck)
-    else
-        queryWMProtocolsProps(conn, win);
+/// Returns cached props if available, otherwise queries, caches the result,
+/// and returns it. Blocking only on a miss; used by the non-hot ICCCM paths
+/// (supportsWMDeleteCached / window close) that genuinely need the verdict.
+fn getOrQueryCachedProps(conn: core.Connection, win: u32) CachedProps {
+    if (peekCachedProps(win)) |p| return p;
+    const protocols = queryWMProtocolsProps(conn, win);
     const props = CachedProps{
         .accepts_input = queryWMHintsAcceptsInput(conn, win),
         .wm_delete = protocols.wm_delete,
@@ -189,60 +182,28 @@ fn resolve(props: CachedProps) InputModelResolution {
     };
 }
 
-pub fn getInputModelResolved(conn: core.Connection, win: u32) InputModelResolution {
-    return resolve(getOrQueryCachedProps(conn, win, null));
+/// Bloom-path input-model resolve: from the focus-property cache only, with no
+/// fallback round trip. Returns null on a cache miss (never blocking); the
+/// focus hot path resolves a miss as provisional focus instead of querying.
+pub fn peekInputModelResolved(win: u32) ?InputModelResolution {
+    return if (peekCachedProps(win)) |p| resolve(p) else null;
 }
 
-/// Resolves the input model from the focus-property cache only, consuming a
-/// caller pre-fired WM_PROTOCOLS cookie on a cache miss and DISCARDING it on a
-/// hit (where the cached take_focus verdict supersedes the redundant query).
-///
-/// The cache is safe because the mask-first map ordering prevents staleness;
-/// a miss fills it from the pre-fired cookie (or a live query when null).
-pub fn getInputModelResolvedConsume(
-    conn: core.Connection,
-    win: u32,
-    pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t,
-) InputModelResolution {
-    return resolve(getOrQueryCachedProps(conn, win, pre_protocols_cookie));
-}
-
-/// Resolves the ICCCM 4.1.7 focus-delivery model for `win`. Both accepts_input
-/// and take_focus come from the focus-property cache (live query only on a
-/// genuine miss, which is rare since the cache is seeded at map time).
-pub fn getInputModel(conn: core.Connection, win: u32) InputModel {
-    return getInputModelResolved(conn, win).model;
-}
-
-/// Falls back to a live query only on a genuine cache miss (extremely rare).
+/// Resolves the input model from the focus-property cache, live-queried only
+/// on a genuine miss (rare: the cache is seeded at map time).
 pub fn supportsWMDeleteCached(conn: core.Connection, win: u32) bool {
-    return getOrQueryCachedProps(conn, win, null).wm_delete;
+    return getOrQueryCachedProps(conn, win).wm_delete;
 }
 
-/// True when `win`'s input-model verdict is already cached (seeded at map
-/// time), i.e. a focus-prep for it will not round-trip. Lets pipeline callers
-/// skip a redundant WM_PROTOCOLS pre-fire on the already-cached common case.
-pub fn isInputModelCached(win: u32) bool {
-    return peekCachedProps(win) != null;
+/// Fallback for a cache miss in the focus hot path: dwm-style provisional
+/// focus, `xcb_set_input_focus` with no WM_TAKE_FOCUS, never a blocking live
+/// query. Correct because the next map/property refresh corrects the verdict.
+pub fn provisionalResolution() InputModelResolution {
+    return .{ .model = .passive, .take_focus = false };
 }
 
 /// The WM_PROTOCOLS and WM_TAKE_FOCUS atoms this module's focus paths share.
 const FocusAtoms = struct { protocols: u32, take_focus: u32 };
-
-/// Called by `sendWMTakeFocus` (live round-trip path) to keep the send logic in one place.
-fn dispatchTakeFocusMessage(
-    conn: core.Connection,
-    win: u32,
-    time: u32,
-    at: FocusAtoms,
-    proto_list: []const u32,
-) void {
-    for (proto_list) |atom| {
-        if (atom == at.take_focus) break;
-    } else return; // window does not advertise WM_TAKE_FOCUS
-
-    sendTakeFocusEvent(conn, win, time, at);
-}
 
 /// Builds and sends the WM_TAKE_FOCUS ClientMessage. No protocol-list scan:
 /// callers either scanned already or hold an authoritative answer.
@@ -273,9 +234,9 @@ fn focusAtoms() ?FocusAtoms {
 }
 
 /// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit, the one
-/// returned by `getInputModelResolved` alongside the input model. Skips the
-/// WM_PROTOCOLS round trip entirely; used by the grab-wrapped focus path so a
-/// keyboard focus change costs one protocol query instead of two.
+/// resolved into the input-model verdict. Skips the WM_PROTOCOLS round trip
+/// entirely; used by the grab-wrapped focus path so a keyboard focus change
+/// costs one protocol query instead of two.
 pub fn sendWMTakeFocusKnown(
     conn: core.Connection,
     win: u32,
@@ -285,50 +246,6 @@ pub fn sendWMTakeFocusKnown(
     if (!advertises_take_focus) return;
     const at = focusAtoms() orelse return;
     sendTakeFocusEvent(conn, win, time, at);
-}
-
-/// Shared body of sendWMTakeFocus and sendWMTakeFocusWithCookie: resolves the
-/// WM_PROTOCOLS and WM_TAKE_FOCUS atoms, drains the WM_PROTOCOLS reply (from the
-/// pre-fired `cookie` when present, else a fresh round-trip), and dispatches the
-/// WM_TAKE_FOCUS ClientMessage iff `win` advertises the protocol (ICCCM 4.1.7).
-/// When the cookie cannot be consumed (atom resolution fails), it is discarded
-/// so the XCB queue drains.
-fn dispatchTakeFocus(
-    conn: core.Connection,
-    win: u32,
-    time: u32,
-    cookie: ?xcb.xcb_get_property_cookie_t,
-) void {
-    const at = focusAtoms() orelse {
-        discardProtocolCookie(conn, cookie);
-        return;
-    };
-
-    const proto_cookie = cookie orelse (fireWMProtocolsQuery(conn, win) orelse return);
-    const proto_reply = xcb.xcb_get_property_reply(conn, proto_cookie, null) orelse return;
-    defer std.c.free(proto_reply);
-    if (proto_reply.*.format != 32 or proto_reply.*.value_len == 0) return;
-    dispatchTakeFocusMessage(
-        conn,
-        win,
-        time,
-        at,
-        u32Values(proto_reply)[0..@intCast(proto_reply.*.value_len)],
-    );
-}
-
-/// Sends a WM_TAKE_FOCUS client message (ICCCM 4.1.7) iff `win` advertises
-/// WM_TAKE_FOCUS in WM_PROTOCOLS. Uses the cached take_focus verdict when
-/// present (no round trip); only on a cache miss does it fall back to a live
-/// WM_PROTOCOLS query, matching dwm's sendevent().
-///
-/// Fallback for callers that don't pre-fire the cookie (drainPendingConfirm).
-pub fn sendWMTakeFocus(conn: core.Connection, win: u32, time: u32) void {
-    if (peekCachedProps(win)) |p| {
-        sendWMTakeFocusKnown(conn, win, time, p.take_focus);
-        return;
-    }
-    dispatchTakeFocus(conn, win, time, null);
 }
 
 /// See ICCCM 4.1.7: the matrix of (accepts_input x supports_take_focus)

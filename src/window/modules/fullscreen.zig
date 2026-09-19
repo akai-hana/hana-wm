@@ -25,6 +25,7 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const model = @import("model");
 const plugin = @import("plugin");
+const pipeline = @import("pipeline");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
@@ -391,7 +392,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
 // actions.fullscreenToggleWindow, keeping the advertisement protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
-    @import("pipeline").grabCtx().sink.setEwmhFullscreen(
+    pipeline.grabCtx().sink.setEwmhFullscreen(
         win,
         g_net_wm_state,
         g_net_wm_state_fullscreen,
@@ -420,7 +421,7 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
     if (g_pending_bar_hide_win == win) {
         if (width == screen_w and height == screen_h) {
             g_pending_bar_hide_win = 0;
-            @import("core").fullscreen.bump();
+            core.fullscreen.bump();
         }
     } else if (g_pending_bar_show_win == win) {
         if (width != screen_w or height != screen_h) resolvePendingBarShow();
@@ -429,7 +430,7 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
 
 fn resolvePendingBarShow() void {
     g_pending_bar_show_win = 0;
-    @import("core").fullscreen.bump();
+    core.fullscreen.bump();
 }
 
 /// Arm the deferred bar-hide from the fullscreenToggle path.

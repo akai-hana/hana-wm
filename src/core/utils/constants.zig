@@ -13,6 +13,11 @@ pub const min_master_width: f32 = 0.05;
 /// bound (tiling.zig's local `max_master_width_ratio` used to duplicate it).
 pub const max_master_width: f32 = 0.95;
 
+/// Primary-column width step per primary-width adjustment press.
+pub const master_width_step: f32 = 0.025;
+/// Secondary-column balance step per grow_stack press.
+pub const stack_balance_step: f32 = 0.5;
+
 /// Maximum number of concurrently minimized windows. Hoisted from the minimize
 /// module's `max_minimized` so the model layer (which may import only std +
 /// utils + constants) can reach it without build_options. Distinct from

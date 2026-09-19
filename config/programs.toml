@@ -11,7 +11,7 @@ Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
 Mod+Shift+A = "~/.local/bin/firefox-sync.sh xpmraevm.default-default; {kill} firefox"
 
 # -- Chat / Socials --
-Mod+S       = "nixGL equibop"
+Mod+S       = "nixGL nixVulkanIntel equibop"
 Mod+Shift+S = "{kill} electron"
 
 # -- Terminal --

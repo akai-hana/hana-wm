@@ -51,6 +51,7 @@ const visibility = @import("visibility");
 // through the isWindowHidden/collectHiddenSet seams instead of naming the
 // minimize or fullscreen module directly.
 const window_mods = @import("window_modules").modules;
+const plugin = @import("plugin");
 
 // Registry-resolved segment identity (comptime): the bar locates modules by
 // name through the generated registry instead of importing them directly.
@@ -96,7 +97,12 @@ fn anyBoolHook(comptime hook: []const u8, args: anytype) bool {
 // mutated.
 
 const min_bar_height: u32 = scale.bar_min_height_px;
+/// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured bar
+/// derives its height from font metrics, and this bounds that derivation so
+/// a huge fallback font can't take over the whole screen.
 const max_bar_height: u32 = 200;
+/// Fallback bar height when even font metrics are unavailable: a small
+/// strip-sized default that stays in proportion on any screen.
 const default_bar_height: u32 = 24;
 
 fn probeMetrics(size_override: ?u16) ?struct { asc: i32, desc: i32 } {
@@ -274,7 +280,7 @@ const max_right_segments: usize = 16;
 /// Cap on updateIfDirty's re-request redraw loop: a module that keeps
 /// re-requesting a full redraw past this many iterations is treated as a
 /// stall (logged), keeping a rogue module from busy-spinning the batch.
-const max_update_draws: u8 = 4;
+const max_batched_redraws: u8 = 4;
 
 /// Right-aligned cluster bookkeeping for one draw frame. Measures every
 /// right-position segment once up front, deriving both the reserved width
@@ -394,6 +400,11 @@ const FrameState = struct {
     /// of the event-loop batch: they live on State, and nothing reallocates
     /// them between draws).
     last_ctx: segmod.DrawCtx = undefined,
+    /// Whether a full scan+fill pass (scanLiveFrame, fillDrawCtx) has ever
+    /// populated `last_ctx`. Guards the marquee-only fast path, which reuses
+    /// the cached snapshot in place of re-scanning the live frame: until the
+    /// first full draw, last_ctx is undefined and must not be copied.
+    ctx_valid: bool = false,
 };
 
 /// Title-data scratch: the current workspace's window title/geometry values
@@ -587,7 +598,7 @@ const State = struct {
 
     /// True when the next draw would repaint at least one layout-rendered
     /// segment: a dirty flag or a live needsRepaint hook (the title marquee).
-    /// Iterates only segments that actually render — the overlay-only prompt
+    /// Iterates only segments that actually render -- the overlay-only prompt
     /// slot's dirty flag is never cleared, so a registry-wide scan would
     /// always report work and defeat the P2 draw early-exit.
     fn hasPendingRepaintWork(self: *const State) bool {
@@ -599,10 +610,26 @@ const State = struct {
         return false;
     }
 
+    /// True when any layout-rendered segment carries a set dirty bit (as
+    /// opposed to only a self-animated needsRepaint hook). A dirty bit means
+    /// the facts backing the drawn content changed, so the frame must be
+    /// rescanned and the DrawCtx refilled before drawing; when no dirty bit is
+    /// set and !force and !dirty.flag, the only pending work is a marquee/overlay
+    /// needsRepaint hook and the cached last_ctx snapshot is still accurate.
+    fn hasLayoutSegmentDirty(self: *const State) bool {
+        for (self.render.config.layout.items) |lay| {
+            for (lay.segments.items) |seg| {
+                const id = segId(seg) orelse continue;
+                if (self.dirty.segments[id]) return true;
+            }
+        }
+        return false;
+    }
+
     /// Records the on-screen bounds of a clickable segment as the layout pass
     /// positions it, so handleButtonPress can hit-test against them without
     /// redoing the layout. Called unconditionally for every segment; segments
-    /// whose module declares `clickable == false` (the clock) are skipped.
+    /// whose module declares `clickable == false` are skipped.
     fn recordClickBound(self: *State, name: []const u8, x: u16, w: u16) void {
         const id = segId(name) orelse return;
         if (!bar_mods[id].clickable) return;
@@ -954,6 +981,10 @@ const State = struct {
         const cid = self_ticking_role orelse return;
         if (bar_mods[cid].draw == null) return;
         var ctx = frameCtx(self);
+        // Clear the whole reserved slot first: a display-mode shrink paints
+        // less than the reservation, and the leftover region must show clean
+        // background (not the previous wider frame's content) for the blit.
+        self.clearRegion(clock_x, self.clock.width);
         // Shared harness: catches/logs draw errors; returns x unchanged
         // ("drew nothing") on failure, which must skip the blit below.
         const drawn_end = self.drawSegmentSafe(&ctx, bar_mods[cid].name, clock_x, null);
@@ -964,8 +995,7 @@ const State = struct {
         // reservation after font fallback or digit-width drift: blitting
         // only the cached width would clip digits) while keeping the full
         // reserved slot covered so stale pixels from a wider earlier frame
-        // still get overwritten with the clean background the last full
-        // frame left.
+        // still get overwritten with the clean background just painted.
         const drawn_w: u16 = drawn_end -| clock_x;
         self.render.dc.blitRegion(clock_x, @max(self.clock.width, drawn_w));
         self.clearSegmentDirty(bar_mods[cid].name);
@@ -1005,6 +1035,26 @@ fn performDraw() void {
     // scan + measure pass. The clock's own repaint on the same wake is handled
     // separately by the region-scoped updateClock blit.
     if (!gBar.force and !s.dirty.flag and !s.hasPendingRepaintWork()) return;
+    // P2a: marquee/overlay-only wake. With nothing forced, nothing whole-bar
+    // dirty, and no layout segment carrying a dirty bit, the only pending
+    // repaint is a self-animated needsRepaint hook (the scrolling title or a
+    // blinking caret). The frame facts backing the drawn content -- workspace
+    // set, window list, titles, geoms, minimized set -- are unchanged since
+    // the last full scan (any such change clears the P2a gate via markDirty/
+    // markDirtySource), so the cached post-draw last_ctx snapshot is still
+    // accurate. Reuse it in place of scanLiveFrame + fillDrawCtx: those two
+    // re-walk tracking.allWindows() and rebuild the title/minute snapshot on
+    // every marquee tick, and the marquee advances 60x/sec.
+    if (!gBar.force and !s.dirty.flag and s.frame.ctx_valid and
+        !s.hasLayoutSegmentDirty() and s.hasPendingRepaintWork())
+    {
+        var ctx = s.frame.last_ctx;
+        s.drawAllInner(&ctx);
+        s.frame.last_ctx = ctx;
+        if (s.dirty.span_w > 0)
+            s.render.dc.queueBlit(s.dirty.span_x, s.dirty.span_w);
+        return;
+    }
     if (gBar.force) s.markAllSegmentsDirty();
     s.scanLiveFrame();
 
@@ -1019,6 +1069,7 @@ fn performDraw() void {
     // Guarded so an empty api still leaves the prior snapshot intact.
     if (ctx.minimized_api.is_minimized != null) s.title_data.minimized_api = ctx.minimized_api;
     s.frame.last_ctx = ctx;
+    s.frame.ctx_valid = true;
     // Only enqueue the dirty span: drawAllInner tracks the bounding x/w of
     // every repainted segment; skip the XCopyArea entirely when nothing
     // changed. No flush here (queueBlit), matching the grab-path contract.
@@ -1206,9 +1257,9 @@ fn applyReload(old: *State, height: u16) !void {
 /// the empty api, so the bar's synthesis loops no-op.
 fn minimizedApiFromRegistry() segmod.MinimizedApi {
     var api: segmod.MinimizedApi = .{};
-    if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden) != null)
+    if (plugin.providerOf(window_mods[0..], .isWindowHidden) != null)
         api.is_minimized = minimizedIsHidden;
-    if (@import("plugin").providerOf(window_mods[0..], .collectHiddenSet) != null)
+    if (plugin.providerOf(window_mods[0..], .collectHiddenSet) != null)
         api.collect = minimizedCollect;
     return api;
 }
@@ -1218,7 +1269,7 @@ fn minimizedApiFromRegistry() segmod.MinimizedApi {
 /// `*const anyopaque` (type-free seam).
 fn minimizedIsHidden(m: *const anyopaque, win: u32) bool {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (@import("plugin").providerOf(window_mods[0..], .isWindowHidden)) |wm|
+    if (plugin.providerOf(window_mods[0..], .isWindowHidden)) |wm|
         return wm.isWindowHidden.?(mm, @intCast(win));
     return false;
 }
@@ -1231,7 +1282,7 @@ fn minimizedCollect(
     allocator: std.mem.Allocator,
 ) void {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (@import("plugin").providerOf(window_mods[0..], .collectHiddenSet)) |wm|
+    if (plugin.providerOf(window_mods[0..], .collectHiddenSet)) |wm|
         wm.collectHiddenSet.?(mm, set, allocator);
 }
 
@@ -1558,7 +1609,7 @@ pub fn updateIfDirty() !void {
     // Cap the iterations so a misbehaving module that re-requests forever
     // can't busy-spin this batch.
     var redraw_iter: u8 = 0;
-    while (redraw_iter < max_update_draws) : (redraw_iter += 1) {
+    while (redraw_iter < max_batched_redraws) : (redraw_iter += 1) {
         if (barModsConsumeRedrawRequest()) {
             requestFullRedraw();
         }
@@ -1566,7 +1617,7 @@ pub fn updateIfDirty() !void {
         s.dirty.flag = false;
         submitDraw();
     }
-    if (redraw_iter == max_update_draws)
+    if (redraw_iter == max_batched_redraws)
         debug.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
 }
 
@@ -1595,6 +1646,20 @@ pub fn updateClock() bool {
     }
     if (!redraw_clock) return false;
     s.drawClockOnly();
+    // A display-mode cycle also changes the clock's slot width: the freshly
+    // reported natural width IS the new reservation. Fold it in and re-lay the
+    // row so neighboring segments shift to the narrowed/widened slot. Within a
+    // mode the reported width is stable (the mode's probe), so the normal
+    // once-per-second clock repaint never trips this re-layout.
+    if (self_ticking_role) |cid| {
+        if (bar_mods[cid].naturalWidth) |nw| {
+            const fresh = nw(&s.frame, s.clock.width);
+            if (fresh != s.clock.width) {
+                s.clock.width = fresh;
+                requestFullRedraw();
+            }
+        }
+    }
     return true;
 }
 
@@ -1629,6 +1694,8 @@ pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t) void {}
 /// Left/right-clicking the layout indicator cycles the tiling layout
 /// forward/backward; left/right-clicking the layout variants indicator
 /// cycles the current layout's variant forward/backward the same way.
+/// Left/right-clicking the clock cycles its display mode (date-time by
+/// default, then time or date).
 /// Scroll-wheel over a segment (buttons 4/5) routes to its `onScroll` hook
 /// (the slider sub's clamp-step); a left press on a clickable segment arms
 /// its `onDragMotion` hook for the duration of the press-hold.

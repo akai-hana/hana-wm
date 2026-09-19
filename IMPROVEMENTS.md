@@ -198,8 +198,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 ### [minor] First prompt activation scans every $PATH executable on the main loop — **FIXED**
 - Completion targets are scanned once and cached; later activations reuse the scan.
 
-### [minor] Config reload probes locations twice — **OPEN**
-- `loadConfigDefault` still re-probes; reporting the loaded location is the candidate fix.
+### [minor] Config reload probes locations twice — **FIXED**
+- `loadConfigDefault` now records the source it actually loaded (`DefaultSource`); reload is rejected unless a user config was loaded (also drops the load-fails-but-exists edge case that the old existence probe would swap to fallback silently).
 
 ### [minor] Any window-fact change triggers a whole-bar clear+blit — **FIXED**
 - Full redraw is now based on configured (layout-rendered) segments only; the prompt overlay's permanent dirty bit no longer forces every frame. Caret-blink repaints are additionally scoped to the overlay slot via `BarOverlay.needsRepaint` forwarding through the title host (see §0).
@@ -327,7 +327,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - `prepareClearFocus` derives from model; `m.focused == last_applied` invariant + parity test — **GATED** (model focus is the decision source; the parity assertion is part of the failover tests)
 - `resolveConfigureGeometry` delegation to `sync.truthRect` — **FIXED**
   - The covering special case was dead: sync already seeds the covering winner's ledger rect with the screen pin, so the branch duplicated `truthRect` output. Removed; fallback remains the single `xcb_get_geometry` on a true cache miss.
-- tracking facade vs ledger visibility parity test — **OPEN**
+- tracking facade vs ledger visibility parity test — **FIXED** (`src/test/engine/tracking_test.zig`, 4 headless tests; gate `has_tiling and has_minimize and has_fullscreen`) — asserts window-for-window parity between the model-read facade (`tracking`) and the sent ledger (`sync`) after each reconcile: managed set + masks + workspace visibility; the workspace-switch transition flips both in lockstep; a minimized window is model-parked (facade) and wire-parked (ledger) together. The fullscreen sibling is asserted as the ONE documented divergence: it stays a managed, model-present window (facade truth), while the ledger parks it on the wire — focus folding already collapses the cycle pool to the covering occupant, so the model-truth read cannot leak a parked window into focus recovery.
 - three-way redundancy codified into one authority — **DEFERRED (Phase 2)**; `model.focused` is the decision source today.
 - cross-add-on queries via `window.providerOf` — **DEFERRED (Phase 2)**
 - latent `snapViewportToFocused` / `focusNext`/`focusPrev` — **FIXED** (removed as dead after the cycle fold)
@@ -348,7 +348,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - `has_*` probes (pathExists vs discovery modal) — **GATED** (single source of truth in discovery).
 - `owner_contracts` manual table — **FIXED**: the per-owner contract (window→`WindowModule`, bar→`Segment`, tiling→`Layout`) is now DERIVED in build.zig from each owner's module files (`deriveOwnerContracts`); all three recognized declaration shapes are read (`pub const module: @import("plugin").X`, `segdraw.module(...)`, `tiling.layoutModule(...)`), disagreement or an unrecognized `modules/` tree is a loud build error, and an EMPTY owner (e.g. all four window behaviors removed) falls back to the documented element-type default since nothing is bindable then.
 - Per-layer import assertions — **FIXED**: build.zig `assertPureLayerImports` enforces pure-layer (model/tiling/config) import purity at build time on the same edges `wireAll` derives, making pure-layer import cycles structurally impossible. Enabled the [critical] §IV fix (below): `config` no longer imports `xkbcommon`/`core`; keysym-name parsing moved to the pure `src/input/keysyms.zig`.
-- Import wiring duplication / `catch unreachable` vs `try` — **OPEN** (nits).
+- Import wiring duplication / `catch unreachable` vs `try` — **PARTIAL/FIXED** (nits): `catch unreachable` is gone from all test bodies except the deliberate `void` fixtures/`Sink` vtable shims in `helpers.zig` (`testReset`, `regCur`, `bump`, `stackShim`), which cannot propagate errors; the remaining wiring duplication (build.zig manual module table vs `wireAll`) stays GATED — it is derived and checked at build time, so it can drift no further than the derive scans themselves.
 
 ### Tests — **GATED/OPEN**
 - Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). `bounded` is now covered headless by `src/test/core/bounded_test.zig` (cap/evict/scan for `BoundedList` + `RecStore`), pure keysym parsing by `src/test/input/keysyms_test.zig`, the ICCCM window-hint cache lifecycle by `src/test/window/wincache_test.zig` (gated, x_gated=false), and the click-raise liveness-before-dedup ordering by `focus_test.zig` (destroyed window under a `mouse_click` is never re-focused). The rest of the wishlist is OPEN (borders, config parser malformed cases).

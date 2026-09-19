@@ -64,7 +64,7 @@ test "moveWindowToWs: full destination list cancels the move before any mutation
     var m = helpers.makeModel();
     helpers.regCur(&m, 404); // stays on ws 0; the destination stays full
     for (0..model.max_tiled_per_ws) |i| {
-        model.register(&m, @as(model.WindowId, @intCast(500 + i)), model.WSId.fromIndex(1)) catch unreachable;
+        try model.register(&m, @as(model.WindowId, @intCast(500 + i)), model.WSId.fromIndex(1));
     }
     try testing.expectEqual(@as(usize, model.max_tiled_per_ws), m.ws[1].tiled_order.len);
 

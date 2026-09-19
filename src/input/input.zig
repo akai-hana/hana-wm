@@ -20,6 +20,7 @@ const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
+const model = @import("model");
 // Layout-name resolution for diagnostics. Reached through the build-generated
 // `tiling_seam` (empty struct when tiling is absent); every member use is
 // gated on has_tiling, so the tiling-less build still compiles.
@@ -359,6 +360,12 @@ fn closeWindow(win: u32) void {
 
 // Action dispatch
 
+/// Directional actions carry a `Dir`; map it to the signed step used by the
+/// tiling ops (`.forward` = +1, `.reverse` = -1).
+inline fn dirSign(dir: types.Dir) i32 {
+    return if (dir == .forward) 1 else -1;
+}
+
 /// Top-level action dispatcher. Routes each action tag to its handler inline
 /// (single switch, no per-class delegates). Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
@@ -379,15 +386,15 @@ fn executeAction(action: *const types.Action) void {
         },
 
         .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
-        .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, if (dir == .forward) @as(i32, 1) else -1),
-        .cycle_variants => |dir| tilingOp(actions.stepVariantDir, if (dir == .forward) @as(i32, 1) else -1),
-        .set_master_width => |dir| actions.adjustPrimaryWidthAction(if (dir == .forward) 0.025 else -0.025),
-        .set_master_count => |dir| actions.adjustPrimaryCount(if (dir == .forward) @as(i32, 1) else -1),
-        .grow_stack => |dir| actions.adjustSecondaryBalance(if (dir == .forward) 0.5 else -0.5),
+        .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(dir)),
+        .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(dir)),
+        .set_master_width => |dir| actions.adjustPrimaryWidthAction(if (dir == .forward) constants.master_width_step else -constants.master_width_step),
+        .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(dir)),
+        .grow_stack => |dir| actions.adjustSecondaryBalance(if (dir == .forward) constants.stack_balance_step else -constants.stack_balance_step),
         .swap_master => |mode| actions.swapPrimaryAction(mode == .focus_swap),
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),
-        .scroll_view => |dir| actions.viewportStep(if (dir == .forward) @as(i32, 1) else -1),
+        .scroll_view => |dir| actions.viewportStep(dirSign(dir)),
 
         // Cycle focus forward/backward. The viewport snap runs as a duty
         // inside the focus transition's single grab (see
@@ -453,10 +460,10 @@ fn dumpState() void {
             );
     }
 
-    if (build_options.has_tiling and @import("core").tilingEnabled()) {
+    if (build_options.has_tiling and core.tilingEnabled()) {
         debug.info("Tiling enabled: true", .{});
         debug.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
-        debug.info("Tiled windows:  {}", .{@import("model").tiledCountOnWs(pipeline.model(), pipeline.model().current)});
+        debug.info("Tiled windows:  {}", .{model.tiledCountOnWs(pipeline.model(), pipeline.model().current)});
     }
 
     debug.info("================================", .{});

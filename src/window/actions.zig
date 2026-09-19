@@ -56,7 +56,10 @@ fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it, never a closed enum. Empty when the tiling subsystem is absent.
-const tiling_mods = @import("plugin").tiling_mods;
+const plugins = @import("plugins");
+const wincache = @import("wincache");
+const plugin = @import("plugin");
+const tiling_mods = plugin.tiling_mods;
 const tiling = @import("tiling_seam").tiling;
 
 /// Withdrawal facts for actions.unmanage. The sole caller (window.
@@ -148,7 +151,7 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
         // model (round trip) and can re-raise an already-applied window.
         // The model write is conditional on a real `.set` intent, so a
         // no_input candidate never takes model focus.
-        const prep = focus.prepareFocus(winner, .tiling_operation, null);
+        const prep = focus.prepareFocus(winner, .tiling_operation);
         if (prep == .none and focus.lastRejectWasNoInput()) {
             excluded = winner;
             continue;
@@ -173,7 +176,7 @@ fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
     // Prepare before the model write (same rule as focusFallback): a
     // no_input restore never takes model focus, but the reconcile still runs
     // so the restored window is mapped and placed.
-    const prep = focus.prepareFocus(win, .window_spawn, null);
+    const prep = focus.prepareFocus(win, .window_spawn);
     if (prep != .none) model_mod.setFocus(m, win);
     pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, prep);
 }
@@ -427,7 +430,7 @@ fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.W
 /// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
 /// window's geometry (1 XCB call) instead of replaying all windows. Called
 /// from the drag provider's updateDrag on every motion event.
-pub fn dragRect(win: model_mod.WindowId, r: @import("utils").Rect) void {
+pub fn dragRect(win: model_mod.WindowId, r: utils.Rect) void {
     const wm = providerOf(.setFloatingRect) orelse return;
     const m = pipeline.mut(&gate);
     wm.setFloatingRect.?(m, win, r);
@@ -481,7 +484,7 @@ pub fn isResizingWindow(win: model_mod.WindowId) bool {
 /// Last committed drag rect, for resize-path geometry replay. Zero rect
 /// fallback when no module provides the hook, matching the old no-floating
 /// default.
-pub fn getDragLastRect() @import("utils").Rect {
+pub fn getDragLastRect() utils.Rect {
     return callFirst(.getDragLastRect, .{}) orelse .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 }
 
@@ -551,7 +554,7 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
     if (focus_swap and (m.focused orelse displaced) != displaced) {
         // Prepare before the model write (same rule as focusFallback): a
         // no_input displaced head must not take model focus.
-        const prep = focus.prepareFocus(displaced, .tiling_operation, null);
+        const prep = focus.prepareFocus(displaced, .tiling_operation);
         if (prep != .none) model_mod.setFocus(m, displaced);
         ft = prep;
     }
@@ -646,7 +649,7 @@ const viewport_inactive: ViewportContext =
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
     if (!build_options.has_tiling) return viewport_inactive;
     const p = &m.ws[m.current.index].params;
-    const mod: ?@import("plugin").Layout =
+    const mod: ?plugin.Layout =
         if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
     const md = mod orelse return viewport_inactive;
     if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
@@ -760,7 +763,7 @@ pub fn seedParamsFromConfig() void {
         // name. The module's own variant_parse hook interprets the string;
         // an unparseable/unknown string warns (Stage-1 style) and uses 0.
         var value_string: ?[]const u8 = override_variant;
-        const active_mod: ?@import("plugin").Layout =
+        const active_mod: ?plugin.Layout =
             if (kind < tiling_mods.len) tiling_mods[kind] else null;
         var v_idx: u8 = 0;
         if (active_mod) |md| {
@@ -829,7 +832,7 @@ pub fn switchTo(ws_idx: u8) void {
     // deferred visibility update would require a SECOND reconcile on this
     // workspace, retiling Discord's geometry twice and causing a flicker.
     if (build_options.has_bar)
-        @import("plugins").Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
+        plugins.Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
     // Bump the core fullscreen fact only when the target workspace actually
     // carries a covering occupant: the bar's reactive path derives its claim
     // from the fact, so spuriously bumping it on every switch would churn a
@@ -845,7 +848,6 @@ pub fn switchTo(ws_idx: u8) void {
     // the FocusTransition prep — runs here, model-local or cache-backed,
     // BEFORE grabServer so a fast-following keypress is never starved by this
     // switch (the drop-safety fix).
-    const cs = core.getState();
 
     // Keyboard-triggered switch focuses the model's tiered fallback
     // (newest-first MRU, then reversed tiled_order, then floating) — NO pointer
@@ -860,15 +862,10 @@ pub fn switchTo(ws_idx: u8) void {
     const ft: focus.FocusTransition = blk: {
         var excluded: ?model_mod.WindowId = null;
         while (model_mod.fallbackFocusCandidate(m, model_mod.WSId.fromIndex(ws_idx), excluded)) |t| {
-            // Pre-fire the WM_PROTOCOLS query only on a take_focus cache
-            // miss; the common path is cache-backed (see window.zig's "ICCCM
-            // focus property cache" note), and the miss case overlaps the
-            // prepareFocus round trip below instead of blocking inline.
-            const cookie = if (window.isInputModelCached(t)) null else window.fireWMProtocolsQuery(cs.conn, t);
             // Prepare BEFORE the model write: a no_input target must not
             // take model focus, and a lone no_input target leaves X focus
             // on the root rather than captive on the departed workspace.
-            const prep = focus.prepareFocus(t, .workspace_switch, cookie);
+            const prep = focus.prepareFocus(t, .workspace_switch);
             if (prep == .none and focus.lastRejectWasNoInput()) {
                 excluded = t;
                 continue;
@@ -922,8 +919,6 @@ pub fn switchTo(ws_idx: u8) void {
 /// anchor/home_ws state. The reconcile tail then sizes it floating in one
 /// pass, so a float-rule spawn never flashes a tiled slot.
 pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?utils.Rect) void {
-    const wincache = @import("wincache");
-
     const m = pipeline.mut(&gate);
     if (m.store.has(win)) return; // double-manage guard
 
@@ -985,7 +980,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // AFTER the reconcile, inside the same grab: the window must be mapped
     // before xcb_set_input_focus, and both map+focus land under one grab
     // (Gap 3 fix).
-    const ft = focus.prepareFocus(win, .window_spawn, null);
+    const ft = focus.prepareFocus(win, .window_spawn);
     if (ft != .none) model_mod.setFocus(m, win);
     pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
 }

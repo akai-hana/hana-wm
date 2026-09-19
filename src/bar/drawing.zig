@@ -155,8 +155,9 @@ pub fn findVisualByDepth(screen: core.Screen, depth: u8) u32 {
     return vt.visual_id;
 }
 
-/// Pango font string used when no fonts are configured or a named font fails to load.
-const fallbackFont = "monospace:size=10";
+/// Pango font string used when no fonts are configured or a named font fails
+/// to load; family/size come from the bar-owned metrics module.
+const fallbackFont = bar_metrics.default_fallback_font;
 
 pub const FontState = struct {
     allocator: std.mem.Allocator,
@@ -613,16 +614,38 @@ pub const DrawContext = struct {
         self.paintText(x + padding, self.baselineY(height), fg);
         return x + width;
     }
+
+    /// Like `drawSegment`, but the background always spans at least `min_w`
+    /// text pixels (plus padding), so a segment whose content shrank in a
+    /// region-scoped repaint still wipes the whole reserved slot.
+    pub fn drawSegmentMin(
+        self: *DrawContext,
+        x: u16,
+        height: u16,
+        text: []const u8,
+        padding: u16,
+        bg: u32,
+        fg: u32,
+        min_w: u16,
+    ) !u16 {
+        const text_w = self.measureTextWidth(text);
+        const width: u16 = @max(text_w, min_w) + padding * 2;
+        self.fillRect(x, 0, width, height, bg);
+        self.paintText(x + padding, self.baselineY(height), fg);
+        return x + width;
+    }
 };
 
 /// Draws `text` at `x` using the config's scaled segment padding and bar
-/// colors. Collapses the identical drawSegment argument list the icon-ish
-/// segment modules (layout, variants, clock) would otherwise repeat.
+/// colors (a `[bar.colors]` override for segment `segment_name` when set, bar
+/// `fg` otherwise). Collapses the identical drawSegment argument list the
+/// icon-ish segment modules (layout, variants, clock) would otherwise repeat.
 pub fn drawPaddedSegment(
     dc: *DrawContext,
     config: types.BarConfig,
     height: u16,
     x: u16,
+    segment_name: []const u8,
     text: []const u8,
 ) !u16 {
     return dc.drawSegment(
@@ -631,7 +654,33 @@ pub fn drawPaddedSegment(
         text,
         config.scaledSegmentPadding(height),
         config.bg,
-        config.fg,
+        config.segmentFg(segment_name),
+    );
+}
+
+/// Like `drawPaddedSegment`, but the background fill always spans at least
+/// `cover_text`'s measured width plus padding. Used by the clock so a
+/// region-scoped repaint of a NARROWER display mode (time-only or date-only
+/// vs the full date-time view) repaints the whole reserved slot instead of
+/// leaving stale pixels from the previous wider frame.
+pub fn drawPaddedSegmentCovering(
+    dc: *DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    x: u16,
+    segment_name: []const u8,
+    text: []const u8,
+    cover_text: []const u8,
+) !u16 {
+    const padding = config.scaledSegmentPadding(height);
+    return dc.drawSegmentMin(
+        x,
+        height,
+        text,
+        padding,
+        config.bg,
+        config.segmentFg(segment_name),
+        dc.measureTextWidth(cover_text),
     );
 }
 

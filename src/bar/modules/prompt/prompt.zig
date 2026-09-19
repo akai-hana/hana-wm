@@ -33,6 +33,8 @@ pub const xk_right = @intFromEnum(XK.Right);
 pub const xk_home = @intFromEnum(XK.Home);
 pub const xk_end = @intFromEnum(XK.End);
 
+/// 256 input chars fits a full `.desktop` file path plus arguments, the
+/// longest payload a drun entry can produce.
 pub const default_max_input: usize = 256;
 pub const Action = enum { none, deactivate, spawn };
 
@@ -1359,7 +1361,7 @@ fn drawActive(
     const scroll_end_x = drawPill(dc, height, baseline, text_left_x, text_end_x, accent) orelse
         return end_x;
     // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
-    const post_clip_end_x = scroll_end_x -| 2;
+    const post_clip_end_x = scroll_end_x -| pill_ink_gap_px;
 
     const max_scroll_px: u16 = scroll_end_x - text_left_x;
     const prompt_w = promptWidth(dc, prompt);

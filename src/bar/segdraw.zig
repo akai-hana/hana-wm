@@ -73,6 +73,8 @@ pub const Opts = struct {
     onPollWakeup: ?*const fn () void = null,
     secondsElapsed: ?*const fn ([]const u8) bool = null,
     invalidate: ?*const fn () void = null,
+    /// Clears per-module caches on config reload (font/padding may change).
+    invalidateReloadCaches: ?*const fn () void = null,
     measureString: ?*const fn () []const u8 = null,
     /// Reserved row width probe; defaults to the measure-string passthrough
     /// (clock) when `measureString` is set, else the cached drawn width.
@@ -91,9 +93,8 @@ fn drawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!u16 {
 }
 
 /// The icon modules' click action: step the integer direction, then force a
-/// redraw. Null action => no click binding (clock).
+/// redraw. Null action => no click binding (modules without click actions).
 fn clickHook(comptime action: anytype) ?OnClick {
-    // `null` is passed for modules with no click action (clock, workspaces).
     if (comptime @TypeOf(action) == @TypeOf(null)) return null;
     return struct {
         fn f(_: u16, left: bool, _: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, redraw: *const fn () void) bool {
@@ -130,6 +131,7 @@ pub fn module(
         .onPollWakeup = opts.onPollWakeup,
         .secondsElapsed = opts.secondsElapsed,
         .invalidate = opts.invalidate orelse W.invalidate,
+        .invalidateReloadCaches = opts.invalidateReloadCaches,
         .consumeRedrawRequest = if (opts.with_collapse) W.consumeRedrawRequest else null,
         .measureString = opts.measureString,
         .naturalWidth = opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),

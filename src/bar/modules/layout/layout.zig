@@ -29,7 +29,7 @@ fn getIcon() []const u8 {
 }
 
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    const end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, getIcon());
+    const end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, "layout", getIcon());
     W.store(end_x - start_x);
     return end_x;
 }

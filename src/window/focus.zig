@@ -45,22 +45,14 @@ const State = struct {
     // atom cache was unavailable (advertiseActiveWindow no-ops then).
     net_active_window: xcb.xcb_atom_t = xcb.XCB_ATOM_NONE,
 
-    // Deferred async state: rather than blocking on xcb_get_input_focus and
-    // xcb_query_pointer replies inline, we fire the requests immediately and
-    // store the cookies, draining them from the event loop on the next
-    // iteration to keep hot paths non-blocking.
+    // Deferred async state: rather than blocking on xcb_get_input_focus
+    // replies inline, we fire the request immediately and store the cookie,
+    // draining it from the event loop on the next iteration to keep hot
+    // paths non-blocking.
     //
-    // confirm_cookie/confirm_win: non-compliant-client focus confirmation.
     // tiling_op_cookie: "has the server caught up" round trip from
     //   beginTilingOpSettle() (see its doc comment).
-    // pre_protocols_cookie: WM_PROTOCOLS query fired at the START of focus
-    //   preparation so the server processes it in parallel with bookkeeping;
-    //   by the time applyPendingFocus needs it the reply is typically already
-    //   in the receive buffer. null when not in use.
-    confirm_cookie: ?xcb.xcb_get_input_focus_cookie_t = null,
-    confirm_win: ?u32 = null,
     tiling_op_cookie: ?xcb.xcb_get_input_focus_cookie_t = null,
-    pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t = null,
 };
 
 // PATTERN: module-global state with explicit init/deinit lifecycle (called
@@ -78,8 +70,6 @@ pub fn init() void {
 pub fn deinit() void {
     // Discard pending cookies so they don't accumulate across a deinit()+init()
     // cycle; at process exit the connection close handles this implicitly.
-    window.discardProtocolCookie(core.getState().conn, state.?.pre_protocols_cookie);
-    window.discardProtocolCookie(core.getState().conn, state.?.confirm_cookie);
     window.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
     state = null;
 }
@@ -89,9 +79,8 @@ pub fn deinit() void {
 /// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
-    const pl = @import("pipeline");
-    if (pl.initialized) {
-        if (pl.model().focused) |w| return @intCast(w);
+    if (pipeline.initialized) {
+        if (pipeline.model().focused) |w| return @intCast(w);
         return null;
     }
     return state.?.last_applied;
@@ -113,14 +102,6 @@ pub fn protocolParityHolds() bool {
     return state.?.last_applied == truth;
 }
 
-/// True when `win` is the last window X input focus was applied to. Lets a
-/// workspace-switch caller tell the already-applied dedup apart from a
-/// genuine `.none` verdict (a no_input target), which prepareFocus returns
-/// identically.
-pub inline fn isLastApplied(win: u32) bool {
-    return state.?.last_applied == win;
-}
-
 /// True when the most recent prepareFocus returned `.none` because the
 /// target resolved to a no_input input model. prepareFocus returns `.none`
 /// for both the no_input verdict and the already-applied dedup; call sites
@@ -128,33 +109,6 @@ pub inline fn isLastApplied(win: u32) bool {
 /// tell the two apart (a no_input target must never take model focus).
 pub inline fn lastRejectWasNoInput() bool {
     return state.?.no_input_reject;
-}
-
-/// Sets X input focus to the root window (CurrentTime, see "Timestamp
-/// handling"). Used when a no_input window is the only focus candidate on
-/// the visible workspace, so keyboard focus is never left on a hidden or
-/// departed window.
-pub fn refocusRoot() void {
-    const cs = core.getState();
-    focusNow(cs.conn, cs.root);
-}
-
-/// True when `win` is the ONLY visible window on the current workspace.
-/// Guards the refocus-to-root fallback: when a rejected (no_input) target
-/// would otherwise leave nothing focusable on the viewed workspace, X focus
-/// falls to the root; when other visible windows exist, root-focus would be
-/// wrong.
-pub fn isOnlyVisibleOnCurrentWs(win: u32) bool {
-    const m = pipeline.model();
-    if (!model_mod.visibleOn(m, win, m.current)) return false;
-    var count: usize = 0;
-    for (tracking.allWindows()) |e| {
-        if (model_mod.visibleOn(m, e.win, m.current)) {
-            count += 1;
-            if (count > 1) return false;
-        }
-    }
-    return count == 1;
 }
 
 /// True when an incoming EnterNotify should be silently ignored.
@@ -309,7 +263,9 @@ const CommitFlags = struct {
 // resolve) that cannot run inside a grab. Split into two phases:
 //
 //   Phase 1 (outside grab): prepareFocus / prepareClearFocus
-//     - Round trips: isWindowMapped, getInputModelResolved
+//     - Cache-only input-model resolve (a miss provisions dwm-style focus);
+//       the only remaining round trip is the isWindowMapped liveness guard
+//       used by mouse_click.
 //     - Returns a FocusTransition descriptor (no X traffic)
 //
 //   Phase 2 (inside grab): applyPendingFocus
@@ -337,50 +293,16 @@ pub const FocusTransition = union(enum) {
     none: void,
 };
 
-/// Discard a pending confirm reply without acting on it, using the
-/// non-blocking xcb_discard_reply. Safe to call when no confirm is pending.
-fn cancelPendingConfirm() void {
-    const cookie = state.?.confirm_cookie orelse return;
-    state.?.confirm_cookie = null;
-    state.?.confirm_win = null;
-    xcb.xcb_discard_reply(core.getState().conn, cookie.sequence);
-}
-
-fn resetStaleProtocols() void {
-    window.discardProtocolCookie(core.getState().conn, state.?.pre_protocols_cookie);
-    state.?.pre_protocols_cookie = null;
-}
-
-/// Clears both pending-async focus states ahead of a fresh transition: the
-/// stale confirm cookie (client-side discard) and the pre-fired WM_PROTOCOLS
-/// pipeline cookie. Shared by prepareFocus and grabFocusReassert.
-fn resetPendingFocusState() void {
-    cancelPendingConfirm();
-    resetStaleProtocols();
-}
-
-/// Phase 1: resolve input model via round trips (outside grab).
+/// Phase 1: resolve input model (cache-only, never blocking).
 /// Returns a FocusTransition that can be committed inside the grab.
 /// Returns .none when focus should not change (invalid window, same window,
 /// unmapped liveness guard, or no_input model).
 ///
-/// `pre_protocols_cookie` is an optional already-fired WM_PROTOCOLS query for
-/// `win` (pipelined focus prep — see switchTo). When provided it is consumed
-/// for the input-model resolve or discarded on an early return, so ownership
-/// is fully transferred here regardless of the outcome.
-/// Discard an optional pre-fired WM_PROTOCOLS cookie and return a no-op
-/// transition. Shared early-exit tail of prepareFocus.
-fn noneWithDiscard(
-    conn: core.Connection,
-    cookie: ?xcb.xcb_get_property_cookie_t,
-) FocusTransition {
-    window.discardProtocolCookie(conn, cookie);
-    return .none;
-}
-
+/// The input model comes strictly from the focus-property cache; a miss
+/// resolves provisionally (dwm's XSetInputFocus model) instead of a blocking
+/// live query, so this hot path has zero round trips.
+///
 /// Build a `.set` FocusTransition from a resolved input model.
-/// Shares the flags-construction boilerplate between prepareFocus and
-/// grabFocusReassert; `opts` carries the per-call-site differences.
 fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
     raise: bool,
     new_suppress: core.FocusSuppressReason,
@@ -399,14 +321,10 @@ fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
     } };
 }
 
-pub fn prepareFocus(
-    win: u32,
-    reason: Reason,
-    pre_protocols_cookie: ?xcb.xcb_get_property_cookie_t,
-) FocusTransition {
+pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     const conn = core.getState().conn;
     state.?.no_input_reject = false;
-    if (window.isInvalidWindow(win)) return noneWithDiscard(conn, pre_protocols_cookie);
+    if (window.isInvalidWindow(win)) return .none;
 
     // Liveness guard first: a destroyed window must never be re-focused or
     // raised, even when it was the last_applied window (mouse_click paths).
@@ -414,7 +332,18 @@ pub fn prepareFocus(
     // window is on the current workspace and visible, so the blocking
     // xcb_get_window_attributes round-trip is redundant.
     if (reason == .mouse_click and !isWindowMapped(conn, win))
-        return noneWithDiscard(conn, pre_protocols_cookie);
+        return .none;
+
+    const resolved = window.peekInputModelResolved(win) orelse window.provisionalResolution();
+    if (resolved.model == .no_input) {
+        // Expose the no_input verdict to call sites: it returns the same
+        // `.none` as a dedup skip, and callers that mutate the model on their
+        // own need to tell them apart (a no_input target must never take
+        // model focus, and a lone no_input window should leave X focus on the
+        // root rather than anywhere it can't be reached).
+        state.?.no_input_reject = true;
+        return .none;
+    }
 
     // Dedup: the same window already owns applied focus. A no-op for most
     // reasons, but a user-driven click still expects its raise side effect,
@@ -422,29 +351,12 @@ pub fn prepareFocus(
     // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
     // re-grab of that same window's buttons (a button-regrab flash).
     if (state.?.last_applied == win) {
-        if (!shouldRaise(reason, win)) return noneWithDiscard(conn, pre_protocols_cookie);
-        const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
-        if (resolved.model == .no_input) return .none;
-        resetPendingFocusState();
+        if (!shouldRaise(reason, win)) return .none;
         return setIntent(win, null, resolved, .{
             .raise = shouldRaise(reason, win),
             .new_suppress = suppressionFor(reason, state.?.suppress_reason),
         });
     }
-
-    const resolved = window.getInputModelResolvedConsume(conn, win, pre_protocols_cookie);
-    if (resolved.model == .no_input) {
-        // Expose the no_input verdict to call sites: it returns the same
-        // `.none` as the dedup above, and callers that mutate the model on
-        // their own need to tell them apart (a no_input target must never
-        // take model focus, and a lone no_input window should leave X focus
-        // on the root rather than anywhere it can't be reached).
-        state.?.no_input_reject = true;
-        return .none;
-    }
-
-    // Cancel any stale confirm cookie (client-side, no round trip).
-    resetPendingFocusState();
 
     return setIntent(win, state.?.last_applied, resolved, .{
         .raise = shouldRaise(reason, win),
@@ -479,12 +391,11 @@ pub fn prepareClearFocus() FocusTransition {
         }
     }
 
-    cancelPendingConfirm();
     return .{ .clear = .{ .old = applied } };
 }
 
 /// Shared shutdown tail of the focus-clear paths (applyPendingFocus's `.clear`
-/// limb and clearFocus): drop applied focus, reset suppression, refocus root.
+/// limb and applyClear): drop applied focus, reset suppression, refocus root.
 fn clearTail() void {
     state.?.last_applied = null;
     state.?.suppress_reason = .none;
@@ -557,14 +468,6 @@ fn pollCookie(conn: core.Connection, seq: u32) PollResult {
     return .{ .pending = false, .raw = reply };
 }
 
-/// Typed, defer-freed accessor for a ready poll reply.
-fn typedReply(comptime T: type, res: PollResult) ?*T {
-    const r = res.raw orelse return null;
-    const t: *T = @ptrCast(@alignCast(r));
-    defer std.c.free(t);
-    return t;
-}
-
 /// Shared drain preamble for the deferred async reply fields. Polls the
 /// cookie in `field`; on a ready/errored reply clears the field (the cookie
 /// is then consumed) and returns the outcome. When nothing is pending or the
@@ -577,97 +480,18 @@ fn drainCookie(comptime T: type, field: *?T) PollResult {
     return res;
 }
 
-/// Drain the deferred focus-confirm reply, if one is pending. Must be called
-/// from the event loop before the next event; the common case completes in
-/// microseconds. If focus did not land on `confirm_win`, retry
-/// xcb_set_input_focus + WM_TAKE_FOCUS once without raising (a raise generates
-/// synthetic FocusOut/In pairs that reset Electron's internal focus state).
-/// ONE-SHOT: never re-arms. Safe when nothing is pending.
-pub fn drainPendingConfirm() void {
-    const win = state.?.confirm_win orelse return; // invariant: set/cleared with confirm_cookie
-    const res = drainCookie(xcb.xcb_get_input_focus_cookie_t, &state.?.confirm_cookie);
-    if (res.pending) return;
-
-    const conn = core.getState().conn;
-    // Reply ready or error: consume and clear state
-    state.?.confirm_win = null;
-    if (res.errored) return;
-
-    if (!window.isValidManagedWindow(win)) return;
-
-    // Live re-query of input model: the take_focus state may have changed
-    // since prepareFocus/applyPendingFocus resolved it (the client could
-    // modify WM_PROTOCOLS between our first query and now), so we must
-    // re-query rather than reuse the CommitFlags snapshot.
-    const input_model = window.getInputModel(conn, win);
-    if (input_model == .no_input) return;
-
-    const c = typedReply(xcb.xcb_get_input_focus_reply_t, res) orelse return;
-
-    // Consider focus landed if ANY real window has it (focus > 1): Electron/Qt
-    // respond to WM_TAKE_FOCUS by focusing an internal child widget, so
-    // xcb_get_input_focus returns a child XID, not the managed toplevel. Only
-    // retry when focus is completely absent (None or PointerRoot, i.e. <= 1).
-    if (c.*.focus > 1) return;
-
-    // Log the retry so failed confirmations are visible in debug sessions
-    // rather than silently degrading into an unresponsive window.
-    debug.debug(
-        "focus: confirm retry for 0x{x}: focus={} (expected > 1), retrying once",
-        .{ win, c.*.focus },
-    );
-
-    focusNow(conn, win);
-    window.sendWMTakeFocus(conn, win, 0);
-}
-
-/// DWM's focusin: translated exactly. No mode/detail/managed filtering.
-///
-/// Every FocusIn that doesn't match the intended window triggers an immediate
-/// re-assertion via grabFocusReassert, which uses CurrentTime so the X server
-/// never rejects it. Filtering mode/detail was incorrect: it allowed Electron's
-/// internal focus steals to slip through unchallenged.
-pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
-    if (state.?.confirm_win) |exp| if (event.event == exp) cancelPendingConfirm();
-    const is_offscreen_steal = !window.isInvalidWindow(event.event) and !tracking.isOnCurrentWorkspace(event.event);
-
-    const prev = state.?.last_applied orelse {
-        if (is_offscreen_steal) grabFocusClear();
-        return;
-    };
-
-    if (event.event == prev) return;
-
-    grabFocusReassert(prev, is_offscreen_steal);
-}
-
-/// Shared post-model-clear tail of clearFocus and grabFocusClear: prepare the
-/// clear transition and either replay it locally (clearFocus) or commit it
-/// under one grab with a reconcile (grabFocusClear, `reconcile_on_none`).
-fn applyClear(reconcile_on_none: bool) void {
-    const pl = @import("pipeline");
+/// Shared post-model-clear tail of the focus-clear paths: prepare the clear
+/// transition and replay it locally.
+fn applyClear() void {
     // prepareClearFocus reads the MODEL as the focus truth, so it must run
     // BEFORE model.clearFocus clears that decision source.
     const ft = prepareClearFocus();
-    if (pl.initialized) @import("model").clearFocus(pl.mut(&gate));
+    if (pipeline.initialized) model_mod.clearFocus(pipeline.mut(&gate));
     if (ft == .none) {
-        if (reconcile_on_none) {
-            // last_applied already null: no X focus to clear, but still
-            // reconcile so borders/stacking reflect the no-focus state.
-            pl.reconcileUnderGrabNow(.{});
-        } else {
-            clearTail();
-        }
+        clearTail();
         return;
     }
-    if (reconcile_on_none)
-        pl.reconcileUnderGrabNowWithFocus(.{}, ft)
-    else
-        applyPendingFocus(ft);
-}
-
-pub fn clearFocus() void {
-    applyClear(false);
+    applyPendingFocus(ft);
 }
 
 /// Write `_NET_ACTIVE_WINDOW` to the root window so EWMH clients stay in sync.
@@ -713,9 +537,8 @@ inline fn suppressionFor(
 // with a reconcile, ensuring focus, borders, and geometry all land
 // atomically under one server grab.
 
-/// Atomically focus `win` with `reason`. Round trips (input-model resolve)
-/// happen outside the grab; focus protocol, borders, and geometry land
-/// inside one grab+reconcile+flush. Drop-in for the old setFocus path.
+/// Atomically focus `win` with `reason`. Focus protocol, borders, and geometry
+/// land inside one server grab. Drop-in for the old setFocus path.
 pub fn grabFocus(win: u32, reason: Reason) void {
     grabFocusWithDuty(win, reason, null);
 }
@@ -727,60 +550,19 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 /// instead of focus-then-snap's two. The duty is skipped whenever the
 /// transition resolves to `.none`, so a rejected target (no_input) never
 /// leaves a stray viewport move.
+///
+/// Hover focus (`.mouse_enter`) is a focus-only commit: nothing geometric
+/// changes, so it skips the reconcile (dwm's enternotify -> focus()). Borders
+/// repaint via the per-batch sweep on the commit's focus bump.
 pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) void {
-    const ft = prepareFocus(win, reason, null);
+    const ft = prepareFocus(win, reason);
     if (ft == .none) return;
-    const pl = @import("pipeline");
-    @import("model").setFocus(pl.mut(&gate), win);
-    pl.reconcileUnderGrabNowWithFocusDuty(.{}, ft, duty);
-}
-
-/// Atomically clear focus to root. Model clear + focus protocol + borders
-/// + geometry all land inside one grab.
-pub fn grabFocusClear() void {
-    applyClear(true);
-}
-
-/// Re-assert focus on `prev` after a FocusIn event indicates the server's
-/// focus drifted. Bypasses the last_applied dedup because the server's
-/// actual focus no longer matches what we last applied.
-pub fn grabFocusReassert(prev: u32, is_offscreen_steal: bool) void {
-    const conn = core.getState().conn;
-    if (window.isInvalidWindow(prev)) {
-        if (is_offscreen_steal) grabFocusClear();
+    model_mod.setFocus(pipeline.mut(&gate), win);
+    if (reason == .mouse_enter) {
+        pipeline.focusOnlyCommit(ft);
         return;
     }
-
-    // Round trip outside grab: resolves input model and take_focus
-    // advertisement from a single WM_PROTOCOLS query.
-    const resolved = window.getInputModelResolved(conn, prev);
-    if (resolved.model == .no_input) {
-        if (is_offscreen_steal) grabFocusClear();
-        return;
-    }
-
-    resetPendingFocusState();
-
-    // W2: when the window we're re-asserting on is already `last_applied`,
-    // passing it as `old` makes applyPendingFocus grab its buttons then
-    // immediately ungrab them again, leaving them UNGRABBED. Treat it as no
-    // previous window (same as the prepareFocus dedup path).
-    const old = if (state.?.last_applied == prev) null else state.?.last_applied;
-    const ft = setIntent(prev, old, resolved, .{
-        .raise = false,
-        .new_suppress = .none,
-    });
-
-    const pl = @import("pipeline");
-    @import("model").setFocus(pl.mut(&gate), prev);
-    // Inline grab: need focusNow(root) before applyPendingFocus for
-    // offscreen steals (breaks the fight with the stealing client).
-    const c = pl.grabCtx();
-    c.sink.grabServer();
-    defer c.sink.ungrabAndFlush();
-    if (is_offscreen_steal) focusNow(conn, core.getState().root);
-    applyPendingFocus(ft);
-    @import("sync").reconcile(pl.model(), c, .{});
+    pipeline.reconcileUnderGrabNowWithFocusDuty(.{}, ft, duty);
 }
 
 /// Fire an async "has the server caught up" round trip that defers lifting

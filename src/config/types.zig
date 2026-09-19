@@ -360,6 +360,22 @@ pub inline fn freeBarLayouts(
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }
 
+/// Frees the owned segment-name keys of a [bar.colors] segment-color map,
+/// then deinits the map itself. Values are scalars (colors); only keys need
+/// freeing.
+pub fn freeSegmentColors(
+    map: *std.StringHashMapUnmanaged(Color),
+    allocator: std.mem.Allocator,
+) void {
+    var it = map.iterator();
+    while (it.next()) |e| allocator.free(e.key_ptr.*);
+    map.deinit(allocator);
+    // Zig 0.16's HashMapUnmanaged.deinit leaves the struct `undefined` rather
+    // than reusable; reset so a later freeSegmentColors/put on the same map
+    // (config reload reuses the field) stays safe.
+    map.* = .empty;
+}
+
 pub const BarConfig = struct {
     enabled: bool = true,
 
@@ -422,12 +438,6 @@ pub const BarConfig = struct {
     /// `/sys/class/leds/*`. Absent ("") = auto-discovery picks the first
     /// usable backlight.
     brightness_device: ?[]const u8 = null,
-    /// Systatus segment readout list, in render order. Valid items: "mem"
-    /// (used/total + %), "cpu" (utilization %), "batt" (charge % when a
-    /// battery is present). Absent (null) = the default set, which is every
-    /// present-capable readout; an EMPTY list = none (the segment renders
-    /// nothing); a non-empty list = exactly those readouts, in that order.
-    systatus_items: ?std.ArrayList([]const u8) = null,
 
     /// Scroll the focused window's title through its slot when it overflows
     /// (marquee) instead of truncating it with an ellipsis.
@@ -441,6 +451,15 @@ pub const BarConfig = struct {
     drun_prompt_color: ?Color = null, // Prompt text color; falls back to primary_color
     drun_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
 
+    /// Per-segment text-color overrides, keyed by bar segment registry name
+    /// ("cpu", "mem", "volume", "brightness", ...). Populated from
+    /// `[bar.colors].<segment>` entries; a segment with no entry paints its
+    /// text in `fg` (see `segmentFg`). Colors for absent segments are
+    /// tolerated and simply never match a live segment, so a theme may carry
+    /// a full readout palette up front. Keys are owned (duped) once; freed
+    /// in deinit.
+    segment_fg: std.StringHashMapUnmanaged(Color) = .empty,
+
     layout: std.ArrayList(BarLayout) = .empty,
 
     transparency: f32 = 1.0,
@@ -451,8 +470,8 @@ pub const BarConfig = struct {
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
         freeStrings(&self.workspace_icons, allocator, false);
         freeStrings(&self.fonts, allocator, false);
-        if (self.systatus_items) |*list| freeStrings(list, allocator, false);
         freeBarLayouts(&self.layout, allocator, false);
+        freeSegmentColors(&self.segment_fg, allocator);
         inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format, &self.brightness_format, &self.brightness_device }) |f| if (f.*) |s| allocator.free(s);
     }
 
@@ -464,6 +483,12 @@ pub const BarConfig = struct {
     }
     pub inline fn drunPromptColor(self: *const BarConfig) Color {
         return self.drun_prompt_color orelse self.primary_color;
+    }
+
+    /// Text color for bar segment `name`: its [bar.colors] override, or the
+    /// bar-wide `fg` when none is set.
+    pub inline fn segmentFg(self: *const BarConfig, name: []const u8) Color {
+        return self.segment_fg.get(name) orelse self.fg;
     }
 
     /// Derives horizontal segment padding from font_size.

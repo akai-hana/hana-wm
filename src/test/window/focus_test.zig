@@ -60,7 +60,7 @@ test "focus: property-less window is passive; apply lands input focus" {
     try std.testing.expect(focus.protocolParityHolds());
 
     // Already-applied window: a repeated prepare is a pure dedup no-op.
-    try std.testing.expect(focus.prepareFocus(win, .user_command, null) == .none);
+    try std.testing.expect(focus.prepareFocus(win, .user_command) == .none);
 }
 
 test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
@@ -78,7 +78,7 @@ test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
     try std.testing.expectEqual(win, fx.inputFocus());
     try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expect(focus.protocolParityHolds());
-    try std.testing.expect(focus.prepareFocus(win, .user_command, null) == .none);
+    try std.testing.expect(focus.prepareFocus(win, .user_command) == .none);
 }
 
 test "focus: no_input window refuses focus (none transition)" {
@@ -90,7 +90,7 @@ test "focus: no_input window refuses focus (none transition)" {
     fx.setNoInput(win); // WM_HINTS input=False
     try admit(win);
 
-    const t = focus.prepareFocus(win, .user_command, null);
+    const t = focus.prepareFocus(win, .user_command);
     try std.testing.expect(t == .none);
     // A no_input window can never hold X input focus, so it must not take
     // model focus either (model focus is one store with the protocol).
@@ -133,7 +133,7 @@ test "focus: destroyed window under a mouse_click is never re-focused (liveness 
     // focus to a destroyed window.
     _ = core.xcb.xcb_destroy_window(fx.conn, win);
     fx.flush();
-    try std.testing.expect(focus.prepareFocus(win, .mouse_click, null) == .none);
+    try std.testing.expect(focus.prepareFocus(win, .mouse_click) == .none);
     try std.testing.expect(focus.protocolParityHolds());
 }
 

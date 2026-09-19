@@ -1,0 +1,19 @@
+minimize.restore(&m, 999);
+model.visibleOn(&m, 999, WSId.fromIndex(0));
+model.reorderTiled(&m, 1, 99);
+model.reorderTiled(&m, 42, 0);
+model.reorderTiled(&m, 9, 0);
+model.stepTiled(&m, 99, 1);
+model.unregister(&m, 999);
+model.unregister(&m, 888);
+floating.honorConfigureRequest(&m, 999, .{ .x = 1 }),
+floating.honorConfigureRequest(&m, 888,
+model.setFocus(&m, 999);
+model.fullscreenWsOf(&m, 999)
+profile.fullscreenWsOf(&m, 999)
+fullscreen.fullscreenWsOf(&m, 999)
+fullscreen.isFullscreenMode(&m, 999)
+fullscreen.isFullscreenOnWs(&m, 999, WSId.fromIndex(0))
+floating.setFloatingRect(&m, 999, new_r);
+m.store.remove(77)
+0x00, 1, 2

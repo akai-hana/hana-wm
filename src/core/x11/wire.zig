@@ -343,13 +343,6 @@ const PropertyCollector = ReplyCollector(
 );
 pub const collectPropertyReply = PropertyCollector.collect;
 
-const GeometryCollector = ReplyCollector(
-    xcb.xcb_get_geometry_reply_t,
-    xcb.xcb_get_geometry_cookie_t,
-    xcb.xcb_get_geometry_reply,
-);
-pub const collectGeometryReply = GeometryCollector.collect;
-
 // ---------------------------------------------------------------------------
 // Property fetchers
 

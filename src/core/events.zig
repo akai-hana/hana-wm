@@ -21,6 +21,7 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const restart = @import("restart");
 const persist = @import("persist");
+const spawn = @import("spawn");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
@@ -119,7 +120,6 @@ const dispatch_table = blk: {
     table[xcb.XCB_BUTTON_PRESS] = asHandler(input.handleButtonPress);
     table[xcb.XCB_BUTTON_RELEASE] = asHandler(input.handleButtonRelease);
     table[xcb.XCB_MOTION_NOTIFY] = asHandler(input.handleMotionNotify);
-    table[xcb.XCB_FOCUS_IN] = asHandler(focus.handleFocusIn);
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
     table[xcb.XCB_EXPOSE] = asHandler(handleExpose);
@@ -269,7 +269,8 @@ fn handleConfigReload() !void {
     debug.info("Reload requested", .{});
     const cs = core.getState();
 
-    const new_config = config.loadConfigDefault(cs.alloc) catch |err| {
+    var source: config.DefaultSource = .fallback;
+    const new_config = config.loadConfigDefault(cs.alloc, &source) catch |err| {
         // C1: a TOML parse error already reported per-line warnings; treat it
         // as a hard failure and keep the live config rather than swapping in a
         // partially-merged one. Nothing to deinit here: the load failed before
@@ -297,14 +298,13 @@ fn handleConfigReload() !void {
         cs.alloc.destroy(new_ptr);
     }
 
-    // C2: loadConfigDefault collapses the "no user config found" case into a
-    // successful embedded-fallback load with no distinguishing signal. Boot
-    // keeps that fallback; on RELOAD a missing user config must NOT silently
-    // swap in the fallback. Distinguish the two with config.userConfigPresent,
-    // which shares loadConfigDefault's search order. This plain return is NOT
-    // an error, so the errdefer above stays dormant: free the short-lived
-    // fallback allocation explicitly here.
-    if (!config.userConfigPresent(cs.alloc)) {
+    // C2: a load with no user config comes back as a successful embedded
+    // fallback load. Boot keeps that fallback; on RELOAD a missing user config
+    // must NOT silently swap in the fallback. loadConfigDefault reports the
+    // source (user vs fallback) directly, so no second existence probe is
+    // needed. This plain return is NOT an error, so the errdefer above stays
+    // dormant: free the short-lived fallback allocation explicitly here.
+    if (source != .user) {
         debug.err(
             "Config reload rejected: no user config file found. " ++
                 "Keeping current config (the embedded fallback is boot-only)",
@@ -507,11 +507,10 @@ fn handleXcbEvents() void {
     // the same poll wakeup: the spawn pipe's EOF will be readable before
     // SIGCHLD fires, so registerSpawn runs before handleMapRequest needs the
     // spawn queue entry.
-    @import("spawn").drainPendingSpawns();
+    spawn.drainPendingSpawns();
 
     if (build_options.has_bar)
         surfaces.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
-    focus.drainPendingConfirm();
     // Must run after the event-draining loop above: any EnterNotify a tiling
     // reflow generated has to have already been dispatched (and filtered,
     // since suppression is still active) before this lifts suppression.

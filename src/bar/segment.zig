@@ -22,6 +22,7 @@ const build_options = @import("build_options");
 const drawing = @import("drawing");
 const types = @import("types");
 const pipeline = @import("pipeline");
+const plugin = @import("plugin");
 
 /// Service handles the bar passes into mechanism segments (the prompt) at
 /// init. Passed once so segments never import the bar orchestrator;
@@ -289,7 +290,7 @@ pub fn hitTest(
 pub const DirtySourcesSource = enum { focus, frame };
 
 /// True when `sources` has the `source` bit set.
-pub fn hasSource(sources: @import("plugin").DirtySources, source: DirtySourcesSource) bool {
+pub fn hasSource(sources: plugin.DirtySources, source: DirtySourcesSource) bool {
     return switch (source) {
         .focus => sources.focus,
         .frame => sources.frame,
@@ -329,6 +330,6 @@ pub fn currentLayoutKind() ?u8 {
     if (!core.getState().config.tiling.enabled) return null;
     if (!build_options.has_tiling) return null;
     const kind = pipeline.getCurrentLayout();
-    if (kind >= @import("plugin").tiling_mods.len) return null;
+    if (kind >= plugin.tiling_mods.len) return null;
     return kind;
 }

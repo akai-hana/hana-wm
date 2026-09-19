@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const constants = @import("constants");
+const fallback = @import("fallback");
 const debug = @import("debug");
 const keysyms = @import("keysyms");
 const masks = @import("masks");
@@ -38,37 +39,45 @@ fn tryParseWs1Based(tok: []const u8, max: usize, ctx: []const u8, comptime fmt: 
     return ws_1based;
 }
 
+/// Appends one class rule. A workspace rule binds `class_name` to the
+/// 1-based workspace `ws_1based`; a null `ws_1based` makes it a "float" class
+/// rule instead (windows are admitted floating on the current workspace, with
+/// `workspace` left 0, unused).
 fn addRule(
     allocator: std.mem.Allocator,
     cfg: *types.Config,
     class_name: []const u8,
-    ws_num: usize,
+    ws_1based: ?usize,
 ) !void {
     try cfg.workspaces.rules.append(allocator, .{
         .class_name = try allocator.dupe(u8, class_name),
-        .workspace = @intCast(ws_num - 1),
+        .workspace = if (ws_1based) |w| @intCast(w - 1) else 0,
+        .float = (ws_1based == null),
     });
 }
 
-/// "float" class rule: windows whose WM_CLASS matches `class_name` are
-/// admitted floating on the current workspace. `workspace` is left 0 (unused).
-fn addFloatRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8) !void {
-    try cfg.workspaces.rules.append(allocator, .{
-        .class_name = try allocator.dupe(u8, class_name),
-        .workspace = 0,
-        .float = true,
-    });
-}
+/// One row of the bar-anchor table driving both the default bar layout
+/// (initDefaultBarLayout) and the per-anchor `[bar.layout.<name>]` sections
+/// (parseBarLayout), so the anchor set can never drift. `position` is the
+/// types.BarSegmentAnchor tag index (0 = left, 1 = center, 2 = right).
+const BarAnchorInfo = struct {
+    name: []const u8,
+    position: u8,
+    default_seg: []const u8,
+};
+
+const bar_anchors = [_]BarAnchorInfo{
+    .{ .name = "left", .position = 0, .default_seg = "workspaces" },
+    .{ .name = "center", .position = 1, .default_seg = "title" },
+    .{ .name = "right", .position = 2, .default_seg = "clock" },
+};
+
+const bar_layout_section_prefix = "bar.layout.";
 
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void {
-    const defaults = [_]struct { pos: types.BarSegmentAnchor, seg: []const u8 }{
-        .{ .pos = .left, .seg = "workspaces" },
-        .{ .pos = .center, .seg = "title" },
-        .{ .pos = .right, .seg = "clock" },
-    };
-    for (defaults) |d| {
-        var layout = types.BarLayout{ .position = d.pos, .segments = .empty };
-        try layout.segments.append(allocator, try allocator.dupe(u8, d.seg));
+    for (bar_anchors) |a| {
+        var layout = types.BarLayout{ .position = @enumFromInt(a.position), .segments = .empty };
+        try layout.segments.append(allocator, try allocator.dupe(u8, a.default_seg));
         try cfg.bar.layout.append(allocator, layout);
     }
 }
@@ -291,8 +300,9 @@ fn tryLoadOrWarn(
 
 /// The directory and single-file locations searched for a user config, in
 /// priority order. Single source of truth shared by the loader
-/// (loadConfigDefault) and the reload fallback probe (userConfigPresent) so
-/// the two search orders cannot drift apart.
+/// (loadConfigDefault) so the search order cannot drift; loadConfigDefault also
+/// reports which source supplied the config, so the reload path needs no
+/// separate existence probe.
 pub const SearchPaths = struct {
     xdg_dir: []u8,
     local_dir: []u8,
@@ -337,63 +347,45 @@ pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     };
 }
 
+/// Where a default-config load came from. Reported by loadConfigDefault so the
+/// reload path can distinguish "loaded the user config" from "fell back to the
+/// embedded fallback" without re-probing the filesystem (they resolve to the
+/// same Config value otherwise).
+pub const DefaultSource = enum {
+    /// One of the user locations at priority (1)-(4) supplied the config.
+    user,
+    /// None of the user locations produced a config; the embedded fallback
+    /// was returned (boot-only semantics; reload rejects it).
+    fallback,
+};
+
 /// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
 /// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
-pub fn loadConfigDefault(allocator: std.mem.Allocator) !types.Config {
+/// `source` receives where the config actually came from (user vs fallback),
+/// so callers with different boot/reload semantics (see events.handleConfigReload)
+/// need no separate existence probe.
+pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource) !types.Config {
     const paths = try searchPaths(allocator);
     defer paths.deinit(allocator);
 
     // Try directories first (contain multiple .toml files), then single files.
     const dir_attempts = [_][]const u8{ paths.xdg_dir, paths.local_dir };
     for (dir_attempts) |dir|
-        if (try tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| return cfg;
+        if (try tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| {
+            source.* = .user;
+            return cfg;
+        };
 
     const file_attempts = [_][]const u8{ paths.xdg_file, paths.local_file };
     for (file_attempts) |path|
-        if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| return cfg;
+        if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| {
+            source.* = .user;
+            return cfg;
+        };
 
     debug.info("No config found, using fallback with auto-detection", .{});
+    source.* = .fallback;
     return try loadFallbackConfig(allocator);
-}
-
-/// True when `dir_path` holds at least one loadable .toml (the loader classes
-/// a directory with zero .toml files as "no config"). Mirrors the filter in
-/// loadConfigFromDir.
-fn dirHasToml(io: std.Io, dir_path: []const u8) bool {
-    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return false;
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (it.next(io) catch return false) |entry| {
-        if (entry.kind == .directory) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".toml")) continue;
-        if (std.mem.eql(u8, entry.name, "fallback.toml")) continue;
-        return true;
-    }
-    return false;
-}
-
-/// True when `path` exists with content (an empty single config file is "no
-/// config" to the loader, which falls back on it; see loadConfig).
-fn fileHasContent(io: std.Io, path: []const u8) bool {
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
-    defer file.close(io);
-    const st = file.stat(io) catch return true; // untrustworthy stat => assume content, as loadConfig does
-    return st.size > 0;
-}
-
-/// Whether a user config exists at all, using the exact same search locations
-/// as the loader. The reload path uses this to tell "loaded the user config"
-/// from "fell back to the embedded fallback", which loadConfigDefault returns
-/// identically. Every probe failure mode is safe-side: a wrong answer only
-/// ever keeps the old config, never swaps in the fallback.
-pub fn userConfigPresent(allocator: std.mem.Allocator) bool {
-    const paths = searchPaths(allocator) catch return false;
-    defer paths.deinit(allocator);
-    const io = std.Options.debug_io;
-    if (dirHasToml(io, paths.xdg_dir)) return true;
-    if (dirHasToml(io, paths.local_dir)) return true;
-    if (fileHasContent(io, paths.xdg_file)) return true;
-    return fileHasContent(io, paths.local_file);
 }
 
 /// Validates domain invariants on a freshly loaded config.
@@ -438,7 +430,6 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config 
 }
 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
-    const fallback = @import("fallback");
     const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -1013,7 +1004,8 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
 /// live; see `input/keybind.zig`. DPI-scaled bar metrics are derived by the
 /// bar itself (see bar/metrics.zig) rather than stored on the config.
 pub fn load(allocator: std.mem.Allocator) !types.Config {
-    var cfg = loadConfigDefault(allocator) catch |err| switch (err) {
+    var source: DefaultSource = .fallback;
+    var cfg = loadConfigDefault(allocator, &source) catch |err| switch (err) {
         // C1: a malformed user config at BOOT falls back to the embedded
         // config (the WM must still start). On reload the parse error
         // propagates instead, so the live config is kept.
@@ -1319,23 +1311,12 @@ fn parseLayoutsArray(
     }
 }
 
-/// Dupe-appends every string element of `items` into `dst`; non-string
-/// entries are skipped silently (the fonts list, where a stray non-string
-/// is simply ignored).
+/// Dupe-appends every string element of `items` into `dst`. Non-string
+/// entries are skipped; with `warn` set they also surface a warning (the bar
+/// segment list, where a typo should be called out, vs. the fonts list, where
+/// a stray non-string is simply ignored).
 fn appendDupedStrings(
-    allocator: std.mem.Allocator,
-    items: []const parser.Value,
-    dst: *std.ArrayList([]const u8),
-) !void {
-    for (items) |item| {
-        if (item.asScalar([]const u8)) |s|
-            try dst.append(allocator, try allocator.dupe(u8, s));
-    }
-}
-
-/// Dupe-appends every string element of `items` into `dst`, warning on
-/// non-string entries (the bar segment list, where a typo should surface).
-fn appendDupedStringsWarned(
+    comptime warn: bool,
     allocator: std.mem.Allocator,
     items: []const parser.Value,
     dst: *std.ArrayList([]const u8),
@@ -1343,7 +1324,7 @@ fn appendDupedStringsWarned(
     for (items) |item| {
         if (item.asScalar([]const u8)) |s| {
             try dst.append(allocator, try allocator.dupe(u8, s));
-        } else {
+        } else if (warn) {
             debug.warn("Non-string entry in bar segment list, skipping", .{});
         }
     }
@@ -1358,21 +1339,8 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     const section = doc.getSection("bar") orelse return;
     if (section.getAs([]const parser.Value, "fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, true);
-        try appendDupedStrings(allocator, arr, &cfg.bar.fonts);
+        try appendDupedStrings(false, allocator, arr, &cfg.bar.fonts);
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
-    }
-    // systatus_items: the systatus segment's readout whitelist (subset +
-    // render order). Absent = default set; an empty list = none; unknown
-    // items are left to the segment to skip silently.
-    if (section.getAs([]const parser.Value, "systatus_items")) |arr| {
-        if (cfg.bar.systatus_items) |*items| {
-            types.freeStrings(items, allocator, true);
-            try appendDupedStrings(allocator, arr, items);
-        } else {
-            var items: std.ArrayList([]const u8) = .empty;
-            try appendDupedStrings(allocator, arr, &items);
-            cfg.bar.systatus_items = items;
-        }
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
     // A pair interaction, so it stays bespoke rather than joining the table.
@@ -1424,18 +1392,16 @@ fn parseWorkspaceIcons(
 
 fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     types.freeBarLayouts(&cfg.bar.layout, allocator, true);
-    const positions = [_]struct { name: []const u8, pos: types.BarSegmentAnchor }{
-        .{ .name = "bar.layout.left", .pos = .left },
-        .{ .name = "bar.layout.center", .pos = .center },
-        .{ .name = "bar.layout.right", .pos = .right },
-    };
-    for (positions) |p| {
-        const layout_section = doc.getSection(p.name) orelse continue;
-        var bar_layout = types.BarLayout{ .position = p.pos, .segments = .empty };
+    inline for (bar_anchors) |a| {
+        const layout_section = doc.getSection(bar_layout_section_prefix ++ a.name) orelse continue;
+        var bar_layout = types.BarLayout{ .position = @enumFromInt(a.position), .segments = .empty };
         if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
-            try appendDupedStringsWarned(allocator, seg_arr, &bar_layout.segments);
+            try appendDupedStrings(true, allocator, seg_arr, &bar_layout.segments);
         if (bar_layout.segments.items.len > 0) try cfg.bar.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
     }
+
+    if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
+}
 
     if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
 }
@@ -1482,7 +1448,7 @@ fn parseNumberedRuleSections(
 fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name: []const u8, value: parser.Value) !void {
     if (value.asScalar([]const u8)) |s| {
         if (std.mem.eql(u8, s, "float")) {
-            try addFloatRule(allocator, cfg, class_name);
+            try addRule(allocator, cfg, class_name, null);
             return;
         }
         debug.warn("Rule for '{s}' has string value '{s}', only integer or \"float\" supported, skipping", .{ class_name, s });
@@ -1495,7 +1461,7 @@ fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name:
     if (ws_num < 1)
         debug.warn("Rule workspace {d} for '{s}' below minimum 1, skipping", .{ ws_num, class_name })
     else if (checkWorkspaceBound(@intCast(ws_num), class_name, cfg.workspaces.count))
-        try addRule(allocator, cfg, class_name, @intCast(ws_num));
+        try addRule(allocator, cfg, class_name, @as(usize, @intCast(ws_num)));
 }
 
 /// Length of the leading run of ASCII digits in `s` (0 when it starts with
@@ -1563,12 +1529,6 @@ fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
     return b == null;
 }
 
-fn eqlOptionalStrings(a: ?std.ArrayList([]const u8), b: ?std.ArrayList([]const u8)) bool {
-    if ((a == null) != (b == null)) return false;
-    if (a == null) return true;
-    return eqlStrings(a.?.items, b.?.items);
-}
-
 fn eqlScalableOpt(a: ?parser.ScalableValue, b: ?parser.ScalableValue) bool {
     if (a) |x| return if (b) |y| eqlScalable(x, y) else false;
     return b == null;
@@ -1626,6 +1586,17 @@ fn eqlRules(a: []const types.Rule, b: []const types.Rule) bool {
     return true;
 }
 
+/// Segment-color maps are compared by (name, color) content, unordered.
+fn eqlSegmentColors(a: *const std.StringHashMapUnmanaged(types.Color), b: *const std.StringHashMapUnmanaged(types.Color)) bool {
+    if (a.count() != b.count()) return false;
+    var it = a.iterator();
+    while (it.next()) |entry| {
+        const v = b.get(entry.key_ptr.*) orelse return false;
+        if (entry.value_ptr.* != v) return false;
+    }
+    return true;
+}
+
 pub const ConfigChanges = struct {
     bar: bool = false,
     tiling: bool = false,
@@ -1664,13 +1635,15 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         !eqlOptionalString(old.clock_format, new.clock_format) or
         !eqlOptionalString(old.volume_format, new.volume_format) or
         !eqlOptionalString(old.volume_muted_format, new.volume_muted_format) or
-        !eqlOptionalStrings(old.systatus_items, new.systatus_items) or
+        !eqlOptionalString(old.brightness_format, new.brightness_format) or
+        !eqlOptionalString(old.brightness_device, new.brightness_device) or
         old.carousel_enabled != new.carousel_enabled or
         old.carousel_speed_px_s != new.carousel_speed_px_s or
         old.drun_bg != new.drun_bg or
         old.drun_fg != new.drun_fg or
         old.drun_prompt_color != new.drun_prompt_color or
         !eqlOptionalString(old.drun_prompt, new.drun_prompt) or
+        !eqlSegmentColors(&old.segment_fg, &new.segment_fg) or
         !eqlBarLayouts(old.layout.items, new.layout.items) or
         old.transparency != new.transparency;
 }

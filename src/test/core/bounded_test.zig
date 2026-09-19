@@ -1,10 +1,10 @@
 //! Headless tests for the shared bounded collections (`core/utils/bounded`).
 //!
-//! `BoundedList`/`RecStore` back the window caches, minimize records, and the
-//! spawn pending table, so their cap/evict/scan semantics are load-bearing
-//! but were previously only exercised indirectly through those call sites.
-//! These tests pin the contract: full-capped append, linear find, both
-//! removal flavors, insert clamping, and RecStore's id-keyed helpers.
+//! `BoundedList` backs the window caches, minimize records, and the spawn
+//! pending table, so its cap/evict/scan semantics are load-bearing but were
+//! previously only exercised indirectly through those call sites. These tests
+//! pin the contract: full-capped append, linear find, both removal flavors,
+//! insert clamping, and the id-keyed remove helpers.
 
 const std = @import("std");
 const bounded = @import("bounded");
@@ -104,19 +104,28 @@ test "bounded: removeWhere and removeAllWhere prune matching items" {
     try std.testing.expectEqual(@as(u32, 4), list.constSlice()[0].win);
 }
 
-test "bounded: RecStore is keyed by win id with find/remove and reset" {
-    var store = bounded.RecStore(Row, 2){};
-    try std.testing.expectEqual(@as(usize, 0), store.len());
+test "bounded: removeById and removeAllById act on the key field" {
+    var rows = bounded.BoundedList(Row, 4){};
+    _ = rows.append(.{ .win = 1, .value = 1 });
+    _ = rows.append(.{ .win = 2, .value = 2 });
+    _ = rows.append(.{ .win = 3, .value = 3 });
 
-    try std.testing.expect(store.append(.{ .win = 7, .value = 70 }));
-    try std.testing.expect(store.append(.{ .win = 8, .value = 80 }));
-    try std.testing.expectEqual(@as(?usize, 1), store.find(8));
-    try std.testing.expectEqual(@as(?usize, null), store.find(9));
+    try std.testing.expect(rows.removeById(.win, 2));
+    try std.testing.expect(!rows.removeById(.win, 2));
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqual(@as(u32, 1), rows.constSlice()[0].win);
+    try std.testing.expectEqual(@as(u32, 3), rows.constSlice()[1].win);
+}
 
-    try std.testing.expect(store.remove(7));
-    try std.testing.expect(!store.remove(7));
-    try std.testing.expectEqual(@as(usize, 1), store.len());
+test "bounded: removeAllById prunes every row sharing the key" {
+    var rows = bounded.BoundedList(Row, 4){};
+    _ = rows.append(.{ .win = 1, .value = 1 });
+    _ = rows.append(.{ .win = 2, .value = 2 });
+    _ = rows.append(.{ .win = 1, .value = 3 });
+    _ = rows.append(.{ .win = 3, .value = 4 });
 
-    store.reset();
-    try std.testing.expectEqual(@as(usize, 0), store.len());
+    try std.testing.expectEqual(@as(usize, 2), rows.removeAllById(.win, 1));
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqual(@as(u32, 2), rows.constSlice()[0].win);
+    try std.testing.expectEqual(@as(u32, 3), rows.constSlice()[1].win);
 }

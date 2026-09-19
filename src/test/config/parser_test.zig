@@ -136,3 +136,88 @@ test "wrong-case section header is a parse error through extends etc" {
     const doc = try parser.parse(arena.allocator(), "[bar]\nheight = 24\n", "cfg/extra.toml");
     try testing.expectEqualStrings("cfg/extra.toml", doc.source_path);
 }
+
+test "array-of-tables and empty section headers are skipped with a flag" {
+    // `[[..]]` is deliberately unsupported; `[]` is an empty name. Both must
+    // be warn-and-skipped (not fatal) but flag the Document (C1) so a load
+    // refuses to proceed on a partial config.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
+        \\[[tiling.arr]]
+        \\[bar]
+        \\height = 24
+        \\[]
+        \\width = 10
+    );
+
+    try testing.expect(doc.had_errors);
+    // The valid sections still parsed; the broken headers did not create keys.
+    const bar = doc.sections.getPtr("bar").?;
+    try testing.expectEqual(@as(i64, 24), bar.get("height").?.asScalar(i64).?);
+    try testing.expect(doc.sections.getPtr("tiling.arr") == null);
+    try testing.expect(doc.sections.getPtr("") == null);
+    try testing.expect(doc.root.get("width") == null);
+}
+
+test "unterminated string and junk after a pair are skipped with a flag" {
+    // A newline inside a double-quoted string and trailing garbage after a
+    // completed pair are both recoverable skips; the surrounding lines parse.
+    // (Space-separated bare values accumulate into an array instead of
+    // tripping the junk path, so the junk case uses a second string.)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
+        \\a = "unterminated
+        \\b = "ok" "junk"
+        \\c = 3
+    );
+
+    try testing.expect(doc.had_errors);
+    try testing.expectEqual(@as(i64, 3), doc.root.get("c").?.asScalar(i64).?);
+    // `b`'s value was parsed, then the junk flagged the line: b survives.
+    try testing.expectEqualStrings("ok", doc.root.get("b").?.asScalar([]const u8).?);
+    try testing.expect(doc.root.get("a") == null);
+}
+
+test "empty key and bare-key flag semantics" {
+    // `= value` has no key (InvalidSyntax skip); a bare `flag` parses as a
+    // boolean true with no '=' (the TOML-subset's presence flag).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
+        \\= 5
+        \\flag
+        \\present = 1
+    );
+
+    try testing.expect(doc.had_errors);
+    try testing.expect(doc.root.get("flag").?.asScalar(bool).?);
+    try testing.expectEqual(@as(i64, 1), doc.root.get("present").?.asScalar(i64).?);
+}
+
+test "single-quoted and double-quoted strings both terminate correctly" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(), "s = 'hello'\n" ++ "d = \"hi\"\n");
+    try testing.expect(!doc.had_errors);
+    try testing.expectEqualStrings("hello", doc.root.get("s").?.asScalar([]const u8).?);
+    try testing.expectEqualStrings("hi", doc.root.get("d").?.asScalar([]const u8).?);
+}
+
+test "mergeDocumentsInto propagates had_errors from an overlay" {
+    // C1: a broken overlay flags the merged result even if the base is clean,
+    // so a load composing documents can see any source's errors.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var base = try parser.parse(a, "theme = \"dark\"\n", "<test>");
+    var broken = try parser.parse(a, "[oops\nstill = \"here\"\n", "<test>");
+
+    try testing.expect(!base.had_errors);
+    try testing.expect(broken.had_errors);
+    try parser.mergeDocumentsInto(a, &base, &broken);
+    try testing.expect(base.had_errors);
+    // The valid line in the broken overlay still landed.
+    try testing.expectEqualStrings("here", base.root.get("still").?.asScalar([]const u8).?);
+}

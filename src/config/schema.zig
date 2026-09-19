@@ -176,6 +176,40 @@ pub const knobs = [_]Knob{
     barDrunColor("drun_prompt_color", "bar.drun_prompt_color", "primary_color"),
 };
 
+/// Keys the [bar.colors] scalar knobs own; every OTHER key in that table is a
+/// bar segment name (a per-segment text-color override, see
+/// `applySegmentColors`). Derived from `knobs` so a future [bar.colors] knob
+/// can never desync the map pass.
+const bar_colors_knob_keys_len = blk: {
+    var n: usize = 0;
+    for (knobs) |k| {
+        for (k.places) |pl| {
+            if (std.mem.eql(u8, pl.section, "bar.colors")) n += 1;
+        }
+    }
+    break :blk n;
+};
+const bar_colors_knob_keys: [bar_colors_knob_keys_len][]const u8 = blk: {
+    var keys: [bar_colors_knob_keys_len][]const u8 = undefined;
+    var i: usize = 0;
+    for (knobs) |k| {
+        for (k.places) |pl| {
+            if (std.mem.eql(u8, pl.section, "bar.colors")) {
+                keys[i] = pl.key;
+                i += 1;
+            }
+        }
+    }
+    break :blk keys;
+};
+
+fn isBarColorsKnobKey(key: []const u8) bool {
+    for (bar_colors_knob_keys) |k| {
+        if (std.mem.eql(u8, k, key)) return true;
+    }
+    return false;
+}
+
 /// How an enum-valued knob is parsed.
 pub const EnumRead = struct {
     T: type,
@@ -500,5 +534,34 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
                 }
             },
         }
+    }
+    try applySegmentColors(allocator, doc, cfg);
+}
+
+/// Reads `[bar.colors]` segment-name -> text-color pairs (any key not owned
+/// by the scalar knobs above) into `cfg.bar.segment_fg`. Runs after the knob
+/// loop so the known keys (title, drun_*, ...) are distinguishable. Gated on
+/// [bar] exactly like the [bar.colors] chain; an absent table or section
+/// leaves the map empty, so segment text falls back to `fg`. Keys are duped
+/// for the Config's lifetime; palette references resolve like every color
+/// knob.
+pub fn applySegmentColors(
+    allocator: std.mem.Allocator,
+    doc: *parser.Document,
+    cfg: *types.Config,
+) !void {
+    types.freeSegmentColors(&cfg.bar.segment_fg, allocator);
+    if (doc.getSection("bar") == null) return;
+    const sec = doc.getSection("bar.colors") orelse return;
+    var it = sec.orderedIterator();
+    while (it.next()) |pair| {
+        sec.markConsumed(pair.key);
+        if (isBarColorsKnobKey(pair.key)) continue;
+        const color = getColorFromValue(pair.key, pair.value, cfg.bar.fg, &doc.palette);
+        const key = try allocator.dupe(u8, pair.key);
+        cfg.bar.segment_fg.put(allocator, key, color) catch |err| {
+            allocator.free(key);
+            return err;
+        };
     }
 }

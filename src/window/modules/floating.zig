@@ -18,6 +18,8 @@ const actions = @import("actions");
 const screen = @import("screen");
 
 const model = @import("model");
+const sync = @import("sync");
+const plugin = @import("plugin");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
@@ -163,7 +165,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
     const geom = blk: {
-        if (@import("sync").truthRect(pipeline.model(), win)) |g| break :blk g;
+        if (sync.truthRect(pipeline.model(), win)) |g| break :blk g;
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
@@ -408,7 +410,7 @@ pub fn honorConfigureRequest(
 
 /// This module's window sub-system contribution: the floating drag/resize
 /// commands floating owns.
-pub const module: @import("plugin").WindowModule = .{
+pub const module: plugin.WindowModule = .{
     .startDrag = startDrag,
     .stopDrag = stopDrag,
     .updateDrag = updateDrag,

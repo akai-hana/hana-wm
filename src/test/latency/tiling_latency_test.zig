@@ -78,7 +78,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         var id: WindowId = 1;
         for (0..10) |ws| {
             for (0..per_ws) |_| {
-                _ = model.register(&m, id, model.WSId.fromIndex(@intCast(ws))) catch unreachable;
+                _ = try model.register(&m, id, model.WSId.fromIndex(@intCast(ws)));
                 id += 1;
             }
         }
