@@ -106,8 +106,7 @@ var state = struct {
     workspace_count: usize = 1,
 }{};
 
-pub fn init(allocator: std.mem.Allocator) void {
-    _ = allocator;
+pub fn init() void {
     state.initialized = true;
     clearFocusMru();
 }

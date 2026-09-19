@@ -85,8 +85,7 @@ pub const LayoutCtx = struct {
     min_dim: u16,
 };
 
-/// Prefer `v.focused` when it appears in `windows`, else `fallback`
-/// (verbatim port of layouts.focusedElse).
+/// Prefer `v.focused` when it appears in `windows`, else `fallback`.
 pub fn focusedElse(
     v: *const View,
     windows: []const model.WindowId,
@@ -108,6 +107,12 @@ pub inline fn totalInset(gap_amount: u16, m: utils.Margins) u16 {
 /// any layout that needs the full shrink in one expression).
 pub inline fn fullInset(m: anytype) u16 {
     return totalInset(m.gap, m);
+}
+
+/// Interior-boundary half-gap: the seam between two adjacent panes carries
+/// half a gap per side so neighboring windows together share one full gap.
+pub inline fn seamGap(m: utils.Margins) u16 {
+    return m.gap / 2;
 }
 
 /// Shrinks `dim` by `margin` (gap/border), floored to `min_dim` so a layout
@@ -168,6 +173,13 @@ pub inline fn bisectRegion(dim: u16, gap: u16) struct { first: u16, second: u16 
     return .{ .first = first, .second = second };
 }
 
+/// Even share of `total` across `count` cells, with a full `gap` between every
+/// pair plus one at each outer edge. The cell math behind grid's rigid and
+/// widened-last-row shapes.
+pub inline fn paneCell(total: u16, count: u16, gap: u16) u16 {
+    return (total -| (count + 1) *| gap) / count;
+}
+
 /// Work-area origin y clamped to >= 0, as u16.
 pub inline fn waY(v: *const View) u16 {
     return clampYToU16(v.workarea.y);
@@ -203,6 +215,15 @@ pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: 
         if (w == top) continue;
         emitParked(out, w);
     }
+}
+
+/// Region too small to subdivide (overflow share): place `top` on-screen
+/// inset by the doubled border, park every other window in `windows`. Shared
+/// by fibonacci and leaf, whose "region can't fit two children" fallbacks
+/// both reduce to this shape.
+pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId, top: model.WindowId, r: Region) void {
+    emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, utils.doubledBorder(ctx.m), ctx.min_dim), true);
+    showOneHideRest(ctx.out, windows, top);
 }
 
 /// Dispatch registry (build-generated, alphabetical stems). The active layout
@@ -254,7 +275,7 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     };
     if (n == 0) return cur;
     for (indices[0..n], 0..) |idx, i| if (idx == cur) {
-        return indices[@intCast(@mod(@as(i32, @intCast(i)) + dir, @as(i32, @intCast(n))))];
+        return indices[utils.wrapIndex(i, dir, n)];
     };
     return indices[if (dir >= 0) 0 else n - 1];
 }

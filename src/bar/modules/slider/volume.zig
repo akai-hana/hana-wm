@@ -207,34 +207,8 @@ fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) []const u8 {
         (config.volume_muted_format orelse default_muted_format)
     else
         (config.volume_format orelse default_format);
-
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < fmt.len and n < buf.len) {
-        if (fmt[i] == '{') {
-            if (std.mem.startsWith(u8, fmt[i..], "{pct}")) {
-                var b: [16]u8 = undefined;
-                const ps = std.fmt.bufPrint(&b, "{d}", .{g_pct}) catch break;
-                if (n + ps.len > buf.len) break;
-                @memcpy(buf[n..][0..ps.len], ps);
-                n += ps.len;
-                i += 5;
-                continue;
-            }
-            if (std.mem.startsWith(u8, fmt[i..], "{state}")) {
-                const state = if (muted) "mute" else "unmute";
-                if (n + state.len > buf.len) break;
-                @memcpy(buf[n..][0..state.len], state);
-                n += state.len;
-                i += 7;
-                continue;
-            }
-        }
-        buf[n] = fmt[i];
-        n += 1;
-        i += 1;
-    }
-    return buf[0..n];
+    const state: []const u8 = if (muted) "mute" else "unmute";
+    return slider.renderLine(fmt, g_pct, state, buf);
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.

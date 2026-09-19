@@ -71,8 +71,10 @@ icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 # brightness_device    = ""            # sysfs pin: "amdgpu_bl0" (backlight) or
 #                                     # "led:kbd" (LED class); absent = auto-pick
 #                                     # the lexicographically smallest backlight
-# systatus_items        = ["cpu", "mem"]  # systatus readouts; absent = every present-capable
-#                             # readout in alphabetical registry order (batt, cpu, mem), [] = none
+
+# Systatus readouts and slider controls are their OWN bar segments, selected
+# per-item via [bar.layout.*].segments: "batt", "cpu", "mem" (readouts),
+# "volume", "brightness" (controls). Each may be ordered/spaced anywhere.
 
 [bar.layout.left]
 segments = ["workspaces", "layout"]

@@ -33,8 +33,8 @@ const regCur = helpers.regCur;
 const makeCtx = helpers.makeCtx;
 
 /// Registers ids 1..n with home-workspace hint 0 (the fill most benchmarks use).
-fn fill(m: *Model, n: u32) void {
-    for (0..n) |i| model.register(m, @intCast(i + 1), model.WSId.fromIndex(0)) catch unreachable;
+fn fill(m: *Model, n: u32) !void {
+    for (0..n) |i| try model.register(m, @intCast(i + 1), model.WSId.fromIndex(0));
 }
 
 test "bench: findHome scan (100 wins, 10 ws)" {
@@ -105,7 +105,7 @@ test "bench: coveringOccupantOnWs store scan (50 wins)" {
 
 test "bench: moveWindowToWs round-trip (50 wins)" {
     var m = makeModel();
-    fill(&m, 50);
+    try fill(&m, 50);
 
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
@@ -126,13 +126,13 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
     var m = makeModel();
     try minimize.init();
     defer minimize.deinit();
-    fill(&m, 32);
+    try fill(&m, 32);
 
     const iterations: usize = if (bench) 5_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
         for (0..32) |i| {
-            minimize.minimize(&m, @intCast(i + 1)) catch unreachable;
+            try minimize.minimize(&m, @intCast(i + 1));
         }
         for (0..32) |i| {
             minimize.restore(&m, @intCast(i + 1));
@@ -145,7 +145,7 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
 
 test "bench: reorderTiled (50 wins)" {
     var m = makeModel();
-    fill(&m, 50);
+    try fill(&m, 50);
 
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
@@ -164,7 +164,7 @@ fn testColor(_: model.WindowId, _: *const model.Model) u32 {
 
 test "bench: reconcile pass (50 windows)" {
     var m = makeModel();
-    fill(&m, 50);
+    try fill(&m, 50);
     model.setFocus(&m, 25);
 
     var recorder = helpers.TestSink(.none){};
@@ -187,7 +187,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     // reconcile over every window) vs AFTER (a targeted reconcileDragTick that
     // sends only the dragged window's geometry).
     var m = makeModel();
-    fill(&m, 50);
+    try fill(&m, 50);
     model.setFocus(&m, 25);
 
     // Float window 50 so it participates in the drag fast path.
@@ -250,7 +250,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
     const t0 = nowNs();
     for (0..iterations) |_| {
         var m = makeModel();
-        fill(&m, 50);
+        try fill(&m, 50);
     }
     const elapsed_ns = nowNs() - t0;
     const per_reg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 50));
@@ -259,7 +259,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
 
 test "bench: fallbackFocusCandidate (50 wins)" {
     var m = makeModel();
-    fill(&m, 50);
+    try fill(&m, 50);
     for (0..50) |i| {
         model.setFocus(&m, @intCast(i + 1));
     }
@@ -277,7 +277,7 @@ test "bench: fallbackFocusCandidate (50 wins)" {
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     var m = makeModel();
     const n = constants.Limits.max_tiled_windows;
-    fill(&m, n);
+    try fill(&m, n);
 
     const iterations: usize = if (bench) 50_000 else 1;
     const t0 = nowNs();
@@ -304,17 +304,17 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     const t0 = nowNs();
     for (0..it_cold) |_| {
         sync.init();
-        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1)) catch unreachable;
+        for (0..n) |i| _ = try sync.sentGetOrPut(@intCast(i + 1));
     }
     const cold_ns = nowNs() - t0;
     const per_cold_ns = @as(f64, @floatFromInt(cold_ns)) / @as(f64, @floatFromInt(it_cold * n));
 
     sync.init();
-    for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001)) catch unreachable;
+    for (0..n) |i| _ = try sync.sentGetOrPut(@intCast(i + 1001));
     const it_warm: usize = if (bench) 20_000 else 1;
     const t1 = nowNs();
     for (0..it_warm) |_| {
-        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001)) catch unreachable;
+        for (0..n) |i| _ = try sync.sentGetOrPut(@intCast(i + 1001));
     }
     const warm_ns = nowNs() - t1;
     const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));

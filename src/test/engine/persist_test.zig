@@ -30,15 +30,15 @@ const page_alloc = std.heap.page_allocator;
 /// A deterministic, non-trivial model: three tiled windows spread over two
 /// workspaces plus one floating window, with focus, reordered tiled order and
 /// custom workspace params and per-ws runtime viewport state.
-fn buildFixtureModel(m: *model.Model) void {
-    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
-    model.register(m, 2, model.WSId.fromIndex(0)) catch unreachable;
-    model.register(m, 3, model.WSId.fromIndex(1)) catch unreachable;
+fn buildFixtureModel(m: *model.Model) !void {
+    try model.register(m, 1, model.WSId.fromIndex(0));
+    try model.register(m, 2, model.WSId.fromIndex(0));
+    try model.register(m, 3, model.WSId.fromIndex(1));
     model.setFocus(m, 1);
-    _ = m.store.put(4, .{
+    _ = try m.store.put(4, .{
         .mask = model.bit(model.WSId.fromIndex(0)),
         .anchor = .{ .floating = .{ .x = 5, .y = 6, .width = 100, .height = 80 } },
-    }) catch unreachable;
+    });
     model.reorderTiled(m, 2, 0); // ws 0 tiled order [2, 1]
 
     m.current = model.WSId.fromIndex(1);
@@ -51,15 +51,15 @@ fn buildFixtureModel(m: *model.Model) void {
 /// The window id set the restore path expects to see again (adoption would
 /// re-register these after a re-exec). Window 4 floats and is deliberately
 /// absent -- like a window that did not survive the re-exec.
-fn registerSurvivors(m: *model.Model) void {
-    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
-    model.register(m, 2, model.WSId.fromIndex(0)) catch unreachable;
-    model.register(m, 3, model.WSId.fromIndex(1)) catch unreachable;
+fn registerSurvivors(m: *model.Model) !void {
+    try model.register(m, 1, model.WSId.fromIndex(0));
+    try model.register(m, 2, model.WSId.fromIndex(0));
+    try model.register(m, 3, model.WSId.fromIndex(1));
 }
 
 test "F10: save/load keeps every window record and workspace field" {
     var src = helpers.makeModel();
-    buildFixtureModel(&src);
+    try buildFixtureModel(&src);
 
     const path = try scratch.scratchPath(testing.allocator, "hana-persist-", "roundtrip");
     defer testing.allocator.free(path);
@@ -127,7 +127,7 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
 
 test "F10: applyModelLevel restores focus, ws state and every membership" {
     var src = helpers.makeModel();
-    buildFixtureModel(&src);
+    try buildFixtureModel(&src);
 
     const path = try scratch.scratchPath(testing.allocator, "hana-persist-", "apply");
     defer testing.allocator.free(path);
@@ -138,7 +138,7 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
     // The re-exec'd process redisovers its old windows and registers them
     // before the persisted model level is applied back.
     var restored = helpers.makeModel();
-    registerSurvivors(&restored);
+    try registerSurvivors(&restored);
 
     persist.applyModelLevel(&restored);
 

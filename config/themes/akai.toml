@@ -84,6 +84,15 @@ title           = primary_color    # focused title = primary_color
 title_unfocused = secondary_color  # unfocused title = secondary_color
 title_minimized = alternative_color # minimized title = alternative_color
 
+# Per-segment text colors: any key that isn't a named color knob above is a
+# segment registry name ("cpu", "mem", "volume", "brightness", "batt", ...).
+# A segment with no entry falls back to the bar-wide fg (text_color).
+# Systatus readouts read primary; slider controls read alternative.
+cpu        = primary_color     # cpu readout text
+mem        = primary_color     # memory readout text
+volume     = alternative_color # volume slider text
+brightness = alternative_color # brightness slider text
+
 # drun command runner colors (all optional; omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)
  # drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)

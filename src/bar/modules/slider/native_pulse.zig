@@ -458,13 +458,6 @@ pub const Backend = struct {
     channels: u8,
     muted: bool,
 
-    pub fn deinit(self: *Backend) void {
-        self.lib.context_free(self.ctx);
-        self.lib.mainloop_stop(self.m);
-        self.lib.mainloop_free(self.m);
-        self.* = undefined;
-    }
-
     /// In-process volume commit: one native-protocol round trip.
     pub fn setVolumePct(self: *const Backend, pct: u8) bool {
         if (!buildCvolume(pct, self.channels, &g_op_vol)) return false;

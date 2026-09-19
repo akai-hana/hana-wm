@@ -51,18 +51,18 @@ const Fixture = struct {
     hint_buf: [model.store_capacity]model.SizeHints = undefined,
     wa: utils.Rect,
 
-    fn init(self: *Fixture, wins: []const model.WindowId) void {
-        self.initAt(wins, helpers.std_wa);
+    fn init(self: *Fixture, wins: []const model.WindowId) !void {
+        try self.initAt(wins, helpers.std_wa);
     }
 
     /// init with an explicit work area, for the non-standard-geometry cases.
-    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: utils.Rect) void {
+    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: utils.Rect) !void {
         self.* = .{
             .m = .{},
             .hv = undefined,
             .wa = wa,
         };
-        for (wins) |w| model.register(&self.m, w, null) catch unreachable;
+        for (wins) |w| try model.register(&self.m, w, null);
         // Materialize hints aligned index-for-index with the order slice.
         const s0 = &self.m.ws[0];
         for (s0.tiled_order.constSlice(), 0..) |w, i| {
@@ -112,7 +112,7 @@ fn expectP(out: *const List, i: usize, win: model.WindowId, x: i32, y: i32, w: u
 // master, single window fills the work area minus gaps/borders.
 test "master single window" {
     var fx: Fixture = undefined;
-    fx.init(&.{11});
+    try fx.init(&.{11});
 
     const out = computeOf(K_MASTER, tuned(&fx));
 
@@ -125,7 +125,7 @@ test "master single window" {
 // master + stack, default 50/50 split.
 test "master two windows" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12 });
+    try fx.init(&.{ 11, 12 });
 
     const out = computeOf(K_MASTER, tuned(&fx));
 
@@ -139,7 +139,7 @@ test "master two windows" {
 // primary_on_right mirrors the columns.
 test "master on right" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12 });
+    try fx.init(&.{ 11, 12 });
 
     var v = tuned(&fx);
     v.env.primary_on_right = true;
@@ -158,7 +158,7 @@ test "master on right" {
 // grid 2x2.
 test "grid 2x2" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 });
+    try fx.init(&.{ 11, 12, 13, 14 });
 
     const out = computeOf(K_GRID, tuned(&fx));
 
@@ -176,7 +176,7 @@ test "grid 2x2" {
 // narrow column stride, making neighbouring wide cells overlap each other).
 test "grid relaxed partial row" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14, 15 });
+    try fx.init(&.{ 11, 12, 13, 14, 15 });
 
     var v = tuned(&fx);
     v.env.variant_idx = GRID_RELAX_VARIANT;
@@ -203,7 +203,7 @@ test "grid relaxed partial row" {
 // fibonacci spiral of four, counter-clockwise from top-left.
 test "fibonacci spiral" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 });
+    try fx.init(&.{ 11, 12, 13, 14 });
 
     const out = computeOf(K_FIB, tuned(&fx));
 
@@ -226,7 +226,7 @@ test "fibonacci overflow fallback" {
     var wins: [40]model.WindowId = undefined;
     for (&wins, 0..) |*w, i| w.* = @intCast(41 + i);
     var fx: Fixture = undefined;
-    fx.initAt(&wins, .{ .x = 0, .y = 0, .width = 200, .height = 200 });
+    try fx.initAt(&wins, .{ .x = 0, .y = 0, .width = 200, .height = 200 });
 
     model.setFocus(&fx.m, 75); // deep in the overflow tail
 
@@ -254,7 +254,7 @@ test "fibonacci overflow fallback" {
 // leaf BSP splits the longer axis first, ties favour vertical.
 test "leaf balanced splits" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 });
+    try fx.init(&.{ 11, 12, 13, 14 });
 
     const out = computeOf(K_LEAF, tuned(&fx));
 
@@ -271,7 +271,7 @@ test "leaf balanced splits" {
 test "scroll strip and parking" {
     if (!build_options.has_layout_scroll) return error.SkipZigTest;
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14, 15 });
+    try fx.init(&.{ 11, 12, 13, 14, 15 });
 
     // Caller duties (algo_scroll header): snap right for new windows, clamp.
     const slot_w = scroll_algo.slotWidth(800);
@@ -300,7 +300,7 @@ test "scroll strip and parking" {
 // monocle raises focusedElse's pick, parks the rest; gaps variant insets.
 test "monocle gaps variant" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13 });
+    try fx.init(&.{ 11, 12, 13 });
 
     model.setFocus(&fx.m, 12);
 
@@ -325,7 +325,7 @@ test "monocle gaps variant" {
 // size hints are applied centrally at emit time (inc snap + centring).
 test "hints applied at emit" {
     var fx: Fixture = undefined;
-    fx.init(&.{11});
+    try fx.init(&.{11});
 
     // Mutate the model entry, then re-materialize the View's hint snapshot
     // exactly as sync.reconcile does per retile (hints are frozen INTO
@@ -357,7 +357,7 @@ test "applyHints ignores declared minimums" {
 // max_height capping, on the width axis.
 test "master swallows freed space from a narrow dialog slave" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12 });
+    try fx.init(&.{ 11, 12 });
 
     // Window 12 (the stack slave) declares a small max_width. Re-materialize
     // the hint snapshot into the buffer, exactly as sync does per retile.
@@ -379,7 +379,7 @@ test "master swallows freed space from a narrow dialog slave" {
 // purity: compute twice yields identical output and mutates nothing.
 test "deterministic and non-mutating" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13 });
+    try fx.init(&.{ 11, 12, 13 });
 
     const params_before = fx.m.ws[0].params;
     const focus_before = fx.m.focused;
@@ -405,7 +405,7 @@ test "deterministic and non-mutating" {
 // calcGridShape(0).rows == 0 and monocle indexed order[len - 1].
 test "n=0 emits nothing across all layouts" {
     var fx: Fixture = undefined;
-    fx.init(&.{});
+    try fx.init(&.{});
 
     // Scroll is a removeable addon: absent it, its registry entries collapse
     // to the same index as another layout, so prune it from the sweep.
@@ -429,7 +429,7 @@ test "n=0 emits nothing across all layouts" {
 test "scroll orphan keep-last invariant" {
     if (!build_options.has_layout_scroll) return error.SkipZigTest;
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13, 14 });
+    try fx.init(&.{ 11, 12, 13, 14 });
 
     const slot_w = scroll_algo.slotWidth(800);
     const params = &fx.m.ws[0].params;
@@ -452,7 +452,7 @@ test "scroll orphan keep-last invariant" {
     // (3) Shrink 4 -> 2: maxOffset(2) == 0 forces offset 0; both visible.
     params.viewport_offset = @min(stale_off, scroll_algo.maxOffset(2, slot_w, 800));
     var fx2: Fixture = undefined;
-    fx2.init(&.{ 11, 12 });
+    try fx2.init(&.{ 11, 12 });
 
     const params2 = &fx2.m.ws[0].params;
     params2.viewport_offset = 0;
@@ -468,7 +468,7 @@ test "scroll orphan keep-last invariant" {
 // already pinned per-layout above.
 test "emission order pin across layouts" {
     var fx: Fixture = undefined;
-    fx.init(&.{ 11, 12, 13 });
+    try fx.init(&.{ 11, 12, 13 });
 
     model.setFocus(&fx.m, 12);
 

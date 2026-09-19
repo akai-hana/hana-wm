@@ -13,14 +13,12 @@ pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon-x11.h");
 });
 
-// Pure name->keysym parsing lives in `keysyms` (xcb-free, importable from
-// the pure config layer); these re-exports keep legacy `xkbcommon.*` callers
-// (keybind.zig, input.zig) on the same symbols without a second home.
-pub const xkb_keysym_case_insensitive = keysyms.xkb_keysym_case_insensitive;
-pub const XKB_KEY_NoSymbol: u32 = keysyms.XKB_KEY_NoSymbol;
-pub const xkb_keysym_from_name = keysyms.keysymFromName;
 const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
+
+/// X11 reserves keycodes 0..7; the first real keycode is 8. The flat keysym
+/// table therefore covers 8..255.
+const x11_min_keycode: u8 = 8;
 
 /// The XKB setup requests are sent once after setup; these retries cover the
 /// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
@@ -100,7 +98,7 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 /// Keycodes below 8 are reserved by X11 and produce no real keysym.
 fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
     var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
-    for (8..256) |kc| {
+    for (@as(usize, x11_min_keycode)..256) |kc| {
         table[kc] = baseSymbol(km, @intCast(kc));
     }
     return table;
@@ -187,7 +185,7 @@ pub const XkbState = struct {
     /// truly symmetric multi-keycode keysyms are rare in WM bindings (modifier
     /// left/right pairs have distinct keysyms: Shift_L ≠ Shift_R, etc.).
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
-        for (8..256) |kc| {
+        for (@as(usize, x11_min_keycode)..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
         }
         return null;
@@ -283,16 +281,20 @@ fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
     return try retryXkb(i32, error.XkbNoKeyboard, xcb_conn, coreKeyboardDeviceId);
 }
 
-/// Minimum reachable keysyms in 8..128 for a keymap to count as populated.
-/// A healthy keymap has 100+; 40 accepts minimal/embedded keymaps while
-/// still rejecting the empty keymap a not-yet-ready XKB returns at startup.
+/// Minimum reachable keysyms in the health-check window for a keymap to count
+/// as populated. A healthy keymap has 100+; 40 accepts minimal/embedded
+/// keymaps while still rejecting the empty keymap a not-yet-ready XKB returns
+/// at startup.
 const min_keymap_symbols: u32 = 40;
+
+/// Upper bound of the reachable-symbols health-check window (8..128).
+const keymap_health_hi: u8 = 128;
 
 /// Returns true if `km` has at least min_keymap_symbols reachable keysyms in the 8..128 range.
 /// Guards against accepting a partially-initialised keymap on early startup.
 fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
     var valid_keys: u32 = 0;
-    for (8..128) |kc| {
+    for (x11_min_keycode..keymap_health_hi) |kc| {
         if (baseSymbol(km, @intCast(kc)) != xkb.XKB_KEY_NoSymbol)
             valid_keys += 1;
     }

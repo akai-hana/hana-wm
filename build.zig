@@ -127,7 +127,17 @@ pub fn build(b: *std.Build) !void {
     // Contract names are read from the modules' own `pub const module`
     // declarations (typed or via segdraw), never from a hand-written table.
     try deriveOwnerContracts(b, &discovery.source_paths, &registry);
-    var owner_modules = try buildOwnerRegistries(b, &discovery.modules, target, optimize, &registry);
+    // Precompute each package's bound-sub list (siblings self-declaring the
+    // binding, sorted alphabetically) BEFORE either consumer needs it: every
+    // generated `<package>_subs` registry is one such list, and the
+    // `segmentFor(i)` entries a `bar_segments` package contributes to
+    // `bar_modules` index the SAME sorted list (`i` == `subs[i]`), so the two
+    // orderings can never drift from each other.
+    var bound_subs = std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    for (sub_registry_specs) |spec| {
+        _ = try boundSubStems(b, &discovery, spec, &bound_subs);
+    }
+    var owner_modules = try buildOwnerRegistries(b, &discovery.modules, target, optimize, &registry, &bound_subs);
     // Package sub-addon registries (`<package>_subs`), generated from file
     // presence the same way the owner registries are, so a package core
     // (systatus, prompt, title, ...) never names one of its addon siblings
@@ -136,20 +146,7 @@ pub fn build(b: *std.Build) !void {
     // Injected through `owner_modules` so every module sees the generated
     // import like the other registries.
     for (sub_registry_specs) |spec| {
-        if (!discovery.modules.contains(spec.package)) continue;
-        // A package sibling is listed as an addon only when it SELF-DECLARES
-        // the binding (`pub const <binding>`); a sibling without it (e.g. the
-        // native ALSA/PulseAudio backends beside the slider package) is a
-        // private implementation file -- still a discovered module, still
-        // importable by stem, but never bound into the generated registry.
-        var filtered = std.ArrayListUnmanaged([]const u8).empty;
-        if (discovery.sub_stems.get(spec.package)) |stems| {
-            for (stems.items) |stem| {
-                const rel_path = discovery.source_paths.get(stem) orelse continue;
-                if (try declaresBinding(b, rel_path, spec.binding))
-                    try filtered.append(b.allocator, stem);
-            }
-        }
+        const subs = bound_subs.getPtr(spec.package) orelse continue;
         const registry_name = try std.fmt.allocPrint(b.allocator, "{s}_subs", .{spec.package});
         try owner_modules.put(b.allocator, registry_name, try buildSubsRegistryModule(
             b,
@@ -160,7 +157,7 @@ pub fn build(b: *std.Build) !void {
             spec.array,
             spec.binding,
             spec.contract,
-            filtered.items,
+            subs.items,
         ));
     }
     // Tiling-engine seam: a generated `tiling_seam` module that names the
@@ -264,6 +261,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "schema_test", .gate = true, .x_gated = false },
         .{ .name = "tiling_test", .gate = has_tiling, .x_gated = false },
         .{ .name = "sync_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
+        .{ .name = "tracking_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
         .{ .name = "workspaces_test", .gate = has_workspaces, .x_gated = false },
         .{ .name = "config_test", .gate = true, .x_gated = false },
         .{ .name = "parser_test", .gate = true, .x_gated = false },
@@ -503,9 +501,10 @@ fn buildPluginsModule(
 /// parent directory. Stems are harvested during the single `src/` walk in
 /// `DiscoveryContext.discoverAll` and sorted here for deterministic dispatch.
 const OwnerRegistry = struct {
-    /// owner name (parent dir basename) maps to sorted, deduped `.zig` stems under
-    /// that owner's `modules/` tree. All strings are dup'd into b.allocator
-    /// (build-lifetime arena); never freed.
+    /// Same as above, restricted to the stems that SELF-DECLARE the owner's
+    /// module binding (`pub const module`), so a package core whose aggregate
+    /// belt module is gone (systatus, slider) drops out of the owner registry
+    /// and reaches `bar_modules` only through its derived `segmentFor(i)` entries.
     owners: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{},
 
     /// owner name -> the `plugin.*` contract its modules bind (`window` ->
@@ -525,7 +524,16 @@ const OwnerRegistry = struct {
             const dup_owner = try discovery.b.allocator.dupe(u8, entry.key_ptr.*);
             var list = std.ArrayListUnmanaged([]const u8).empty;
             for (entry.value_ptr.items) |stem| {
-                try list.append(discovery.b.allocator, stem);
+                // Only files SELF-DECLARING the owner's module binding
+                // (`pub const module`) are registry members. A package core
+                // WITHOUT one -- systatus/slider once their aggregate belt
+                // module is gone -- contributes its readouts/controls to the
+                // bar as standalone `segmentFor(i)` segments via
+                // `ownerModuleEntries` instead (they stay discovered and
+                // importable by stem; they just no longer ride one belt).
+                const rel_path = discovery.source_paths.get(stem) orelse continue;
+                if (try declaresBinding(discovery.b, rel_path, "module"))
+                    try list.append(discovery.b.allocator, stem);
             }
             try reg.owners.put(discovery.b.allocator, dup_owner, list);
         }
@@ -734,11 +742,21 @@ const sub_registry_specs = [_]struct {
     array: []const u8,
     binding: []const u8,
     contract: []const u8,
+    /// Packages whose bound subs are promoted to standalone BAR segments: one
+    /// `@import("<package>").segmentFor(i)` entry per bound sub is appended to
+    /// the generated `bar_modules` registry (see `ownerModuleEntries`), so each
+    /// readout/control is individually selectable, orderable, and spaced in
+    /// `[bar.layout.*]` rather than riding one aggregate "systatus"/"slider"
+    /// belt. The package core exports `pub fn segmentFor(comptime i: usize)
+    /// plugin.Segment`, and the entry index `i` always equals the sub's index
+    /// in the generated `<package>_subs` registry (both consume the same
+    /// sorted bound-sub list), so `segmentFor(i)` selects exactly `subs[i]`.
+    bar_segments: bool = false,
 }{
-    .{ .package = "systatus", .array = "subs", .binding = "sub", .contract = "systatus.Sub" },
+    .{ .package = "systatus", .array = "subs", .binding = "sub", .contract = "systatus.Sub", .bar_segments = true },
     .{ .package = "prompt", .array = "addons", .binding = "addon", .contract = "prompt.Addon" },
     .{ .package = "title", .array = "addons", .binding = "addon", .contract = "title.Scroller" },
-    .{ .package = "slider", .array = "subs", .binding = "sub", .contract = "slider.Sub" },
+    .{ .package = "slider", .array = "subs", .binding = "sub", .contract = "slider.Sub", .bar_segments = true },
 };
 
 /// True when `rel_path` declares the top-level binding `pub const <binding>`
@@ -772,19 +790,75 @@ fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bo
     return false;
 }
 
+/// Filters one `sub_registry_spec`'s package siblings to those that
+/// SELF-DECLARE the binding (`pub const <binding>`), sorts them
+/// alphabetically, caches them (duped, sorted) in `out` keyed by the
+/// package, and returns the map entry pointer (null when the package itself
+/// isn't discovered -- its dir-named core file is absent, so nothing can
+/// reference the generated registry).
+///
+/// The one sorted list feeds BOTH consumers, so their ordering can never
+/// drift: the generated `<package>_subs` registry `subs[k]`, and the derived
+/// bar segment `segmentFor(i)` with `i == k` (see `bar_segments` above). A
+/// sibling without the binding (e.g. native_alsa.zig / native_pulse.zig
+/// beside the slider package) stays a discovered, importable module but is
+/// never bound.
+fn boundSubStems(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+    spec: anytype,
+    out: *std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+) !?*std.ArrayListUnmanaged([]const u8) {
+    if (!discovery.modules.contains(spec.package)) return null;
+    var filtered = std.ArrayListUnmanaged([]const u8).empty;
+    if (discovery.sub_stems.get(spec.package)) |stems| {
+        for (stems.items) |stem| {
+            const rel_path = discovery.source_paths.get(stem) orelse continue;
+            if (try declaresBinding(b, rel_path, spec.binding))
+                try filtered.append(b.allocator, stem);
+        }
+    }
+    std.mem.sortUnstable([]const u8, filtered.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b_: []const u8) bool {
+            return std.mem.lessThan(u8, a, b_);
+        }
+    }.lessThan);
+    const dup = try b.allocator.dupe(u8, spec.package);
+    try out.put(b.allocator, dup, filtered);
+    return out.getPtr(dup).?;
+}
+
+/// One entry a generated `<owner>_modules` registry lists.
+const OwnerEntry = struct {
+    /// The import name the entry's expression resolves through, used to wire
+    /// the module edge into the generated registry module
+    /// (`@import("<owner>_modules")` adds this import to its own import table).
+    import: []const u8,
+    /// The full entry expression: `@import("<stem>").module` for a
+    /// module-declaring stem, or `@import("<package>").segmentFor(<i>)` for a
+    /// derived standalone bar segment.
+    expr: []const u8,
+};
+
 /// Generates one synthesized `<owner>_modules` registry module per discovered
 /// `modules/` dir and returns them keyed by their injectable import name.
 /// Each registry source lists, in deterministic scan order, every discovered
 /// sub-system module's `module` value, so core tiers iterate it with uniform
-/// loops and never name a sub-system module. Committed source is
-/// behaviour-identical across presence combinations; deleting a sub-system's
-/// file only regenerates a shorter array.
+/// loops and never name a sub-system module. The bar registry additionally
+/// appends -- AFTER the module-declaring stems, never intermixed -- one
+/// `segmentFor(i)` entry per bound sub of each `bar_segments` package (see
+/// `sub_registry_specs`): those packages no longer bind an aggregate belt
+/// module, so their readouts/controls reach `bar_modules` only as these
+/// derived entries. Committed source is behaviour-identical across presence
+/// combinations; deleting a sub-system's file only regenerates a shorter
+/// array.
 fn buildOwnerRegistries(
     b: *std.Build,
     discovered: *std.StringHashMap(*std.Build.Module),
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     registry: *OwnerRegistry,
+    bound_subs: *const std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
 ) !std.StringHashMapUnmanaged(*std.Build.Module) {
     var out = std.StringHashMapUnmanaged(*std.Build.Module){};
     var it = registry.owners.iterator();
@@ -792,6 +866,12 @@ fn buildOwnerRegistries(
         const name = try std.fmt.allocPrint(b.allocator, "{s}_modules", .{entry.key_ptr.*});
         const contract = registry.contracts.get(entry.key_ptr.*) orelse
             @panic("owner contract not derived; see deriveOwnerContracts");
+        const entries = try ownerModuleEntries(
+            b,
+            std.mem.eql(u8, entry.key_ptr.*, "bar"),
+            entry.value_ptr.*.items,
+            bound_subs,
+        );
         const mod = try buildOwnerRegistryModule(
             b,
             discovered,
@@ -799,18 +879,54 @@ fn buildOwnerRegistries(
             optimize,
             name,
             contract,
-            entry.value_ptr.*.items,
+            entries.items,
         );
         try out.put(b.allocator, name, mod);
     }
     return out;
 }
 
+/// The entries one `<owner>_modules` registry lists. The standard member is
+/// `@import("<stem>").module` per owner stem (module-declaring only, see
+/// `OwnerRegistry.run`); a bar registry additionally appends one
+/// `@import("<package>").segmentFor(k)` per bound sub of each `bar_segments`
+/// package, iterated in `sub_registry_specs` order and, within a package, in
+/// the same sorted order as its generated `<package>_subs` registry
+/// (`k` == `subs[k]`; both consume `bound_subs`).
+fn ownerModuleEntries(
+    b: *std.Build,
+    is_bar: bool,
+    stems: []const []const u8,
+    bound_subs: *const std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+) !std.ArrayListUnmanaged(OwnerEntry) {
+    var entries = std.ArrayListUnmanaged(OwnerEntry).empty;
+    for (stems) |stem| {
+        try entries.append(b.allocator, .{
+            .import = stem,
+            .expr = try std.fmt.allocPrint(b.allocator, "@import(\"{s}\").module", .{stem}),
+        });
+    }
+    if (is_bar) {
+        for (sub_registry_specs) |spec| {
+            if (!spec.bar_segments) continue;
+            const subs = bound_subs.get(spec.package) orelse continue;
+            for (subs.items, 0..) |_, k| {
+                try entries.append(b.allocator, .{
+                    .import = spec.package,
+                    .expr = try std.fmt.allocPrint(b.allocator, "@import(\"{s}\").segmentFor({d})", .{ spec.package, k }),
+                });
+            }
+        }
+    }
+    return entries;
+}
+
 /// Generates a single `<owner>_modules` registry module alongside its source
 /// file. Imports are added only for what the source references: `plugin` (the
-/// interface contract) and every discovered sub-system stem it lists.
-/// A stem that isn't discovered can't be listed (the scan walked the real
-/// filesystem), so every listed stem import exists.
+/// interface contract), every discovered sub-system stem it lists, and -- for
+/// a bar registry -- each bar_segments package whose `segmentFor` entries it
+/// lists. A stem that isn't discovered can't be listed (the scan walked the
+/// real filesystem), so every listed import exists.
 fn buildOwnerRegistryModule(
     b: *std.Build,
     discovered: *std.StringHashMap(*std.Build.Module),
@@ -818,24 +934,34 @@ fn buildOwnerRegistryModule(
     optimize: std.builtin.OptimizeMode,
     name: []const u8,
     contract: []const u8,
-    stems: []const []const u8,
+    entries: []const OwnerEntry,
 ) !*std.Build.Module {
     var src = std.ArrayList(u8).empty;
     try src.print(b.allocator, "const plugin = @import(\"plugin\");\n\n", .{});
     try src.print(b.allocator, "/// The auto-discovered `{s}` sub-system modules, in deterministic\n", .{name});
     try src.print(b.allocator, "/// filesystem scan order (dispatch order == this array's order).\n", .{});
-    try src.print(b.allocator, "/// Generated by build.zig; never committed.\n", .{});
+    if (std.mem.eql(u8, name, "bar_modules")) {
+        try src.appendSlice(b.allocator, "/// Bar registries additionally list derived standalone segments\n");
+        try src.appendSlice(b.allocator, "/// (`segmentFor(i)`, see build.zig `bar_segments`) after the stems.\n");
+    }
+    try src.appendSlice(b.allocator, "/// Generated by build.zig; never committed.\n");
     try src.print(b.allocator, "pub const modules = [_]plugin.{s}{{\n", .{contract});
-    for (stems) |stem| {
-        try src.print(b.allocator, "    @import(\"{s}\").module,\n", .{stem});
+    for (entries) |e| {
+        try src.print(b.allocator, "    {s},\n", .{e.expr});
     }
     try src.print(b.allocator, "}};\n", .{});
 
     const mod = makeGeneratedModule(b, target, optimize, b.fmt("{s}.zig", .{name}), src.items, &[_]Import{});
 
     if (discovered.get("plugin")) |m| mod.addImport("plugin", m);
-    for (stems) |stem| {
-        if (discovered.get(stem)) |m| mod.addImport(stem, m);
+    var added = std.StringHashMapUnmanaged(void){};
+    defer added.deinit(b.allocator);
+    for (entries) |e| {
+        if (discovered.get(e.import)) |m| {
+            if (added.contains(e.import)) continue;
+            try added.put(b.allocator, e.import, {});
+            mod.addImport(e.import, m);
+        }
     }
     return mod;
 }

@@ -1,26 +1,11 @@
 //! Systatus battery readout.
 //! Reports the charge % of the first /sys/class/power_supply/BAT* found.
-//! `present` drives default-set inclusion; `read` returns null while no
-//! battery reports a capacity, so an explicitly selected batt item renders
-//! nothing on a battery-less machine rather than a stale value.
+//! `read` returns null while no battery reports a capacity, so a selected
+//! `batt` segment renders nothing on a battery-less machine rather than a
+//! stale value (its slot collapses to zero width).
 
 const std = @import("std");
 const systatus = @import("systatus");
-
-/// Whether a battery is present at all (drives the default item list).
-fn present() bool {
-    const io = std.Options.debug_io;
-    var buf: [64]u8 = undefined;
-    for (0..8) |i| {
-        const name = std.fmt.bufPrint(&buf, "BAT{d}", .{i}) catch return false;
-        var p: [256]u8 = undefined;
-        const path = std.fmt.bufPrint(&p, "/sys/class/power_supply/{s}", .{name}) catch return false;
-        const dir = std.Io.Dir.openDirAbsolute(io, path, .{}) catch continue;
-        dir.close(io);
-        return true;
-    }
-    return false;
-}
 
 /// Charge % of the first present battery under /sys/class/power_supply.
 fn read() ?u8 {
@@ -44,5 +29,4 @@ pub const sub: systatus.Sub = .{
     .name = "batt",
     .label = "Batt",
     .read = read,
-    .present = present,
 };

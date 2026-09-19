@@ -17,7 +17,7 @@ pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
 });
 
-pub const xkb_keysym_case_insensitive = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
+const xkb_keysym_case_insensitive = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 
 /// Keysym for `name` under case-insensitive lookup (so `"super_l"` and

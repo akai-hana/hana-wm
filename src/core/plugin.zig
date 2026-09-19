@@ -35,6 +35,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
 const utils = @import("utils");
+const build_options = @import("build_options");
 const model = @import("model");
 
 /// Casts the `*anyopaque` blob handle from the deserialize seam to the model.
@@ -46,7 +47,7 @@ pub inline fn modelPtrOf(ptr: *anyopaque) *model.Model {
 /// one conditional-import definition instead of copy-pasting the
 /// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
 pub const tiling_mods =
-    if (@import("build_options").has_tiling) @import("tiling_modules").modules else &[_]Layout{};
+    if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
 /// The chrome-surface hook set a surface module binds to. The bar binds its
 /// `surfaces` value to this; when no surface is compiled in, core's
@@ -305,8 +306,8 @@ pub const Segment = struct {
     /// the segment's draw runs. Name-free: the segment owns the query's
     /// state; the bar merely honours the declared capability.
     needsRepaint: ?*const fn () bool = null,
-    /// Whether the segment participates in click-hit bounds (the clock does
-    /// not).
+    /// Whether the segment participates in click-hit bounds. Segments opt out
+    /// by setting this false.
     clickable: bool = true,
     // Lifecycle. `handlers` is a bar-provided service handle (function
     // pointers for chrome behaviors the segment must call back into); passed

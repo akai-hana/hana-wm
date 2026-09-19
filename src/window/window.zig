@@ -20,6 +20,9 @@ const borders = @import("borders");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const persist = @import("persist");
+const plugin = @import("plugin");
+const model_mod = @import("model");
+const sync = @import("sync");
 
 // Private transition-layer gate for mutable model access (tracking no longer
 // exports a shared one; each transition owner declares its own token).
@@ -28,13 +31,13 @@ const gate: pipeline.Gate = .{};
 /// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
 /// no module binds it; shared by the window layer (actions/borders alias this).
 pub fn providerOf(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
-) ?@import("plugin").WindowModule {
-    return @import("plugin").providerOf(window_mods[0..], field);
+    comptime field: std.meta.FieldEnum(plugin.WindowModule),
+) ?plugin.WindowModule {
+    return plugin.providerOf(window_mods[0..], field);
 }
 
 pub fn callHook(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    comptime field: std.meta.FieldEnum(plugin.WindowModule),
     args: anytype,
 ) void {
     inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
@@ -44,7 +47,7 @@ pub fn callHook(
 }
 
 pub fn callHookBool(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    comptime field: std.meta.FieldEnum(plugin.WindowModule),
     args: anytype,
 ) bool {
     inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
@@ -56,7 +59,7 @@ pub fn callHookBool(
 /// Runs a hook on EVERY module that binds it, not just the first (callHook
 /// returns after the first provider). Dispatch loops shared by actions.
 pub fn dispatchAll(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    comptime field: std.meta.FieldEnum(plugin.WindowModule),
     args: anytype,
 ) void {
     inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| @call(.auto, f, args);
@@ -65,7 +68,7 @@ pub fn dispatchAll(
 /// Like dispatchAll but returns true at the first provider whose hook does;
 /// false when no provider binds the hook or none returns true.
 pub fn dispatchFirstTrue(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    comptime field: std.meta.FieldEnum(plugin.WindowModule),
     args: anytype,
 ) bool {
     inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
@@ -83,7 +86,7 @@ fn HookReturnOf(comptime Hook: type) type {
 /// Returns the first provider's hook result (callHook that yields a value),
 /// with the return type derived from the hook field instead of hardcoded.
 pub inline fn callFirst(
-    comptime field: std.meta.FieldEnum(@import("plugin").WindowModule),
+    comptime field: std.meta.FieldEnum(plugin.WindowModule),
     args: anytype,
 ) ?HookReturnOf(@TypeOf(@field(window_mods[0], @tagName(field)))) {
     inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| return @call(.auto, f, args);
@@ -93,19 +96,16 @@ pub inline fn callFirst(
 /// True when `win` is currently screen-covering via a covering-mode module
 /// (fullscreen). Shared by the configure-resolution and client-message paths;
 /// actions aliases this as its dispatch seam.
-pub fn isCoveringMode(m: *const @import("model").Model, win: u32) bool {
+pub fn isCoveringMode(m: *const model_mod.Model, win: u32) bool {
     return callHookBool(.isCoveringMode, .{ m, win });
 }
 
 // ICCCM protocol surface (ICCCM 4.1.2/4.1.7) lives in icccm.zig; window.zig
 // re-exports the pub API so `window.*` stays the stable external facade.
 pub const fireWMProtocolsQuery = icccm.fireWMProtocolsQuery;
-pub const getInputModelResolved = icccm.getInputModelResolved;
-pub const getInputModelResolvedConsume = icccm.getInputModelResolvedConsume;
-pub const getInputModel = icccm.getInputModel;
+pub const peekInputModelResolved = icccm.peekInputModelResolved;
+pub const provisionalResolution = icccm.provisionalResolution;
 pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
-pub const isInputModelCached = icccm.isInputModelCached;
-pub const sendWMTakeFocus = icccm.sendWMTakeFocus;
 pub const sendWMTakeFocusKnown = icccm.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
@@ -731,7 +731,7 @@ fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
 /// describes brand-new spawns rather than pre-existing windows.
 fn restoredOrCurrent(record: ?*const persist.WindowRecord) u8 {
     if (record) |r| {
-        if (r.mask != 0) return @intCast((@import("model").lowestBit(r.mask) orelse unreachable).index);
+        if (r.mask != 0) return @intCast((model_mod.lowestBit(r.mask) orelse unreachable).index);
     }
     return tracking.getCurrentWorkspace() orelse 0;
 }
@@ -950,7 +950,7 @@ fn unmanageWindow(win: u32) void {
     // pointer event re-focused it. Both facts ride ctx into
     // actions.unmanage, which runs the same close fallback as the hide path.
     const model = if (pipeline.initialized) pipeline.model() else null;
-    const fs_ws: ?@import("model").WSId = if (model) |m|
+    const fs_ws: ?model_mod.WSId = if (model) |m|
         (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(m, win) else null)
     else
         null;
@@ -1020,7 +1020,7 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
 /// Returns null when even the fallback fails (window gone).
 fn resolveConfigureGeometry(win: u32) ?utils.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
-    if (@import("sync").truthRect(pipeline.model(), win)) |rect| {
+    if (sync.truthRect(pipeline.model(), win)) |rect| {
         // W3: report the border width we actually last sent for this window
         // (the ledger), not the global config default. The two differ before
         // the first reconcile and for per-window overrides; a wrong value here
@@ -1028,7 +1028,7 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         const border: u16 = if (!build_options.has_tiling)
             0
         else
-            @import("sync").lastBorderWidthFor(win) orelse @import("core").borderWidth();
+            sync.lastBorderWidthFor(win) orelse core.borderWidth();
         return .{
             .x = rect.x,
             .y = rect.y,
@@ -1058,7 +1058,7 @@ fn handleManagedConfigureRequest(
     event: *const xcb.xcb_configure_request_event_t,
     mask: u16,
 ) void {
-    const req: @import("model").ConfigureReq = .{
+    const req: model_mod.ConfigureReq = .{
         .x = if (mask & xcb.XCB_CONFIG_WINDOW_X != 0) event.x else null,
         .y = if (mask & xcb.XCB_CONFIG_WINDOW_Y != 0) event.y else null,
         .width = if (mask & xcb.XCB_CONFIG_WINDOW_WIDTH != 0) event.width else null,
@@ -1077,7 +1077,7 @@ fn handleManagedConfigureRequest(
             // observable) AND the reconcile ledger updated so the next pass
             // doesn't re-assert the WM width (reverting the honored value).
             if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
-                if (build_options.has_tiling) @import("sync").markSentBorderWidth(win, event.border_width);
+                if (build_options.has_tiling) sync.markSentBorderWidth(win, event.border_width);
                 if (has_bw) _ = wincache.cacheBorderWidth(win, event.border_width);
                 sendSyntheticConfigureNotify(win);
                 return;
@@ -1088,7 +1088,7 @@ fn handleManagedConfigureRequest(
             // module above) but not move the X window, which would flash it
             // onto the current workspace; it is configured when next shown.
             const m = pipeline.model();
-            if (@import("model").visibleOn(m, win, m.current))
+            if (model_mod.visibleOn(m, win, m.current))
                 sendRequestedConfigure(win, event, mask);
             return;
         },
@@ -1100,7 +1100,7 @@ fn handleManagedConfigureRequest(
                     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
                     &[_]u32{event.border_width},
                 );
-            if (build_options.has_tiling) @import("sync").markSentBorderWidth(win, event.border_width);
+            if (build_options.has_tiling) sync.markSentBorderWidth(win, event.border_width);
         },
         .ignored => {},
     }
@@ -1340,7 +1340,7 @@ fn parseSizeHintsIntoCache(
     // pre-registration staging area (actions.mapRequest bridges it into the
     // freshly created model entry); once registered, the model write below is
     // the only truth and the wincache copy is never read again.
-    const hints: @import("model").SizeHints = .{
+    const hints: model_mod.SizeHints = .{
         .min_width = @max(min_pair.width, base_pair.width),
         .min_height = @max(min_pair.height, base_pair.height),
         .max_width = max_pair.width,

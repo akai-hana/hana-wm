@@ -110,7 +110,9 @@ position = "bottom" # "top" / "bottom" — can be toggled at runtime
 # -- Bar layout --
 # Segments are placed into left/center/right anchor groups.
 # Available segments: "workspaces", "title", "clock", "layout", "variants",
-#                     "slider", "systatus"
+#                     "batt", "cpu", "mem", "volume", "brightness".
+# Each systatus readout and slider control is its OWN segment, so they can be
+# selected, ordered, and spaced independently.
 [bar.layout.left]
 segments = ["workspaces", "layout", "variants"]
 
@@ -118,7 +120,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["systatus", "slider", "clock"]
+segments = ["batt", "cpu", "mem", "volume", "brightness", "clock"]
 
 # -- Bar appearance --
 # Defaults below; the theme file typically overrides these.
@@ -153,10 +155,6 @@ segments = ["systatus", "slider", "clock"]
 #                              # ("amdgpu_bl0") or "led:<name>" for the LED
 #                              # class. Absent = auto-picked (lexicographically
 #                              # smallest backlight with max_brightness > 0)
-# systatus_items       = ["cpu", "mem"] # Systatus readouts, in render order
-#                         # absent = every present-capable readout, in
-#                         # alphabetical registry order (batt, cpu, mem);
-#                         # empty [ ] = none; unknown/duplicate entries skipped
 #
 # bg          = "#222222"  # Background color
 # fg          = "#BBBBBB"  # Foreground color
@@ -220,8 +218,8 @@ Mod+N       = "grow_stack_top"       # Grow topmost slave, shrink the rest evenl
 Mod+O       = "grow_stack_bottom"    # Grow bottommost slave, shrink the rest evenly
 
 # -- Focus cycling --
-Mod+j         = "focus_next_window"
-Mod+k         = "focus_prev_window"
+Mod+j         = "focus_prev_window"
+Mod+k         = "focus_next_window"
 Mod+Shift+j   = "move_window_next"
 Mod+Shift+k   = "move_window_prev"
 

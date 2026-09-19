@@ -4,6 +4,7 @@
 const std = @import("std");
 const debug = @import("debug");
 const paths = @import("paths");
+const fallback_toml = @import("fallback_toml");
 
 // Ordered by preference so the first match wins.
 const terminals = [_][]const u8{
@@ -68,6 +69,6 @@ fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
 /// The `fallback_toml` module (injected by build.zig's injectShared) always
 /// exists; an empty `content` slice is the only "missing" signal.
 pub fn getFallbackToml() ?[]const u8 {
-    const content = @import("fallback_toml").content;
+    const content = fallback_toml.content;
     return if (content.len == 0) null else content;
 }

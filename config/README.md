@@ -87,11 +87,18 @@ segments = ["clock"]
 ```
 
 Available segments: `workspaces`, `title`, `clock`, `layout`, `variants`,
-`slider`, `systatus`. A segment is compiled in only when its
-`src/bar/modules/*` file is present; the above list is the full stock set.
-`slider` aggregates every slider-style sub in `src/bar/modules/slider/`
-(volume + brightness) into one draggable belt; each sub is present only when
-its source file was dropped into that directory.
+`batt`, `cpu`, `mem`, `volume`, `brightness`. A segment is compiled in only
+when its `src/bar/modules/*` file (or, for a readout/control sub, its file in
+`src/bar/modules/systatus/` or `src/bar/modules/slider/`) is present; the
+above list is the full stock set.
+
+Every systatus readout and slider control is its OWN segment — there is no
+aggregate `systatus`/`slider` belt anymore. Each is selected, ordered, and
+spaced independently through `segments`:
+- readouts `batt`, `cpu`, `mem` (systatus; a readout absent on this machine —
+  e.g. `batt` with no battery — renders nothing and takes no space);
+- controls `volume`, `brightness` (slider; a control present only when its
+  source file was dropped into the package directory).
 
 Segment behavior knobs:
 
@@ -110,14 +117,6 @@ Segment behavior knobs:
   To make every commit a native, un-throttled write, install
   `contrib/udev/90-hana-backlight.rules` and add your user to the `video`
   group.
-- `systatus_items` — the systatus widget's readouts, in render order. Valid
-  items: `"mem"` (used/total + %), `"cpu"` (utilization %), `"batt"` (charge %
-  when a battery is present). Absent = every present-capable readout in
-  alphabetical registry order (`batt`, `cpu`, `mem`; `batt` only when a battery
-  is present), `[]` = none (renders nothing), otherwise exactly those readouts
-  in that order. Readout membership is generated from file presence: dropping a
-  readout's `.zig` file in `src/bar/modules/systatus/` both removes it from the
-  bar and from the accepted `systatus_items` names, with no other edits.
 - `clock_format` (strftime), `drun_prompt`, `carousel_enabled`,
   `carousel_speed_px_s`, `indicator_*` and the appearance/color knobs
   (usually themed).

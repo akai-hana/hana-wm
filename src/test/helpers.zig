@@ -46,6 +46,22 @@ pub fn colorOfFocused(win: model.WindowId, m: *const model.Model) u32 {
     return if (m.focused == win) 1 else 0;
 }
 
+/// Shared golden-sequence border-pixel convention: the sync and tracking
+/// fixtures assert these exact focused/unfocused values, so they live here
+/// as the single source instead of a per-file duplicate.
+pub const focused_pixel: u32 = 100;
+pub const unfocused_pixel: u32 = 200;
+
+/// Configured border width the sync fixture sends on the wire (cfg_bw).
+pub const cfg_bw: u16 = 2;
+
+/// Golden-sequence border-color callback: bright border when focused, dim
+/// otherwise. Shared by the sync/tracking fixtures (latency benches use the
+/// cheaper colorOfFocused instead).
+pub fn testColor(win: model.WindowId, m: *const model.Model) u32 {
+    return if (m.focused == win) focused_pixel else unfocused_pixel;
+}
+
 pub fn makeCtx(
     sink: sync.Sink,
     color_of: *const fn (model.WindowId, *const model.Model) u32,
@@ -55,7 +71,7 @@ pub fn makeCtx(
         .sink = sink,
         .screen = screen,
         .workarea = screen,
-        .cfg_bw = 2,
+        .cfg_bw = cfg_bw,
         .color_of = color_of,
         .env = std_env,
     };
@@ -101,6 +117,47 @@ pub const std_env: @FieldType(sync.Ctx, "env") = .{
 /// fixtures. Single source of truth so the test layouts list can't drift from
 /// the config's accepted set (src/config/config.zig canonical layout names).
 pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci", "leaf", "scroll" };
+
+/// Golden master-layout rects on the standard 800x600 fixture (gap 8 /
+/// border 2, default 50/50 split), derived from the shared constants instead
+/// of magic literals: any resize of std_wa/std_env propagates to every golden
+/// assertion. Formulas mirror tiling/modules/master.zig (totalInset,
+/// stackSeamMargin) and the sync/tiling tests rely on exactly this geometry.
+pub const std_golden = struct {
+    const gap: u16 = std_env.margins.gap; // 8
+    const border: u16 = std_env.margins.border; // 2
+    /// Outer gap both sides + both borders (master.zig totalInset).
+    const total_inset: u16 = gap *| 2 +| border *| 2; // 20
+    /// Half-gap toward the stack + row pitch (master.zig stackSeamMargin).
+    const seam: u16 = gap / 2 +| (gap +| border *| 2); // 16
+    const inner_h: u16 = std_wa.height -| total_inset; // 580
+    const split_w: u16 = std_wa.width / 2; // round(800 * 0.5) = 400
+
+    /// Single window filling the master pane.
+    pub const single = utils.Rect{
+        .x = @intCast(gap),
+        .y = @intCast(gap),
+        .width = std_wa.width -| total_inset,
+        .height = inner_h,
+    };
+    /// Master pane of a two-window 50/50 split.
+    pub const master = utils.Rect{
+        .x = @intCast(gap),
+        .y = @intCast(gap),
+        .width = split_w -| seam,
+        .height = inner_h,
+    };
+    /// Stack pane of a two-window 50/50 split: origin = master_w, then a
+    /// half-gap step; the stack column shrinks by the same seam.
+    pub const stack = utils.Rect{
+        .x = @intCast(split_w +| gap / 2),
+        .y = @intCast(gap),
+        .width = split_w -| seam,
+        .height = inner_h,
+    };
+    /// Fullscreen rect: the entire work area.
+    pub const fullscreen = std_wa;
+};
 
 pub fn TestSink(comptime mode: SinkMode) type {
     return struct {
@@ -219,6 +276,17 @@ pub fn TestSink(comptime mode: SinkMode) type {
             } else {
                 try std.testing.expect(op.geom.stack == null);
             }
+        }
+
+        pub fn expectGeomRect(
+            self: *const Self,
+            i: usize,
+            win: model.WindowId,
+            rect: utils.Rect,
+            stack: ?sync.Stack,
+        ) !void {
+            comptime if (mode != .record) @compileError("expectGeomRect requires record mode");
+            try self.expectGeom(i, win, rect.x, rect.y, rect.width, rect.height, stack);
         }
 
         pub fn expectPixel(self: *const Self, i: usize, win: model.WindowId, p: u32) !void {

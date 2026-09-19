@@ -26,6 +26,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const config_mod = @import("config");
 const constants = @import("constants");
+const core = @import("core");
 const debug = @import("debug");
 const model = @import("model");
 /// Layout registry (build-generated); the active layout is a `u8` index into
@@ -257,7 +258,7 @@ pub fn loaded() ?*const StateFile {
 /// (applyModelLevel) where core is already initialized and config is live.
 fn resumableDefaultKind() u8 {
     if (!build_options.has_tiling) return 0;
-    const layout_name = @import("core").getState().config.tiling.layout;
+    const layout_name = core.getState().config.tiling.layout;
     return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }
 

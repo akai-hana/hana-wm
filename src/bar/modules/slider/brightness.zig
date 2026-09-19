@@ -38,7 +38,6 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-const scroll_step: u8 = 2;
 /// Largest device/pin name accepted (sysfs device names are short; a longer
 /// pin is ignored and auto-discovery is used instead).
 const max_dev_len: usize = 64;
@@ -323,26 +322,7 @@ fn previewPct(v: u8) void {
 /// scan-safe string.
 fn renderDisplay(config: types.BarConfig, pct: u8, buf: []u8) []const u8 {
     const fmt = config.brightness_format orelse default_format;
-
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < fmt.len and n < buf.len) {
-        if (fmt[i] == '{') {
-            if (std.mem.startsWith(u8, fmt[i..], "{pct}")) {
-                var b: [16]u8 = undefined;
-                const ps = std.fmt.bufPrint(&b, "{d}", .{pct}) catch break;
-                if (n + ps.len > buf.len) break;
-                @memcpy(buf[n..][0..ps.len], ps);
-                n += ps.len;
-                i += 5;
-                continue;
-            }
-        }
-        buf[n] = fmt[i];
-        n += 1;
-        i += 1;
-    }
-    return buf[0..n];
+    return slider.renderLine(fmt, pct, null, buf);
 }
 
 /// Copies the config's `brightness_device` pin into the owned buffer (config

@@ -131,6 +131,28 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             return false;
         }
 
+        /// Removes the first item whose `field_name` equals `id` (order-
+        /// preserving). The id-keyed form of `removeWhere` the record stores
+        /// used to hand-roll via `item.win == key` match structs.
+        pub fn removeById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) bool {
+            return self.removeWhere(id, struct {
+                fn match(key: u32, item: T) bool {
+                    return @field(item, @tagName(field_name)) == key;
+                }
+            }.match);
+        }
+
+        /// Removes every item whose `field_name` equals `id`, compacting in
+        /// place (unordered). Used when several entries share one key (e.g.
+        /// every child-window cache row pointing at the same toplevel).
+        pub fn removeAllById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) usize {
+            return self.removeAllWhere(id, struct {
+                fn match(key: u32, item: T) bool {
+                    return @field(item, @tagName(field_name)) == key;
+                }
+            }.match);
+        }
+
         pub fn removeAllWhere(
             self: *Self,
             context: anytype,
@@ -167,51 +189,6 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// Resets to empty without touching capacity or contents of unused slots.
         pub fn clear(self: *Self) void {
             self.len = 0;
-        }
-    };
-}
-
-pub fn RecStore(comptime T: type, comptime capacity: usize) type {
-    return struct {
-        const List = BoundedList(T, capacity);
-        items: List = .{},
-
-        const Self = @This();
-
-        pub fn len(self: Self) usize {
-            return self.items.len;
-        }
-
-        pub fn reset(self: *Self) void {
-            self.items.clear();
-        }
-
-        pub fn append(self: *Self, item: T) bool {
-            return self.items.append(item);
-        }
-
-        pub fn slice(self: *Self) []T {
-            return self.items.slice();
-        }
-
-        pub fn constSlice(self: *const Self) []const T {
-            return self.items.constSlice();
-        }
-
-        pub fn orderedRemove(self: *Self, i: usize) void {
-            self.items.orderedRemove(i);
-        }
-
-        pub fn find(self: *const Self, id: u32) ?usize {
-            return self.items.indexOfByIdField(.win, id);
-        }
-
-        pub fn remove(self: *Self, id: u32) bool {
-            return self.items.removeWhere(id, struct {
-                fn match(key: u32, item: T) bool {
-                    return item.win == key;
-                }
-            }.match);
         }
     };
 }

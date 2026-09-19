@@ -293,6 +293,47 @@ test "palette references resolve by full name cross-section" {
     try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.title_minimized_accent);
 }
 
+test "per-segment text colors: bar.colors keys override segment fg" {
+    var cfg = try loadToml(testing.allocator, "segment-fg",
+        \\[bar]
+        \\primary_color     = "#aa0000"
+        \\alternative_color = "#0000cc"
+        \\fg = "#070809"
+        \\
+        \\[bar.colors]
+        \\title               = primary_color
+        \\cpu                 = primary_color
+        \\mem                 = primary_color
+        \\volume              = alternative_color
+        \\brightness          = alternative_color
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+
+    // Systatus readouts read primary; slider controls read alternative.
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("mem"));
+    try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("volume"));
+    try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("brightness"));
+    // A segment without an entry falls back to the bar-wide fg.
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("batt"));
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("clock"));
+    // The scalar title knob still lands, untouched by the map pass.
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.title_accent_color);
+    try testing.expectEqual(@as(usize, 4), cfg.bar.segment_fg.count());
+}
+
+test "per-segment colors: no [bar.colors] table leaves map empty" {
+    var cfg = try loadToml(testing.allocator, "segment-fg-absent",
+        \\[bar]
+        \\fg = "#070809"
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), cfg.bar.segment_fg.count());
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("cpu"));
+}
+
 test "warn-and-revert: out-of-range scalars revert to defaults" {
     var cfg = try loadToml(testing.allocator, "revert",
         \\[bar]

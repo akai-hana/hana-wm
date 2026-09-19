@@ -261,6 +261,31 @@ run_scenarios() {
         "src/bar/modules/prompt/prompt.zig" \
         "src/bar/modules/prompt/vim.zig"
 
+    # Systatus readouts and slider controls are their OWN bar segments
+    # (`segmentFor(i)` generated entries), so each is individually removable
+    # while its package core keeps compiling the survivors.
+    run_scenario \
+        "bar segment: -batt (systatus sub)" \
+        "src/bar/modules/systatus/batt.zig"
+
+    run_scenario \
+        "bar segment: -cpu -mem (systatus subs)" \
+        "src/bar/modules/systatus/cpu.zig" \
+        "src/bar/modules/systatus/mem.zig"
+
+    run_scenario \
+        "bar segment: -volume -brightness (slider subs)" \
+        "src/bar/modules/slider/volume.zig" \
+        "src/bar/modules/slider/brightness.zig"
+
+    run_scenario \
+        "bar segment: -systatus package" \
+        "src/bar/modules/systatus"
+
+    run_scenario \
+        "bar segment: -slider package" \
+        "src/bar/modules/slider"
+
     run_scenario \
         "bar segment: all segments removed" \
         "src/bar/modules/clock.zig" \
@@ -270,7 +295,9 @@ run_scenarios() {
         "src/bar/modules/title/title.zig" \
         "src/bar/modules/title/carousel.zig" \
         "src/bar/modules/prompt/prompt.zig" \
-        "src/bar/modules/prompt/vim.zig"
+        "src/bar/modules/prompt/vim.zig" \
+        "src/bar/modules/systatus" \
+        "src/bar/modules/slider"
 
     # Tier 5: Bar internals
     echo ""

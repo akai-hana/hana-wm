@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const debug = @import("debug");
+const types = @import("types");
 
 /// A value that can be expressed as either an absolute pixel count or a
 /// percentage of some reference dimension.
@@ -337,7 +338,7 @@ pub const Document = struct {
 /// default accent knob (the former `accent_color`); the other three are pure
 /// palette declarations currently consumed by the fallback chain and the
 /// theme's `[bar.colors]` entries.
-pub const palette_var_names = [_][]const u8{
+const palette_var_names = [_][]const u8{
     "primary_color",
     "secondary_color",
     "alternative_color",
@@ -348,9 +349,17 @@ pub const palette_var_names = [_][]const u8{
 /// strings (quoted `"#RRGGBB"`), and in-range integers. Anything else is
 /// ignored so a duplicated/non-color declaration can't poison the palette.
 fn paletteColorOf(val: Value) ?u32 {
+    return colorFromValue(val);
+}
+
+/// Single decoder for the color-literal / in-range-integer / hex-string forms
+/// a color knob accepts. `null` means "not a color"; callers layer their own
+/// palette-reference lookup and warning policy on top (schema's
+/// getColorFromValue).
+pub fn colorFromValue(val: Value) ?u32 {
     if (val.asScalar(u32)) |c| return c;
     if (val.asScalar(i64)) |i| {
-        if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
+        if (i >= 0 and i <= types.max_color) return @intCast(i);
     }
     if (val.asScalar([]const u8)) |s| {
         return parseColor(s) catch null;
@@ -483,7 +492,7 @@ pub fn parseColor(value: []const u8) !u32 {
     if (hex_part.len == 0) return error.InvalidColor;
 
     const color = std.fmt.parseInt(u32, hex_part, 16) catch return error.InvalidColor;
-    if (color > 0xFFFFFF) return error.InvalidColor;
+    if (color > types.max_color) return error.InvalidColor;
     return color;
 }
 
@@ -509,11 +518,6 @@ const Parser = struct {
     // Config is locally authored and trusted, so this is a defensive
     // backstop, not a response to observed input.
     array_depth: usize = 0,
-    // Set while parsing array elements so parseBareValues parses only a
-    // single bare token per call, the `,`/`]` separators belong to
-    // parseArray, and without this an element list like `[a, b]` would be
-    // gathered greedily into one nested array.
-    in_array: bool = false,
 
     fn init(allocator: std.mem.Allocator, content: []const u8, had_errors: *bool) Parser {
         return .{ .allocator = allocator, .content = content, .pos = 0, .line = 1, .had_errors = had_errors };
@@ -534,16 +538,35 @@ const Parser = struct {
         debug.warn("{s}:{d}:{d}: " ++ fmt, .{ self.sourceLabel(), self.line, self.column() } ++ args);
     }
 
-    fn skip(self: *Parser, comptime include_newlines: bool, comptime include_comments: bool) void {
+    // Advances one byte. A newline also bumps the line counter and resets
+    // `line_start` (see the field docs); every scanner consumes characters
+    // through here so the bookkeeping never drifts.
+    inline fn advanceChar(self: *Parser) void {
+        self.pos += 1;
+        if (self.content[self.pos - 1] == '\n') {
+            self.line += 1;
+            self.line_start = self.pos;
+        }
+    }
+
+    // Skips inline whitespace (' ', '\t', '\r') only; a newline or comment
+    // stops the scan.
+    inline fn skipWhitespace(self: *Parser) void {
         while (self.pos < self.content.len) {
             switch (self.content[self.pos]) {
-                ' ', '\t', '\r' => self.pos += 1,
-                '\n' => if (include_newlines) {
-                    self.pos += 1;
-                    self.line += 1;
-                    self.line_start = self.pos;
-                } else break,
-                '#' => if (include_comments) self.skipToNewline() else break,
+                ' ', '\t', '\r' => self.advanceChar(),
+                else => break,
+            }
+        }
+    }
+
+    // Skips whitespace, newlines, and comments (the full inter-token run
+    // consumed inside arrays and at line starts).
+    inline fn skipWhitespaceAndNewlines(self: *Parser) void {
+        while (self.pos < self.content.len) {
+            switch (self.content[self.pos]) {
+                ' ', '\t', '\r', '\n' => self.advanceChar(),
+                '#' => self.skipToNewline(),
                 else => break,
             }
         }
@@ -551,18 +574,7 @@ const Parser = struct {
 
     fn skipToNewline(self: *Parser) void {
         while (self.pos < self.content.len and self.content[self.pos] != '\n') self.pos += 1;
-        if (self.pos < self.content.len) {
-            self.pos += 1;
-            self.line += 1;
-            self.line_start = self.pos;
-        }
-    }
-
-    inline fn skipWhitespace(self: *Parser) void {
-        self.skip(false, false);
-    }
-    inline fn skipWhitespaceAndNewlines(self: *Parser) void {
-        self.skip(true, true);
+        if (self.pos < self.content.len) self.advanceChar();
     }
 
     inline fn peek(self: *const Parser) ?u8 {
@@ -571,11 +583,7 @@ const Parser = struct {
 
     inline fn consume(self: *Parser) ?u8 {
         const c = self.peek() orelse return null;
-        self.pos += 1;
-        if (c == '\n') {
-            self.line += 1;
-            self.line_start = self.pos;
-        }
+        self.advanceChar();
         return c;
     }
 
@@ -660,9 +668,6 @@ const Parser = struct {
             return ParseError.InvalidValue;
         }
 
-        self.in_array = true;
-        defer self.in_array = false;
-
         _ = self.consume();
         var array = try std.ArrayList(Value).initCapacity(self.allocator, 8);
 
@@ -672,7 +677,7 @@ const Parser = struct {
                 _ = self.consume();
                 break;
             }
-            try array.append(self.allocator, try self.parseValue());
+            try array.append(self.allocator, try self.parseValue(true));
             self.skipWhitespaceAndNewlines();
             if (self.peek() == ',') _ = self.consume();
         }
@@ -769,7 +774,7 @@ const Parser = struct {
     // clock` -> ["workspaces","layout","clock"] or `icons = #ac3232, #52263e`
     // -> [0xac3232, 0x52263e]. Inside `[...]` one token is consumed (commas
     // belong to parseArray); semicolons are likewise left to the pair parser.
-    fn parseBareValues(self: *Parser) ParseError!Value {
+    fn parseBareValues(self: *Parser, in_array: bool) ParseError!Value {
         var items: std.ArrayList(Value) = .empty;
 
         while (true) {
@@ -780,8 +785,8 @@ const Parser = struct {
             // collected yet) starts a color literal instead.
             if (nxt == '#' and items.items.len > 0) break;
             const token = self.parseBareToken() orelse break;
-            try items.append(self.allocator, try self.parseBareTokenValue(token));
-            if (self.in_array) break;
+            try items.append(self.allocator, try parseBareTokenValue(token));
+            if (in_array) break;
             self.skipWhitespace();
             if (self.peek() == ',') _ = self.consume();
         }
@@ -793,14 +798,14 @@ const Parser = struct {
         return .{ .array = items };
     }
 
-    fn parseValue(self: *Parser) ParseError!Value {
+    fn parseValue(self: *Parser, in_array: bool) ParseError!Value {
         self.skipWhitespace();
         const c = self.peek() orelse return ParseError.InvalidValue;
 
         if (c == '[') return .{ .array = try self.parseArray() };
         if (c == '"' or c == '\'') return .{ .string = try self.parseString() };
 
-        return self.parseBareValues();
+        return self.parseBareValues(in_array);
     }
 
     // Advances past a trailing newline or comment character at line end.

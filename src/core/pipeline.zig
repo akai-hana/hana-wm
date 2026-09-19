@@ -223,6 +223,16 @@ pub inline fn reconcileUnderGrabNowWithFocusDuty(
     sync.reconcile(&instance, c, o);
 }
 
+/// Commit a focus transition inside one server grab with no reconcile: for
+/// focus-only changes where geometry/stacking cannot differ (hover focus).
+/// Borders repaint via the per-batch sweep on the commit's focus bump.
+pub inline fn focusOnlyCommit(t: focus.FocusTransition) void {
+    const c = ctx();
+    c.sink.grabServer();
+    defer c.sink.ungrabAndFlush();
+    focus.applyPendingFocus(t);
+}
+
 /// Focus lands after geometry, for mapRequest: the window must be mapped (by
 /// reconcile) before xcb_set_input_focus can target it without BadMatch.
 /// Both map+focus under one grab eliminates the atomicity gap where a client

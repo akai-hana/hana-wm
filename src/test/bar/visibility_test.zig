@@ -61,7 +61,7 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     try testing.expect(!visibility.barForcedHiddenByFullscreen(0));
 
     // A covering occupant on ws 0 claims the screen: the coercion fires.
-    model.register(m, 1, model.WSId.fromIndex(0)) catch unreachable;
+    try model.register(m, 1, model.WSId.fromIndex(0));
     const ent = m.store.getPtr(1).?;
     ent.presence = .covering;
     ent.covering_ws = model.WSId.fromIndex(0);
