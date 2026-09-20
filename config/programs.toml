@@ -11,7 +11,7 @@ Mod+A       = "MOZ_USE_XINPUT2=1 firefox"
 Mod+Shift+A = "~/.local/bin/firefox-sync.sh xpmraevm.default-default; {kill} firefox"
 
 # -- Chat / Socials --
-Mod+S       = "nixGL nixVulkanIntel equibop"
+Mod+S       = "equibop"
 Mod+Shift+S = "{kill} electron"
 
 # -- Terminal --
@@ -20,16 +20,16 @@ Mod+Shift+D = "{kill} ghostty"
 Mod+I       = "xeyes"
 
 # -- Games --
-Mod+Z       = "nixGL prismlauncher"
+Mod+Z       = "prismlauncher"
 Mod+Shift+Z = "distrobox enter aur -- ~/Games/factorio-vanilla"
-Mod+X       = "nixVulkanIntel TaterClient-DDNet"
-Mod+Shift+X = "nixGL nixVulkanIntel etterna"
-Mod+C       = "nixGL nixVulkanIntel steam steam://rungameid/1229490"
-Mod+Shift+C = "nixGL nixVulkanIntel steam"
+Mod+X       = "TaterClient-DDNet"
+Mod+Shift+X = "etterna"
+Mod+C       = "steam steam://rungameid/1229490"
+Mod+Shift+C = "steam"
 
 # -- Media --
-Mod+V       = "nixGL pear-desktop"
-Mod+Shift+V = "nixGL nixVulkanIntel stremio-enhanced"
+Mod+V       = "pear-desktop"
+Mod+Shift+V = "stremio-enhanced"
 
 # -- File manager --
 Mod+Y       = "thunar"

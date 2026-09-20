@@ -23,12 +23,12 @@
 //!     cast from persist's const handle -- no `@constCast`. Each module
 //!     decides from the model state whether it owns the window's blob
 //!     (presence-driven), so at most one blob exists per window.
-//!   - `deserializeWindow(win, blob, m-as-*anyopaque)` -- returns a "claimed"
+//!   - `deserializeWindow(win, blob, m)` -- returns a "claimed"
 //!     bool. Hooks self-identify via a format tag (magic byte) inside the
 //!     blob, so the registry adoption loop can't mis-claim another module's
-//!     blob; unclaimed blobs leave the window in its default state. This seam
-//!     stays `*anyopaque` because adoption may WRITE model state; it is
-//!     dispatched only from the window layer's gate-holding restore path.
+//!     blob; unclaimed blobs leave the window in its default state. Adoption
+//!     MAY WRITE model state, so the model arrives as a mutable `*model.Model`;
+//!     it is dispatched only from the window layer's gate-holding restore path.
 
 const std = @import("std");
 const core = @import("core");
@@ -37,11 +37,6 @@ const types = @import("types");
 const utils = @import("utils");
 const build_options = @import("build_options");
 const model = @import("model");
-
-/// Casts the `*anyopaque` blob handle from the deserialize seam to the model.
-pub inline fn modelPtrOf(ptr: *anyopaque) *model.Model {
-    return @ptrCast(@alignCast(ptr));
-}
 
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
@@ -60,11 +55,21 @@ pub const Surfaces = struct {
     deinit: *const fn () void,
     // Event-loop hooks.
     handleExpose: *const fn (*const xcb.xcb_expose_event_t) void,
-    handlePropertyNotify: *const fn (*const xcb.xcb_property_notify_event_t) void,
+    /// Optional: the window layer already handles PropertyNotify for managed
+    /// windows, so a surface only binds this if it needs the notification
+    /// (the bar does not). Null skips the forward.
+    handlePropertyNotify: ?*const fn (*const xcb.xcb_property_notify_event_t) void = null,
     updateIfDirty: *const fn () anyerror!void,
     pollTimeoutMs: *const fn () i32,
     onPollWakeup: *const fn () void,
-    updateClock: *const fn () bool,
+    updateClock: *const fn () void,
+    // RandR hooks (refresh-rate detection). The engine lives with the bar
+    // (render pacing is its only consumer); core's event loop forwards
+    // extension events and defers re-detection through these when a bar is
+    // compiled in, and drops the machinery entirely when it is not.
+    randrFirstEvent: *const fn () u8,
+    handleRandrEvent: *const fn (*anyopaque) void,
+    runPendingRedetect: *const fn (core.Connection) void,
     onReload: *const fn () void,
     /// Re-points the bar's config copy at the live config without rebuilding
     /// the surface. Called on config reloads that leave the bar untouched
@@ -121,7 +126,7 @@ pub const WindowModule = struct {
     // claimed the blob; hooks self-identify via a format tag so the registry
     // loop can't mis-claim.
     serializeWindow: ?*const fn (*const model.Model, u32, std.mem.Allocator) ?[]const u8 = null,
-    deserializeWindow: ?*const fn (u32, []const u8, *anyopaque) bool = null,
+    deserializeWindow: ?*const fn (u32, []const u8, *model.Model) bool = null,
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
     armPendingBarHide: ?*const fn (u32) void = null,
     armPendingBarShow: ?*const fn (u32) void = null,

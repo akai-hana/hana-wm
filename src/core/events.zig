@@ -15,7 +15,6 @@ const input = @import("input");
 const window = @import("window");
 const focus = @import("focus");
 
-const refresh = @import("refresh");
 const signals = @import("signals");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
@@ -42,6 +41,16 @@ const max_events_per_batch: usize = 128;
 // Cap for the post-batch drain of XCB's internal event queue (see the drain
 // loop in handleXcbEvents); a chatty client cannot fill it beyond this.
 const max_queued_drain: usize = 256;
+
+/// Dispatch table size. Must index every XCB core event code hana dispatches;
+/// the highest is MappingNotify (34), so 36 leaves headroom. The table lookup
+/// is guarded by this bound (dispatch()).
+const event_dispatch_table = 36;
+
+/// Upper bound for the XCB cookie scratch buffer in grabKeybindings
+/// (max distinct keybindings x lock_modifiers.len combinations).
+/// Raise if you ever exceed 128 keybindings.
+const max_keybind_cookies = 1024;
 
 const EventHandler = *const fn (event: *anyopaque) void;
 
@@ -74,7 +83,11 @@ fn handleExpose(event: *anyopaque) void {
 
 fn handlePropertyNotify(event: *anyopaque) void {
     const e = utils.eventCast(*xcb.xcb_property_notify_event_t, event);
-    if (build_options.has_bar) surfaces.handlePropertyNotify(e);
+    if (build_options.has_bar)
+        // Null when the surface chose not to bind the hook (the bar does
+        // not: the window layer owns PropertyNotify handling for managed
+        // windows). Skip the forward instead of forcing a slot-filler.
+        if (surfaces.handlePropertyNotify) |f| f(e);
     window.handlePropertyNotify(e);
 }
 
@@ -103,7 +116,7 @@ fn handleMappingNotify(event: *anyopaque) void {
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 const dispatch_table = blk: {
-    var table = [_]?EventHandler{null} ** constants.Limits.event_dispatch_table;
+    var table = [_]?EventHandler{null} ** event_dispatch_table;
 
     table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
@@ -142,7 +155,10 @@ const dispatch_table = blk: {
 /// disabling refresh re-detection, misrouting the event in dispatch, and
 /// reclassifying a RandR event as a coalesceable motion in isMotion.
 fn isRandrEvent(t: u8) bool {
-    const r = refresh.randrFirstEvent();
+    // RandR is a bar feature (render pacing); without a compiled bar the
+    // extension is never queried and no event can be one.
+    if (!build_options.has_bar) return false;
+    const r = surfaces.randrFirstEvent();
     return (r != 0 and t >= r and t <= r + 1);
 }
 
@@ -159,16 +175,17 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 
     // RandR extension events (base and base+1) trigger refresh re-detection
     // here; they sit above the fixed dispatch table and would otherwise be
-    // dropped by the bounds guard below.
-    if (isRandrEvent(event_type)) {
+    // dropped by the bounds guard below. The `has_bar` conductor prunes the
+    // branch (and the `surfaces` calls) in bar-less trees.
+    if (build_options.has_bar and isRandrEvent(event_type)) {
         // Pass the raw event: a CRTC-change payload carries the active mode id,
-        // letting refresh resolve the rate from its cached mode table with zero
+        // letting the bar resolve the rate from its cached mode table with zero
         // XCB round-trips (see refresh.handleRandrNotifyEvent).
-        refresh.handleRandrNotifyEvent(core.getState().conn, event);
+        surfaces.handleRandrEvent(event);
         return;
     }
 
-    const idx = event_type & 0x7F; // strip XCB synthetic-event bit
+    const idx = event_type & masks.synthetic_event_mask; // strip XCB synthetic-event bit
 
     // Guard the fixed-size table: extension events live above XCB_GE_GENERIC
     // and would index out of bounds. hana only selects core events today, but
@@ -199,7 +216,7 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
         if (n + masks.lock_modifiers.len > cookies.len) {
             debug.warn(
                 "Too many keybindings. Increase max_keybind_cookies (currently {})",
-                .{constants.Limits.max_keybind_cookies},
+                .{max_keybind_cookies},
             );
             break;
         }
@@ -243,7 +260,7 @@ pub fn grabKeybindings() void {
     const cs = core.getState();
     _ = xcb.xcb_ungrab_key(cs.conn, xcb.XCB_GRAB_ANY, cs.root, xcb.XCB_MOD_MASK_ANY);
 
-    var cookies: [constants.Limits.max_keybind_cookies]CookieEntry = undefined;
+    var cookies: [max_keybind_cookies]CookieEntry = undefined;
     const n = fillGrabCookies(&cookies);
 
     const failed = checkGrabCookies(cookies[0..n]);
@@ -271,7 +288,7 @@ fn handleConfigReload() !void {
 
     var source: config.DefaultSource = .fallback;
     const new_config = config.loadConfigDefault(cs.alloc, &source) catch |err| {
-        // C1: a TOML parse error already reported per-line warnings; treat it
+        // A TOML parse error already reported per-line warnings; treat it
         // as a hard failure and keep the live config rather than swapping in a
         // partially-merged one. Nothing to deinit here: the load failed before
         // new_ptr existed, and the load path's own errdefers released its
@@ -288,30 +305,31 @@ fn handleConfigReload() !void {
         return err;
     };
     // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
-    // errdefer frees the allocation if anything fails before the swap.
+    // The defer below frees the allocation unless the swap commits.
     const new_ptr = try cs.alloc.create(@TypeOf(new_config));
     new_ptr.* = new_config;
-    // C3: errdefer owns BOTH the Config internals and the box itself, so a
-    // pre-swap failure (e.g. validate below) frees the whole allocation.
-    errdefer {
+    // The defer owns BOTH the Config internals and the box itself, so any
+    // pre-swap failure or early return frees the whole allocation. `committed`
+    // flips once the swap makes the live state own it; post-swap all calls are
+    // infallible, so the defer stays dormant.
+    var committed = false;
+    defer if (!committed) {
         new_ptr.deinit(cs.alloc);
         cs.alloc.destroy(new_ptr);
-    }
+    };
 
-    // C2: a load with no user config comes back as a successful embedded
+    // A load with no user config comes back as a successful embedded
     // fallback load. Boot keeps that fallback; on RELOAD a missing user config
     // must NOT silently swap in the fallback. loadConfigDefault reports the
     // source (user vs fallback) directly, so no second existence probe is
-    // needed. This plain return is NOT an error, so the errdefer above stays
-    // dormant: free the short-lived fallback allocation explicitly here.
+    // needed. This plain return is NOT an error, but the defer still fires
+    // (not committed) and frees the short-lived fallback allocation.
     if (source != .user) {
         debug.err(
             "Config reload rejected: no user config file found. " ++
                 "Keeping current config (the embedded fallback is boot-only)",
             .{},
         );
-        new_ptr.deinit(cs.alloc);
-        cs.alloc.destroy(new_ptr);
         return;
     }
 
@@ -319,11 +337,8 @@ fn handleConfigReload() !void {
     if (input.getXkbState() == null) {
         // XKB was torn down (deinit/init window during a reload); reusing the
         // old config here prevents the rebuilt keybind resolver from running
-        // on stale XKB. Free the not-yet-live allocation that the errdefer
-        // above owned.
+        // on stale XKB. The defer above frees the not-yet-live allocation.
         debug.warn("Config reload before XKB init; keeping old config", .{});
-        new_ptr.deinit(cs.alloc);
-        cs.alloc.destroy(new_ptr);
         return;
     }
     input.buildKeybinds(new_ptr.keybindings.items);
@@ -331,6 +346,7 @@ fn handleConfigReload() !void {
     // Swap pointers: new config becomes live, old config is isolated.
     const old_ptr = cs.config;
     cs.config = new_ptr;
+    committed = true;
 
     // Per-subsystem change detection: only tear down and rebuild the
     // subsystems whose config actually changed.  E.g. a bar color tweak
@@ -360,7 +376,7 @@ fn handleConfigReload() !void {
     }
 
     // Free the displaced old config after subsystem reloads have moved on
-    // (C3: the pointer box too; core.init() allocated it with alloc.create).
+    // (the pointer box too; core.init() allocated it with alloc.create).
     old_ptr.deinit(cs.alloc);
     cs.alloc.destroy(old_ptr);
 
@@ -384,7 +400,7 @@ fn handleReexec() !void {
     debug.info("Re-executing new binary", .{});
 
     const path = try persist.defaultStatePath(cs.alloc);
-    // C15: the path is allocator-owned; execNext never returns so this only
+    // The path is allocator-owned; execNext never returns so this only
     // ever runs on the error/abort exits below, where the leak would else
     // live for the rest of the process lifetime.
     defer cs.alloc.free(path);
@@ -394,15 +410,46 @@ fn handleReexec() !void {
     restart.execNext(self_path, path);
 }
 
-// Returns a pending coalesced non-motion event if one exists, otherwise polls
-// for the next XCB event. `pending` holds the non-motion event stashed during
-// motion coalescing so ordering is preserved across batch iterations.
-fn takeEvent(pending: *?*xcb.xcb_generic_event_t, conn: core.Connection) ?*xcb.xcb_generic_event_t {
-    if (pending.*) |p| {
-        pending.* = null;
-        return p;
+/// One comptime-parameterized drain shared by the batch poll loop and the
+/// post-batch queued drain (they differ only in pull function, cap, and
+/// charge_tail policy). Each iteration pulls from the caller's `pending`
+/// slot first when `charge_tail` is false, so a coalesced non-motion stashed
+/// there is re-pulled (and charged) on the following iteration, preserving
+/// order across batches. With `charge_tail` true the terminating non-motion
+/// is already charged by the collapse and is dispatched in place.
+fn drainEvents(
+    pending: *?*xcb.xcb_generic_event_t,
+    conn: core.Connection,
+    budget: *usize,
+    comptime cap: usize,
+    comptime pull: anytype,
+    comptime charge_tail: bool,
+) void {
+    while (budget.* < cap) {
+        const event = blk: {
+            if (pending.*) |p| {
+                pending.* = null;
+                break :blk p;
+            }
+            break :blk pull(conn) orelse break;
+        };
+        budget.* += 1;
+        if (!isMotion(event)) {
+            dispatchOwned(event);
+            continue;
+        }
+        var newest = event;
+        var pause: ?*xcb.xcb_generic_event_t = null;
+        collapseMotionRun(&newest, &pause, conn, budget, cap, pull, charge_tail);
+        dispatchOwned(newest);
+        if (pause) |p| {
+            if (charge_tail) {
+                dispatchOwned(p);
+            } else {
+                pending.* = p;
+            }
+        }
     }
-    return xcb.xcb_poll_for_event(conn);
 }
 
 fn isMotion(e: *xcb.xcb_generic_event_t) bool {
@@ -410,14 +457,47 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
     // Exclude the RandR window before stripping the send_event bit; see
     // isRandrEvent for the raw-compare-before-mask rationale.
     if (isRandrEvent(t)) return false;
-    return (t & 0x7f) == xcb.XCB_MOTION_NOTIFY;
+    return (t & masks.synthetic_event_mask) == xcb.XCB_MOTION_NOTIFY;
+}
+
+/// Shared motion-run collapse used by both the batch loop and the queued
+/// drain. `newest` is the run's newest motion so far (caller-owned; a
+/// superseding motion frees it). Reads ahead with `pull` while `budget.*`
+/// stays below `cap`, charging each drained motion into `budget` the same way
+/// the caller's outer loop charges. The first non-motion ends the run and is
+/// stashed to `pause` UNDELIVERED, so the caller emits `newest` before
+/// `pause`, preserving order. `charge_tail` mirrors the two budget
+/// policies: the drain loop charges every pull (its terminating non-motion
+/// counts against the per-iteration budget), while the batch loop charges
+/// only drained motions -- its terminating non-motion is re-pulled and
+/// charged by the outer loop later.
+fn collapseMotionRun(
+    newest: anytype,
+    pause: *?*xcb.xcb_generic_event_t,
+    conn: core.Connection,
+    budget: *usize,
+    comptime cap: usize,
+    comptime pull: anytype,
+    comptime charge_tail: bool,
+) void {
+    while (budget.* < cap) {
+        const next = pull(conn) orelse break;
+        if (!isMotion(next)) {
+            if (charge_tail) budget.* += 1;
+            pause.* = next;
+            break;
+        }
+        std.c.free(newest.*);
+        newest.* = next;
+        budget.* += 1;
+    }
 }
 
 // Drains pending XCB events for this batch, then runs post-batch housekeeping.
 fn handleXcbEvents() void {
     const conn = core.getState().conn;
 
-    // P5: snapshot the border-relevant fact revisions so the batch-end border
+    // Snapshot the border-relevant fact revisions so the batch-end border
     // sweep can be skipped when nothing that affects borders changed this
     // batch (focus/workspace/tiling/fullscreen). Any bump during dispatch OR
     // the post-batch drains below (pending focus confirm, tiling settle)
@@ -434,34 +514,21 @@ fn handleXcbEvents() void {
     // member before dispatch (drag paths only need the freshest pointer
     // position, and every extra dispatched motion costs a reconcile). The
     // first non-motion event is held in `pending` (it counts against the
-    // batch cap via takeEvent) so ordering is preserved.
+    // batch cap via the drain's pull-from-pending) so ordering is preserved.
     var pending: ?*xcb.xcb_generic_event_t = null;
-
     var dispatched: usize = 0;
-    while (dispatched < max_events_per_batch) {
-        var event = takeEvent(&pending, conn) orelse break;
-        // C15: charge each pulled event exactly when it is pulled. The old
-        // `: (dispatched += 1)` continue-expression ran on top of the inner
-        // motion loop's own increment, so a motion run let the counter reach
-        // cap+1 and dispatch one extra event per batch.
-        dispatched += 1;
-        if (isMotion(event)) {
-            // Coalesce the run, but charge every drained motion against the
-            // batch budget: an endless motion stream must not starve the
-            // signal pipe and timer paths the cap exists to protect.
-            while (dispatched < max_events_per_batch) {
-                const next = xcb.xcb_poll_for_event(conn) orelse break;
-                if (!isMotion(next)) {
-                    pending = next;
-                    break;
-                }
-                std.c.free(event);
-                event = next; // keep only the newest motion of the run
-                dispatched += 1;
-            }
-        }
-        dispatchOwned(event);
-    }
+    // Charge each pulled event exactly when it is pulled. A motion run lets
+    // the counter reach cap precisely (motions are charged during the
+    // collapse); a trailing non-motion stashed against a full cap is
+    // dispatched uncharged by the tail below -- never cap+1.
+    drainEvents(
+        &pending,
+        conn,
+        &dispatched,
+        max_events_per_batch,
+        xcb.xcb_poll_for_event,
+        false,
+    );
 
     // A cap exit can leave a non-motion event held in `pending` (stashed
     // during motion coalescing). It was pulled BEFORE anything the queued
@@ -476,30 +543,22 @@ fn handleXcbEvents() void {
     // poll() cycle — potentially up to the timer deadline — before being
     // dispatched. xcb_poll_for_queued_event reads only from the internal
     // queue without touching the socket, so it surfaces these stranded
-    // events immediately.
+    // events immediately. Motion runs collapse here too (a motion-heavy
+    // read-ahead buffer — the very stream that cap-exited the batch above —
+    // collapses to its newest member instead of dispatching up to 256
+    // individual reconciles); charge_tail=true charges the terminating
+    // non-motion and delivers it in place.
     {
+        var queued_pending: ?*xcb.xcb_generic_event_t = null;
         var extra: usize = 0;
-        // Coalesce motion runs here too: a motion-heavy read-ahead buffer
-        // (the very stream that cap-exited the batch above) must collapse to
-        // its newest member instead of dispatching up to 256 individual
-        // reconciles. The newest motion is held and flushed only when a
-        // non-motion event (or the queue's end) forces it, preserving order.
-        var held: ?*xcb.xcb_generic_event_t = null;
-        while (extra < max_queued_drain) : (extra += 1) {
-            const event = xcb.xcb_poll_for_queued_event(conn) orelse break;
-            if (isMotion(event)) {
-                if (held) |h| std.c.free(h);
-                held = event;
-                continue;
-            }
-            if (held) |h| {
-                const m = h;
-                held = null;
-                dispatchOwned(m);
-            }
-            dispatchOwned(event);
-        }
-        if (held) |h| dispatchOwned(h);
+        drainEvents(
+            &queued_pending,
+            conn,
+            &extra,
+            max_queued_drain,
+            xcb.xcb_poll_for_queued_event,
+            true,
+        );
     }
 
     // Drain any spawn pipes that became readable during this event batch.
@@ -516,16 +575,12 @@ fn handleXcbEvents() void {
     // since suppression is still active) before this lifts suppression.
     // See beginTilingOpSettle's doc comment in focus.zig.
     focus.drainTilingOpSettle();
-    // P5: run the per-batch border sweep only when a border-relevant fact
+    // Run the per-batch border sweep only when a border-relevant fact
     // actually changed this batch; a motion/expose-only batch skips the
     // unconditional O(N) walk. Wire sends are unchanged either way (the sweep
     // is CacheMap-dedup'd), so steady-state output is identical.
     const facts = core.getState().facts;
-    if (facts_before.focus_rev != facts.focus_rev or
-        facts_before.window_rev != facts.window_rev or
-        facts_before.fullscreen_rev != facts.fullscreen_rev or
-        facts_before.layout_rev != facts.layout_rev)
-    {
+    if (!std.meta.eql(facts_before, facts)) {
         window.updateWorkspaceBordersIfNeeded();
     }
 
@@ -544,17 +599,15 @@ pub fn run() !void {
 
     while (utils.running.load(.acquire)) {
         // No built-in deadline: with no timer sources the loop blocks until
-        // an X event or signal arrives. Timer sources (clock segment, prompt
-        // cursor blink, carousel marquee) contribute deadlines exclusively
-        // through surfaces.pollTimeoutMs().
+        // an X event or signal arrives. Timer sources are exclusively a bar
+        // concern (clock segment, prompt cursor blink, carousel marquee) and
+        // contribute deadlines through surfaces.pollTimeoutMs(); a non-negative
+        // deadline means a timeout wake must be handed to the bar for repaint,
+        // never worked around in core.
         var poll_timeout_ms: i32 = -1;
-        var cursor_is_blinking = false;
         if (build_options.has_bar) {
             const ms = surfaces.pollTimeoutMs();
-            if (ms >= 0) {
-                cursor_is_blinking = true;
-                poll_timeout_ms = ms;
-            }
+            if (ms >= 0) poll_timeout_ms = ms;
         }
 
         const poll_rc = std.os.linux.poll(&fds, fds.len, poll_timeout_ms);
@@ -591,7 +644,7 @@ pub fn run() !void {
         if (utils.consumeReload())
             handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
 
-        if (ready == 0 and cursor_is_blinking) {
+        if (ready == 0 and poll_timeout_ms >= 0) {
             if (build_options.has_bar) surfaces.onPollWakeup();
             _ = xcb.xcb_flush(cs.conn);
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
@@ -601,12 +654,12 @@ pub fn run() !void {
             handleXcbEvents();
         }
 
-        // Run any refresh-rate re-detection deferred by handleRandrNotifyEvent.
-        // It performs synchronous XCB round-trips, so it must run here, outside
-        // event dispatch, never mid-batch.
-        refresh.runPendingRedetect(cs.conn);
+        // Run any refresh-rate re-detection deferred by a RandR event. It
+        // performs synchronous XCB round-trips, so it must run here, outside
+        // event dispatch, never mid-batch. RandR is a bar feature: without a
+        // bar the extension is never queried and nothing is ever pending.
+        if (build_options.has_bar) surfaces.runPendingRedetect(cs.conn);
 
-        // Return value reserved, currently unused.
-        if (build_options.has_bar) _ = surfaces.updateClock();
+        if (build_options.has_bar) surfaces.updateClock();
     }
 }

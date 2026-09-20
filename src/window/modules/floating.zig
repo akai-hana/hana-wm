@@ -25,16 +25,16 @@ const plugin = @import("plugin");
 // registry, and capabilities stay provider-agnostic.
 const providerOf = window.providerOf;
 
-pub const DragMode = enum { move, resize };
+const DragMode = enum { move, resize };
 
 /// Corner closest to the cursor at drag-start; the opposite corner is the
 /// anchor that stays fixed during the resize. Crossing the anchor on an axis
 /// wraps the resize to grow the opposite way instead of collapsing.
-pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
+const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
 const WaEdges = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
-pub const DragState = struct {
+const DragState = struct {
     active: bool = false,
     window: core.WindowId = 0,
     mode: DragMode = .move,

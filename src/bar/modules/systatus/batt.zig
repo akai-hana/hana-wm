@@ -7,11 +7,16 @@
 const std = @import("std");
 const systatus = @import("systatus");
 
+/// Number of `BAT*` slots probed under `/sys/class/power_supply`
+/// (`BAT0`..`BAT{battery_probe_slots - 1}`): laptops with many slots are
+/// exotic, but the probe is a handful of no-op stat/opens either way.
+const battery_probe_slots: usize = 8;
+
 /// Charge % of the first present battery under /sys/class/power_supply.
 fn read() ?u8 {
     const io = std.Options.debug_io;
     var buf: [128]u8 = undefined;
-    for (0..8) |i| {
+    for (0..battery_probe_slots) |i| {
         const name = std.fmt.bufPrint(&buf, "BAT{d}", .{i}) catch return null;
         var cap_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&cap_buf, "/sys/class/power_supply/{s}/capacity", .{name}) catch return null;

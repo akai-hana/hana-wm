@@ -43,21 +43,20 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const border2 = utils.doubledBorder(m);
 
     const outer = tiling.outerArea(v.workarea, m.gap);
-    var cur = Region{
-        .x = outer.x,
-        .y = outer.y,
-        .w = outer.w,
-        .h = outer.h,
-    };
+    var cur = outer;
     var dir: SpiralDirection = .right;
 
     const windows = v.order;
     for (windows, 0..) |win, i| {
         const last = i == windows.len - 1;
         if (last or cur.w < m.gap *| 2 + border2 or cur.h < m.gap *| 2 + border2) {
-            const top = if (last) win else tiling.focusedElse(v, windows[i..], windows[i]);
-            tiling.emitView(v, out, top, tiling.insetRect(cur.x, cur.y, cur.w, cur.h, border2, v.env.min_dim), true);
-            if (!last) tiling.showOneHideRest(out, windows[i..], top);
+            const top = tiling.focusedElse(v, windows[i..], win);
+            tiling.emitOverflowShare(
+                .{ .v = v, .out = out, .m = m, .min_dim = v.env.min_dim },
+                windows[i..],
+                top,
+                cur,
+            );
             return;
         }
 
@@ -93,7 +92,7 @@ inline fn splitAndAdvance(
         .width = (if (split_x) win_dim else cur.w) -| border2,
         .height = (if (split_x) cur.h else win_dim) -| border2,
     };
-    tiling.emitView(v, out, win, rect, true);
+    tiling.emitView(v, out, win, rect);
     if (forward and split_x) cur.x += advance;
     if (forward and !split_x) cur.y += advance;
     if (split_x) {

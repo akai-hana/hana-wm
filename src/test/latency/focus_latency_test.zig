@@ -47,7 +47,7 @@ test "latency: reconcile cost + request count at focus change" {
         for (0..n) |i| regCur(&m, @intCast(i + 1));
 
         sync.init();
-        defer sync.deinit();
+        defer sync.init();
 
         // Warm once (a live counter seeds the ledger), then measure the CPU
         // cost of one reconcile pass.
@@ -81,7 +81,7 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     for (0..n) |i| regCur(&m, @intCast(i + 1));
 
     sync.init();
-    defer sync.deinit();
+    defer sync.init();
 
     var warm = CountingSink{};
     var warm_ctx = makeCtx(warm.sink(), colorOfFocused);

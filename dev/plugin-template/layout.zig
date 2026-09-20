@@ -53,7 +53,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // parks the rest (`tiling.emitHidden(out, win)`), or splits the area
     // across windows.
     for (v.order) |win| {
-        tiling.emitView(v, out, win, rect, true);
+        tiling.emitView(v, out, win, rect);
     }
 }
 

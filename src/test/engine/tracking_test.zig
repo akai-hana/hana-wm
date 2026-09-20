@@ -41,7 +41,7 @@ fn setUpModel() *model.Model {
     m.* = helpers.makeModel();
     helpers.testReset();
     sync.init();
-    tracking.init(testing.allocator);
+    tracking.init();
     return m;
 }
 

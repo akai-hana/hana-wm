@@ -63,7 +63,7 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     var msg: [pid_msg_len]u8 = undefined;
     msg[0] = tag_pid;
     @memcpy(msg[1..], std.mem.asBytes(&gp));
-    // C5: a short/failed write (e.g. EPIPE after the WM closed the read end
+    // A short/failed write (e.g. EPIPE after the WM closed the read end
     // on shutdown) would leave the WM waiting on a conversation that never
     // delivers a pid. In that case declare the spawn failed and exit
     // non-zero; the grandchild (if any) still runs, just unrouted.
@@ -122,7 +122,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
         break :blk heap_cmd_z.?.ptr;
     };
 
-    // C5: refuse up front instead of fork-then-discover-the-table-is-full. The
+    // Refuse up front instead of fork-then-discover-the-table-is-full. The
     // old path logged past the append and, once the table filled, fell back
     // to a synchronous waitpid on the event loop and silently dropped
     // workspace routing for the spawn.

@@ -264,6 +264,9 @@ const num_modes = @typeInfo(Mode).@"enum".fields.len;
 
 const cursor_width: u16 = 1;
 const cursor_v_pad: u16 = 2;
+/// Ink/pill margin: scrolled post-cursor text stops this many px short of the
+/// mode pill so ink never bleeds into it.
+const pill_ink_gap_px: u16 = 2;
 const max_completions: usize = 1024;
 const max_completion_len: usize = 64;
 const max_history: usize = 128;
@@ -287,11 +290,14 @@ const PromptState = struct {
     // Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
     cached_mode_w: [num_modes]?u16 = .{null} ** num_modes,
 
-    comp_names: []u8 = &.{},
+    // Completion table: `max_completions` fixed 65-byte zero-terminated slots,
+    // embedded in the global so no allocation/partial-OOM bookkeeping exists.
+    // `comp_count` is the live length; slots beyond it are stale.
+    comp_names: [max_completions][max_completion_len + 1:0]u8 = .{.{0} ** (max_completion_len + 1)} ** max_completions,
     comp_count: usize = 0,
 
     // Ghost text: the completion suffix shown dimmed after the cursor.
-    ghost_buf: []u8 = &.{},
+    ghost_buf: [max_completion_len:0]u8 = .{0} ** max_completion_len,
     ghost_len: usize = 0,
     // True when the current buffer contains at least one space.  Maintained
     // incrementally so `updateGhost` can skip a full buffer scan on every call.
@@ -304,14 +310,13 @@ const PromptState = struct {
     cached_caret_top: ?u16 = null,
     cached_caret_h: ?u16 = null,
 
-    hist_entries: []u8 = &.{},
+    hist_entries: [max_history][max_history_line + 1:0]u8 = .{.{0} ** (max_history_line + 1)} ** max_history,
     hist_count: usize = 0,
     hist_head: usize = 0,
     is_hist_loaded: bool = false,
     // Tracks whether the $PATH scan has run at all, separate from comp_count:
-    // a legitimately empty result (or an ensureAlloc failure) leaves
-    // comp_count at 0, and gating on that would re-scan $PATH on every
-    // activation.
+    // a legitimately empty result leaves comp_count at 0, and gating on that
+    // would re-scan $PATH on every activation.
     is_completions_loaded: bool = false,
 
     // Set by key handlers, `activate`, and `deactivate` to notify the bar
@@ -410,9 +415,7 @@ pub fn consumeRedrawRequest() bool {
 
 /// Initialises prompt state that is needed regardless of whether the prompt
 /// is ever opened: the bar service handles, vim engine, and key-symbol table.
-/// Completion / history buffers are deferred to `ensureAlloc` (~97 KiB total:
-/// 66,560 B completions + 64 B ghost + 32,896 B history)
-/// and allocated lazily on the first activation.
+/// The completion/history/ghost buffers are embedded in the global (~99 KiB).
 pub fn init(
     allocator: std.mem.Allocator,
     conn: core.Connection,
@@ -433,23 +436,8 @@ pub fn init(
     }
 }
 
-/// Lazily allocate the completion, ghost-text and history buffers on first
-/// activation.  Each sub-allocation is independently guarded so a partial
-/// OOM on a previous attempt is retried.  ~97 KiB total.
-fn ensureAlloc() void {
-    if (g.comp_names.len == 0)
-        g.comp_names = g.allocator.alloc(
-            u8,
-            (max_completion_len + 1) * max_completions,
-        ) catch return;
-    if (g.ghost_buf.len == 0)
-        g.ghost_buf = g.allocator.alloc(u8, max_completion_len) catch return;
-    if (g.hist_entries.len == 0)
-        g.hist_entries = g.allocator.alloc(u8, (max_history_line + 1) * max_history) catch return;
-}
-
-/// Releases all prompt resources including the keyboard grab, vim state,
-/// completion and history buffers.
+/// Releases all prompt resources including the keyboard grab and vim state.
+/// The completion/history/ghost buffers are embedded in the global (no heap).
 pub fn deinit(allocator: std.mem.Allocator) void {
     inline for (addons) |a| a.deinit(allocator);
     if (g.key_syms) |ks| {
@@ -457,8 +445,6 @@ pub fn deinit(allocator: std.mem.Allocator) void {
         g.key_syms = null;
     }
     if (g.vim_state.buf.len != 0) g.vim_state.deinit();
-    for ([_]*[]u8{ &g.hist_entries, &g.ghost_buf, &g.comp_names }) |p|
-        if (p.*.len != 0) g.allocator.free(p.*);
     g = .{};
 }
 
@@ -634,13 +620,13 @@ fn resetPromptEditing() void {
 }
 
 /// Acquires the keyboard grab and marks the prompt active.  Completion and
-/// history buffers are allocated on first activation via `ensureAlloc`.
+/// history buffers are embedded in the global, so no per-activation setup
+/// beyond loading (once) from disk.
 fn activate() void {
-    ensureAlloc();
     resetPromptEditing();
     // Load completions and history on first activation.
-    if (!g.is_completions_loaded and g.comp_names.len > 0) loadCompletions();
-    if (!g.is_hist_loaded and g.hist_entries.len > 0) loadHistory();
+    if (!g.is_completions_loaded) loadCompletions();
+    if (!g.is_hist_loaded) loadHistory();
     g.is_blink_visible = true;
 
     const cs = core.getState();
@@ -694,7 +680,6 @@ fn deactivate() void {
 /// completion table.  Called once on first activation.
 fn loadCompletions() void {
     g.comp_count = 0;
-    if (g.comp_names.len == 0) return; // ensureAlloc failed
     // Mark attempted up front: a missing $PATH or an empty result must not
     // re-trigger the scan on the next activation.
     g.is_completions_loaded = true;
@@ -723,10 +708,9 @@ fn loadCompletions() void {
     }
 
     // Sort for O(log n) binary search in updateGhost.
-    const slot_stride = max_completion_len + 1;
-    const entries = @as([*][slot_stride]u8, @ptrCast(g.comp_names.ptr))[0..g.comp_count];
-    std.sort.pdq([slot_stride]u8, entries, {}, struct {
-        fn lt(_: void, a: [slot_stride]u8, b: [slot_stride]u8) bool {
+    const entries = g.comp_names[0..g.comp_count];
+    std.sort.pdq([max_completion_len + 1:0]u8, entries, {}, struct {
+        fn lt(_: void, a: [max_completion_len + 1:0]u8, b: [max_completion_len + 1:0]u8) bool {
             return std.mem.order(u8, std.mem.sliceTo(&a, 0), std.mem.sliceTo(&b, 0)) == .lt;
         }
     }.lt);
@@ -747,9 +731,9 @@ fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
 /// Stores `name` into the next completion slot.  Returns true when the table is
 /// full and the $PATH scan should stop.
 fn offerCompletion(name: []const u8) bool {
-    const slot = g.comp_count * (max_completion_len + 1);
-    @memcpy(g.comp_names[slot .. slot + name.len], name);
-    g.comp_names[slot + name.len] = 0;
+    const slot = &g.comp_names[g.comp_count];
+    @memcpy(slot[0..name.len], name);
+    slot[name.len] = 0;
     g.comp_count += 1;
     return g.comp_count >= max_completions;
 }
@@ -768,24 +752,16 @@ fn compLowerBound(prefix: []const u8) usize {
 }
 
 fn compName(i: usize) []const u8 {
-    const slot = i * (max_completion_len + 1);
-    return std.mem.sliceTo(g.comp_names[slot .. slot + max_completion_len + 1], 0);
+    return std.mem.sliceTo(&g.comp_names[i], 0);
 }
 
 fn histEntry(i: usize) []const u8 {
-    const slot = ((g.hist_head + i) % max_history) * (max_history_line + 1);
-    return std.mem.sliceTo(g.hist_entries[slot .. slot + max_history_line + 1], 0);
+    return std.mem.sliceTo(&g.hist_entries[(g.hist_head + i) % max_history], 0);
 }
 
 /// Clamps `suffix` into g.ghost_buf/g.ghost_len.  Shared by both updateGhost
 /// branches, which only differ in how they find the match.
 inline fn setGhost(suffix: []const u8) void {
-    // B1: ghost_buf is empty when its one-time allocation failed (partial OOM
-    // in ensureAlloc). Slicing it for a non-empty suffix is then an OOB write.
-    if (g.ghost_buf.len == 0) {
-        g.ghost_len = 0;
-        return;
-    }
     const n = @min(suffix.len, max_completion_len);
     @memcpy(g.ghost_buf[0..n], suffix[0..n]);
     g.ghost_len = n;
@@ -835,17 +811,14 @@ fn updateGhost() void {
 /// Silently no-ops when cmd is empty or exceeds max_history_line.
 fn histPrepend(cmd: []const u8) void {
     if (cmd.len == 0 or cmd.len > max_history_line) return;
-    // B1: hist_entries is empty when its one-time allocation failed (partial
-    // OOM in ensureAlloc); don't index into it (OOB write at slot + cmd.len).
-    if (g.hist_entries.len == 0) return;
     // Skip consecutive duplicates (shell convention): when the newest entry
     // already equals this command, re-running it must not stack the ring.
     if (g.hist_count > 0 and std.mem.eql(u8, histEntry(0), cmd)) return;
 
     g.hist_head = if (g.hist_head == 0) max_history - 1 else g.hist_head - 1;
-    const slot = g.hist_head * (max_history_line + 1);
-    @memcpy(g.hist_entries[slot .. slot + cmd.len], cmd);
-    g.hist_entries[slot + cmd.len] = 0;
+    const slot = &g.hist_entries[g.hist_head];
+    @memcpy(slot[0..cmd.len], cmd);
+    slot[cmd.len] = 0;
     if (g.hist_count < max_history) g.hist_count += 1;
 }
 
@@ -977,8 +950,6 @@ fn histLoadFile(path: []const u8) void {
 /// suggestion priority in `updateGhost`.
 fn loadHistory() void {
     g.is_hist_loaded = true;
-    if (g.hist_entries.len == 0) return; // ensureAlloc failed
-
     var path_buf: [history_path_buf_len]u8 = undefined;
     const home = std.mem.span(c.getenv("HOME") orelse return);
 

@@ -58,25 +58,24 @@ fn addRule(
 
 /// One row of the bar-anchor table driving both the default bar layout
 /// (initDefaultBarLayout) and the per-anchor `[bar.layout.<name>]` sections
-/// (parseBarLayout), so the anchor set can never drift. `position` is the
-/// types.BarSegmentAnchor tag index (0 = left, 1 = center, 2 = right).
+/// (parseBarLayout), so the anchor set can never drift.
 const BarAnchorInfo = struct {
     name: []const u8,
-    position: u8,
+    position: types.BarSegmentAnchor,
     default_seg: []const u8,
 };
 
 const bar_anchors = [_]BarAnchorInfo{
-    .{ .name = "left", .position = 0, .default_seg = "workspaces" },
-    .{ .name = "center", .position = 1, .default_seg = "title" },
-    .{ .name = "right", .position = 2, .default_seg = "clock" },
+    .{ .name = "left", .position = .left, .default_seg = "workspaces" },
+    .{ .name = "center", .position = .center, .default_seg = "title" },
+    .{ .name = "right", .position = .right, .default_seg = "clock" },
 };
 
-const bar_layout_section_prefix = "bar.layout.";
+const bar_layout_section_prefix = types.section_prefix_bar_layout;
 
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void {
     for (bar_anchors) |a| {
-        var layout = types.BarLayout{ .position = @enumFromInt(a.position), .segments = .empty };
+        var layout = types.BarLayout{ .position = a.position, .segments = .empty };
         try layout.segments.append(allocator, try allocator.dupe(u8, a.default_seg));
         try cfg.bar.layout.append(allocator, layout);
     }
@@ -89,6 +88,12 @@ pub const max_file_bytes = 1024 * 1024;
 const read_growth_initial_bytes = 64 * 1024;
 
 const default_tiling_layout = (types.TilingConfig{}).layout;
+
+/// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
+const max_master_count: u8 = 10;
+
+/// Longest keysym name the bind parser will accept raw (longer → error.KeyNameTooLong).
+const max_key_name_bytes = 64;
 
 /// Reads `path`, returning `error.FileTooLarge` when it exceeds
 /// `max_file_bytes`. The returned slice may alias a larger allocation
@@ -206,7 +211,7 @@ fn mergeIncludes(
     // The `include` key is copied into `dst` by mergeDocumentsInto, so mark it
     // consumed there as well: otherwise warnUnconsumed would flag it as a typo.
     dst.root.markConsumed("include");
-    const inc_val = src_doc.get("include") orelse return;
+    const inc_val = src_doc.root.get("include") orelse return;
     const includes = inc_val.asArray() orelse return;
     for (includes) |item| {
         const rel = item.asScalar([]const u8) orelse continue;
@@ -216,7 +221,7 @@ fn mergeIncludes(
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
         var inc_doc = tryParseTomlFile(allocator, abs, dst) orelse continue;
-        if (inc_doc.get("include")) |_| {
+        if (inc_doc.root.get("include")) |_| {
             debug.warn("{s}: nested 'include' inside an included file is not " ++ "supported; its include list is skipped", .{abs});
         }
         try parser.mergeDocumentsInto(allocator, dst, &inc_doc);
@@ -286,7 +291,7 @@ fn tryLoadOrWarn(
     comptime silent: []const anyerror,
 ) !?types.Config {
     return loader(allocator, path) catch |err| {
-        // C1: a parse error must reach the caller. On reload it makes the
+        // A parse error must reach the caller. On reload it makes the
         // swap fail so the live config is kept (see events.handleConfigReload);
         // at boot `load` catches it and falls back to the embedded config.
         // Swallowing it here is what silently installed the fallback over a
@@ -303,7 +308,7 @@ fn tryLoadOrWarn(
 /// (loadConfigDefault) so the search order cannot drift; loadConfigDefault also
 /// reports which source supplied the config, so the reload path needs no
 /// separate existence probe.
-pub const SearchPaths = struct {
+const SearchPaths = struct {
     xdg_dir: []u8,
     local_dir: []u8,
     xdg_file: []u8,
@@ -317,7 +322,7 @@ pub const SearchPaths = struct {
     }
 };
 
-pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
+fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
     const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
     // Always dupe and always free: the arena makes the extra dupe of the
@@ -378,7 +383,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource) !
 
     const file_attempts = [_][]const u8{ paths.xdg_file, paths.local_file };
     for (file_attempts) |path|
-        if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back\n", &.{error.FileNotFound})) |cfg| {
+        if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back", &.{error.FileNotFound})) |cfg| {
             source.* = .user;
             return cfg;
         };
@@ -513,20 +518,20 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
 /// spelling. A section header that differs from one of these only by case is
 /// almost certainly a typo that silently drops the whole section (C6).
 const known_sections = std.StaticStringMap(void).initComptime(.{
-    .{ "binds", {} },                       .{ "Keybindings", {} },
-    .{ "workspace.rules", {} },             .{ "rules", {} },
-    .{ "drag", {} },                        .{ "fullscreen", {} },
-    .{ "tiling", {} },                      .{ "workspaces", {} },
-    .{ "bar", {} },                         .{ "bar.colors", {} },
-    .{ "bar.layout.left", {} },             .{ "bar.layout.center", {} },
-    .{ "bar.layout.right", {} },            .{ "bar.modules.workspaces", {} },
-    .{ "tiling.aesthetics", {} },           .{ "tiling.layouts.master-stack", {} },
+    .{ "binds", {} },                         .{ "Keybindings", {} },
+    .{ types.section_workspace_rules, {} },   .{ types.section_rules, {} },
+    .{ "drag", {} },                          .{ "fullscreen", {} },
+    .{ types.section_tiling, {} },            .{ "workspaces", {} },
+    .{ types.section_bar, {} },               .{ types.section_bar_colors, {} },
+    .{ "bar.layout.left", {} },               .{ "bar.layout.center", {} },
+    .{ "bar.layout.right", {} },              .{ "bar.modules.workspaces", {} },
+    .{ types.section_tiling_aesthetics, {} }, .{ types.section_tiling_layouts_master_stack, {} },
     .{ "tiling.layouts.master_stack", {} },
 });
 
 /// Section families whose parent section must exist for their knobs to do
 /// anything; a mis-cased or missing parent leaves them inert (C9).
-const known_section_prefixes = [_][]const u8{ "tiling.layouts.", "workspace.rules.", "rules." };
+const known_section_prefixes = [_][]const u8{ types.section_prefix_tiling_layouts, types.section_prefix_workspace_rules, types.section_prefix_rules };
 
 fn warnMisCasedSections(doc: *parser.Document) void {
     var iter = doc.sections.iterator();
@@ -553,16 +558,16 @@ fn warnMisCasedSections(doc: *parser.Document) void {
 /// Warns once when a section family that requires a parent section is present
 /// without it, which leaves its knobs silently inert (C9).
 fn warnInertSectionFamilies(doc: *parser.Document) void {
-    if (doc.getSection("tiling") == null) {
+    if (doc.getSection(types.section_tiling) == null) {
         var iter = doc.sections.iterator();
         while (iter.next()) |entry| {
-            if (std.mem.startsWith(u8, entry.key_ptr.*, "tiling.")) {
+            if (std.mem.startsWith(u8, entry.key_ptr.*, types.section_prefix_tiling)) {
                 debug.warn("[tiling.*] sections present but bare [tiling] is missing; their knobs are inert", .{});
                 break;
             }
         }
     }
-    if (doc.getSection("bar") == null and doc.getSection("bar.colors") != null)
+    if (doc.getSection(types.section_bar) == null and doc.getSection(types.section_bar_colors) != null)
         debug.warn("[bar.colors] present but [bar] is missing; its knobs are inert", .{});
 }
 
@@ -856,17 +861,15 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *t
     var kill_placeholder: ?[]const u8 = null;
     var iter = section.orderedIterator();
     while (iter.next()) |entry| {
+        section.markConsumed(entry.key);
         if (std.ascii.eqlIgnoreCase(entry.key, "Mod")) {
             mod_placeholder = entry.value.asScalar([]const u8);
-            section.markConsumed(entry.key);
             continue;
         }
         if (std.ascii.eqlIgnoreCase(entry.key, "kill")) {
             kill_placeholder = entry.value.asScalar([]const u8);
-            section.markConsumed(entry.key);
             continue;
         }
-        section.markConsumed(entry.key);
         const glob_entries = try expandGlobKeys(allocator, entry.key);
         defer {
             for (glob_entries) |ge| if (ge.owned) allocator.free(ge.key);
@@ -929,8 +932,8 @@ fn parseBindString(str: []const u8) !BindResult {
 }
 
 fn keyNameToKeysym(name: []const u8) !u32 {
-    if (name.len >= 64) return error.KeyNameTooLong;
-    var buf: [64]u8 = undefined;
+    if (name.len >= max_key_name_bytes) return error.KeyNameTooLong;
+    var buf: [max_key_name_bytes]u8 = undefined;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
     const keysym = keysyms.keysymFromName(&buf);
@@ -1006,7 +1009,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
 pub fn load(allocator: std.mem.Allocator) !types.Config {
     var source: DefaultSource = .fallback;
     var cfg = loadConfigDefault(allocator, &source) catch |err| switch (err) {
-        // C1: a malformed user config at BOOT falls back to the embedded
+        // A malformed user config at BOOT falls back to the embedded
         // config (the WM must still start). On reload the parse error
         // propagates instead, so the live config is kept.
         error.ConfigParseFailed => blk: {
@@ -1044,7 +1047,7 @@ fn parseTilingStructures(
     doc: *parser.Document,
     cfg: *types.Config,
 ) !void {
-    const section = doc.getSection("tiling") orelse return;
+    const section = doc.getSection(types.section_tiling) orelse return;
     types.freeStrings(&cfg.tiling.layouts, allocator, true);
     cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
     types.freeStringMap(&cfg.tiling.variants, allocator, true);
@@ -1101,10 +1104,10 @@ fn parseTilingLayoutSubtables(
     doc: *parser.Document,
     cfg: *types.Config,
 ) !void {
-    if (doc.getSection("tiling")) |sec| for (flat_variant_keys) |fk|
+    if (doc.getSection(types.section_tiling)) |sec| for (flat_variant_keys) |fk|
         if (sec.getAs([]const u8, fk.key)) |v| try setTilingVariant(allocator, cfg, fk.canon, v);
 
-    const prefix = "tiling.layouts.";
+    const prefix = types.section_prefix_tiling_layouts;
     const suffix = ".counts";
     var iter = doc.sections.iterator();
     while (iter.next()) |entry| {
@@ -1112,7 +1115,7 @@ fn parseTilingLayoutSubtables(
         if (!std.mem.startsWith(u8, sec_name, prefix)) continue;
         // Only direct "<prefix><name>[.counts]" tables qualify (no deeper
         // nesting); the counts table is master-family only, and its keys are
-        // 1-based workspace numbers -> in-[0,10] master counts.
+        // 1-based workspace numbers -> in-[0,max_master_count] master counts.
         const tail = sec_name[prefix.len..];
         if (std.mem.endsWith(u8, tail, suffix)) {
             const seg = tail[0 .. tail.len - suffix.len];
@@ -1127,8 +1130,8 @@ fn parseTilingLayoutSubtables(
                             debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
                             continue;
                         };
-                        if (count_val < 0 or count_val > 10)
-                            debug.warn("master-stack.counts: count {} for workspace {} out of range [0,10], skipping", .{ count_val, ws_1based })
+                        if (count_val < 0 or count_val > max_master_count)
+                            debug.warn("master-stack.counts: count {} for workspace {} out of range [0,{d}], skipping", .{ count_val, ws_1based, max_master_count })
                         else
                             try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
                                 .workspace_idx = @intCast(ws_1based - 1),
@@ -1336,7 +1339,7 @@ fn appendDupedStrings(
 /// is driven by schema.applyAll; like parseBar always did, everything here
 /// stays gated on the [bar] section existing.
 fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    const section = doc.getSection("bar") orelse return;
+    const section = doc.getSection(types.section_bar) orelse return;
     if (section.getAs([]const parser.Value, "fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, true);
         try appendDupedStrings(false, allocator, arr, &cfg.bar.fonts);
@@ -1392,9 +1395,15 @@ fn parseWorkspaceIcons(
 
 fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     types.freeBarLayouts(&cfg.bar.layout, allocator, true);
-    inline for (bar_anchors) |a| {
-        const layout_section = doc.getSection(bar_layout_section_prefix ++ a.name) orelse continue;
-        var bar_layout = types.BarLayout{ .position = @enumFromInt(a.position), .segments = .empty };
+    const max_anchor_name_len = comptime blk: {
+        var longest: usize = 0;
+        for (bar_anchors) |a| longest = @max(longest, a.name.len);
+        break :blk longest;
+    };
+    var section_buf: [bar_layout_section_prefix.len + max_anchor_name_len]u8 = undefined;
+    for (bar_anchors) |a| {
+        const layout_section = doc.getSection(std.fmt.bufPrint(&section_buf, "{s}{s}", .{ bar_layout_section_prefix, a.name }) catch unreachable) orelse continue;
+        var bar_layout = types.BarLayout{ .position = a.position, .segments = .empty };
         if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
             try appendDupedStrings(true, allocator, seg_arr, &bar_layout.segments);
         if (bar_layout.segments.items.len > 0) try cfg.bar.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
@@ -1403,15 +1412,12 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
     if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
 }
 
-    if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
-}
-
 fn parseRules(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     // [workspace.rules]: key is either a class name (value = ws int) or a
     // workspace number (value = class array). Both directions call addRule.
-    if (doc.getSection("workspace.rules")) |s| try parseWorkspaceRuleSection(allocator, cfg, s);
+    if (doc.getSection(types.section_workspace_rules)) |s| try parseWorkspaceRuleSection(allocator, cfg, s);
     // [rules]: simple class -> workspace mapping (key = class, value = ws int).
-    if (doc.getSection("rules")) |s| {
+    if (doc.getSection(types.section_rules)) |s| {
         var iter = s.orderedIterator();
         while (iter.next()) |entry| {
             s.markConsumed(entry.key);
@@ -1432,7 +1438,7 @@ fn parseNumberedRuleSections(
     var section_iter = doc.sections.iterator();
     while (section_iter.next()) |entry| {
         const name = entry.key_ptr.*;
-        const suffix_len = if (std.mem.startsWith(u8, name, "workspace.rules.")) "workspace.rules.".len else if (std.mem.startsWith(u8, name, "rules.")) "rules.".len else continue;
+        const suffix_len = if (std.mem.startsWith(u8, name, types.section_prefix_workspace_rules)) types.section_prefix_workspace_rules.len else if (std.mem.startsWith(u8, name, types.section_prefix_rules)) types.section_prefix_rules.len else continue;
         const ws_num = tryParseWs1Based(name[suffix_len..], cfg.workspaces.count, name, null, .{}) orelse continue;
         var iter = entry.value_ptr.orderedIterator();
         while (iter.next()) |class_entry| {
@@ -1518,81 +1524,27 @@ fn parseWorkspaceRuleSection(
 // bookkeeping bytes, which would make a reload comparison depend on append
 // history, and never by pointer identity.
 
-fn eqlStrings(a: []const []const u8, b: []const []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| if (!std.mem.eql(u8, x, y)) return false;
-    return true;
-}
-
-fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
-    if (a) |x| return if (b) |y| std.mem.eql(u8, x, y) else false;
-    return b == null;
-}
-
-fn eqlScalableOpt(a: ?parser.ScalableValue, b: ?parser.ScalableValue) bool {
-    if (a) |x| return if (b) |y| eqlScalable(x, y) else false;
-    return b == null;
-}
-
-/// ScalableValue is a bare struct (no `==` operator), so compare its fields.
-fn eqlScalable(a: parser.ScalableValue, b: parser.ScalableValue) bool {
-    return a.value == b.value and a.is_percentage == b.is_percentage;
-}
-
+/// Bar layouts are compared logically; the segments ArrayList's capacity is
+/// bookkeeping that append history must never make read as different.
 fn eqlBarLayouts(a: []const types.BarLayout, b: []const types.BarLayout) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
         if (x.position != y.position) return false;
-        if (!eqlStrings(x.segments.items, y.segments.items)) return false;
+        if (!std.meta.eql(x.segments.items, y.segments.items)) return false;
     }
     return true;
 }
 
-fn eqlLayoutOverrides(a: []const types.WorkspaceLayoutOverride, b: []const types.WorkspaceLayoutOverride) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (x.workspace_idx != y.workspace_idx or x.layout_idx != y.layout_idx) return false;
-        if (!eqlOptionalString(x.variant, y.variant)) return false;
-    }
-    return true;
-}
-
-fn eqlMasterCountOverrides(a: []const types.WorkspaceMasterCountOverride, b: []const types.WorkspaceMasterCountOverride) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (x.workspace_idx != y.workspace_idx or x.count != y.count) return false;
-    }
-    return true;
-}
-
-/// Variant maps are compared by (key, value) content, unordered: append
-/// history must never make two identical maps read as different.
-fn eqlVariantMap(a: *const std.StringHashMapUnmanaged([]const u8), b: *const std.StringHashMapUnmanaged([]const u8)) bool {
+/// Unordered string-keyed map comparison, shared by the variant map and the
+/// segment-color maps: append history must never make two identical maps read
+/// as different, and `std.meta.eql` on StringHashMapUnmanaged would trip on
+/// internal bookkeeping. Values compare via `std.meta.eql` (slice or scalar).
+fn eqlStringMap(comptime V: type, a: *const std.StringHashMapUnmanaged(V), b: *const std.StringHashMapUnmanaged(V)) bool {
     if (a.count() != b.count()) return false;
     var it = a.iterator();
     while (it.next()) |entry| {
         const v = b.get(entry.key_ptr.*) orelse return false;
-        if (!std.mem.eql(u8, entry.value_ptr.*, v)) return false;
-    }
-    return true;
-}
-
-fn eqlRules(a: []const types.Rule, b: []const types.Rule) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (x.workspace != y.workspace) return false;
-        if (!std.mem.eql(u8, x.class_name, y.class_name)) return false;
-    }
-    return true;
-}
-
-/// Segment-color maps are compared by (name, color) content, unordered.
-fn eqlSegmentColors(a: *const std.StringHashMapUnmanaged(types.Color), b: *const std.StringHashMapUnmanaged(types.Color)) bool {
-    if (a.count() != b.count()) return false;
-    var it = a.iterator();
-    while (it.next()) |entry| {
-        const v = b.get(entry.key_ptr.*) orelse return false;
-        if (entry.value_ptr.* != v) return false;
+        if (!std.meta.eql(entry.value_ptr.*, v)) return false;
     }
     return true;
 }
@@ -1603,16 +1555,33 @@ pub const ConfigChanges = struct {
     keys: bool = false,
 };
 
+/// The three detectors below compare per-subsystem content summaries. They
+/// deliberately stay hand-maintained field lists rather than being derived
+/// from `types.schema.knobs` (which declares every scalar knob once):
+///
+///   * keysChanged is entirely bespoke: keybindings/mouse_bindings have no
+///     knob entries, and their equality is pair-based (modifiers + keysym /
+///     button, action deliberately excluded) -- not field equality.
+///   * bar/tiling carry non-knob content anyway (fonts, workspace icons,
+///     per-segment color overrides, layout/override tables, workspace rules)
+///     that a knob scan could not see, so a derivation would replace these
+///     plain scalar comparisons with reflection plus a second hand-built
+///     overlay -- more machinery for a residual list.
+///
+/// The per-shape comparators were already consolidated (std.meta.eql for
+/// unit/map/rule/string/override shapes, eqlStringMap and eqlBarLayouts for
+/// the two compound shapes), which keeps the lists drift-resistant without a
+/// reflection layer.
 /// Bar-subsystem content: every field of BarConfig compared logically
 /// (arrays by items, optionals by inner value, strings by contents).
 fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
     return old.enabled != new.enabled or
         old.vim_mode != new.vim_mode or
         old.bar_position != new.bar_position or
-        !eqlScalableOpt(old.height, new.height) or
-        !eqlStrings(old.fonts.items, new.fonts.items) or
-        !eqlScalable(old.font_size, new.font_size) or
-        !eqlScalable(old.spacing, new.spacing) or
+        !std.meta.eql(old.height, new.height) or
+        !std.meta.eql(old.fonts.items, new.fonts.items) or
+        !std.meta.eql(old.font_size, new.font_size) or
+        !std.meta.eql(old.spacing, new.spacing) or
         old.bg != new.bg or
         old.fg != new.fg or
         old.selected_bg != new.selected_bg or
@@ -1624,26 +1593,26 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         old.title_accent_color != new.title_accent_color or
         old.title_unfocused_accent != new.title_unfocused_accent or
         old.title_minimized_accent != new.title_minimized_accent or
-        !eqlStrings(old.workspace_icons.items, new.workspace_icons.items) or
-        !eqlScalable(old.indicator_size, new.indicator_size) or
-        !eqlScalable(old.workspace_tag_width, new.workspace_tag_width) or
+        !std.meta.eql(old.workspace_icons.items, new.workspace_icons.items) or
+        !std.meta.eql(old.indicator_size, new.indicator_size) or
+        !std.meta.eql(old.workspace_tag_width, new.workspace_tag_width) or
         old.indicator_location != new.indicator_location or
         old.indicator_padding != new.indicator_padding or
-        !eqlOptionalString(old.indicator_focused, new.indicator_focused) or
-        !eqlOptionalString(old.indicator_unfocused, new.indicator_unfocused) or
+        !std.meta.eql(old.indicator_focused, new.indicator_focused) or
+        !std.meta.eql(old.indicator_unfocused, new.indicator_unfocused) or
         old.indicator_color != new.indicator_color or
-        !eqlOptionalString(old.clock_format, new.clock_format) or
-        !eqlOptionalString(old.volume_format, new.volume_format) or
-        !eqlOptionalString(old.volume_muted_format, new.volume_muted_format) or
-        !eqlOptionalString(old.brightness_format, new.brightness_format) or
-        !eqlOptionalString(old.brightness_device, new.brightness_device) or
+        !std.meta.eql(old.clock_format, new.clock_format) or
+        !std.meta.eql(old.volume_format, new.volume_format) or
+        !std.meta.eql(old.volume_muted_format, new.volume_muted_format) or
+        !std.meta.eql(old.brightness_format, new.brightness_format) or
+        !std.meta.eql(old.brightness_device, new.brightness_device) or
         old.carousel_enabled != new.carousel_enabled or
         old.carousel_speed_px_s != new.carousel_speed_px_s or
         old.drun_bg != new.drun_bg or
         old.drun_fg != new.drun_fg or
         old.drun_prompt_color != new.drun_prompt_color or
-        !eqlOptionalString(old.drun_prompt, new.drun_prompt) or
-        !eqlSegmentColors(&old.segment_fg, &new.segment_fg) or
+        !std.meta.eql(old.drun_prompt, new.drun_prompt) or
+        !eqlStringMap(types.Color, &old.segment_fg, &new.segment_fg) or
         !eqlBarLayouts(old.layout.items, new.layout.items) or
         old.transparency != new.transparency;
 }
@@ -1652,26 +1621,26 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
 /// drag/snap gates the reload handler rebuilds together with tiling state.
 fn tilingChanged(old: *const types.Config, new: *const types.Config) bool {
     return old.tiling.enabled != new.tiling.enabled or
-        !std.mem.eql(u8, old.tiling.layout, new.tiling.layout) or
-        !eqlStrings(old.tiling.layouts.items, new.tiling.layouts.items) or
+        !std.meta.eql(old.tiling.layout, new.tiling.layout) or
+        !std.meta.eql(old.tiling.layouts.items, new.tiling.layouts.items) or
         old.tiling.master_side != new.tiling.master_side or
-        !eqlScalable(old.tiling.master_width, new.tiling.master_width) or
+        !std.meta.eql(old.tiling.master_width, new.tiling.master_width) or
         old.tiling.master_count != new.tiling.master_count or
-        !eqlScalable(old.tiling.gap_width, new.tiling.gap_width) or
-        !eqlScalable(old.tiling.border_width, new.tiling.border_width) or
+        !std.meta.eql(old.tiling.gap_width, new.tiling.gap_width) or
+        !std.meta.eql(old.tiling.border_width, new.tiling.border_width) or
         old.tiling.border_focused != new.tiling.border_focused or
         old.tiling.border_unfocused != new.tiling.border_unfocused or
         old.tiling.min_window_dim != new.tiling.min_window_dim or
-        !eqlVariantMap(&old.tiling.variants, &new.tiling.variants) or
-        !eqlLayoutOverrides(old.tiling.workspace_layout_overrides.items, new.tiling.workspace_layout_overrides.items) or
-        !eqlMasterCountOverrides(old.tiling.workspace_master_count_overrides.items, new.tiling.workspace_master_count_overrides.items) or
+        !eqlStringMap([]const u8, &old.tiling.variants, &new.tiling.variants) or
+        !std.meta.eql(old.tiling.workspace_layout_overrides.items, new.tiling.workspace_layout_overrides.items) or
+        !std.meta.eql(old.tiling.workspace_master_count_overrides.items, new.tiling.workspace_master_count_overrides.items) or
         old.tiling.global_layout != new.tiling.global_layout or
         old.workspaces.enabled != new.workspaces.enabled or
         old.workspaces.count != new.workspaces.count or
-        !eqlRules(old.workspaces.rules.items, new.workspaces.rules.items) or
+        !std.meta.eql(old.workspaces.rules.items, new.workspaces.rules.items) or
         old.fullscreen_enabled != new.fullscreen_enabled or
         old.drag_enabled != new.drag_enabled or
-        !eqlScalable(old.snap_distance, new.snap_distance);
+        !std.meta.eql(old.snap_distance, new.snap_distance);
 }
 
 /// Keys-subsystem content: the pair layout — (modifiers, keysym) per keyboard

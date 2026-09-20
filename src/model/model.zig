@@ -19,10 +19,6 @@ pub inline fn bit(ws: WSId) Mask {
     return @as(Mask, 1) << @intCast(ws.index);
 }
 
-/// Alias for the workspace count ceiling; the canonical value lives in
-/// constants so config plumbing shares one source.
-const MAX_WS = constants.max_workspaces;
-
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
 /// Single canonical size-hints record. Do NOT import layouts from here (layer rule).
@@ -121,7 +117,6 @@ pub const WsState = struct {
 pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
-        pub const Error = error{StoreFull};
 
         keys: [capacity]K = undefined,
         vals: [capacity]V = undefined,
@@ -178,12 +173,12 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             return self.exactAt(k) != null;
         }
 
-        pub fn put(self: *Self, k: K, v: V) Error!*V {
+        pub fn put(self: *Self, k: K, v: V) error{StoreFull}!*V {
             if (self.exactAt(k)) |i| {
                 self.vals[i] = v;
                 return &self.vals[i];
             }
-            if (self.len == capacity) return Error.StoreFull;
+            if (self.len == capacity) return error.StoreFull;
             const pos = self.lowerBound(k);
             std.mem.copyBackwards(K, self.keys[pos + 1 .. self.len + 1], self.keys[pos..self.len]);
             std.mem.copyBackwards(V, self.vals[pos + 1 .. self.len + 1], self.vals[pos..self.len]);
@@ -208,11 +203,29 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         pub const Item = struct { key: K, val: *const V };
 
-        /// seq must be < count(). Iterates in sorted-key order.
-        /// seq beyond count() clamps to the last stored row (real check, not a
-        /// debug-only assert), so an off-by-one index can't OOB the backing
-        /// arrays in ReleaseFast. Empty map → row 0 of the fixed-capacity
-        /// storage (always addressable, capacity >= 1).
+        /// Sorted-key row iterator: yields every stored (key, value) in order,
+        /// so scans never hand-roll the `0..count()`/`, at(k)` bounds dance.
+        /// The row pointer is valid until the store mutates (see the pointer
+        /// contract on getPtr). Early-exit mid-iteration is safe.
+        pub const Iterator = struct {
+            store: *const Self,
+            pos: usize = 0,
+            pub fn next(self: *Iterator) ?Item {
+                if (self.pos >= self.store.len) return null;
+                const i = self.pos;
+                self.pos += 1;
+                return .{ .key = self.store.keys[i], .val = &self.store.vals[i] };
+            }
+        };
+        pub fn iterator(self: *const Self) Iterator {
+            return .{ .store = self };
+        }
+
+        /// Iterates in sorted-key order; `seq` beyond count() clamps to the
+        /// last stored row (real check, not a debug-only assert), so an
+        /// off-by-one index can't OOB the backing arrays in ReleaseFast.
+        /// Empty map → row 0 of the fixed-capacity storage (always
+        /// addressable, capacity >= 1).
         pub fn at(self: *const Self, seq: usize) Item {
             const idx = @min(seq, self.len -| 1);
             return .{ .key = self.keys[idx], .val = &self.vals[idx] };
@@ -220,6 +233,11 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         pub fn count(self: *const Self) usize {
             return self.len;
+        }
+
+        /// Index of the entry keyed `k`, or null when absent.
+        pub inline fn slotOf(self: *const Self, k: K) ?usize {
+            return self.exactAt(k);
         }
 
         pub fn clear(self: *Self) void {
@@ -246,7 +264,7 @@ pub fn lowestBit(m: Mask) ?WSId {
 
 pub const Model = struct {
     store: StoreT = .{},
-    ws: [MAX_WS]WsState = [_]WsState{.{}} ** MAX_WS,
+    ws: [constants.max_workspaces]WsState = [_]WsState{.{}} ** constants.max_workspaces,
     current: WSId = WSId.fromIndex(0),
     focused: ?WindowId = null,
     all_view_active: bool = false,
@@ -287,18 +305,23 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
-    if (m.store.getPtr(win) == null) return;
+    if (!m.store.remove(win)) return;
     if (findHome(m, win)) |h| removeValue(&m.ws[h.index].tiled_order, win);
     for (&m.ws) |*s| removeValue(&s.focus_mru, win);
     if (m.focused == win) m.focused = null;
-    _ = m.store.remove(win);
 }
 
 pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
     const e = m.store.get(win) orelse return false;
+    return visibleEntry(m, e, ws);
+}
+
+/// Whether entry `e` is visible on `ws`: the exact predicate behind
+/// `visibleOn`, minus the store lookup, so callers that already hold the
+/// entry avoid a second binary search.
+fn visibleEntry(m: *const Model, e: Entry, ws: WSId) bool {
     if (e.presence == .parked) return false;
-    if (m.all_view_active) return true;
-    return e.mask & bit(ws) != 0;
+    return m.all_view_active or e.mask & bit(ws) != 0;
 }
 
 /// Whether `e` is pinned: its mask carries the soft all-workspaces sentinel
@@ -329,11 +352,11 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
 /// enumerating optional subsystems. At most one occupant per ws by the
 /// reconciler.
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
-    for (0..m.store.count()) |k| {
-        const it = m.store.at(k);
-        if (it.val.presence != .covering) continue;
-        const anchored = if (it.val.covering_ws) |cws| cws.eql(ws) else false;
-        if (anchored or visibleOn(m, it.key, ws)) return it.key;
+    var it = m.store.iterator();
+    while (it.next()) |row| {
+        if (row.val.presence != .covering) continue;
+        const anchored = if (row.val.covering_ws) |cws| cws.eql(ws) else false;
+        if (anchored or visibleEntry(m, row.val.*, ws)) return row.key;
     }
     return null;
 }
@@ -385,6 +408,15 @@ pub fn clearFocus(m: *Model) void {
     m.focused = null;
 }
 
+/// Whether `cand` is eligible as a focus-fallback candidate on `ws`: not the
+/// `excluded` window, and visible there (parked entries fail visibleOn). The
+/// tier-specific extra criteria (tiled membership, base mode) stay at each
+/// tier's call site.
+fn qualifies(m: *const Model, cand: WindowId, ws: WSId, excluded: ?WindowId) bool {
+    if (cand == excluded) return false;
+    return visibleOn(m, cand, ws);
+}
+
 /// Minimize-fallback target policy. The window layer's focusFallback
 /// delegates here, and tests exercise the same logic without linking the
 /// protocol layers. Tier order on workspace `ws`:
@@ -402,27 +434,24 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?W
     //    just-parked window itself.
     const mru = &m.ws[ws.index].focus_mru;
     for (mru.constSlice()) |cand| {
-        if (cand == excluded) continue;
-        if (visibleOn(m, cand, ws)) return cand;
+        if (qualifies(m, cand, ws, excluded)) return cand;
     }
     // 2. reversed tiled_order of the workspace.
     var j = m.ws[ws.index].tiled_order.len;
     while (j > 0) {
         j -= 1;
         const cand = m.ws[ws.index].tiled_order.items[j];
-        if (cand == excluded) continue;
-        if (visibleOn(m, cand, ws)) return cand;
+        if (qualifies(m, cand, ws, excluded)) return cand;
     }
     // 3. any floating window on ws (base geometry, not in tiled_order).
     //    A covering window owns the screen, so it is not a fallback target.
     //    Linear membership check per floating entry against tiled_order;
     //    adequate for <50 windows.
-    for (0..m.store.count()) |k| {
-        const it = m.store.at(k);
-        if (it.val.anchor != .floating or it.val.presence == .covering) continue;
-        if (it.key == excluded) continue;
-        if (!visibleOn(m, it.key, ws)) continue;
-        if (m.ws[ws.index].tiled_order.indexOfScalar(it.key) == null) return it.key;
+    var it = m.store.iterator();
+    while (it.next()) |row| {
+        if (row.val.anchor != .floating or row.val.presence == .covering) continue;
+        if (!qualifies(m, row.key, ws, excluded)) continue;
+        if (m.ws[ws.index].tiled_order.indexOfScalar(row.key) == null) return row.key;
     }
     return null;
 }
@@ -467,6 +496,9 @@ pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {
     p.primary_width = std.math.clamp(p.primary_width + delta, constants.min_master_width, constants.max_master_width);
 }
 
+/// Stamp one `LayoutParams` template across every workspace (the config
+/// reload/seeding path — `actions.seedParamsFromConfig` supplies the template;
+/// at-zone tests use it too).
 pub fn applyConfigReload(m: *Model, tpl: LayoutParams) void {
     for (&m.ws) |*s| {
         // Viewport state is RUNTIME state, not config: preserving it prevents

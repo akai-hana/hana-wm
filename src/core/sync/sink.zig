@@ -1,6 +1,7 @@
-//! Production request sink for sync, the ONLY module allowed to contain raw
-//! `xcb_` calls. Every shim wraps the exact request
-//! pattern it consolidates here:
+//! Sends are planned in sync.zig and dispatched by the shims in this file
+//! (the sanctioned seam); the raw XCB primitives the shims call are defined
+//! in core/x11/wire.zig (allowlisted primitive home). Each shim wraps the
+//! exact request pattern it consolidates here:
 //!   geom          ~ utils.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
 //!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent)
@@ -85,7 +86,7 @@ pub const XcbSink = struct {
     /// blocking get_property round-trip then one replace-mode change_property;
     /// only reachable from a fullscreen toggle, so the round-trip is acceptable.
     ///
-    /// C6: the read buffer is bounded, so a list longer than `max_ewmh_states`
+    /// The read buffer is bounded, so a list longer than `max_ewmh_states`
     /// would be silently TRUNCATED by the REPLACE (dropping the client's other
     /// state atoms). We detect that via `bytes_after != 0` and bail out without
     /// touching the property rather than corrupting it.

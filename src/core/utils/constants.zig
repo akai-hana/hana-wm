@@ -18,6 +18,10 @@ pub const master_width_step: f32 = 0.025;
 /// Secondary-column balance step per grow_stack press.
 pub const stack_balance_step: f32 = 0.5;
 
+/// Secondary-column balance swing cap for grow_stack adjustments (see
+/// StackBoost.fromBalance).
+pub const max_primary_swing: f32 = 6.0;
+
 /// Maximum number of concurrently minimized windows. Hoisted from the minimize
 /// module's `max_minimized` so the model layer (which may import only std +
 /// utils + constants) can reach it without build_options. Distinct from
@@ -29,6 +33,10 @@ pub const max_minimized: usize = 32;
 // Short enough to be imperceptible, long enough to avoid busy-spinning while
 // XKB initialises (~1 polling cycle at 50 Hz).
 pub const xkb_retry_delay_ms: u64 = 20;
+
+/// X11 reserves keycodes 0..7; the first real keycode is 8. The flat keysym
+/// table therefore covers 8..255.
+pub const x11_min_keycode: u8 = 8;
 
 // Offscreen positioning
 // Windows on inactive workspaces are parked here so they are hidden without
@@ -88,16 +96,6 @@ pub const mouse_button_scroll_down: u8 = 5;
 pub const baseline_dpi: f32 = 96.0;
 
 pub const Limits = struct {
-    /// Dispatch table size. Must index every XCB core event code hana
-    /// dispatches; the highest is MappingNotify (34), so 36 leaves headroom.
-    /// The table lookup is guarded by this bound (events.zig dispatch()).
-    pub const event_dispatch_table = 36;
-
-    /// Upper bound for the XCB cookie scratch buffer in grabKeybindings
-    /// (max distinct keybindings x lock_modifiers.len combinations).
-    /// Raise if you ever exceed 128 keybindings.
-    pub const max_keybind_cookies = 1024;
-
     /// Maximum tiled windows across the whole WM (all workspaces combined),
     /// not per workspace. Buffers sized from this are indexed by usize/u16,
     /// so raising it only costs memory; keep it a compile-time bound so

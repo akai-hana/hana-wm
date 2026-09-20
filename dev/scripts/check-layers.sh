@@ -101,18 +101,11 @@ wire_allowed() {
 
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
-        # buffer after others' queued requests). refresh.zig/events.zig are core
-        # event-loop/DRR-detection flushes; prompt.zig is the bar's keyboard
-        # grab-drop flush. These are documented non-mutations, not Rule-1 sends.
-        src/core/refresh.zig|src/core/events.zig|src/bar/modules/prompt/prompt.zig) ;;
-
-        # One-shot XKB detectable-autorepeat enablement at startup.
-        # xkbcommon.zig queues the XkbSetDetectableAutoRepeat request (an XKB
-        # control, once, at init -- not a per-window geometry/border/map
-        # mutation) and does a bare xcb_flush to push it out. The flush matched
-        # by pat1 is the only symbol in this file that trips the guard, and it
-        # is exactly the documented non-mutation flush category.
-        src/input/xkbcommon.zig) ;;
+        # buffer after others' queued requests). events.zig is the core
+        # event-loop flush; refresh.zig is the RandR (bar-side) detection
+        # flush; prompt.zig is the bar's keyboard grab-drop flush. These are
+        # documented non-mutations, not Rule-1 sends.
+        src/core/events.zig|src/bar/refresh.zig|src/bar/modules/prompt/prompt.zig) ;;
 
         *) return 1 ;;
     esac
@@ -174,6 +167,13 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/sync/' | 
 # commentary that merely names an xcb symbol does not trip the guard. The awk
 # strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
+#
+# This rule is the SOLE body/reference guard on pure-layer xcb contamination:
+# it sweeps for any `xcb` token in model/ and tiling/ after comment removal —
+# imports AND re-exported bare references alike. (The complementary IMPORT-
+# EDGE-only scan lives in build.zig's assertPureLayerImports: a pure module
+# can import an xcb-using sibling and pass there, so Rule 3, not that scan,
+# is the last line of defense on bodies.)
 hits=$(
     while IFS= read -r f; do
         awk '

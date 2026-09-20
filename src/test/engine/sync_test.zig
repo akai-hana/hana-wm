@@ -50,7 +50,7 @@ const Fixture = struct {
     fn deinit(self: *Fixture) void {
         self.rec.deinit();
         minimize.deinit();
-        sync.deinit();
+        sync.init();
     }
 
     fn reconcile(self: *Fixture, opts: sync.ReconcileOpts) void {
@@ -436,7 +436,7 @@ test "ledger index: swap-remove across a shared home bucket does not hit tombsto
     fx.reconcile(.{});
 
     // Removing y tombstones its bucket; swap-moving z re-points its probe
-    // across that tombstone (pre-fix: `unreachable` in sentIndexMove).
+    // across that tombstone (pre-fix: `unreachable` stepping over it).
     sync.forget(y);
 
     // Neither surviving ledger record is lost by the index surgery.

@@ -211,6 +211,7 @@ pub fn build(b: *std.Build) !void {
     finalizeModule(root_mod, optimize, has_usr);
     // Wire & link
     try Module.wireAll(b, root_mod, &discovery.modules, &discovery.source_paths, shared_ctx);
+    try SystemLibraries.loadLinks(b);
     SystemLibraries.link(root_mod);
     // Discovered modules don't inherit root_mod's include/library paths, so
     // give each one the same system paths for its @cImport / link work.
@@ -1420,6 +1421,13 @@ const Module = struct {
     /// the hub, this makes pure-layer cycles structurally impossible and
     /// catches regressions like the old config -> xkbcommon -> core -> config
     /// cycle (config now parses keysym names through the pure `keysyms`).
+    ///
+    /// This check is the IMPORT-EDGE guard only. The complementary body/
+    /// reference sweep (any bare `xcb` token in model/ and tiling/, comments
+    /// stripped) lives in check-layers.sh Rule 3 — an import of an xcb-using
+    /// module passes here yet still lets `xcb` reach a pure file by
+    /// re-export, so Rule 3 -- not this function -- is the sole guard on
+    /// pure-layer xcb BODIES.
     fn assertPureLayerImports(
         name: []const u8,
         rel_path: []const u8,
@@ -1551,48 +1559,58 @@ const Module = struct {
 ///
 /// Helps keep `build()` clean.
 const SystemLibraries = struct {
-    /// System libraries hana links against, by name. This is the code-side
-    /// single source of truth for what gets linked on every module that asks
-    /// (`link`, below). It deliberately mirrors build.zig.zon's `.links`
-    /// table, which is the package-side declaration of the same set — a
-    /// consumer depending on hana as a package gets `.links` applied on its
-    /// own build, duplicating these calls (idempotent, but the two lists
-    /// must stay in sync manually).
-    const linked_libs = [_][]const u8{
-        // Core X11 libraries.
-        "xcb-keysyms", // keycode -> keysym map
-        "xkbcommon-x11", // XKB-to-X11 transport
-        "xcb-xkb", // Provides xcb_xkb_id (XKB extension opcode lookup) for detectable auto-repeat.
-        "xcb-cursor", // Makes hana's root window respect custom cursor settings.
-        "xcb-randr", // Monitor refresh-rate detection for the carousel.
-        // Bar libraries.
-        "pangocairo-1.0", // Cairo/Pango text rendering.
+    /// System libraries hana links against, by name. The single source of
+    /// truth is build.zig.zon's own `.links` table: `loadLinks` reads it at
+    /// build time (every `zig build` re-reads the file), so this set can
+    /// never drift from the package-side declaration. A consumer depending on
+    /// hana as a package gets the same set applied on its own build by the
+    /// package mechanism (idempotent with these calls).
+    var links: []const []const u8 = &.{};
+
+    /// The parcel of build.zig.zon this build cares about. Field-for-field
+    /// shape of the manifest so the parser walks the whole file (zon rejects
+    /// unknown fields), with the name enum spelled out because `.{ .name = .hana }`
+    /// deserializes only into a matching enum literal type.
+    const Name = enum { hana };
+    const Zon = struct {
+        name: Name,
+        fingerprint: u64,
+        version: []const u8,
+        minimum_zig_version: []const u8,
+        paths: []const []const u8,
+        links: []const []const u8,
     };
 
-    /// build.zig.zon `.links` mirror of `linked_libs` (same names, package
-    /// side). The comptime check below fails the build the moment the two
-    /// drift, keeping the split declaration mechanically honest instead of
-    /// asking the hand to keep them in sync.
-    const zon_links = [_][]const u8{
-        "xcb-keysyms",
-        "xkbcommon-x11",
-        "xcb-xkb",
-        "xcb-cursor",
-        "xcb-randr",
-        "pangocairo-1.0",
-    };
-
-    comptime {
-        if (zon_links.len != linked_libs.len)
-            @compileError("build.zig.zon `.links` and SystemLibraries.linked_libs drifted in length");
-        for (zon_links, linked_libs) |zon, code| {
-            if (!std.mem.eql(u8, zon, code))
-                @compileError("build.zig.zon `.links` and SystemLibraries.linked_libs drifted: '" ++ zon ++ "' vs '" ++ code ++ "'");
-        }
+    /// Populates `links` from build.zig.zon. An unreadable or unparsable
+    /// `.links` fails the build (an empty set would silently link nothing,
+    /// which a runtime relocation error would surface much later).
+    fn loadLinks(b: *std.Build) !void {
+        const src = try b.build_root.handle.readFileAlloc(
+            b.graph.io,
+            "build.zig.zon",
+            b.allocator,
+            .limited(1 << 16),
+        );
+        var diag: std.zon.parse.Diagnostics = .{};
+        defer diag.deinit(b.allocator);
+        const parsed = std.zon.parse.fromSliceAlloc(
+            Zon,
+            b.allocator,
+            try b.allocator.dupeZ(u8, src),
+            &diag,
+            .{},
+        ) catch |err| {
+            std.debug.print("SystemLibraries: build.zig.zon `.links` unparsable:\n", .{});
+            var it = diag.iterateErrors();
+            while (it.next()) |d| std.debug.print("  {}\n", .{d});
+            return err;
+        };
+        if (parsed.links.len == 0) return error.EmptyLinksDeclaration;
+        links = parsed.links;
     }
 
-    /// Links system libraries depended on by hana.
+    /// Links the system libraries declared in build.zig.zon.
     fn link(root: *std.Build.Module) void {
-        for (linked_libs) |lib| root.linkSystemLibrary(lib, .{});
+        for (links) |lib| root.linkSystemLibrary(lib, .{});
     }
 };

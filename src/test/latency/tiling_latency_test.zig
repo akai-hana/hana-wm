@@ -45,7 +45,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         model.setFocus(&m, 1);
 
         sync.init();
-        defer sync.deinit();
+        defer sync.init();
 
         // Warm: seed steady-state ledger, then measure one steady-state reconcile
         // pass (all desire compute + ledger scans; sends mostly elided).
@@ -85,7 +85,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         model.setFocus(&m, 1);
 
         sync.init();
-        defer sync.deinit();
+        defer sync.init();
 
         // Warm, then measure one steady-state reconcile pass.
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
@@ -107,7 +107,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     model.setFocus(&m, 1);
 
     sync.init();
-    defer sync.deinit();
+    defer sync.init();
 
     const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
     var order_buf: [128]WindowId = undefined;
@@ -156,7 +156,7 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         model.setFocus(&m, 1);
 
         sync.init();
-        defer sync.deinit();
+        defer sync.init();
 
         var warm = CountingSink{};
         var warm_ctx = makeCtx(warm.sink(), colorOfFocused);

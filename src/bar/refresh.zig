@@ -1,5 +1,9 @@
 //! Refresh-rate detection via RandR.
 //! Publishes the monitor refresh rate lock-free for bar render pacing.
+//! A bar feature by construction: the only consumer of the detected rate is
+//! bar segment drawing (title/carousel pacing). Lives under src/bar so a
+//! bar-less tree drops the whole RandR probe/subscribe machinery with the
+//! directory; core's event loop reaches it only through the `Surfaces` seam.
 
 const std = @import("std");
 
@@ -87,8 +91,7 @@ var redetect_pending: bool = false;
 /// mode not yet in the table) is rate-limited and flags a deferred full
 /// re-detection, which runs at a controlled point in the loop
 /// (runPendingRedetect) and refreshes the cached mode table. Main thread only.
-pub fn handleRandrNotifyEvent(conn: core.Connection, event: *anyopaque) void {
-    _ = conn;
+pub fn handleRandrNotifyEvent(event: *anyopaque) void {
     if (rateFromNotifyEvent(event)) |rate| {
         // A burst of RandR notify events describes one configuration. Once the
         // mode is resolved from the payload, drop any full re-detection that a
@@ -145,7 +148,7 @@ var cached_mode_count: usize = 0;
 /// stores it in the cache (capped at max_cached_modes).
 fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
     if (modes.len > max_cached_modes) {
-        // C8: the CRTC-change fast path can only resolve mode ids held in the
+        // The CRTC-change fast path can only resolve mode ids held in the
         // cache, and RandR has no targeted per-mode rate request to fetch one
         // on demand. Overflowed modes therefore always fall back to a full
         // re-detect when they become active; surface it rather than stall it.
@@ -212,7 +215,7 @@ fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
     const primary_cookie = xcb.xcb_randr_get_output_primary(conn, root);
 
     const res = xcb.xcb_randr_get_screen_resources_current_reply(conn, res_cookie, null) orelse {
-        // C5: the primary-output reply is already in flight; if we return now
+        // The primary-output reply is already in flight; if we return now
         // it would sit unconsumed and desync the next reply read on this
         // connection. Discard it (no reply allocation, no blocking wait).
         xcb.xcb_discard_reply(conn, primary_cookie.sequence);

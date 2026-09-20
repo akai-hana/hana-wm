@@ -58,18 +58,6 @@ var keybind_resolver: keybind.KeybindResolver = .{};
 // raw KEYCODE both suppresses autorepeat and always clears on release.
 var held_keys = std.StaticBitSet(256).initEmpty();
 
-fn keyHeld(keycode: u8) bool {
-    return held_keys.isSet(keycode);
-}
-
-fn setKeyHeld(keycode: u8) void {
-    held_keys.set(keycode);
-}
-
-fn clearKeyHeld(keycode: u8) void {
-    held_keys.unset(keycode);
-}
-
 /// Initialises the XKB context, keymap, and key state
 /// from the server's current keyboard configuration.
 pub fn initXkb(conn: core.Connection) !void {
@@ -99,7 +87,8 @@ pub fn getXkbState() ?*xkbcommon.XkbState {
 /// `getXkbState` themselves and abort first.
 pub fn buildKeybinds(keybindings: []types.Keybind) void {
     const state = getXkbState() orelse return;
-    keybind_resolver.build(keybindings, state, core.getState().alloc);
+    keybind.resolveKeycodes(keybindings, state);
+    keybind_resolver.rebuildDispatchMap(keybindings, core.getState().alloc);
 }
 
 /// Releases the dispatch map. Call before the config whose keybindings the
@@ -110,7 +99,7 @@ pub fn deinitKeybinds() void {
 
 /// O(1) keybinding lookup for the hot key-press path; returns a pointer into
 /// the current config's keybindings slice, or null.
-pub inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
+inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
     return keybind_resolver.lookup(mods, keysym);
 }
 
@@ -174,7 +163,6 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
 // `build_options.profile_key` so release WMs compile it out entirely.
 const key_profile = utils.WindowedProfiler(
     build_options.profile_key,
-    "KPROF",
     "[KPROF] receive->action last {} keys: avg={d:.0}ns min={d}ns max={d}ns",
     debug.info,
 );
@@ -211,8 +199,8 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // the action, so suppress re-dispatch while the keycode is already held.
     // Only keycodes this WM's grabs intercepted ever reach here, so the set
     // stays small.
-    if (keyHeld(event.detail)) return;
-    setKeyHeld(event.detail);
+    if (held_keys.isSet(event.detail)) return;
+    held_keys.set(event.detail);
 
     if (matched) |action| {
         // Per-key dispatch logs are `.debug` so release WMs (default log
@@ -235,27 +223,38 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 /// same binding later be recognized as a genuine new press.
 pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
     focus.setLastEventTime(event.time);
-    clearKeyHeld(event.detail);
+    held_keys.unset(event.detail);
 }
 
-/// Dispatches a priority-ordered button-press event.
+/// Dispatches a priority-ordered button-press event, splitting the two named
+/// paths: a plain click on the bar window routes to the bar; every other
+/// press goes through the managed-window mouse machinery.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     focus.setLastEventTime(event.time);
-
-    const cs = core.getState();
-    const clicked_window = if (event.child != 0) event.child else event.event;
     const super_held = (event.state & masks.mod_super) != 0;
-    const mods = utils.normalizeModifiers(event.state);
+    const clicked_window = if (event.child != 0) event.child else event.event;
+    if (handleBarButtonPress(event, super_held, clicked_window)) return;
+    handleWindowButtonPress(event, super_held, clicked_window);
+}
 
-    // The bar selects BUTTON_PRESS directly (not via the Super+Button grab),
-    // so a plain click arrives ungrabbed; route it to the bar and skip the
-    // managed-window/replay-pointer machinery built for the synchronous grab
-    // a client-window click goes through. Super-held clicks fall through to
-    // the normal mouse-binding/drag path.
-    if (!super_held and build_options.has_bar and surfaces.isBarWindow(clicked_window)) {
-        surfaces.handleButtonPress(event);
-        return;
-    }
+/// The bar path: a plain (non-Super) click whose target is the bar window.
+/// The bar selects BUTTON_PRESS directly (not via the Super+Button grab), so
+/// a plain click arrives ungrabbed; route it to the bar and skip the
+/// managed-window/replay-pointer machinery built for the synchronous grab a
+/// client-window click goes through. Super-held clicks fall through to the
+/// normal mouse-binding/drag path. Returns true when the event was consumed.
+fn handleBarButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) bool {
+    if (super_held) return false;
+    if (!build_options.has_bar or !surfaces.isBarWindow(clicked_window)) return false;
+    surfaces.handleButtonPress(event);
+    return true;
+}
+
+/// The managed-window path: scroll-wheel binds, focus, config mouse-bind
+/// lookup, drag, and the unbound-Super replay fallback.
+fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) void {
+    const cs = core.getState();
+    const mods = utils.normalizeModifiers(event.state);
 
     // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
     // a specific window, so they're checked before the managed-window guard
@@ -366,6 +365,10 @@ inline fn dirSign(dir: types.Dir) i32 {
     return if (dir == .forward) 1 else -1;
 }
 
+inline fn dirSignF(dir: types.Dir) f32 {
+    return if (dir == .forward) 1 else -1;
+}
+
 /// Top-level action dispatcher. Routes each action tag to its handler inline
 /// (single switch, no per-class delegates). Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
@@ -388,9 +391,9 @@ fn executeAction(action: *const types.Action) void {
         .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
         .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(dir)),
         .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(dir)),
-        .set_master_width => |dir| actions.adjustPrimaryWidthAction(if (dir == .forward) constants.master_width_step else -constants.master_width_step),
+        .set_master_width => |dir| actions.adjustPrimaryWidthAction(dirSignF(dir) * constants.master_width_step),
         .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(dir)),
-        .grow_stack => |dir| actions.adjustSecondaryBalance(if (dir == .forward) constants.stack_balance_step else -constants.stack_balance_step),
+        .grow_stack => |dir| actions.adjustSecondaryBalance(dirSignF(dir) * constants.stack_balance_step),
         .swap_master => |mode| actions.swapPrimaryAction(mode == .focus_swap),
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),
@@ -421,10 +424,7 @@ fn executeAction(action: *const types.Action) void {
 
         // Minimize: minimize, unminimize (LIFO/FIFO), and restore all.
         .minimize_window => actions.minimize(focus.getFocused()),
-        .unminimize => |order| switch (order) {
-            .lifo => actions.restoreOrdered(.lifo),
-            .fifo => actions.restoreOrdered(.fifo),
-        },
+        .unminimize => |order| actions.restoreOrdered(order),
         .unminimize_all => actions.restoreAll(),
     }
 }

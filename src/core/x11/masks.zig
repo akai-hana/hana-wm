@@ -29,31 +29,28 @@ pub const modifier_keysym_hi: u32 = 0xFFEF;
 
 /// Lock key combinations grabbed alongside every keybinding so binds work
 /// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
-/// the three lock modifiers, folded at comptime in the historical grab order
-/// (size 0, the three singles, the three pairs, the triple) -- byte-identical
-/// to the explicit table it replaces. Consumers only iterate it / use `.len`.
-pub const lock_modifiers: [8]u16 = blk: {
-    const locks = [_]u16{ mod_capslock, mod_numlock, mod_scrolllock };
-    var out: [8]u16 = undefined;
-    var n: usize = 0;
-    // The whole block is a comptime const initializer, so the loops below
-    // already evaluate at comptime.
-    for (0..4) |size| {
-        var i: u8 = 0;
-        while (i < 8) : (i += 1) {
-            if (@popCount(i) != size) continue;
-            var mask: u16 = 0;
-            for (locks, 0..) |lock, b| {
-                if ((i & (@as(u8, 1) << @intCast(b))) != 0) mask |= lock;
-            }
-            out[n] = mask;
-            n += 1;
-        }
-    }
-    break :blk out;
+/// the three lock modifiers in the historical grab order (size 0, the three
+/// singles, the three pairs, the triple). Consumers only iterate it / use `.len`.
+pub const lock_modifiers: [8]u16 = .{
+    0,
+    mod_capslock,
+    mod_numlock,
+    mod_scrolllock,
+    mod_capslock | mod_numlock,
+    mod_capslock | mod_scrolllock,
+    mod_numlock | mod_scrolllock,
+    mod_capslock | mod_numlock | mod_scrolllock,
 };
 
 // Event masks
+/// Strips the XCB synthetic-event bit (bit 7) from a raw event `response_type`
+/// to recover the core event code. Core event codes are 0..0x7F; the top bit
+/// marks events delivered via SendEvent. Core events keep their low-7 bits
+/// under a SendEvent, so masking recovers the true code; extension bases can
+/// legitimately sit at/above 0x80, so extension-range tests compare the RAW
+/// type byte before any mask (see isRandrEvent).
+pub const synthetic_event_mask: u8 = 0x7f;
+
 pub const EventMasks = struct {
     // DWM verbatim (setup() in dwm.c): SubstructureRedirect|Notify, ButtonPress,
     // PointerMotion, Enter/LeaveWindow, StructureNotify, PropertyChange.

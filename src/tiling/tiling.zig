@@ -4,7 +4,7 @@
 const std = @import("std");
 const utils = @import("utils");
 const model = @import("model");
-const build_options = @import("build_options");
+const debug = @import("debug");
 
 const plugin = @import("plugin");
 
@@ -103,12 +103,6 @@ pub inline fn totalInset(gap_amount: u16, m: utils.Margins) u16 {
     return gap_amount *| 2 +| utils.doubledBorder(m);
 }
 
-/// Per-axis inset for a client window, read from a Margins value (scroll and
-/// any layout that needs the full shrink in one expression).
-pub inline fn fullInset(m: anytype) u16 {
-    return totalInset(m.gap, m);
-}
-
 /// Interior-boundary half-gap: the seam between two adjacent panes carries
 /// half a gap per side so neighboring windows together share one full gap.
 pub inline fn seamGap(m: utils.Margins) u16 {
@@ -116,7 +110,7 @@ pub inline fn seamGap(m: utils.Margins) u16 {
 }
 
 /// Shrinks `dim` by `margin` (gap/border), floored to `min_dim` so a layout
-/// never hands a client a zero or negative size (verbatim port).
+/// never hands a client a zero or negative size.
 pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
 }
@@ -192,19 +186,13 @@ inline fn appendPlacement(out: *List, win: model.WindowId, rect: utils.Rect, vis
     if (!out.append(.{ .win = win, .rect = rect, .visible = visible })) return;
 }
 
-/// Emit a placement with the window's size hints applied to `rect`.
-inline fn emit(
-    v: *const View,
-    out: *List,
-    win: model.WindowId,
-    rect: utils.Rect,
-    visible: bool,
-) void {
-    appendPlacement(out, win, if (visible) applyHints(rect, v.hints.forWin(win)) else parked_rect, visible);
+/// Emit a visible placement with the window's size hints applied to `rect`.
+pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: utils.Rect) void {
+    appendPlacement(out, win, applyHints(rect, v.hints.forWin(win)), true);
 }
 
-/// Emit a parked placement (the pushWindowOffscreenAndInvalidate transform).
-inline fn emitParked(out: *List, win: model.WindowId) void {
+/// Emit a parked placement (the parked position sync applies via Sink.park).
+pub inline fn emitHidden(out: *List, win: model.WindowId) void {
     appendPlacement(out, win, parked_rect, false);
 }
 
@@ -213,7 +201,7 @@ inline fn emitParked(out: *List, win: model.WindowId) void {
 pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: model.WindowId) void {
     for (windows) |w| {
         if (w == top) continue;
-        emitParked(out, w);
+        emitHidden(out, w);
     }
 }
 
@@ -222,7 +210,7 @@ pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: 
 /// by fibonacci and leaf, whose "region can't fit two children" fallbacks
 /// both reduce to this shape.
 pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId, top: model.WindowId, r: Region) void {
-    emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, utils.doubledBorder(ctx.m), ctx.min_dim), true);
+    emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, utils.doubledBorder(ctx.m), ctx.min_dim));
     showOneHideRest(ctx.out, windows, top);
 }
 
@@ -237,6 +225,27 @@ pub fn layoutByName(name: []const u8) ?usize {
     if (name.len > 64) return null;
     for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return i;
     return null;
+}
+
+/// Resolve a config layout name to a registry index, collapsing to `fallback`
+/// when the name does not resolve. Loud, never silent: an unresolvable/removed
+/// layout name is a config bug, and every seeding/reload site resolves config
+/// names through this one function (kept distinct from `layoutKindOf` only by
+/// the fallback choice: the neutral default vs a caller-chosen seed).
+pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
+    if (layoutByName(name)) |k| return @intCast(k);
+    debug.warn(
+        "Config: layout name '{s}' did not resolve to a registered layout; " ++
+            "using layout '{s}'",
+        .{ name, moduleName(fallback) },
+    );
+    return fallback;
+}
+
+/// Resolve a config layout name to a registry index, collapsing to the
+/// neutral default (index 0) when the name does not resolve.
+pub fn layoutKindOf(name: []const u8) u8 {
+    return layoutKindFallingBack(name, defaultKind());
 }
 
 /// Neutral last-resort default layout: the first registered module (index 0).
@@ -290,10 +299,6 @@ pub fn compute(kind: u8, v: View, out: *List) void {
     if (v.order.len == 0) return;
     if (tiling_mods[kind].compute) |f| f(&v, out);
 }
-
-// Algo modules share this file's private emit helpers via pub re-exports.
-pub const emitView = emit;
-pub const emitHidden = emitParked;
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of
 /// the first exact-case match in `names`, or null when unmatched. Shared by

@@ -712,7 +712,7 @@ const State = struct {
             @memset(&self.frame.ws_has_windows, false);
             self.frame.wins_len = 0;
             const cur_bit: u64 = if (self.frame.current_ws < self.frame.ws_count)
-                tracking.workspaceBit(self.frame.current_ws)
+                model.bit(model.WSId.fromIndex(self.frame.current_ws))
             else
                 0;
             // OR-accumulate all window masks in a single pass, collecting the
@@ -729,7 +729,7 @@ const State = struct {
             }
             for (0..self.frame.ws_count) |i| {
                 self.frame.ws_has_windows[i] = combined_mask &
-                    tracking.workspaceBit(@as(u8, @intCast(i))) != 0;
+                    model.bit(model.WSId.fromIndex(@intCast(i))) != 0;
             }
         }
     }
@@ -1030,7 +1030,7 @@ fn performDraw() void {
     // never drop it; the onPollWakeup / updateIfDirty callers have typically
     // already consumed, in which case this is a false no-op.
     if (!gBar.force and barModsConsumeRedrawRequest()) gBar.force = true;
-    // P2: a timer-only wake with zero repaint work (nothing forced, nothing
+    // A timer-only wake with zero repaint work (nothing forced, nothing
     // whole-bar dirty, no segment dirty or needsRepaint) must not run the full
     // scan + measure pass. The clock's own repaint on the same wake is handled
     // separately by the region-scoped updateClock blit.
@@ -1345,12 +1345,6 @@ fn syncScreenClaim() void {
     screen.setClaim(screen.bar_id.?, edge, px);
 }
 
-/// Window id of the bar, or null before init(). Lets the boot-time
-/// window adoption skip the WM's own window.
-pub fn winId() ?u32 {
-    return if (gBar.state) |s| s.win.win_id else null;
-}
-
 /// Synchronous bar update safe to call inside xcb_grab_server.
 ///
 /// Phase 1 (inside grab): render to the off-screen pixmap; queueBlit does
@@ -1627,13 +1621,30 @@ fn barModsConsumeRedrawRequest() bool {
     return anyBoolHook("consumeRedrawRequest", .{});
 }
 
+/// RandR extension-event base, forwarded from core's event dispatcher so it
+/// can recognise (and classify) extension events; see refresh.zig.
+pub fn randrFirstEvent() u8 {
+    return refresh.randrFirstEvent();
+}
+
+/// Core event-loop forwarder for RandR extension events (base and base+1).
+pub fn handleRandrEvent(event: *anyopaque) void {
+    refresh.handleRandrNotifyEvent(event);
+}
+
+/// Core event-loop forwarder that runs the deferred re-detection once per
+/// batch, outside dispatch.
+pub fn runPendingRedetect(conn: core.Connection) void {
+    refresh.runPendingRedetect(conn);
+}
+
 /// Redraws just the clock segment when its on-screen content is stale
 /// (second rolled over, or config reload changed the format). Cheap to call
 /// on every event batch: it no-ops unless staleness is detected.
-pub fn updateClock() bool {
-    const s = gBar.state orelse return false;
-    if (!s.vis.shown) return false;
-    if (self_ticking_role == null) return false;
+pub fn updateClock() void {
+    const s = gBar.state orelse return;
+    if (!s.vis.shown) return;
+    if (self_ticking_role == null) return;
     const fmt = drawing.clockFormat(core.getState().config.bar);
     var redraw_clock = false;
     for (bar_mods) |m| {
@@ -1644,7 +1655,7 @@ pub fn updateClock() bool {
             }
         }
     }
-    if (!redraw_clock) return false;
+    if (!redraw_clock) return;
     s.drawClockOnly();
     // A display-mode cycle also changes the clock's slot width: the freshly
     // reported natural width IS the new reservation. Fold it in and re-lay the
@@ -1660,7 +1671,6 @@ pub fn updateClock() bool {
             }
         }
     }
-    return true;
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
@@ -1668,13 +1678,6 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
         if (build_options.has_floating and actions.isDragging()) s.dirty.flag = true else submitDraw();
     };
 }
-
-/// Property-notify on the bar surface needs no title handling: title changes
-/// are refreshed by the WM window layer (window.handlePropertyNotify), which
-/// bumps the window fact so the next updateIfDirty pass repaints. Kept as a
-/// slot-filling no-op for the surfaces contract; all other property-notifies
-/// are already ignored by the bar.
-pub fn handlePropertyNotify(_: *const xcb.xcb_property_notify_event_t) void {}
 
 // Mouse click handling
 
@@ -1747,7 +1750,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
     const s = gBar.state orelse return;
     const id = s.drag_segment orelse return;
-    if (s.vis.shown == false) return;
+    if (!s.vis.shown) return;
     if (bar_mods[id].onDragMotion) |drag| {
         const tb = s.recordedBound(bar_mods[id].name) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
@@ -1763,10 +1766,7 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
 /// settle the drag (flush a throttled commit, leave its drag render mode).
 pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
     const s = gBar.state orelse return;
-    const id = s.drag_segment orelse {
-        s.drag_segment = null;
-        return;
-    };
+    const id = s.drag_segment orelse return;
     s.drag_segment = null;
     if (bar_mods[id].onDragEnd) |end| end(redrawInsideGrab);
 }
@@ -1820,11 +1820,13 @@ pub const surfaces = @import("plugin").Surfaces{
     .init = init,
     .deinit = deinit,
     .handleExpose = handleExpose,
-    .handlePropertyNotify = handlePropertyNotify,
     .updateIfDirty = updateIfDirty,
     .pollTimeoutMs = pollTimeoutMs,
     .onPollWakeup = onPollWakeup,
     .updateClock = updateClock,
+    .randrFirstEvent = randrFirstEvent,
+    .handleRandrEvent = handleRandrEvent,
+    .runPendingRedetect = runPendingRedetect,
     .onReload = reload,
     .refreshConfig = refreshConfig,
     .chromeHandleKeypress = chromeHandleKeypress,

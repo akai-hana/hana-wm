@@ -70,11 +70,9 @@ pub inline fn realtimeNs() u64 {
 /// entirely when `enabled` is false (callers still reference `.enabled`).
 pub fn WindowedProfiler(
     comptime enabled_flag: bool,
-    comptime tag: []const u8,
     comptime fmt: []const u8,
     comptime logFn: anytype,
 ) type {
-    _ = tag;
     return struct {
         pub const enabled = enabled_flag;
         var count: u64 = 0;
@@ -111,13 +109,11 @@ pub const initAtomCache = x11wire.initAtomCache;
 pub const getAtomCached = x11wire.getAtomCached;
 pub const getAtomOrZero = x11wire.getAtomOrZero;
 pub const advertiseEwmhSupport = x11wire.advertiseEwmhSupport;
-pub const fetchPropertyToBuffer = x11wire.fetchPropertyToBuffer;
 pub const collectPropertyReply = x11wire.collectPropertyReply;
 pub const configureWindow = x11wire.configureWindow;
 pub const raiseWindow = x11wire.raiseWindow;
 pub const setBorderPixel = x11wire.setBorderPixel;
 pub const grabServer = x11wire.grabServer;
-pub const ungrabServer = x11wire.ungrabServer;
 pub const ungrabAndFlush = x11wire.ungrabAndFlush;
 pub const rectFromXcb = x11wire.rectFromXcb;
 

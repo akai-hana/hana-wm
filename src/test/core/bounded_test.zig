@@ -126,6 +126,8 @@ test "bounded: removeAllById prunes every row sharing the key" {
 
     try std.testing.expectEqual(@as(usize, 2), rows.removeAllById(.win, 1));
     try std.testing.expectEqual(@as(usize, 2), rows.len);
-    try std.testing.expectEqual(@as(u32, 2), rows.constSlice()[0].win);
-    try std.testing.expectEqual(@as(u32, 3), rows.constSlice()[1].win);
+    var remaining = [_]u32{ 0, 0 };
+    for (rows.constSlice(), 0..) |row, i| remaining[i] = row.win;
+    std.mem.sort(u32, &remaining, {}, std.sort.asc(u32));
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 2, 3 }, &remaining);
 }

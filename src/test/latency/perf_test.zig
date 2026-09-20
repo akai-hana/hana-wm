@@ -170,7 +170,7 @@ test "bench: reconcile pass (50 windows)" {
     var recorder = helpers.TestSink(.none){};
 
     sync.init();
-    defer sync.deinit();
+    defer sync.init();
 
     var ctx = makeCtx(recorder.sink(), testColor);
 
@@ -196,7 +196,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     e.anchor = .{ .floating = .{ .x = 100, .y = 100, .width = 300, .height = 200 } };
 
     sync.init();
-    defer sync.deinit();
+    defer sync.init();
 
     var recorder = helpers.TestSink(.none){};
     var ctx = makeCtx(recorder.sink(), testColor);
@@ -296,7 +296,7 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     // ledger, hit-only sweep (steady-state pass; model.Store iterates sorted-key
     // order, so the sweep walks ascending window ids).
     sync.init();
-    defer sync.deinit();
+    defer sync.init();
 
     const n: usize = 64;
 
@@ -304,17 +304,17 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     const t0 = nowNs();
     for (0..it_cold) |_| {
         sync.init();
-        for (0..n) |i| _ = try sync.sentGetOrPut(@intCast(i + 1));
+        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1));
     }
     const cold_ns = nowNs() - t0;
     const per_cold_ns = @as(f64, @floatFromInt(cold_ns)) / @as(f64, @floatFromInt(it_cold * n));
 
     sync.init();
-    for (0..n) |i| _ = try sync.sentGetOrPut(@intCast(i + 1001));
+    for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001));
     const it_warm: usize = if (bench) 20_000 else 1;
     const t1 = nowNs();
     for (0..it_warm) |_| {
-        for (0..n) |i| _ = try sync.sentGetOrPut(@intCast(i + 1001));
+        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001));
     }
     const warm_ns = nowNs() - t1;
     const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));

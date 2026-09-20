@@ -26,24 +26,8 @@ pub const KeybindResolver = struct {
         return (@as(u64, modifiers) << 32) | keysym;
     }
 
-    /// Resolves each keybinding's keysym to a keycode via `xkb_state`, then
-    /// rebuilds the dispatch map (see rebuildDispatchMap). Called once at
-    /// startup (input.buildKeybinds) and again on every config reload
-    /// (events.handleConfigReload).
-    pub fn build(
-        self: *KeybindResolver,
-        keybindings: []types.Keybind,
-        xkb_state: *xkbcommon.XkbState,
-        allocator: std.mem.Allocator,
-    ) void {
-        resolveKeycodes(keybindings, xkb_state);
-        self.rebuildDispatchMap(keybindings, allocator);
-    }
-
     /// Warns about conflicting bindings (same effective mods+keysym the map
-    /// is keyed on) and rebuilds the dispatch map from scratch. Split out
-    /// from `build` so it can be exercised without a live XkbState/X
-    /// connection.
+    /// is keyed on) and rebuilds the dispatch map from scratch.
     pub fn rebuildDispatchMap(
         self: *KeybindResolver,
         keybindings: []types.Keybind,

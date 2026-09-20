@@ -458,8 +458,10 @@ fn reverseFindKind(kind: u8) u8 {
 }
 
 fn modeLabel(m: Mode) []const u8 {
-    const labels = [_][]const u8{ "[INSERT]", "[NORMAL]" };
-    return labels[@intFromEnum(m)];
+    return switch (m) {
+        .insert => "[INSERT]",
+        .normal => "[NORMAL]",
+    };
 }
 
 pub fn init(allocator: std.mem.Allocator, max_input: usize) !void {

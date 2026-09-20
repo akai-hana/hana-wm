@@ -287,13 +287,13 @@ fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
     return drainWMProtocolsReply(conn, ck);
 }
 
-/// Drains a WM_PROTOCOLS reply (the pipelined cookie of
-/// queryWMProtocolsPropsConsume, or the one fired by queryWMProtocolsProps
-/// above) into take_focus/wm_delete. Sharing one drain keeps the pipelined
-/// verdict byte-identical to the live one; the caller fired the query BEFORE
-/// the pointer round trip so its reply is typically already buffered by the
-/// time this is reached. A failed atom resolution (cache not ready) returns
-/// early with empty props, so the reply still drains cleanly.
+/// Drains a WM_PROTOCOLS reply (the cookie fired by queryWMProtocolsProps
+/// above, or the admission-path cookie) into take_focus/wm_delete. Sharing
+/// one drain keeps the pipelined verdict byte-identical to the live one; the
+/// caller fired the query BEFORE the pointer round trip so its reply is
+/// typically already buffered by the time this is reached. A failed atom
+/// resolution (cache not ready) returns early with empty props, so the reply
+/// still drains cleanly.
 fn drainWMProtocolsReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) WMProtocolsProps {
     const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return .{};
     defer std.c.free(reply);

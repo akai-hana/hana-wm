@@ -45,13 +45,13 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const scroll: i32 = @max(0, @min(v.params.viewport_offset, max_off));
 
     // Border subtracted here (once); emitView's applyHints never touches it.
-    const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.fullInset(m), v.env.min_dim);
+    const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.totalInset(m.gap, m), v.env.min_dim);
     const win_y: i32 = @as(i32, @intCast(tiling.waY(v))) + @as(i32, @intCast(m.gap));
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
     // adjacent windows together share exactly one full gap.
     const gap_i32: i32 = @intCast(m.gap);
-    const gap_half: i32 = @intCast(m.gap / 2);
+    const gap_half: i32 = @intCast(tiling.seamGap(m));
     const border2: i32 = @as(i32, utils.doubledBorder(m));
 
     for (windows, 0..) |win, i| {
@@ -78,7 +78,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             tiling.emitHidden(out, win);
             continue;
         }
-        tiling.emitView(v, out, win, .{ .x = tiling.satI16(x), .y = tiling.satI16(win_y), .width = content_w, .height = content_h }, true);
+        tiling.emitView(v, out, win, .{ .x = tiling.satI16(x), .y = tiling.satI16(win_y), .width = content_w, .height = content_h });
     }
 }
 
