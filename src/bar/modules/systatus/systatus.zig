@@ -9,6 +9,15 @@
 //! The readout modules keep binding `pub const sub: Sub`; this closed core
 //! owns only the machinery every readout shares: arm-on-first-draw, the poll
 //! deadline, dirty redraw requests, and the "<label> <pct>%" render.
+//!
+//! This per-segment lifecycle (arm once, poll a deadline, mark dirty on
+//! change, track painted width) is a structural twin of slider.zig's. The
+//! two are deliberately NOT merged into a shared "polled-segment" scaffold:
+//! a readout is read-only on one fixed cadence, while a slider adds drag /
+//! scroll interaction, a commit throttle, per-control cadences, and a click
+//! bound -- so the extracted core would be a parameterised contract surface
+//! (refresh + draw + cadence hooks) around a thin body. The shared 10-line
+//! shape is kept explicit in each file instead; see slider.zig.
 
 const std = @import("std");
 const utils = @import("utils");

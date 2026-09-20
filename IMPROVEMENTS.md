@@ -243,7 +243,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### [minor] input/input.zig widest fan-in, events↔input mutual — **DEFERRED (Phase 2)**
 
-### [minor] 14 inline body-level @imports — **OPEN** (normalize to top-level consts; comptime-gated exceptions documented)
+### [minor] 14 inline body-level @imports — **GATED**
+- Reduced to 5, all documented comptime-gated exceptions: `@import("builtin")` in `debug.zig` (can't be a top-level const in that position without cluttering the module) and the test-only module addresses in `helpers.zig`'s `testReset`. The remainder live in top-level `const` positions or type positions (registry `pub const module`, `gate`, `scroller`, build-option-conditional test module aliases).
 
 ### [minor] Window add-ons cross-import each other instead of the registry — **DEFERRED (Phase 2)**
 
@@ -254,7 +255,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### [minor] events.zig entangles poll loop with reload/reexec/drain — **DEFERRED (Phase 2)**
 
-### [minor] sync.st is a public mutable global — **OPEN** (privatize + three accessor functions)
+### [minor] sync.st is a public mutable global — **FIXED**
+- `st` is a private module-level `State`; external readers go through the accessor functions (`sentIndex`, `sentGet`, `sentGetOrPut`, `sentSwapRemove`, `forget`, `lastRectFor`, `lastBorderWidthFor`, `truthRect`), so the mutable global is never touched outside `sync.zig`.
 
 ### [minor] bar/segment.zig imports pipeline (core) — **DEFERRED (Phase 2)**
 
@@ -343,7 +345,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - Per-add-on engine test gates — **VERIFIED** (no change needed): each root's gate already matches exactly the add-ons its scenarios touch (`model_test` needs `floating`/`fullscreen`/`minimize`/`workspaces` for its real `floating.honorConfigureRequest`/`setFloatingRect` use, `sync_test` needs `tiling` via its fixture, `perf_test` matches its flags, the new headless `bounded_test`/`keysyms_test` are ungated).
 - `tiling_test` scroll prune vs scroll tests reconciled (`has_layout_scroll`).
 - `-Dbar=false`-style feature toggles — **OPEN** (the exposed options are `-Drelease`, `-Dprofile-key`, `-Dbench`; module presence is still auto-detected from the discovered tree).
-- `build.zig.zon` `.links` duplication vs `SystemLibraries` — **OPEN** (no equality check).
+- `build.zig.zon` `.links` duplication vs `SystemLibraries` — **GATED**: the zon `.links` table is now the single source of truth — `SystemLibraries.loadLinks` re-reads it at every `zig build` (an unparsable/empty table fails the build), and both sides document the relationship; the mirror can no longer drift.
 - `has_seg_*` computed-but-unused — **FIXED** (dead features pruned).
 - `has_*` probes (pathExists vs discovery modal) — **GATED** (single source of truth in discovery).
 - `owner_contracts` manual table — **FIXED**: the per-owner contract (window→`WindowModule`, bar→`Segment`, tiling→`Layout`) is now DERIVED in build.zig from each owner's module files (`deriveOwnerContracts`); all three recognized declaration shapes are read (`pub const module: @import("plugin").X`, `segdraw.module(...)`, `tiling.layoutModule(...)`), disagreement or an unrecognized `modules/` tree is a loud build error, and an EMPTY owner (e.g. all four window behaviors removed) falls back to the documented element-type default since nothing is bindable then.

@@ -13,7 +13,7 @@
 
 const std = @import("std");
 
-pub const xkb = @cImport({
+const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
 });
 

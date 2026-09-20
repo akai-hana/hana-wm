@@ -107,7 +107,7 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    pipeline.init(alloc); // owns the model; the model path IS the path
+    pipeline.init(); // owns the model; the model path IS the path
 
     // Boot-time config seeding. Without this the config's layout kind,
     // variants, master count, and per-workspace overrides stay inert until
@@ -128,8 +128,8 @@ pub fn main() !void {
     // re-exec because hana never reparents: clients are direct root
     // children, so the successor adopts them, re-applies the persisted
     // model level, then runs ONE reconcile that places everything exactly
-    // as it was. Adoption runs AFTER bar.init() so bar.winId() and the
-    // bar-aware workarea are live.
+    // as it was. Adoption runs AFTER bar.init() so the bar-aware workarea is
+    // live.
     if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
         const restore_path = std.mem.span(restore_path_z);
         if (try persist.loadToGlobal(alloc, restore_path)) {
@@ -144,7 +144,7 @@ pub fn main() !void {
                 // entry (the adopted window is already mapped).
                 if (pipeline.model().focused) |focused| {
                     const ft = focus.prepareFocus(focused, .window_spawn);
-                    pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
+                    pipeline.reconcileGrabFocus(.{}, ft, false);
                 } else {
                     pipeline.reconcileUnderGrabNow(.{});
                 }

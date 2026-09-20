@@ -48,6 +48,11 @@ const MAX_WS = constants.max_workspaces;
 /// rejected in loadToGlobal rather than migrated.
 const persist_version: u32 = 4;
 
+/// Cap on the restore file's size. The file is a bounded JSON dump of the
+/// model (bounded stores/workspaces), so a file beyond this is junk (or a
+/// corrupt/hostile write), not a legitimately huge session.
+const max_restore_bytes = 1 << 20;
+
 /// Per-window record: identity + anchor, matched by XID during adoption.
 /// `presence` restores visibility semantics across the re-exec (parked /
 /// covering windows are re-hidden by the adopting module via their `ext`
@@ -103,19 +108,52 @@ pub fn defaultStatePath(alloc: std.mem.Allocator) ![]u8 {
 /// so a crash mid-save never leaves a truncated restore file behind (the
 /// boot loader tolerates a missing file but warns on a corrupt one). Any
 /// error returns to the caller, which ABORTS the re-exec and keeps running.
-pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u8) !void {
-    // Windows: flat snapshot of every registered entry (store iterates in
-    // sorted-key order). The WindowRecord shape matches the model's Entry
-    // fields that survive a re-exec (mask + mode); size_hints and home_ws
-    // are rebuilt/derived by registration and transitions.
-    const n = m.store.count();
-    const windows = try allocator.alloc(WindowRecord, n);
-    defer allocator.free(windows);
-    for (0..n) |i| {
-        const item = m.store.at(i);
+/// One save session's flat records. The owner allocations (dup'ed membership
+/// lists and feature blobs) live here so a single deinit releases everything
+/// on success and on partial-built error paths alike.
+const Snapshot = struct {
+    allocator: std.mem.Allocator,
+    windows: []WindowRecord,
+    workspaces: [MAX_WS]WsRecord,
+    ws_filled: usize,
+
+    fn deinit(self: *Snapshot) void {
+        // Feature blobs are allocator-owned by contract (each module's
+        // serializeWindow allocates them; there is no deinit hook to call).
+        for (self.windows) |r| {
+            if (r.ext) |blob| self.allocator.free(blob);
+        }
+        self.allocator.free(self.windows);
+        for (self.workspaces[0..self.ws_filled]) |r| {
+            self.allocator.free(r.tiled);
+            self.allocator.free(r.mru);
+        }
+    }
+};
+
+/// Snapshots the model into ownership-neutral records: every registered
+/// window as a flat WindowRecord (store iterates in sorted-key order), plus
+/// each workspace's bounded membership lists dup'ed out. The window loop is
+/// error-free; a mid-workspace dupe failure is caught by the row-local
+/// errdefer (that workspace's tiled slice), and `ws_filled` always counts
+/// exactly the workspaces fully built before the failure.
+fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
+    var snap: Snapshot = .{
+        .allocator = allocator,
+        .windows = try allocator.alloc(WindowRecord, m.store.count()),
+        .workspaces = undefined,
+        .ws_filled = 0,
+    };
+    errdefer snap.deinit();
+
+    // The WindowRecord shape matches the model's Entry fields that survive a
+    // re-exec (mask + mode); size_hints and home_ws are rebuilt/derived by
+    // registration and transitions.
+    var widx: usize = 0;
+    var it = m.store.iterator();
+    while (it.next()) |item| : (widx += 1) {
         // Opaque feature blob: ask each module in registry order whether it
         // owns this window; the first module that returns bytes claims it.
-        // `blob` memory is allocator-owned and freed by the caller (below).
         // The model is handed across the seam AS-IS (a `*const` handle --
         // serialization never mutates, and the contract type is const so this
         // save path can't even @constCast: writing through it is a compile
@@ -129,7 +167,7 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
                 }
             }
         }
-        windows[i] = .{
+        snap.windows[widx] = .{
             .win = item.key,
             .mask = item.val.mask,
             .anchor = item.val.anchor,
@@ -139,51 +177,44 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
         };
     }
 
-    // C1: the feature blobs are allocator-owned by contract (each module's
-    // serializeWindow allocates them; there is no deinit hook to call). Free
-    // them once the flat snapshot is complete, on EVERY exit path. Registered
-    // after the `defer allocator.free(windows)` above, so defers run LIFO:
-    // blobs go first, then the window array.
-    defer for (windows) |r| {
-        if (r.ext) |blob| allocator.free(blob);
-    };
-
-    // Workspaces: every slot, ids copied out of the bounded lists. On a
-    // mid-loop dupe failure only the already-filled records are freed.
-    var workspaces: [MAX_WS]WsRecord = undefined;
-    var ws_filled: usize = 0;
+    // Workspaces: every slot, ids copied out of the bounded lists.
     for (&m.ws, 0..) |*s, i| {
         const tiled = try allocator.dupe(u32, s.tiled_order.constSlice());
         errdefer allocator.free(tiled);
         const mru = try allocator.dupe(u32, s.focus_mru.constSlice());
-        workspaces[i] = .{
+        snap.workspaces[i] = .{
             .params = s.params,
             .tiled = tiled,
             .mru = mru,
         };
-        ws_filled = i + 1;
+        snap.ws_filled = i + 1;
     }
-    defer for (workspaces[0..ws_filled]) |r| {
-        allocator.free(r.tiled);
-        allocator.free(r.mru);
-    };
+    return snap;
+}
 
+/// Renders the snapshot to JSON bytes (model-level scalars read live from
+/// `m`; the durable window/workspace records come from the snapshot).
+fn stringifySnapshot(allocator: std.mem.Allocator, m: *const model.Model, snap: *const Snapshot) !std.ArrayList(u8) {
     const state = StateFile{
         .version = persist_version,
         .current = @intCast(m.current.index),
         .focused = m.focused,
         .all_view_active = m.all_view_active,
-        .workspaces = workspaces,
-        .windows = windows,
+        .workspaces = snap.workspaces,
+        .windows = snap.windows,
     };
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try std.json.Stringify.value(state, .{ .whitespace = .indent_2 }, &aw.writer);
     try aw.writer.flush();
-    var al = aw.toArrayList();
-    defer al.deinit(allocator);
+    return aw.toArrayList();
+}
 
+/// Writes `bytes` to `path` atomically. Writes through a temp sibling + rename
+/// so a crash mid-save never leaves a truncated restore file behind (the boot
+/// loader tolerates a missing file but warns on a corrupt one).
+fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
     const io = std.Options.debug_io;
     const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
     defer allocator.free(tmp);
@@ -204,10 +235,20 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
         break :blk attempt;
     };
     defer file.close(io);
-    try file.writeStreamingAll(io, al.items);
+    try file.writeStreamingAll(io, bytes);
     // POSIX rename replaces the name while the fd stays open; the defer's
     // close lands after the rename moved the temp into place.
     try std.Io.Dir.renameAbsolute(tmp, path, io);
+}
+
+/// Serializes the live model to `path`. Any error returns to the caller,
+/// which ABORTS the re-exec and keeps running.
+pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u8) !void {
+    var snap = try saveSnapshot(allocator, m);
+    defer snap.deinit();
+    var al = try stringifySnapshot(allocator, m, &snap);
+    defer al.deinit(allocator);
+    try atomicWrite(allocator, path, al.items);
 }
 
 /// Parses the restore file into the module-global `loaded`. Returns false
@@ -218,7 +259,7 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
         std.Options.debug_io,
         path,
         allocator,
-        std.Io.Limit.limited(1 << 20),
+        std.Io.Limit.limited(max_restore_bytes),
     ) catch |err| {
         debug.warn("persist: no usable restore file ({s}); booting fresh", .{@errorName(err)});
         return false;
@@ -332,13 +373,13 @@ pub fn applyModelLevel(m: *model.Model) void {
     // a tiled slot the window has no placement and the reconcile parks it
     // offscreen indefinitely. Re-append any base-tiled member that the file
     // did not list (in store order, appended to the list tail).
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        const e = it.val;
+    var it = m.store.iterator();
+    while (it.next()) |row| {
+        const e = row.val;
         if (e.anchor != .tiled) continue;
         const home = e.home_ws orelse continue;
-        if (m.ws[home.index].tiled_order.indexOfScalar(it.key) != null) continue;
+        if (m.ws[home.index].tiled_order.indexOfScalar(row.key) != null) continue;
         if (m.ws[home.index].tiled_order.len >= model.max_tiled_per_ws) continue;
-        _ = m.ws[home.index].tiled_order.append(it.key);
+        _ = m.ws[home.index].tiled_order.append(row.key);
     }
 }

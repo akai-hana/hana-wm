@@ -36,6 +36,9 @@ const resource_manager_max_len: u32 = 1024;
 /// Larger retry fetch (16 KB) used when Xft.dpi is not in the first probe.
 const resource_manager_retry_len: u32 = 4096;
 
+/// Inches per meter, i.e. mm per inch: converts screen mm to pixels-per-inch.
+const mm_per_inch: f32 = 25.4;
+
 /// Result of probing RESOURCE_MANAGER. `.got_string` is true when a
 /// structurally valid string came back (regardless of whether it held an
 /// entry), so callers can tell "entry not in this window" from "unreadable".
@@ -77,7 +80,7 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
     return .{
         .got_string = true,
         .dpi = parseXftDpi(resource_str),
-        // C7: truncation is `bytes_after > 0`, not the value_len hitting the
+        // Truncation is `bytes_after > 0`, not the value_len hitting the
         // requested cap (a string of exactly cap length is complete).
         .possibly_truncated = prop_reply.*.bytes_after > 0,
     };
@@ -115,8 +118,8 @@ fn calcDpiFromGeometry(screen: core.Screen) f32 {
         debug.warn("Display reports 0mm dimensions, using baseline DPI", .{});
         return baseline_dpi;
     }
-    const dpi_x = (width_px / width_mm) * 25.4;
-    const dpi_y = (height_px / height_mm) * 25.4;
+    const dpi_x = (width_px / width_mm) * mm_per_inch;
+    const dpi_y = (height_px / height_mm) * mm_per_inch;
     const avg_dpi = (dpi_x + dpi_y) / 2.0;
     debug.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
     return avg_dpi;

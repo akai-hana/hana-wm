@@ -433,4 +433,49 @@ Prior audits flagged that module presence is auto-detected from the discovered t
 
 ---
 
+## Execution status
+
+**Implementation pass (Phase A/B/C, D-only-where-pinned) complete.** Verified: `zig fmt --check .` clean; `zig build check` (incl. `check-layers.sh` all-rules pass); `zig build check-modularity` 31/31; `zig build test` 270 tests pass. X-gated suite via `dev/scripts/xtest.sh zig build test`: 251/252 pass.
+
+**Knobs turned (compile fixes from the implementation agents, all behavior-preserving):**
+- `schema.splitPath`/`ptr`/`value`: forced `comptime` on the split so `@field` resolves (kernel lookup was failing at runtime).
+- `config.parseBarLayout`: `inline for` + comptime `++` replaced with a plain `for` over a bounded `bufPrint` section-name buffer (max anchor name from the table at comptime).
+- `metrics.default_fallback_font`: typed `[:0]const u8` so drawing's `pango_font_description_from_string` receives a sentinel-terminated string.
+- `events.collapseMotionRun`: `newest` made `anytype` so the `[*c]` C-pointer (raw `xcb_poll_for_queued_event`) and the managed `*T` (batch loop) call sites unify.
+- `model.visibleOn`: passes the store entry by value into the shared `visibleEntry` predicate (read-only; no store re-lookup; the `getPtr` mutable-receiver path isn't usable from a `*const Model`).
+
+**Known pre-existing failure (NOT introduced by this pass):** `focus_test "no_input window refuses focus (none transition)"` fails under the X-gated suite on the pre-change baseline as well (verified by reverting the agent's `actions.zig` to HEAD — same failure). The test, `focus.zig`, and `icccm.zig` are byte-identical to HEAD (`aaa9bfdc`), which itself does not compile cleanly at HEAD. Deferred for a follow-up outside the simplification mandate.
+
+**Deferred (answered in the final report):** Phase D11/D12 arrived partially via the input/tiling agent (tiling mathematics helpers were already in the tree); D11 remainder, D13, D14 and D15–D17 were not attempted this pass. See the final summary for each Phase D item and its disposition; questions D.1–D.10 remain open for the writer.
+
+---
+
 *This plan is authoritative for the current campaign. Phase A/B/C are executed first (safety-first), Phase D only where tests pin behavior. Items not attempted are reported with their question in the final summary. The source tree remains `TODO`/`FIXME`-clean and `zig fmt`-clean throughout.*
+## D7 — Compute-winner divergence: collapsed + documented (2026-09-20)
+
+Context: on `060ee78` (D6) the O(1) winner/covering/present machinery shipped and
+`zig build check` was green (D6+ straight through). During D12 reserved-key /
+cover-dispatch I rewrote `computeDesire`'s arm splitting to a block-bodied
+`.present => {}` switch and dropped the `tag` param from
+`utils.WindowedProfiler` (4→3 args), keeping call sites inconsistent. That
+divergence did **not** compile under 0.16 (expected-statement / argument-count
+errors at `sync.zig:367`, `utils.zig:71`, `input.zig:175`).
+
+**Collapse performed (0.16.0, native):**
+- `src/core/sync/sync.zig` — restored to HEAD `060ee78` form; winner election
+  stays the audited `if/else-if/else switch (e.anchor)` O(1) shape; the
+  `.present/.covering` arms remain presence-block-bodied as authored, sending
+  only when geometry actually moved.
+- `src/core/utils/utils.zig` — restored `tag` param (3→4 args) so
+  `WindowedProfiler` matches HEAD's 4-arg declaration used by the profit
+  dispatch gate.
+- `src/input/input.zig` — call site back on the 4-arg `key_prof` shape.
+
+**Status after collapse: `zig build check` exit 0, `zig build test` exit 0.**
+
+**Documented divergence (accepted, do NOT resurrect without a new audit):**
+the intermediate block-bodied `.present => {}` switch and the 3-arg
+`WindowedProfiler` tag-free signature were both valid in intent but did not
+formulate to a compiling tree in this session's 0.16 toolchain; they live only
+in this plan as a note, not in working-tree code. Re-adding either requires
+re-auditing the whole computeDesire winner path on a fresh `zig build check`.

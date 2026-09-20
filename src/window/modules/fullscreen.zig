@@ -13,10 +13,10 @@
 //! so `fullscreenWsOf` still reports the ws and the rec resumes coverage on
 //! restore.
 //!
-//! The deserialize hook receives the wire layer's `*model.Model` as a
-//! `*anyopaque` (see plugin.WindowModule) so the seam's signature stays free
-//! of model types in the core interface file (layer rule); the cast happens
-//! here, where the concrete model type is known.
+//! The deserialize hook receives the wire layer's `*model.Model` directly
+//! (see plugin.WindowModule); the core interface file carries the model type,
+//! and adoption rewrites model state only through the window layer's
+//! gate-holding restore path.
 
 const std = @import("std");
 
@@ -107,11 +107,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
         // OFF: leave fullscreen; releaseCovering replays the recorded
         // pre-fullscreen anchor into the model, then the rec is dropped.
         releaseCovering(m, win);
-        _ = g_recs.removeWhere(win, struct {
-            fn match(key: u32, item: Rec) bool {
-                return item.win == key;
-            }
-        }.match);
+        _ = g_recs.removeById(.win, win);
         return true;
     }
     // ON: capacity guard BEFORE any mutation — a full store refuses the
@@ -131,11 +127,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     if (entrant_claims_ws) {
         while (presentVisibleRecOnWs(m, m.current, win)) |occupant| {
             releaseCovering(m, occupant); // replays the anchor before the rec drops
-            _ = g_recs.removeWhere(occupant, struct {
-                fn match(key: u32, item: Rec) bool {
-                    return item.win == key;
-                }
-            }.match);
+            _ = g_recs.removeById(.win, occupant);
         }
     }
 
@@ -198,8 +190,8 @@ fn releaseCovering(m: *model.Model, win: model.WindowId) void {
 
 /// The first record on `ws` whose window is present-not-parked AND visible on
 /// `ws`, skipping `skip` (null scans every record). The shared occupant scan
-/// behind fullscreenOccupantOnWs/fullscreenOccupied and the covering-switch
-/// eviction loop. The `ws` match reads the model's `covering_ws` intent.
+/// behind fullscreenOccupantOnWs and the covering-switch eviction loop.
+/// The `ws` match reads the model's `covering_ws` intent.
 fn presentVisibleRecOnWs(m: *const model.Model, ws: model.WSId, skip: ?model.WindowId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         if (skip) |s| if (rec.win == s) continue;
@@ -221,15 +213,6 @@ fn presentVisibleRecOnWs(m: *const model.Model, ws: model.WSId, skip: ?model.Win
 /// visible fullscreen per ws is guaranteed by sync (others parked).
 pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     return presentVisibleRecOnWs(m, ws, null);
-}
-
-/// True iff some OTHER window's record covers `dest`: a rec with `r.win != win`,
-/// whose covering intent anchors `dest`, whose window is present-not-parked AND
-/// visible on `dest` (same visibility rule as the occupant query). Shared with
-/// the workspaces move/tag slice: fullscreen transfer-on-move drops the mover
-/// rather than clobbering a resident.
-pub fn fullscreenOccupied(m: *const model.Model, win: model.WindowId, dest: model.WSId) bool {
-    return presentVisibleRecOnWs(m, dest, win) != null;
 }
 
 /// Seam for the workspaces module's move/tag slice: retargets `win`'s
@@ -327,26 +310,24 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 
 /// Persistence seam (plugin.WindowModule.deserializeWindow): adopts the blob
 /// written by `serializeWindow` and replays the covering record on the live
-/// model (passed in as `*anyopaque`). Returns true when this module claims the
-/// blob; false (magic mismatch, unknown window, wrong length) lets the
-/// registry loop continue to other modules. Idempotent when the rec already
-/// exists.
-fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
+/// model. Returns true when this module claims the blob; false (magic
+/// mismatch, unknown window, wrong length) lets the registry loop continue to
+/// other modules. Idempotent when the rec already exists.
+fn deserializePreamble(win: u32, bytes: []const u8, m: *model.Model) ?struct { *model.Model, ?*model.Entry } {
     if (bytes.len < 1 or bytes[0] != FS_MAGIC) return null; // not ours
-    const m: *model.Model = plugin.modelPtrOf(ptr);
     if (g_recs.indexOfByIdField(.win, win) != null) return .{ m, null }; // already adopted; idempotent
     const e = m.store.getPtr(win) orelse return null;
     return .{ m, e };
 }
 
-pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
-    const p = deserializePreamble(win, bytes, ptr) orelse return false;
+pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
+    const p = deserializePreamble(win, bytes, m) orelse return false;
     const e = p[1] orelse return true;
     if (bytes.len < 4) return false;
     const ws: model.WSId = model.WSId.fromIndex(@intCast(readLE(u16, bytes, 1)));
     if (ws.index >= p[0].ws.len) return false; // corrupt/oversized capture target: reject before writing
     const tag = bytes[3];
-    // W6: check capacity BEFORE mutating e.anchor below; the old placement
+    // Check capacity BEFORE mutating e.anchor below; the old placement
     // left the floating restore applied on a rejected (growth-capped) blob.
     if (g_recs.len >= MAX_FULLSCREEN) return false;
     var anchor: model.BaseMode = undefined;
@@ -450,11 +431,7 @@ pub fn armPendingBarShow(win: u32) void {
 /// unmanage) after removing the store entry. Also clears any pending deferred
 /// bar op so the bar doesn't stay stuck (both show and hide cases).
 pub fn onWindowGone(win: u32) void {
-    _ = g_recs.removeWhere(win, struct {
-        fn match(key: u32, item: Rec) bool {
-            return item.win == key;
-        }
-    }.match);
+    _ = g_recs.removeById(.win, win);
     if (g_pending_bar_show_win == win) resolvePendingBarShow();
     if (g_pending_bar_hide_win == win) g_pending_bar_hide_win = 0;
 }

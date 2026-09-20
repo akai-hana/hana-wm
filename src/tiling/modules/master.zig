@@ -8,7 +8,7 @@ const tiling = @import("tiling");
 
 /// Stack-column weight boosts derived from `secondary_balance`:
 /// positive boosts the top slot, negative boosts the bottom slot.
-pub const StackBoost = struct {
+const StackBoost = struct {
     top: f32 = 0,
     bottom: f32 = 0,
 
@@ -16,8 +16,7 @@ pub const StackBoost = struct {
         return self.top == 0 and self.bottom == 0;
     }
 
-    /// Derive from `secondary_balance`: positive → top, negative → bottom.
-    pub inline fn fromBalance(balance: f32) StackBoost {
+    inline fn fromBalance(balance: f32) StackBoost {
         return .{ .top = @max(0, balance), .bottom = @max(0, -balance) };
     }
 };
@@ -121,7 +120,7 @@ fn tileColumn(
     const row_pitch = rowPitch(ctx.m);
     for (windows, 0..) |win, i| {
         const rect = utils.Rect{ .x = tiling.satI16(@intCast(x)), .y = tiling.satI16(@intCast(y)), .width = inner_w, .height = heights[i] };
-        tiling.emitView(ctx.v, ctx.out, win, rect, true);
+        tiling.emitView(ctx.v, ctx.out, win, rect);
         y = y +| heights[i] +| row_pitch;
     }
 }
@@ -191,12 +190,12 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
 inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
     var w: f32 = 1.0;
     if (i == 0) w += boost.top;
-    if (count > 0 and i == count - 1) w += boost.bottom;
+    if (i == count - 1) w += boost.bottom;
     return w;
 }
 
 inline fn stackSeamMargin(m: utils.Margins) u16 {
-    return m.gap / 2 +| rowPitch(m);
+    return tiling.seamGap(m) +| rowPitch(m);
 }
 
 inline fn rowPitch(m: utils.Margins) u16 {
@@ -237,13 +236,13 @@ fn tileStack(
     const stack_n: u16 = @intCast(windows.len);
 
     const space_per_window: u32 =
-        @max(1, @as(u32, ctx.min_dim) + 2 * @as(u32, ctx.m.border) + @as(u32, ctx.m.gap));
+        @max(1, @as(u32, ctx.min_dim) + @as(u32, utils.doubledBorder(ctx.m)) + @as(u32, ctx.m.gap));
     const available: u32 = @as(u32, h) -| @as(u32, ctx.m.gap);
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
     if (stack_n <= max_fit) {
         const stack_inner_w = tiling.shrinkClamped(w, stackSeamMargin(ctx.m), ctx.min_dim);
-        tileColumn(ctx, windows, x +| ctx.m.gap / 2, y_offset, h, stack_inner_w, boost);
+        tileColumn(ctx, windows, x +| tiling.seamGap(ctx.m), y_offset, h, stack_inner_w, boost);
         return;
     }
     tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit);
@@ -274,10 +273,10 @@ fn tileStackExtra(
         const cols_by_width: u16 = @max(1, (w +| ctx.m.gap) / (min_col_w +| ctx.m.gap));
         const cols_in_row: u16 = @max(1, @min(cols_by_count, cols_by_width));
 
-        const gaps_in_row = ctx.m.gap / 2 +| ctx.m.gap *| cols_in_row;
+        const gaps_in_row = tiling.seamGap(ctx.m) +| ctx.m.gap *| cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row *| min_col_w;
         const col_w = row_total_w / cols_in_row;
-        const col_inner_w = tiling.shrinkClamped(col_w, 2 * ctx.m.border, ctx.min_dim);
+        const col_inner_w = tiling.shrinkClamped(col_w, utils.doubledBorder(ctx.m), ctx.min_dim);
 
         const y_pos = y_offset +| ctx.m.gap +|
             @as(u16, @intCast(@as(u32, row) * @as(u32, row_avail) / @as(u32, max_fit))) +|
@@ -294,12 +293,12 @@ fn tileStackExtra(
                 continue;
             }
             const rect = utils.Rect{
-                .x = tiling.satI16(@intCast(x +| ctx.m.gap / 2 +| col *| (col_w +| ctx.m.gap))),
+                .x = tiling.satI16(@intCast(x +| tiling.seamGap(ctx.m) +| col *| (col_w +| ctx.m.gap))),
                 .y = tiling.satI16(@intCast(y_pos)),
                 .width = col_inner_w,
                 .height = row_h,
             };
-            tiling.emitView(ctx.v, ctx.out, windows[win_idx], rect, true);
+            tiling.emitView(ctx.v, ctx.out, windows[win_idx], rect);
         }
     }
 }

@@ -1,8 +1,11 @@
-//! X11 wire primitives: the ONLY xcb-dependent
-//! half. Atom cache, EWMH root advertisement, property fetchers, and the
-//! configure/raise/grab/offscreen request shims that sync's sink and the
-//! allowlisted entry points call. Pure geometry (Rect/Margins/scaling)
-//! stays in utils.zig so model/tiling never import this file.
+//! Raw XCB primitives here live behind the sync seam's sink
+//! (the sanctioned boundary: send planning in sync.zig, dispatch in
+//! sink.zig), plus a documented allowlist for bar lifecycle, client-protocol,
+//! and non-mutation flushes (dev/scripts/check-layers.sh Rules 1-2).
+//! Atom cache, EWMH root advertisement, property fetchers, and the
+//! configure/raise/grab/offscreen request shims live here. Pure geometry
+//! (Rect/Margins/scaling) stays in utils.zig so model/tiling never imports
+//! this file.
 
 const std = @import("std");
 
@@ -14,12 +17,7 @@ const xcb = @import("xcb").xcb;
 const Connection = *xcb.xcb_connection_t;
 const Screen = *xcb.xcb_screen_t;
 const constants = @import("constants");
-const debug = @import("debug");
 const utils = @import("utils");
-
-const max_property_length = constants.property_max_length;
-/// Passed as the `delete` argument to xcb_get_property; 0 means do not consume the property.
-const property_no_delete = constants.property_no_delete;
 
 // ---------------------------------------------------------------------------
 // Geometry <-> wire conversions
@@ -342,45 +340,3 @@ const PropertyCollector = ReplyCollector(
     xcb.xcb_get_property_reply,
 );
 pub const collectPropertyReply = PropertyCollector.collect;
-
-// ---------------------------------------------------------------------------
-// Property fetchers
-
-/// Fetches an 8-bit X11 window property into the caller-supplied `buffer`.
-/// Returns a slice into `buffer`, or null if the property is absent, empty,
-/// not 8-bit encoded, the reply's type doesn't match the requested
-/// `atom_type`, or the value exceeds the buffer length.
-pub fn fetchPropertyToBuffer(
-    conn: Connection,
-    window: u32,
-    atom: u32,
-    atom_type: u32,
-    buffer: []u8,
-) !?[]const u8 {
-    const reply = collectPropertyReply(
-        conn,
-        xcb.xcb_get_property(
-            conn,
-            property_no_delete,
-            window,
-            atom,
-            atom_type,
-            0,
-            max_property_length,
-        ),
-    ) orelse return null;
-    defer std.c.free(reply);
-    const r = reply.*;
-    if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
-    // C9: key truncation off the reply's bytes_after, not on value_len hitting
-    // the cap: a property of exactly cap length with no remainder is complete,
-    // while value_len==cap with bytes pending is genuinely truncated.
-    if (r.bytes_after > 0)
-        debug.warn("Property atom {x} on window {x} exceeds the {}-byte fetch cap; value truncated", .{ atom, window, max_property_length });
-
-    const len: usize = @intCast(r.value_len);
-    if (len > buffer.len) return null;
-    const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    @memcpy(buffer[0..len], value_ptr[0..len]);
-    return buffer[0..len];
-}

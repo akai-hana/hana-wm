@@ -211,7 +211,7 @@ pub fn setup() !void {
         .flags = 0,
     }, null);
 
-    // C4: the backtrace handler arms SA.ONSTACK, but no alternate stack was
+    // The backtrace handler arms SA.ONSTACK, but no alternate stack was
     // ever installed -- without one the handler would run on the (possibly
     // corrupted) interrupted stack it exists to diagnose. Install it before
     // arming any ONSTACK handler.

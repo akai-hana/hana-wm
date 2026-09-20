@@ -20,8 +20,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
 
-    const cell_w = (screen_w -| (grid.cols + 1) *| m.gap) / grid.cols;
-    const cell_h = (screen_h -| (grid.rows + 1) *| m.gap) / grid.rows;
+    const cell_w = tiling.paneCell(screen_w, grid.cols, m.gap);
+    const cell_h = tiling.paneCell(screen_h, grid.rows, m.gap);
     const win_h = tiling.shrinkClamped(cell_h, bm, v.env.min_dim);
     const win_w = tiling.shrinkClamped(cell_w, bm, v.env.min_dim);
     const wa_y = tiling.waY(v);
@@ -29,7 +29,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // In relaxed mode a partial last row shares the full screen width.
     const last_row_count = n % grid.cols;
     const partial_cell_w: u16 = if (v.env.variant_idx == variant_relaxed and last_row_count != 0)
-        widenedLastRowCellWidth(screen_w, last_row_count, m.gap)
+        tiling.paneCell(screen_w, @intCast(last_row_count), m.gap)
     else
         cell_w;
     const partial_win_w: u16 = tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
@@ -48,15 +48,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             .width = if (is_partial_row) partial_win_w else win_w,
             .height = win_h,
         };
-        tiling.emitView(v, out, win, rect, true);
+        tiling.emitView(v, out, win, rect);
     }
-}
-
-/// Width of a widened (relaxed) last row's cell, sharing `screen_w` across
-/// `count` windows with full gaps on each side.
-inline fn widenedLastRowCellWidth(screen_w: u16, count: usize, gap: u16) u16 {
-    const c: u16 = @intCast(count);
-    return (screen_w -| (c + 1) *| gap) / c;
 }
 
 /// Column/row counts of the smallest square grid holding `n` windows; uses

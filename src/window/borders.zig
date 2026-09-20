@@ -21,29 +21,23 @@ pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
 
 /// Pure covering-occupant borderless rule: true when `win` must render
 /// borderless because a covering (fullscreen) occupant holds the workspace it
-/// actually lives on. `is_covering` is `win`'s own covering-mode bit (the
-/// hook result, injected so the rule needs no X state); `current` is the
-/// current workspace for the unresolvable-workspace fallback; `has_fullscreen`
-/// gates the covering-mode reads for fullscreen-absent builds.
+/// actually lives on. `current` is the current workspace for the
+/// unresolvable-workspace fallback; `has_fullscreen` gates the
+/// covering-mode reads for fullscreen-absent builds.
 pub fn coveredByOccupant(
     m: *const model.Model,
     win: u32,
-    is_covering: bool,
     current: model.WSId,
     has_fullscreen: bool,
 ) bool {
     const e = m.store.get(win) orelse return false;
-    const ws: ?model.WSId = blk: {
-        if (has_fullscreen and is_covering) break :blk e.covering_ws;
-        break :blk model.findHome(m, win);
-    };
-    if (ws) |w| return model.coveringOccupantOnWs(m, w) != null;
+    if (model.findHome(m, win)) |w| return model.coveringOccupantOnWs(m, w) != null;
     return has_fullscreen and model.coveringOccupantOnWs(m, current) != null;
 }
 
 /// Returns the border color for `win`: 0 for screen-covering windows,
 /// focused or unfocused color otherwise.
-pub fn color(win: u32) u32 {
+pub fn resolveBorderColor(win: u32) u32 {
     // Covering windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
     if (callHookBool(.isCoveringMode, .{ pipeline.model(), win })) return 0;
@@ -55,10 +49,6 @@ pub fn color(win: u32) u32 {
     // unfindable window falls back to whether the CURRENT workspace has a
     // covering occupant.
     const m = pipeline.model();
-    // A stray/unmanaged window has no workspace to resolve; fall back to the
-    // unfocused color (callers all pass managed windows today, so this is
-    // purely defensive hardening).
-    if (m.store.get(win) == null) return cfg.border_unfocused;
     if (coveredByOccupant(m, win, false, m.current, build_options.has_fullscreen)) return 0;
     return borderColorOf(focus.getFocused() == win, cfg.border_focused, cfg.border_unfocused);
 }
@@ -85,7 +75,7 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
 /// is unavailable, the send is unconditional.
 pub fn apply(conn: core.Connection, win: u32) void {
     applyWidth(conn, win);
-    const c = color(win);
+    const c = resolveBorderColor(win);
     if (build_options.has_tiling) {
         if (wincache.sendBorderColorIfChanged(win, c)) return;
     }

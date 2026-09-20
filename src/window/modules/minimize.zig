@@ -6,10 +6,10 @@
 //! (serialize/deserialize), and record cleanup for torn-down windows
 //! (onWindowGone). The core never names minimize.
 //!
-//! The deserialize hook receives the wire layer's `*model.Model` as a
-//! `*anyopaque` (see plugin.WindowModule) so the seam's signature stays free
-//! of model types in the core interface file (layer rule); the cast happens
-//! here, where the concrete model type is known.
+//! The deserialize hook receives the wire layer's `*model.Model` directly
+//! (see plugin.WindowModule); the core interface file carries the model type,
+//! and adoption rewrites model state only through the window layer's
+//! gate-holding restore path.
 
 const std = @import("std");
 const constants = @import("constants");
@@ -43,6 +43,9 @@ pub const MinimizeError = error{CapacityFull};
 /// One minimized window's parked record. The on-disk blob is PackedMinimize
 /// ({magic: u8, slot: u32, seq: u32}; slot is maxInt for floating-originated).
 const Rec = struct { win: model.WindowId, slot: ?usize, seq: u32 };
+
+/// Magic byte of the on-disk blob ('Z' — see serializeWindow).
+const min_magic: u8 = 0x5A;
 
 /// The on-disk blob layout: {magic: u8, slot-OR-maxInt: u32, seq: u32}. The
 /// native-endian u32 fields keep the byte layout of the hand-rolled slice
@@ -218,8 +221,8 @@ pub fn isMinimized(m: *const model.Model, win: model.WindowId) bool {
 }
 
 /// Number of concurrently minimized windows (the module's own count).
-pub fn count(m: *const model.Model) u32 {
-    _ = m;
+/// Test-only; the production bar and persist paths read the model directly.
+pub fn count() u32 {
     return @intCast(g_recs.len);
 }
 
@@ -255,7 +258,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
     const rec = p[1];
     const held = alloc.alloc(u8, @sizeOf(PackedMinimize)) catch return null;
     const blob: PackedMinimize = .{
-        .magic = 0x5A,
+        .magic = min_magic,
         .slot = @intCast(rec.slot orelse std.math.maxInt(u32)),
         .seq = rec.seq,
     };
@@ -264,21 +267,17 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 }
 
 /// Persistence seam (plugin.WindowModule.deserializeWindow): adopts the blob
-/// written by `serializeWindow` and replays the park on the live model, which
-/// the wire layer passes in as `*anyopaque` (keeps the core seam signature
-/// free of model types; the reverse cast happens on this side).
-fn deserializePreamble(win: u32, bytes: []const u8, ptr: *anyopaque) ?struct { *model.Model, ?*model.Entry } {
-    if (bytes.len != 9 or bytes[0] != 0x5A) return null; // not our blob; let the loop continue
-    const m: *model.Model = plugin.modelPtrOf(ptr);
+/// written by `serializeWindow` and replays the park on the live model.
+fn deserializePreamble(win: u32, bytes: []const u8, m: *model.Model) ?struct { *model.Model, ?*model.Entry } {
+    if (bytes.len != 9 or bytes[0] != min_magic) return null; // not our blob; let the loop continue
     if (g_recs.indexOfByIdField(.win, win) != null) return .{ m, null }; // already adopted; idempotent
     if (g_recs.len >= MAX_MINIMIZED) return null;
     const e = m.store.getPtr(win) orelse return null;
     return .{ m, e };
 }
 
-pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
-    const p = deserializePreamble(win, bytes, ptr) orelse return false;
-    const m = p[0];
+pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
+    const p = deserializePreamble(win, bytes, m) orelse return false;
     const e = p[1] orelse return true;
     // Slice the payload back out via a byte-aligned copy (persist buffers are
     // byte-aligned; the extern struct's align(1) u32s load unaligned safely).
@@ -303,11 +302,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
 /// Record cleanup on window teardown; the wire layer fires this (events /
 /// unmanage) after removing the store entry.
 pub fn onWindowGone(win: u32) void {
-    _ = g_recs.removeWhere(win, struct {
-        fn match(key: u32, item: Rec) bool {
-            return item.win == key;
-        }
-    }.match);
+    _ = g_recs.removeById(.win, win);
 }
 
 /// Adapter for the hide seam: widens the module's `MinimizeError!void`

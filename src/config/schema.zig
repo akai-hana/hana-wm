@@ -41,28 +41,28 @@ fn knobGated(places: []const Placement, target: []const u8, kind: Kind, requires
 /// marker) and still apply border/gap styling. The place probe already
 /// no-ops when neither section exists.
 fn tilingAesthetics(key: []const u8, kind: Kind) Knob {
-    return .{ .places = &.{ place("tiling.aesthetics", key), place("tiling", key) }, .target = "tiling." ++ key, .kind = kind };
+    return .{ .places = &.{ place(types.section_tiling_aesthetics, key), place(types.section_tiling, key) }, .target = "tiling." ++ key, .kind = kind };
 }
 
 /// Master-stack trio: dedicated-section short spelling wins over the flat
 /// [tiling] spelling (section presence, not key presence, picks the spelling).
 fn masterStack(dedicated_key: []const u8, flat_key: []const u8, kind: Kind) Knob {
-    return .{ .places = &.{ place("tiling.layouts.master-stack", dedicated_key), place("tiling", flat_key) }, .target = "tiling." ++ flat_key, .kind = kind, .requires = "tiling" };
+    return .{ .places = &.{ place(types.section_tiling_layouts_master_stack, dedicated_key), place(types.section_tiling, flat_key) }, .target = "tiling." ++ flat_key, .kind = kind, .requires = types.section_tiling };
 }
 
 /// Plain [bar] boolean.
 fn barBool(key: []const u8) Knob {
-    return .{ .places = &.{place("bar", key)}, .target = "bar." ++ key, .kind = .b };
+    return .{ .places = &.{place(types.section_bar, key)}, .target = "bar." ++ key, .kind = .b };
 }
 
 /// Plain [bar] scalable (px or %), rejecting negative raw values.
 fn barScalable(key: []const u8, target: []const u8) Knob {
-    return .{ .places = &.{place("bar", key)}, .target = target, .kind = .{ .scalable = 0.0 } };
+    return .{ .places = &.{place(types.section_bar, key)}, .target = target, .kind = .{ .scalable = 0.0 } };
 }
 
 /// Plain [bar] color (base palette, no gate).
 fn barPlainColor(key: []const u8) Knob {
-    return .{ .places = &.{place("bar", key)}, .target = "bar." ++ key, .kind = .color };
+    return .{ .places = &.{place(types.section_bar, key)}, .target = "bar." ++ key, .kind = .color };
 }
 
 /// [bar.colors] color_from chain: reads a sibling bar field as fallback,
@@ -70,7 +70,7 @@ fn barPlainColor(key: []const u8) Knob {
 /// fallback when [bar.colors] is absent; the drun variant keeps null so the
 /// read-time fallbacks in BarConfig apply (R2).
 fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) Knob {
-    return .{ .places = &.{place("bar.colors", key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = "bar", .copy_when_absent = copy_when_absent };
+    return .{ .places = &.{place(types.section_bar_colors, key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = types.section_bar, .copy_when_absent = copy_when_absent };
 }
 
 /// Title accent color: copies `sibling` when [bar.colors] is absent (R2).
@@ -102,9 +102,9 @@ pub const knobs = [_]Knob{
     // parseTiling always was -- a lone [tiling.aesthetics] without [tiling]
     // never fed these knobs. (The aesthetics quartet below is UNGATED: it's
     // visual, so themes may ship it without the functional marker.)
-    knobGated(&.{place("tiling", "enabled")}, "tiling.enabled", .b, "tiling"),
-    knobGated(&.{place("tiling", "global_layout")}, "tiling.global_layout", .b, "tiling"),
-    knobGated(&.{place("tiling", "min_window_dim")}, "tiling.min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, "tiling"),
+    knobGated(&.{place(types.section_tiling, "enabled")}, "tiling.enabled", .b, types.section_tiling),
+    knobGated(&.{place(types.section_tiling, "global_layout")}, "tiling.global_layout", .b, types.section_tiling),
+    knobGated(&.{place(types.section_tiling, "min_window_dim")}, "tiling.min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, types.section_tiling),
 
     // Aesthetics quartet: [tiling.aesthetics] preferred, flat [tiling]
     // fallback (same key spellings in both).
@@ -130,11 +130,11 @@ pub const knobs = [_]Knob{
     barScalable("indicator_size", "bar.indicator_size"),
     barScalable("workspace_tag_width", "bar.workspace_tag_width"),
     // height: null = auto-calculate from font metrics alone.
-    knob(&.{place("bar", "height")}, "bar.height", .auto_scalable),
+    knob(&.{place(types.section_bar, "height")}, "bar.height", .auto_scalable),
     // Case-insensitive enum (types.enumFromString over BarScreenPosition's
     // string_map); unrecognized spellings warn and keep .top (C8).
-    knob(&.{place("bar", "position")}, "bar.bar_position", .{ .enum_read = .{ .T = types.BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }),
-    knob(&.{place("bar", "carousel_speed_px_s")}, "bar.carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
+    knob(&.{place(types.section_bar, "position")}, "bar.bar_position", .{ .enum_read = .{ .T = types.BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }),
+    knob(&.{place(types.section_bar, "carousel_speed_px_s")}, "bar.carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
 
     // Base palette: read before every color_from consumer below. The three
     // window-state colors (primary/secondary/alternative) plus text_color are
@@ -145,35 +145,35 @@ pub const knobs = [_]Knob{
     barPlainColor("fg"),
     barPlainColor("selected_bg"),
     barPlainColor("selected_fg"),
-    barPlainColor("primary_color"),
-    barPlainColor("secondary_color"),
-    barPlainColor("alternative_color"),
-    barPlainColor("text_color"),
+    barPlainColor(types.palette_primary_color),
+    barPlainColor(types.palette_secondary_color),
+    barPlainColor(types.palette_alternative_color),
+    barPlainColor(types.palette_text_color),
 
-    knob(&.{place("bar", "clock_format")}, "bar.clock_format", .str),
-    knob(&.{place("bar", "drun_prompt")}, "bar.drun_prompt", .str),
-    knob(&.{place("bar", "volume_format")}, "bar.volume_format", .str),
-    knob(&.{place("bar", "volume_muted_format")}, "bar.volume_muted_format", .str),
-    knob(&.{place("bar", "brightness_format")}, "bar.brightness_format", .str),
-    knob(&.{place("bar", "brightness_device")}, "bar.brightness_device", .str),
-    knob(&.{place("bar", "indicator_location")}, "bar.indicator_location", .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
-    knob(&.{place("bar", "indicator_padding")}, "bar.indicator_padding", .ratio),
-    knob(&.{place("bar", "transparency")}, "bar.transparency", .ratio),
+    knob(&.{place(types.section_bar, "clock_format")}, "bar.clock_format", .str),
+    knob(&.{place(types.section_bar, "drun_prompt")}, "bar.drun_prompt", .str),
+    knob(&.{place(types.section_bar, "volume_format")}, "bar.volume_format", .str),
+    knob(&.{place(types.section_bar, "volume_muted_format")}, "bar.volume_muted_format", .str),
+    knob(&.{place(types.section_bar, "brightness_format")}, "bar.brightness_format", .str),
+    knob(&.{place(types.section_bar, "brightness_device")}, "bar.brightness_device", .str),
+    knob(&.{place(types.section_bar, "indicator_location")}, "bar.indicator_location", .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
+    knob(&.{place(types.section_bar, "indicator_padding")}, "bar.indicator_padding", .ratio),
+    knob(&.{place(types.section_bar, "transparency")}, "bar.transparency", .ratio),
     // Falls back to the bar-wide fg (its historical default) -- but only
     // when the key is present; absent keeps the field null.
-    knob(&.{place("bar", "indicator_color")}, "bar.indicator_color", .{ .color_opt = "fg" }),
+    knob(&.{place(types.section_bar, "indicator_color")}, "bar.indicator_color", .{ .color_opt = "fg" }),
 
     // [bar.colors] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
     // title accents additionally COPY their fallback when [bar.colors] is
     // absent (they were unconditionally assigned); the drun trio stay null
     // so the read-time fallbacks in BarConfig apply.
-    barTitleColor("title", "bar.title_accent_color", "primary_color"),
-    barTitleColor("title_unfocused", "bar.title_unfocused_accent", "secondary_color"),
-    barTitleColor("title_minimized", "bar.title_minimized_accent", "alternative_color"),
+    barTitleColor("title", "bar.title_accent_color", types.palette_primary_color),
+    barTitleColor("title_unfocused", "bar.title_unfocused_accent", types.palette_secondary_color),
+    barTitleColor("title_minimized", "bar.title_minimized_accent", types.palette_alternative_color),
     barDrunColor("drun_bg", "bar.drun_bg", "bg"),
     barDrunColor("drun_fg", "bar.drun_fg", "fg"),
-    barDrunColor("drun_prompt_color", "bar.drun_prompt_color", "primary_color"),
+    barDrunColor("drun_prompt_color", "bar.drun_prompt_color", types.palette_primary_color),
 };
 
 /// Keys the [bar.colors] scalar knobs own; every OTHER key in that table is a
@@ -184,7 +184,7 @@ const bar_colors_knob_keys_len = blk: {
     var n: usize = 0;
     for (knobs) |k| {
         for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, "bar.colors")) n += 1;
+            if (std.mem.eql(u8, pl.section, types.section_bar_colors)) n += 1;
         }
     }
     break :blk n;
@@ -194,7 +194,7 @@ const bar_colors_knob_keys: [bar_colors_knob_keys_len][]const u8 = blk: {
     var i: usize = 0;
     for (knobs) |k| {
         for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, "bar.colors")) {
+            if (std.mem.eql(u8, pl.section, types.section_bar_colors)) {
                 keys[i] = pl.key;
                 i += 1;
             }
@@ -271,30 +271,38 @@ pub const Knob = struct {
 
 // Type-level access into Config by dotted path.
 
+/// Splits a dotted "group.leaf" target path at its first '.'. With no dot the
+/// whole path is the `leaf` and `group` is empty (a top-level Config field).
+/// Shared by every dotted-path accessor so their splitting cannot drift.
+const PathParts = struct { group: []const u8, leaf: []const u8 };
+inline fn splitPath(comptime path: []const u8) PathParts {
+    if (std.mem.indexOfScalar(u8, path, '.')) |dot| {
+        return .{ .group = path[0..dot], .leaf = path[dot + 1 ..] };
+    }
+    return .{ .group = "", .leaf = path };
+}
+
 /// Resolves a dotted "group.leaf" (or bare root-level) target path to its
 /// field type. Groups are exactly one level deep on types.Config.
-pub fn PathType(comptime path: []const u8) type {
-    if (comptime std.mem.indexOfScalar(u8, path, '.')) |dot| {
-        const Group = @TypeOf(@field(@as(types.Config, undefined), path[0..dot]));
-        return @TypeOf(@field(@as(Group, undefined), path[dot + 1 ..]));
-    }
-    return @TypeOf(@field(@as(types.Config, undefined), path));
+fn PathType(comptime path: []const u8) type {
+    const parts = comptime splitPath(path);
+    if (parts.group.len == 0) return @TypeOf(@field(@as(types.Config, undefined), path));
+    const Group = @TypeOf(@field(@as(types.Config, undefined), parts.group));
+    return @TypeOf(@field(@as(Group, undefined), parts.leaf));
 }
 
 /// Mutable pointer to a knob's target field.
-pub fn ptr(cfg: *types.Config, comptime path: []const u8) *PathType(path) {
-    if (comptime std.mem.indexOfScalar(u8, path, '.')) |dot| {
-        return &@field(@field(cfg, path[0..dot]), path[dot + 1 ..]);
-    }
-    return &@field(cfg, path);
+fn ptr(cfg: *types.Config, comptime path: []const u8) *PathType(path) {
+    const parts = comptime splitPath(path);
+    if (parts.group.len == 0) return &@field(cfg, path);
+    return &@field(@field(cfg, parts.group), parts.leaf);
 }
 
 /// Read-only view of a knob's target field.
 pub fn value(cfg: *const types.Config, comptime path: []const u8) PathType(path) {
-    if (comptime std.mem.indexOfScalar(u8, path, '.')) |dot| {
-        return @field(@field(cfg, path[0..dot]), path[dot + 1 ..]);
-    }
-    return @field(cfg, path);
+    const parts = comptime splitPath(path);
+    if (parts.group.len == 0) return @field(cfg, path);
+    return @field(@field(cfg, parts.group), parts.leaf);
 }
 
 // Generic readers.
@@ -329,7 +337,7 @@ pub fn getInRange(
     const val = switch (T) {
         bool => section.getAsOrWarn(bool, key) orelse return default,
         []const u8 => section.getAsOrWarn([]const u8, key) orelse return default,
-        u8, u16, u32, usize => blk: {
+        u8, u16 => blk: {
             const i = section.getAsOrWarn(i64, key) orelse return default;
             // A negative int would trap on the @intCast below; warn-and-default
             // it here so the out-of-range contract holds for negatives too.
@@ -350,23 +358,22 @@ pub fn getInRange(
 
 /// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
 /// `0xRRGGBB`, an integer, or a full-name reference to a collected palette
-/// variable (e.g. `border_focused = primary_color`).
+/// variable (e.g. `border_focused = primary_color`). The value-decoding forms
+/// share parser.colorFromValue (the single decoder); this layer adds the
+/// palette-reference lookup and the warn-and-default policy on top.
 fn getColorFromValue(
     key: []const u8,
     val: parser.Value,
     default: u32,
     palette: *const std.StringHashMap(u32),
 ) u32 {
-    if (val.asScalar(u32)) |c| return c;
+    if (parser.colorFromValue(val)) |c| return c;
     if (val.asScalar([]const u8)) |s| {
-        if (parser.parseColor(s)) |c| return c else |_| {
-            if (palette.get(s)) |c| return c;
-            debug.warn("Invalid color for {s}: '{s}' (not a hex code or palette reference)", .{ key, s });
-            return default;
-        }
+        if (palette.get(s)) |c| return c;
+        debug.warn("Invalid color for {s}: '{s}' (not a hex code or palette reference)", .{ key, s });
+        return default;
     }
-    if (val.asScalar(i64)) |i| if (i >= 0 and i <= 0xFFFFFF) return @intCast(i);
-    // C4: unresolvable value (boolean, size, bare float, out-of-range int, ...)
+    // Unresolvable value (boolean, size, bare float, out-of-range int, ...)
     // would otherwise silently use the default without a trace.
     debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', an integer, or a palette reference), using default", .{key});
     return default;
@@ -433,7 +440,7 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
             "{s} value '{s}' is quoted; write it unquoted (e.g. {s} = 0.5), using default",
             .{ key, str, key },
         )
-    else if (val != .array) // C4: something else entirely (boolean, ...)
+    else if (val != .array) // something else entirely (boolean, ...)
         debug.warn(
             "{s} expects a number or ratio, got a union/other value; using default",
             .{key},
@@ -551,8 +558,8 @@ pub fn applySegmentColors(
     cfg: *types.Config,
 ) !void {
     types.freeSegmentColors(&cfg.bar.segment_fg, allocator);
-    if (doc.getSection("bar") == null) return;
-    const sec = doc.getSection("bar.colors") orelse return;
+    if (doc.getSection(types.section_bar) == null) return;
+    const sec = doc.getSection(types.section_bar_colors) orelse return;
     var it = sec.orderedIterator();
     while (it.next()) |pair| {
         sec.markConsumed(pair.key);

@@ -22,8 +22,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const top_rect = tiling.insetRect(inset, tiling.waY(v) +| inset, v.workarea.width, v.workarea.height, total_margin, v.env.min_dim);
 
-    // showOneHideRest: raise/configure `top` on-screen, park every other window.
-    tiling.emitView(v, out, top_win, top_rect, true);
+    tiling.emitView(v, out, top_win, top_rect);
     tiling.showOneHideRest(out, v.order, top_win);
 }
 

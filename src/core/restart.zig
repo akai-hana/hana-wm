@@ -32,6 +32,16 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
+/// c_allocator-owned, NUL-terminated copy of `src`, or die: the re-exec
+/// cannot proceed without the path, the X connection is already closed, and
+/// there is nothing left to do but end the session.
+fn mustDupeZ(src: []const u8, what: []const u8) [:0]const u8 {
+    return std.heap.c_allocator.dupeZ(u8, src) catch {
+        debug.err("restart: out of memory copying {s}", .{what});
+        std.process.exit(1);
+    };
+}
+
 /// Null-terminated absolute path to exec on re-exec (readLink of
 /// `/proc/self/exe`, or the override passed to init()). c_allocator-owned,
 /// process-lifetime: never freed.
@@ -55,7 +65,7 @@ pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
-    // C6: readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
+    // readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
     // path fills the buffer -- truncated, no NUL. The old code then dupeZ'd
     // the truncated bytes as the exec path. Treat a full buffer as
     // unresolvable so a re-exec can never hand execv a cut-off path.
@@ -111,16 +121,8 @@ pub fn selfPath() ?[]const u8 {
 /// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
 /// environment is the one channel a fresh boot can see.
 pub fn execNext(self_path: []const u8, restore_path: []const u8) noreturn {
-    // Null-terminated copies for setenv/execv: the caller's slices are not
-    // necessarily terminated, and nothing runs after exec to free them.
-    const self_z = std.heap.c_allocator.dupeZ(u8, self_path) catch {
-        debug.err("restart: out of memory copying self path", .{});
-        std.process.exit(1);
-    };
-    const restore_z = std.heap.c_allocator.dupeZ(u8, restore_path) catch {
-        debug.err("restart: out of memory copying restore path", .{});
-        std.process.exit(1);
-    };
+    const self_z = mustDupeZ(self_path, "self path");
+    const restore_z = mustDupeZ(restore_path, "restore path");
 
     if (c.setenv("HANA_RESTORE", restore_z, 1) != 0) {
         debug.err("restart: setenv failed", .{});

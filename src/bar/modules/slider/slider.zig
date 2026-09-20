@@ -24,6 +24,13 @@
 //! core addresses it through hooks -- `read`/`pct`/`preview`/`commit`/`apply`
 //! -- and remembers only per-segment slot geometry, arming, and cadence.
 //!
+//! The per-segment lifecycle (arm-on-first-draw, poll deadline, dirty redraw
+//! marking, painted-width tracking) is a structural twin of systatus.zig's
+//! read-only version -- and deliberately not shared with it: this core adds
+//! drag/scroll interaction, a commit throttle, and per-control cadences atop
+//! the same 10-line shape, so extracting a common scaffold would cost a
+//! parameterised contract surface for little net body. See systatus.zig.
+//!
 //! Interaction mirrors the standalone segments it replaces, verbatim:
 //!   - wheel up/down: +/- 2 %;
 //!   - left press / press-hold drag anywhere over the control's slot: set its
@@ -273,15 +280,6 @@ var g_throttle: [subs.len]Throttle = [_]Throttle{.{ .interval_ms = throttle_ms }
 /// drag per segment).
 var g_drag: [subs.len]bool = @splat(false);
 
-/// A control's recorded slot bounds in the drawn belt (see `slotAt`).
-/// Test-only reference type for multi-slot hit-testing (the multi-slot
-/// geometry is exercised by slider_test); production is single-slot per
-/// segment and maps through `pctFromSlot`/`pctAt` instead.
-pub const Slot = struct {
-    x: u16,
-    w: u16,
-};
-
 /// Linear slider mapping across a slot: a pointer offset (relative to the
 /// segment start) maps to 0-100 % of the slot. The bar records the click
 /// bound at the reserved width, which mirrors `slot_w` at draw time.
@@ -290,21 +288,6 @@ pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
     const base: u32 = @as(u32, offset) -| @as(u32, slot_x);
     const v: u32 = base * 100 / w;
     return @intCast(@min(v, 100));
-}
-
-/// Which recorded slot owns the pointer offset (relative to the segment
-/// start), by the slot bounds from the last idle draw. Zero-width slots hold
-/// nothing.
-/// Test-only reference implementation of multi-slot hit-testing (exercised
-/// directly by slider_test); production is single-slot per segment and
-/// resolves the level through `pctFromSlot`/`pctAt` instead. Pure.
-pub fn slotAt(offset: u16, slots: []const Slot) ?usize {
-    const off: u32 = offset;
-    for (slots, 0..) |s, i| {
-        if (s.w == 0) continue;
-        if (off >= s.x and off < @as(u32, s.x) + s.w) return i;
-    }
-    return null;
 }
 
 /// The slider denominator for control `idx` at pointer `offset` (the single
@@ -560,5 +543,5 @@ pub fn segmentFor(comptime i: usize) plugin.Segment {
     };
 }
 
-// Pure geometry helpers (pctFromSlot, slotAt) are covered by slider_test; the
-// stateful wrappers above are exercised end-to-end through interaction tests.
+// Pure geometry helper pctFromSlot is covered by slider_test; the stateful
+// wrappers above are exercised end-to-end through interaction tests.

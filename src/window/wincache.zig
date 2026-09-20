@@ -208,7 +208,7 @@ fn ensureAtoms() void {
 /// WM_NAME reply is simply ignored.
 pub fn fireTitleCookies(conn: core.Connection, win: u32) TitleCookies {
     ensureAtoms();
-    const utf_type = utf8_string orelse xcb.XCB_ATOM_STRING;
+    const utf_type = utf8Type();
     return .{
         .net_wm = xcb.xcb_get_property(
             conn,
@@ -242,44 +242,47 @@ pub fn discardTitleCookies(conn: core.Connection, cookies: TitleCookies) void {
 /// _NET_WM_NAME when it carries bytes, else the legacy WM_NAME. Blocking, so
 /// it rides the admission drain exactly like the other cached properties.
 pub fn collectTitleCookies(conn: core.Connection, win: u32, cookies: TitleCookies) void {
-    ensureAtoms();
-    const utf_type = utf8_string orelse xcb.XCB_ATOM_STRING;
     var buf: [title_fetch_len]u8 = undefined;
-
-    var title: ?[]const u8 = null;
-    if (net_wm_name != null) {
-        title = takePropertyReply(conn, cookies.net_wm, utf_type, &buf);
-    }
-    if (title == null or title.?.len == 0) {
-        title = takePropertyReply(conn, cookies.wm_name, xcb.XCB_ATOM_STRING, &buf);
-    }
-    storeTitle(win, title orelse "");
+    storeTitle(win, pickTitle(conn, cookies, &buf));
 }
 
 /// Standalone refresh for one renamed window (PropertyNotify path). Blocking,
 /// but single-window and rare -- never in the draw path.
 pub fn refreshTitle(conn: core.Connection, win: u32) bool {
     const cookies = fireTitleCookies(conn, win);
-    ensureAtoms();
-    const utf = utf8_string orelse xcb.XCB_ATOM_STRING;
     var buf: [title_fetch_len]u8 = undefined;
-
-    var title: []const u8 = "";
-    if (net_wm_name != null) {
-        if (takePropertyReply(conn, cookies.net_wm, utf, &buf)) |t| title = t;
-    }
-    if (title.len == 0) {
-        if (takePropertyReply(conn, cookies.wm_name, xcb.XCB_ATOM_STRING, &buf)) |t| title = t;
-    }
+    const title = pickTitle(conn, cookies, &buf);
     if (std.mem.eql(u8, title, peekTitle(win))) return false;
     storeTitle(win, title);
     return true;
 }
 
+/// The property-type atom used to query _NET_WM_NAME: prefer UTF8_STRING,
+/// falling back to XCB_ATOM_STRING when the server lacks it.
+inline fn utf8Type() u32 {
+    return utf8_string orelse xcb.XCB_ATOM_STRING;
+}
+
+/// Picks the winning title from a fired TitleCookies pair, preferring
+/// _NET_WM_NAME (queried as UTF8_STRING) over the legacy WM_NAME. Captures
+/// the bytes into `buf`; returns "" when neither reply yields a valid title.
+/// Shared by the pipelined admission drain and the rename-refresh path.
+fn pickTitle(conn: core.Connection, cookies: TitleCookies, buf: []u8) []const u8 {
+    ensureAtoms();
+    var title: []const u8 = "";
+    if (net_wm_name != null) {
+        if (takePropertyReply(conn, cookies.net_wm, utf8Type(), buf)) |t| title = t;
+    }
+    if (title.len == 0) {
+        if (takePropertyReply(conn, cookies.wm_name, xcb.XCB_ATOM_STRING, buf)) |t| title = t;
+    }
+    return title;
+}
+
 /// Reads a single in-batch get_property reply into `buf`. Mirrors
-/// `utils.fetchPropertyToBuffer`'s validation (8-bit encoded, matching
-/// property type) but consumes an already-fired cookie instead of issuing its
-/// own request, so it can ride the pipelined admission batch.
+/// wire's property validation (8-bit encoded, matching property type) but
+/// consumes an already-fired cookie instead of issuing its own request, so it
+/// can ride the pipelined admission batch.
 fn takePropertyReply(
     conn: core.Connection,
     cookie: xcb.xcb_get_property_cookie_t,

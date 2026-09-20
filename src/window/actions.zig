@@ -96,10 +96,10 @@ const RetileOpts = struct {
 fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
     if (opts.full_redraw) core.layout.bump() else core.window.bump();
     if (opts.bump_fullscreen) core.fullscreen.bump();
-    if (opts.with_focus)
-        pipeline.reconcileUnderGrabNowWithFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?)
-    else
-        pipeline.reconcileUnderGrabNow(if (opts.restack) .{ .force_restack = true } else .{});
+    if (opts.with_focus) {
+        // Focus lands before geometry (focus-before).
+        pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, true);
+    } else pipeline.reconcileUnderGrabNow(if (opts.restack) .{ .force_restack = true } else .{});
 }
 
 // ----------------------------------------------------------- hide (window park)
@@ -126,7 +126,7 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
 
     wm.hideWindow.?(m, win) catch return; // Pre-refusal (CapacityFull)
 
-    const ft: focus.FocusTransition = if (was_focused) focusFallback(m) else .none;
+    const ft: focus.FocusTransition = if (was_focused) focusFallback(m, .tiling_operation) else .none;
 
     // If the hidden window was the current workspace's screen-covering
     // occupant, its removal changed occupancy: bump the core fact and let
@@ -138,8 +138,10 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
 /// reversed tiled_order -> any floating on ws. First visibleOn(current) wins.
 /// Returns a FocusTransition for the caller to commit inside its server grab.
 /// Model and protocol focus are updated together: the model update runs
-/// before the grab, the protocol commit runs inside it.
-fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
+/// before the grab, the protocol commit runs inside it. `reason` is the
+/// prepareFocus reason handed to the winner (the fallback's own
+/// `.tiling_operation`, or `.workspace_switch` on a workspace switch).
+fn focusFallback(m: *model_mod.Model, reason: focus.Reason) focus.FocusTransition {
     // Tier policy lives in the model layer so tests can exercise it without
     // linking the protocol side (see model.fallbackFocusCandidate). A
     // no_input candidate can never hold X focus, so it is excluded and the
@@ -147,22 +149,28 @@ fn focusFallback(m: *model_mod.Model) focus.FocusTransition {
     // focusable remains is model focus cleared and X focus handed to root.
     var excluded: ?model_mod.WindowId = null;
     while (model_mod.fallbackFocusCandidate(m, m.current, excluded)) |winner| {
-        // Prepare BEFORE the model write: prepareFocus resolves the input
-        // model (round trip) and can re-raise an already-applied window.
-        // The model write is conditional on a real `.set` intent, so a
-        // no_input candidate never takes model focus.
-        const prep = focus.prepareFocus(winner, .tiling_operation);
+        const prep = prepareAndSetFocus(m, winner, reason);
         if (prep == .none and focus.lastRejectWasNoInput()) {
             excluded = winner;
             continue;
         }
-        if (prep != .none) model_mod.setFocus(m, winner);
         return prep;
     }
     // prepareClearFocus reads MODEL focus as its decision source, so it
     // runs BEFORE the model clear.
     const prep = focus.prepareClearFocus();
     model_mod.clearFocus(m);
+    return prep;
+}
+
+/// Prepare BEFORE the model write: prepareFocus resolves the input model
+/// (round trip) and can re-raise an already-applied window. The model write
+/// is conditional on a real `.set` intent, so a no_input candidate never
+/// takes model focus. Returns the transition so the caller can commit it
+/// inside its own server grab.
+fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: focus.Reason) focus.FocusTransition {
+    const prep = focus.prepareFocus(win, reason);
+    if (prep != .none) model_mod.setFocus(m, win);
     return prep;
 }
 
@@ -173,12 +181,10 @@ fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 }
 
 fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
-    // Prepare before the model write (same rule as focusFallback): a
-    // no_input restore never takes model focus, but the reconcile still runs
-    // so the restored window is mapped and placed.
-    const prep = focus.prepareFocus(win, .window_spawn);
-    if (prep != .none) model_mod.setFocus(m, win);
-    pipeline.reconcileUnderGrabNowWithFocus(.{ .force_restack = true }, prep);
+    // A no_input restore never takes model focus, but the reconcile still
+    // runs so the restored window is mapped and placed.
+    const prep = prepareAndSetFocus(m, win, .window_spawn);
+    pipeline.reconcileGrabFocus(.{ .force_restack = true }, prep, true);
 }
 
 fn armFullscreenBarHideIfNeeded(
@@ -318,7 +324,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
 
     var ft: focus.FocusTransition = .none;
     if (ws_idx != m.current.index) {
-        if (was_focused) ft = focusFallback(m);
+        if (was_focused) ft = focusFallback(m, .tiling_operation);
         // Moving the current workspace's covering window away changes the
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
@@ -344,14 +350,14 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
         if (providerOf(.removeFromWs)) |rp| {
             if (!rp.removeFromWs.?(m, win, model_mod.WSId.fromIndex(ws_idx))) return; // last tag protected
         }
-        if (removing_current and m.focused == win) ft = focusFallback(m);
+        if (removing_current and m.focused == win) ft = focusFallback(m, .tiling_operation);
     } else {
         callHook(.addToWs, .{ m, win, model_mod.WSId.fromIndex(ws_idx), protect_current });
     }
 
     if (removing_current or (!had_bit and ws_idx == m.current.index)) {
         // Visible-set changed on the shown workspace: atomic evict/map+retile.
-        pipeline.reconcileUnderGrabNowWithFocus(.{}, ft);
+        pipeline.reconcileGrabFocus(.{}, ft, true);
     }
     if (!removing_current) {
         // Off-workspace change: the tag set changed; bump the fact so the
@@ -377,7 +383,7 @@ pub fn allViewToggle() void {
     const entering = wm.toggleAllView.?(m);
     var ft: focus.FocusTransition = .none;
     if (!entering and m.focused != null and !model_mod.visibleOn(m, m.focused.?, m.current)) {
-        ft = focusFallback(m);
+        ft = focusFallback(m, .tiling_operation);
     }
     retile(.{ .restack = true, .with_focus = true }, ft);
 }
@@ -534,10 +540,9 @@ pub fn adjustPrimaryCount(delta: i32) void {
 }
 
 pub fn adjustSecondaryBalance(delta: f32) void {
-    const max_balance: f32 = 6.0; // secondary-column swing cap (see StackBoost.fromBalance)
     const m = pipeline.mut(&gate);
     const p = &m.ws[m.current.index].params;
-    p.secondary_balance = std.math.clamp(p.secondary_balance + delta, -max_balance, max_balance);
+    p.secondary_balance = std.math.clamp(p.secondary_balance + delta, -constants.max_primary_swing, constants.max_primary_swing);
     pipeline.reconcileUnderGrabNow(.{});
 }
 
@@ -552,13 +557,10 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
     model_mod.swapPrimary(m);
     var ft: focus.FocusTransition = .none;
     if (focus_swap and (m.focused orelse displaced) != displaced) {
-        // Prepare before the model write (same rule as focusFallback): a
-        // no_input displaced head must not take model focus.
-        const prep = focus.prepareFocus(displaced, .tiling_operation);
-        if (prep != .none) model_mod.setFocus(m, displaced);
-        ft = prep;
+        // A no_input displaced head must not take model focus.
+        ft = prepareAndSetFocus(m, displaced, .tiling_operation);
     }
-    pipeline.reconcileUnderGrabNowWithFocus(.{}, ft);
+    pipeline.reconcileGrabFocus(.{}, ft, true);
 }
 
 pub fn moveFocused(delta: i32) void {
@@ -690,14 +692,14 @@ pub fn applyRestoredLevel() void {
 /// last-wins lookup rules on TilingConfig). The one labeled bundle driving
 /// per-workspace param seeding here (the separate workspaces override store
 /// was dead and is gone, C12).
-pub const SeedOverrides = struct {
+const SeedOverrides = struct {
     /// Override index into `cfg.workspace_layout_overrides` per ws, or null.
     layout: [constants.max_workspaces]?usize,
     /// Master-count override per ws, or null (global default applies).
     master_count: [constants.max_workspaces]?u8,
 };
 
-pub fn seedLookups(cfg: *const types.TilingConfig) SeedOverrides {
+fn seedLookups(cfg: *const types.TilingConfig) SeedOverrides {
     return .{
         .layout = cfg.workspaceLayoutLookup(),
         .master_count = cfg.masterCountLookup(),
@@ -712,81 +714,83 @@ pub fn seedLookups(cfg: *const types.TilingConfig) SeedOverrides {
 /// primary_width/secondary_balance are runtime-only (no config
 /// representation) and reset to their defaults.
 /// No reconcile: callers decide when to push state to X.
+///
+/// The stamping loop lives in model.applyConfigReload (whose viewport-preserve
+/// invariant gets its production caller here); this fn supplies the template.
 pub fn seedParamsFromConfig() void {
     if (!build_options.has_tiling) return;
     const cs = core.getState();
     const cfg = &cs.config.tiling;
 
-    // Config layout names resolve to registry ids here, once per seed.
-    // A name that fails to resolve (an unregistered module) must not be
-    // silent: report it and the fallback used.
-    const default_kind: u8 = blk: {
-        if (tiling.layoutByName(cfg.layout)) |k| break :blk @intCast(k);
-        debug.warn(
-            "Config: layout name '{s}' did not resolve to a registered layout; " ++
-                "using default layout '{s}'",
-            .{ cfg.layout, tiling.moduleName(tiling.defaultKind()) },
-        );
-        break :blk tiling.defaultKind();
-    };
-    // Last-wins per-ws seed lookups (shared rule on TilingConfig).
+    // Config layout names resolve to registry ids here, once per seed;
+    // unresolvable names fall back loudly to the default.
+    const default_kind: u8 = tiling.layoutKindOf(cfg.layout);
     const lookups = seedLookups(cfg);
 
     const m = pipeline.mut(&gate);
+    // Global default template, stamped across every workspace by
+    // applyConfigReload (preserves viewport runtime state). Per-workspace
+    // overrides are re-stamped in the pass below.
+    model_mod.applyConfigReload(m, .{
+        .kind = default_kind,
+        .variant_idx = resolveVariant(cfg, default_kind, null),
+        .primary_count = cfg.master_count,
+        .primary_width = 0.5, // runtime-only; reset to the model default (LayoutParams.primary_width)
+        .secondary_balance = 0,
+    });
+
     for (&m.ws, 0..) |*s, i| {
         const id: u8 = @intCast(i);
-        var kind = default_kind;
-        var override_variant: ?[]const u8 = null;
         if (lookups.layout[id]) |oi| {
             const o = cfg.workspace_layout_overrides.items[oi];
-            if (o.layout_idx < cfg.layouts.items.len)
-                kind = @intCast(
-                    tiling.layoutByName(cfg.layouts.items[o.layout_idx]) orelse blk: {
-                        debug.warn(
-                            "Config: workspace {} layout name '{s}' did not resolve to a " ++
-                                "registered layout; using layout '{s}'",
-                            .{
-                                i,
-                                cfg.layouts.items[o.layout_idx],
-                                tiling.moduleName(default_kind),
-                            },
-                        );
-                        break :blk default_kind;
-                    },
-                );
-            override_variant = o.variant;
+            const kind = if (o.layout_idx < cfg.layouts.items.len)
+                tiling.layoutKindFallingBack(
+                    cfg.layouts.items[o.layout_idx],
+                    default_kind,
+                )
+            else
+                default_kind;
+            s.params.kind = kind;
+            // A layout override always carries the variant override through,
+            // even when its layout_idx resolved out of range (the override
+            // string still applies to the active kind).
+            s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        s.params.kind = kind;
-        // Resolve the active variant index from the registry-driven
-        // value-string: a per-workspace override when present, else the
-        // per-layout variants map entry for the active module's canonical
-        // name. The module's own variant_parse hook interprets the string;
-        // an unparseable/unknown string warns (Stage-1 style) and uses 0.
-        var value_string: ?[]const u8 = override_variant;
-        const active_mod: ?plugin.Layout =
-            if (kind < tiling_mods.len) tiling_mods[kind] else null;
-        var v_idx: u8 = 0;
-        if (active_mod) |md| {
-            if (value_string == null) value_string = cfg.variants.get(md.name);
-            if (value_string) |vs| {
-                if (md.variant_parse) |vp| {
-                    v_idx = vp(vs) orelse blk: {
-                        if (override_variant != null)
-                            debug.warn("Config: workspace {d} layout variant '{s}' ignored — not a variant of the active layout", .{ i, vs })
-                        else
-                            debug.warn("Unknown {s} variants '{s}', using default", .{ md.name, vs });
-                        break :blk 0;
-                    };
-                } else if (override_variant != null) {
-                    debug.warn("Config: workspace {d} layout variant ignored — not a variant of the active layout", .{i});
-                }
+        if (lookups.master_count[id]) |mc| s.params.primary_count = mc;
+    }
+}
+
+/// Resolve the active variant index for `kind` from the registry-driven
+/// value-string: `override_variant` when present, else the per-layout
+/// variants map entry for the active module's canonical name. The module's
+/// own variant_parse hook interprets the string; an unparseable/unknown
+/// string warns (Stage-1 style) and uses 0.
+fn resolveVariant(
+    cfg: *const types.TilingConfig,
+    kind: u8,
+    override_variant: ?[]const u8,
+) u8 {
+    var value_string: ?[]const u8 = override_variant;
+    const active_mod: ?plugin.Layout =
+        if (kind < tiling_mods.len) tiling_mods[kind] else null;
+    var v_idx: u8 = 0;
+    if (active_mod) |md| {
+        if (value_string == null) value_string = cfg.variants.get(md.name);
+        if (value_string) |vs| {
+            if (md.variant_parse) |vp| {
+                v_idx = vp(vs) orelse blk: {
+                    if (override_variant != null)
+                        debug.warn("Config: workspace layout variant '{s}' ignored — not a variant of the active layout", .{vs})
+                    else
+                        debug.warn("Unknown {s} variants '{s}', using default", .{ md.name, vs });
+                    break :blk 0;
+                };
+            } else if (override_variant != null) {
+                debug.warn("Config: workspace layout variant ignored — not a variant of the active layout", .{});
             }
         }
-        s.params.variant_idx = v_idx;
-        s.params.primary_count = lookups.master_count[id] orelse cfg.master_count;
-        s.params.primary_width = 0.5; // runtime-only; reset to default
-        s.params.secondary_balance = 0;
     }
+    return v_idx;
 }
 
 pub fn applyConfigReload() void {
@@ -856,29 +860,8 @@ pub fn switchTo(ws_idx: u8) void {
     // (Super+2 immediately after Super+1) waits behind that stall, which is
     // exactly the "quick workspace switches sometimes don't register" symptom.
     // A keyboard switch has no pointer gesture to honor, so focus is decided
-    // purely from the model with zero X round trips. A no_input candidate can
-    // never hold X focus, so it is skipped and the scan continues; only when
-    // nothing focusable remains is X focus cleared to root.
-    const ft: focus.FocusTransition = blk: {
-        var excluded: ?model_mod.WindowId = null;
-        while (model_mod.fallbackFocusCandidate(m, model_mod.WSId.fromIndex(ws_idx), excluded)) |t| {
-            // Prepare BEFORE the model write: a no_input target must not
-            // take model focus, and a lone no_input target leaves X focus
-            // on the root rather than captive on the departed workspace.
-            const prep = focus.prepareFocus(t, .workspace_switch);
-            if (prep == .none and focus.lastRejectWasNoInput()) {
-                excluded = t;
-                continue;
-            }
-            if (prep != .none) model_mod.setFocus(m, t);
-            break :blk prep;
-        }
-        // prepareClearFocus reads MODEL focus as its decision source, so it
-        // runs BEFORE the model clear.
-        const prep = focus.prepareClearFocus();
-        model_mod.clearFocus(m);
-        break :blk prep;
-    };
+    // purely from the model with zero X round trips.
+    const ft: focus.FocusTransition = focusFallback(m, .workspace_switch);
 
     const t2 = utils.monotonicNs();
 
@@ -980,9 +963,8 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // AFTER the reconcile, inside the same grab: the window must be mapped
     // before xcb_set_input_focus, and both map+focus land under one grab
     // (Gap 3 fix).
-    const ft = focus.prepareFocus(win, .window_spawn);
-    if (ft != .none) model_mod.setFocus(m, win);
-    pipeline.reconcileUnderGrabNowWithFocusAfter(.{}, ft);
+    const ft = prepareAndSetFocus(m, win, .window_spawn);
+    pipeline.reconcileGrabFocus(.{}, ft, false);
 }
 
 /// Unmanage tail: close/destroy/unmap of a managed window. Local
@@ -1008,7 +990,7 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     // (MRU newest-first -> reversed tiled_order -> floating); with no
     // candidate left, focus clears. Model update runs before the grab;
     // protocol commit runs inside the grab (Gap 1 atomicity fix).
-    const ft: focus.FocusTransition = if (was_focused) focusFallback(m) else .none;
+    const ft: focus.FocusTransition = if (was_focused) focusFallback(m, .tiling_operation) else .none;
 
     // Closing the current workspace's covering occupant releases the area:
     // bump the core fact (bar reacts, re-derives its claim before the reconcile

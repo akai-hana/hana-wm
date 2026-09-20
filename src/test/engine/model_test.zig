@@ -199,7 +199,7 @@ test "minimize tiled removes from order; capacity refuses" {
     // Fill the remaining budget, then the next minimize must be refused
     // without mutating anything (full no-mutation proof in the capacity-refusal tests).
     for (wins[0 .. wins.len - 1]) |w| try minimize.minimize(&m, w);
-    try testing.expectEqual(@as(u32, max_minimized), minimize.count(&m));
+    try testing.expectEqual(@as(u32, max_minimized), minimize.count());
     try testing.expectError(error.CapacityFull, minimize.minimize(&m, wins[wins.len - 1]));
     // The refused window is unchanged: still present, not minimized.
     try testing.expect(!minimize.isMinimized(&m, wins[wins.len - 1]));
@@ -503,7 +503,7 @@ test "unregister cleans all references" {
     try testing.expect(m.focused != 1);
 
     // Destroying a minimized window clears its only ref (the store entry).
-    try testing.expectEqual(@as(u32, 1), minimize.count(&m)); // window 2 minimized
+    try testing.expectEqual(@as(u32, 1), minimize.count()); // window 2 minimized
     try testing.expect(minimize.isMinimized(&m, 2));
     model.unregister(&m, 2);
     try testing.expect(!m.store.has(2));
@@ -511,7 +511,7 @@ test "unregister cleans all references" {
     // model.unregister never touches module bookkeeping; the WIRE layer fires
     // onWindowGone (simulated here), then the module must be clean.
     minimize.onWindowGone(2);
-    try testing.expectEqual(@as(u32, 0), minimize.count(&m));
+    try testing.expectEqual(@as(u32, 0), minimize.count());
     try testing.expect(!minimize.isMinimized(&m, 2));
 
     // Destroying a fullscreen window leaves no dangling refs either.
@@ -785,7 +785,7 @@ test "minimize seq stamps drive LIFO/FIFO restore candidates" {
     try model.register(&m, 12, WSId.fromIndex(1)); // ws 1: must never win on ws 0
     try minimize.minimize(&m, 10); // seq 0 (oldest)
     try minimize.minimize(&m, 11); // seq 1 (newest)
-    try testing.expectEqual(@as(u32, 2), minimize.count(&m));
+    try testing.expectEqual(@as(u32, 2), minimize.count());
     // Seq ordering: 10 has lower seq (oldest) -> FIFO; 11 has higher -> LIFO.
     try testing.expectEqual(@as(?model.WindowId, 10), minimize.restoreCandidate(&m, WSId.fromIndex(0), .fifo));
     try testing.expectEqual(@as(?model.WindowId, 11), minimize.restoreCandidate(&m, WSId.fromIndex(0), .lifo));
@@ -1111,10 +1111,10 @@ test "restoreAllOnWs restores in slot order" {
     try minimize.minimize(&m, 10);
     try minimize.minimize(&m, 20);
     try minimize.minimize(&m, 30);
-    try testing.expectEqual(@as(u32, 3), minimize.count(&m));
+    try testing.expectEqual(@as(u32, 3), minimize.count());
     minimize.restoreAllOnWs(&m, WSId.fromIndex(0));
     // No window may stay parked/minimized after the restore.
-    try testing.expectEqual(@as(u32, 0), minimize.count(&m));
+    try testing.expectEqual(@as(u32, 0), minimize.count());
     const e10 = m.store.get(10) orelse unreachable;
     const e20 = m.store.get(20) orelse unreachable;
     const e30 = m.store.get(30) orelse unreachable;
@@ -1204,7 +1204,7 @@ test "minimize serialize/deserialize round-trip" {
     // Clear module state + presence, then re-adopt from the blob.
     minimize.onWindowGone(70);
     m.store.getPtr(70).?.presence = .present;
-    try testing.expect(minimize.deserializeWindow(70, blob, @ptrCast(&m)));
+    try testing.expect(minimize.deserializeWindow(70, blob, &m));
     try testing.expect(minimize.isMinimized(&m, 70));
     try testing.expect(m.store.get(70).?.presence == .parked);
     // Verify saved slot 0 via restore: 70 rejoins tiled_order at index 0.
@@ -1212,7 +1212,7 @@ test "minimize serialize/deserialize round-trip" {
     try expectOrder(&m, WSId.fromIndex(0), &.{70});
     try minimize.minimize(&m, 70);
     // A foreign-magic or malformed blob is not claimed.
-    try testing.expect(!minimize.deserializeWindow(70, &foreign_blob, @ptrCast(&m)));
+    try testing.expect(!minimize.deserializeWindow(70, &foreign_blob, &m));
     // A present window's blob is never produced while parked=false.
     minimize.restore(&m, 70);
     try testing.expect(minimize.serializeWindow(@ptrCast(&m), 70, testing.allocator) == null);
@@ -1237,13 +1237,13 @@ test "fullscreen serialize/deserialize round-trip" {
     // Clear module state + presence, then re-adopt from the blob.
     minimize.onWindowGone(80);
     m.store.getPtr(80).?.presence = .present;
-    try testing.expect(fullscreen.deserializeWindow(80, blob, @ptrCast(&m)));
+    try testing.expect(fullscreen.deserializeWindow(80, blob, &m));
     try testing.expect(fullscreen.isFullscreenMode(&m, 80));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), fullscreen.fullscreenWsOf(&m, 80));
     try testing.expect(m.store.get(80).?.presence == .covering);
     try testing.expectEqual(@as(?model.WindowId, 80), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
     // A foreign-magic blob is not claimed.
-    try testing.expect(!fullscreen.deserializeWindow(80, &foreign_blob, @ptrCast(&m)));
+    try testing.expect(!fullscreen.deserializeWindow(80, &foreign_blob, &m));
 }
 
 // -- Core intents: covering_ws is a model-authoritative core intent -----
@@ -1322,7 +1322,7 @@ test "fullscreen deserialize restores covering_ws" {
     fullscreen.onWindowGone(92);
     m.store.getPtr(92).?.presence = .present;
     m.store.getPtr(92).?.covering_ws = null;
-    try testing.expect(fullscreen.deserializeWindow(92, blob, @ptrCast(&m)));
+    try testing.expect(fullscreen.deserializeWindow(92, blob, &m));
     try testing.expect(m.store.get(92).?.presence == .covering);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(92).?.covering_ws);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), fullscreen.fullscreenWsOf(&m, 92));

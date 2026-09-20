@@ -76,9 +76,10 @@ var snapshot_buf: [model_mod.store_capacity]Entry = undefined;
 pub fn allWindows() []const Entry {
     const mm = m() orelse return &.{};
     const n = @min(mm.store.count(), snapshot_buf.len);
-    for (0..n) |i| {
-        const it = mm.store.at(i);
-        snapshot_buf[i] = .{ .win = it.key, .mask = it.val.mask, .presence = it.val.presence };
+    var i: usize = 0;
+    var it = mm.store.iterator();
+    while (it.next()) |row| : (i += 1) {
+        snapshot_buf[i] = .{ .win = row.key, .mask = row.val.mask, .presence = row.val.presence };
     }
     return snapshot_buf[0..n];
 }
@@ -121,8 +122,8 @@ pub fn deinit() void {
 /// represented; clamp (never crash) so a corrupt boot count can't overflow the
 /// mask in ReleaseFast.
 pub fn setWorkspaceCount(count: usize) void {
-    if (count > 64) debug.warn("setWorkspaceCount: {d} workspaces requested; clamping to 64", .{count});
-    state.workspace_count = @min(count, 64);
+    if (count > constants.max_workspaces) debug.warn("setWorkspaceCount: {d} workspaces requested; clamping to {d}", .{ count, constants.max_workspaces });
+    state.workspace_count = @min(count, constants.max_workspaces);
 }
 
 /// Read-through facade over `model.current`, the single source of truth:
@@ -139,7 +140,7 @@ pub inline fn getWorkspaceCount() usize {
 }
 
 pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
-    const bit = workspaceBit(ws_idx.index);
+    const bit = model_mod.bit(ws_idx);
     var n: usize = 0;
     for (allWindows()) |e| {
         if (e.mask & bit != 0) n += 1;
@@ -151,25 +152,19 @@ pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
 // Workspace bitmask helpers
 // ---------------------------------------------------------------------------
 
-/// Returns a u64 bitmask with only the bit for `ws_idx` set.
-pub inline fn workspaceBit(ws_idx: anytype) u64 {
-    if (ws_idx >= 64) return 0; // out-of-range → no windows in that mask
-    return model_mod.bit(model_mod.WSId.fromIndex(@intCast(ws_idx)));
-}
-
 // Comptime workspace label table
 
 /// Comptime number strings "1".."64" for workspace display labels.
-pub const workspace_labels: [64][]const u8 = blk: {
+pub const workspace_labels: [constants.max_workspaces][]const u8 = blk: {
     @setEvalBranchQuota(10_000);
-    var labels: [64][]const u8 = undefined;
+    var labels: [constants.max_workspaces][]const u8 = undefined;
     for (&labels, 1..) |*label, i| label.* = std.fmt.comptimePrint("{d}", .{i});
     break :blk labels;
 };
 
 pub inline fn isWindowOnWorkspace(win: u32, ws_idx: core.WorkspaceId) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
-    return mask & workspaceBit(ws_idx.index) != 0;
+    return mask & model_mod.bit(ws_idx) != 0;
 }
 
 /// True when `win` has a tiled anchor (not floating, covering or

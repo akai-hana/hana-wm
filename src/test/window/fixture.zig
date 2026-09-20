@@ -208,7 +208,7 @@ pub const Fx = struct {
             std.heap.page_allocator.destroy(fx);
             return null;
         };
-        pipeline.init(alloc);
+        pipeline.init();
         // Seed the config layout cycle in canonical order with the modules
         // actually compiled in — `cycleLayoutKind` cycles this list (a real
         // boot's parser seeds it from config; `types.Config{}` leaves it
@@ -237,7 +237,7 @@ pub const Fx = struct {
             sync.forget(win);
         }
         self.flush();
-        pipeline.init(self.alloc);
+        pipeline.init();
     }
 
     pub fn deinit(self: *Fx) void {
@@ -381,7 +381,6 @@ pub const Fx = struct {
         if (!build_options.has_tiling) return null;
         const m = pipeline.model();
         const ws = m.current;
-        const cs = core.getState();
         const p = &m.ws[ws.index].params;
 
         var order_buf: [max_order]u32 = undefined;
@@ -406,15 +405,7 @@ pub const Fx = struct {
                 .workarea = self.workArea(),
                 .hints = &hv,
                 .focused = m.focused,
-                .env = .{
-                    .margins = .{
-                        .gap = utils.scaling.scaleBorderWidth(cs.config.tiling.gap_width, cs.screen.height_in_pixels),
-                        .border = utils.scaling.scaleBorderWidth(cs.config.tiling.border_width, cs.screen.height_in_pixels),
-                    },
-                    .min_dim = cs.config.tiling.min_window_dim,
-                    .primary_on_right = cs.config.tiling.master_side == types.MasterSide.right,
-                    .variant_idx = p.variant_idx,
-                },
+                .env = pipeline.tilingEnv(p),
             },
             &placements,
         );

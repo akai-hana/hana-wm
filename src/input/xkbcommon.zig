@@ -6,19 +6,14 @@ const std = @import("std");
 const constants = @import("constants");
 const debug = @import("debug");
 const core = @import("core");
-const keysyms = @import("keysyms");
 
-pub const xkb = @cImport({
+const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
     @cInclude("xkbcommon/xkbcommon-x11.h");
 });
 
 const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
-
-/// X11 reserves keycodes 0..7; the first real keycode is 8. The flat keysym
-/// table therefore covers 8..255.
-const x11_min_keycode: u8 = 8;
 
 /// The XKB setup requests are sent once after setup; these retries cover the
 /// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
@@ -98,7 +93,7 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 /// Keycodes below 8 are reserved by X11 and produce no real keysym.
 fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
     var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
-    for (@as(usize, x11_min_keycode)..256) |kc| {
+    for (@as(usize, constants.x11_min_keycode)..256) |kc| {
         table[kc] = baseSymbol(km, @intCast(kc));
     }
     return table;
@@ -185,7 +180,7 @@ pub const XkbState = struct {
     /// truly symmetric multi-keycode keysyms are rare in WM bindings (modifier
     /// left/right pairs have distinct keysyms: Shift_L ≠ Shift_R, etc.).
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
-        for (@as(usize, x11_min_keycode)..256) |kc| {
+        for (@as(usize, constants.x11_min_keycode)..256) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
         }
         return null;
@@ -225,7 +220,9 @@ fn retryDelay(attempt: u8) void {
 /// Runs `op.call()` up to max_xkb_retries times, sleeping retryDelay between
 /// tries, and returns the first non-null result (null = that attempt failed).
 /// `op` is a value-capturing struct with a `call(self) ?T` method so each
-/// retrying wrapper passes the args its attempt needs without a closure.
+/// retried XKB lookup passes the args its attempt needs without a closure.
+/// All three retried operations (extension setup, core device id, keymap)
+/// share this primitive; each caller inlines its own attempt.
 fn retryPoll(comptime T: type, op: anytype) ?T {
     for (0..max_xkb_retries) |i| {
         if (op.call()) |result| return result;
@@ -234,51 +231,38 @@ fn retryPoll(comptime T: type, op: anytype) ?T {
     return null;
 }
 
-/// Runs a conn-bound `op` through retryPoll up to max_xkb_retries times and
-/// converts exhaustion into `err`. `op` is a comptime `fn (*anyopaque) ?T`;
-/// the two retried XKB calls (retrySetup/retryDeviceId) differ only in it.
-fn retryXkb(comptime T: type, comptime err: anyerror, xcb_conn: *anyopaque, comptime op: anytype) !T {
-    if (retryPoll(T, struct {
-        conn: *anyopaque,
-        fn call(self: @This()) ?T {
-            return op(self.conn);
-        }
-    }{ .conn = xcb_conn })) |value| return value;
-    return err;
-}
-
-/// One attempt at xkb_x11_setup_xkb_extension (nonzero return = success).
-fn setupXkb(conn: *anyopaque) ?c_int {
-    const ok = xkb.xkb_x11_setup_xkb_extension(
-        @ptrCast(conn),
-        xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
-        xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
-        xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-        null,
-        null,
-        null,
-        null,
-    );
-    return if (ok != 0) ok else null;
-}
-
 /// Retries xkb_x11_setup_xkb_extension up to max_xkb_retries times; the
 /// extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: *anyopaque) !void {
-    _ = try retryXkb(c_int, error.XkbSetupFailed, xcb_conn, setupXkb);
-}
-
-/// One attempt at xkb_x11_get_core_keyboard_device_id (-1 = device not ready).
-fn coreKeyboardDeviceId(conn: *anyopaque) ?i32 {
-    const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(conn));
-    return if (device_id != -1) device_id else null;
+    if (retryPoll(c_int, struct {
+        conn: *anyopaque,
+        fn call(self: @This()) ?c_int {
+            const ok = xkb.xkb_x11_setup_xkb_extension(
+                @ptrCast(self.conn),
+                xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
+                xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
+                xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
+                null,
+                null,
+                null,
+                null,
+            );
+            return if (ok != 0) ok else null;
+        }
+    }{ .conn = xcb_conn }) == null) return error.XkbSetupFailed;
 }
 
 /// Retries xkb_x11_get_core_keyboard_device_id up to max_xkb_retries times;
 /// the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
-    return try retryXkb(i32, error.XkbNoKeyboard, xcb_conn, coreKeyboardDeviceId);
+    return retryPoll(i32, struct {
+        conn: *anyopaque,
+        fn call(self: @This()) ?i32 {
+            const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(self.conn));
+            return if (device_id != -1) device_id else null;
+        }
+    }{ .conn = xcb_conn }) orelse error.XkbNoKeyboard;
 }
 
 /// Minimum reachable keysyms in the health-check window for a keymap to count
@@ -294,7 +278,7 @@ const keymap_health_hi: u8 = 128;
 /// Guards against accepting a partially-initialised keymap on early startup.
 fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
     var valid_keys: u32 = 0;
-    for (x11_min_keycode..keymap_health_hi) |kc| {
+    for (constants.x11_min_keycode..keymap_health_hi) |kc| {
         if (baseSymbol(km, @intCast(kc)) != xkb.XKB_KEY_NoSymbol)
             valid_keys += 1;
     }

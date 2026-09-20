@@ -96,6 +96,9 @@ pub inline fn getSuppressReason() core.FocusSuppressReason {
 /// (apply updates the cache before the caller's model write lands). Before
 /// pipeline.init there is no model truth, so the cache is the only record and
 /// the invariant is vacuously true.
+/// Test-only invariant check: the focus cache must mirror the model's last
+/// assigned focus. Lives in-module (not the test) because it reads the
+/// private `state`.
 pub fn protocolParityHolds() bool {
     if (!pipeline.initialized) return true;
     const truth: ?u32 = if (pipeline.model().focused) |w| @intCast(w) else null;

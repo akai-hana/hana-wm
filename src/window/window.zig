@@ -121,8 +121,8 @@ const wm_normal_hints_long_length: u32 = 18; // flags + 17 fields (up to base_si
 const max_window_tree_depth = constants.max_window_tree_depth;
 
 // Spawn queue: pending (workspace, pid) assignments for newly-mapped windows,
-// consumed by resolveTargetWorkspace. Capped at max_spawn_queue; overflow logs
-// and drops the entry rather than growing unbounded.
+// consumed by resolveTargetWorkspace. Capped at spawn_queue_capacity; overflow
+// logs and drops the entry rather than growing unbounded.
 
 const SpawnEntry = struct {
     workspace: u8,
@@ -131,7 +131,7 @@ const SpawnEntry = struct {
 };
 
 // Bounds pending spawns awaiting their first map, not the tiled-window pool.
-const max_spawn_queue: usize = 64;
+const spawn_queue_capacity: usize = 64;
 
 // All mutable window-module state is grouped into a single State struct
 // (mirroring the pattern focus.zig uses) so init()/deinit() each reset
@@ -156,7 +156,7 @@ const State = struct {
     float_rules: std.StringHashMapUnmanaged(void) = .{},
 
     // Child XID -> managed toplevel XID (see "Child window resolution").
-    child_cache: utils.BoundedList(ChildEntry, max_child_cache) = .{},
+    child_cache: utils.BoundedList(ChildEntry, child_cache_capacity) = .{},
 
     // True when a grab-flush path already swept floating borders this batch,
     // so the event loop can skip the redundant second sweep. Reset at the
@@ -172,11 +172,6 @@ const State = struct {
 };
 
 var state: ?State = null;
-
-pub inline fn getState() *State {
-    if (state) |*s| return s;
-    @panic("window: getState() called before init()");
-}
 
 // Geometry cache: last-known window geometry for workspace-switch and
 // minimize/restore. Owned by wincache.zig, the single source of truth for both
@@ -204,7 +199,9 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
 // evicted when their toplevel is unmanaged (evictChildCache). A fixed flat
 // array is enough: Electron nests at most 3-5 children per app.
 
-const max_child_cache: usize = 64;
+// Child-window cache ceiling: bounds findManagedWindow's child->toplevel rows
+// (a flat array; Electron/Qt nest at most a handful of children per app).
+const child_cache_capacity: usize = 64;
 
 const ChildEntry = struct { id: u32, managed: u32 };
 
@@ -217,11 +214,7 @@ fn cacheChildWindow(child: u32, managed: u32) void {
 
 /// Called from unmanageWindow so stale child entries don't linger.
 fn evictChildCache(managed_win: u32) void {
-    _ = state.?.child_cache.removeAllWhere(managed_win, struct {
-        fn match(m: u32, item: ChildEntry) bool {
-            return item.managed == m;
-        }
-    }.match);
+    _ = state.?.child_cache.removeAllById(.managed, managed_win);
 }
 
 /// Walks up the X11 window tree from `win` to find the managed toplevel.
@@ -293,7 +286,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // carrying over whatever the previous cycle left behind.
     state = .{};
     state.?.alloc = alloc;
-    tracking.init(alloc);
+    tracking.init();
     focus.init();
     wincache.init(alloc);
     // Uniform lifecycle dispatch: each compiled-in sub-system's init runs,
@@ -328,9 +321,8 @@ pub fn deinit() void {
     icccm.reset(false);
     focus.deinit();
     tracking.deinit();
-    // Set to null so any accidental post-deinit access hits a panic (via
-    // getState()) or null-deref instead of silently reading freed state.
-    // init() restores it to .{} unconditionally.
+    // Set to null so any accidental post-deinit access null-derefs instead of
+    // silently reading freed state. init() restores it to .{} unconditionally.
     state = null;
 }
 
@@ -496,10 +488,10 @@ fn resolveAdmissionDecision(
 
 pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     const alloc = state.?.alloc orelse return;
-    if (state.?.spawn_queue.items.len >= max_spawn_queue) {
+    if (state.?.spawn_queue.items.len >= spawn_queue_capacity) {
         debug.warn(
             "registerSpawn: spawn queue full ({d} entries); entry dropped",
-            .{max_spawn_queue},
+            .{spawn_queue_capacity},
         );
         return;
     }
@@ -770,9 +762,8 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
     // the record carried no ext), the entry stays present and reconciles
     // on-screen -- the graceful degrade.
     if (record.ext) |blob| {
-        const m_ptr: *anyopaque = @ptrCast(model);
         for (window_mods) |mod| if (mod.deserializeWindow) |f| {
-            if (f(win, blob, m_ptr)) break; // claimed
+            if (f(win, blob, model)) break; // claimed
         };
     }
 }
@@ -1021,7 +1012,7 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
 fn resolveConfigureGeometry(win: u32) ?utils.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
     if (sync.truthRect(pipeline.model(), win)) |rect| {
-        // W3: report the border width we actually last sent for this window
+        // Report the border width we actually last sent for this window
         // (the ledger), not the global config default. The two differ before
         // the first reconcile and for per-window overrides; a wrong value here
         // makes clients mis-size themselves.
@@ -1082,7 +1073,7 @@ fn handleManagedConfigureRequest(
                 sendSyntheticConfigureNotify(win);
                 return;
             }
-            // W1: don't teleport an off-screen window onto the visible screen.
+            // Don't teleport an off-screen window onto the visible screen.
             // A parked (off-workspace) or non-current-workspace floating
             // window's ConfigureRequest must update its model rect (done in the
             // module above) but not move the X window, which would flash it
@@ -1184,13 +1175,23 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     return root_x == state.?.spawn_cursor.x and root_y == state.?.spawn_cursor.y;
 }
 
+/// Shared guard tail for the EnterNotify/LeaveNotify handlers, run after each
+/// handler's event-shape filter (mode/detail/root): a floating drag owns the
+/// pointer, and a spawn's synthetic crossing (the window mapping under the
+/// parked cursor) must be suppressed. Returns true when the crossing should
+/// be dropped.
+inline fn crossingShouldDrop(root_x: i16, root_y: i16) bool {
+    if (build_options.has_floating and actions.isDragging()) return true;
+    return suppressSpawnCrossing(root_x, root_y);
+}
+
 /// Attempt to focus `win` via the hover (EnterNotify) path.
 ///
 /// Guards against workspace membership and hidden state before calling
 /// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
 inline fn maybeFocusWindow(win: u32) void {
-    // W4: in all-view mode every window is visible on the current workspace
+    // In all-view mode every window is visible on the current workspace
     // regardless of its tag mask, so hover must be able to focus it too; a
     // bare membership check made all-view windows un-focusable by ENTER.
     if (!isOnCurrentWorkspace(win) and !pipeline.model().all_view_active) return;
@@ -1203,8 +1204,7 @@ pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
         event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR)
         return;
-    if (build_options.has_floating and actions.isDragging()) return;
-    if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
+    if (crossingShouldDrop(event.root_x, event.root_y)) return;
     if (focus.shouldSuppressEnterNotify()) return;
     maybeFocusWindow(findManagedWindow(core.getState().conn, event.event, tracking.isManaged));
 }
@@ -1213,8 +1213,7 @@ pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.event != core.getState().root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    if (build_options.has_floating and actions.isDragging()) return;
-    if (suppressSpawnCrossing(event.root_x, event.root_y)) return;
+    if (crossingShouldDrop(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window.
     if (event.child == 0) return;
     // Guard against unmanaged subwindows (e.g. embedded GTK widgets): a root
@@ -1367,20 +1366,20 @@ fn parseSizeHintsIntoCache(
 ///   sweep generates zero XCB traffic.
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
-    const cur_bit = tracking.workspaceBit(cur);
+    const cur_bit = model_mod.bit(model_mod.WSId.fromIndex(cur));
     const cs = core.getState();
     const conn = cs.conn;
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (entry.mask & cur_bit == 0) continue;
-        // W7: parked (offscreen/minimized) windows are invisible; recoloring
+        // Parked (offscreen/minimized) windows are invisible; recoloring
         // them is pointless XCB traffic and can race the park position. The
         // unpark reconcile re-establishes their border color.
         if (entry.presence == .parked) continue;
         if (comptime skip_tiled) {
             if (build_options.has_tiling and tilingActive() and tracking.isTiledMode(win)) continue;
         }
-        const color = borders.color(win);
+        const color = borders.resolveBorderColor(win);
         // Same CacheMap dedup in both sweep variants: windows with a cache
         // entry skip the XCB call when their color is unchanged; uncached
         // ones get an entry created and colored in one step.
@@ -1452,10 +1451,14 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     const action = event.data.data32[0];
     const is_fs = isCoveringMode(pipeline.model(), win);
+    // EWMH _NET_WM_STATE action codes, carried in data32[0].
+    const ewmh_state_add: u32 = 1;
+    const ewmh_state_remove: u32 = 0;
+    const ewmh_state_toggle: u32 = 2;
     const should_enter = switch (action) {
-        1 => true, // _NET_WM_STATE_ADD
-        0 => false, // _NET_WM_STATE_REMOVE
-        2 => !is_fs, // _NET_WM_STATE_TOGGLE
+        ewmh_state_add => true,
+        ewmh_state_remove => false,
+        ewmh_state_toggle => !is_fs,
         else => return,
     };
     if (should_enter == is_fs) return;

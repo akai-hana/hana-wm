@@ -19,7 +19,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // Strip the outer gap; each recursive split inserts one gap at its seam
     // (adjacent windows stay one gap_width apart).
     const area = tiling.outerArea(v.workarea, ctx.m.gap);
-    tileRegion(ctx, v.order, .{ .x = area.x, .y = area.y, .w = area.w, .h = area.h });
+    tileRegion(ctx, v.order, area);
 }
 
 /// Recursively tile `windows` into the region, splitting the longer axis
@@ -34,7 +34,7 @@ fn tileRegion(
 
     if (n == 1) {
         // All leaf placements are visible; hints applied by tiling.emitView.
-        tiling.emitView(ctx.v, ctx.out, windows[0], tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim), true);
+        tiling.emitView(ctx.v, ctx.out, windows[0], tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim));
         return;
     }
 
@@ -49,8 +49,7 @@ fn tileRegion(
     // window and park the rest, the same overflow-share shape fibonacci uses.
     if (dim < @as(@TypeOf(dim), ctx.min_dim) * 2 +| @as(@TypeOf(dim), gap)) {
         const top = tiling.focusedElse(ctx.v, windows, windows[0]);
-        tiling.emitView(ctx.v, ctx.out, top, tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim), true);
-        tiling.showOneHideRest(ctx.out, windows, top);
+        tiling.emitOverflowShare(ctx, windows, top, r);
         return;
     }
 

@@ -151,13 +151,12 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 /// Replay your state against the LIVE model: the entry is already registered
 /// (present + tiled + home_ws set); flip presence/geometry as your feature
 /// requires. Idempotent: never crash on a double-claim (findRec check).
-/// The model handle arrives as `*anyopaque` (the seam casts it with
-/// `plugin.modelPtrOf`), keeping the contract free of model types.
-pub fn deserializeWindow(win: u32, bytes: []const u8, ptr: *anyopaque) bool {
+/// The model arrives typed as `*model.Model`; adoption may rewrite model
+/// state, so it is only dispatched from the window layer's restore path.
+pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (bytes.len != 6 or bytes[0] != 0x50) return false; // not ours
     if (findRec(win) != null) return true; // already adopted
     if (g_recs.len >= MAX_FLAGGED) return false; // capacity BEFORE mutation
-    const m: *model.Model = plugin.modelPtrOf(ptr);
     const e = m.store.getPtr(win) orelse return false;
     // TODO: apply whatever this blob means to e (anchor/presence/mask...).
     // Example — a feature that hides the window tunes presence to .parked:

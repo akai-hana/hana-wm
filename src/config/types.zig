@@ -3,17 +3,51 @@
 
 const std = @import("std");
 const constants = @import("constants");
+const model = @import("model");
 const parser = @import("parser");
 
 /// X11 color value packed as 0x00RRGGBB into 32 bits.
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
 pub const Color = u32;
 
+/// Ceiling of a valid 24-bit color (0x000000-0xFFFFFF). Shared by the
+/// in-range-integer color checks in the parser's single color decoder.
+pub const max_color: u32 = 0xFF_FF_FF;
+
+/// Config-file section names shared by the parser, the schema's placement
+/// tables, and the config interpreter's sweeps. Single-sourced so a spelling
+/// change (and the case-typo sweep that keys on these) updates one place.
+pub const section_tiling = "tiling";
+pub const section_bar = "bar";
+pub const section_bar_colors = "bar.colors";
+pub const section_rules = "rules";
+pub const section_workspace_rules = "workspace.rules";
+pub const section_tiling_aesthetics = "tiling.aesthetics";
+pub const section_tiling_layouts_master_stack = "tiling.layouts.master-stack";
+
+/// Section-name prefixes for the family sweeps (inert-family warnings,
+/// numbered-rule sections, tiling layout subtables).
+pub const section_prefix_tiling = "tiling.";
+pub const section_prefix_tiling_layouts = "tiling.layouts.";
+pub const section_prefix_workspace_rules = "workspace.rules.";
+pub const section_prefix_rules = "rules.";
+pub const section_prefix_bar_layout = "bar.layout.";
+
+/// Document-global color-palette variable names declared once and referenced
+/// by any color knob (schema's color_from chain and the parser's collectPalette).
+pub const palette_primary_color = "primary_color";
+pub const palette_secondary_color = "secondary_color";
+pub const palette_alternative_color = "alternative_color";
+pub const palette_text_color = "text_color";
+
 // Keybinding and action types
 
 pub const Dir = enum { forward, reverse };
 pub const SwapMode = enum { normal, focus_swap };
-pub const RestoreOrder = enum { lifo, fifo };
+/// Single source: the model owns the restore-order vocabulary (its enum is
+/// what minimize/actions dispatch on); config aliases it so the Action knob
+/// and the runtime share one type and one definition.
+pub const RestoreOrder = model.RestoreOrder;
 
 pub const Action = union(enum) {
     exec: []const u8,
@@ -233,9 +267,7 @@ pub const TilingConfig = struct {
 const default_focused_border: Color = 0x5294E2;
 const default_unfocused_border: Color = 0x383C4A;
 
-/// Default accent color used by several BarConfig fields.
-/// Declared once here so every field referencing it has a single source of truth;
-/// changing the theme default is a one-line edit.
+/// Default accent color; declared once so every referencing field has a single source of truth.
 const default_accent: Color = 0x61AFEF;
 
 // Default bar background/foreground scheme. Kept in one place so the bar's
@@ -514,8 +546,11 @@ pub const BarConfig = struct {
         const clamped = std.math.clamp(val, 0.0, @as(f32, std.math.maxInt(u16)));
         return @as(u16, @intFromFloat(@round(clamped)));
     }
+    /// Scale factor applied to the spacing percentage path (`spacing` widens
+    /// with the bar); the absolute-px path is used verbatim.
+    const spacing_scale_factor: f32 = 5.0;
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
-        return scaleToU16(scaleValue(self.spacing, bar_height, 5.0));
+        return scaleToU16(scaleValue(self.spacing, bar_height, spacing_scale_factor));
     }
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
         return @max(1, scaleToU16(scaleValue(self.indicator_size, bar_height, 1.0)));
@@ -524,9 +559,12 @@ pub const BarConfig = struct {
         return @max(1, scaleToU16(scaleValue(self.workspace_tag_width, bar_height, 1.0)));
     }
 
+    /// The 16-bit alpha ceiling: `transparency` (0.0-1.0) maps into 0x0000-0xFFFF.
+    const alpha16_ceiling: f32 = 0xFFFF;
+
     /// Returns the bar's alpha in 16-bit format (0x0000-0xFFFF).
     pub inline fn getAlpha16(self: *const BarConfig) u16 {
-        return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * 0xFFFF));
+        return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * alpha16_ceiling));
     }
 };
 

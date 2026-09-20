@@ -22,8 +22,8 @@ pub const default_scaled_font_size: u16 = 10;
 
 /// Fallback Pango font description used when no configured font loads:
 /// monospace at the default `default_scaled_font_size` point size.
-pub const default_fallback_font: []const u8 =
-    comptime std.fmt.comptimePrint("monospace:size={d}", .{default_scaled_font_size});
+pub const default_fallback_font: [:0]const u8 =
+    std.fmt.comptimePrint("monospace:size={d}", .{default_scaled_font_size});
 
 var scaled_font_size: u16 = default_scaled_font_size;
 
