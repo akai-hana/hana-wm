@@ -446,6 +446,51 @@ test "reorder and swapPrimary" {
     try expectOrder(&small, WSId.fromIndex(0), &.{7});
 }
 
+// swapFocusedWithPrevious exchanges the focused and the previously focused
+// window's tiled slots wherever they sit, honouring the swap_master "current
+// and previous windows" contract (unlike swapPrimary's head/follower swap).
+test "swapFocusedWithPrevious swaps focused and previous slots" {
+    var m = makeModel();
+
+    for ([_]WindowId{ 1, 2, 3 }) |w| regCur(&m, w);
+    try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3 });
+
+    // Focus 2 then 3: MRU = [3,2,1]; focused 3 in the LAST slot, previous 2
+    // in the middle. The swap must exchange them right where they sit, not
+    // the list head/follower.
+    model.setFocus(&m, 2);
+    model.setFocus(&m, 3);
+    model.swapFocusedWithPrevious(&m);
+    try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 3, 2 });
+    try testing.expectEqual(@as(?WindowId, 3), m.focused);
+
+    // Toggling again swaps the same pair back (alt-tab shape).
+    model.swapFocusedWithPrevious(&m);
+    try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3 });
+
+    // Single MRU entry (first focus): no-op.
+    var lone = makeModel();
+    regCur(&lone, 7);
+    model.setFocus(&lone, 7);
+    model.swapFocusedWithPrevious(&lone);
+    try expectOrder(&lone, WSId.fromIndex(0), &.{7});
+
+    // No focus at all: no-op.
+    var none_focus = makeModel();
+    for ([_]WindowId{ 8, 9 }) |w| regCur(&none_focus, w);
+    model.swapFocusedWithPrevious(&none_focus);
+    try expectOrder(&none_focus, WSId.fromIndex(0), &.{ 8, 9 });
+
+    // Previously focused window has no tiled slot here (floating): no-op.
+    var floating_prev = makeModel();
+    for ([_]WindowId{ 10, 11 }) |w| regCur(&floating_prev, w);
+    model.setFocus(&floating_prev, 10);
+    try addFloating(&floating_prev, 12, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
+    model.setFocus(&floating_prev, 12); // focused 12, previous 10 (tiled)
+    model.swapFocusedWithPrevious(&floating_prev);
+    try expectOrder(&floating_prev, WSId.fromIndex(0), &.{ 10, 11 });
+}
+
 // stepTiled (dwm stack rotate) wraps around the tiled_order edges,
 // mirroring the modulo wrap of the focus cycle; middle slots move by one.
 test "stepTiled wraps at both ends" {

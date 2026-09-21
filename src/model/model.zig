@@ -505,6 +505,26 @@ pub fn swapPrimary(m: *Model) void {
     list.items[1] = tmp;
 }
 
+/// Exchanges the tiled slots of the currently focused window and the
+/// previously focused window (focus MRU, newest first), regardless of their
+/// positions -- the pair the swap_master actions advertise ("current and
+/// previous windows"). No-op when either window has no tiled slot here
+/// (floating or covering focus, a predecessor parked on another workspace,
+/// minimized) or when fewer than two distinct windows are focused.
+pub fn swapFocusedWithPrevious(m: *Model) void {
+    const focused = m.focused orelse return;
+    const ws = &m.ws[m.current.index];
+    const list = &ws.tiled_order;
+    const mru = ws.focus_mru.constSlice();
+    if (list.len < 2 or mru.len < 2) return;
+    const prev = mru[1];
+    if (prev == focused) return;
+    const i = list.indexOfScalar(focused) orelse return;
+    const j = list.indexOfScalar(prev) orelse return;
+    list.items[i] = prev;
+    list.items[j] = focused;
+}
+
 /// Steps the current workspace's primary-column width fraction by `delta`,
 /// clamped to the shared master-width bounds in constants.
 pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {

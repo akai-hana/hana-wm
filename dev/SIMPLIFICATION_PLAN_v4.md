@@ -284,6 +284,15 @@ impl of CC-v4-4/6 if authorized.
 
 # C. Deferred items & questions (dedicated section — please decide)
 
+> Resolved in this pass (kept here for the record): **§C.8 CFG-30** (ScalableValue moved,
+> circular import broken), **§C.9 CFG-31** (Rule 3 widened to src/config after comment-only
+> token verification; the CC-v4-1/IN-11 guard-policy question remains), **§C.16 MOD-07**
+> (taggedOn landed, 13 sites), **§C.18 NEW-6** (clockwise label), **§C.19 NEW-9/10**
+> (divergence documented, fallback conventions annotated), **§C.4 COREH-09** (FocusOrder enum
+> landed despite the stet recommendation — named-arg readability win), **§C.24** (deletion
+> matrix run: 31/31 after fixing the pre-existing empty-bar-registry build break).
+> Phase-3 config items CFG-23/32/34 and CC-v4-8 are also landed.
+
 1. **BARCR-09** — merge `force` into `dirty.flag` + dirty-set (−10..−14)? Three gate predicates change; behavioral but test-pinned. Fold or keep the explicit channels?
 2. **BARCR-14** — delete `Segment.configurable` (dead) — touches the public plugin `Segment` contract (community template may set it).
 3. **BARCR-16** — `.center` layout double-measures every non-center segment per frame; a claim-pass cache is a perf fix that costs lines — legal under the "algorithmic" axis but trade-heavy.
@@ -312,5 +321,55 @@ impl of CC-v4-4/6 if authorized.
 
 ## Execution status (2026-09-21, this pass)
 
-(filled in per phase; each change verified with `zig fmt --check`, `zig build check`,
-`dev/scripts/xtest.sh zig build test`, and the tokei delta)
+Phase 1 (zero-risk deletions, dead-param cuts, comment/header hygiene) — **LANDED, gate
+verified** (`zig fmt --check`, `zig build check`, xtest): MOD-01..05; BARCR-01..08,
+11-13, 15; BARMOD-01..09, 12, 14; CFG-15..17, 22, 25, 33, 35; COREH-01..08, 10, 11;
+COREP-01, 02, 04, 05, 06, 11; IN-12; NEW-1..3, 13, 14; WINC-01..08; WINM-3..6, 8;
+CC-v4-2, 3, 7. The declared skips stand: BARCR-17 (no real Zig shadowing),
+BARMOD-06 (clock's 9 pub fns consumed by clock_test), COREP-01 (resolved by reworded
+doc only).
+
+Phase 2 (consolidation) — **LANDED**: BARCR-06/07/08/10; BARMOD-10/11/12;
+CFG-18, 19, 20, 21, 26, 27, 29, 30, 31 (CFG-30: `ScalableValue` → types.zig, breaking
+the `types ↔ parser` circular import); COREH-10; COREP-03, 08, 09, 12, 14; IN-13, 15;
+MOD-06, 07 (`taggedOn`, 8 prod + 5 test memberships converted); NEW-5..11, 14;
+WINC-10; CC-v4-5 (tiling seam → `buildTilingSeamModule`). Phase 2 gate status
+(tests): 254/259 pass — 4 `schema_test` colour-weight tests + the known
+`focus_test:97` fail; the 4 belong to a CONCURRENT in-flight colour-weights/schema
+edit (see "open conflict" below) and are not regression from this pass.
+
+Phase 3 — **ALL LANDED** once the concurrent config rewrite finished:
+- COREH-09: `reconcileGrabFocus` takes `FocusOrder {before, after}` (6 call sites).
+- CFG-23: every bare audit-marker ref (C1..C14, S1/S2/S4, T3, C8) stripped from
+  config.zig/parser.zig/schema.zig/types.zig (21 inline refs; test-ID titles left).
+- CFG-32: config/README.md quick-reference corrected — `indicator` removed from the
+  tiling-layout override list (it belongs to `[bar]`), `[tiling.layouts.master-stack.counts]`,
+  `[fullscreen] enabled`, and the `[bar.modules.workspaces]` alias documented.
+- CFG-34: the array-depth diagnostic now routes through `warnLine` (file:line:column
+  prefix, no duplicated "at line").
+- CC-v4-8: `WorkspaceLayoutOverride`/`WorkspaceMasterCountOverride.workspace_idx` typed
+  as `ids.WorkspaceId` (pure-shelf import) instead of bare `u8`; lookups use `.index`,
+  construction uses `fromIndex`.
+
+Post-check (§C.24) — **deletion matrix now 31/31 PASS**. This surfaced and fixed one
+PRE-EXISTING failure ("bar segment: all segments removed"), confirmed identical at
+pristine HEAD via a throwaway worktree: `bar.zig` indexed the zero-length `bar_mods`
+array and `dirty.segments` bitset with runtime indices, so the all-segments-removed
+build did not compile — contradicting the file's own "still compiles and no-ops"
+claim. Added comptime-guarded accessors `segAt`/`segDirty`/`setSegDirty` (zero-length
+branch is `unreachable`, so the runtime index never reaches the empty-array build) and
+routed every `bar_mods[<id>]` / `dirty.segments[<id>]` site through them. No behaviour
+change: every caller resolves a name/role first, which is impossible on an empty
+registry.
+
+Gate state (final): `zig fmt --check .` clean; `zig build check` green including all
+layer rules; `zig build test` 259/260 (sole failure the pre-existing
+`focus_test.test.focus: no_input window refuses focus`, unrelated to this work);
+`check-modularity.sh` 31/31.
+
+Tokei (src, excluding src/test): 17,046 code lines vs the 16,463 post-Phase-1
+baseline. The +583 net is dominated by the CONCURRENT feature work that landed during
+this pass (slider volume/brightness split with native backends, Pango attribute
+enums, schema colour-weight rework — see the `automated sync` commits); the
+simplification items themselves were net-negative per item as estimated, and the
+`bar.zig` empty-registry fix adds ~15 lines of guards.

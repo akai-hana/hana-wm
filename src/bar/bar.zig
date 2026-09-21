@@ -63,10 +63,41 @@ const self_ticking_role: ?usize = segmod.findByCapability(&bar_mods, "self_ticki
 const center_slot_role: ?usize = segmod.findByCapability(&bar_mods, "center_slot");
 
 /// Registry index for `name`, or null when absent (also when the registry is
-/// empty: `bar_mods` is then a zero-length slice and idByName finds nothing,
-/// so the empty-registry case needs no separate comptime guard at call sites).
+/// empty: `bar_mods` is then a zero-length array and idByName finds nothing).
 inline fn segId(name: []const u8) ?usize {
     return segmod.idByName(&bar_mods, name);
+}
+
+/// Registry entry at a resolved `id`. Callers reach this only after `segId`
+/// (or a registry capability/role lookup) matched a name, which is impossible
+/// when the registry is empty, so the zero-length branch is statically
+/// unreachable -- and, being comptime-selected, it keeps the runtime index
+/// expression out of the all-segments-removed build (indexing a zero-length
+/// array is otherwise a compile error, not a runtime panic).
+inline fn segAt(id: usize) *const plugin.Segment {
+    if (comptime bar_mods.len == 0) {
+        unreachable;
+    } else {
+        return &bar_mods[id];
+    }
+}
+
+/// Dirty-bit read for a resolved `id` (same empty-registry guard as segAt).
+inline fn segDirty(self: *const State, id: usize) bool {
+    if (comptime bar_mods.len == 0) {
+        unreachable;
+    } else {
+        return self.dirty.segments[id];
+    }
+}
+
+/// Dirty-bit write for a resolved `id` (same empty-registry guard as segAt).
+inline fn setSegDirty(self: *State, id: usize, v: bool) void {
+    if (comptime bar_mods.len == 0) {
+        unreachable;
+    } else {
+        self.dirty.segments[id] = v;
+    }
 }
 
 /// True when `name` resolves to the segment claiming the registry role `role`
@@ -211,7 +242,7 @@ pub fn chromeHandleKeypress(
 pub fn chromeToggleOverlay() void {
     const s = gBar.state orelse return;
     if (center_slot_role) |tid| {
-        if (bar_mods[tid].onClick) |oc|
+        if (segAt(tid).onClick) |oc|
             _ = oc(0, false, true, s, titleClickTrampoline, redrawInsideGrab);
     }
 }
@@ -482,7 +513,7 @@ const State = struct {
         // measureString hook (at most one module provides it).
         var clock_width: u16 = 0;
         if (self_ticking_role) |cid| {
-            if (bar_mods[cid].measureString) |ms|
+            if (segAt(cid).measureString) |ms|
                 clock_width = dc.measureTextWidth(ms()) + 2 * config.scaledSegmentPadding(height);
         }
         s.* = .{
@@ -525,7 +556,7 @@ const State = struct {
     }
 
     fn clearSegmentDirty(self: *State, name: []const u8) void {
-        if (segId(name)) |id| self.dirty.segments[id] = false;
+        if (segId(name)) |id| setSegDirty(self, id, false);
     }
 
     /// Extends the current draw's dirty span to cover [x, x + w).
@@ -577,8 +608,8 @@ const State = struct {
     /// not skip it). Uniform: resolved by registry, never by segment name.
     fn isSegmentRepaintable(self: *const State, name: []const u8) bool {
         const id = segId(name) orelse return false;
-        if (self.dirty.segments[id]) return true;
-        if (bar_mods[id].needsRepaint) |q| return q();
+        if (segDirty(self, id)) return true;
+        if (segAt(id).needsRepaint) |q| return q();
         return false;
     }
 
@@ -620,7 +651,7 @@ const State = struct {
         for (self.render.config.layout.items) |lay| {
             for (lay.segments.items) |seg| {
                 const id = segId(seg) orelse continue;
-                if (self.dirty.segments[id]) return true;
+                if (segDirty(self, id)) return true;
             }
         }
         return false;
@@ -632,7 +663,7 @@ const State = struct {
     /// whose module declares `clickable == false` are skipped.
     fn recordClickBound(self: *State, name: []const u8, x: u16, w: u16) void {
         const id = segId(name) orelse return;
-        if (!bar_mods[id].clickable) return;
+        if (!segAt(id).clickable) return;
         if (self.clicks.len >= max_click_bounds) return;
         self.clicks.bounds[self.clicks.len] = .{ .name = name, .x = x, .w = w };
         self.clicks.len += 1;
@@ -649,7 +680,7 @@ const State = struct {
     /// naturalWidth hook, or 0 for an unknown/removed segment name.
     fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, name: []const u8) u16 {
         const id = segId(name) orelse return 0;
-        if (bar_mods[id].naturalWidth) |nw| return nw(frame, self.clock.width);
+        if (segAt(id).naturalWidth) |nw| return nw(frame, self.clock.width);
         return 0;
     }
 
@@ -764,12 +795,12 @@ const State = struct {
 
     fn drawSegment(self: *State, ctx: *segmod.DrawCtx, name: []const u8, x: u16, width: ?u16) !u16 {
         const id = segId(name) orelse return error.DrewInvalidSegment;
-        if (bar_mods[id].draw == null) return error.DrewInvalidSegment;
+        if (segAt(id).draw == null) return error.DrewInvalidSegment;
         // The DrawCtx is shared mutable scratch: pin the reserved width into it
         // immediately before the draw so width-reading renderers (the title)
         // advance correctly.
         ctx.width = width orelse self.measureSegmentWidth(&ctx.frame, name);
-        return bar_mods[id].draw.?(ctx, x);
+        return segAt(id).draw.?(ctx, x);
     }
 
     /// Draws one segment of a left-to-right row, painting the inter-segment gap
@@ -1350,7 +1381,7 @@ fn redrawSegmentScoped(s: *State, id: usize) void {
         s.markDirty();
         return;
     }
-    const tb = s.recordedBound(bar_mods[id].name) orelse return;
+    const tb = s.recordedBound(segAt(id).name) orelse return;
     redrawSlotScoped(s, id, tb.x, tb.w, tb.w, false);
 }
 
@@ -1365,7 +1396,7 @@ fn redrawSegmentScoped(s: *State, id: usize) void {
 /// blitRegion+flush (timer-driven clock path -- no event-loop flush is
 /// coming) vs queueBlit (event-loop batch, no flush).
 fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, flush_blit: bool) void {
-    if (bar_mods[id].draw == null) return;
+    if (segAt(id).draw == null) return;
     // Clear the whole reserved slot first: a display-mode shrink paints less
     // than the reservation, and the leftover region must show clean
     // background (not the previous wider frame's content) for the blit.
@@ -1373,7 +1404,7 @@ fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, 
     var ctx = frameCtx(s);
     // Shared harness: catches/logs draw errors; returns x unchanged
     // ("drew nothing") on failure, which must skip the blit below.
-    const drawn_end = s.drawSegmentSafe(&ctx, bar_mods[id].name, x, pinned_w);
+    const drawn_end = s.drawSegmentSafe(&ctx, segAt(id).name, x, pinned_w);
     if (drawn_end == x) return;
     const drawn_w: u16 = drawn_end -| x;
     if (flush_blit) {
@@ -1381,7 +1412,7 @@ fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, 
     } else {
         s.render.dc.queueBlit(x, @max(bound_w, drawn_w));
     }
-    s.clearSegmentDirty(bar_mods[id].name);
+    s.clearSegmentDirty(segAt(id).name);
 }
 
 /// Scoped repaint for the in-flight button-1 scrub: repaints the segment the
@@ -1635,7 +1666,7 @@ pub fn updateClock() void {
     // mode the reported width is stable (the mode's probe), so the normal
     // once-per-second clock repaint never trips this re-layout.
     if (self_ticking_role) |cid| {
-        if (bar_mods[cid].naturalWidth) |nw| {
+        if (segAt(cid).naturalWidth) |nw| {
             const fresh = nw(&s.frame, s.clock.width);
             if (fresh != s.clock.width) {
                 s.clock.width = fresh;
@@ -1688,13 +1719,13 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const detail = event.detail;
     if (detail == constants.mouse_button_left) {
         s.drag_segment = id;
-        if (bar_mods[id].onClick != null)
-            _ = bar_mods[id].onClick.?(x - h.x, true, false, s, titleClickTrampoline, redrawInsideGrab);
+        if (segAt(id).onClick != null)
+            _ = segAt(id).onClick.?(x - h.x, true, false, s, titleClickTrampoline, redrawInsideGrab);
         return;
     }
     if (detail == constants.mouse_button_right) {
-        if (bar_mods[id].onClick != null)
-            _ = bar_mods[id].onClick.?(x - h.x, false, true, s, titleClickTrampoline, redrawInsideGrab);
+        if (segAt(id).onClick != null)
+            _ = segAt(id).onClick.?(x - h.x, false, true, s, titleClickTrampoline, redrawInsideGrab);
         return;
     }
     // Scroll buttons 4/5: no click semantics, no drag anchor. The repaint is
@@ -1704,7 +1735,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     if (detail == constants.mouse_button_scroll_up or
         detail == constants.mouse_button_scroll_down)
     {
-        if (bar_mods[id].onScroll) |scroll| {
+        if (segAt(id).onScroll) |scroll| {
             const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
             s.scroll_segment = id;
             _ = scroll(dir, redrawScrolledSegment);
@@ -1723,8 +1754,8 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
     const s = gBar.state orelse return;
     const id = s.drag_segment orelse return;
     if (!s.vis.shown) return;
-    if (bar_mods[id].onDragMotion) |drag| {
-        const tb = s.recordedBound(bar_mods[id].name) orelse return;
+    if (segAt(id).onDragMotion) |drag| {
+        const tb = s.recordedBound(segAt(id).name) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
         const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
         // Scoped repaint, not redrawInsideGrab: a scrub only mutates the
@@ -1740,7 +1771,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
     const s = gBar.state orelse return;
     const id = s.drag_segment orelse return;
     s.drag_segment = null;
-    if (bar_mods[id].onDragEnd) |end| end(redrawInsideGrab);
+    if (segAt(id).onDragEnd) |end| end(redrawInsideGrab);
 }
 
 /// `offset` is the click position relative to the title segment's start.
@@ -1755,7 +1786,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
 fn handleTitleClick(s: *State, offset: u16) void {
     if (s.frame.wins_len == 0) return;
     const center_id = center_slot_role orelse return;
-    const tb = s.recordedBound(bar_mods[center_id].name) orelse return;
+    const tb = s.recordedBound(segAt(center_id).name) orelse return;
 
     const target = (segmod.hitTest(
         s.frame.last_ctx.titleRenderContext(tb.x, tb.w),

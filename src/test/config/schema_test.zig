@@ -204,7 +204,7 @@ test "segment_spacing feeds BarConfig.spacing; workspaces count pads icons" {
 }
 
 test "fallback chains: title/drun colors follow their siblings" {
-    // Regime 1: no [bar.colors] at all. The accent trio was UNCONDITIONALLY
+    // Regime 1: no [bar.properties] at all. The accent trio was UNCONDITIONALLY
     // assigned its fallback sibling (now the palette canon: primary_color /
     // secondary_color / alternative_color); the drun trio were left untouched (null),
     // deferring to BarConfig's read-time fallbacks.
@@ -224,7 +224,7 @@ test "fallback chains: title/drun colors follow their siblings" {
     try testing.expectEqual(@as(?u32, null), no_colors.bar.drun_prompt_color);
     try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.drunPromptColor());
 
-    // Regime 2: [bar.colors] present with only `title`. The accent trio now
+    // Regime 2: [bar.properties] present with only `title`. The accent trio now
     // reads per-key (absent keys copy their sibling); the drun trio are also
     // assigned -- copying siblings when their own keys are absent, exactly
     // like the old `if (colors)` block.
@@ -236,7 +236,7 @@ test "fallback chains: title/drun colors follow their siblings" {
         \\bg = "#0a0b0c"
         \\fg = "#070809"
         \\
-        \\[bar.colors]
+        \\[bar.properties]
         \\title = "#0a0b0c"
         \\
     );
@@ -270,7 +270,7 @@ test "palette references resolve by full name cross-section" {
         \\fg = "#070809"
         \\selected_bg = primary_color
         \\
-        \\[bar.colors]
+        \\[bar.properties]
         \\title           = primary_color
         \\title_unfocused = secondary_color
         \\title_minimized = alternative_color
@@ -286,14 +286,14 @@ test "palette references resolve by full name cross-section" {
     try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.secondary_color);
     try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.alternative_color);
     try testing.expectEqual(@as(u32, 0xEEEEEE), refs.bar.text_color);
-    // [bar.colors] and selected_bg inherit through full-name references.
+    // [bar.properties] and selected_bg inherit through full-name references.
     try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.selected_bg);
     try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.title_unfocused_accent);
     try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.title_minimized_accent);
 }
 
-test "per-segment text colors: bar.colors keys override segment fg" {
+test "per-segment text colors: bar.properties keys override segment fg" {
     var cfg = try loadToml(testing.allocator, "segment-fg",
         \\[bar]
         \\primary_color     = "#aa0000"
@@ -301,14 +301,15 @@ test "per-segment text colors: bar.colors keys override segment fg" {
         \\alternative_color = "#0000cc"
         \\fg = "#070809"
         \\
-        \\[bar.colors]
+        \\[bar.properties]
         \\title               = primary_color
-        \\cpu                 = primary_color
+        \\cpu                 = primary_color italic=true
         \\mem                 = primary_color
-        \\volume              = alternative_color
-        \\brightness          = alternative_color
-        \\cpu_value           = secondary_color
+        \\volume              = alternative_color underline
+        \\brightness          = alternative_color bold
         \\brightness_value    = primary_color
+        \\clock               = bold underline
+        \\cpu_value           = secondary_color
         \\
     );
     defer cfg.deinit(testing.allocator);
@@ -320,6 +321,7 @@ test "per-segment text colors: bar.colors keys override segment fg" {
     try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("brightness"));
     // A segment without an entry falls back to the bar-wide fg.
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("batt"));
+    // clock has a style-only entry (no color): its color stays the bar fg.
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("clock"));
     // The scalar title knob still lands, untouched by the map pass.
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.title_accent_color);
@@ -332,9 +334,61 @@ test "per-segment text colors: bar.colors keys override segment fg" {
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("mem"));
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentValueFg("batt"));
     try testing.expectEqual(@as(usize, 2), cfg.bar.segment_value_fg.count());
+    // Style flags ride the same composite entry: `underline`/`bold`/`italic`
+    // booleans, combinable with a color. Style-only segments keep the default
+    // fg and still get their flags.
+    try testing.expectEqual(types.SegmentProps{ .italic = true }, cfg.bar.segmentProps("cpu"));
+    try testing.expectEqual(types.SegmentProps{ .underline = true }, cfg.bar.segmentProps("volume"));
+    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segmentProps("brightness"));
+    try testing.expectEqual(types.SegmentProps{ .bold = true, .underline = true }, cfg.bar.segmentProps("clock"));
+    // Everything else stays plain; the map holds only non-default entries.
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("mem"));
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("batt"));
+    try testing.expectEqual(@as(usize, 4), cfg.bar.segment_props.count());
 }
 
-test "per-segment colors: no [bar.colors] table leaves map empty" {
+test "per-segment properties: composite entries decode every spelling" {
+    var cfg = try loadToml(testing.allocator, "seg-props",
+        \\[bar]
+        \\fg = "#070809"
+        \\
+        \\[bar.properties]
+        \\a = #aa0000 underline=true
+        \\b = #00aa00 bold
+        \\c = #0000cc italic
+        \\d = bold=true italic=true
+        \\e = underline=false
+        \\f = underline=1
+        \\g = italic=0 bold=true
+        \\h = plain
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+
+    // Color + `name=bool` composite.
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("a"));
+    try testing.expectEqual(types.SegmentProps{ .underline = true }, cfg.bar.segmentProps("a"));
+    // Bare-flag shorthand (true by default).
+    try testing.expectEqual(@as(u32, 0x00AA00), cfg.bar.segmentFg("b"));
+    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segmentProps("b"));
+    try testing.expectEqual(types.SegmentProps{ .italic = true }, cfg.bar.segmentProps("c"));
+    // Style-only entry, no color: fg stays default.
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("d"));
+    try testing.expectEqual(types.SegmentProps{ .bold = true, .italic = true }, cfg.bar.segmentProps("d"));
+    // `name=false` clears (a no-op here, so no entry is stored).
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("e"));
+    // 0/1 integers spell booleans.
+    try testing.expectEqual(types.SegmentProps{ .underline = true }, cfg.bar.segmentProps("f"));
+    try testing.expectEqual(types.SegmentProps{ .italic = false, .bold = true }, cfg.bar.segmentProps("g"));
+    // An unknown bare token is neither a color nor a flag: warn-and-skip, so
+    // the segment stays plain with the default fg.
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("h"));
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("h"));
+    // Only non-default flag sets are stored (a, b, c, d, f, g).
+    try testing.expectEqual(@as(usize, 6), cfg.bar.segment_props.count());
+}
+
+test "per-segment colors: no [bar.properties] table leaves map empty" {
     var cfg = try loadToml(testing.allocator, "segment-fg-absent",
         \\[bar]
         \\fg = "#070809"
@@ -343,7 +397,9 @@ test "per-segment colors: no [bar.colors] table leaves map empty" {
     defer cfg.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_fg.count());
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_value_fg.count());
+    try testing.expectEqual(@as(usize, 0), cfg.bar.segment_props.count());
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("cpu"));
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("cpu"));
 }
 
 test "warn-and-revert: out-of-range scalars revert to defaults" {
@@ -521,7 +577,7 @@ test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette
         \\alternative_color = primary_color + secondary_color
         \\fg = "#070809"
         \\
-        \\[bar.colors]
+        \\[bar.properties]
         \\title = alternative_color
         \\cpu   = primary_color +(weight:40%) secondary_color
         \\mem   = primary_color
@@ -535,10 +591,10 @@ test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette
     // border_unfocused: 50/50
     //   r = (170 + 1)/2 = 85 (0x55), g = (136 + 1)/2 = 68 (0x44).
     try testing.expectEqual(@as(u32, 0x554400), cfg.tiling.border_unfocused);
-    // alternative_color is itself a palette-declared mix (50/50); bar.colors
+    // alternative_color is itself a palette-declared mix (50/50); bar.properties
     // `title` references it through the collected palette.
     try testing.expectEqual(@as(u32, 0x554400), cfg.bar.title_accent_color);
-    // [bar.colors] segment mix: 60% primary + 40% secondary
+    // [bar.properties] segment mix: 60% primary + 40% secondary
     //   r = (10200 + 50)/100 = 102 (0x66), g = (5440 + 50)/100 = 54 (0x36).
     try testing.expectEqual(@as(u32, 0x663600), cfg.bar.segmentFg("cpu"));
     // A plain palette reference through the same path stays literal.

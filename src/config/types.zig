@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const constants = @import("constants");
+const ids = @import("ids");
 const model = @import("model");
 
 /// A value that can be expressed as either an absolute pixel count or a
@@ -200,14 +201,14 @@ pub const MasterSide = enum {
 /// Per-workspace startup layout assignment, overriding the global default.
 /// variant is null -> use the per-layout map default ([tiling].variants).
 pub const WorkspaceLayoutOverride = struct {
-    workspace_idx: u8, // 0-indexed workspace number
+    workspace_idx: ids.WorkspaceId,
     layout_idx: u8, // index into TilingConfig.layouts
     variant: ?[]const u8, // null = use per-layout variants-map default
 };
 
 /// Per-workspace master count override, parsed from [tiling.layouts.master-stack.counts].
 pub const WorkspaceMasterCountOverride = struct {
-    workspace_idx: u8, // 0-indexed workspace number
+    workspace_idx: ids.WorkspaceId,
     count: u8,
 };
 
@@ -260,8 +261,8 @@ pub const TilingConfig = struct {
     pub fn masterCountLookup(self: *const TilingConfig) [constants.max_workspaces]?u8 {
         var lookup: [constants.max_workspaces]?u8 = .{null} ** constants.max_workspaces;
         for (self.workspace_master_count_overrides.items) |o| {
-            if (o.workspace_idx < constants.max_workspaces)
-                lookup[o.workspace_idx] = o.count;
+            if (o.workspace_idx.index < constants.max_workspaces)
+                lookup[o.workspace_idx.index] = o.count;
         }
         return lookup;
     }
@@ -275,8 +276,8 @@ pub const TilingConfig = struct {
     pub fn workspaceLayoutLookup(self: *const TilingConfig) [constants.max_workspaces]?usize {
         var lookup: [constants.max_workspaces]?usize = .{null} ** constants.max_workspaces;
         for (self.workspace_layout_overrides.items, 0..) |o, oi| {
-            if (o.workspace_idx < constants.max_workspaces)
-                lookup[o.workspace_idx] = oi;
+            if (o.workspace_idx.index < constants.max_workspaces)
+                lookup[o.workspace_idx.index] = oi;
         }
         return lookup;
     }
@@ -354,7 +355,7 @@ pub const BarScreenPosition = enum {
     bottom,
 
     // Case-insensitive alias map for types.enumFromString, so `bar.position`
-    // accepts any-case "top"/"bottom" (C8).
+    // accepts any-case "top"/"bottom".
     const string_map = std.StaticStringMap(BarScreenPosition).initComptime(.{
         .{ "top", .top },
         .{ "bottom", .bottom },

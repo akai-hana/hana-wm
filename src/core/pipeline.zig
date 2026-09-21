@@ -195,7 +195,6 @@ pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
 
 /// Grab server, run the focus transition, reconcile, then ungrabAndFlush
 /// (or the reverse order) atomically.
-
 /// Order of `reconcileGrabFocus`' two phases inside the grab: focus lands
 /// before geometry (most actions), or after (mapRequest, where the window
 /// must be mapped before xcb_set_input_focus targets it).

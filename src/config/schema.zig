@@ -132,7 +132,7 @@ pub const knobs = [_]Knob{
     // height: null = auto-calculate from font metrics alone.
     knob(&.{place(types.section_bar, "height")}, "bar.height", .auto_scalable),
     // Case-insensitive enum (types.enumFromString over BarScreenPosition's
-    // string_map); unrecognized spellings warn and keep .top (C8).
+    // string_map); unrecognized spellings warn and keep .top.
     knob(&.{place(types.section_bar, "position")}, "bar.bar_position", .{ .enum_read = .{ .T = types.BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }),
     knob(&.{place(types.section_bar, "carousel_speed_px_s")}, "bar.carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
 
@@ -355,6 +355,21 @@ pub fn getInRange(
     return val;
 }
 
+/// True when an accumulated value is (or contains) a `+`/weight color-mix
+/// attempt. Such an array that failed resolveColorExpr is an INVALID mix, and
+/// the last-scalar fallback below must not swallow it (descending to its
+/// final operand silently resolves the bad mix instead of reverting).
+fn isMixAttempt(val: parser.Value) bool {
+    if (val != .array) return false;
+    for (val.asArray().?) |item| {
+        if (item.asScalar([]const u8)) |s| {
+            if (std.mem.indexOfScalar(u8, s, '+') != null) return true;
+        }
+        if (parser.isWeightToken(item.asScalar([]const u8) orelse "")) return true;
+    }
+    return false;
+}
+
 /// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
 /// `0xRRGGBB`, an integer, a full-name reference to a collected palette
 /// variable (e.g. `border_focused = primary_color`), or a `+` color-mix
@@ -370,6 +385,10 @@ fn getColorFromValue(
 ) u32 {
     if (parser.colorFromValue(val)) |c| return c;
     if (parser.resolveColorExpr(val, palette)) |c| return c;
+    if (isMixAttempt(val)) {
+        debug.warn("Invalid color mix for '{s}': coalesced + weights may not exceed 100 and the head operand cannot carry a weight (using default)", .{key});
+        return default;
+    }
     if (val.asScalar([]const u8)) |s| {
         if (palette.get(s)) |c| return c;
         debug.warn("Invalid color for {s}: '{s}' (not a hex code, palette reference, or + mix)", .{ key, s });
@@ -561,8 +580,9 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
 /// for the flags are `underline=true|false`, space-separated `underline true`,
 /// integer `underline 1`, or a bare `underline` (meaning true). The color is
 /// the first color-carrying item (`#RRGGBB`, `0xRRGGBB`, integer, or a
-/// palette reference by full name); everything else must be a recognized
-/// style flag or it is warn-and-skipped. A style-only entry keeps the
+/// palette reference by full name); a whole-array `+` color-mix is resolved
+/// as a unit first; everything else must be a recognized style flag or it is
+/// warn-and-skipped. A style-only entry keeps the
 /// segment's default `fg` (no color map entry is added).
 ///
 /// Runs after the knob loop so the known keys (title, drun_*, ...) are
@@ -647,6 +667,29 @@ fn applySegmentEntry(
     palette: *const std.StringHashMap(u32),
 ) !void {
     if (raw != .array) {
+        // Style-only single-token spellings: `<flag>` (true) and
+        // `<flag>=<bool>`. A non-default result is stored; a cleared flag
+        // (all-false props) is a no-op, exactly as an absent entry.
+        if (raw == .string) {
+            const s = raw.asScalar([]const u8).?;
+            var props = types.SegmentProps{};
+            var recognized = false;
+            if (!is_value) {
+                if (boolFromEqualsToken(s)) |eq| {
+                    if (setStyleFlag(&props, eq.name, eq.value)) recognized = true;
+                } else if (setStyleFlag(&props, s, true)) {
+                    recognized = true;
+                }
+            }
+            if (recognized) {
+                if (!props.isDefault()) {
+                    const k = try allocator.dupe(u8, seg_key);
+                    errdefer allocator.free(k);
+                    try cfg.bar.segment_props.put(allocator, k, props);
+                }
+                return;
+            }
+        }
         // Plain scalar: color only, exactly as the pre-properties behavior.
         const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
         const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
@@ -657,6 +700,18 @@ fn applySegmentEntry(
     }
 
     const items = raw.asArray().?;
+    // A satisfying color-mix expression spans the whole array; resolve it as a
+    // unit first, so `a + (weight:40%) b` compounds aren't misread as stray
+    // tokens (the per-item scan below would grab just the head operand).
+    // Pure mixes are color-only, exactly as the pre-properties decoding.
+    if (parser.resolveColorExpr(raw, palette)) |mix| {
+        const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
+        const k = try allocator.dupe(u8, seg_key);
+        errdefer allocator.free(k);
+        try map.put(allocator, k, mix);
+        return;
+    }
+
     var props = types.SegmentProps{};
     const found = firstColorInItems(items, palette);
     if (!is_value) {

@@ -89,13 +89,16 @@ selected_bg = primary_color  # follows primary_color
 selected_fg = "#eeeeee"
 
 # Per-segment accent colors inherit from the palette by reference
-[bar.colors]
+[bar.properties]
 title           = primary_color       # focused title = primary_color
 title_unfocused = secondary_color     # unfocused title = secondary_color
 title_minimized = alternative_color   # minimized title + slider fill = alternative_color
 
-# Per-segment text colors: any key that isn't a named color knob above is a
-# segment registry name ("cpu", "mem", "volume", "brightness", "batt", ...).
+# Per-segment text properties: any key that isn't a named color knob above is
+# a segment registry name ("cpu", "mem", "volume", "brightness", "batt", ...).
+# The first color-carrying item sets the text color; trailing style flags
+# (underline/bold/italic, bare = true or name=true/1) set its style, e.g.
+# `volume = alternative_color bold`. A style-only entry keeps the default fg.
 # A segment with no entry falls back to the bar-wide fg (text_color).
 # Per-segment NUMBER colors: the segment name + "_value" recolors just the
 # numeric readout (the "42%" in "Cpu 42%"); the rest of the segment keeps its

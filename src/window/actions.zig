@@ -359,7 +359,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
 
     if (removing_current or (!had_bit and ws_idx == m.current.index)) {
         // Visible-set changed on the shown workspace: atomic evict/map+retile.
-pipeline.reconcileGrabFocus(.{}, ft, .before);
+        pipeline.reconcileGrabFocus(.{}, ft, .before);
     }
     if (!removing_current) {
         // Off-workspace change: the tag set changed; bump the fact so the
@@ -550,18 +550,21 @@ pub fn adjustSecondaryBalance(delta: f32) void {
     pipeline.reconcileUnderGrabNow(.{});
 }
 
-/// swap_master: exchanges the focused window with the list head. focus_swap
-/// variant moves focus to the displaced window BEFORE the reconcile so
-/// head-focused layouts render the right window on the first pass.
+/// swap_master: exchanges the focused window's tiled slot with the previously
+/// focused window's (focus MRU), not the list head -- a slot in the middle of
+/// a 3+ window workspace still swaps the pair the user expects. focus_swap
+/// variant moves focus to the previously focused window BEFORE the reconcile
+/// so the swapped-in window is focused on the first pass.
 pub fn swapPrimaryAction(focus_swap: bool) void {
     const m = pipeline.mut(&gate);
-    const list = &m.ws[m.current.index].tiled_order;
-    if (list.items.len < 2) return;
-    const displaced = list.items[0];
-    model_mod.swapPrimary(m);
+    const focused = m.focused orelse return;
+    const mru = m.ws[m.current.index].focus_mru.constSlice();
+    if (mru.len < 2 or mru[1] == focused) return;
+    const displaced = mru[1];
+    model_mod.swapFocusedWithPrevious(m);
     var ft: focus.FocusTransition = .none;
-    if (focus_swap and (m.focused orelse displaced) != displaced) {
-        // A no_input displaced head must not take model focus.
+    if (focus_swap) {
+        // A no_input displaced window must not take model focus.
         ft = prepareAndSetFocus(m, displaced, .tiling_operation);
     }
     pipeline.reconcileGrabFocus(.{}, ft, .before);
@@ -811,6 +814,11 @@ pub fn applyConfigReload() void {
 /// Kept protocol-side: pointer-hover query and focus suppression reset.
 /// model.current is the single store; tracking's getCurrentWorkspace is a
 /// read-through facade over it.
+///
+/// Geometry-before-focus: the reconcile maps the arriving window before
+/// applyPendingFocus targets it — the arriving window may have been spawned
+/// off-current and never mapped, so an earlier focus-before-reconcile ordering
+/// produced a BadMatch that left X focus on the old workspace's window.
 pub fn switchTo(ws_idx: u8) void {
     const m = pipeline.mut(&gate);
     if (ws_idx >= constants.max_workspaces) return;
@@ -876,10 +884,15 @@ pub fn switchTo(ws_idx: u8) void {
     c.sink.grabServer();
     defer c.sink.ungrabAndFlush();
 
-    focus.applyPendingFocus(ft);
-
-    // force_restack raises the bar window.
+    // Geometry (map/geom/park) before focus: the arriving window may have been
+    // spawned off-current and never mapped (the spawn path registers but
+    // defers the map to the first reconcile).  Firing xcb_set_input_focus on
+    // an unmapped window is a BadMatch that leaves X focus on the old
+    // workspace's window.  The reconcile's map precedes focus in the same
+    // grab, so the target is viewable when focusNow targets it.
     sync.reconcile(m, c, .{ .force_restack = true });
+
+    focus.applyPendingFocus(ft);
 
     const t3 = utils.monotonicNs();
     debug.info("[TIMING] switchTo ws={}: model={d}us rt_prep={d}us grab_body={d}us total={d}us", .{
