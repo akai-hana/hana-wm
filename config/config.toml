@@ -120,69 +120,7 @@ segments = ["workspaces", "layout", "variants"]
 segments = ["title"]
 
 [bar.layout.right]
-segments = ["batt", "cpu", "mem", "volume", "brightness", "clock"]
-
-# -- Bar appearance --
-# Defaults below; the theme file typically overrides these.
-# [bar]
-# font_size           = 10%     # Font size as % of bar height [0%-200%] or [0-N]px
-# segment_spacing     = 12px    # Spacing between bar segments [0%-200%] or [0-N]px
-# indicator_size      = 30%     # Workspace indicator size [0%-200%] or [0-N]px
-# workspace_tag_width = 100%    # Workspace tag width [0%-200%] or [0-N]px
-# height              = auto    # Bar height in [0%-200%] or [0-N]px; absent = auto-calculate
-# transparency        = 1.0     # [0.0-1.0] / [0%-100%]; 1.0 or 100% = fully opaque
-#
-# indicator_location  = "up-left"  # Workspace indicator position:
-#                                  #   "up", "down", "left", "right",
-#                                  #   "up-left", "up-right", "down-left", "down-right"
-# indicator_padding   = 0.1        # Indicator padding ratio [0.0-1.0]
-# indicator_color     = auto       # Falls back to fg when absent
-#
-# vim_mode            = true   # Full vim modal editing in prompt
-# carousel_enabled    = true   # Marquee scrolling for overflowing titles
-# carousel_speed_px_s = 125    # Carousel scroll speed in px/s [1-1000]
-#
-# clock_format        = auto   # strftime format string; absent = default
-# drun_prompt         = auto   # Command runner prompt; absent = "run: "
-#
-# volume_format       = auto   # Volume slider text; "{pct}" = level 0-100,
-#                              # "{state}" = "mute"/"unmute". Absent = "VOL {pct}%"
-# volume_muted_format = auto   # Shown instead while the sink is muted;
-#                              # "{pct}"/{state}". Absent = "MUTE"
-# brightness_format   = auto   # Brightness slider text; "{pct}" = level 0-100.
-#                              # Absent = "BRT {pct}%"
-# brightness_device   = auto   # Sysfs device pin; a backlight name
-#                              # ("amdgpu_bl0") or "led:<name>" for the LED
-#                              # class. Absent = auto-picked (lexicographically
-#                              # smallest backlight with max_brightness > 0)
-#
-# bg          = "#222222"  # Background color
-# fg          = "#BBBBBB"  # Foreground color
-# selected_bg = "#005577"  # Active workspace indicator background
-# selected_fg = "#EEEEEE"  # Active workspace indicator foreground
-#
-# The palette variables below are the theme's source of truth: color knobs
-# reference them by full name (e.g. `selected_bg = primary_color`) from any
-# section, so changing one variable recolors the whole bar.
-# primary_color     = "#ac3232"  # Focused title / active border / selected_bg default
-# secondary_color   = "#52263e"  # Unfocused titles
-# alternative_color = "#007373"  # Minimized titles
-# text_color        = "#ebd9bc"  # Bar text (matches fg)
-#
-# fonts  = ["monospace"]   # Font list; first is primary, others fill missing glyphs
-# icons  = ["1".."9"]      # Workspace labels; array or single string (split into chars)
-#
-# [bar.colors]
-# title           = auto  # Title segment accent (fallback: primary_color)
-# title_unfocused = auto  # Unfocused title accent (fallback: secondary_color)
-# title_minimized = auto  # Minimized title accent (fallback: alternative_color)
-# drun_bg           = auto  # Command runner background (fallback: bar bg)
-# drun_fg           = auto  # Command runner text (fallback: bar fg)
-# drun_prompt_color = auto  # Command runner prompt (fallback: primary_color)
-# Any other key "<segment>" colors that segment's text (e.g. "cpu"), and
-# "<segment>_value" colors just its numeric readout (the "42%" in "Cpu 42%").
-# cpu             = auto  # cpu/mem/volume/brightness/batt segment text
-# cpu_value       = auto  # that segment's readout number (fallback: cpu)
+segments = ["cpu", "mem", "volume", "brightness", "clock"]
 
 # ---------------------------------------------------------------------------
 # Keybindings

@@ -221,8 +221,12 @@ pub const Reason = enum {
     /// window_spawn crossing suppression via external state.
     window_spawn,
 
-    /// Workspace switch: window guaranteed mapped, suppression cleared, never
-    /// raised (stacking order is already correct after the switch).
+    /// Workspace switch: suppression cleared, xcb_set_input_focus forced
+    /// (even for globally_active input models) so X focus always lands on the
+    /// target window rather than relying on WM_TAKE_FOCUS self-focus.
+    /// Never raised (stacking order is already correct after the switch).
+    /// The reconcile maps the arriving window before focus targets it so
+    /// xcb_set_input_focus never hits an unmapped window.
     workspace_switch,
 };
 
@@ -233,6 +237,8 @@ pub const Reason = enum {
 const CommitFlags = struct {
     /// Send xcb_set_input_focus. False for no_input (never receives focus
     /// protocol) and globally_active (manages its own focus, ICCCM 4.1.7).
+    /// Overridden to true by workspace_switch: an explicit switch must land
+    /// X focus on the target window regardless of input model.
     set_input_focus: bool,
 
     /// Raise to the top of the stack. True for click/command (user-driven)
@@ -309,12 +315,19 @@ pub const FocusTransition = union(enum) {
 fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
     raise: bool,
     new_suppress: core.FocusSuppressReason,
+    /// Force xcb_set_input_focus even for globally_active input models.
+    /// Workspace switch is an explicit user action: the WM must land X focus
+    /// on the target window rather than relying on the app to self-focus via
+    /// WM_TAKE_FOCUS.  Parked windows on the departing workspace may not
+    /// respond to the protocol message, leaving X focus stranded on the old
+    /// workspace's window.
+    force_set_input_focus: bool = false,
 }) FocusTransition {
     return .{ .set = .{
         .win = win,
         .old = old,
         .flags = .{
-            .set_input_focus = resolved.model != .globally_active,
+            .set_input_focus = opts.force_set_input_focus or resolved.model != .globally_active,
             .raise = opts.raise,
             .send_wm_take_focus = true,
             .take_focus_known = resolved.take_focus,
@@ -353,17 +366,20 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // so an already-focused window re-raises instead of being swallowed by
     // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
     // re-grab of that same window's buttons (a button-regrab flash).
+    const force = reason == .workspace_switch;
     if (state.?.last_applied == win) {
         if (!shouldRaise(reason, win)) return .none;
         return setIntent(win, null, resolved, .{
             .raise = shouldRaise(reason, win),
             .new_suppress = suppressionFor(reason, state.?.suppress_reason),
+            .force_set_input_focus = force,
         });
     }
 
     return setIntent(win, state.?.last_applied, resolved, .{
         .raise = shouldRaise(reason, win),
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
+        .force_set_input_focus = force,
     });
 }
 

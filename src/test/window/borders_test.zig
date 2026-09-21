@@ -17,6 +17,7 @@ const fixture = @import("fixture");
 const model = @import("model");
 const parser = @import("parser");
 const utils = @import("utils");
+const types = @import("types");
 
 test "borders.width resolves absolute and percentage border widths" {
     const fx = fixture.setUp("borders.width") orelse return;

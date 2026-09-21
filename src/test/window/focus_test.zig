@@ -137,6 +137,62 @@ test "focus: destroyed window under a mouse_click is never re-focused (liveness 
     try std.testing.expect(focus.protocolParityHolds());
 }
 
+test "focus: switch to a workspace with a never-shown window lands input focus" {
+    var fx = fixture.setUp("focus_test") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    // w1 lives on the current workspace and holds focus.
+    const w1 = fx.createWindow();
+    try admit(w1);
+    fx.flush();
+    try std.testing.expectEqual(w1, fx.inputFocus());
+
+    // w2 is admitted on ws 1 while ws 0 is current: it is parked off-current
+    // and never mapped (the spawn register path sends no map).
+    const w2 = fx.createWindow();
+    actions.mapRequest(w2, 1, false, null);
+    fx.flush();
+    try std.testing.expect(!fx.isViewable(w2));
+
+    actions.switchTo(1);
+    fx.flush();
+
+    // The arriving window must be mapped before xcb_set_input_focus targets
+    // it; otherwise the request is a BadMatch and focus stays on w1.
+    try std.testing.expect(fx.isViewable(w2));
+    try std.testing.expectEqual(w2, fx.inputFocus());
+    try std.testing.expectEqual(w2, m.focused.?);
+}
+
+test "focus: switch lands xcb_set_input_focus on globally_active window" {
+    var fx = fixture.setUp("focus_test") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    // w1 on ws 0 holds focus.
+    const w1 = fx.createWindow();
+    try admit(w1);
+    fx.flush();
+    try std.testing.expectEqual(w1, fx.inputFocus());
+
+    // w2 is globally_active (WM_TAKE_FOCUS advertised + WM_HINTS input=False).
+    // The WM must force xcb_set_input_focus during workspace switch rather than
+    // relying on WM_TAKE_FOCUS self-focus, which parked windows may ignore.
+    const w2 = fx.createWindow();
+    fx.setWmTakeFocus(w2);
+    fx.setNoInput(w2);
+    actions.mapRequest(w2, 1, false, null);
+    fx.flush();
+
+    actions.switchTo(1);
+    fx.flush();
+
+    try std.testing.expectEqual(w2, fx.inputFocus());
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expect(focus.protocolParityHolds());
+}
+
 test "focus: parked cursor cannot steal a fresh spawn's focus (one-shot suppression)" {
     var fx = fixture.setUp("focus_test") orelse return;
     defer fx.deinit();

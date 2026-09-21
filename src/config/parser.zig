@@ -86,14 +86,14 @@ pub const Section = struct {
     // for `[binds]`, `[workspace.rules]`, etc. Holds `pairs`' allocations.
     keys_in_order: std.ArrayListUnmanaged([]const u8) = .empty,
     // Per-key source line, kept in parallel with `keys_in_order` for the
-    // unrecognized-key / duplicate-key diagnostics (C5/C6/C14). Best-effort.
+    // unrecognized-key / duplicate-key diagnostics. Best-effort.
     lines_in_order: std.ArrayListUnmanaged(usize) = .empty,
     // Keys that were declared more than once in this section (across the
     // duplicate / cross-file merge paths). Distinct from a single literal
     // array value like `layouts = [...]`: only genuine duplicate declarations
-    // accumulate, and only those warn when read as a scalar (C14).
+    // accumulate, and only those warn when read as a scalar.
     duplicated_keys: std.StringHashMap(void),
-    // Keys already warned about for scalar-duplicate reads (C14), so each
+    // Keys already warned about for scalar-duplicate reads, so each
     // section+key pair warns at most once.
     scalar_dup_warned: std.StringHashMap(void),
     // The section header this Section belongs to ("" for the root pairs that
@@ -133,7 +133,7 @@ pub const Section = struct {
     }
 
     // Records `key` as declared more than once (calling `accumulate` path);
-    // these are the only keys that can trigger C14's scalar-duplicate warn.
+    // these are the only keys that can trigger the scalar-duplicate warn.
     fn markDuplicated(self: *Section, key: []const u8) void {
         self.duplicated_keys.put(key, {}) catch {};
     }
@@ -155,7 +155,7 @@ pub const Section = struct {
     // Warns about every key in the section that was never examined via
     // get()/getAs()/markConsumed(); typically a typo in the key name, since
     // the parser otherwise accepts it silently. Names the source line so a
-    // large config's typos are findable (C6). Iterates in document order
+    // large config's typos are findable. Iterates in document order
     // (keys_in_order, filled together with lines_in_order by
     // insertOrAccumulate) so warnings are deterministic and O(n).
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
@@ -557,9 +557,17 @@ pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32
 
 /// Resolves a palette-variable declaration to a color. Literals decode
 /// directly; a `+`-bearing value is a color mix; a single name is an alias of
-/// another collected palette variable. Used by collectPalette's fixpoint.
+/// another collected palette variable. An accumulated `.array` first tries
+/// the whole-value mix (the spaced spelling accumulates element-wise), then
+/// falls through to the last-declaration scalar (later declaration wins) for
+/// plain duplicates. Used by collectPalette's fixpoint.
 fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
     if (colorFromValue(val)) |c| return c;
+    if (val == .array) {
+        if (resolveColorExpr(val, palette)) |c| return c;
+        if (val.asScalar([]const u8)) |s| return palette.get(s);
+        return null;
+    }
     if (val.asScalar([]const u8)) |s| {
         if (std.mem.indexOfScalar(u8, s, '+') != null) return resolveColorExpr(val, palette);
         return palette.get(s);
@@ -587,7 +595,11 @@ pub fn collectPalette(self: *Document) void {
             if (entry.value_ptr.get(name)) |val| best = val;
         }
         if (self.root.get(name)) |val| best = val;
-        last[i] = if (best) |b| b.lastScalar() else null;
+        // Keep the full accumulated declaration: an array-spelling `+` mix
+        // (`primary_color + secondary_color`) must survive to the resolver,
+        // which reads it as a unit (resolvePaletteDecl). Its own resolution
+        // keeps later-declaration-wins for plain scalar duplicates.
+        last[i] = best;
     }
 
     // Fixpoint: each round resolves whatever became resolvable this pass; a
@@ -654,7 +666,7 @@ fn accumulate(
 // (mergeSectionsInto), so both paths apply the identical duplicate policy:
 // scalar reads later resolve to the LAST declaration (later file wins), array
 // reads see the full accumulation, and the key is recorded as duplicated for
-// the scalar-read warning (C14). `line` is the source line involved when the
+// the scalar-read warning. `line` is the source line involved when the
 // key is FIRST inserted; it only feeds the best-effort diagnostic, and
 // duplicate declarations keep the original line.
 fn insertOrAccumulate(
@@ -776,7 +788,7 @@ const Parser = struct {
         return if (self.source_path.len == 0) "<input>" else self.source_path;
     }
 
-    // Per-line diagnostic prefixed with file:line:column (C5).
+    // Per-line diagnostic prefixed with file:line:column.
     fn warnLine(self: *const Parser, comptime fmt: []const u8, args: anytype) void {
         debug.warn("{s}:{d}:{d}: " ++ fmt, .{ self.sourceLabel(), self.line, self.column() } ++ args);
     }
@@ -912,10 +924,7 @@ const Parser = struct {
         self.array_depth += 1;
         defer self.array_depth -= 1;
         if (self.array_depth > max_array_depth) {
-            debug.warn(
-                "Array nesting too deep (> {}) at line {}, treating as invalid",
-                .{ max_array_depth, self.line },
-            );
+            self.warnLine("Array nesting too deep (> {d}), treating as invalid", .{max_array_depth});
             return ParseError.InvalidValue;
         }
 

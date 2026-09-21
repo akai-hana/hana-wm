@@ -214,7 +214,7 @@ test "actions: unmanage drops the window and re-focuses" {
     try std.testing.expectEqual(fx.root, fx.inputFocus());
 }
 
-test "actions: swapPrimary and moveFocused rotate the tiled order" {
+test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
@@ -230,15 +230,20 @@ test "actions: swapPrimary and moveFocused rotate the tiled order" {
     try std.testing.expect(order.len == 3);
     try std.testing.expectEqual(w3, m.focused.?);
 
-    // swap_master: head and follower exchange.
+    // swap_master: the focused window (w3) and the previously focused one (w2)
+    // exchange tiled slots, wherever they sit; focus stays on w3.
     actions.swapPrimaryAction(false);
-    try std.testing.expectEqual(w2, order.items[0]);
-    try std.testing.expectEqual(w1, order.items[1]);
+    try std.testing.expectEqual(w1, order.items[0]);
+    try std.testing.expectEqual(w3, order.items[1]);
+    try std.testing.expectEqual(w2, order.items[2]);
     try std.testing.expectEqual(w3, m.focused.?);
 
-    // swap_master focus variant: the displaced follower is focused.
+    // swap_master focus variant: the pair swaps once more (toggling back) and
+    // focus moves to the previously focused displaced window.
     actions.swapPrimaryAction(true);
     try std.testing.expectEqual(w1, order.items[0]);
+    try std.testing.expectEqual(w2, order.items[1]);
+    try std.testing.expectEqual(w3, order.items[2]);
     try std.testing.expectEqual(w2, m.focused.?);
 
     // moveFocused steps the focused window one slot (wraps off the far edge).

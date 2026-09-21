@@ -110,7 +110,7 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
         // the lowest tagged workspace of a possibly distant workspace list.
         // Falls back to the lowest tagged workspace otherwise.
         const h: model.WSId = blk: {
-            if (model.taggedOn(e, m.current)) break :blk m.current;
+            if (model.taggedOn(e.*, m.current)) break :blk m.current;
             break :blk model.lowestBit(e.mask) orelse return;
         };
         const list = &m.ws[h.index].tiled_order;

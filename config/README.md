@@ -67,8 +67,11 @@ Run `config.toml` for the working example; this is the quick reference.
 ### `[tiling]`
 
 Master-stack behavior (`global_layout`, `min_window_dim`, `layouts` list) plus
-per-layout overrides in `[tiling.layouts.<name>]` (`count`, `side`, `width`,
-`variants`, optional `indicator`). Window chrome lives in
+per-layout overrides. A `[tiling.layouts.<name>]` table carries that layout's
+`variants` string; the master family additionally accepts `count`, `side`, and
+`width` under `[tiling.layouts.master-stack]`, and per-workspace count
+overrides under `[tiling.layouts.master-stack.counts]` (1-based workspace =
+count; only meaningful with `global_layout = false`). Window chrome lives in
 `[tiling.aesthetics]` (`gap_width`, `border_width`, `border_focused`,
 `border_unfocused`) — usually themed by the theme file.
 
@@ -76,9 +79,15 @@ per-layout overrides in `[tiling.layouts.<name>]` (`count`, `side`, `width`,
 
 `enabled` and `snap_distance` for the drag-and-drop placement behavior.
 
+### `[fullscreen]`
+
+`enabled` toggles the fullscreen-window feature.
+
 ### `[workspaces]`
 
-`count` — number of workspaces, 1–64.
+`count` — number of workspaces, 1–64 — and `enabled` for the workspaces
+segment. Both are also accepted under the alias section
+`[bar.modules.workspaces]`.
 
 ### `[bar]`
 
@@ -130,11 +139,16 @@ Segment behavior knobs:
   `carousel_speed_px_s`, `indicator_*` and the appearance/color knobs
   (usually themed).
 
-Per-segment accents live in `[bar.colors]` (`title`, `title_unfocused`,
+Per-segment accents live in `[bar.properties]` (`title`, `title_unfocused`,
 `title_minimized`, `drun_bg`, `drun_fg`, `drun_prompt_color`). Any other key
-`<segment>` is that segment's text color (e.g. `cpu = primary_color`), and
-`<segment>_value` separately colors its numeric readout (the `42%` in
-`Cpu 42%`), falling back to the segment text color when absent.
+`<segment>` is that segment's text color and/or style: the first color-carrying
+item (`cpu = primary_color`) sets the text color and trailing
+`underline`/`bold`/`italic` flags set its style, e.g.
+`volume = #ff0000 underline bold` or a style-only `clock = underline`.
+A bare flag means `true`; `name=bool` and `name=0|1` spellings work too.
+A `<segment>_value` key is color-only and separately colors its numeric
+readout (the `42%` in `Cpu 42%`), falling back to the segment text color when
+absent.
 
 ### `[binds]`
 

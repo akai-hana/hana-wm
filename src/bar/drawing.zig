@@ -162,9 +162,6 @@ pub const pango_style_t = enum(c_int) {
     ITALIC = 2,
 };
 
-/// Gives a layout permanently owned, non-default typographic attributes.
-/// style attrs applied with `pango_layout_set_attributes`.
-
 pub extern fn pango_attr_underline_new(underline: pango_underline_t) ?*PangoAttribute;
 pub extern fn pango_attr_weight_new(weight: pango_weight_t) ?*PangoAttribute;
 pub extern fn pango_attr_style_new(style: pango_style_t) ?*PangoAttribute;
