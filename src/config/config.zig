@@ -13,6 +13,13 @@ const schema = @import("schema");
 const types = @import("types");
 const utils = @import("utils");
 
+/// Longest section name a mis-case warning must lower (bounded helper buffer;
+/// real-world section names are far shorter, this just caps a pathological
+/// line's cost).
+const max_section_name_bytes = 64;
+/// Longest single modifier token in a bind string, after trimming.
+const max_modifier_key_bytes = 16;
+
 /// Validates a 1-based workspace number, warn-and-skip when outside 1..255 or
 /// exceeding `max` (the workspace count / constants.max_workspaces ceiling).
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
@@ -30,9 +37,18 @@ fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     return true;
 }
 
-fn tryParseWs1Based(tok: []const u8, max: usize, ctx: []const u8, comptime fmt: ?[]const u8, args: anytype) ?usize {
-    const ws_1based = std.fmt.parseInt(usize, tok, 10) catch {
-        if (fmt) |f| debug.warn(f, args);
+/// Parses a 1-based workspace number from a bare token, with no warning or
+/// bound checking (the caller owns `checkWorkspaceBound`). The pure-parse
+/// core behind `tryParseWsToken`.
+fn parseWsToken(tok: []const u8) ?usize {
+    return std.fmt.parseInt(usize, tok, 10) catch return null;
+}
+
+/// Parses a 1-based workspace number from a bare token, warning on a malformed
+/// token and skipping values outside 1..255 / `max`.
+fn tryParseWsToken(tok: []const u8, max: usize, ctx: []const u8, comptime fmt: []const u8, args: anytype) ?usize {
+    const ws_1based = parseWsToken(tok) orelse {
+        debug.warn(fmt, args);
         return null;
     };
     if (!checkWorkspaceBound(ws_1based, ctx, max)) return null;
@@ -92,7 +108,8 @@ const default_tiling_layout = (types.TilingConfig{}).layout;
 /// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
 const max_master_count: u8 = 10;
 
-/// Longest keysym name the bind parser will accept raw (longer → error.KeyNameTooLong).
+/// Longest keysym name the bind parser will accept raw (at that length the
+/// name no longer fits a zero-terminated copy in the fixed buffer → error.KeyNameTooLong).
 const max_key_name_bytes = 64;
 
 /// Reads `path`, returning `error.FileTooLarge` when it exceeds
@@ -164,7 +181,7 @@ fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?parser.Docume
 /// warn-and-skip wrapper around parseTomlFile, the "never crash on bad
 /// config" path shared by the directory loader and `include` resolution.
 /// On read or parse failure, marks the destination merged document's
-/// `had_errors` so the caller can propagate error.ConfigParseFailed (C1).
+/// `had_errors` so the caller can propagate error.ConfigParseFailed.
 /// An empty file returns null without setting `had_errors`.
 fn tryParseTomlFile(
     allocator: std.mem.Allocator,
@@ -238,14 +255,6 @@ fn sliceLessThan(_: void, a: []u8, b: []u8) bool {
 /// arrays accumulate (enforced by the parser's Value getters: scalar reads resolve to
 /// the last declaration, array reads see every one).
 pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.Config {
-    // One load-scoped arena hosts every parsed Document (and its aliased file
-    // buffers); documents share strings through it, and the reset below
-    // reclaims them all once the Config has been built (Config dupes its own
-    // strings from the general `allocator`).
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
     var names: std.ArrayList([]u8) = .empty;
     defer {
         for (names.items) |n| allocator.free(n);
@@ -275,12 +284,21 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
     }
 
     std.mem.sort([]u8, names.items, {}, sliceLessThan);
-    var merged = parser.Document.init(a);
-    for (names.items) |name| try mergeOneFile(a, &merged, dir_path, name);
-
-    const cfg = try buildConfigFromDoc(allocator, &merged);
+    const cfg = try parseAndBuild(allocator, parseDirDoc, DirInput{ .dir_path = dir_path, .names = names.items });
     debug.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
     return cfg;
+}
+
+/// Merge inputs for `parseDirDoc`: a sorted file list plus the directory they
+/// live in, for `mergeOneFile`'s path join.
+const DirInput = struct { dir_path: []const u8, names: []const []u8 };
+
+/// Merges every file named in `in.names` (directory-loading order) into one
+/// arena document.
+fn parseDirDoc(a: std.mem.Allocator, in: DirInput) !parser.Document {
+    var merged = parser.Document.init(a);
+    for (in.names) |name| try mergeOneFile(a, &merged, in.dir_path, name);
+    return merged;
 }
 
 fn tryLoadOrWarn(
@@ -314,7 +332,7 @@ const SearchPaths = struct {
     xdg_file: []u8,
     local_file: []u8,
 
-    pub fn deinit(self: SearchPaths, allocator: std.mem.Allocator) void {
+    fn deinit(self: SearchPaths, allocator: std.mem.Allocator) void {
         allocator.free(self.xdg_dir);
         allocator.free(self.local_dir);
         allocator.free(self.xdg_file);
@@ -420,27 +438,56 @@ pub fn validate(cfg: *const types.Config) !void {
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var doc = try parseTomlFile(a, path) orelse {
-        debug.info("Empty config file: {s}, using fallback", .{path});
-        return try loadFallbackConfig(allocator);
+    const cfg = parseAndBuild(allocator, parseFileDoc, FileInput{ .path = path, .base_dir = std.fs.path.dirname(path) orelse "." }) catch |err| switch (err) {
+        error.ConfigEmpty => {
+            debug.info("Empty config file: {s}, using fallback", .{path});
+            return try loadFallbackConfig(allocator);
+        },
+        else => return err,
     };
-    try mergeIncludes(a, &doc, &doc, std.fs.path.dirname(path) orelse ".");
-    const cfg = try buildConfigFromDoc(allocator, &doc);
     debug.info("Loaded: {s}", .{path});
     return cfg;
 }
 
-fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
-    const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
+/// Parse inputs for `parseFileDoc`: the single config file and its include
+/// resolution base directory.
+const FileInput = struct { path: []const u8, base_dir: []const u8 };
+
+/// Parses one config file plus its `include`s into an arena document.
+fn parseFileDoc(a: std.mem.Allocator, in: FileInput) !parser.Document {
+    var doc = try parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
+    try mergeIncludes(a, &doc, &doc, in.base_dir);
+    return doc;
+}
+
+/// Parse inputs for `parseFallbackDoc`: the embedded fallback TOML text.
+const FallbackInput = struct { toml: []const u8 };
+
+/// Parses the embedded fallback TOML into an arena document.
+fn parseFallbackDoc(a: std.mem.Allocator, in: FallbackInput) !parser.Document {
+    return try parser.parse(a, in.toml, "<embedded fallback>");
+}
+
+/// Shared tail of the config load pipelines: one load-scoped arena hosts the
+/// parsed Document(s) (and their aliased file buffers) while `parse` fills a
+/// document from the arena allocator; `buildConfigFromDoc` then dupes every
+/// owned Config string from the backing `allocator` before the arena reset
+/// reclaims the documents.
+fn parseAndBuild(
+    allocator: std.mem.Allocator,
+    comptime parse: anytype,
+    in: anytype,
+) !types.Config {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var doc = try parser.parse(a, fallback_toml, "<embedded fallback>");
-    var cfg = try buildConfigFromDoc(allocator, &doc);
+    var doc = try parse(a, in);
+    return buildConfigFromDoc(allocator, &doc);
+}
+
+fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
+    const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
+    var cfg = try parseAndBuild(allocator, parseFallbackDoc, FallbackInput{ .toml = fallback_toml });
     // If the terminal detection/dupe below errors, free the built config
     // rather than leaking it (the `try` above means buildConfigFromDoc's own
     // errdefer already handled its internal failures).
@@ -471,9 +518,9 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
 fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
     var cfg: types.Config = .{};
     errdefer cfg.deinit(allocator);
-    // Canonical default name: it resolves to the "master" module at seed
-    // time; every stored name is canonical.
-    const default_layout = try allocator.dupe(u8, "master");
+    // Canonical default name: it resolves to the canonical master module at
+    // seed time; every stored name is canonical.
+    const default_layout = try allocator.dupe(u8, types.canon_master_layout);
     try cfg.tiling.layouts.append(allocator, default_layout);
     cfg.tiling.layout = cfg.tiling.layouts.items[0];
     try padWorkspaceIcons(allocator, &cfg);
@@ -484,7 +531,7 @@ fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
 fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !types.Config {
     // A broken TOML (warn-and-skipped line, or a whole file skipped during
     // the merge) must not silently produce a partially-applied config: fail
-    // the load so reload keeps the live config (C1). Boot falls through to
+    // the load so reload keeps the live config. Boot falls through to
     // the embedded fallback via loadConfigDefault's warn-and-skip.
     if (doc.had_errors) return error.ConfigParseFailed;
     // Mis-cased KNOWN section headers ([Bar], [TILING], ...) are otherwise
@@ -498,12 +545,13 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     try parseKeybindings(allocator, doc, &cfg);
     try parseTilingStructures(allocator, doc, &cfg);
     // Every scalar knob ([drag], [fullscreen], [workspaces], [tiling]
-    // flags/aesthetics/master trio, all of [bar] incl. [bar.colors]) in one
-    // table-driven pass; must precede parseBar so icon padding sees the
-    // freshly parsed workspaces.count.
+    // flags/aesthetics/master trio, all of [bar] incl. [bar.properties])
+    // in one table-driven pass; must precede parseBar so icon padding sees
+    // the freshly parsed workspaces.count.
     try schema.applyAll(doc, allocator, &cfg);
-    // A `tiling.*`/`bar.colors` family without its parent section is inert
-    // (applyAll and the parse functions both gate on it); warn once (C9).
+    // A `tiling.*`/`bar.properties` family without its parent section is
+    // inert (applyAll and the parse functions both gate on it); warn once
+    // (C9).
     warnInertSectionFamilies(doc);
     try parseBar(allocator, doc, &cfg);
     try parseRules(allocator, doc, &cfg);
@@ -522,7 +570,7 @@ const known_sections = std.StaticStringMap(void).initComptime(.{
     .{ types.section_workspace_rules, {} },   .{ types.section_rules, {} },
     .{ "drag", {} },                          .{ "fullscreen", {} },
     .{ types.section_tiling, {} },            .{ "workspaces", {} },
-    .{ types.section_bar, {} },               .{ types.section_bar_colors, {} },
+    .{ types.section_bar, {} },               .{ types.section_bar_properties, {} },
     .{ "bar.layout.left", {} },               .{ "bar.layout.center", {} },
     .{ "bar.layout.right", {} },              .{ "bar.modules.workspaces", {} },
     .{ types.section_tiling_aesthetics, {} }, .{ types.section_tiling_layouts_master_stack, {} },
@@ -538,7 +586,7 @@ fn warnMisCasedSections(doc: *parser.Document) void {
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
         if (known_sections.has(name)) continue;
-        var buf: [64]u8 = undefined;
+        var buf: [max_section_name_bytes]u8 = undefined;
         const lowered = types.lowerSlice(buf.len, &buf, name) orelse continue;
         if (!std.mem.eql(u8, lowered, name) and known_sections.has(lowered)) {
             debug.warn("Section [{s}] is mis-cased; hana recognizes [{s}], ignoring the section", .{ name, lowered });
@@ -567,8 +615,8 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
             }
         }
     }
-    if (doc.getSection(types.section_bar) == null and doc.getSection(types.section_bar_colors) != null)
-        debug.warn("[bar.colors] present but [bar] is missing; its knobs are inert", .{});
+    if (doc.getSection(types.section_bar) == null and doc.getSection(types.section_bar_properties) != null)
+        debug.warn("[bar.properties] present but [bar] is missing; its knobs are inert", .{});
 }
 
 const mod_map = std.StaticStringMap(u16).initComptime(.{
@@ -910,8 +958,8 @@ fn parseBindString(str: []const u8) !BindResult {
         const trimmed = std.mem.trim(u8, part, " \t");
         // Normalise to lowercase (modifiers are case-insensitive) via a bounded
         // helper; overlong tokens → null.
-        var lowered_buf: [16]u8 = undefined;
-        const lowered = types.lowerSlice(16, &lowered_buf, trimmed);
+        var lowered_buf: [max_modifier_key_bytes]u8 = undefined;
+        const lowered = types.lowerSlice(max_modifier_key_bytes, &lowered_buf, trimmed);
         const mod: ?u16 = if (lowered) |l| mod_map.get(l) else null;
         if (mod) |m| {
             modifiers |= m;
@@ -1033,7 +1081,7 @@ pub fn load(allocator: std.mem.Allocator) !types.Config {
 pub fn canonicalLayoutName(name: []const u8) []const u8 {
     if (std.ascii.eqlIgnoreCase(name, "master-stack") or
         std.ascii.eqlIgnoreCase(name, "master_stack"))
-        return "master";
+        return types.canon_master_layout;
     return name;
 }
 
@@ -1048,9 +1096,9 @@ fn parseTilingStructures(
     cfg: *types.Config,
 ) !void {
     const section = doc.getSection(types.section_tiling) orelse return;
-    types.freeStrings(&cfg.tiling.layouts, allocator, true);
+    types.freeStrings(&cfg.tiling.layouts, allocator, types.keep_capacity);
     cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
-    types.freeStringMap(&cfg.tiling.variants, allocator, true);
+    types.freeStringMap(&cfg.tiling.variants, allocator, types.keep_capacity);
     // Single-layout path clears the getDefaultConfig default; the "layout"
     // fallback is (types.TilingConfig{}).layout, NOT cfg.tiling.layout (which
     // aliases layouts.items[0], freed below, so using it would read freed
@@ -1066,7 +1114,7 @@ fn parseTilingStructures(
 /// The flat `[tiling] master_variant/monocle_variant/grid_variant` keys
 /// map onto their canonical layout names.
 const flat_variant_keys = [_]struct { key: []const u8, canon: []const u8 }{
-    .{ .key = "master_variant", .canon = "master" },
+    .{ .key = "master_variant", .canon = types.canon_master_layout },
     .{ .key = "monocle_variant", .canon = "monocle" },
     .{ .key = "grid_variant", .canon = "grid" },
 };
@@ -1119,13 +1167,13 @@ fn parseTilingLayoutSubtables(
         const tail = sec_name[prefix.len..];
         if (std.mem.endsWith(u8, tail, suffix)) {
             const seg = tail[0 .. tail.len - suffix.len];
-            if (std.mem.eql(u8, canonicalLayoutName(seg), "master")) {
+            if (std.mem.eql(u8, canonicalLayoutName(seg), types.canon_master_layout)) {
                 const counts_sec = entry.value_ptr;
                 cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
                 var inner = counts_sec.orderedIterator();
                 while (inner.next()) |p| {
                     counts_sec.markConsumed(p.key);
-                    if (tryParseWs1Based(p.key, constants.max_workspaces, "master-stack.counts", "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
+                    if (tryParseWsToken(p.key, constants.max_workspaces, "master-stack.counts", "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
                         const count_val = p.value.asScalar(i64) orelse {
                             debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
                             continue;
@@ -1233,7 +1281,7 @@ fn parseWorkspaceListInto(
     var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
     while (ws_iter.next()) |ws_tok| {
         const trimmed = std.mem.trim(u8, ws_tok, " \t");
-        const ws_1based = tryParseWs1Based(trimmed, constants.max_workspaces, "layouts array", "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
+        const ws_1based = tryParseWsToken(trimmed, constants.max_workspaces, "layouts array", "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
         const variant_copy: ?[]const u8 = if (variant) |v| try allocator.dupe(u8, v) else null;
         try overrides.append(allocator, .{ .workspace_idx = @intCast(ws_1based - 1), .layout_idx = layout_idx, .variant = variant_copy });
     }
@@ -1253,6 +1301,40 @@ const max_layouts = model.max_layouts;
 /// single-name format ("master-stack") is fully backward-compatible. Names
 /// are stored lowercased and de-duplicated case-insensitively; an overlong
 /// name is skipped with a warning (resolution, not spelling, is authoritative).
+/// The optional trailing group after an appended layout name: a workspace
+/// list and/or a variants word, consumed in either order. A variants word
+/// feeds both the per-layout map (`parseLayoutVariant`) and, when a
+/// workspace list follows, the per-workspace overrides. `i` advanced past
+/// every consumed token; null when the trailing token is another layout
+/// name or nothing (a malformed variants word also yields null, leaving the
+/// word for the caller's warn-and-skip).
+fn parseLayoutTrailing(
+    allocator: std.mem.Allocator,
+    cfg: *types.Config,
+    name_lower: []const u8,
+    arr: []const parser.Value,
+    i: *usize,
+) !?struct { variants: ?[]const u8, ws_list: ?[]const u8 } {
+    if (i.* + 1 >= arr.len) return null;
+    const peek = arr[i.* + 1].asScalar([]const u8) orelse return null;
+    if (isWorkspaceList(peek)) {
+        i.* += 1;
+        return .{ .variants = null, .ws_list = peek };
+    }
+    if (isLayoutName(peek)) return null;
+    const variants = (try parseLayoutVariant(allocator, cfg, name_lower, peek)) orelse return null;
+    i.* += 1;
+    if (i.* + 1 < arr.len) {
+        if (arr[i.* + 1].asScalar([]const u8)) |peek2| {
+            if (isWorkspaceList(peek2)) {
+                i.* += 1;
+                return .{ .variants = variants, .ws_list = peek2 };
+            }
+        }
+    }
+    return .{ .variants = variants, .ws_list = null };
+}
+
 fn parseLayoutsArray(
     allocator: std.mem.Allocator,
     arr: []const parser.Value,
@@ -1289,30 +1371,20 @@ fn parseLayoutsArray(
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(name_lower)));
 
-        if (i + 1 >= arr.len) continue;
-        const peek = arr[i + 1].asScalar([]const u8) orelse continue;
-        var variants: ?[]const u8 = null;
-        var ws_list_str: ?[]const u8 = null;
-        if (isWorkspaceList(peek)) {
-            ws_list_str = peek;
-            i += 1;
-        } else if (!isLayoutName(peek)) {
-            // A variants word feeds both the per-layout map and, when a
-            // workspace list follows, the per-workspace overrides.
-            variants = (try parseLayoutVariant(allocator, cfg, name_lower, peek)) orelse continue;
-            i += 1;
-            if (i + 1 < arr.len) {
-                if (arr[i + 1].asScalar([]const u8)) |peek2| {
-                    if (isWorkspaceList(peek2)) {
-                        ws_list_str = peek2;
-                        i += 1;
-                    }
-                }
+        // Optional trailing group: a workspace list and/or variants word.
+        if (try parseLayoutTrailing(allocator, cfg, name_lower, arr, &i)) |trail| {
+            if (trail.ws_list) |ws_str| {
+                try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, trail.variants, &cfg.tiling.workspace_layout_overrides);
             }
         }
-        if (ws_list_str) |ws_str| try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, variants, &cfg.tiling.workspace_layout_overrides);
     }
 }
+
+/// `appendDupedStrings`'s comptime `warn` argument meanings: the bar segment
+/// list warns on a stray non-string entry (a typo should be called out), the
+/// fonts list silently ignores it.
+const warn_bad_segment_entries = true;
+const ignore_bad_font_entries = false;
 
 /// Dupe-appends every string element of `items` into `dst`. Non-string
 /// entries are skipped; with `warn` set they also surface a warning (the bar
@@ -1335,14 +1407,14 @@ fn appendDupedStrings(
 
 /// Bar's NON-scalar structures: fonts, indicator glyph mirroring, workspace
 /// icons, and the bar columns. Every bar SCALAR (flags, scalables, height,
-/// colors incl. the [bar.colors] fallback chains, strings, enums, ratios)
+/// colors incl. the [bar.properties] fallback chains, strings, enums, ratios)
 /// is driven by schema.applyAll; like parseBar always did, everything here
 /// stays gated on the [bar] section existing.
 fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection(types.section_bar) orelse return;
     if (section.getAs([]const parser.Value, "fonts")) |arr| {
-        types.freeStrings(&cfg.bar.fonts, allocator, true);
-        try appendDupedStrings(false, allocator, arr, &cfg.bar.fonts);
+        types.freeStrings(&cfg.bar.fonts, allocator, types.keep_capacity);
+        try appendDupedStrings(ignore_bad_font_entries, allocator, arr, &cfg.bar.fonts);
         debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
@@ -1374,7 +1446,7 @@ fn parseWorkspaceIcons(
     section: *parser.Section,
     cfg: *types.Config,
 ) !void {
-    types.freeStrings(&cfg.bar.workspace_icons, allocator, true);
+    types.freeStrings(&cfg.bar.workspace_icons, allocator, types.keep_capacity);
     if (section.getAs([]const parser.Value, "icons")) |arr| {
         for (arr) |item| {
             if (item.asScalar([]const u8)) |s|
@@ -1394,7 +1466,7 @@ fn parseWorkspaceIcons(
 }
 
 fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    types.freeBarLayouts(&cfg.bar.layout, allocator, true);
+    types.freeBarLayouts(&cfg.bar.layout, allocator, types.keep_capacity);
     const max_anchor_name_len = comptime blk: {
         var longest: usize = 0;
         for (bar_anchors) |a| longest = @max(longest, a.name.len);
@@ -1405,7 +1477,7 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
         const layout_section = doc.getSection(std.fmt.bufPrint(&section_buf, "{s}{s}", .{ bar_layout_section_prefix, a.name }) catch unreachable) orelse continue;
         var bar_layout = types.BarLayout{ .position = a.position, .segments = .empty };
         if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
-            try appendDupedStrings(true, allocator, seg_arr, &bar_layout.segments);
+            try appendDupedStrings(warn_bad_segment_entries, allocator, seg_arr, &bar_layout.segments);
         if (bar_layout.segments.items.len > 0) try cfg.bar.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
     }
 
@@ -1439,7 +1511,11 @@ fn parseNumberedRuleSections(
     while (section_iter.next()) |entry| {
         const name = entry.key_ptr.*;
         const suffix_len = if (std.mem.startsWith(u8, name, types.section_prefix_workspace_rules)) types.section_prefix_workspace_rules.len else if (std.mem.startsWith(u8, name, types.section_prefix_rules)) types.section_prefix_rules.len else continue;
-        const ws_num = tryParseWs1Based(name[suffix_len..], cfg.workspaces.count, name, null, .{}) orelse continue;
+        const ws_num = parseWsToken(name[suffix_len..]) orelse {
+            debug.warn("Section [{s}]: workspace suffix is not a number, skipping", .{name});
+            continue;
+        };
+        if (!checkWorkspaceBound(ws_num, name, cfg.workspaces.count)) continue;
         var iter = entry.value_ptr.orderedIterator();
         while (iter.next()) |class_entry| {
             entry.value_ptr.markConsumed(class_entry.key);
@@ -1613,6 +1689,8 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         old.drun_prompt_color != new.drun_prompt_color or
         !std.meta.eql(old.drun_prompt, new.drun_prompt) or
         !eqlStringMap(types.Color, &old.segment_fg, &new.segment_fg) or
+        !eqlStringMap(types.Color, &old.segment_value_fg, &new.segment_value_fg) or
+        !eqlStringMap(types.SegmentProps, &old.segment_props, &new.segment_props) or
         !eqlBarLayouts(old.layout.items, new.layout.items) or
         old.transparency != new.transparency;
 }

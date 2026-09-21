@@ -72,9 +72,15 @@ var g_slot_width: [subs.len]u16 = @splat(0);
 /// actually changes, so the 2 s poll doesn't repaint the bar unconditionally.
 var g_last: [subs.len][128]u8 = undefined;
 var g_len: [subs.len]usize = @splat(0);
+/// Byte range of the numeric readout ("42%") inside `g_last`; `g_value_len ==
+/// 0` when there is no value this tick. The number is painted with the
+/// segment's `_value` color while the label keeps its own (see
+/// drawing.drawPaddedSegmentValue).
+var g_value_start: [subs.len]usize = @splat(0);
+var g_value_len: [subs.len]usize = @splat(0);
 
 fn nowMs() i64 {
-    return @intCast(utils.realtimeNs() / std.time.ns_per_ms);
+    return utils.realtimeMs();
 }
 
 fn appendText(dst: []u8, start: usize, text: []const u8) usize {
@@ -92,17 +98,23 @@ fn refresh(idx: usize) bool {
 
     var buf: [128]u8 = undefined;
     var n: usize = 0;
+    var value_start: usize = 0;
+    var value_len: usize = 0;
     if (sub.read()) |value| {
         var num: [16]u8 = undefined;
         const value_text = std.fmt.bufPrint(&num, "{d}%", .{value}) catch "";
         n = appendText(&buf, n, sub.label);
         n = appendText(&buf, n, " ");
+        value_start = n;
         n = appendText(&buf, n, value_text);
+        value_len = value_text.len;
     }
 
     const changed = g_len[idx] != n or !std.mem.eql(u8, g_last[idx][0..n], buf[0..n]);
     @memcpy(g_last[idx][0..n], buf[0..n]);
     g_len[idx] = n;
+    g_value_start[idx] = value_start;
+    g_value_len[idx] = value_len;
     return changed;
 }
 
@@ -158,7 +170,11 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
         return x;
     }
 
-    const end_x = try drawing.drawPaddedSegment(c.dc, c.config, c.height, x, subs[idx].name, g_last[idx][0..g_len[idx]]);
+    const value = if (g_value_len[idx] != 0)
+        g_last[idx][g_value_start[idx] .. g_value_start[idx] + g_value_len[idx]]
+    else
+        null;
+    const end_x = try drawing.drawPaddedSegmentValue(c.dc, c.config, c.height, x, subs[idx].name, g_last[idx][0..g_len[idx]], value, c.config.segmentProps(subs[idx].name));
 
     // Track the ACTUAL painted width, not the row reservation: the row must
     // follow the text or the segment locks onto the startup probe and paints

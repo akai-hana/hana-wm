@@ -25,7 +25,7 @@ pub const max_primary_swing: f32 = 6.0;
 /// Maximum number of concurrently minimized windows. Hoisted from the minimize
 /// module's `max_minimized` so the model layer (which may import only std +
 /// utils + constants) can reach it without build_options. Distinct from
-/// Limits.max_tiled_windows: this bounds the minimized-window buffer, not the
+/// `max_tiled_windows`: this bounds the minimized-window buffer, not the
 /// tiled-window pool.
 pub const max_minimized: usize = 32;
 
@@ -37,6 +37,9 @@ pub const xkb_retry_delay_ms: u64 = 20;
 /// X11 reserves keycodes 0..7; the first real keycode is 8. The flat keysym
 /// table therefore covers 8..255.
 pub const x11_min_keycode: u8 = 8;
+/// The keycode space is 0..255; tables and bitsets covering the full range are
+/// sized from this.
+pub const x11_max_keycode = 256;
 
 // Offscreen positioning
 // Windows on inactive workspaces are parked here so they are hidden without
@@ -52,6 +55,12 @@ pub const offscreen_x_position: i32 = -30000;
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 pub const max_window_tree_depth: usize = 10;
+
+/// Upper bound on live cache entries (focus-property cache in icccm.zig and
+/// the border/hints/title cache in wincache.zig). Backing tables are fixed,
+/// allocation-free, and O(1) at the cap; windows beyond the ceiling still
+/// work, they just fall through to the live X11 path.
+pub const max_window_cache: usize = 512;
 
 /// Hard ceiling on the number of workspaces the WM can meaningfully support.
 ///
@@ -95,10 +104,8 @@ pub const mouse_button_scroll_down: u8 = 5;
 /// Standard DPI for a 1x display. All scale factors are computed relative to this value.
 pub const baseline_dpi: f32 = 96.0;
 
-pub const Limits = struct {
-    /// Maximum tiled windows across the whole WM (all workspaces combined),
-    /// not per workspace. Buffers sized from this are indexed by usize/u16,
-    /// so raising it only costs memory; keep it a compile-time bound so
-    /// stack buffers stay stack buffers.
-    pub const max_tiled_windows = 64;
-};
+/// Maximum number of tiled windows across the whole WM (all workspaces combined),
+/// not per workspace. Buffers sized from this are indexed by usize/u16,
+/// so raising it only costs memory; keep it a compile-time bound so
+/// stack buffers stay stack buffers.
+pub const max_tiled_windows = 64;

@@ -53,8 +53,6 @@ pub const Frame = struct {
 /// window addon. `m` is the live model passed as `*const anyopaque`
 /// (type-free seam); the title segment casts back.
 pub const MinimizedApi = struct {
-    /// Live per-window minimized query (bar's fetch-key diff + click routing).
-    is_minimized: ?*const fn (m: *const anyopaque, win: u32) bool = null,
     /// Synthesize the full minimized-window set into `set` (bar's title shot).
     collect: ?*const fn (
         m: *const anyopaque,
@@ -136,8 +134,9 @@ pub const DrawCtx = struct {
 /// Minimum reserved row width for the title segment.
 pub const title_min_width: u16 = 100;
 
-/// Maximum number of windows rendered in split-view.
-const max_visible_windows = constants.Limits.max_tiled_windows;
+/// Maximum number of windows rendered in split-view; the single bar-wide cap
+/// (whole batch, per-window scratch, and title gather all bound to it).
+pub const max_visible_windows = constants.max_tiled_windows;
 
 /// Off-screen sentinel: sorts last in position, drawing is skipped.
 pub const offscreen_rect: utils.Rect = .{

@@ -6,9 +6,10 @@ const utils = @import("utils");
 const model = @import("model");
 const tiling = @import("tiling");
 
-// CALLER DUTIES: on window grow, snap viewport_offset to maxOffset(n,
-// slotWidth(wa.w), wa.w) and update viewport_prev_count
-// (see pipeline.preReconcileDuties). slotWidth/maxOffset feed actions too.
+// GROW DUTY (optional): on window grow, callers may pre-clamp viewport_offset
+// to maxOffset(n, slotWidth(wa.w), wa.w) and update viewport_prev_count
+// (see pipeline.preReconcileDuties); compute clamps internally either way.
+// slotWidth/maxOffset feed actions too.
 
 /// Pixel width of one scroll slot: exactly half the screen width. Single
 /// source of truth; maxOffset and compute derive their geometry from it.

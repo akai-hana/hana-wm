@@ -132,7 +132,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const iterations: usize = if (bench) 50_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        tiling.compute(m.ws[m.current.index].params.kind, view, &placements);
+        tiling.compute(m.ws[m.current.index].params.kind, &view, &placements);
     }
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 

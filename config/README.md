@@ -44,6 +44,15 @@ Most sizing knobs accept a `ScalableValue`: a percentage, or exact pixels.
   float. Mind the bare-`1` ambiguity rule: for these knobs `1` means **1%**,
   not 1.0 — write `1.0` or `100%` for fully opaque.
 - Colors accept `"#RRGGBB"`, bare `RRGGBB`, or `0xRRGGBB`, quoted or not.
+- Colors can also be built by **mixing** other colors with `+`, where the
+  first operand carries the remaining weight:
+  `primary_color +(weight:25%) secondary_color` = 75%/25%; a bare `+` is an
+  50/50 split. Operands are hex values or palette variables
+  (`primary_color`, `secondary_color`, `alternative_color`, `text_color`),
+  and a palette variable may itself be declared as a mix or an alias of
+  another one. Weights sit in 0-100 and their sum must not exceed 100. Since a
+  bare `#` after the first token starts a comment, use quoted `"#RRGGBB"` or
+  `0xRRGGBB` for a hex operand past the head.
 - Strings (fonts, icons, formats) are normal TOML strings. `icons` accepts
   either a single string (split into characters) or an array of labels.
 - Binds support **glob expansion**: `Mod+{1-4,Q,W,E,R}` expands into the full
@@ -122,7 +131,10 @@ Segment behavior knobs:
   (usually themed).
 
 Per-segment accents live in `[bar.colors]` (`title`, `title_unfocused`,
-`title_minimized`, `drun_bg`, `drun_fg`, `drun_prompt_color`).
+`title_minimized`, `drun_bg`, `drun_fg`, `drun_prompt_color`). Any other key
+`<segment>` is that segment's text color (e.g. `cpu = primary_color`), and
+`<segment>_value` separately colors its numeric readout (the `42%` in
+`Cpu 42%`), falling back to the segment text color when absent.
 
 ### `[binds]`
 

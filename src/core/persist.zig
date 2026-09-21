@@ -5,7 +5,7 @@
 //! save() dumps the model; the booting process loadToGlobal()s the file and
 //! the adoption path (window.adoptRootWindows) consumes the records while
 //! applyModelLevel() restores model-level fields (current/ws params/orders/
-//! focused). home_ws and count_minimized are derived and NOT serialized.
+//! focused). home_ws is derived (with presence) and NOT serialized.
 //!
 //! Seam: each WindowRecord carries `presence` (model.Presence) and
 //! an opaque `ext` blob. Only `presence` and the identity/mode survive in the
@@ -253,7 +253,7 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
 
 /// Parses the restore file into the module-global `loaded`. Returns false
 /// (after a warn) on any failure so boot proceeds without restore.
-pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) !bool {
+pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) bool {
     const raw = std.Io.Dir.readFileAlloc(
         std.Io.Dir.cwd(),
         std.Options.debug_io,

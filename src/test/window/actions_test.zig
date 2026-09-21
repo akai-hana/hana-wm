@@ -97,14 +97,14 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     // Multi-tag: add tag 2, protecting the current tag.
     actions.tagToggle(w1, 2, true);
     const e1 = m.store.get(w1) orelse return error.UnknownWindow;
-    try std.testing.expect(e1.mask & model.bit(model.WSId.fromIndex(2)) != 0);
-    try std.testing.expect(e1.mask & model.bit(m.current) != 0);
+    try std.testing.expect(model.taggedOn(e1, model.WSId.fromIndex(2)));
+    try std.testing.expect(model.taggedOn(e1, m.current));
 
     // Detag the current tag: evicted from the shown workspace, focus follows
     // (no other candidate -> cleared), window parked.
     actions.tagToggle(w1, ws0, false);
     const e2 = m.store.get(w1) orelse return error.UnknownWindow;
-    try std.testing.expect(e2.mask & model.bit(m.current) == 0);
+    try std.testing.expect(!model.taggedOn(e2, m.current));
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
     fx.flush();
     try fx.expectParked(w1);
@@ -112,7 +112,7 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     // Re-add the current tag: window returns and is shown again.
     actions.tagToggle(w1, ws0, false);
     const e3 = m.store.get(w1) orelse return error.UnknownWindow;
-    try std.testing.expect(e3.mask & model.bit(m.current) != 0);
+    try std.testing.expect(model.taggedOn(e3, m.current));
     fx.flush();
     try std.testing.expect(fx.isViewable(w1));
 

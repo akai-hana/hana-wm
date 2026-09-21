@@ -77,22 +77,6 @@ pub fn dispatchFirstTrue(
     return false;
 }
 
-/// The return type of a hook field's optional function pointer
-/// (`?*const fn(...) T`); lets callHook-value wrappers avoid hardcoding it.
-fn HookReturnOf(comptime Hook: type) type {
-    return @typeInfo(@typeInfo(@typeInfo(Hook).optional.child).pointer.child).@"fn".return_type.?;
-}
-
-/// Returns the first provider's hook result (callHook that yields a value),
-/// with the return type derived from the hook field instead of hardcoded.
-pub inline fn callFirst(
-    comptime field: std.meta.FieldEnum(plugin.WindowModule),
-    args: anytype,
-) ?HookReturnOf(@TypeOf(@field(window_mods[0], @tagName(field)))) {
-    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| return @call(.auto, f, args);
-    return null;
-}
-
 /// True when `win` is currently screen-covering via a covering-mode module
 /// (fullscreen). Shared by the configure-resolution and client-message paths;
 /// actions aliases this as its dispatch seam.
@@ -173,9 +157,9 @@ const State = struct {
 
 var state: ?State = null;
 
-// Geometry cache: last-known window geometry for workspace-switch and
-// minimize/restore. Owned by wincache.zig, the single source of truth for both
-// tiled and floating windows.
+// Live geometry is read straight off the wire via getGeometry(). The
+// last-sent geometry for X-side state (workspace-switch replay, minimize/
+// restore) lives in the sync ledger and the model, not here.
 
 pub fn markBordersFlushed() void {
     state.?.borders_flushed_this_batch = true;
@@ -186,7 +170,7 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
     const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse
         return null;
     defer std.c.free(reply);
-    return utils.rectFromXcb(reply, true);
+    return utils.rectFromXcb(reply);
 }
 
 // Child window resolution
@@ -1036,7 +1020,7 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         null,
     ) orelse return null;
     defer std.c.free(reply);
-    return utils.rectFromXcb(reply, true);
+    return utils.rectFromXcb(reply);
 }
 
 fn sendSyntheticConfigureNotify(win: u32) void {

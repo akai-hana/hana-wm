@@ -11,7 +11,7 @@ const segmod = @import("segment");
 
 /// Reserved row width when no workspaces are configured (moved here from
 /// bar.zig: width policy belongs to the segment that owns the pixels).
-pub const fallback_width: u16 = 270;
+const fallback_width: u16 = 270;
 
 // Sized to workspace_labels, the largest label source. Every workspace index
 // is bounded by tracking.getWorkspaceCount() (<= max_workspaces), so no
@@ -33,12 +33,12 @@ inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
 }
 
 // Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
-pub fn invalidate() void {
+fn invalidate() void {
     cache_valid = false;
 }
 
 // Returns the last-computed workspace cell width in pixels (0 until first draw).
-pub fn getCachedWorkspaceWidth() u16 {
+fn getCachedWorkspaceWidth() u16 {
     return ws_width;
 }
 
@@ -46,7 +46,8 @@ pub fn getCachedWorkspaceWidth() u16 {
 fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) void {
     if (cache_valid) return;
     const count = @min(tracking.getWorkspaceCount(), label_widths.len);
-    for (label_widths[0..count], 0..) |*w, i| w.* = dc.measureTextWidth(getLabel(i, config));
+    const props = config.segmentProps("workspaces");
+    for (label_widths[0..count], 0..) |*w, i| w.* = dc.measureTextWidthStyled(getLabel(i, config), props);
     ws_width = config.scaledWorkspaceWidth(height);
     cache_valid = true;
 
@@ -135,7 +136,7 @@ fn drawFrame(
         const label = getLabel(i, config);
         const label_w = label_widths[i];
         const text_x = x + (ws_width -| label_w) / 2;
-        try dc.drawText(text_x, baseline_y, label, fg);
+        try dc.drawTextStyled(text_x, baseline_y, label, fg, config.segmentProps("workspaces"));
 
         if (has_windows) {
             const glyph = if (is_current)

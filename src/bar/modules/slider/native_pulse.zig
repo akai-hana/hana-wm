@@ -74,7 +74,6 @@ var g_sink = SinkInfoResult{};
 /// Per-op parameters (single-threaded, never overlapping).
 var g_op_index: u32 = PA_INVALID_INDEX;
 var g_op_mute: c_int = 0;
-var g_op_muted_current: bool = false;
 var g_op_vol: [132]u8 = undefined;
 var g_op_name: [257]u8 = undefined;
 var g_op_name_len: usize = 0;
@@ -237,7 +236,7 @@ pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
 // --- Operation plumbing ---
 
 fn nowMs() i64 {
-    return @intCast(utils.realtimeNs() / std.time.ns_per_ms);
+    return utils.realtimeMs();
 }
 
 /// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`.

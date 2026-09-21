@@ -43,26 +43,16 @@ fn mustDupeZ(src: []const u8, what: []const u8) [:0]const u8 {
 }
 
 /// Null-terminated absolute path to exec on re-exec (readLink of
-/// `/proc/self/exe`, or the override passed to init()). c_allocator-owned,
-/// process-lifetime: never freed.
+/// `/proc/self/exe`). c_allocator-owned, process-lifetime: never freed.
 var exec_path_z: ?[*:0]const u8 = null;
 
 /// Re-exec request flag. Set by `requestReexec` (the `reload_hana` action and
 /// SIGUSR1), consumed by `consumeReexec` in the main event loop.
 var should_reexec = std.atomic.Value(bool).init(false);
 
-/// Resolves the binary to exec on re-exec: the readLink of `/proc/self/exe`
-/// (or the override passed in). One-shot at startup, before any reload/reexec
-/// request can arrive.
-///
-/// `binary_path_override` names the binary to exec when the running image
-/// can't be resolved via /proc (e.g. tests); when null, the resolved
-/// readLink of `/proc/self/exe` is used.
-pub fn init(alloc: std.mem.Allocator, binary_path_override: ?[]const u8) void {
-    if (binary_path_override) |override| {
-        exec_path_z = alloc.dupeZ(u8, override) catch null;
-        return;
-    }
+/// Resolves the binary to exec on re-exec: the readLink of `/proc/self/exe`.
+/// One-shot at startup, before any reload/reexec request can arrive.
+pub fn init(alloc: std.mem.Allocator) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
     // readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
@@ -94,8 +84,9 @@ pub fn consumeReexec() bool {
 }
 
 /// The resolved path of the running image (readLink of `/proc/self/exe`, or
-/// the init() override). Null when re-exec was never armed (init saw no
-/// /proc). The event loop hands this to execNext as argv[0] / exec path.
+/// the readLink of `/proc/self/exe`). Null when re-exec was never armed
+/// (init saw no /proc). The event loop hands this to execNext as argv[0] /
+/// exec path.
 pub fn selfPath() ?[]const u8 {
     const z = exec_path_z orelse return null;
     return z[0..std.mem.len(z)];

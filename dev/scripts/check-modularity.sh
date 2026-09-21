@@ -76,7 +76,9 @@ setup_copy() {
 }
 
 # Remove paths (files or directories) relative to a project copy.
-# Paths starting with ! are expects; if the file doesn't exist, skip.
+# Paths starting with ! are expects; if the file doesn't exist, skip. Any
+# other missing path is an error -- a scenario that names a path the tree
+# no longer has is silently testing nothing, so fail loudly instead.
 remove_paths() {
     local root="$1"
     shift
@@ -84,6 +86,9 @@ remove_paths() {
         if [[ "$p" == '!'* ]]; then
             p="${p#!}"
             [[ -e "$root/$p" ]] || continue
+        elif [[ ! -e "$root/$p" ]]; then
+            echo "${RED}error: scenario path '$p' does not exist (stale scenario?)${RESET}" >&2
+            return 1
         fi
         rm -rf "$root/$p"
     done
@@ -248,8 +253,8 @@ run_scenarios() {
 
     run_scenario \
         "bar segment: -layout+variants" \
-        "src/bar/modules/layout.zig" \
-        "src/bar/modules/variants.zig"
+        "src/bar/modules/layout/layout.zig" \
+        "src/bar/modules/layout/variants.zig"
 
     run_scenario \
         "bar segment: -title+carousel" \
@@ -290,8 +295,8 @@ run_scenarios() {
         "bar segment: all segments removed" \
         "src/bar/modules/clock.zig" \
         "src/bar/modules/tags.zig" \
-        "src/bar/modules/layout.zig" \
-        "src/bar/modules/variants.zig" \
+        "src/bar/modules/layout/layout.zig" \
+        "src/bar/modules/layout/variants.zig" \
         "src/bar/modules/title/title.zig" \
         "src/bar/modules/title/carousel.zig" \
         "src/bar/modules/prompt/prompt.zig" \

@@ -179,6 +179,10 @@ segments = ["batt", "cpu", "mem", "volume", "brightness", "clock"]
 # drun_bg           = auto  # Command runner background (fallback: bar bg)
 # drun_fg           = auto  # Command runner text (fallback: bar fg)
 # drun_prompt_color = auto  # Command runner prompt (fallback: primary_color)
+# Any other key "<segment>" colors that segment's text (e.g. "cpu"), and
+# "<segment>_value" colors just its numeric readout (the "42%" in "Cpu 42%").
+# cpu             = auto  # cpu/mem/volume/brightness/batt segment text
+# cpu_value       = auto  # that segment's readout number (fallback: cpu)
 
 # ---------------------------------------------------------------------------
 # Keybindings

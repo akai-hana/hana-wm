@@ -65,20 +65,20 @@ fn barPlainColor(key: []const u8) Knob {
     return .{ .places = &.{place(types.section_bar, key)}, .target = "bar." ++ key, .kind = .color };
 }
 
-/// [bar.colors] color_from chain: reads a sibling bar field as fallback,
+/// [bar.properties] color_from chain: reads a sibling bar field as fallback,
 /// gated on "bar". `copy_when_absent` (title variant) also assigns the
-/// fallback when [bar.colors] is absent; the drun variant keeps null so the
-/// read-time fallbacks in BarConfig apply (R2).
+/// fallback when [bar.properties] is absent; the drun variant keeps null so
+/// the read-time fallbacks in BarConfig apply (R2).
 fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) Knob {
-    return .{ .places = &.{place(types.section_bar_colors, key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = types.section_bar, .copy_when_absent = copy_when_absent };
+    return .{ .places = &.{place(types.section_bar_properties, key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = types.section_bar, .copy_when_absent = copy_when_absent };
 }
 
-/// Title accent color: copies `sibling` when [bar.colors] is absent (R2).
+/// Title accent color: copies `sibling` when [bar.properties] is absent (R2).
 fn barTitleColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
     return barColor(key, target, sibling, true);
 }
 
-/// Drun accent color: stays null when [bar.colors] is absent (R2).
+/// Drun accent color: stays null when [bar.properties] is absent (R2).
 fn barDrunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
     return barColor(key, target, sibling, false);
 }
@@ -163,9 +163,9 @@ pub const knobs = [_]Knob{
     // when the key is present; absent keeps the field null.
     knob(&.{place(types.section_bar, "indicator_color")}, "bar.indicator_color", .{ .color_opt = "fg" }),
 
-    // [bar.colors] chain. Gated on [bar] because parseBar always returned
+    // [bar.properties] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
-    // title accents additionally COPY their fallback when [bar.colors] is
+    // title accents additionally COPY their fallback when [bar.properties] is
     // absent (they were unconditionally assigned); the drun trio stay null
     // so the read-time fallbacks in BarConfig apply.
     barTitleColor("title", "bar.title_accent_color", types.palette_primary_color),
@@ -176,25 +176,25 @@ pub const knobs = [_]Knob{
     barDrunColor("drun_prompt_color", "bar.drun_prompt_color", types.palette_primary_color),
 };
 
-/// Keys the [bar.colors] scalar knobs own; every OTHER key in that table is a
-/// bar segment name (a per-segment text-color override, see
-/// `applySegmentColors`). Derived from `knobs` so a future [bar.colors] knob
-/// can never desync the map pass.
-const bar_colors_knob_keys_len = blk: {
+/// Keys the [bar.properties] scalar knobs own; every OTHER key in that table
+/// is a bar segment name (a per-segment color + style override, see
+/// `applyBarProperties`). Derived from `knobs` so a future [bar.properties]
+/// knob can never desync the map pass.
+const bar_properties_knob_keys_len = blk: {
     var n: usize = 0;
     for (knobs) |k| {
         for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, types.section_bar_colors)) n += 1;
+            if (std.mem.eql(u8, pl.section, types.section_bar_properties)) n += 1;
         }
     }
     break :blk n;
 };
-const bar_colors_knob_keys: [bar_colors_knob_keys_len][]const u8 = blk: {
-    var keys: [bar_colors_knob_keys_len][]const u8 = undefined;
+const bar_properties_knob_keys: [bar_properties_knob_keys_len][]const u8 = blk: {
+    var keys: [bar_properties_knob_keys_len][]const u8 = undefined;
     var i: usize = 0;
     for (knobs) |k| {
         for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, types.section_bar_colors)) {
+            if (std.mem.eql(u8, pl.section, types.section_bar_properties)) {
                 keys[i] = pl.key;
                 i += 1;
             }
@@ -203,8 +203,8 @@ const bar_colors_knob_keys: [bar_colors_knob_keys_len][]const u8 = blk: {
     break :blk keys;
 };
 
-fn isBarColorsKnobKey(key: []const u8) bool {
-    for (bar_colors_knob_keys) |k| {
+fn isBarPropertiesKnobKey(key: []const u8) bool {
+    for (bar_properties_knob_keys) |k| {
         if (std.mem.eql(u8, k, key)) return true;
     }
     return false;
@@ -344,8 +344,7 @@ pub fn getInRange(
             if (i < 0) return reject(i64, key, i, "below minimum", 0, default);
             // Guard the type's own range before the cast: an int larger than T
             // can hold would trap on @intCast even when no explicit max is set.
-            // (For u64/usize the comparison is comptime-folded away.)
-            if (std.math.maxInt(T) < std.math.maxInt(i64) and i > std.math.maxInt(T))
+            if (i > std.math.maxInt(T))
                 return reject(i64, key, i, "above maximum", std.math.maxInt(T), default);
             break :blk @as(T, @intCast(i));
         },
@@ -357,10 +356,12 @@ pub fn getInRange(
 }
 
 /// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
-/// `0xRRGGBB`, an integer, or a full-name reference to a collected palette
-/// variable (e.g. `border_focused = primary_color`). The value-decoding forms
-/// share parser.colorFromValue (the single decoder); this layer adds the
-/// palette-reference lookup and the warn-and-default policy on top.
+/// `0xRRGGBB`, an integer, a full-name reference to a collected palette
+/// variable (e.g. `border_focused = primary_color`), or a `+` color-mix
+/// expression of any of those (e.g. `primary_color + (weight:75%)
+/// secondary_color`). The value-decoding forms share parser.colorFromValue
+/// (the single decoder); this layer adds the palette-reference lookup and the
+/// warn-and-default policy on top.
 fn getColorFromValue(
     key: []const u8,
     val: parser.Value,
@@ -368,14 +369,15 @@ fn getColorFromValue(
     palette: *const std.StringHashMap(u32),
 ) u32 {
     if (parser.colorFromValue(val)) |c| return c;
+    if (parser.resolveColorExpr(val, palette)) |c| return c;
     if (val.asScalar([]const u8)) |s| {
         if (palette.get(s)) |c| return c;
-        debug.warn("Invalid color for {s}: '{s}' (not a hex code or palette reference)", .{ key, s });
+        debug.warn("Invalid color for {s}: '{s}' (not a hex code, palette reference, or + mix)", .{ key, s });
         return default;
     }
     // Unresolvable value (boolean, size, bare float, out-of-range int, ...)
     // would otherwise silently use the default without a trace.
-    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', an integer, or a palette reference), using default", .{key});
+    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', an integer, a palette reference, or a + mix), using default", .{key});
     return default;
 }
 
@@ -388,11 +390,11 @@ fn getColorFromValue(
 fn getScalableInRange(
     section: *parser.Section,
     key: []const u8,
-    default: ?parser.ScalableValue,
+    default: ?types.ScalableValue,
     min: f32,
     comptime fallback_label: []const u8,
-) ?parser.ScalableValue {
-    const val = section.getAsOrWarn(parser.ScalableValue, key) orelse return default;
+) ?types.ScalableValue {
+    const val = section.getAsOrWarn(types.ScalableValue, key) orelse return default;
     if (val.value < min) {
         debug.warn(
             "Value for '{s}' ({d}) below minimum ({d}), using {s}",
@@ -424,7 +426,7 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
         debug.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
         return default;
     }
-    if (val.asScalar(parser.ScalableValue)) |s| {
+    if (val.asScalar(types.ScalableValue)) |s| {
         const f = utils.scaling.asRatio(s);
         if (f < 0.0 or f > 1.0) {
             debug.warn(
@@ -440,9 +442,9 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
             "{s} value '{s}' is quoted; write it unquoted (e.g. {s} = 0.5), using default",
             .{ key, str, key },
         )
-    else if (val != .array) // something else entirely (boolean, ...)
+    else if (val != .array) // a non-string, non-number scalar (boolean, ...)
         debug.warn(
-            "{s} expects a number or ratio, got a union/other value; using default",
+            "{s} expects a number or ratio, got an unreadable value; using default",
             .{key},
         );
     return default;
@@ -494,7 +496,7 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
                 p.* = getScalableInRange(h.sec, h.key, p.*, min, "default") orelse p.*;
             },
             .scalable_free => if (hit) |h| {
-                if (h.sec.getAsOrWarn(parser.ScalableValue, h.key)) |v| p.* = v;
+                if (h.sec.getAsOrWarn(types.ScalableValue, h.key)) |v| p.* = v;
             },
             .auto_scalable => if (hit) |h| {
                 p.* = getScalableInRange(h.sec, h.key, null, 0, "auto");
@@ -542,33 +544,181 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             },
         }
     }
-    try applySegmentColors(allocator, doc, cfg);
+    try applyBarProperties(allocator, doc, cfg);
 }
 
-/// Reads `[bar.colors]` segment-name -> text-color pairs (any key not owned
-/// by the scalar knobs above) into `cfg.bar.segment_fg`. Runs after the knob
-/// loop so the known keys (title, drun_*, ...) are distinguishable. Gated on
-/// [bar] exactly like the [bar.colors] chain; an absent table or section
-/// leaves the map empty, so segment text falls back to `fg`. Keys are duped
-/// for the Config's lifetime; palette references resolve like every color
-/// knob.
-pub fn applySegmentColors(
+/// Reads `[bar.properties]` segment-name entries (any key not owned by the
+/// scalar knobs above) into `cfg.bar.segment_fg` / `segment_value_fg` /
+/// `segment_props`.
+///
+/// A key with the `_value` suffix (`cpu_value`) is that segment's NUMBER
+/// color: the numeric readout ("42%" in "Cpu 42%") is painted with it while
+/// the rest of the segment keeps the plain entry (`cpu`) -- see
+/// `segmentValueFg`. `_value` entries are color-only.
+///
+/// A plain `<segment>` entry is a composite: an optional color override plus
+/// optional style flags, either of which may stand alone. Accepted spellings
+/// for the flags are `underline=true|false`, space-separated `underline true`,
+/// integer `underline 1`, or a bare `underline` (meaning true). The color is
+/// the first color-carrying item (`#RRGGBB`, `0xRRGGBB`, integer, or a
+/// palette reference by full name); everything else must be a recognized
+/// style flag or it is warn-and-skipped. A style-only entry keeps the
+/// segment's default `fg` (no color map entry is added).
+///
+/// Runs after the knob loop so the known keys (title, drun_*, ...) are
+/// distinguishable. Gated on [bar] exactly like the [bar.properties] chain;
+/// an absent table or section leaves the maps empty, so segment text falls
+/// back to `fg`. Keys are duped for the Config's lifetime.
+fn applyBarProperties(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
     cfg: *types.Config,
 ) !void {
     types.freeSegmentColors(&cfg.bar.segment_fg, allocator);
+    types.freeSegmentColors(&cfg.bar.segment_value_fg, allocator);
+    types.freeSegmentProps(&cfg.bar.segment_props, allocator);
     if (doc.getSection(types.section_bar) == null) return;
-    const sec = doc.getSection(types.section_bar_colors) orelse return;
+    const sec = doc.getSection(types.section_bar_properties) orelse return;
     var it = sec.orderedIterator();
     while (it.next()) |pair| {
         sec.markConsumed(pair.key);
-        if (isBarColorsKnobKey(pair.key)) continue;
-        const color = getColorFromValue(pair.key, pair.value, cfg.bar.fg, &doc.palette);
-        const key = try allocator.dupe(u8, pair.key);
-        cfg.bar.segment_fg.put(allocator, key, color) catch |err| {
-            allocator.free(key);
-            return err;
-        };
+        if (isBarPropertiesKnobKey(pair.key)) continue;
+        const is_value = std.mem.endsWith(u8, pair.key, "_value");
+        const seg_key = if (is_value) pair.key[0 .. pair.key.len - "_value".len] else pair.key;
+        try applySegmentEntry(allocator, cfg, pair.key, seg_key, is_value, pair.value, &doc.palette);
+    }
+}
+
+/// Sets one style flag (`underline`/`bold`/`italic`) on `props`. Returns
+/// true when `name` was a recognized flag.
+fn setStyleFlag(props: *types.SegmentProps, name: []const u8, val: bool) bool {
+    if (std.mem.eql(u8, name, "underline")) {
+        props.underline = val;
+        return true;
+    }
+    if (std.mem.eql(u8, name, "bold")) {
+        props.bold = val;
+        return true;
+    }
+    if (std.mem.eql(u8, name, "italic")) {
+        props.italic = val;
+        return true;
+    }
+    return false;
+}
+
+/// Parses one `=value` bool spelling (`underline=true`, `underline=1`,
+/// `underline=false`), or null when `token` is not a `name=bool` form.
+fn boolFromEqualsToken(token: []const u8) ?struct { name: []const u8, value: bool } {
+    const eq = std.mem.indexOfScalar(u8, token, '=') orelse return null;
+    const name = token[0..eq];
+    const raw = token[eq + 1 ..];
+    if (std.mem.eql(u8, raw, "true") or std.mem.eql(u8, raw, "1"))
+        return .{ .name = name, .value = true };
+    if (std.mem.eql(u8, raw, "false") or std.mem.eql(u8, raw, "0"))
+        return .{ .name = name, .value = false };
+    return null;
+}
+
+/// The first color-carrying item of a composite `[bar.properties]` array
+/// value (`#RRGGBB`, `0xRRGGBB`, integer, or palette reference by full name).
+fn firstColorInItems(
+    items: []const parser.Value,
+    palette: *const std.StringHashMap(u32),
+) ?struct { color: u32, consumed: usize } {
+    for (items, 0..) |item, i| {
+        if (parser.colorFromValue(item)) |c| return .{ .color = c, .consumed = i };
+        if (item.asScalar([]const u8)) |s| {
+            if (palette.get(s)) |c| return .{ .color = c, .consumed = i };
+        }
+    }
+    return null;
+}
+
+/// Applies one [bar.properties] segment entry: `_value` keys are color-only
+/// (unchanged decoding); base keys take the composite color+style decoding.
+fn applySegmentEntry(
+    allocator: std.mem.Allocator,
+    cfg: *types.Config,
+    key: []const u8,
+    seg_key: []const u8,
+    is_value: bool,
+    raw: parser.Value,
+    palette: *const std.StringHashMap(u32),
+) !void {
+    if (raw != .array) {
+        // Plain scalar: color only, exactly as the pre-properties behavior.
+        const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
+        const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
+        const k = try allocator.dupe(u8, seg_key);
+        errdefer allocator.free(k);
+        try map.put(allocator, k, color);
+        return;
+    }
+
+    const items = raw.asArray().?;
+    var props = types.SegmentProps{};
+    const found = firstColorInItems(items, palette);
+    if (!is_value) {
+        var i: usize = 0;
+        while (i < items.len) {
+            if (found) |f| if (i == f.consumed) {
+                i += 1;
+                continue;
+            };
+            const token = items[i].asScalar([]const u8) orelse {
+                debug.warn("Invalid token for '{s}': expected a color or underline/bold/italic flag, skipping", .{key});
+                i += 1;
+                continue;
+            };
+            if (boolFromEqualsToken(token)) |eq| {
+                if (!setStyleFlag(&props, eq.name, eq.value))
+                    debug.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
+                i += 1;
+                continue;
+            }
+            // Bare `name` spelling: true by default; a following boolean or
+            // 0/1 integer item sets the value instead.
+            var set: bool = true;
+            var consumed_next = false;
+            if (i + 1 < items.len) {
+                if (items[i + 1].asScalar(bool)) |b| {
+                    set = b;
+                    consumed_next = true;
+                } else if (items[i + 1].asScalar(i64)) |iv| {
+                    if (iv == 0 or iv == 1) {
+                        set = iv == 1;
+                        consumed_next = true;
+                    }
+                }
+            }
+            if (setStyleFlag(&props, token, set)) {
+                if (consumed_next) i += 1;
+            } else {
+                debug.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
+            }
+            i += 1;
+        }
+    }
+
+    if (found) |f| {
+        const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
+        const k = try allocator.dupe(u8, seg_key);
+        errdefer allocator.free(k);
+        try map.put(allocator, k, f.color);
+    } else if (is_value) {
+        // A `_value` key is color-only: an array with no color is invalid.
+        const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
+        const k = try allocator.dupe(u8, seg_key);
+        errdefer allocator.free(k);
+        try cfg.bar.segment_value_fg.put(allocator, k, color);
+    }
+    // Else: style-only base entry; the segment color stays default fg (no
+    // map entry), so segmentFg's orelse fallback yields exactly that.
+
+    if (!is_value and !props.isDefault()) {
+        const k = try allocator.dupe(u8, seg_key);
+        errdefer allocator.free(k);
+        try cfg.bar.segment_props.put(allocator, k, props);
     }
 }

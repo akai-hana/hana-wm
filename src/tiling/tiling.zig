@@ -78,11 +78,18 @@ pub const HintsView = plugin.HintsView;
 pub const Env = plugin.Env;
 pub const View = plugin.View;
 pub const List = plugin.List;
+/// Working context for a layout module pass: the input view and output list,
+/// plus the two environment scalars every module needs (outer margins and the
+/// minimum pane dimension).
 pub const LayoutCtx = struct {
     v: *const View,
     out: *List,
     m: utils.Margins,
     min_dim: u16,
+
+    pub inline fn init(v: *const View, out: *List) LayoutCtx {
+        return .{ .v = v, .out = out, .m = v.env.margins, .min_dim = v.env.min_dim };
+    }
 };
 
 /// Prefer `v.focused` when it appears in `windows`, else `fallback`.
@@ -158,9 +165,11 @@ pub inline fn outerArea(wa: utils.Rect, gap: u16) Region {
     };
 }
 
-/// Split `dim` into two halves separated by `gap` at the seam. Both halves are
-/// saturating so `first + gap + second <= dim`: the pair never overflows the
-/// parent region. Shared by leaf (BSP) and fibonacci (spiral).
+/// Split `dim` into two halves separated by `gap` at the seam. Division and
+/// subtraction are saturating (so a `gap` larger than `dim` yields two zero
+/// halves rather than underflowing); callers guard `gap <= dim` (leaf via its
+/// min-dim check) so the pair really does fit the parent region. Shared by
+/// leaf (BSP) and fibonacci (spiral).
 pub inline fn bisectRegion(dim: u16, gap: u16) struct { first: u16, second: u16 } {
     const first = (dim -| gap) / 2;
     const second = dim -| (first +| gap);
@@ -222,7 +231,6 @@ const tiling_mods = @import("tiling_modules").modules;
 /// Names are canonicalized at the config boundary, so this is an exact
 /// lowercased match on module names.
 pub fn layoutByName(name: []const u8) ?usize {
-    if (name.len > 64) return null;
     for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return i;
     return null;
 }
@@ -252,7 +260,7 @@ pub fn layoutKindOf(name: []const u8) u8 {
 /// The effective default is config-driven (cfg.tiling.layout resolves at every
 /// seeding site); this only stands in when that name fails to resolve (a
 /// removed/unknown module), keeping dispatch ids always resolvable.
-pub fn defaultKind() u8 {
+fn defaultKind() u8 {
     return 0;
 }
 
@@ -293,11 +301,11 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
 /// binds its `compute` hook to the module's placement function and must
 /// append exactly one placement per window in `v.order` (off-viewport/hidden
 /// windows are parked via emitHidden).
-pub fn compute(kind: u8, v: View, out: *List) void {
+pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
     if (kind >= tiling_mods.len) return;
     if (v.order.len == 0) return;
-    if (tiling_mods[kind].compute) |f| f(&v, out);
+    if (tiling_mods[kind].compute) |f| f(v, out);
 }
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of

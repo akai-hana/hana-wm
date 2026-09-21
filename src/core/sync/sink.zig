@@ -1,13 +1,16 @@
 //! Sends are planned in sync.zig and dispatched by the shims in this file
-//! (the sanctioned seam); the raw XCB primitives the shims call are defined
-//! in core/x11/wire.zig (allowlisted primitive home). Each shim wraps the
-//! exact request pattern it consolidates here:
+//! (the sanctioned seam where raw XCB calls are allowed -- the seam may call
+//! `xcb.*` and core utils directly, so a few shims stay inline rather than
+//! forcing every primitive through wire.zig; the check-layers allowlist
+//! covers this file). Each shim wraps the exact request pattern it
+//! consolidates here:
 //!   geom          ~ utils.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
-//!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent)
+//!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent);
+//!                   inline xcb_configure_window in this seam
 //!   borderPixel   ~ utils.setBorderPixel
 //!   park          ~ X-offscreen + BELOW merged into one request
-//!   stackOnly     ~ utils.raiseWindow and its BELOW sibling
+//!   stackOnly     ~ utils.raiseWindow (ABOVE; the only stack mode)
 //!   setEwmhFullscreen ~ xcb_change_property (_NET_WM_STATE_FULLSCREEN)
 //!   flush/grab    ~ conn.flush / utils.grabServer / ungrabAndFlush
 

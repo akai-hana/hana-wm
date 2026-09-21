@@ -2,20 +2,17 @@
 //! builds the per-reconcile sync.Ctx from live state, and exposes the
 //! reconcile slots entry points call.
 //!
-//! Call sites (all marked `// PIPELINE:`):
-//!   startup        calls init()
-//!   floating       updateDrag calls dragTick()
-//!   window         unmanage/EWMH call actions.unmanage / fullscreenToggleWindow
+//! Entry points: init() (startup), dragTick() (floating drag motion),
+//! reconcileNow() (retile/EWMH/manage/unmanage), and the
+//! fullscreenToggleWindow/workspace hooks routed from the window layer.
 
 const model_mod = @import("model");
 const sync = @import("sync");
 const core = @import("core");
 const utils = @import("utils");
-const wincache = @import("wincache");
 const focus = @import("focus");
 const xcb_sink = @import("sink");
 const screen = @import("screen");
-const types = @import("types");
 const build_options = @import("build_options");
 const surfaces = @import("plugins").Surfaces;
 // Fullscreen EWMH/bar-arming hooks are reached through the build-generated
@@ -26,7 +23,8 @@ const window_mods = @import("window_modules").modules;
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile.
-const tiling_mods = @import("plugin").tiling_mods;
+const plugin = @import("plugin");
+const tiling_mods = plugin.tiling_mods;
 const tiling = @import("tiling_seam").tiling;
 
 /// True after init(); tracking's facade gates every model access on this so
@@ -100,7 +98,7 @@ var g_ctx: sync.Ctx = undefined;
 /// from live config (scaled margins, min_dim, master side, variant index).
 /// Shared by `ctx()` and the test fixture's placement expectations, so the
 /// fixture mirrors production env resolution instead of hand-building it.
-pub fn tilingEnv(p: *const model_mod.LayoutParams) tiling.Env {
+pub fn tilingEnv(p: *const model_mod.LayoutParams) plugin.Env {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     return .{
@@ -120,13 +118,14 @@ pub fn tilingEnv(p: *const model_mod.LayoutParams) tiling.Env {
 }
 
 /// Builds the per-retile Ctx from live state: workarea via bar's helper,
-/// margins/min_dim and variant booleans from config, border width from
-/// wincache.width(), colors from config.tiling. Only valid after init().
+/// margins/min_dim and variant booleans from config, border width from the
+/// same scaled config fact (see tilingEnv), colors from config.tiling.
+/// Only valid after init().
 fn ctx() *sync.Ctx {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
-    const border_width = core.borderWidth();
     const p = &model().ws[model().current.index].params;
+    const env = tilingEnv(p);
     g_ctx = .{
         .sink = sink(),
         .screen = .{
@@ -136,18 +135,18 @@ fn ctx() *sync.Ctx {
             .height = screen_h,
         },
         .workarea = screen.workArea(cs.screen),
-        .cfg_bw = border_width,
-        .env = tilingEnv(p),
+        .cfg_bw = env.margins.border,
+        .env = env,
         .color_of = colorOf,
         .bar_win = screen.mappedSurfaceWindow(),
     };
     return &g_ctx;
 }
 
-/// Ported from wincache.color minus its fullscreen check: fullscreen windows
-/// get bw=0/pixel=0 through the fullscreen branch policy in sync instead.
-/// Reads MODEL focus; focus.zig mirrors every transition into m.focused,
-/// so this is the same single source of truth.
+/// Focused/unfocused border-pixel pick for the reconcile Ctx. Fullscreen
+/// windows get bw=0/pixel=0 through the fullscreen branch policy in sync
+/// instead. Reads MODEL focus; focus.zig mirrors every transition into
+/// m.focused, so this is the same single source of truth.
 fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     const cfg = &core.getState().config.tiling;
     return if (m.focused == win) cfg.border_focused else cfg.border_unfocused;
@@ -194,26 +193,33 @@ pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
     sync.reconcileUnderGrab(&instance, ctx(), o);
 }
 
-/// Grab server, run the focus transition, reconcile, then ungrabAndFlush (or
-/// the reverse order) atomically. When `focus_before` is true, focus lands
-/// before geometry (most actions); when false it lands after (mapRequest,
-/// where the window must be mapped before xcb_set_input_focus targets it).
+/// Grab server, run the focus transition, reconcile, then ungrabAndFlush
+/// (or the reverse order) atomically.
+
+/// Order of `reconcileGrabFocus`' two phases inside the grab: focus lands
+/// before geometry (most actions), or after (mapRequest, where the window
+/// must be mapped before xcb_set_input_focus targets it).
+pub const FocusOrder = enum {
+    before,
+    after,
+};
+
 pub inline fn reconcileGrabFocus(
     o: sync.ReconcileOpts,
     t: focus.FocusTransition,
-    focus_before: bool,
+    order: FocusOrder,
 ) void {
     preReconcileDuties();
     withServerGrab(struct {
         o: sync.ReconcileOpts,
         t: focus.FocusTransition,
-        focus_before: bool,
+        order: FocusOrder,
         fn call(self: @This(), c: *sync.Ctx) void {
-            if (self.focus_before) focus.applyPendingFocus(self.t);
+            if (self.order == .before) focus.applyPendingFocus(self.t);
             sync.reconcile(&instance, c, self.o);
-            if (!self.focus_before) focus.applyPendingFocus(self.t);
+            if (self.order == .after) focus.applyPendingFocus(self.t);
         }
-    }{ .o = o, .t = t, .focus_before = focus_before });
+    }{ .o = o, .t = t, .order = order });
 }
 
 /// Focus lands before geometry so border colors and stacking are correct on

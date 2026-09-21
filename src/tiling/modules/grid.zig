@@ -53,7 +53,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 }
 
 /// Column/row counts of the smallest square grid holding `n` windows; uses
-/// a 1x3 layout for `n == 3`. Integer ceiling-sqrt loop.
+/// a 3-column, 1-row layout for `n == 3`. Integer ceiling-sqrt loop.
 inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 3) return .{ .cols = 3, .rows = 1 };
     var cols: u16 = 1;

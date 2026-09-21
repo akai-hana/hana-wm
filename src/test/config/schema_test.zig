@@ -66,7 +66,7 @@ test "types.Config{} carries sensible field initializers" {
     try testing.expectEqual(@as(u32, 0x61AFEF), proto.bar.primary_color);
     try testing.expectEqual(types.MasterSide.left, proto.tiling.master_side);
     try testing.expectEqual(types.BarScreenPosition.top, proto.bar.bar_position);
-    try testing.expectEqual(parser.ScalableValue.percentage(50.0), proto.tiling.master_width);
+    try testing.expectEqual(types.ScalableValue.percentage(50.0), proto.tiling.master_width);
 }
 
 test "key-less config file loads pure table defaults end-to-end" {
@@ -125,7 +125,7 @@ test "master trio: flat [tiling] names match dedicated section" {
     try expectConfigsEqual(&flat, &dedicated);
     try testing.expectEqual(@as(u8, 3), dedicated.tiling.master_count);
     try testing.expectEqual(types.MasterSide.right, dedicated.tiling.master_side);
-    try testing.expectEqual(parser.ScalableValue.percentage(60.0), dedicated.tiling.master_width);
+    try testing.expectEqual(types.ScalableValue.percentage(60.0), dedicated.tiling.master_width);
 }
 
 test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
@@ -151,7 +151,7 @@ test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
     );
     defer sub.deinit(testing.allocator);
     try expectConfigsEqual(&flat, &sub);
-    try testing.expectEqual(parser.ScalableValue.absolute(7.0), sub.tiling.gap_width);
+    try testing.expectEqual(types.ScalableValue.absolute(7.0), sub.tiling.gap_width);
     try testing.expectEqual(@as(u32, 0x112233), sub.tiling.border_focused);
 
     // A lone [tiling.aesthetics] (no [tiling] functional marker) still feeds
@@ -163,7 +163,7 @@ test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
         \\
     );
     defer lone.deinit(testing.allocator);
-    try testing.expectEqual(parser.ScalableValue.absolute(7.0), lone.tiling.gap_width);
+    try testing.expectEqual(types.ScalableValue.absolute(7.0), lone.tiling.gap_width);
 }
 
 test "[bar.modules.workspaces] and [workspaces] agree on count/enabled" {
@@ -197,7 +197,7 @@ test "segment_spacing feeds BarConfig.spacing; workspaces count pads icons" {
         \\
     );
     defer cfg.deinit(testing.allocator);
-    try testing.expectEqual(parser.ScalableValue.absolute(20.0), cfg.bar.spacing);
+    try testing.expectEqual(types.ScalableValue.absolute(20.0), cfg.bar.spacing);
     try testing.expectEqual(@as(u8, 4), cfg.workspaces.count);
     // Icons padded to the workspace count after the explicit entry.
     try testing.expectEqual(@as(usize, 4), cfg.bar.workspace_icons.items.len);
@@ -297,6 +297,7 @@ test "per-segment text colors: bar.colors keys override segment fg" {
     var cfg = try loadToml(testing.allocator, "segment-fg",
         \\[bar]
         \\primary_color     = "#aa0000"
+        \\secondary_color   = "#00aa00"
         \\alternative_color = "#0000cc"
         \\fg = "#070809"
         \\
@@ -306,6 +307,8 @@ test "per-segment text colors: bar.colors keys override segment fg" {
         \\mem                 = primary_color
         \\volume              = alternative_color
         \\brightness          = alternative_color
+        \\cpu_value           = secondary_color
+        \\brightness_value    = primary_color
         \\
     );
     defer cfg.deinit(testing.allocator);
@@ -321,6 +324,14 @@ test "per-segment text colors: bar.colors keys override segment fg" {
     // The scalar title knob still lands, untouched by the map pass.
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.title_accent_color);
     try testing.expectEqual(@as(usize, 4), cfg.bar.segment_fg.count());
+    // `<name>_value` keys are per-segment NUMBER colors; a segment without one
+    // falls back to its own label color (then the bar-wide fg).
+    try testing.expectEqual(@as(u32, 0x00AA00), cfg.bar.segmentValueFg("cpu"));
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("brightness"));
+    try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentValueFg("volume"));
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("mem"));
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentValueFg("batt"));
+    try testing.expectEqual(@as(usize, 2), cfg.bar.segment_value_fg.count());
 }
 
 test "per-segment colors: no [bar.colors] table leaves map empty" {
@@ -331,6 +342,7 @@ test "per-segment colors: no [bar.colors] table leaves map empty" {
     );
     defer cfg.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_fg.count());
+    try testing.expectEqual(@as(usize, 0), cfg.bar.segment_value_fg.count());
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("cpu"));
 }
 
@@ -353,9 +365,9 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     );
     defer cfg.deinit(testing.allocator);
     try testing.expectEqual(@as(u16, 125), cfg.bar.carousel_speed_px_s);
-    try testing.expectEqual(parser.ScalableValue.percentage(10.0), cfg.bar.font_size);
-    try testing.expectEqual(parser.ScalableValue.absolute(10.0), cfg.tiling.gap_width);
-    try testing.expectEqual(parser.ScalableValue.absolute(8.0), cfg.snap_distance);
+    try testing.expectEqual(types.ScalableValue.percentage(10.0), cfg.bar.font_size);
+    try testing.expectEqual(types.ScalableValue.absolute(10.0), cfg.tiling.gap_width);
+    try testing.expectEqual(types.ScalableValue.absolute(8.0), cfg.snap_distance);
     try testing.expectEqual(@as(u8, 9), cfg.workspaces.count);
 }
 
@@ -450,7 +462,7 @@ test "validate accepts pixel master_width above the ratio ceiling" {
     );
     defer px.deinit(testing.allocator);
     try config.validate(&px);
-    try testing.expectEqual(parser.ScalableValue.absolute(600.0), px.tiling.master_width);
+    try testing.expectEqual(types.ScalableValue.absolute(600.0), px.tiling.master_width);
 }
 
 test "workspace and float rules parse from TOML" {
@@ -492,4 +504,63 @@ test "workspace and float rules parse from TOML" {
     try testing.expectEqual(@as(usize, 3), seen_float);
     try testing.expectEqual(@as(usize, 4), n);
     try testing.expectEqual(@as(u32, 2 + 6 + 1 + 0), @as(u32, @intCast(ws_sum)));
+}
+
+test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette vars" {
+    // palette: primary = #aa0000 (170,0,0), secondary = #008800 (0,136,0).
+    // Every expectation below is the exact round-half-up channel average.
+    var cfg = try loadToml(testing.allocator, "mix-e2e",
+        \\[tiling]
+        \\[tiling.aesthetics]
+        \\border_focused   = primary_color +(weight:25%) secondary_color
+        \\border_unfocused = secondary_color + primary_color
+        \\
+        \\[bar]
+        \\primary_color     = "#aa0000"
+        \\secondary_color   = "#008800"
+        \\alternative_color = primary_color + secondary_color
+        \\fg = "#070809"
+        \\
+        \\[bar.colors]
+        \\title = alternative_color
+        \\cpu   = primary_color +(weight:40%) secondary_color
+        \\mem   = primary_color
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+
+    // border_focused: 75% primary + 25% secondary
+    //   r = (170*75 + 50)/100 = 128 (0x80), g = (136*25 + 50)/100 = 34 (0x22).
+    try testing.expectEqual(@as(u32, 0x802200), cfg.tiling.border_focused);
+    // border_unfocused: 50/50
+    //   r = (170 + 1)/2 = 85 (0x55), g = (136 + 1)/2 = 68 (0x44).
+    try testing.expectEqual(@as(u32, 0x554400), cfg.tiling.border_unfocused);
+    // alternative_color is itself a palette-declared mix (50/50); bar.colors
+    // `title` references it through the collected palette.
+    try testing.expectEqual(@as(u32, 0x554400), cfg.bar.title_accent_color);
+    // [bar.colors] segment mix: 60% primary + 40% secondary
+    //   r = (10200 + 50)/100 = 102 (0x66), g = (5440 + 50)/100 = 54 (0x36).
+    try testing.expectEqual(@as(u32, 0x663600), cfg.bar.segmentFg("cpu"));
+    // A plain palette reference through the same path stays literal.
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("mem"));
+}
+
+test "color-mix: over-budget and head weights revert to the default" {
+    // primary_color +(weight:150%) secondary_color sums past 100; the head
+    // operand may never carry a weight. Both shape as valid TOML but invalid
+    // mixes, so each knob warn-and-reverts to its default color.
+    var cfg = try loadToml(testing.allocator, "mix-bad-weight",
+        \\[tiling]
+        \\[tiling.aesthetics]
+        \\border_focused   = primary_color +(weight:150%) secondary_color
+        \\border_unfocused = (weight:60%)primary_color + secondary_color
+        \\
+        \\[bar]
+        \\primary_color   = "#aa0000"
+        \\secondary_color = "#008800"
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0x5294E2), cfg.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0x383C4A), cfg.tiling.border_unfocused);
 }

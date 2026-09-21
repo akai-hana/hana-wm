@@ -43,23 +43,25 @@ test "borderColorOf picks focused vs unfocused pixel" {
 
 test "member of a workspace without a covering occupant keeps its color" {
     var m = try modelWithTiled(ws0);
-    try std.testing.expect(!borders.coveredByOccupant(&m, 10, false, ws0, true));
+    try std.testing.expect(!borders.coveredByOccupant(&m, 10, ws0, true));
 }
 
 test "member of a workspace with a covering occupant renders borderless" {
     var m = try modelWithTiled(ws1);
     try model.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
-    try std.testing.expect(borders.coveredByOccupant(&m, 10, false, ws0, true));
+    try std.testing.expect(borders.coveredByOccupant(&m, 10, ws0, true));
 }
 
-test "covering-mode member follows its capture anchor over blended tags" {
+test "member is covered by an occupant anchored to its home over blended tags" {
     var m = try modelWithTiled(ws1);
     try model.register(&m, 20, ws0);
-    // 20 is tagged on ws0 but covering-anchors to ws1: the rule must follow
-    // the covering anchor, not the tagged home.
+    // 20 is tagged on ws0 but covering-anchors to ws1 (a blended window):
+    // the rule resolves WIN's home (ws1, where 10 lives) and sees the
+    // anchored occupant there, going borderless -- it does not chase the
+    // occupant's tag-mask home.
     setCovering(&m, 20, ws1);
-    try std.testing.expect(borders.coveredByOccupant(&m, 10, true, ws0, true));
+    try std.testing.expect(borders.coveredByOccupant(&m, 10, ws0, true));
 }
 
 test "member of a workspace with only a foreign-anchored occupant keeps its color" {
@@ -67,7 +69,7 @@ test "member of a workspace with only a foreign-anchored occupant keeps its colo
     try model.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
     // 10 lives on ws0; the occupant is anchored to ws1, so nothing covers ws0.
-    try std.testing.expect(!borders.coveredByOccupant(&m, 10, false, ws0, true));
+    try std.testing.expect(!borders.coveredByOccupant(&m, 10, ws0, true));
 }
 
 test "window with no resolvable workspace falls back to the current ws occupant" {
@@ -78,19 +80,20 @@ test "window with no resolvable workspace falls back to the current ws occupant"
     try model.register(&m, 40, ws0);
     setCovering(&m, 40, ws0);
     // No home: the current-ws fallback sees the occupant and goes borderless.
-    try std.testing.expect(borders.coveredByOccupant(&m, 30, false, ws0, true));
+    try std.testing.expect(borders.coveredByOccupant(&m, 30, ws0, true));
     // Without any occupant on the current ws, the fallback keeps the color.
     model.unregister(&m, 40);
-    try std.testing.expect(!borders.coveredByOccupant(&m, 30, false, ws0, true));
+    try std.testing.expect(!borders.coveredByOccupant(&m, 30, ws0, true));
 }
 
-test "fullscreen-absent build ignores the entity's own covering anchor" {
+test "fullscreen-absent build never resolves the current-ws fallback" {
     var m = try modelWithTiled(ws0);
-    try model.register(&m, 20, ws1);
-    setCovering(&m, 20, ws1);
-    // 10 lives on ws0; the occupant anchors ws1. has_fullscreen=false disables
-    // the member's own covering-anchor branch, so home (ws0) wins and no
-    // occupant sits on ws0. (With the anchor enabled -- the mirror shape of the
-    // covering-mode test above -- the same setup resolves to borderless.)
-    try std.testing.expect(!borders.coveredByOccupant(&m, 10, true, ws0, false));
+    _ = m.store.put(30, .{ .mask = 0, .anchor = .tiled }) catch null;
+    detach(&m, 30);
+    try std.testing.expectEqual(null, model.findHome(&m, 30));
+    try model.register(&m, 40, ws0);
+    setCovering(&m, 40, ws0);
+    // No home, but has_fullscreen=false gates the whole covering resolution
+    // off: the window keeps its color despite the current-ws occupant.
+    try std.testing.expect(!borders.coveredByOccupant(&m, 30, ws0, false));
 }

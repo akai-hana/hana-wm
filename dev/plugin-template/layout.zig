@@ -20,7 +20,7 @@
 //! The placement machinery (View/List/emit helpers) lives in the tiling
 //! engine — import it with `@import("tiling")`; the engine never imports
 //! your module (the registry dispatch is the one edge). Mirror the shipped
-//! modules, not this template alone: grid.zig is the least complex real
+//! modules, not this template alone: monocle.zig is the least complex real
 //! layout, master.zig the reference one — the template below must always
 //! compile against the same `tiling` API they use.
 
@@ -31,7 +31,7 @@ const tiling = @import("tiling");
 /// append exactly one placement per window in `v.order` — either a real
 /// placement (`tiling.emitView`) or a parked one (`tiling.emitHidden`).
 /// Origin top-left, y-down; use the engine's `outerArea`/`shrinkClamped`/
-/// `waY` helpers (see grid.zig, the least complex shipped layout).
+/// `waY` helpers (see monocle.zig, the smallest shipped layout).
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     if (v.order.len == 0) return;
 

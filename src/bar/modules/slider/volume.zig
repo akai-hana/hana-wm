@@ -184,35 +184,36 @@ fn commitPct(v: u8) void {
     }
 }
 
-/// Applies a state change, then re-reads so the display follows the sink
-/// immediately rather than on the next poll tick. One-shot callers only
-/// (press, drag end): the scroll/drag motion paths use the core's preview +
-/// throttle and their own optimistic display.
+const level = slider.Level{ .pct = &g_pct, .commit = commitPct, .reread = readVolume };
+
+/// One-shot apply (press, drag end): commit then re-read so the display
+/// follows the sink immediately rather than on the next poll tick. The
+/// scroll/drag motion paths use the core's preview + throttle and their own
+/// optimistic display.
 fn applyPct(v: u8) void {
-    commitPct(v);
-    _ = readVolume();
+    level.apply(v);
 }
 
 /// Optimistic display update from a scroll/drag motion: the label follows
 /// immediately while the backend write is committed by the core's scheduler.
 fn previewPct(v: u8) void {
-    g_pct = v;
+    level.preview(v);
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}` and
-/// `{state}` placeholder, and returns the text; a truncated tail is still a
-/// complete, scan-safe string.
-fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) []const u8 {
+/// `{state}` placeholder, and returns the text (plus the numeric region); a
+/// truncated tail is still a complete, scan-safe string.
+fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) slider.Label {
     const fmt = if (muted)
         (config.volume_muted_format orelse default_muted_format)
     else
         (config.volume_format orelse default_format);
     const state: []const u8 = if (muted) "mute" else "unmute";
-    return slider.renderLine(fmt, g_pct, state, buf);
+    return slider.renderLineValue(fmt, g_pct, state, buf);
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-fn label(config: types.BarConfig, buf: []u8) []const u8 {
+fn label(config: types.BarConfig, buf: []u8) slider.Label {
     return renderDisplay(config, g_muted, buf);
 }
 
@@ -241,7 +242,7 @@ fn toggleMute() void {
 
 // Current displayed level / write-gate hooks for the core.
 fn currentPct() u8 {
-    return g_pct;
+    return level.current();
 }
 
 fn writable() bool {
@@ -281,9 +282,11 @@ test "label honors configuration" {
     var buf: [128]u8 = undefined;
     g_pct = 42;
     g_muted = false;
-    try testing.expectEqualStrings("Level 42", label(&cfg, &buf));
+    try testing.expectEqualStrings("Level 42", label(&cfg, &buf).text);
+    try testing.expectEqualStrings("42", label(&cfg, &buf).value.?);
     g_muted = true;
-    try testing.expectEqualStrings("Silenced mute", label(&cfg, &buf));
+    try testing.expectEqualStrings("Silenced mute", label(&cfg, &buf).text);
+    try testing.expect(label(&cfg, &buf).value == null);
     g_muted = false;
 }
 
@@ -291,8 +294,9 @@ test "label default formats" {
     var buf: [128]u8 = undefined;
     g_pct = 33;
     g_muted = false;
-    try testing.expectEqualStrings("VOL 33%", label(&(types.BarConfig{}), &buf));
+    try testing.expectEqualStrings("VOL 33%", label(&(types.BarConfig{}), &buf).text);
+    try testing.expectEqualStrings("33%", label(&(types.BarConfig{}), &buf).value.?);
     g_muted = true;
-    try testing.expectEqualStrings("MUTE", label(&(types.BarConfig{}), &buf));
+    try testing.expectEqualStrings("MUTE", label(&(types.BarConfig{}), &buf).text);
     g_muted = false;
 }

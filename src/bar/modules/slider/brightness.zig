@@ -303,26 +303,26 @@ fn commitPct(v: u8) void {
     g_read_only = !ok;
 }
 
-/// Applies a state change, then re-reads so the display follows the device
-/// immediately rather than on the next poll tick. One-shot callers only
-/// (press, drag end).
+const level = slider.Level{ .pct = &g_pct, .commit = commitPct, .reread = readBrightness };
+
+/// One-shot apply (press, drag end): commit then re-read so the display
+/// follows the device immediately rather than on the next poll tick.
 fn applyPct(v: u8) void {
-    commitPct(v);
-    _ = readBrightness();
+    level.apply(v);
 }
 
 /// Optimistic display update from a scroll/drag motion: the label follows
 /// immediately while the backend write is committed by the core's scheduler.
 fn previewPct(v: u8) void {
-    g_pct = v;
+    level.preview(v);
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}`
-/// placeholder, and returns the text; a truncated tail is still a complete,
-/// scan-safe string.
-fn renderDisplay(config: types.BarConfig, pct: u8, buf: []u8) []const u8 {
+/// placeholder, and returns the text (plus the numeric region); a truncated
+/// tail is still a complete, scan-safe string.
+fn renderDisplay(config: types.BarConfig, pct: u8, buf: []u8) slider.Label {
     const fmt = config.brightness_format orelse default_format;
-    return slider.renderLine(fmt, pct, null, buf);
+    return slider.renderLineValue(fmt, pct, null, buf);
 }
 
 /// Copies the config's `brightness_device` pin into the owned buffer (config
@@ -334,14 +334,14 @@ fn cacheConfigPin(config: types.BarConfig) void {
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-fn label(config: types.BarConfig, buf: []u8) []const u8 {
+fn label(config: types.BarConfig, buf: []u8) slider.Label {
     cacheConfigPin(config);
     return renderDisplay(config, g_pct, buf);
 }
 
 // Current level / presence / write-gate hooks for the core.
 fn currentPct() u8 {
-    return g_pct;
+    return level.current();
 }
 
 fn hasValue() bool {
@@ -397,11 +397,13 @@ test "label honors configuration" {
     cfg.brightness_format = "Level {pct}";
     var buf: [128]u8 = undefined;
     g_pct = 42;
-    try testing.expectEqualStrings("Level 42", label(&cfg, &buf));
+    try testing.expectEqualStrings("Level 42", label(&cfg, &buf).text);
+    try testing.expectEqualStrings("42", label(&cfg, &buf).value.?);
 }
 
 test "label default format" {
     var buf: [128]u8 = undefined;
     g_pct = 33;
-    try testing.expectEqualStrings("BRT 33%", label(&(types.BarConfig{}), &buf));
+    try testing.expectEqualStrings("BRT 33%", label(&(types.BarConfig{}), &buf).text);
+    try testing.expectEqualStrings("33%", label(&(types.BarConfig{}), &buf).value.?);
 }

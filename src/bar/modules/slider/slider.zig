@@ -72,11 +72,11 @@ const max_cadence_ms: i64 = 5000;
 /// blocks the WM's event loop for ~1-5 ms, so a per-event spawn throttled the
 /// whole WM under a fast drag or scroll; coalescing onto the newest value
 /// keeps a sweep to at most one spawn per window. Native commits ignore it.
-pub const throttle_ms: i64 = 80;
+const throttle_ms: i64 = 80;
 
 /// The WM's single time base: monotonic-ish wall time in ms.
 pub fn nowMs() i64 {
-    return @intCast(utils.realtimeNs() / std.time.ns_per_ms);
+    return utils.realtimeMs();
 }
 
 /// Commit scheduler for scroll/drag events, shared by every slider control. A
@@ -130,6 +130,37 @@ pub const Throttle = struct {
     }
 };
 
+/// Shared scalar-level plumbing for the Sub contract's `apply`/`preview`/
+/// `pct` hooks: one-shot commit-then-reread, optimistic preview, current
+/// read. A control backs its three hooks off its own level storage and
+/// commit/reread pair (only the reread source differs across controls).
+pub const Level = struct {
+    /// The control's displayed 0-100 level (its `g_pct`).
+    pct: *u8,
+    /// The control's backend write.
+    commit: *const fn (u8) void,
+    /// The control's post-commit re-read (sink/device truth).
+    reread: *const fn () bool,
+
+    /// One-shot apply: commit then re-read so the display follows the sink
+    /// immediately rather than on the next poll tick (press, drag end).
+    pub fn apply(self: *const Level, v: u8) void {
+        self.commit(v);
+        _ = self.reread();
+    }
+
+    /// Optimistic display update from a scroll/drag motion: the label follows
+    /// immediately while the backend write is committed by the throttle.
+    pub fn preview(self: *const Level, v: u8) void {
+        self.pct.* = v;
+    }
+
+    /// The currently displayed 0-100 level.
+    pub fn current(self: *const Level) u8 {
+        return self.pct.*;
+    }
+};
+
 /// Runs `cmd` via /bin/sh, drains its stdout into `sink` (so `pclose` never
 /// blocks on a full pipe), and reports the bytes captured plus whether the
 /// child exited 0. Null on any failure: the command is too long for the fixed
@@ -161,6 +192,16 @@ pub fn runOk(cmd: []const u8) bool {
     return cap.exit_ok;
 }
 
+/// A rendered slider label plus its numeric value region: the byte subslice of
+/// `text` holding the `{pct}` expansion (plus a directly-attached literal
+/// `%`, so "42%" colors as one number). Null when the format has no number to
+/// color (e.g. volume's muted "MUTE"), in which case the whole label paints in
+/// the segment color.
+pub const Label = struct {
+    text: []const u8,
+    value: ?[]const u8 = null,
+};
+
 /// Renders a control's display `format` into `buf`, substituting every
 /// `{pct}` placeholder with the decimal `pct` and -- when `state` is non-null
 /// -- every `{state}` placeholder with that marker string. A substitution
@@ -168,8 +209,17 @@ pub fn runOk(cmd: []const u8) bool {
 /// complete, scan-safe string. Any other `{...}` passes through literally.
 /// Shared substitution walker for the volume/brightness display formats.
 pub fn renderLine(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) []const u8 {
+    return renderLineValue(format, pct, state, buf).text;
+}
+
+/// Like `renderLine`, but also records the numeric value region of the output
+/// (see `Label.value`) so the segment can paint the number in its `_value`
+/// color. The value is the first `{pct}` expansion plus a literal `%` that
+/// directly follows the placeholder.
+pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) Label {
     var n: usize = 0;
     var i: usize = 0;
+    var value: ?[]const u8 = null;
     while (i < format.len and n < buf.len) {
         if (format[i] == '{') {
             if (state != null and std.mem.startsWith(u8, format[i..], "{state}")) {
@@ -185,6 +235,12 @@ pub fn renderLine(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) []
                 const ps = std.fmt.bufPrint(&b, "{d}", .{pct}) catch break;
                 if (n + ps.len > buf.len) break;
                 @memcpy(buf[n..][0..ps.len], ps);
+                // Extend the number's span through a literal '%' right after
+                // the placeholder (guarded by `n` so the record never points
+                // past the final `text`), coloring "42%" as one number.
+                const ok_percent = i + 5 < format.len and format[i + 5] == '%';
+                const value_len = ps.len + @intFromBool(ok_percent and n + ps.len < buf.len);
+                if (value == null) value = buf[n .. n + value_len];
                 n += ps.len;
                 i += 5;
                 continue;
@@ -194,7 +250,7 @@ pub fn renderLine(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) []
         n += 1;
         i += 1;
     }
-    return buf[0..n];
+    return .{ .text = buf[0..n], .value = value };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,8 +303,9 @@ pub const Sub = struct {
     /// the label follows the sink/device truth.
     apply: *const fn (u8) void,
     /// Renders the idle label into `buf` (control-scoped scratch) from the
-    /// control's own state and config; valid until the next call.
-    label: *const fn (types.BarConfig, []u8) []const u8,
+    /// control's own state and config, plus the label's numeric region;
+    /// valid until the next call.
+    label: *const fn (types.BarConfig, []u8) Label,
     /// Right-click action (volume's mute toggle); null = reserved no-op.
     secondary: ?*const fn () void = null,
     /// Idle width when the control has never laid out (natural-reserve
@@ -258,13 +315,11 @@ pub const Sub = struct {
 
 const Instance = struct {
     /// Latched on the control's first read (the segment's first draw arms
-    /// it). Poll deadlines only count armed instances.
-    armed: bool = false,
+    /// it; see `g_armed`).
     next_read_ms: i64 = 0,
-    /// The control's slot bounds relative to the segment start, from the last
-    /// idle draw (a single-slot segment: always [0, slot_w)): the click
+    /// The control's slot width from the last idle draw (a single-slot
+    /// segment spanning [0, slot_w) at the segment start): the click
     /// hit-test range and the slider denominator.
-    slot_x: u16 = 0,
     slot_w: u16 = 0,
     /// Sub-scoped label scratch, so each control's label stays valid until
     /// its own next draw.
@@ -293,7 +348,7 @@ pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
 /// The slider denominator for control `idx` at pointer `offset` (the single
 /// slot spans [0, slot_w)).
 fn pctAt(idx: usize, offset: u16) u8 {
-    return pctFromSlot(g_inst[idx].slot_x, g_inst[idx].slot_w, offset);
+    return pctFromSlot(0, g_inst[idx].slot_w, offset);
 }
 
 fn present(idx: usize) bool {
@@ -351,10 +406,12 @@ fn naturalWidthFor(idx: usize) u16 {
 
 /// Drag-mode loading bar for one control: paints its whole reserved slot with
 /// a background strip plus a fill (the title segment's minimized accent) and
-/// overlays the live percentage centered in the slot. Returns the slot's far
+/// overlays the live percentage centered in the slot, in the bar-wide fg
+/// (regular text color, not the segment's accent). Returns the slot's far
 /// edge WITHOUT feeding `slot_w`: the label width must survive the scrub so
 /// the drag-end redraw re-renders it in place.
 fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8, sub_name: []const u8) u16 {
+    _ = sub_name;
     const height = dc.height;
     dc.dc.fillRect(x, 0, slot, height, dc.config.bg);
     const pad = @max(@as(u16, 1), dc.config.scaledSegmentPadding(height) / 2);
@@ -367,7 +424,7 @@ fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8, sub_name: []cons
     var b: [8]u8 = undefined;
     if (std.fmt.bufPrint(&b, "{d}", .{pct})) |ps| {
         const tw = dc.dc.measureTextWidth(ps);
-        dc.dc.drawText(x +| slot / 2 -| tw / 2, dc.dc.baselineY(height), ps, dc.config.segmentFg(sub_name)) catch {};
+        dc.dc.drawText(x +| slot / 2 -| tw / 2, dc.dc.baselineY(height), ps, dc.config.fg) catch {};
     } else |_| {}
     return x + slot;
 }
@@ -385,14 +442,13 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     // Absent backend: nothing to show (a zero-width slot, unclickable, never
     // polled past arm); naturalWidth reports 0, so the layout leaves no gap.
     if (!present(idx)) return x;
-    inst.slot_x = 0;
     // While scrubbed the control is a loading bar; the label resumes on the
     // drag-end redraw.
     if (g_drag[idx]) {
         return drawDragBar(dc, x, inst.slot_w, sub.pct(), sub.name);
     }
     const label = sub.label(dc.config, &inst.scratch);
-    const end_x = try drawing.drawPaddedSegment(dc.dc, dc.config, dc.height, x, sub.name, label);
+    const end_x = try drawing.drawPaddedSegmentValue(dc.dc, dc.config, dc.height, x, sub.name, label.text, label.value, dc.config.segmentProps(sub.name));
     // Track the ACTUAL painted width, not the row reservation: the palette
     // must follow the text, or the segment locks onto the startup probe and
     // its neighbors overlap it, forever (matches the widthState collapse

@@ -4,7 +4,22 @@
 const std = @import("std");
 const constants = @import("constants");
 const model = @import("model");
-const parser = @import("parser");
+
+/// A value that can be expressed as either an absolute pixel count or a
+/// percentage of some reference dimension. Defined here (not in the parser)
+/// so the config's field types and the scaling formulas need no parser
+/// import (the parser, in turn, imports types for the section names).
+pub const ScalableValue = struct {
+    value: f32,
+    is_percentage: bool,
+
+    pub inline fn absolute(val: f32) ScalableValue {
+        return .{ .value = val, .is_percentage = false };
+    }
+    pub inline fn percentage(val: f32) ScalableValue {
+        return .{ .value = val, .is_percentage = true };
+    }
+};
 
 /// X11 color value packed as 0x00RRGGBB into 32 bits.
 /// The high byte is unused; values match what XCB expects for pixel/color fields.
@@ -14,12 +29,25 @@ pub const Color = u32;
 /// in-range-integer color checks in the parser's single color decoder.
 pub const max_color: u32 = 0xFF_FF_FF;
 
+/// Per-segment text style flags, settable in `[bar.properties].<segment>`
+/// alongside (or without) a color override. Painted via Pango text attributes
+/// (underline / bold weight / italic style); all default to false.
+pub const SegmentProps = struct {
+    underline: bool = false,
+    bold: bool = false,
+    italic: bool = false,
+
+    pub fn isDefault(self: SegmentProps) bool {
+        return !self.underline and !self.bold and !self.italic;
+    }
+};
+
 /// Config-file section names shared by the parser, the schema's placement
 /// tables, and the config interpreter's sweeps. Single-sourced so a spelling
 /// change (and the case-typo sweep that keys on these) updates one place.
 pub const section_tiling = "tiling";
 pub const section_bar = "bar";
-pub const section_bar_colors = "bar.colors";
+pub const section_bar_properties = "bar.properties";
 pub const section_rules = "rules";
 pub const section_workspace_rules = "workspace.rules";
 pub const section_tiling_aesthetics = "tiling.aesthetics";
@@ -183,19 +211,23 @@ pub const WorkspaceMasterCountOverride = struct {
     count: u8,
 };
 
+/// Canonical name of the master layout module. Every "master-stack"/
+/// "master_stack" alias folds onto this at the config boundary.
+pub const canon_master_layout = "master";
+
 pub const TilingConfig = struct {
     enabled: bool = true,
     /// Canonical default layout name (resolved at seed time against the
     /// `tiling_modules` registry). The "master-stack"/"master_stack" alias
-    /// spellings in config are canonicalized onto "master" by the config
-    /// boundary, so the stored value is always canonical.
-    layout: []const u8 = "master",
+    /// spellings in config are canonicalized onto the canonical name by the
+    /// config boundary, so the stored value is always canonical.
+    layout: []const u8 = canon_master_layout,
     layouts: std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
     master_side: MasterSide = .left,
-    master_width: parser.ScalableValue = parser.ScalableValue.percentage(50.0),
+    master_width: ScalableValue = ScalableValue.percentage(50.0),
     master_count: u8 = 1,
-    gap_width: parser.ScalableValue = parser.ScalableValue.absolute(10.0),
-    border_width: parser.ScalableValue = parser.ScalableValue.absolute(2.0),
+    gap_width: ScalableValue = ScalableValue.absolute(10.0),
+    border_width: ScalableValue = ScalableValue.absolute(2.0),
     border_focused: Color = default_focused_border,
     border_unfocused: Color = default_unfocused_border,
     /// Smallest on-screen width/height a tiled window (and floating drag
@@ -252,7 +284,7 @@ pub const TilingConfig = struct {
     pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
         for (self.layouts.items) |layout| allocator.free(layout);
         self.layouts.deinit(allocator);
-        freeStringMap(&self.variants, allocator, false);
+        freeStringMap(&self.variants, allocator, free_storage);
         for (self.workspace_layout_overrides.items) |o| {
             if (o.variant) |v| allocator.free(v);
         }
@@ -356,6 +388,13 @@ pub const default_drun_prompt: []const u8 = "run: ";
 pub const default_indicator_focused: []const u8 = "■";
 pub const default_indicator_unfocused: []const u8 = "□";
 
+/// Meanings for the free helpers' `retain_capacity` argument: `keep_capacity`
+/// reuses backing storage (a config reload repopulates the same lists), while
+/// `free_storage` deinits it (full teardown). A named spelling beats a bare
+/// boolean at every call site.
+pub const keep_capacity = true;
+pub const free_storage = false;
+
 /// Frees every owned string in `list`, then either deinits or clears the
 /// list depending on `retain_capacity`. Shared by `BarConfig.deinit`
 /// (full teardown) and config reload (reuse backing storage).
@@ -392,7 +431,7 @@ pub inline fn freeBarLayouts(
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }
 
-/// Frees the owned segment-name keys of a [bar.colors] segment-color map,
+/// Frees the owned segment-name keys of a [bar.properties] segment-color map,
 /// then deinits the map itself. Values are scalars (colors); only keys need
 /// freeing.
 pub fn freeSegmentColors(
@@ -408,6 +447,20 @@ pub fn freeSegmentColors(
     map.* = .empty;
 }
 
+/// Frees the owned segment-name keys of the [bar.properties] segment-style
+/// map, then deinits the map itself. Values are scalars (SegmentProps); only
+/// keys need freeing. Mirrors freeSegmentColors, including the deinit reset
+/// so a config reload can reuse the field.
+pub fn freeSegmentProps(
+    map: *std.StringHashMapUnmanaged(SegmentProps),
+    allocator: std.mem.Allocator,
+) void {
+    var it = map.iterator();
+    while (it.next()) |e| allocator.free(e.key_ptr.*);
+    map.deinit(allocator);
+    map.* = .empty;
+}
+
 pub const BarConfig = struct {
     enabled: bool = true,
 
@@ -419,10 +472,10 @@ pub const BarConfig = struct {
     bar_position: BarScreenPosition = .top,
     // Configured bar height: absolute pixel value or percentage of screen height.
     // null = auto-calculate from font metrics alone.
-    height: ?parser.ScalableValue = null,
+    height: ?ScalableValue = null,
     fonts: std.ArrayList([]const u8) = .empty,
-    font_size: parser.ScalableValue = parser.ScalableValue.percentage(10.0),
-    spacing: parser.ScalableValue = parser.ScalableValue.absolute(12.0),
+    font_size: ScalableValue = ScalableValue.percentage(10.0),
+    spacing: ScalableValue = ScalableValue.absolute(12.0),
 
     // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
     bg: Color = default_bar_bg,
@@ -443,8 +496,8 @@ pub const BarConfig = struct {
     title_minimized_accent: Color = default_accent,
 
     workspace_icons: std.ArrayList([]const u8) = .empty,
-    indicator_size: parser.ScalableValue = parser.ScalableValue.percentage(30.0),
-    workspace_tag_width: parser.ScalableValue = parser.ScalableValue.percentage(100.0),
+    indicator_size: ScalableValue = ScalableValue.percentage(30.0),
+    workspace_tag_width: ScalableValue = ScalableValue.percentage(100.0),
 
     indicator_location: IndicatorLocation = .up_left,
     indicator_padding: f32 = 0.1,
@@ -485,12 +538,26 @@ pub const BarConfig = struct {
 
     /// Per-segment text-color overrides, keyed by bar segment registry name
     /// ("cpu", "mem", "volume", "brightness", ...). Populated from
-    /// `[bar.colors].<segment>` entries; a segment with no entry paints its
+    /// `[bar.properties].<segment>` entries; a segment with no entry paints its
     /// text in `fg` (see `segmentFg`). Colors for absent segments are
     /// tolerated and simply never match a live segment, so a theme may carry
     /// a full readout palette up front. Keys are owned (duped) once; freed
     /// in deinit.
     segment_fg: std.StringHashMapUnmanaged(Color) = .empty,
+    /// Per-segment NUMBER-color overrides, keyed by bar segment registry
+    /// name. Populated from `[bar.properties].<segment>_value` entries; a
+    /// segment with no entry paints its number in the segment color
+    /// (`segmentValueFg` falls back to `segmentFg`), so the
+    /// readout/slider label-vs-number split is opt-in per theme. Keys are
+    /// owned (duped) once; freed in deinit.
+    segment_value_fg: std.StringHashMapUnmanaged(Color) = .empty,
+    /// Per-segment style flags (underline/bold/italic), keyed by bar segment
+    /// registry name. Populated from the `[bar.properties].<segment>` entry
+    /// (the same entry that may carry the color override); a segment with no
+    /// entry draws plain text (see `segmentProps`). The flags apply to the
+    /// whole segment, label and number alike. Keys are owned (duped) once;
+    /// freed in deinit.
+    segment_props: std.StringHashMapUnmanaged(SegmentProps) = .empty,
 
     layout: std.ArrayList(BarLayout) = .empty,
 
@@ -500,10 +567,12 @@ pub const BarConfig = struct {
     // (each set via schema.assignStr which always dupes). If one mirrors
     // the other, both point to separate allocations. Do not bypass assignStr.
     pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
-        freeStrings(&self.workspace_icons, allocator, false);
-        freeStrings(&self.fonts, allocator, false);
-        freeBarLayouts(&self.layout, allocator, false);
+        freeStrings(&self.workspace_icons, allocator, free_storage);
+        freeStrings(&self.fonts, allocator, free_storage);
+        freeBarLayouts(&self.layout, allocator, free_storage);
         freeSegmentColors(&self.segment_fg, allocator);
+        freeSegmentColors(&self.segment_value_fg, allocator);
+        freeSegmentProps(&self.segment_props, allocator);
         inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format, &self.brightness_format, &self.brightness_device }) |f| if (f.*) |s| allocator.free(s);
     }
 
@@ -517,10 +586,23 @@ pub const BarConfig = struct {
         return self.drun_prompt_color orelse self.primary_color;
     }
 
-    /// Text color for bar segment `name`: its [bar.colors] override, or the
-    /// bar-wide `fg` when none is set.
+    /// Text color for bar segment `name`: its [bar.properties] override, or
+    /// the bar-wide `fg` when none is set.
     pub inline fn segmentFg(self: *const BarConfig, name: []const u8) Color {
         return self.segment_fg.get(name) orelse self.fg;
+    }
+
+    /// Number text color for bar segment `name`: its [bar.properties]
+    /// `<name>_value` override, else the segment color (`segmentFg`) so a
+    /// segment without a `_value` entry colors its number like its label.
+    pub inline fn segmentValueFg(self: *const BarConfig, name: []const u8) Color {
+        return self.segment_value_fg.get(name) orelse self.segmentFg(name);
+    }
+
+    /// Style flags for bar segment `name`: its [bar.properties] underline/
+    /// bold/italic overrides, or all-false plain text when none is set.
+    pub inline fn segmentProps(self: *const BarConfig, name: []const u8) SegmentProps {
+        return self.segment_props.get(name) orelse .{};
     }
 
     /// Derives horizontal segment padding from font_size.
@@ -537,7 +619,7 @@ pub const BarConfig = struct {
     }
 
     /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path.
-    inline fn scaleValue(sv: parser.ScalableValue, bar_height: u16, factor: f32) f32 {
+    inline fn scaleValue(sv: ScalableValue, bar_height: u16, factor: f32) f32 {
         const h: f32 = @floatFromInt(bar_height);
         return if (sv.is_percentage) h * factor * (sv.value / 100.0) else sv.value;
     }
@@ -608,7 +690,7 @@ pub const Config = struct {
 
     /// How close (in px or %) a window edge must be to a monitor/bar boundary
     /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
-    snap_distance: parser.ScalableValue = parser.ScalableValue.absolute(8.0),
+    snap_distance: ScalableValue = ScalableValue.absolute(8.0),
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(allocator);

@@ -30,7 +30,7 @@ const Claim = struct {
 // screen space; a future surface adds its own slot here (and its own id
 // constant), keeping the ledger fully comptime-sized (no allocation, no
 // runtime registration).
-pub const max_claims = if (build_options.has_bar) 1 else 0;
+const max_claims = if (build_options.has_bar) 1 else 0;
 
 // The bar is surface id 0 (present only when has_bar).
 pub const bar_id: ?u8 = if (build_options.has_bar) 0 else null;

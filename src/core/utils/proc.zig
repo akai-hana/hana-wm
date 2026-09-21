@@ -23,7 +23,7 @@ var signal_write_fd: std.posix.fd_t = -1;
 /// be a real signal number: `signals.drainAndDispatch` dispatches every byte
 /// it reads, and re-dispatching the wake byte as SIGHUP would make the drain
 /// loop call `reload()` again; writing another wake byte and spinning forever.
-pub const wake_byte: u8 = 0xff;
+const wake_byte: u8 = 0xff;
 
 /// Registers the write end of the signal self-pipe so `reload()` can wake the
 /// event loop. Pass -1 to unregister (teardown).

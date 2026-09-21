@@ -42,12 +42,13 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 
     // Refuse-before-mutate: full destination list cancels the move.
     const h: ?model.WSId = e.home_ws;
-    if (h) |old_h| if (!old_h.eql(ws) and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
+    const to_new_ws = h == null or !h.?.eql(ws);
+    if (h != null and to_new_ws and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
 
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
     if (h) |old_h| {
-        if (!old_h.eql(ws)) {
+        if (to_new_ws) {
             model.removeValue(&m.ws[old_h.index].tiled_order, win);
             _ = m.ws[ws.index].tiled_order.append(win);
             e.home_ws = ws;

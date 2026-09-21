@@ -259,7 +259,7 @@ const CommitFlags = struct {
     new_suppress: core.FocusSuppressReason,
 };
 
-// Two-phase focus protocol (Gap 1 atomicity fix)
+// Two-phase focus protocol (focus protocol + geometry land under one grab)
 //
 // Some actions need focus protocol + geometry to land under one server grab.
 // The existing `setFocus`/`clearFocus` path does round trips (input-model

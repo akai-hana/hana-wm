@@ -72,6 +72,8 @@ pub const PangoLayout = opaque {};
 pub const PangoContext = opaque {};
 pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics = opaque {};
+pub const PangoAttrList = opaque {};
+pub const PangoAttribute = opaque {};
 
 /// Divide Pango units by pango_scale to get pixels.
 pub const pango_scale: c_int = 1024;
@@ -131,6 +133,53 @@ pub extern fn pango_context_get_metrics(
 pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
 pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
+
+/// Numeric values match the C ABI; do not change them.
+pub const pango_underline_t = enum(c_int) {
+    NONE = 0,
+    SINGLE = 1,
+    DOUBLE = 2,
+    LOW = 3,
+    ERROR = 4,
+};
+
+/// Numeric values match the C ABI; do not change them.
+pub const pango_weight_t = enum(c_int) {
+    THIN = 100,
+    LIGHT = 300,
+    NORMAL = 400,
+    MEDIUM = 500,
+    SEMIBOLD = 600,
+    BOLD = 700,
+    ULTRABOLD = 800,
+    HEAVY = 900,
+};
+
+/// Numeric values match the C ABI; do not change them.
+pub const pango_style_t = enum(c_int) {
+    NORMAL = 0,
+    OBLIQUE = 1,
+    ITALIC = 2,
+};
+
+/// Gives a layout permanently owned, non-default typographic attributes.
+/// style attrs applied with `pango_layout_set_attributes`.
+
+pub extern fn pango_attr_underline_new(underline: pango_underline_t) ?*PangoAttribute;
+pub extern fn pango_attr_weight_new(weight: pango_weight_t) ?*PangoAttribute;
+pub extern fn pango_attr_style_new(style: pango_style_t) ?*PangoAttribute;
+
+/// An attribute list owns its attributes; every attribute `insert`-ed must
+/// NOT be freed by the caller.
+pub extern fn pango_attr_list_new() ?*PangoAttrList;
+pub extern fn pango_attr_list_insert(list: *PangoAttrList, attr: *PangoAttribute) void;
+pub extern fn pango_attr_list_unref(list: *PangoAttrList) void;
+pub extern fn pango_layout_set_attributes(layout: *PangoLayout, attrs: ?*PangoAttrList) void;
+
+/// The Pango layout does NOT take ownership of the list; the list must stay
+/// alive while set, and be unref'd afterwards. This module's styled-draw
+/// helpers pair `applyStyleProps`/`restoreStyleProps` around a draw to keep
+/// that lifetime explicit.
 
 // GLib / GObject
 
@@ -257,6 +306,39 @@ inline fn showLayoutAtBaseline(
     pango_cairo_show_layout(ctx, layout);
 }
 
+/// Builds a one-shot attribute list encoding the non-default flags of `props`
+/// (underline, bold, italic), or null when no flags are set. The caller owns
+/// the returned list and must unref it (pango_attr_list_unref) once detached
+/// from the layout.
+fn buildStyleAttrs(props: types.SegmentProps) ?*PangoAttrList {
+    if (props.isDefault()) return null;
+    const list = pango_attr_list_new() orelse return null;
+    // On a partial attribute-creation failure, unref the list (which frees
+    // any attrs already inserted) and degrade to unstyled drawing.
+    if (props.underline) {
+        const attr = pango_attr_underline_new(.SINGLE) orelse {
+            pango_attr_list_unref(list);
+            return null;
+        };
+        pango_attr_list_insert(list, attr);
+    }
+    if (props.bold) {
+        const attr = pango_attr_weight_new(.BOLD) orelse {
+            pango_attr_list_unref(list);
+            return null;
+        };
+        pango_attr_list_insert(list, attr);
+    }
+    if (props.italic) {
+        const attr = pango_attr_style_new(.ITALIC) orelse {
+            pango_attr_list_unref(list);
+            return null;
+        };
+        pango_attr_list_insert(list, attr);
+    }
+    return list;
+}
+
 pub const DrawContext = struct {
     font: FontState,
     conn: core.Connection,
@@ -294,9 +376,6 @@ pub const DrawContext = struct {
     /// Tracks the font description currently set on the Pango layout so
     /// drawTextSized can skip the set/restore pair when reusing the same sized font.
     layout_font: ?*PangoFontDescription = null,
-
-    /// Actual pixel depth of the offscreen pixmap: 32 for ARGB, screen root_depth otherwise.
-    depth: u8 = 24,
 
     pub fn initWithVisual(
         allocator: std.mem.Allocator,
@@ -356,7 +435,6 @@ pub const DrawContext = struct {
                 @intFromFloat(@round(std.math.clamp(transparency, 0.0, 1.0) * 255.0))
             else
                 0xFF,
-            .depth = depth,
         };
 
         // Fire both GC-create requests before blocking on either reply so both
@@ -557,6 +635,68 @@ pub const DrawContext = struct {
         return @intCast(w);
     }
 
+    /// Builds the attribute list encoding `props`' non-default flags (or empty
+    /// for default props), optionally voiding any attached list, and applies
+    /// it to this context's layout. Returns the list (owned by the caller,
+    /// paired with restoreStyleProps) or null.
+    inline fn applyStyleProps(self: *DrawContext, props: types.SegmentProps) ?*PangoAttrList {
+        const list = buildStyleAttrs(props);
+        pango_layout_set_attributes(self.font.pango_layout, list);
+        return list;
+    }
+
+    /// Detaches and unrefs `list` (if any) after a styled draw so the layout
+    /// returns to the base font state.
+    inline fn restoreStyleProps(self: *DrawContext, list: ?*PangoAttrList) void {
+        pango_layout_set_attributes(self.font.pango_layout, null);
+        if (list) |l| pango_attr_list_unref(l);
+    }
+
+    /// Measures `text` with the styling of `props` applied, exactly matching
+    /// how a styled draw will render it (bold/italic glyphs are wider).
+    pub fn measureTextWidthStyled(self: *DrawContext, text: []const u8, props: types.SegmentProps) u16 {
+        const list = self.applyStyleProps(props);
+        defer self.restoreStyleProps(list);
+        return self.measureTextWidth(text);
+    }
+
+    /// Like `drawText`, but `text` is drawn with `props`' Pango styling.
+    pub fn drawTextStyled(
+        self: *DrawContext,
+        x: u16,
+        y: u16,
+        text: []const u8,
+        color: u32,
+        props: types.SegmentProps,
+    ) !void {
+        try self.drawTextImplStyled(x, y, text, null, color, props);
+    }
+
+    /// Shared styled text rendering: apply style props, set pango text,
+    /// optionally ellipsize to `max_width`, paint at baseline.
+    inline fn drawTextImplStyled(
+        self: *DrawContext,
+        x: u16,
+        y: u16,
+        text: []const u8,
+        max_width: ?u16,
+        color: u32,
+        props: types.SegmentProps,
+    ) !void {
+        const list = self.applyStyleProps(props);
+        defer self.restoreStyleProps(list);
+        self.setPangoText(text);
+        if (max_width) |w| {
+            pango_layout_set_width(self.font.pango_layout, @as(i32, w) * pango_scale);
+            pango_layout_set_ellipsize(self.font.pango_layout, PangoEllipsizeMode.END);
+        }
+        defer if (max_width != null) {
+            pango_layout_set_width(self.font.pango_layout, -1);
+            pango_layout_set_ellipsize(self.font.pango_layout, PangoEllipsizeMode.NONE);
+        };
+        self.paintText(x, y, color);
+    }
+
     /// Shared blit body: cairo_surface_flush + xcb_copy_area of [x, x+w),
     /// plus an immediate xcb_flush only for blitRegion. queueBlit must NOT
     /// flush here: it is safe inside xcb_grab_server precisely because the
@@ -615,6 +755,27 @@ pub const DrawContext = struct {
         return x + width;
     }
 
+    /// Like `drawSegment`, but draws `text` with `props`' Pango styling; the
+    /// width is measured with the style applied so bold/italic widths reserve
+    /// the right slot.
+    pub fn drawSegmentStyled(
+        self: *DrawContext,
+        x: u16,
+        height: u16,
+        text: []const u8,
+        padding: u16,
+        bg: u32,
+        fg: u32,
+        props: types.SegmentProps,
+    ) !u16 {
+        const list = self.applyStyleProps(props);
+        defer self.restoreStyleProps(list);
+        const width: u16 = self.measureTextWidth(text) + padding * 2;
+        self.fillRect(x, 0, width, height, bg);
+        self.paintText(x + padding, self.baselineY(height), fg);
+        return x + width;
+    }
+
     /// Like `drawSegment`, but the background always spans at least `min_w`
     /// text pixels (plus padding), so a segment whose content shrank in a
     /// region-scoped repaint still wipes the whole reserved slot.
@@ -634,12 +795,34 @@ pub const DrawContext = struct {
         self.paintText(x + padding, self.baselineY(height), fg);
         return x + width;
     }
+
+    /// Like `drawSegmentMin`, but styled.
+    pub fn drawSegmentMinStyled(
+        self: *DrawContext,
+        x: u16,
+        height: u16,
+        text: []const u8,
+        padding: u16,
+        bg: u32,
+        fg: u32,
+        min_w: u16,
+        props: types.SegmentProps,
+    ) !u16 {
+        const list = self.applyStyleProps(props);
+        defer self.restoreStyleProps(list);
+        const text_w = self.measureTextWidth(text);
+        const width: u16 = @max(text_w, min_w) + padding * 2;
+        self.fillRect(x, 0, width, height, bg);
+        self.paintText(x + padding, self.baselineY(height), fg);
+        return x + width;
+    }
 };
 
 /// Draws `text` at `x` using the config's scaled segment padding and bar
-/// colors (a `[bar.colors]` override for segment `segment_name` when set, bar
-/// `fg` otherwise). Collapses the identical drawSegment argument list the
-/// icon-ish segment modules (layout, variants, clock) would otherwise repeat.
+/// colors (a `[bar.properties]` override for segment `segment_name` when set,
+/// bar `fg` otherwise), optionally with `props`' Pango styling. Collapses the
+/// identical drawSegment argument list the icon-ish segment modules (layout,
+/// variants, clock) would otherwise repeat.
 pub fn drawPaddedSegment(
     dc: *DrawContext,
     config: types.BarConfig,
@@ -647,15 +830,69 @@ pub fn drawPaddedSegment(
     x: u16,
     segment_name: []const u8,
     text: []const u8,
+    props: types.SegmentProps,
 ) !u16 {
-    return dc.drawSegment(
+    return dc.drawSegmentStyled(
         x,
         height,
         text,
         config.scaledSegmentPadding(height),
         config.bg,
         config.segmentFg(segment_name),
+        props,
     );
+}
+
+/// Like `drawPaddedSegment`, but paints the `value` subslice of `text` (the
+/// numeric readout, e.g. "42%") in the segment's NUMBER color -- the
+/// `[bar.properties] <segment>_value` override (`segmentValueFg`), falling
+/// back to the segment foreground -- and everything else in the segment
+/// foreground. Collapses into `drawPaddedSegment` behavior when `value` is
+/// null or not a subslice of `text`. The width comes from the whole string,
+/// exactly like `drawSegment`, so a segment's reserved slot never changes when
+/// a value color is added.
+pub fn drawPaddedSegmentValue(
+    dc: *DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    x: u16,
+    segment_name: []const u8,
+    text: []const u8,
+    value: ?[]const u8,
+    props: types.SegmentProps,
+) !u16 {
+    const padding = config.scaledSegmentPadding(height);
+    const list = dc.applyStyleProps(props);
+    defer dc.restoreStyleProps(list);
+    const width: u16 = dc.measureTextWidth(text) + padding * 2;
+    dc.fillRect(x, 0, width, height, config.bg);
+    const baseline = dc.baselineY(height);
+    if (value) |v| {
+        // `value` must live inside `text` (both callers pass a slice of it);
+        // anything else draws the whole text in the segment color.
+        const v_a: usize = @intFromPtr(v.ptr);
+        const t_a: usize = @intFromPtr(text.ptr);
+        const in_bounds = v.len <= text.len and v_a >= t_a and v_a + v.len <= t_a + text.len;
+        if (in_bounds) {
+            const start: usize = @intFromPtr(v.ptr) - @intFromPtr(text.ptr);
+            const fg = config.segmentFg(segment_name);
+            const value_fg = config.segmentValueFg(segment_name);
+            const parts = [_]struct { text: []const u8, color: u32 }{
+                .{ .text = text[0..start], .color = fg },
+                .{ .text = v, .color = value_fg },
+                .{ .text = text[start + v.len ..], .color = fg },
+            };
+            var cursor: u16 = x + padding;
+            for (parts) |part| {
+                if (part.text.len == 0) continue;
+                try dc.drawText(cursor, baseline, part.text, part.color);
+                cursor +|= dc.measureTextWidth(part.text);
+            }
+            return x + width;
+        }
+    }
+    try dc.drawText(x + padding, baseline, text, config.segmentFg(segment_name));
+    return x + width;
 }
 
 /// Like `drawPaddedSegment`, but the background fill always spans at least
@@ -671,9 +908,12 @@ pub fn drawPaddedSegmentCovering(
     segment_name: []const u8,
     text: []const u8,
     cover_text: []const u8,
+    props: types.SegmentProps,
 ) !u16 {
     const padding = config.scaledSegmentPadding(height);
-    return dc.drawSegmentMin(
+    const list = dc.applyStyleProps(props);
+    defer dc.restoreStyleProps(list);
+    return dc.drawSegmentMinStyled(
         x,
         height,
         text,
@@ -681,6 +921,7 @@ pub fn drawPaddedSegmentCovering(
         config.bg,
         config.segmentFg(segment_name),
         dc.measureTextWidth(cover_text),
+        props,
     );
 }
 

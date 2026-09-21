@@ -35,7 +35,7 @@ const tiling = if (build_options.has_tiling) @import("tiling") else @import("std
 const helpers = @import("helpers");
 
 /// Bounded placement buffer width, mirroring the engine's own cap.
-pub const max_order = constants.Limits.max_tiled_windows;
+pub const max_order = constants.max_tiled_windows;
 
 /// Why the fixture refused to connect, so setUp can pick the right banner.
 const SkipReason = enum { no_x, live_wm };
@@ -389,7 +389,7 @@ pub const Fx = struct {
         for (m.ws[ws.index].tiled_order.constSlice()) |w| {
             if (n >= max_order) break;
             const e = m.store.get(w) orelse continue;
-            if (e.mask & model.bit(ws) == 0) continue;
+            if (!model.taggedOn(e, ws)) continue;
             order_buf[n] = w;
             hints_buf[n] = e.size_hints;
             n += 1;
@@ -399,7 +399,7 @@ pub const Fx = struct {
         var placements: tiling.List = .{};
         tiling.compute(
             p.kind,
-            .{
+            &.{
                 .order = order_buf[0..n],
                 .params = p,
                 .workarea = self.workArea(),

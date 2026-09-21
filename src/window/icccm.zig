@@ -49,7 +49,7 @@ const CachedProps = struct {
 // allocation-free open-addressed table, so lookups are O(1) even at the cap.
 // Windows beyond max_window_cache still work; they just fall through to the
 // live X11 path.
-pub const max_window_cache: usize = 512;
+pub const max_window_cache: usize = constants.max_window_cache;
 
 /// Enables (window init) or disables (window deinit) the cache and drops all
 /// entries. Callers must not touch the cache outside the active window.

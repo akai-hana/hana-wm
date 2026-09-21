@@ -95,7 +95,7 @@ fn tuned(fx: *Fixture) tiling.View {
 /// is allocation-free).
 fn computeOf(kind: u8, v: tiling.View) List {
     var list: List = .{};
-    tiling.compute(kind, v, &list);
+    tiling.compute(kind, &v, &list);
     return list;
 }
 
@@ -200,7 +200,7 @@ test "grid relaxed partial row" {
     try expectP(&outr, 4, 15, 272, 304, 252, 284, true);
 }
 
-// fibonacci spiral of four, counter-clockwise from top-left.
+// fibonacci spiral of four, clockwise from top-left (screen coords are y-down).
 test "fibonacci spiral" {
     var fx: Fixture = undefined;
     try fx.init(&.{ 11, 12, 13, 14 });

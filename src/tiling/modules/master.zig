@@ -28,12 +28,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     const n = windows.len;
     const m = v.env.margins;
-    const ctx = tiling.LayoutCtx{
-        .v = v,
-        .out = out,
-        .m = m,
-        .min_dim = v.env.min_dim,
-    };
+    const ctx = tiling.LayoutCtx.init(v, out);
 
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
@@ -107,7 +102,7 @@ fn tileColumn(
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, ctx.m, ctx.min_dim);
 
-    var heights_buf: [constants.Limits.max_tiled_windows]u16 = undefined;
+    var heights_buf: [constants.max_tiled_windows]u16 = undefined;
     const heights = heights_buf[0..windows.len];
     const used = fillHeights(ctx, windows, avail, boost, heights);
 
@@ -132,12 +127,12 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     const n: u16 = @intCast(windows.len);
     const zero_boost = boost.isZero();
 
-    var capped: [constants.Limits.max_tiled_windows]bool = undefined;
+    var capped: [constants.max_tiled_windows]bool = undefined;
     @memset(capped[0..windows.len], false);
     // Snapshot each window's max_height ONCE: the water-fill below re-reads
     // the hint inside its pinning passes, and hoisting it keeps those passes
     // O(n) plain u16 compares instead of re-resolving the hint each time.
-    var max_h: [constants.Limits.max_tiled_windows]u16 = undefined;
+    var max_h: [constants.max_tiled_windows]u16 = undefined;
     for (windows, 0..) |win, i| max_h[i] = ctx.v.hints.forWin(win).max_height;
     var rem_avail = avail;
     var rem_weight: f32 = @as(f32, @floatFromInt(n)) + boost.top + boost.bottom;
@@ -164,6 +159,12 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
         }
     }
 
+    // Three rounding schemes coexist here, deliberately not merged: the
+    // zero-boost pass uses integer even-split chunks (windowHeight: largest
+    // rows first, any row differs from its neighbor by <= 1px); the boost pass
+    // rounds cumulative pixel boundaries to nearest and diffs them; pinned
+    // windows take their exact hint floored at min_dim. The pin threshold
+    // `fair` above floors too, but only as a comparator.
     var cum: f32 = 0;
     var prev_px: f32 = 0;
     var seen: u16 = 0;

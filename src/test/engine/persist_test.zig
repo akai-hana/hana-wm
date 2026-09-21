@@ -66,7 +66,7 @@ test "F10: save/load keeps every window record and workspace field" {
     try persist.save(testing.allocator, &src, path);
     defer scratch.cleanupScratch(path);
 
-    try testing.expect(try persist.loadToGlobal(page_alloc, path));
+    try testing.expect(persist.loadToGlobal(page_alloc, path));
 
     const recorded = persist.loaded().?;
     // loadToGlobal's own version gate already rejected the wrong-version file;
@@ -110,19 +110,19 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
     try scratch.writeScratchFile(bad, "not json at all");
     defer scratch.cleanupScratch(bad);
 
-    try testing.expect(!try persist.loadToGlobal(page_alloc, bad));
+    try testing.expect(!persist.loadToGlobal(page_alloc, bad));
 
     const wrong_version = try scratch.scratchPath(testing.allocator, "hana-persist-", "wrongver");
     defer testing.allocator.free(wrong_version);
     try scratch.writeScratchFile(wrong_version, "{ \"version\": 9999, \"current\": 0, \"windows\": [] }");
     defer scratch.cleanupScratch(wrong_version);
 
-    try testing.expect(!try persist.loadToGlobal(page_alloc, wrong_version));
+    try testing.expect(!persist.loadToGlobal(page_alloc, wrong_version));
 
     // A missing path is not an error, just a clean "nothing to restore".
     const missing = try scratch.scratchPath(testing.allocator, "hana-persist-", "missing");
     defer testing.allocator.free(missing);
-    try testing.expect(!try persist.loadToGlobal(page_alloc, missing));
+    try testing.expect(!persist.loadToGlobal(page_alloc, missing));
 }
 
 test "F10: applyModelLevel restores focus, ws state and every membership" {
@@ -133,7 +133,7 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
     defer testing.allocator.free(path);
     try persist.save(testing.allocator, &src, path);
     defer scratch.cleanupScratch(path);
-    try testing.expect(try persist.loadToGlobal(page_alloc, path));
+    try testing.expect(persist.loadToGlobal(page_alloc, path));
 
     // The re-exec'd process redisovers its old windows and registers them
     // before the persisted model level is applied back.
