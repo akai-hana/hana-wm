@@ -30,10 +30,12 @@ const callHook = window.callHook;
 const callHookBool = window.callHookBool;
 const dispatchAll = window.dispatchAll;
 const dispatchFirstTrue = window.dispatchFirstTrue;
-const callFirst = window.callFirst;
 const isCoveringMode = window.isCoveringMode;
 
 /// Convenience: returns the current workspace's covering occupant, or null.
+/// Routes through the optional fullscreen module's AND-scan hook (rec +
+/// present + recorded on ws) rather than the core OR scan; contrast
+/// model.coveringOccupantOnWs.
 fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
     return if (providerOf(.coveringOccupantOnWs)) |prov|
         prov.coveringOccupantOnWs.?(m, m.current)
@@ -98,7 +100,7 @@ fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
     if (opts.bump_fullscreen) core.fullscreen.bump();
     if (opts.with_focus) {
         // Focus lands before geometry (focus-before).
-        pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, true);
+        pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, .before);
     } else pipeline.reconcileUnderGrabNow(if (opts.restack) .{ .force_restack = true } else .{});
 }
 
@@ -184,7 +186,7 @@ fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
     // A no_input restore never takes model focus, but the reconcile still
     // runs so the restored window is mapped and placed.
     const prep = prepareAndSetFocus(m, win, .window_spawn);
-    pipeline.reconcileGrabFocus(.{ .force_restack = true }, prep, true);
+    pipeline.reconcileGrabFocus(.{ .force_restack = true }, prep, .before);
 }
 
 fn armFullscreenBarHideIfNeeded(
@@ -278,8 +280,8 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
 
     if (!wm.toggleCovering.?(m, win)) return;
 
-    // EWMH writes + bar arming land inside the same grab as geometry
-    // (Gap 2 atomicity fix). All fire-and-forget or pure state.
+    // EWMH writes + bar arming land inside the same grab as geometry -- all
+    // fire-and-forget or pure state.
     pipeline.reconcileUnderGrabNowFullscreen(
         .{ .force_restack = true },
         win,
@@ -342,7 +344,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (!canTagChange(m, win)) return;
     const e = m.store.get(win).?;
 
-    const had_bit = e.mask & model_mod.bit(model_mod.WSId.fromIndex(ws_idx)) != 0;
+    const had_bit = model_mod.taggedOn(e, model_mod.WSId.fromIndex(ws_idx));
     const removing_current = ws_idx == m.current.index;
 
     var ft: focus.FocusTransition = .none;
@@ -357,7 +359,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
 
     if (removing_current or (!had_bit and ws_idx == m.current.index)) {
         // Visible-set changed on the shown workspace: atomic evict/map+retile.
-        pipeline.reconcileGrabFocus(.{}, ft, true);
+pipeline.reconcileGrabFocus(.{}, ft, .before);
     }
     if (!removing_current) {
         // Off-workspace change: the tag set changed; bump the fact so the
@@ -491,7 +493,9 @@ pub fn isResizingWindow(win: model_mod.WindowId) bool {
 /// fallback when no module provides the hook, matching the old no-floating
 /// default.
 pub fn getDragLastRect() utils.Rect {
-    return callFirst(.getDragLastRect, .{}) orelse .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    const zero = utils.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    const wm = providerOf(.getDragLastRect) orelse return zero;
+    return wm.getDragLastRect.?();
 }
 
 /// Cancels any active drag targeting `win` (unmanage path).
@@ -560,7 +564,7 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
         // A no_input displaced head must not take model focus.
         ft = prepareAndSetFocus(m, displaced, .tiling_operation);
     }
-    pipeline.reconcileGrabFocus(.{}, ft, true);
+    pipeline.reconcileGrabFocus(.{}, ft, .before);
 }
 
 pub fn moveFocused(delta: i32) void {
@@ -603,7 +607,7 @@ fn snapViewportParamsToFocused() bool {
     var n: usize = 0;
     for (m.ws[m.current.index].tiled_order.constSlice()) |w| {
         const e = m.store.get(w) orelse continue;
-        if (e.mask & model_mod.bit(m.current) == 0) continue;
+        if (!model_mod.taggedOn(e, m.current)) continue;
         if (w == win) idx = n;
         n += 1;
     }
@@ -865,8 +869,8 @@ pub fn switchTo(ws_idx: u8) void {
 
     const t2 = utils.monotonicNs();
 
-    // Inline the server grab so protocol focus and geometry land atomically
-    // (Gap 4 atomicity fix). Only fire-and-forget XCB runs below, so the grab
+    // Inline the server grab so protocol focus and geometry land atomically.
+    // Only fire-and-forget XCB runs below, so the grab
     // is held for microseconds — no blocking wait can freeze a next keypress.
     const c = pipeline.grabCtx();
     c.sink.grabServer();
@@ -961,10 +965,9 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // protocol can't land, so marking it focused would leave borders and
     // stacking claiming a focus X will never deliver. X input focus lands
     // AFTER the reconcile, inside the same grab: the window must be mapped
-    // before xcb_set_input_focus, and both map+focus land under one grab
-    // (Gap 3 fix).
+    // before xcb_set_input_focus, so both map+focus land under one grab.
     const ft = prepareAndSetFocus(m, win, .window_spawn);
-    pipeline.reconcileGrabFocus(.{}, ft, false);
+    pipeline.reconcileGrabFocus(.{}, ft, .after);
 }
 
 /// Unmanage tail: close/destroy/unmap of a managed window. Local
@@ -989,7 +992,7 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     // held focus, hand it to the previously focused window on this ws
     // (MRU newest-first -> reversed tiled_order -> floating); with no
     // candidate left, focus clears. Model update runs before the grab;
-    // protocol commit runs inside the grab (Gap 1 atomicity fix).
+    // protocol commit runs inside the grab.
     const ft: focus.FocusTransition = if (was_focused) focusFallback(m, .tiling_operation) else .none;
 
     // Closing the current workspace's covering occupant releases the area:

@@ -10,6 +10,7 @@
 const std = @import("std");
 const debug = @import("debug");
 const types = @import("types");
+const keysyms = @import("keysyms");
 const xkbcommon = @import("xkbcommon");
 
 /// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
@@ -74,7 +75,7 @@ pub fn resolveKeycodes(keybindings: []types.Keybind, state: *xkbcommon.XkbState)
         kb.keycode = state.keysymToKeycode(kb.keysym);
         if (kb.keycode == null) {
             var name_buf: [64]u8 = undefined;
-            const name = xkbcommon.keysymGetName(kb.keysym, &name_buf);
+            const name = keysyms.keysymGetName(kb.keysym, &name_buf);
             debug.warn(
                 "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base " ++
                     "keycode and will NOT be grabbed, shifted symbols such as \"@\" " ++

@@ -28,15 +28,15 @@ test "borders.width resolves absolute and percentage border widths" {
     // A percentage is half the reference dimension (a border insets two
     // sides). Derive the expectation from the LIVE screen height so any
     // display geometry passes.
-    fx.config.tiling.border_width = parser.ScalableValue.percentage(2.0);
+    fx.config.tiling.border_width = types.ScalableValue.percentage(2.0);
     const expected = utils.scaling.scaleBorderWidth(
-        parser.ScalableValue.percentage(2.0),
+        types.ScalableValue.percentage(2.0),
         fx.scr.*.height_in_pixels,
     );
     try testing.expectEqual(expected, borders.width());
 
     // Absolute mode ignores the reference dimension entirely.
-    fx.config.tiling.border_width = parser.ScalableValue.absolute(7.0);
+    fx.config.tiling.border_width = types.ScalableValue.absolute(7.0);
     try testing.expectEqual(@as(u16, 7), borders.width());
 }
 

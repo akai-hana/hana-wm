@@ -47,9 +47,9 @@ const barwin = @import("win");
 // Bar visibility subsystem (pure decisions only; bar.zig keeps the wire glue).
 const visibility = @import("visibility");
 
-// Window-addon registry (generated): the fullscreen-hide decision is routed
-// through the isWindowHidden/collectHiddenSet seams instead of naming the
-// minimize or fullscreen module directly.
+// Window-addon registry (generated): the hidden-set synthesis is routed
+// through the collectHiddenSet seam instead of naming the minimize or
+// fullscreen module directly.
 const window_mods = @import("window_modules").modules;
 const plugin = @import("plugin");
 
@@ -87,7 +87,7 @@ fn anyBoolHook(comptime hook: []const u8, args: anytype) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Bar height / font-size resolution (folded from metrics.zig).
+// Bar height / font-size resolution.
 //
 // Owns everything needed to decide the bar's pixel height and effective font
 // size from config + font metrics, including the percentage-font-size probe
@@ -137,7 +137,7 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
     return @as(u16, @intFromFloat(@round(clamped)));
 }
 
-fn calcBarHeightAndFontSize() !u16 {
+fn calcBarHeightAndFontSize() u16 {
     const cs = core.getState();
     metrics.recompute();
     if (cs.config.bar.height) |h| {
@@ -262,9 +262,9 @@ const RenderCtx = struct {
     allocator: std.mem.Allocator,
 };
 
-/// Per-frame window-count bound for the title scratch buffers. Matches
-/// segment.zig's batch scratch limit (constants.Limits.max_tiled_windows).
-const max_frame_windows: usize = constants.Limits.max_tiled_windows;
+/// Per-frame window-count bound for the title scratch buffers; shares the
+/// single bar-wide cap in segment.zig.
+const max_frame_windows: usize = segmod.max_visible_windows;
 
 /// Upper bound on recorded click bounds: one slot per clickable segment in
 /// the configured layout. Configs with more clickable segments than this
@@ -600,7 +600,7 @@ const State = struct {
     /// segment: a dirty flag or a live needsRepaint hook (the title marquee).
     /// Iterates only segments that actually render -- the overlay-only prompt
     /// slot's dirty flag is never cleared, so a registry-wide scan would
-    /// always report work and defeat the P2 draw early-exit.
+    /// always report work and defeat the fast-path draw early-exit.
     fn hasPendingRepaintWork(self: *const State) bool {
         for (self.render.config.layout.items) |lay| {
             for (lay.segments.items) |seg| {
@@ -979,26 +979,7 @@ const State = struct {
     fn drawClockOnly(self: *State) void {
         const clock_x = self.clock.x orelse return;
         const cid = self_ticking_role orelse return;
-        if (bar_mods[cid].draw == null) return;
-        var ctx = frameCtx(self);
-        // Clear the whole reserved slot first: a display-mode shrink paints
-        // less than the reservation, and the leftover region must show clean
-        // background (not the previous wider frame's content) for the blit.
-        self.clearRegion(clock_x, self.clock.width);
-        // Shared harness: catches/logs draw errors; returns x unchanged
-        // ("drew nothing") on failure, which must skip the blit below.
-        const drawn_end = self.drawSegmentSafe(&ctx, bar_mods[cid].name, clock_x, null);
-        if (drawn_end == clock_x) return;
-        // Region-scoped blit: copies only the clock region and flushes (this
-        // is a timer-driven path; no event-loop flush is coming). Blit at
-        // least what was PAINTED (drawn_end can exceed the layout-time
-        // reservation after font fallback or digit-width drift: blitting
-        // only the cached width would clip digits) while keeping the full
-        // reserved slot covered so stale pixels from a wider earlier frame
-        // still get overwritten with the clean background just painted.
-        const drawn_w: u16 = drawn_end -| clock_x;
-        self.render.dc.blitRegion(clock_x, @max(self.clock.width, drawn_w));
-        self.clearSegmentDirty(bar_mods[cid].name);
+        redrawSlotScoped(self, cid, clock_x, self.clock.width, null, true);
     }
 };
 
@@ -1035,18 +1016,18 @@ fn performDraw() void {
     // scan + measure pass. The clock's own repaint on the same wake is handled
     // separately by the region-scoped updateClock blit.
     if (!gBar.force and !s.dirty.flag and !s.hasPendingRepaintWork()) return;
-    // P2a: marquee/overlay-only wake. With nothing forced, nothing whole-bar
+    // Marquee/overlay-only wake. With nothing forced, nothing whole-bar
     // dirty, and no layout segment carrying a dirty bit, the only pending
     // repaint is a self-animated needsRepaint hook (the scrolling title or a
     // blinking caret). The frame facts backing the drawn content -- workspace
     // set, window list, titles, geoms, minimized set -- are unchanged since
-    // the last full scan (any such change clears the P2a gate via markDirty/
+    // the last full scan (any such change clears this gate via markDirty/
     // markDirtySource), so the cached post-draw last_ctx snapshot is still
     // accurate. Reuse it in place of scanLiveFrame + fillDrawCtx: those two
     // re-walk tracking.allWindows() and rebuild the title/minute snapshot on
     // every marquee tick, and the marquee advances 60x/sec.
     if (!gBar.force and !s.dirty.flag and s.frame.ctx_valid and
-        !s.hasLayoutSegmentDirty() and s.hasPendingRepaintWork())
+        !s.hasLayoutSegmentDirty())
     {
         var ctx = s.frame.last_ctx;
         s.drawAllInner(&ctx);
@@ -1065,9 +1046,9 @@ fn performDraw() void {
     s.fillDrawCtx(&ctx);
     s.drawAllInner(&ctx);
     // Cache the minimized-state service (built by fillDrawCtx from the window
-    // module registry) so scanLiveFrame can synthesize the set each frame
+    // module registry) so scanLiveFrame can synthesize the set each frame.
     // Guarded so an empty api still leaves the prior snapshot intact.
-    if (ctx.minimized_api.is_minimized != null) s.title_data.minimized_api = ctx.minimized_api;
+    if (ctx.minimized_api.collect != null) s.title_data.minimized_api = ctx.minimized_api;
     s.frame.last_ctx = ctx;
     s.frame.ctx_valid = true;
     // Only enqueue the dirty span: drawAllInner tracks the bounding x/w of
@@ -1089,7 +1070,7 @@ inline fn ungrabAndFlush() void {
 
 /// Draws and blits to the window. Drawing always happens inline on the
 /// calling thread.
-pub fn submitDraw() void {
+fn submitDraw() void {
     performDraw();
 }
 
@@ -1141,7 +1122,7 @@ pub fn init() !void {
     std.debug.assert(cs.config.bar.enabled);
     barwin.initAtoms();
     refresh.ensureRefreshRateDetected(cs.conn);
-    const height = try calcBarHeightAndFontSize();
+    const height = calcBarHeightAndFontSize();
     const bar = try createBar(height, barwin.calcBarYPos(height));
     gBar.state = bar.state;
     screen.setSurfaceWindow(bar.setup.win_id);
@@ -1194,7 +1175,7 @@ pub fn reload() void {
         deinit();
         return;
     }
-    const height = calcBarHeightAndFontSize() catch default_bar_height;
+    const height = calcBarHeightAndFontSize();
     applyReload(old, height) catch |err| {
         debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
@@ -1252,26 +1233,14 @@ fn applyReload(old: *State, height: u16) !void {
 
 /// Builds the minimized-state service the title segment consumes, from the
 /// window module registry's hide family. The bar never names the addon;
-/// it only forwards the registry's `isWindowHidden`/`collectHiddenSet` hooks
-/// through the shared DrawCtx. All hooks null (no hide module compiled in) =>
+/// it only forwards the registry's `collectHiddenSet` hook through the
+/// shared DrawCtx. The hook null (no hide module compiled in) =>
 /// the empty api, so the bar's synthesis loops no-op.
 fn minimizedApiFromRegistry() segmod.MinimizedApi {
     var api: segmod.MinimizedApi = .{};
-    if (plugin.providerOf(window_mods[0..], .isWindowHidden) != null)
-        api.is_minimized = minimizedIsHidden;
     if (plugin.providerOf(window_mods[0..], .collectHiddenSet) != null)
         api.collect = minimizedCollect;
     return api;
-}
-
-/// Live per-window hidden query forwarded to the hide-family provider
-/// (DrawCtx api signature). `m` is the bar-passed model behind
-/// `*const anyopaque` (type-free seam).
-fn minimizedIsHidden(m: *const anyopaque, win: u32) bool {
-    const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (plugin.providerOf(window_mods[0..], .isWindowHidden)) |wm|
-        return wm.isWindowHidden.?(mm, @intCast(win));
-    return false;
 }
 
 /// Full hidden-set synthesis forwarded to the hide-family provider
@@ -1304,7 +1273,7 @@ pub fn toggleBarSegmentAnchor() void {
         xcb.XCB_CONFIG_WINDOW_Y,
         &[_]u32{utils.toXcbCoord(new_y)},
     );
-    // B3: publish the new edge BEFORE any early return. The bar window has
+    // Publish the new edge BEFORE any early return. The bar window has
     // already moved and bar_position changed, so bailing out below without
     // syncing would leave core.screen claiming the old edge.
     syncScreenClaim();
@@ -1377,21 +1346,41 @@ pub fn redrawInsideGrab() void {
 /// reserved slot even when the draw ran narrow.
 fn redrawSegmentScoped(s: *State, id: usize) void {
     if (!s.vis.shown) return;
-    if (bar_mods[id].draw == null) return;
     if (gBar.force) {
         s.markDirty();
         return;
     }
     const tb = s.recordedBound(bar_mods[id].name) orelse return;
-    s.clearRegion(tb.x, tb.w);
+    redrawSlotScoped(s, id, tb.x, tb.w, tb.w, false);
+}
+
+/// Shared region-scoped single-slot repaint skeleton: clear the reserved
+/// slot, re-draw the segment, then blit at least what was painted
+/// (`drawn_end` can exceed the reserved width after font fallback or
+/// digit-width drift: blitting only the cached width would clip digits)
+/// while covering the full reserved slot so stale pixels from a wider
+/// earlier frame get overwritten with the clean background just painted.
+/// `pinned_w` pins the reserved width into the ctx exactly like a layout
+/// pass draw (null = draw unmeasured); `flush_blit` picks the immediate
+/// blitRegion+flush (timer-driven clock path -- no event-loop flush is
+/// coming) vs queueBlit (event-loop batch, no flush).
+fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, flush_blit: bool) void {
+    if (bar_mods[id].draw == null) return;
+    // Clear the whole reserved slot first: a display-mode shrink paints less
+    // than the reservation, and the leftover region must show clean
+    // background (not the previous wider frame's content) for the blit.
+    s.clearRegion(x, bound_w);
     var ctx = frameCtx(s);
-    // Pin the reserved width into the shared ctx exactly like a layout pass
-    // draw (`drawSegment` with the measured width), so dragging a segment
-    // whose reserved and painted widths differ still repaints the slot.
-    const drawn_end = s.drawSegmentSafe(&ctx, bar_mods[id].name, tb.x, tb.w);
-    if (drawn_end == tb.x) return;
-    const drawn_w: u16 = drawn_end -| tb.x;
-    s.render.dc.queueBlit(tb.x, @max(tb.w, drawn_w));
+    // Shared harness: catches/logs draw errors; returns x unchanged
+    // ("drew nothing") on failure, which must skip the blit below.
+    const drawn_end = s.drawSegmentSafe(&ctx, bar_mods[id].name, x, pinned_w);
+    if (drawn_end == x) return;
+    const drawn_w: u16 = drawn_end -| x;
+    if (flush_blit) {
+        s.render.dc.blitRegion(x, @max(bound_w, drawn_w));
+    } else {
+        s.render.dc.queueBlit(x, @max(bound_w, drawn_w));
+    }
     s.clearSegmentDirty(bar_mods[id].name);
 }
 
@@ -1412,7 +1401,7 @@ fn redrawScrolledSegment() void {
     redrawSegmentScoped(s, id);
 }
 
-pub fn raiseBar() void {
+fn raiseBar() void {
     if (gBar.state) |s|
         _ = xcb.xcb_configure_window(
             s.win.conn,
@@ -1621,23 +1610,6 @@ fn barModsConsumeRedrawRequest() bool {
     return anyBoolHook("consumeRedrawRequest", .{});
 }
 
-/// RandR extension-event base, forwarded from core's event dispatcher so it
-/// can recognise (and classify) extension events; see refresh.zig.
-pub fn randrFirstEvent() u8 {
-    return refresh.randrFirstEvent();
-}
-
-/// Core event-loop forwarder for RandR extension events (base and base+1).
-pub fn handleRandrEvent(event: *anyopaque) void {
-    refresh.handleRandrNotifyEvent(event);
-}
-
-/// Core event-loop forwarder that runs the deferred re-detection once per
-/// batch, outside dispatch.
-pub fn runPendingRedetect(conn: core.Connection) void {
-    refresh.runPendingRedetect(conn);
-}
-
 /// Redraws just the clock segment when its on-screen content is stale
 /// (second rolled over, or config reload changed the format). Cheap to call
 /// on every event batch: it no-ops unless staleness is detected.
@@ -1824,9 +1796,9 @@ pub const surfaces = @import("plugin").Surfaces{
     .pollTimeoutMs = pollTimeoutMs,
     .onPollWakeup = onPollWakeup,
     .updateClock = updateClock,
-    .randrFirstEvent = randrFirstEvent,
-    .handleRandrEvent = handleRandrEvent,
-    .runPendingRedetect = runPendingRedetect,
+    .randrFirstEvent = refresh.randrFirstEvent,
+    .handleRandrEvent = refresh.handleRandrNotifyEvent,
+    .runPendingRedetect = refresh.runPendingRedetect,
     .onReload = reload,
     .refreshConfig = refreshConfig,
     .chromeHandleKeypress = chromeHandleKeypress,

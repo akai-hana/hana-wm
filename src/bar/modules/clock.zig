@@ -125,7 +125,7 @@ pub fn deadlineFromMs(now_ms: i64) i32 {
 
 /// ms until the next whole-second boundary, contributed via bar.pollTimeoutMs().
 pub fn tickDeadlineMs() i32 {
-    return deadlineFromMs(realtimeMs());
+    return deadlineFromMs(utils.realtimeMs());
 }
 
 // Drawing
@@ -144,7 +144,7 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
     // per-second text-width drift never re-lays the row.
     if (reserved_mode != mode) {
         reserved_mode = mode;
-        reserved_width = dc.measureTextWidth(measureStringFor(mode)) +
+        reserved_width = dc.measureTextWidthStyled(measureStringFor(mode), config.segmentProps("clock")) +
             2 * config.scaledSegmentPadding(height);
     }
     // Record the attempt before rendering: a persistent render failure
@@ -154,7 +154,7 @@ pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, star
     // one extra second, exactly as the cadence design intends.
     rendered_sec = sec;
     rendered_fmt = fmt;
-    return drawing.drawPaddedSegmentCovering(dc, config, height, start_x, "clock", str, measureStringFor(mode));
+    return drawing.drawPaddedSegmentCovering(dc, config, height, start_x, "clock", str, measureStringFor(mode), config.segmentProps("clock"));
 }
 
 /// Reserved row width: the current mode's slot (measured once per mode) once
@@ -176,10 +176,6 @@ fn invalidateWidth() void {
 
 fn currentEpochSeconds() i64 {
     return @intCast(utils.realtimeNs() / ns_per_s);
-}
-
-fn realtimeMs() i64 {
-    return @intCast(utils.realtimeNs() / std.time.ns_per_ms);
 }
 
 /// Formats `sec` (seconds since the Unix epoch) into `buf` using `fmt` as a

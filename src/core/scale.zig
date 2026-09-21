@@ -8,7 +8,7 @@ const xcb = core.xcb;
 const constants = @import("constants");
 const debug = @import("debug");
 
-const parser = @import("parser");
+const types = @import("types");
 const utils = @import("utils");
 
 const baseline_dpi = constants.baseline_dpi;
@@ -102,7 +102,7 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     // Xft.dpi was not in the first resource_manager_max_len bytes; retry with a
     // larger fetch ONLY when the reply was a string AND was cut short
     // (bytes_after > 0). An untruncated fetch that lacks Xft.dpi genuinely
-    // lacks it; a bigger fetch would return the same bytes (C7).
+    // lacks it; a bigger fetch would return the same bytes.
     if (!first.got_string or !first.possibly_truncated) return null;
     return probeXftDpi(conn, root, atom, resource_manager_retry_len).dpi;
 }
@@ -152,7 +152,7 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 /// Scales a font size value against the screen height, clamped to a minimum of 1px.
 /// Percentage values are relative to font_baseline_height (1080px) rather than the
 /// screen baseline, so font sizes degrade more gracefully on smaller screens.
-pub fn scaleFontSize(value: parser.ScalableValue, screen: core.Screen) u16 {
+pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
     const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
     const raw = if (value.is_percentage)
         value.value * (screen_height / font_baseline_height)
@@ -162,7 +162,7 @@ pub fn scaleFontSize(value: parser.ScalableValue, screen: core.Screen) u16 {
 }
 
 /// Converts a scalable bar height value to pixels, clamped to bar_min_height_px.
-pub fn scaleBarHeight(value: parser.ScalableValue, screen_height: u16) u16 {
+pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = utils.scaling.scaleToPixels(value, screen_height_f);
     return @max(bar_min_height_px, utils.scaling.roundToU16(scaled_px, 0.0));

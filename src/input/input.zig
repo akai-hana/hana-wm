@@ -56,7 +56,7 @@ var keybind_resolver: keybind.KeybindResolver = .{};
 // to the grabbing window only if the mask selects it; keycodes are stable
 // across a gesture regardless of modifier release order, so keying on the
 // raw KEYCODE both suppresses autorepeat and always clears on release.
-var held_keys = std.StaticBitSet(256).initEmpty();
+var held_keys = std.StaticBitSet(constants.x11_max_keycode).initEmpty();
 
 /// Initialises the XKB context, keymap, and key state
 /// from the server's current keyboard configuration.
@@ -97,13 +97,7 @@ pub fn deinitKeybinds() void {
     keybind_resolver.deinit(core.getState().alloc);
 }
 
-/// O(1) keybinding lookup for the hot key-press path; returns a pointer into
-/// the current config's keybindings slice, or null.
-inline fn lookupKeybinding(mods: u16, keysym: u32) ?*const types.Action {
-    return keybind_resolver.lookup(mods, keysym);
-}
-
-/// Rebuilds the keymap/keysym table after the server changes the keyboard
+// Rebuilds the keymap/keysym table after the server changes the keyboard
 /// mapping (setxkbmap/xmodmap). Keybinding resolution is keysym-indexed, so
 /// rebuilding the flat keycode->keysym table keeps existing bindings working
 /// under the new layout. However, the per-binding keycodes the key grabs were
@@ -114,7 +108,7 @@ pub fn handleMappingNotify() void {
     const cs = core.getState();
     const state = getXkbState() orelse return;
     state.rebuild(cs.conn);
-    held_keys = std.StaticBitSet(256).initEmpty();
+    held_keys = std.StaticBitSet(constants.x11_max_keycode).initEmpty();
 
     // The dispatch map is keyed on keysym (unaffected by the rebuild), but
     // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
@@ -186,7 +180,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 
     // O(1) dispatch via the (modifiers << 32 | keysym) map built by
     // input.buildKeybinds.
-    const matched: ?*const types.Action = lookupKeybinding(mods, keysym);
+    const matched: ?*const types.Action = keybind_resolver.lookup(mods, keysym);
 
     // The chrome overlay owns all key input while active; routing is handled
     // inside it (input flows in, true = consumed, before keybinding dispatch).

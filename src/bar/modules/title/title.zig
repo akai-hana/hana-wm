@@ -10,7 +10,6 @@ const core = @import("core");
 const std = @import("std");
 const utils = @import("utils");
 const refresh = @import("refresh");
-const debug = @import("debug");
 
 const constants = @import("constants");
 const types = @import("types");
@@ -99,12 +98,12 @@ fn focusedTitleWidth(
 const SegmentedTitlesMemo = struct {
     win_count: usize = 0,
     height: u16 = 0,
-    windows: [constants.Limits.max_tiled_windows]u32 = undefined,
-    titles: [constants.Limits.max_tiled_windows][]const u8 = undefined,
-    geoms: [constants.Limits.max_tiled_windows]?utils.Rect = undefined,
-    minimized: [constants.Limits.max_tiled_windows]bool = undefined,
-    sorted: [constants.Limits.max_tiled_windows]segmod.WindowInfo = undefined,
-    widths: [constants.Limits.max_tiled_windows]u16 = undefined,
+    windows: [constants.max_tiled_windows]u32 = undefined,
+    titles: [constants.max_tiled_windows][]const u8 = undefined,
+    geoms: [constants.max_tiled_windows]?utils.Rect = undefined,
+    minimized: [constants.max_tiled_windows]bool = undefined,
+    sorted: [constants.max_tiled_windows]segmod.WindowInfo = undefined,
+    widths: [constants.max_tiled_windows]u16 = undefined,
     sorted_len: usize = 0,
 };
 var segmented_titles_memo: SegmentedTitlesMemo = .{};
@@ -341,17 +340,9 @@ fn drawSegmentedTitles(
     snapshot: segmod.TitleSnapshot,
 ) !void {
     const windows = snapshot.current_ws_wins;
-    // Bound by the frame/scratch constant, not the older 128-window cap:
-    // windows can never contain more than max_tiled_windows, so guarding and
-    // clamping to 128 was dead code that would also let win_count exceed the
-    // gather scratch buffer (max_visible_windows) and overflow it.
-    const max_title_windows = constants.Limits.max_tiled_windows;
-    if (windows.len > max_title_windows)
-        debug.warn(
-            "Workspace has {} windows; only the first {} are rendered in split-view",
-            .{ windows.len, max_title_windows },
-        );
-    const win_count = @min(windows.len, max_title_windows);
+    // The snapshot list is built into the bar-wide scratch (max_visible_windows,
+    // shared with the gather buffer), so it can never exceed that cap in count.
+    const win_count = windows.len;
     if (win_count == 0) return;
 
     if (!segmentedTitlesCached(ctx, snapshot, windows, win_count)) {

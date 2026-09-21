@@ -9,12 +9,7 @@ const Region = tiling.Region;
 /// Compute BSP layout: recursive bisection of the longer axis 50/50 with one
 /// gap at each seam; border subtracted at leaf nodes only.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
-    const ctx = tiling.LayoutCtx{
-        .v = v,
-        .out = out,
-        .m = v.env.margins,
-        .min_dim = v.env.min_dim,
-    };
+    const ctx = tiling.LayoutCtx.init(v, out);
 
     // Strip the outer gap; each recursive split inserts one gap at its seam
     // (adjacent windows stay one gap_width apart).
@@ -44,10 +39,15 @@ fn tileRegion(
     const horizontal = r.w >= r.h;
     const dim: u32 = if (horizontal) r.w else r.h;
     // The pane cannot hold two min-dim children plus the seam gap: the leaf
-    // inset would floor both halves to min_dim and push the second past the
-    // parent (overlapping its neighbor). Hand the whole region to the focused
-    // window and park the rest, the same overflow-share shape fibonacci uses.
+    // Pane too small for two min_dim children plus one seam: splitting both
+    // sides to min_dim would push the second past the parent's far edge, so
+    // leaf overflows instead. Gate is a min_dim floor, unlike fibonacci.zig's
+    // gap+border gate for the recursive spiral. (split_y: dim==h checks the
+    // row height; split_x mirrors with dim==w, inset so a tight pane can't
+    // overlap its neighbor.) Hand the whole region to the focused window and
+    // park the rest, the same overflow-share shape fibonacci uses.
     if (dim < @as(@TypeOf(dim), ctx.min_dim) * 2 +| @as(@TypeOf(dim), gap)) {
+        // focusedElse: fallback is the list head (first window).
         const top = tiling.focusedElse(ctx.v, windows, windows[0]);
         tiling.emitOverflowShare(ctx, windows, top, r);
         return;

@@ -39,7 +39,7 @@ pub const std_options: std.Options = .{
 
 pub fn main() !void {
     const x = try connectToX();
-    // C15: only disconnect when the connection never errored. A dropped X
+    // Only disconnect when the connection never errored. A dropped X
     // server has already torn the stream down; xcb_disconnect on an errored
     // connection can crash inside libxcb's teardown.
     defer if (xcb.xcb_connection_has_error(x.conn) == 0) xcb.xcb_disconnect(x.conn);
@@ -76,7 +76,7 @@ pub fn main() !void {
 
     // Arm the unified reload: resolve the exec path before any reload/reexec
     // request can arrive (restart.init).
-    restart.init(alloc, null);
+    restart.init(alloc);
 
     // Drop the Config internals and the heap box core.init() owns; the
     // keybind resolver (input-owned) is deinited separately above.
@@ -86,7 +86,7 @@ pub fn main() !void {
     // Without the identity check this defer would free it a second time at
     // shutdown, the GP fault seen in reload-then-quit runs.
     const initial_config = core.getState().config;
-    // C3: drop the Config INTERNALS and the heap box core.init() owns (both
+    // Drop the Config INTERNALS and the heap box core.init() owns (both
     // were allocated with alloc). The identity guard still holds: the reload
     // path now deinits AND destroys the displaced boot config itself, so this
     // safely no-ops after a swap.
@@ -132,7 +132,7 @@ pub fn main() !void {
     // live.
     if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
         const restore_path = std.mem.span(restore_path_z);
-        if (try persist.loadToGlobal(alloc, restore_path)) {
+        if (persist.loadToGlobal(alloc, restore_path)) {
             const n = window.adoptRootWindows() catch |err| blk: {
                 debug.err("Window adoption failed: {}", .{err});
                 break :blk 0;
@@ -144,7 +144,7 @@ pub fn main() !void {
                 // entry (the adopted window is already mapped).
                 if (pipeline.model().focused) |focused| {
                     const ft = focus.prepareFocus(focused, .window_spawn);
-                    pipeline.reconcileGrabFocus(.{}, ft, false);
+                    pipeline.reconcileGrabFocus(.{}, ft, .after);
                 } else {
                     pipeline.reconcileUnderGrabNow(.{});
                 }

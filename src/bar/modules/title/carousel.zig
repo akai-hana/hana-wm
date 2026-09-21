@@ -32,12 +32,12 @@ pub const addon: title_mod.Scroller = .{
 };
 
 /// Horizontal gap between the repeating copies of a title, in pixels.
-pub const gap_px: u16 = 48;
+pub const inter_title_gap_px: u16 = 48;
 
 /// Center-to-center distance between the repeating copies of a title (text
 /// width plus the inter-copy gap): the wrap period of the marquee cycle.
 pub fn cyclePx(text_w: u16) f32 {
-    return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(gap_px));
+    return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(inter_title_gap_px));
 }
 
 /// Frame cadence follows the detected monitor refresh rate (see

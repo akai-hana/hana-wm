@@ -18,9 +18,6 @@ pub fn widthState(comptime tag: []const u8) type {
         var redraw_pending: bool = false;
         const _ = tag;
 
-        pub fn get() u16 {
-            return cached;
-        }
         pub fn invalidate() void {
             // Keep the last measured width as the row reservation instead of
             // zeroing it: zero would make the FIRST measure after a reload

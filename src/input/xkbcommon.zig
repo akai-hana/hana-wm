@@ -91,9 +91,9 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 
 /// Builds the flat keycode->keysym table from level-0 symbols.
 /// Keycodes below 8 are reserved by X11 and produce no real keysym.
-fn buildKeysymTable(km: *xkb_keymap) [256]u32 {
-    var table: [256]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** 256;
-    for (@as(usize, constants.x11_min_keycode)..256) |kc| {
+fn buildKeysymTable(km: *xkb_keymap) [constants.x11_max_keycode]u32 {
+    var table: [constants.x11_max_keycode]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
+    for (@as(usize, constants.x11_min_keycode)..constants.x11_max_keycode) |kc| {
         table[kc] = baseSymbol(km, @intCast(kc));
     }
     return table;
@@ -104,7 +104,7 @@ pub const XkbState = struct {
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
     /// No allocator needed; 256 x 4 bytes = 1 KiB, lives inside XkbState.
-    keysym_by_keycode: [256]u32,
+    keysym_by_keycode: [constants.x11_max_keycode]u32,
 
     /// Initialises an XKB context and builds the keysym table from the live
     /// X connection. Retries up to max_xkb_retries times to handle early-startup
@@ -180,21 +180,12 @@ pub const XkbState = struct {
     /// truly symmetric multi-keycode keysyms are rare in WM bindings (modifier
     /// left/right pairs have distinct keysyms: Shift_L ≠ Shift_R, etc.).
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
-        for (@as(usize, constants.x11_min_keycode)..256) |kc| {
+        for (@as(usize, constants.x11_min_keycode)..constants.x11_max_keycode) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
         }
         return null;
     }
 };
-
-/// Renders a keysym to its XKB name (e.g. XKB_KEY_at -> "at") into `buf`,
-/// returning a slice of `buf` holding the name. Used for diagnostic messages.
-pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
-    if (buf.len == 0) return "";
-    const n = xkb.xkb_keysym_get_name(keysym, @ptrCast(buf.ptr), buf.len);
-    const len: usize = if (n < 0) 0 else @min(@as(usize, @intCast(n)), buf.len);
-    return buf[0..len];
-}
 
 const xkb_retry_delay_ms = constants.xkb_retry_delay_ms;
 

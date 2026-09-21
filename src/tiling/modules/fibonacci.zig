@@ -1,12 +1,12 @@
 //! Fibonacci (spiral) tiling layout.
-//! Arranges windows in a counter-clockwise spiral, each taking half the remaining screen area.
+//! Arranges windows in a clockwise spiral, each taking half the remaining screen area.
 
 const utils = @import("utils");
 const model = @import("model");
 const tiling = @import("tiling");
 const Region = tiling.Region;
 
-// Counter-clockwise spiral direction for the next window split.
+// Clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
     right, // Split vertically: window on left, remainder on right.
     down, // Split horizontally: window on top, remainder below.
@@ -49,10 +49,14 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     for (windows, 0..) |win, i| {
         const last = i == windows.len - 1;
+        // Too small for another split: the seam would leave no room for a
+        // border either side. Gate is geometry-only (gap+borders), unlike
+        // leaf.zig's 2*min_dim+gap floor for a flat two-child pane.
         if (last or cur.w < m.gap *| 2 + border2 or cur.h < m.gap *| 2 + border2) {
+            // focusedElse: fallback is the current split-remainder head.
             const top = tiling.focusedElse(v, windows[i..], win);
             tiling.emitOverflowShare(
-                .{ .v = v, .out = out, .m = m, .min_dim = v.env.min_dim },
+                tiling.LayoutCtx.init(v, out),
                 windows[i..],
                 top,
                 cur,

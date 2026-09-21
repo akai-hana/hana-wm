@@ -45,7 +45,7 @@ pub const CacheMap = std.AutoHashMap(u32, WindowData);
 /// few dozen managed windows; 512 is a generous ceiling that prevents
 /// unbounded heap growth from a runaway client without impacting
 /// legitimate use. Shared with icccm's focus-property cache.
-const max_entries = @import("icccm").max_window_cache;
+const max_entries = constants.max_window_cache;
 
 // Module-level singleton
 
@@ -146,32 +146,24 @@ pub fn removeWindow(window_id: u32) void {
     }
 }
 
-fn updateBorderColor(
-    conn: core.Connection,
-    win: u32,
-    color: u32,
-) bool {
-    // Bounded by max_entries like every other writer: refuse to grow past
-    // the ceiling so WM-churn of distinct windows can't bloat the cache
-    // (the caller falls back to an unconditional send in that case).
-    const wd = getOrPutDefault(win) catch return false;
-    if (wd.border == color) return true;
-    wd.border = color;
-    utils.setBorderPixel(conn, win, color);
-    return true;
-}
-
 /// Sends the border-pixel change for `win` unless the cache already shows
 /// that exact color as applied, and RECORDS the color either way. The
 /// recording is load-bearing, not just an optimization: values forced
 /// outside this function (fullscreen's pixel 0) must end up in the cache,
 /// or the next real color change dedups against a stale value and is
 /// silently skipped -- the un-fullscreen "lost borders" bug. Returns false
-/// only when the cache is unavailable (not initialized); callers then fall
-/// back to an unconditional send.
+/// when the cache is unavailable (not initialized; bounded by max_entries
+/// like every other writer); callers then fall back to an unconditional
+/// send.
 pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
     const conn = core.getState().conn;
-    return updateBorderColor(conn, win, color);
+    // Refuse to grow past the ceiling so WM-churn of distinct windows can't
+    // bloat the cache (the caller falls back to an unconditional send).
+    const wd = getOrPutDefault(win) catch return false;
+    if (wd.border == color) return true;
+    wd.border = color;
+    utils.setBorderPixel(conn, win, color);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

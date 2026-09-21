@@ -2,13 +2,21 @@
 
 # - HEX color code values can be set to either of the following formats:
 #   "#RRGGBB" / RRGGBB / 0xRRGGBB
+# - Any color knob also accepts a "mix" combining other colors: join them
+#   with '+', optionally tagging each later operand with a percentage:
+#     primary_color +(weight:25%) secondary_color     => 75% / 25%
+#   The FIRST operand absorbs the remainder; a plain '+' is an even split.
+#   Operands may be hex values or palette variable names. Use the 0xRRGGBB
+#   (or quoted "#RRGGBB") spelling for a hex operand after the first, since a
+#   bare '#' there starts a comment.
 
 [tiling.aesthetics]
-# [0% - 200%] / [0 - N] px
-## 100% = Entire display; 0% = disabled
-gap_width        = 2%
-border_width     = 1% #TODO: 100% doesn't cover 100% of the display.
-#TODO: make config parser accept both N% and %N values (currently %N doesn't work).
+# Sizes take exact pixels (N / Npx) or a percentage (N%); the reversed '%N'
+# spelling is not supported yet. A percentage resolves against HALF the screen
+# height, because gaps and borders inset a window on two sides: e.g. 100% =
+# half the display height, 0% = disabled. Use exact px for absolute control.
+gap_width      = 2%
+border_width   = 1%
 
 # Borders follow the focus palette variables (from [bar] below)
 border_focused   = primary_color
@@ -27,8 +35,8 @@ fonts = [
 ## Auto-adapts to font size by default.
 height = 3.5%
 
-## Font size covers a percentage of the bar's area according to its height
-## (e.g., 16% = font takes up 16% of the bar's vertical space)
+## Font size as a percentage of the bar's height (70% = glyphs occupy 70% of
+## the bar's vertical space); the activity indicator scales the same way.
 font_size      = 70%
 indicator_size = 25%
 
@@ -38,14 +46,16 @@ icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
 segment_spacing    = 5%
 indicator_padding  = 40%
 
-#
-## if neither is set
+# Activity glyph drawn in each tag that has windows. The two keys are optional
+# glyph overrides; unset uses the defaults shown below. indicator_location
+# anchors the glyph inside the tag (up-left suits a bottom bar).
 # indicator_focused   = "■"
 # indicator_unfocused = "□"
 indicator_location = "up-left"
 
-# Workspace width as percentage of base (100% = 40px, 150% = 60px, or set exact pixels)
-workspace_tag_width = 100%  # Default base width
+# Workspace tag width as a percentage of the bar's height (100% = the bar's
+# full height) or exact pixels
+workspace_tag_width = 100%
 
 # Bar transparency. Bare integers are percentages: 0% = fully transparent,
 # 100% / 1.0 = fully opaque, 50% / 0.5 = half. (A bare `1` means 1% opacity,
@@ -56,7 +66,7 @@ transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 # drun command runner prompt string (default: "run: ")
 drun_prompt = "$ "
 
-#  Carousel (scrolling title) 
+#  Carousel (scrolling title)
 # carousel_enabled: set to false to disable scrolling entirely and use a
 #   static ellipsis when the title overflows.
 carousel_enabled = true
@@ -80,18 +90,28 @@ selected_fg = "#eeeeee"
 
 # Per-segment accent colors inherit from the palette by reference
 [bar.colors]
-title           = primary_color    # focused title = primary_color
-title_unfocused = secondary_color  # unfocused title = secondary_color
-title_minimized = alternative_color # minimized title = alternative_color
+title           = primary_color       # focused title = primary_color
+title_unfocused = secondary_color     # unfocused title = secondary_color
+title_minimized = alternative_color   # minimized title + slider fill = alternative_color
 
 # Per-segment text colors: any key that isn't a named color knob above is a
 # segment registry name ("cpu", "mem", "volume", "brightness", "batt", ...).
 # A segment with no entry falls back to the bar-wide fg (text_color).
-# Systatus readouts read primary; slider controls read alternative.
-cpu        = primary_color     # cpu readout text
-mem        = primary_color     # memory readout text
-volume     = alternative_color # volume slider text
-brightness = alternative_color # brightness slider text
+# Per-segment NUMBER colors: the segment name + "_value" recolors just the
+# numeric readout (the "42%" in "Cpu 42%"); the rest of the segment keeps its
+# entry above. A segment with no `_value` entry colors its number like its
+# label. Systatus readouts read secondary; slider text stays alternative,
+# slider fill follows title_minimized (alternative).
+cpu        = secondary_color     # cpu readout text
+mem        = secondary_color     # memory readout text
+volume     = alternative_color   # volume slider text
+brightness = alternative_color   # brightness slider text
+
+# Readout numbers pop in the focused accent, distinct from their labels
+cpu_value        = primary_color # cpu readout number
+mem_value        = primary_color # memory readout number
+volume_value     = primary_color # volume slider number
+brightness_value = primary_color # brightness slider number
 
 # drun command runner colors (all optional; omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)

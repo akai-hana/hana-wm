@@ -23,19 +23,15 @@ const utils = @import("utils");
 // Geometry <-> wire conversions
 
 /// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
-/// geometry type in utils.zig stays xcb-free).
-/// `include_border` selects whether the wire border_width feeds the Rect's
-/// border_width.
-pub inline fn rectFromXcb(
-    geom: *const xcb.xcb_get_geometry_reply_t,
-    include_border: bool,
-) utils.Rect {
+/// geometry type in utils.zig stays xcb-free). The wire border_width feeds
+/// the Rect's border_width.
+pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect {
     return .{
         .x = geom.x,
         .y = geom.y,
         .width = geom.width,
         .height = geom.height,
-        .border_width = if (include_border) geom.border_width else 0,
+        .border_width = geom.border_width,
     };
 }
 
@@ -284,59 +280,25 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
 // ---------------------------------------------------------------------------
 // Reply collection (poll-first)
 
-/// Collects the reply for an already-fired request, trying a non-blocking
-/// poll first and falling back to the typed blocking collector only when the
-/// reply isn't buffered yet. One entry point for every request kind: each
-/// `xcb_*_cookie_t` wraps just a sequence number, so the poll works off
-/// `cookie.sequence` and the original cookie object flows to the blocking
-/// call unchanged.
+/// Collects the reply for an already-fired get_property request, trying a
+/// non-blocking poll first and falling back to the typed blocking collector
+/// only when the reply isn't buffered yet. `xcb_get_property_cookie_t` wraps
+/// just a sequence number, so the poll works off `cookie.sequence` and the
+/// original cookie object flows to the blocking call unchanged.
 ///
 /// Poll semantics: `xcb_poll_for_reply` consumes the cookie on BOTH success
 /// and error, so a plain "null means block" contract is unsound; blocking
 /// on a consumed-error cookie has undefined XCB semantics. An X error seen
 /// here is freed and reported as plain failure; after it, the cookie must
 /// never be touched again.
-///
-/// `blockingReply` issues the request's blocking reply call (passing null for
-/// the error out-param, exactly like every pre-absorption call site) and
-/// returns the owned reply pointer or null. Typed wrappers below cast the
-/// result back so callers never see `*anyopaque`.
-fn collectReply(
-    conn: Connection,
-    cookie: anytype,
-    comptime blockingReply: anytype,
-) ?*anyopaque {
-    var reply: ?*anyopaque = null;
+pub fn collectPropertyReply(conn: Connection, cookie: xcb.xcb_get_property_cookie_t) ?*xcb.xcb_get_property_reply_t {
+    var reply: ?*xcb.xcb_get_property_reply_t = null;
     var err: ?*xcb.xcb_generic_error_t = null;
-    _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, &reply, &err);
+    _ = xcb.xcb_poll_for_reply(conn, cookie.sequence, @ptrCast(&reply), &err);
     if (reply) |r| return r;
     if (err) |e| {
         std.c.free(e);
         return null;
     }
-    return blockingReply(conn, cookie);
+    return xcb.xcb_get_property_reply(conn, cookie, null);
 }
-
-/// Generates a typed reply-collector family over the shared poll-first
-/// `collectReply`. `T` is the reply record type (e.g. xcb_get_property_reply_t),
-/// `CookieT` the request's cookie type, and `blockingFn` the xcb blocking reply
-/// call (taking conn + cookie, returning the typed reply pointer or null).
-fn ReplyCollector(comptime T: type, comptime CookieT: type, comptime blockingFn: anytype) type {
-    return struct {
-        fn blockingReply(conn: Connection, cookie: CookieT) ?*anyopaque {
-            return @ptrCast(blockingFn(conn, cookie, null));
-        }
-        /// An owned `*T` reply, or null when neither the poll nor the blocking
-        /// fallback produced one.
-        pub fn collect(conn: Connection, cookie: CookieT) ?*T {
-            return @ptrCast(@alignCast(collectReply(conn, cookie, blockingReply)));
-        }
-    };
-}
-
-const PropertyCollector = ReplyCollector(
-    xcb.xcb_get_property_reply_t,
-    xcb.xcb_get_property_cookie_t,
-    xcb.xcb_get_property_reply,
-);
-pub const collectPropertyReply = PropertyCollector.collect;

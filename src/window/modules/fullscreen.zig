@@ -190,7 +190,12 @@ fn releaseCovering(m: *model.Model, win: model.WindowId) void {
 
 /// The first record on `ws` whose window is present-not-parked AND visible on
 /// `ws`, skipping `skip` (null scans every record). The shared occupant scan
-/// behind fullscreenOccupantOnWs and the covering-switch eviction loop.
+/// behind fullscreenOccupantOnWs and the covering-switch eviction loop — the
+/// module's AND-semantics counterpart to the pure model scan
+/// `model.coveringOccupantOnWs` (OR: anchor-or-visibility union over the whole
+/// store, no record registry). Prefer this when the record registry is what
+/// matters (the eviction loop, record-backed presence); use the model query in
+/// pure layers that must not enumerate feature modules.
 /// The `ws` match reads the model's `covering_ws` intent.
 fn presentVisibleRecOnWs(m: *const model.Model, ws: model.WSId, skip: ?model.WindowId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {

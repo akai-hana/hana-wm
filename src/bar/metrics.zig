@@ -18,7 +18,7 @@ const scale = @import("scale");
 /// Default point size for scaled metrics; also the size embedded in the
 /// fallback font description (`default_fallback_font`), so drawing's
 /// last-resort font and the metric probe always agree.
-pub const default_scaled_font_size: u16 = 10;
+const default_scaled_font_size: u16 = 10;
 
 /// Fallback Pango font description used when no configured font loads:
 /// monospace at the default `default_scaled_font_size` point size.

@@ -21,7 +21,6 @@ const x11wire = @import("wire");
 
 // --- process lifecycle (re-exports) --------------------------------------
 pub const running = &proc.running;
-pub const wake_byte = proc.wake_byte;
 pub const setSignalWriteFd = proc.setSignalWriteFd;
 pub const quit = proc.quit;
 pub const reload = proc.reload;
@@ -41,7 +40,7 @@ inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
     return ts;
 }
 
-pub fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
+fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
     const ts = clockTs(clock_id);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }

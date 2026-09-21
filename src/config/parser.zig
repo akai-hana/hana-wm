@@ -14,27 +14,13 @@ const std = @import("std");
 const debug = @import("debug");
 const types = @import("types");
 
-/// A value that can be expressed as either an absolute pixel count or a
-/// percentage of some reference dimension.
-pub const ScalableValue = struct {
-    value: f32,
-    is_percentage: bool,
-
-    pub inline fn absolute(val: f32) ScalableValue {
-        return .{ .value = val, .is_percentage = false };
-    }
-    pub inline fn percentage(val: f32) ScalableValue {
-        return .{ .value = val, .is_percentage = true };
-    }
-};
-
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
     string: []const u8,
     array: std.ArrayList(Value),
     color: u32,
-    scalable: ScalableValue,
+    scalable: types.ScalableValue,
 
     // Duplicate keys accumulate into a flat array (see `accumulate`), so
     // scalar reads implement "later declaration wins": the latest value is
@@ -72,9 +58,9 @@ pub const Value = union(enum) {
                 .color => |c| c,
                 else => null,
             },
-            ScalableValue => switch (scalar) {
+            types.ScalableValue => switch (scalar) {
                 .scalable => |s| s,
-                .integer => |i| ScalableValue.absolute(@floatFromInt(i)),
+                .integer => |i| types.ScalableValue.absolute(@floatFromInt(i)),
                 else => null,
             },
             else => @compileError("asScalar: unsupported type " ++ @typeName(T)),
@@ -229,7 +215,7 @@ pub const Section = struct {
             bool => v.asScalar(bool),
             []const u8 => v.asScalar([]const u8),
             []const Value => v.asArray(),
-            ScalableValue => v.asScalar(ScalableValue),
+            types.ScalableValue => v.asScalar(types.ScalableValue),
             else => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
         };
     }
@@ -259,7 +245,7 @@ fn typeLabel(comptime T: type) []const u8 {
         i64 => "a number",
         bool => "a boolean",
         []const u8 => "a string",
-        ScalableValue => "a size or percentage",
+        types.ScalableValue => "a size or percentage",
         else => "a different type",
     };
 }
@@ -303,11 +289,8 @@ pub const Document = struct {
     /// whole file it represents was skipped during the load's merge.
     /// config.zig turns a had_errors merged document into
     /// error.ConfigParseFailed so a broken config can't silently partial-load
-    /// (C1); keeps its existing per-line/file warns either way.
+    /// (the existing per-line/file warns surface anyway).
     had_errors: bool = false,
-    /// Path of the TOML file this document was parsed from ("" for in-memory
-    /// / embedded inputs). Named in every per-line diagnostic (C5).
-    source_path: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
@@ -327,7 +310,7 @@ pub const Document = struct {
 /// `title = secondary_color`, ...). `primary_color` doubles as the bar's
 /// default accent knob (the former `accent_color`); the other three are pure
 /// palette declarations currently consumed by the fallback chain and the
-/// theme's `[bar.colors]` entries.
+/// theme's `[bar.properties]` entries.
 const palette_var_names = [_][]const u8{
     types.palette_primary_color,
     types.palette_secondary_color,
@@ -350,24 +333,287 @@ pub fn colorFromValue(val: Value) ?u32 {
     return null;
 }
 
+/// Maximum number of `+`-separated color operands in a single color-mix
+/// expression. Config is locally authored, so this is a defensive backstop
+/// against a pathological chain, not a response to observed input.
+pub const max_mix_operands = 8;
+
+/// One resolved operand of a color-mix expression: a literal color plus the
+/// optional percentage weight annotated on the `+` before it (null = weight
+/// derived from the remaining budget, or an equal share when nothing carries
+/// a weight).
+pub const MixOperand = struct {
+    color: u32,
+    weight: ?u32 = null,
+};
+
+/// True when `raw` is a weight-marker token (`+(weight:50%)`, `(weight:50%)`,
+/// or the `%`-less `(weight:50)`) rather than a value. Kept syntax-only so
+/// the bare-token interpreter can classify a `%`-suffixed weight token as a
+/// string before the generic percentage branch mistakes its non-numeric
+/// prefix for an invalid ratio and errors the whole line.
+pub fn isWeightToken(raw: []const u8) bool {
+    var s = raw;
+    if (s.len == 0) return false;
+    if (s[0] == '+') s = s[1..];
+    const prefix = "(weight:";
+    if (!std.mem.startsWith(u8, s, prefix)) return false;
+    var i: usize = prefix.len;
+    const digits_start = i;
+    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+    if (i == digits_start) return false;
+    if (i < s.len and s[i] == '%') i += 1;
+    return i == s.len - 1 and s[i] == ')';
+}
+
+/// The weight (0-100) carried by a weight-marker token; null when `raw` is
+/// not one. `+(weight:N%)` annotates the operand RIGHT after the `+`; the
+/// operand at the head of the chain absorbs the remaining weight.
+pub fn weightFromToken(raw: []const u8) ?u32 {
+    if (!isWeightToken(raw)) return null;
+    var s = raw;
+    if (s[0] == '+') s = s[1..];
+    const body = s["(weight:".len .. s.len - 1];
+    const digits = if (std.mem.endsWith(u8, body, "%")) body[0 .. body.len - 1] else body;
+    return std.fmt.parseInt(u32, digits, 10) catch null;
+}
+
+/// Splits a `+`-separated chain part like `(weight:25%)secondary_color` into
+/// its weight annotation and the operand it annotates. A part with no
+/// annotation yields weight null and the part unchanged.
+fn splitWeightPrefix(part: []const u8) struct { weight: ?u32, operand: []const u8 } {
+    const prefix = "(weight:";
+    if (!std.mem.startsWith(u8, part, prefix)) return .{ .weight = null, .operand = part };
+    var i: usize = prefix.len;
+    const digits_start = i;
+    while (i < part.len and std.ascii.isDigit(part[i])) i += 1;
+    if (i == digits_start) return .{ .weight = null, .operand = part };
+    const digits_end = i;
+    if (i < part.len and part[i] == '%') i += 1;
+    if (i >= part.len or part[i] != ')') return .{ .weight = null, .operand = part };
+    i += 1;
+    const weight = std.fmt.parseInt(u32, part[digits_start..digits_end], 10) catch
+        return .{ .weight = null, .operand = part };
+    return .{ .weight = weight, .operand = part[i..] };
+}
+
+/// Resolves a single mix operand (a hex string or a palette variable name)
+/// against the collected palette.
+fn resolveMixOperand(operand: []const u8, palette: *const std.StringHashMap(u32)) ?u32 {
+    if (parseColor(operand)) |c| return c else |_| {}
+    return palette.get(operand);
+}
+
+/// Resolves a single mix operand carried by a Value (a `.color`/integer
+/// literal, or a string palette reference); null when it isn't a color.
+fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
+    if (colorFromValue(val)) |c| return c;
+    if (val.asScalar([]const u8)) |s| return resolveMixOperand(s, palette);
+    return null;
+}
+
+/// Parses `val` (either the one-token spelling `a+(weight:20%)b` or the
+/// spaced array spelling `[a, "+", (weight:20%), b]`) as a `+` color-mix
+/// expression, resolving every operand against `palette`. null when `val` is
+/// not a valid mix: no `+`, malformed structure (two operands without an
+/// operator, stray/trailing `+`, a weight before the head operand), more than
+/// max_mix_operands operands, or an operand that isn't a color.
+fn extractMixOperands(val: Value, palette: *const std.StringHashMap(u32)) ?[]MixOperand {
+    var operands: [max_mix_operands]MixOperand = undefined;
+    var count: usize = 0;
+
+    // Match on the variant directly: asScalar would descend into an array's
+    // last element, misreading the spaced spelling as the unspaced one.
+    switch (val) {
+        // Unspaced spelling: one bare token, "a+b+(weight:20%)c".
+        .string => |s| {
+            if (std.mem.indexOfScalar(u8, s, '+') == null) return null;
+            var it = std.mem.splitScalar(u8, s, '+');
+            while (it.next()) |part| {
+                const tagged = splitWeightPrefix(part);
+                const color = resolveMixOperand(tagged.operand, palette) orelse return null;
+                if (count == max_mix_operands) return null;
+                operands[count] = .{ .color = color, .weight = tagged.weight };
+                count += 1;
+            }
+            return operands[0..count];
+        },
+        // Spaced spelling: an array alternating operand and "+"([weight]) tokens.
+        .array => |arr| {
+            if (arr.items.len < 3) return null;
+            var last_was_operand = false;
+            var pending_weight: ?u32 = null;
+            var expecting_operand_after_plus = false;
+            for (arr.items) |elem| {
+                if (elem == .string) {
+                    const s = elem.string;
+                    if (std.mem.eql(u8, s, "+")) {
+                        if (!last_was_operand) return null;
+                        last_was_operand = false;
+                        expecting_operand_after_plus = true;
+                        pending_weight = null;
+                        continue;
+                    }
+                    if (isWeightToken(s)) {
+                        if (std.mem.startsWith(u8, s, "+")) {
+                            // Combined "+(weight:N%)": operator + weight in one token.
+                            if (!last_was_operand) return null;
+                            last_was_operand = false;
+                            expecting_operand_after_plus = true;
+                            pending_weight = weightFromToken(s);
+                            continue;
+                        }
+                        // Bare "(weight:N%)": continues a pending '+'.
+                        if (!expecting_operand_after_plus) return null;
+                        pending_weight = weightFromToken(s);
+                        continue;
+                    }
+                }
+                if (last_was_operand) return null;
+                const color = resolveMixOperandValue(elem, palette) orelse return null;
+                if (count == max_mix_operands) return null;
+                operands[count] = .{
+                    .color = color,
+                    .weight = if (expecting_operand_after_plus) pending_weight else null,
+                };
+                count += 1;
+                last_was_operand = true;
+                expecting_operand_after_plus = false;
+                pending_weight = null;
+            }
+            if (!last_was_operand) return null;
+            return operands[0..count];
+        },
+        else => return null,
+    }
+}
+
+/// Weighted channel average of `parts`: the head operand absorbs the weight
+/// remainder (`100 - explicit sum`) when any weight is given, later operands
+/// take their annotation; with no weights at all every operand shares
+/// equally. Weights must be validated (each 0-100, explicit sum <= 100) by
+/// resolveColorExpr before this is reached.
+pub fn mixColors(parts: []const MixOperand) u32 {
+    const n = parts.len;
+    if (n == 0) return 0;
+    if (n == 1) return parts[0].color;
+
+    var any_explicit = false;
+    var explicit_sum: u64 = 0;
+    for (parts[1..]) |p| if (p.weight) |w| {
+        any_explicit = true;
+        explicit_sum += w;
+    };
+
+    var weights: [max_mix_operands]u64 = undefined;
+    if (any_explicit) {
+        weights[0] = 100 - explicit_sum;
+        for (parts[1..], 0..) |p, i| weights[i + 1] = p.weight orelse 0;
+    } else {
+        for (parts, 0..) |_, i| weights[i] = 1;
+    }
+
+    var acc_r: u64 = 0;
+    var acc_g: u64 = 0;
+    var acc_b: u64 = 0;
+    var wsum: u64 = 0;
+    for (parts, 0..) |p, i| {
+        const w = weights[i];
+        acc_r += ((p.color >> 16) & 0xFF) * w;
+        acc_g += ((p.color >> 8) & 0xFF) * w;
+        acc_b += (p.color & 0xFF) * w;
+        wsum += w;
+    }
+    if (wsum == 0) return 0;
+    // Round-half-up keeps the midpoint of black/white at 128 where the bare
+    // division would truncate 127.5 down to 127.
+    const r = (acc_r + wsum / 2) / wsum;
+    const g = (acc_g + wsum / 2) / wsum;
+    const b = (acc_b + wsum / 2) / wsum;
+    return (@as(u32, @intCast(r)) << 16) |
+        (@as(u32, @intCast(g)) << 8) |
+        @as(u32, @intCast(b));
+}
+
+/// Resolves a `+` color-mix expression into a single mixed color, null when
+/// `val` is not a valid mix (callers layer their own warn-and-default
+/// policy). Every operand resolves through the collected palette; weights
+/// must each sit in 0-100 and their explicit sum must not exceed 100, so a
+/// `+(weight:N%)` chain always produces a valid, fully-determined mix.
+pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
+    const parts = extractMixOperands(val, palette) orelse return null;
+    if (parts.len == 0) return null;
+    if (parts[0].weight != null) return null;
+    var any_explicit = false;
+    var explicit_sum: u64 = 0;
+    for (parts) |p| if (p.weight) |w| {
+        any_explicit = true;
+        explicit_sum += w;
+    };
+    if (any_explicit and explicit_sum > 100) return null;
+    for (parts) |p| if (p.weight) |w| if (w > 100) return null;
+    return mixColors(parts);
+}
+
+/// Resolves a palette-variable declaration to a color. Literals decode
+/// directly; a `+`-bearing value is a color mix; a single name is an alias of
+/// another collected palette variable. Used by collectPalette's fixpoint.
+fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
+    if (colorFromValue(val)) |c| return c;
+    if (val.asScalar([]const u8)) |s| {
+        if (std.mem.indexOfScalar(u8, s, '+') != null) return resolveColorExpr(val, palette);
+        return palette.get(s);
+    }
+    return null;
+}
+
 /// Scans every section (and the root) for palette-variable declarations,
 /// resolving each to its color value and storing the last declaration into
-/// `doc.palette`. Also marks the keys consumed so they never appear as
-/// unrecognized. Call once per merged Document, before knobs are applied.
+/// `doc.palette` ("later declaration wins" like every other knob). One pass
+/// resolves literal declarations; a bounded fixpoint then resolves aliases
+/// and `+` mixes that reference other palette variables, so
+/// `primary_color = secondary_color + text_color` works. Also marks the keys
+/// consumed so they never appear as unrecognized. A variable left unresolved
+/// after the fixpoint is cyclic or references an unknown operand: warned and
+/// skipped (referencing knobs fall back to their own defaults). Call once per
+/// merged Document, before knobs are applied.
 pub fn collectPalette(self: *Document) void {
-    for (palette_var_names) |name| {
-        var best: ?u32 = null;
+    // Last declaration per palette variable, in reserved-name order.
+    var last: [palette_var_names.len]?Value = undefined;
+    for (palette_var_names, 0..) |name, i| {
+        var best: ?Value = null;
         var iter = self.sections.iterator();
         while (iter.next()) |entry| {
-            if (entry.value_ptr.get(name)) |val| {
-                if (colorFromValue(val)) |c| best = c;
+            if (entry.value_ptr.get(name)) |val| best = val;
+        }
+        if (self.root.get(name)) |val| best = val;
+        last[i] = if (best) |b| b.lastScalar() else null;
+    }
+
+    // Fixpoint: each round resolves whatever became resolvable this pass; a
+    // progress-free round means everything left is cyclic or unresolvable.
+    var progress = true;
+    var rounds: usize = 0;
+    while (progress and rounds <= palette_var_names.len) {
+        progress = false;
+        rounds += 1;
+        for (last, 0..) |may, i| {
+            if (may == null) continue;
+            const name = palette_var_names[i];
+            if (resolvePaletteDecl(may.?, &self.palette)) |c| {
+                self.palette.put(name, c) catch {};
+                last[i] = null;
+                progress = true;
             }
         }
-        if (self.root.get(name)) |val| {
-            if (colorFromValue(val)) |c| best = c;
-        }
-        if (best) |c| {
-            self.palette.put(name, c) catch {};
+    }
+
+    for (last, 0..) |may, i| {
+        if (may != null) {
+            debug.warn(
+                "Palette variable '{s}' is a cyclic or unresolvable color expression; ignoring (referencing colors fall back to defaults)",
+                .{palette_var_names[i]},
+            );
         }
     }
 }
@@ -506,9 +752,9 @@ const Parser = struct {
     // when a pair fails mid-parse.
     last_key: []const u8 = "",
     /// Owning Document's had_errors flag; set whenever a line is warn-and-
-    // skipped so the load can fail on broken configs (C1).
+    // skipped so the load can fail on broken configs.
     had_errors: *bool,
-    /// File path named in every per-line diagnostic (C5); "" = in-memory input.
+    /// File path named in every per-line diagnostic; "" = in-memory input.
     source_path: []const u8 = "",
     // Current nested-array depth, checked against max_array_depth so a
     // pathologically deep literal (`[[[[[...]]]]]`) can't exhaust the stack.
@@ -741,13 +987,19 @@ const Parser = struct {
         if (std.mem.eql(u8, raw, "true")) return .{ .boolean = true };
         if (std.mem.eql(u8, raw, "false")) return .{ .boolean = false };
 
+        // A weight-marker token (`+(weight:50%)`) must survive the tokenizer
+        // as a string for the color-mix resolver: the trailing '%' would
+        // otherwise fall into the percentage branch below and, having a
+        // non-numeric prefix, error the whole line.
+        if (isWeightToken(raw)) return .{ .string = raw };
+
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
             const f = std.fmt.parseFloat(
                 f32,
                 raw[0 .. raw.len - 1],
             ) catch return ParseError.InvalidValue;
             if (!std.math.isFinite(f)) return ParseError.InvalidValue;
-            return .{ .scalable = ScalableValue.percentage(f) };
+            return .{ .scalable = types.ScalableValue.percentage(f) };
         }
 
         // Bare decimal (no '%' suffix), e.g. `border_width = 2.5`: parsed as
@@ -756,7 +1008,7 @@ const Parser = struct {
         // asInt()/asBool() consumers are unaffected.
         if (looksLikeDecimal(raw)) {
             const f = std.fmt.parseFloat(f32, raw) catch return ParseError.InvalidValue;
-            if (std.math.isFinite(f)) return .{ .scalable = ScalableValue.absolute(f) };
+            if (std.math.isFinite(f)) return .{ .scalable = types.ScalableValue.absolute(f) };
         }
 
         // Colors require '#' or '0x' prefix: bare all-hex identifiers
@@ -894,7 +1146,6 @@ const Parser = struct {
 /// every per-line diagnostic ("" for in-memory/embedded inputs).
 pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []const u8) !Document {
     var doc = Document.init(allocator);
-    doc.source_path = source_path;
 
     var p = Parser.init(allocator, content, &doc.had_errors);
     p.source_path = source_path;

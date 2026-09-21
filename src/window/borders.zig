@@ -11,8 +11,6 @@ const build_options = @import("build_options");
 const wincache = @import("wincache");
 const window = @import("window");
 
-const callHookBool = window.callHookBool;
-
 /// Pure focused/unfocused pixel pick: 0 for screen-covering windows,
 /// focused or unfocused color otherwise. Headless-testable.
 pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
@@ -22,15 +20,16 @@ pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
 /// Pure covering-occupant borderless rule: true when `win` must render
 /// borderless because a covering (fullscreen) occupant holds the workspace it
 /// actually lives on. `current` is the current workspace for the
-/// unresolvable-workspace fallback; `has_fullscreen` gates the
+/// unresolvable-workspace fallback; `has_fullscreen` (comptime) gates the
 /// covering-mode reads for fullscreen-absent builds.
 pub fn coveredByOccupant(
     m: *const model.Model,
     win: u32,
     current: model.WSId,
-    has_fullscreen: bool,
+    comptime has_fullscreen: bool,
 ) bool {
-    const e = m.store.get(win) orelse return false;
+    // Only windows present in the store take part in the rule.
+    _ = m.store.get(win) orelse return false;
     if (model.findHome(m, win)) |w| return model.coveringOccupantOnWs(m, w) != null;
     return has_fullscreen and model.coveringOccupantOnWs(m, current) != null;
 }
@@ -40,7 +39,8 @@ pub fn coveredByOccupant(
 pub fn resolveBorderColor(win: u32) u32 {
     // Covering windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
-    if (callHookBool(.isCoveringMode, .{ pipeline.model(), win })) return 0;
+    const m = pipeline.model();
+    if (window.isCoveringMode(m, win)) return 0;
     const cfg = &core.getState().config.tiling;
     // A window that shares a workspace with a covering (fullscreen) occupant
     // is hidden behind it, so it must render borderless too -- otherwise the
@@ -48,8 +48,7 @@ pub fn resolveBorderColor(win: u32) u32 {
     // real workspace from its covering state or (re)place home; a stray or
     // unfindable window falls back to whether the CURRENT workspace has a
     // covering occupant.
-    const m = pipeline.model();
-    if (coveredByOccupant(m, win, false, m.current, build_options.has_fullscreen)) return 0;
+    if (coveredByOccupant(m, win, m.current, build_options.has_fullscreen)) return 0;
     return borderColorOf(focus.getFocused() == win, cfg.border_focused, cfg.border_unfocused);
 }
 

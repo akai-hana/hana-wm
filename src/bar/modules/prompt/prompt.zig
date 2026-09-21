@@ -24,10 +24,10 @@ pub const Addon = struct {
 };
 pub const addons = @import("prompt_subs").addons;
 pub const XK = core.XK;
-pub const xk_back_space = @intFromEnum(XK.BackSpace);
+const xk_back_space = @intFromEnum(XK.BackSpace);
 pub const xk_return = @intFromEnum(XK.Return);
 pub const xk_escape = @intFromEnum(XK.Escape);
-pub const xk_delete = @intFromEnum(XK.Delete);
+const xk_delete = @intFromEnum(XK.Delete);
 pub const xk_left = @intFromEnum(XK.Left);
 pub const xk_right = @intFromEnum(XK.Right);
 pub const xk_home = @intFromEnum(XK.Home);
@@ -176,15 +176,7 @@ pub fn handleInsertBasic(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
 pub fn insertChar(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
     switch (sym) {
         xk_return => return .spawn,
-        xk_back_space => if (es.cursor > 0) {
-            std.mem.copyForwards(
-                u8,
-                es.buf[es.cursor - 1 .. es.len - 1],
-                es.buf[es.cursor..es.len],
-            );
-            es.cursor -= 1;
-            es.len -= 1;
-        },
+        xk_back_space => backspace(es),
         xk_delete => if (es.cursor < es.len) {
             std.mem.copyForwards(
                 u8,

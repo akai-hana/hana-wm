@@ -276,7 +276,7 @@ test "bench: fallbackFocusCandidate (50 wins)" {
 
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     var m = makeModel();
-    const n = constants.Limits.max_tiled_windows;
+    const n = constants.max_tiled_windows;
     try fill(&m, n);
 
     const iterations: usize = if (bench) 50_000 else 1;

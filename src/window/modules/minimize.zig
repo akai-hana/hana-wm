@@ -71,8 +71,18 @@ pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     if (isMinimized(m, win)) return; // idempotent
     // Capacity check BEFORE any mutation.
     if (g_recs.len >= MAX_MINIMIZED) return error.CapacityFull;
+    const slot = parkEntry(m, win);
+    const appended = g_recs.append(.{ .win = win, .slot = slot, .seq = g_seq });
+    std.debug.assert(appended); // cannot fail: capacity pre-checked above
+    g_seq = g_seq +| 1;
+}
+
+/// Shared park: drop `win`'s tiled home-list slot and mark the entry parked.
+/// Returns the former slot (or null when it held none -- a float-originated
+/// window keeps its home so a later restore still resolves a placement).
+fn parkEntry(m: *model.Model, win: model.WindowId) ?usize {
+    const e = m.store.getPtr(win) orelse return null;
     var slot: ?usize = null;
-    const e = m.store.getPtr(win) orelse return;
     if (model.findHome(m, win)) |h| {
         slot = m.ws[h.index].tiled_order.indexOfScalar(win);
         model.removeValue(&m.ws[h.index].tiled_order, win);
@@ -82,9 +92,7 @@ pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
         if (e.anchor == .tiled) e.home_ws = null; // no longer in any tiled_order
     }
     e.presence = .parked; // mode stays unchanged (base/fullscreen)
-    const appended = g_recs.append(.{ .win = win, .slot = slot, .seq = g_seq });
-    std.debug.assert(appended); // cannot fail: capacity pre-checked above
-    g_seq = g_seq +| 1;
+    return slot;
 }
 
 pub fn restore(m: *model.Model, win: model.WindowId) void {
@@ -96,16 +104,13 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // re-listed; floating-anchored ones restore to their saved rect directly
     // and are never appended (a phantom layout member). A covering (fullscreen)
     // window keeps its anchor, so re-listing also applies to fullscreen-tiled.
-    if (switch (e.anchor) {
-        .tiled => true,
-        .floating => false,
-    }) {
+    if (e.anchor == .tiled) {
         // Restore toward the CURRENT workspace when the window is tagged to
         // it -- a restore act is aimed at where the user is looking, not at
         // the lowest tagged workspace of a possibly distant workspace list.
         // Falls back to the lowest tagged workspace otherwise.
         const h: model.WSId = blk: {
-            if (e.mask & model.bit(m.current) != 0) break :blk m.current;
+            if (model.taggedOn(e, m.current)) break :blk m.current;
             break :blk model.lowestBit(e.mask) orelse return;
         };
         const list = &m.ws[h.index].tiled_order;
@@ -151,7 +156,7 @@ const RestoreCandidate = struct {
 fn parkedOnWs(m: *const model.Model, rec: Rec, ws: model.WSId) bool {
     const e = m.store.get(rec.win) orelse return false;
     if (e.presence != .parked) return false;
-    return e.mask & model.bit(ws) != 0;
+    return model.taggedOn(e, ws);
 }
 
 /// Restore-order target selection over minimized windows on `ws`:
@@ -246,16 +251,15 @@ pub fn collectMinimizedIntoSet(
 /// when the window has no minimized record OR the model presence is not
 /// parked (a covering window is fullscreen's blob). The returned slice is
 /// allocator-owned; persist frees it after writing.
-fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const model.Model, Rec } {
+fn serializePreamble(m: *const model.Model, win: u32) ?Rec {
     const idx = g_recs.indexOfByIdField(.win, win) orelse return null;
     const e = m.store.get(win) orelse return null;
     if (e.presence != .parked) return null;
-    return .{ m, g_recs.slice()[idx] };
+    return g_recs.slice()[idx];
 }
 
 pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
-    const p = serializePreamble(m, win) orelse return null;
-    const rec = p[1];
+    const rec = serializePreamble(m, win) orelse return null;
     const held = alloc.alloc(u8, @sizeOf(PackedMinimize)) catch return null;
     const blob: PackedMinimize = .{
         .magic = min_magic,
@@ -268,32 +272,21 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 
 /// Persistence seam (plugin.WindowModule.deserializeWindow): adopts the blob
 /// written by `serializeWindow` and replays the park on the live model.
-fn deserializePreamble(win: u32, bytes: []const u8, m: *model.Model) ?struct { *model.Model, ?*model.Entry } {
-    if (bytes.len != 9 or bytes[0] != min_magic) return null; // not our blob; let the loop continue
-    if (g_recs.indexOfByIdField(.win, win) != null) return .{ m, null }; // already adopted; idempotent
-    if (g_recs.len >= MAX_MINIMIZED) return null;
-    const e = m.store.getPtr(win) orelse return null;
-    return .{ m, e };
-}
-
 pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
-    const p = deserializePreamble(win, bytes, m) orelse return false;
-    const e = p[1] orelse return true;
+    if (bytes.len != 9 or bytes[0] != min_magic) return false; // not our blob; let the loop continue
+    if (g_recs.indexOfByIdField(.win, win) != null) return true; // already adopted; idempotent
+    if (m.store.getPtr(win) == null) return true; // window gone; claim the blob, nothing to park
+    if (g_recs.len >= MAX_MINIMIZED) return false;
     // Slice the payload back out via a byte-aligned copy (persist buffers are
     // byte-aligned; the extern struct's align(1) u32s load unaligned safely).
     var raw: PackedMinimize align(@alignOf(PackedMinimize)) = undefined;
     @memcpy(std.mem.asBytes(&raw), bytes[0..@sizeOf(PackedMinimize)]);
     const slot: ?usize = if (raw.slot == std.math.maxInt(u32)) null else raw.slot;
     const seq = raw.seq;
-    // Replay the minimize park: drop the tiled slot, mark parked. `mode`
-    // comes from the model (already persisted), the blob restores the rec.
-    // Mirror minimize(): a float-anchored window keeps its home so its later
-    // restore resolves a placement.
-    if (model.findHome(m, win)) |h| {
-        model.removeValue(&m.ws[h.index].tiled_order, win);
-        if (e.anchor == .tiled) e.home_ws = null; // no longer in any tiled_order
-    }
-    e.presence = .parked;
+    // Replay the minimize park (shared with minimize()): drop the tiled slot,
+    // mark parked. `mode` comes from the model (already persisted), the blob
+    // restores the rec.
+    _ = parkEntry(m, win);
     if (g_seq <= seq) g_seq = seq +| 1; // keep the monotonic counter ahead (saturating, see g_seq)
     _ = g_recs.append(.{ .win = win, .slot = slot, .seq = seq });
     return true;

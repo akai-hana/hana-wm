@@ -16,8 +16,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const inset: u16 = if (gaps) m.gap else 0;
     const total_margin = tiling.totalInset(inset, m);
 
-    // Pick the top (visible) window: prefer the focused window, else the
-    // list tail, so the last-focused window resurfaces on close.
+    // focusedElse: fallback is the list tail, so the last-focused window
+    // resurfaces on close.
     const top_win = tiling.focusedElse(v, v.order, v.order[v.order.len - 1]);
 
     const top_rect = tiling.insetRect(inset, tiling.waY(v) +| inset, v.workarea.width, v.workarea.height, total_margin, v.env.min_dim);

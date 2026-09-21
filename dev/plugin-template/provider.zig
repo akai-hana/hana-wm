@@ -172,9 +172,10 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
 // ---------------------------------------------------------------------------
 
 /// Screen-cover seam (plugin.WindowModule.coveringOccupantOnWs): "which
-/// window owns the screen on `ws`, if any". sync calls it once per
-/// reconcile, through the registry, INSTEAD of scanning the model for
-/// fullscreen state. Rules:
+/// window owns the screen on `ws`, if any". sync resolves coverage directly
+/// from the model's core `coveringOccupantOnWs` scan; this hook exists for
+/// the ACTIONS/workspaces layer, which asks the same question per workspace
+/// through the registry. Rules:
 ///   - first module in registry order that returns non-null claims the ws;
 ///   - a STOPPED (parked) window must never claim (returns null) — this is
 ///     how minimize-from-fullscreen ghosts correctly release the screen;
@@ -190,8 +191,8 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
         if (!rec.flag) continue; // TODO: your "claims the screen" predicate
         const e = m.store.get(rec.win) orelse continue;
         if (e.presence == .parked) continue; // never claim for hidden windows
-        // TODO: your visibility rule, e.g. `e.covering_ws == ws or
-        // model.visibleOn(m, rec.win, ws)`, mirroring fullscreen.
+        // TODO: your visibility rule, mirroring fullscreen's model read:
+        // `const cws = e.covering_ws orelse continue; if (cws.eql(ws)) return rec.win;`
         _ = ws;
         return rec.win;
     }

@@ -277,6 +277,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### [major] Three workspace-id types across layers — **OPEN** (one canonical 0-based id)
 
+> Still three spellings in-tree: `model.WSId`, `core.WorkspaceId`, and config's bare `u8 workspace_idx` (src/config/types.zig). CC-v4-8 proposes typing the config field with the pure-shelf core id.
+
 ### [major] Focus truth stored three times — **DEFERRED (Phase 2)**
 - `model.focused` is now the decision source for clear/failover paths; `last_applied` remains the protocol-commit mirror.
 
@@ -284,9 +286,13 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ### [minor] Magic numbers — **OPEN** (sample: events poll array, XK literals, icccm WM_HINTS, `variant_idx == 1`, duplicate layout-name buffers)
 
-### [minor] Redundant/Gate copies, dispatch helpers, blob encoding — **OPEN** (sample: 7 dispatch wrappers, `deserializeWindow *anyopaque`, minimize blob packing, `borders` width double-meaning, `pipeline` anonymous `struct {}` fallback)
+### [minor] Redundant/Gate copies, dispatch helpers, blob encoding — **PARTIALLY FIXED** (sample: 7 dispatch wrappers, `deserializeWindow *anyopaque`, minimize blob packing, `borders` width double-meaning, `pipeline` anonymous `struct {}` fallback)
 
-### [nit] Naming/readability — **GATED** — several landed (layout-name normalization via `helpers.std_layout_names`, `isOnlyVisibleOnCurrentWs` naming); the rest (vim Awaiting/PendingCmd, config parser loops, `ALL_MASK`→`isPinned`, proc wake_byte accessor) remain OPEN.
+> Dispatch helper count cut to 4 (callHook/callHookBool/dispatchAll/dispatchFirstTrue — callFirst and the comptime type gymnastics are gone, WINC-01) and the `deserializeWindow`/`serializeWindow` `*anyopaque`-to-tuple preamble plumbing dropped (WINM-3). The minimize blob packing, `borders` width double-meaning, and `pipeline` struct fallback remain.
+
+### [nit] Naming/readability — **PARTIALLY FIXED** — several landed (layout-name normalization via `helpers.std_layout_names`, `isOnlyVisibleOnCurrentWs` naming); the rest (vim Awaiting/PendingCmd, config parser loops, `ALL_MASK`→`isPinned`, proc wake_byte accessor) remain OPEN.
+
+> The vim subsystem is gone (its Awaiting/PendingCmd naming lives only in the prompt module), `isPinned` landed (model.zig; ALL_MASK stays as the sentinel behind it), and the `proc wake_byte` accessor + re-export were removed (COREP-05). The config parser loop naming remains OPEN (CFG-18/19/22 partially applied).
 
 ---
 

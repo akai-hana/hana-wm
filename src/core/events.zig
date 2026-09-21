@@ -6,7 +6,6 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
-const constants = @import("constants");
 const masks = @import("masks");
 
 const debug = @import("debug");
@@ -273,7 +272,7 @@ pub fn grabKeybindings() void {
 // swap. On failure the old config remains active.
 //
 // Ordering is load-bearing:
-//   1. Keybind resolution and DPI scaling run pre-swap on the new config.
+//   1. Keybind resolution runs pre-swap on the new config.
 //   2. The swap precedes subsystem reloads (reloadBorders / reloadConfig /
 //      surfaces.onReload) so they rebuild from the NEW config. (The old ordering kept
 //      stale settings, then freed string slices the new bar had shallow-copied;

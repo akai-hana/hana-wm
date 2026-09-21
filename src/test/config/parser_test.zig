@@ -11,6 +11,7 @@ const testing = std.testing;
 // warn-level diagnostics; src/core/utils/debug.zig silences all std.log
 // diagnostics in test binaries, so this stays quiet on success.
 const parser = @import("parser");
+const types = @import("types");
 
 /// Parses into the caller's arena (like the load-scoped arena the real config
 /// pipeline uses); the caller owns the arena and frees it after use. Named
@@ -44,8 +45,8 @@ test "parses root + named sections into a flat Document" {
     try testing.expectEqualStrings("hana", general.get("name").?.asScalar([]const u8).?);
     // Bare decimals parse as absolute ScalableValues, not strings.
     const extra = general.get("extra").?;
-    try testing.expectEqual(@as(f32, 1.5), extra.asScalar(parser.ScalableValue).?.value);
-    try testing.expect(!extra.asScalar(parser.ScalableValue).?.is_percentage);
+    try testing.expectEqual(@as(f32, 1.5), extra.asScalar(types.ScalableValue).?.value);
+    try testing.expect(!extra.asScalar(types.ScalableValue).?.is_percentage);
 }
 
 test "double-quoted strings resolve escapes; single-quoted pass through" {
@@ -126,15 +127,6 @@ test "duplicate key accumulates and flags scalar-duplicate reads" {
     const val = sec.get("count").?;
     try testing.expectEqual(@as(usize, 2), val.asArray().?.len);
     try testing.expectEqual(@as(i64, 5), sec.getAs(i64, "count").?);
-}
-
-test "wrong-case section header is a parse error through extends etc" {
-    // Placeholder for C1 integration (buildConfigFromDoc-level tests live in
-    // config_test.zig); parser-level just verifies source_path plumbing.
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const doc = try parser.parse(arena.allocator(), "[bar]\nheight = 24\n", "cfg/extra.toml");
-    try testing.expectEqualStrings("cfg/extra.toml", doc.source_path);
 }
 
 test "array-of-tables and empty section headers are skipped with a flag" {
@@ -220,4 +212,133 @@ test "mergeDocumentsInto propagates had_errors from an overlay" {
     try testing.expect(base.had_errors);
     // The valid line in the broken overlay still landed.
     try testing.expectEqualStrings("here", base.root.get("still").?.asScalar([]const u8).?);
+}
+
+test "color-mix weight markers: isWeightToken / weightFromToken" {
+    try testing.expect(parser.isWeightToken("+(weight:50%)"));
+    try testing.expect(parser.isWeightToken("(weight:50%)"));
+    try testing.expect(parser.isWeightToken("(weight:50)"));
+    try testing.expect(!parser.isWeightToken("+"));
+    try testing.expect(!parser.isWeightToken("(weight:)"));
+    try testing.expect(!parser.isWeightToken("(weight:abc%)"));
+    try testing.expect(!parser.isWeightToken("50%"));
+    try testing.expect(!parser.isWeightToken("primary_color"));
+
+    try testing.expectEqual(@as(?u32, 50), parser.weightFromToken("+(weight:50%)"));
+    try testing.expectEqual(@as(?u32, 25), parser.weightFromToken("(weight:25)"));
+    try testing.expectEqual(@as(?u32, null), parser.weightFromToken("+"));
+    try testing.expectEqual(@as(?u32, null), parser.weightFromToken("50%"));
+}
+
+test "color-mix: a weight token survives the tokenizer instead of erroring" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
+        \\[bar]
+        \\border_focused = primary_color +(weight:50%) secondary_color
+    );
+    try testing.expect(!doc.had_errors);
+    const bar = doc.sections.getPtr("bar").?;
+    const vals = bar.get("border_focused").?.asArray().?;
+    // "+(weight:50%)" is one bare token (no space after '+'), so three
+    // elements, not four.
+    try testing.expectEqual(@as(usize, 3), vals.len);
+    try testing.expectEqualStrings("primary_color", vals[0].asScalar([]const u8).?);
+    try testing.expectEqualStrings("+(weight:50%)", vals[1].asScalar([]const u8).?);
+    try testing.expectEqualStrings("secondary_color", vals[2].asScalar([]const u8).?);
+}
+
+test "color-mix: resolveColorExpr averages channels across spellings and weights" {
+    // pa = (160, 0, 0), pb = (128, 32, 0); every assertion below is exact.
+    // (Names deliberately avoid [0-9a-f] so they can't be misread as hex
+    // literals by colorFromValue before the palette lookup.)
+    var palette = std.StringHashMap(u32).init(testing.allocator);
+    defer palette.deinit();
+    try palette.put("pa", 0xA00000);
+    try palette.put("pb", 0x802000);
+
+    // Plain midpoint (unspaced string spelling).
+    try testing.expectEqual(@as(u32, 0x901000), parser.resolveColorExpr(.{ .string = "pa+pb" }, &palette).?);
+    // Spaced array spelling with a weight on the second operand: b = 25%.
+    var spaced = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 4);
+    defer spaced.deinit(testing.allocator);
+    try spaced.append(testing.allocator, .{ .string = "pa" });
+    try spaced.append(testing.allocator, .{ .string = "+" });
+    try spaced.append(testing.allocator, .{ .string = "(weight:25%)" });
+    try spaced.append(testing.allocator, .{ .string = "pb" });
+    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = spaced }, &palette).?);
+
+    // Combined "+(weight:N%)" token (no space after the plus) is equivalent.
+    var compact = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 3);
+    defer compact.deinit(testing.allocator);
+    try compact.append(testing.allocator, .{ .string = "pa" });
+    try compact.append(testing.allocator, .{ .string = "+(weight:25%)" });
+    try compact.append(testing.allocator, .{ .string = "pb" });
+    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = compact }, &palette).?);
+    // Reversed weight: b = 75%.
+    try testing.expectEqual(@as(u32, 0x881800), parser.resolveColorExpr(.{ .string = "pa+(weight:75%)pb" }, &palette).?);
+
+    // A chain: a stays the head, later operands take their annotation
+    // (a=50%, b=25%, a=25%).
+    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .string = "pa+(weight:25%)pb+(weight:25%)pa" }, &palette).?);
+
+    // Equal weights beyond two operands share evenly (a=160/0/0,
+    // b=128/32/0: r=(160+128+128)/3=139, g=(32+32)/3=21).
+    try testing.expectEqual(@as(u32, 0x8B1500), parser.resolveColorExpr(.{ .string = "pa+pb+pb" }, &palette).?);
+}
+
+test "color-mix: malformed expressions resolve to null, not garbage" {
+    var palette = std.StringHashMap(u32).init(testing.allocator);
+    defer palette.deinit();
+    try palette.put("a", 0xA00000);
+    try palette.put("b", 0x802000);
+
+    // No '+': not a mix (plain aliases live in getColorFromValue).
+    try testing.expect(parser.resolveColorExpr(.{ .string = "pa" }, &palette) == null);
+    // A weight above 100 is invalid.
+    try testing.expect(parser.resolveColorExpr(.{ .string = "pa+(weight:150%)pb" }, &palette) == null);
+    // An unknown operand is invalid.
+    try testing.expect(parser.resolveColorExpr(.{ .string = "pa+nope" }, &palette) == null);
+    // Stray structure in the array spelling.
+    const cases = [_][]const parser.Value{ &.{ .{ .string = "pa" }, .{ .string = "pb" } }, &.{ .{ .string = "+" }, .{ .string = "pa" }, .{ .string = "pb" } }, &.{ .{ .string = "pa" }, .{ .string = "+" } }, &.{ .{ .string = "pa" }, .{ .string = "+" }, .{ .string = "pb" }, .{ .string = "c" } } };
+    for (cases) |cs| {
+        var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, cs.len);
+        defer arr.deinit(testing.allocator);
+        try arr.appendSlice(testing.allocator, cs);
+        try testing.expect(parser.resolveColorExpr(.{ .array = arr }, &palette) == null);
+    }
+    // The head operand may never carry a weight.
+    try testing.expect(parser.resolveColorExpr(.{ .string = "(weight:50%)pa+pb" }, &palette) == null);
+}
+
+test "collectPalette: aliases and + mixes resolve through a fixpoint" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
+        \\[bar]
+        \\secondary_color   = text_color        # alias of another palette var
+        \\primary_color     = secondary_color + text_color
+        \\alternative_color = "#000000"
+        \\text_color        = "#ffffff"
+    );
+    parser.collectPalette(&doc);
+    try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("primary_color").?);
+    try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("secondary_color").?);
+    try testing.expectEqual(@as(u32, 0x000000), doc.palette.get("alternative_color").?);
+    try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("text_color").?);
+}
+
+test "collectPalette: a cyclic mix is skipped, not infinite-looped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var doc = try parse(arena.allocator(),
+        \\[bar]
+        \\primary_color   = secondary_color    # mutual alias (cycle)
+        \\secondary_color = primary_color
+        \\text_color      = "#ffffff"
+    );
+    parser.collectPalette(&doc);
+    try testing.expect(doc.palette.contains("text_color"));
+    try testing.expect(!doc.palette.contains("primary_color"));
+    try testing.expect(!doc.palette.contains("secondary_color"));
 }

@@ -162,7 +162,7 @@ pub const workspace_labels: [constants.max_workspaces][]const u8 = blk: {
     break :blk labels;
 };
 
-pub inline fn isWindowOnWorkspace(win: u32, ws_idx: core.WorkspaceId) bool {
+inline fn isWindowOnWorkspace(win: u32, ws_idx: core.WorkspaceId) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
     return mask & model_mod.bit(ws_idx) != 0;
 }

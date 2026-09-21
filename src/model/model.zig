@@ -89,9 +89,10 @@ pub const Entry = struct {
     /// invariant); null when the window has no tiled slot.
     home_ws: ?WSId = null,
     presence: Presence = .present,
-    /// Core covering intent: the workspace this window's coverage anchors to,
-    /// present iff `presence == .covering`. The owning extension writes and
-    /// clears it; core reads it without naming any optional subsystem.
+    /// Core covering intent: the workspace this window's coverage anchors to.
+    /// Set while the owning extension parks the window as covering the screen;
+    /// kept while parked so a later park wins retargeting, then cleared. Core
+    /// reads it without naming any optional subsystem.
     covering_ws: ?WSId = null,
 };
 
@@ -221,7 +222,7 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             return .{ .store = self };
         }
 
-        /// Iterates in sorted-key order; `seq` beyond count() clamps to the
+        /// Indexed accessor: `seq` beyond count() clamps to the
         /// last stored row (real check, not a debug-only assert), so an
         /// off-by-one index can't OOB the backing arrays in ReleaseFast.
         /// Empty map → row 0 of the fixed-capacity storage (always
@@ -250,13 +251,13 @@ pub const store_capacity = 128;
 pub const mru_capacity = 16;
 /// Bounded per-workspace tiled membership list (defined capacity; total
 /// operations, so transitions never allocate and have no OOM rollback paths).
-pub const max_tiled_per_ws = constants.Limits.max_tiled_windows;
-pub const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
-pub const MruList = utils.BoundedList(WindowId, mru_capacity);
-pub const StoreT = Store(WindowId, Entry, store_capacity);
+pub const max_tiled_per_ws = constants.max_tiled_windows;
+const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
+const MruList = utils.BoundedList(WindowId, mru_capacity);
+const StoreT = Store(WindowId, Entry, store_capacity);
 
 /// Index (workspace id) of the lowest set bit in `m`. Returns null when `m`
-/// is zero (`@ctz(0)` = 64 is out of the [0, MAX_WS) index range).
+/// is zero (`@ctz(0)` = 64 is out of the [0, constants.max_workspaces) range).
 pub fn lowestBit(m: Mask) ?WSId {
     if (m == 0) return null;
     return WSId.fromIndex(@intCast(@ctz(m)));
@@ -318,10 +319,11 @@ pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
 
 /// Whether entry `e` is visible on `ws`: the exact predicate behind
 /// `visibleOn`, minus the store lookup, so callers that already hold the
-/// entry avoid a second binary search.
-fn visibleEntry(m: *const Model, e: Entry, ws: WSId) bool {
+/// entry avoid a second binary search. `pub inline` so the sync layer's
+/// fast-path derives visibility with no spelling drift.
+pub inline fn visibleEntry(m: *const Model, e: Entry, ws: WSId) bool {
     if (e.presence == .parked) return false;
-    return m.all_view_active or e.mask & bit(ws) != 0;
+    return m.all_view_active or taggedOn(e, ws);
 }
 
 /// Whether `e` is pinned: its mask carries the soft all-workspaces sentinel
@@ -330,6 +332,13 @@ fn visibleEntry(m: *const Model, e: Entry, ws: WSId) bool {
 /// `mask == ALL_MASK`, keeping the sentinel's meaning in one place.
 pub inline fn isPinned(e: Entry) bool {
     return e.mask == ALL_MASK;
+}
+
+/// Whether `e` is tagged on `ws`: the tag-membership test behind the
+/// visible/tiled-count predicates. `pub inline` so window/sync layers share
+/// one spelling instead of re-deriving `e.mask & bit(ws)`.
+pub inline fn taggedOn(e: Entry, ws: WSId) bool {
+    return e.mask & bit(ws) != 0;
 }
 
 /// Number of windows placed in tiled slots of `ws`: entries of `ws`'s
@@ -341,16 +350,23 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     var n: usize = 0;
     for (m.ws[ws.index].tiled_order.constSlice()) |w| {
         const e = m.store.get(w) orelse continue;
-        if (e.mask & bit(ws) != 0) n += 1;
+        if (taggedOn(e, ws)) n += 1;
     }
     return n;
 }
 
 /// The covering occupant owning the screen on `ws`: a covering entry whose
-/// capture anchors to `ws`, or a covering entry visible on `ws` (multi-tag).
-/// Pure core computation, so sync/bar resolve the screen owner without
-/// enumerating optional subsystems. At most one occupant per ws by the
+/// capture anchors to `ws`, or a covering entry visible on `ws` (multi-tag) —
+/// OR semantics. Pure core computation, so sync/bar resolve the screen owner
+/// without enumerating optional subsystems. At most one occupant per ws by the
 /// reconciler.
+///
+/// Contrast with the fullscreen module's own occupant query
+/// (`fullscreen.fullscreenOccupantOnWs`, AND semantics): it scans the module's
+/// record registry and requires an entry to be present-not-parked AND
+/// recorded on `ws`, whereas this pure store scan unions anchor-or-visibility.
+/// Use the module query when you need the record-backed presence check; use
+/// this when you must stay inside pure layers (sync, borders, bar).
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -393,7 +409,7 @@ pub const HonorDecision = enum { geometry_applied, border_only, ignored };
 // ---------------------------------------------------------------------------
 
 pub fn setFocus(m: *Model, win: WindowId) void {
-    _ = m.store.getPtr(win) orelse return;
+    if (!m.store.has(win)) return;
     m.focused = win;
     const list = &m.ws[m.current.index].focus_mru;
     removeValue(list, win);

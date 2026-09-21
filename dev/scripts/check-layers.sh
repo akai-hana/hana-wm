@@ -162,16 +162,16 @@ while IFS= read -r line; do
     viol "rule 2 ($f outside src/sync/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
 
-# Rule 3: no xcb imports/references in model/ or tiling/.
+# Rule 3: no xcb imports/references in model/, tiling/, or config/.
 # Comments are stripped first so `/* ... */` (incl. multi-line) and `//`
 # commentary that merely names an xcb symbol does not trip the guard. The awk
 # strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
-# it sweeps for any `xcb` token in model/ and tiling/ after comment removal —
-# imports AND re-exported bare references alike. (The complementary IMPORT-
-# EDGE-only scan lives in build.zig's assertPureLayerImports: a pure module
+# it sweeps for any `xcb` token in model/, tiling/, and config/ after comment
+# removal -- imports AND re-exported bare references alike. (The complementary
+# IMPORT-EDGE scan lives in build.zig's assertPureLayerImports: a pure module
 # can import an xcb-using sibling and pass there, so Rule 3, not that scan,
 # is the last line of defense on bodies.)
 hits=$(
@@ -189,7 +189,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/model src/tiling -name '*.zig') || true
+    done < <(find src/model src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

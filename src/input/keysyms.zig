@@ -27,3 +27,12 @@ pub fn keysymFromName(name: []const u8) u32 {
     const z = std.mem.sliceTo(name, 0);
     return xkb.xkb_keysym_from_name(@ptrCast(z.ptr), xkb_keysym_case_insensitive);
 }
+
+/// XKB name for `keysym` (e.g. XKB_KEY_at -> "at") into `buf`, returning a
+/// slice of `buf` holding the name. Used for diagnostic messages.
+pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
+    if (buf.len == 0) return "";
+    const n = xkb.xkb_keysym_get_name(keysym, @ptrCast(buf.ptr), buf.len);
+    const len: usize = if (n < 0) 0 else @min(@as(usize, @intCast(n)), buf.len);
+    return buf[0..len];
+}

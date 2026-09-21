@@ -230,5 +230,29 @@ the deferred questions below.
 
 ## Execution status (2026-09-20, this pass)
 
-(To be filled in as each phase lands, with `zig fmt` / `zig build check` / `zig build
-test` results and the tokei delta.)
+All phases land clean at every gate. Each change was verified with `zig fmt --check`,
+`zig build check` (check-layers all pass), and `dev/scripts/xtest.sh zig build test`
+(251/252 — the single failure is the pre-existing `focus_test.zig:97` no_input ICCCM
+fixture admission, unrelated to this plan).
+
+- **Phase 1** (CONFIG-1..8/10/11, CORE-2..7/9, INPUT-1/2/4/5/7/8/9, MODEL-3/4/5/6/8/9,
+  TILING-2/3/4/6/8/9/11, WIN-1/6/7/8/10, BAR-1/2, CC-1/3/4): landed, gates green. tokei
+  closeout 16,480 (baseline 16,553).
+- **Phase 2** (TILING-1, TILING-5+7, MODEL-2+WIN-4, MODEL-1 adoption, CORE-8, CORE-1,
+  CONFIG-12, CC-2 nullable, WIN-2): landed, gates green (251/252 each).
+- **Phase 3** (WIN-5 cross-reference comments, CORE-6 orphan-marker strip final pass,
+  BAR-4 investigated — decision in §C.8): landed, gates green (251/252).
+- **tokei (src, code, excl. test) closeout: 16,480** → final delta **−73 vs 16,553**.
+- **§C.20 modularity matrix: 31/31 PASS** (`dev/scripts/check-modularity.sh`). This surfaced a
+  latent defect that preceded this plan: `pipeline.tilingEnv` returned the seam type
+  `tiling.Env` (= `struct {}` when `has_tiling` is false), so the tiling-less / bar+floating
+  build configurations could not compile. Fixed by returning `plugin.Env` directly (the type
+  `tiling.Env` is a re-export of `plugin.Env`), decoupling the function from the seam — a
+  one-line change, verified against the full matrix (bar-removal, tiling-removal, and all
+  behavior/layout/segment/internals scenarios now build). Gates re-verified: fmt + build check
+  (all layer rules) + 251/252 (the sole failure remains the pre-existing `focus_test.zig:97`
+  no_input ICCCM fixture admission).
+
+Remaining open items are only the deferred §C.2/C.4/C.5/C.6/C.7/C.9/C.10/C.11/C.12/
+C.13/C.14/C.15/C.16/C.17/C.18 decisions recorded above (none are regressions; most are
+encapsulation/verb-naming calls that tie to user-facing config or contract surface).
