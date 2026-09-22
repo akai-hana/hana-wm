@@ -223,6 +223,26 @@ pub const WindowModule = struct {
     cancelDragForWindow: ?*const fn (u32) void = null,
 };
 
+/// The `WindowModule` hooks whose contract is "at most one module binds
+/// this": dispatch is first-match (`providerOf`/`callHook`/`callHookBool`), so
+/// a second binder would be silently ignored. Every other hook is adopted
+/// by explicit registry loops (init/deinit, notifyConfigureIfPending,
+/// onWindowGone, the serialize/deserialize persistence seam,
+/// setEwmhFullscreenState, armPendingBarHide/Show) and may have many
+/// binders. The build-generated `window_modules` registry asserts at comptime
+/// that each field below has <= 1 binder.
+pub const single_binder_hooks = [_][]const u8{
+    "hideWindow",       "restoreWindow",         "restoreCandidateOn",
+    "restoreOnWs",      "latestHiddenOnWs",      "isWindowHidden",
+    "collectHiddenSet", "toggleCovering",        "isCoveringMode",
+    "coveringWsOf",     "isCoveringOnWs",        "coveringOccupantOnWs",
+    "moveCoveringTo",   "sendToWs",              "addToWs",
+    "removeFromWs",     "togglePin",             "toggleAllView",
+    "setFloatingRect",  "honorConfigureRequest", "startDrag",
+    "stopDrag",         "updateDrag",            "isDragging",
+    "isResizingWindow", "getDragLastRect",       "cancelDragForWindow",
+};
+
 /// The single canonical registry-lookup entry: the first module in `registry`
 /// that binds the hook `field`, in the registry's deterministic scan order.
 /// Returns null when no compiled-in module provides

@@ -7,7 +7,8 @@ const std = @import("std");
 const utils = @import("utils");
 const constants = @import("constants");
 
-pub const WindowId = u32;
+/// Alias of the canonical WindowId (`@import("ids").WindowId`; xcb_window_t).
+pub const WindowId = @import("ids").WindowId;
 /// Alias of the canonical WorkspaceId (`@import("ids").WorkspaceId`). Model
 /// never imports core (xcb-free layer rule); inside the model, ws values are
 /// used directly as array indices via `.index`, with the integer form only at
@@ -96,7 +97,7 @@ pub const Entry = struct {
     covering_ws: ?WSId = null,
 };
 
-pub const WsState = struct {
+const WsState = struct {
     tiled_order: OrderList = .{},
     focus_mru: MruList = .{}, // newest first (index 0), bounded at mru_capacity
     params: LayoutParams = .{},

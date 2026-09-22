@@ -32,8 +32,8 @@ fn m() ?*const model_mod.Model {
 }
 
 pub const Entry = struct {
-    win: u32,
-    mask: u64,
+    win: model_mod.WindowId,
+    mask: model_mod.Mask,
     presence: model_mod.Presence = .present,
 };
 

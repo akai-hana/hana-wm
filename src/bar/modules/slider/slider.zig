@@ -207,15 +207,10 @@ pub const Label = struct {
 /// -- every `{state}` placeholder with that marker string. A substitution
 /// that would overflow `buf` stops the walk; a truncated tail is still a
 /// complete, scan-safe string. Any other `{...}` passes through literally.
-/// Shared substitution walker for the volume/brightness display formats.
-pub fn renderLine(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) []const u8 {
-    return renderLineValue(format, pct, state, buf).text;
-}
-
-/// Like `renderLine`, but also records the numeric value region of the output
-/// (see `Label.value`) so the segment can paint the number in its `_value`
-/// color. The value is the first `{pct}` expansion plus a literal `%` that
-/// directly follows the placeholder.
+/// Shared substitution walker for the volume/brightness display formats;
+/// records the numeric value region (see `Label.value`) so the segment can
+/// paint the number in its `_value` color. The value is the first `{pct}`
+/// expansion plus a literal `%` that directly follows the placeholder.
 pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) Label {
     var n: usize = 0;
     var i: usize = 0;
@@ -310,7 +305,7 @@ pub const Sub = struct {
     secondary: ?*const fn () void = null,
     /// Idle width when the control has never laid out (natural-reserve
     /// fallback).
-    probe_natural_width: u16 = 44,
+    probeNaturalWidth: u16 = 44,
 };
 
 const Instance = struct {
@@ -401,7 +396,7 @@ fn consumeRedrawRequestFor(idx: usize) bool {
 
 fn naturalWidthFor(idx: usize) u16 {
     if (!present(idx)) return 0;
-    return if (g_inst[idx].slot_w != 0) g_inst[idx].slot_w else subs[idx].probe_natural_width;
+    return if (g_inst[idx].slot_w != 0) g_inst[idx].slot_w else subs[idx].probeNaturalWidth;
 }
 
 /// Drag-mode loading bar for one control: paints its whole reserved slot with
@@ -410,8 +405,7 @@ fn naturalWidthFor(idx: usize) u16 {
 /// (regular text color, not the segment's accent). Returns the slot's far
 /// edge WITHOUT feeding `slot_w`: the label width must survive the scrub so
 /// the drag-end redraw re-renders it in place.
-fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8, sub_name: []const u8) u16 {
-    _ = sub_name;
+fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
     const height = dc.height;
     dc.dc.fillRect(x, 0, slot, height, dc.config.bg);
     const pad = @max(@as(u16, 1), dc.config.scaledSegmentPadding(height) / 2);
@@ -445,7 +439,7 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     // While scrubbed the control is a loading bar; the label resumes on the
     // drag-end redraw.
     if (g_drag[idx]) {
-        return drawDragBar(dc, x, inst.slot_w, sub.pct(), sub.name);
+        return drawDragBar(dc, x, inst.slot_w, sub.pct());
     }
     const label = sub.label(dc.config, &inst.scratch);
     const end_x = try drawing.drawPaddedSegmentValue(dc.dc, dc.config, dc.height, x, sub.name, label.text, label.value, dc.config.segmentProps(sub.name));

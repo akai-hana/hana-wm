@@ -37,9 +37,8 @@ const tiling_mods = @import("plugin").tiling_mods;
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
 const pipeline_mod = @import("pipeline");
-// Per-feature serialization hooks live on the build-generated `window_modules`
-// registry; a tree without a feature has no serializeWindow provider, so the
-// loop below no-ops for it.
+// Per-feature serialization hooks via the build-generated `window_modules`
+// registry (a tree without a feature has no serializeWindow provider).
 const window_mods = @import("window_modules").modules;
 
 const MAX_WS = constants.max_workspaces;

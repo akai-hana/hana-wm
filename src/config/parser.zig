@@ -336,13 +336,13 @@ pub fn colorFromValue(val: Value) ?u32 {
 /// Maximum number of `+`-separated color operands in a single color-mix
 /// expression. Config is locally authored, so this is a defensive backstop
 /// against a pathological chain, not a response to observed input.
-pub const max_mix_operands = 8;
+const max_mix_operands = 8;
 
 /// One resolved operand of a color-mix expression: a literal color plus the
 /// optional percentage weight annotated on the `+` before it (null = weight
 /// derived from the remaining budget, or an equal share when nothing carries
 /// a weight).
-pub const MixOperand = struct {
+const MixOperand = struct {
     color: u32,
     weight: ?u32 = null,
 };
@@ -369,6 +369,7 @@ pub fn isWeightToken(raw: []const u8) bool {
 /// The weight (0-100) carried by a weight-marker token; null when `raw` is
 /// not one. `+(weight:N%)` annotates the operand RIGHT after the `+`; the
 /// operand at the head of the chain absorbs the remaining weight.
+/// Test seam: pure parse core pinned by parser_test.
 pub fn weightFromToken(raw: []const u8) ?u32 {
     if (!isWeightToken(raw)) return null;
     var s = raw;
@@ -493,7 +494,7 @@ fn extractMixOperands(val: Value, palette: *const std.StringHashMap(u32)) ?[]Mix
 /// take their annotation; with no weights at all every operand shares
 /// equally. Weights must be validated (each 0-100, explicit sum <= 100) by
 /// resolveColorExpr before this is reached.
-pub fn mixColors(parts: []const MixOperand) u32 {
+fn mixColors(parts: []const MixOperand) u32 {
     const n = parts.len;
     if (n == 0) return 0;
     if (n == 1) return parts[0].color;
@@ -738,6 +739,8 @@ fn hexPrefixLen(value: []const u8) ?u2 {
     return null;
 }
 
+/// Parses a color token into a packed 0xRRGGBB value.
+/// Test seam: pure parse core pinned by parser_test.
 pub fn parseColor(value: []const u8) !u32 {
     if (value.len == 0) return error.InvalidColor;
 

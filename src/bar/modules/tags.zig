@@ -156,7 +156,7 @@ fn drawFrame(
 /// Draw workspace tags: the per-frame frame state (current workspace,
 /// per-workspace window flags, all-view) lives in the shared DrawCtx the bar
 /// builds every frame, so no separate frame-arg draw signature is needed.
-pub fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
+fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
     const f = ctx.frame;
     return drawFrame(
         ctx.dc,

@@ -13,8 +13,8 @@ const debug = @import("debug");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
 
-// Private transition-layer gate for mutable model access (tracking no longer
-// exports a shared one; each transition owner declares its own token).
+// Private transition-layer gate for mutable model access (per-owner token,
+// see tracking.gate).
 const gate: @import("pipeline").Gate = .{};
 
 // Module state

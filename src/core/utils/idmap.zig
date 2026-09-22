@@ -61,6 +61,7 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
             return self.vals[i];
         }
 
+        /// Test seam: `true` when `id` has a live entry.
         pub fn contains(self: *const Self, id: u32) bool {
             return self.find(id) != null;
         }
@@ -104,6 +105,7 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
             return true;
         }
 
+        /// Test seam: number of live entries.
         pub fn count(self: *const Self) usize {
             return self.len;
         }

@@ -150,7 +150,8 @@ fn probeMetrics(size_override: ?u16) ?struct { asc: i32, desc: i32 } {
 
 fn resolvePercentageFontSize(bar_height: u16) ?u16 {
     // Probe metrics at a trial point size via the override parameter, so
-    // there is no save/mutate/restore round on cs.config.
+    // there is no save/mutate/restore round on cs.config. 100 pt is an
+    // arbitrary stable probe; only the ascent+descent ratio is used.
     const trial_pt: u16 = 100;
     const cs = core.getState();
     const m = probeMetrics(trial_pt) orelse return null;
@@ -243,10 +244,18 @@ pub fn chromeHandleKeypress(
 /// and the bar must not name it.
 pub fn chromeToggleOverlay() void {
     const s = gBar.state orelse return;
-    if (center_slot_role) |tid| {
-        if (segAt(tid).onClick) |oc|
-            _ = oc(0, false, true, s, titleClickTrampoline, redrawInsideGrab);
-    }
+    if (center_slot_role) |tid|
+        dispatchClick(s, tid, 0, false, true);
+}
+
+/// Routes one click at `offset` pixels into segment `id` to its onClick hook
+/// (not present -> no-op). `is_left`/`is_right` select the click's semantics
+/// for the module (e.g. cycle direction for the layout/clock, minimize vs
+/// focus for the title). Exported as a `BarHandlers.dispatchClick`-shaped
+/// trampoline (see titleClickTrampoline).
+fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right: bool) void {
+    if (segAt(id).onClick) |oc|
+        _ = oc(offset, is_left, is_right, s, titleClickTrampoline, redrawInsideGrab);
 }
 
 /// Global bar coordination flags. Read and written exclusively on the main
@@ -415,11 +424,14 @@ const Clicks = struct {
     len: usize = 0,
 };
 
-/// Live frame state (recollected on every draw; see scanLiveFrame).
+/// Live frame state (recollected on every draw; see scanLiveFrame). Holds
+/// the shared `segmod.Frame` directly (workspace_count/current_workspace/
+/// is_all_view_active) plus the bar-local backing array it slices, so the
+/// segment-visible struct stays the single source instead of a mirror.
 const FrameState = struct {
-    ws_count: u32 = 0,
-    current_ws: u8 = 0,
-    all_view: bool = false,
+    frame: segmod.Frame = .{},
+    /// Backing array for `frame.workspace_has_windows` (the shared struct
+    /// only holds the slice).
     ws_has_windows: [constants.max_workspaces]bool = @splat(false),
     wins: [max_frame_windows]u32 = undefined,
     wins_len: usize = 0,
@@ -693,12 +705,8 @@ const State = struct {
     /// Fills the shared per-frame DrawCtx the bar hands to every segment's
     /// draw hook, including the title snapshot slots.
     fn fillDrawCtx(self: *State, ctx: *segmod.DrawCtx) void {
-        ctx.frame = .{
-            .workspace_count = self.frame.ws_count,
-            .current_workspace = self.frame.current_ws,
-            .is_all_view_active = self.frame.all_view,
-            .workspace_has_windows = self.frame.ws_has_windows[0..self.frame.ws_count],
-        };
+        ctx.frame = self.frame.frame;
+        ctx.frame.workspace_has_windows = self.frame.ws_has_windows[0..self.frame.frame.workspace_count];
         // The minimized-state service is drawn from the window module registry
         // here (upfront, per frame) so the title segment need not name the
         // addon that owns it. All hooks null => empty api => scanLiveFrame
@@ -743,13 +751,13 @@ const State = struct {
             if (self.title_data.minimized_api.collect) |f| f(m, &self.title_data.minimized, self.render.allocator);
         }
         if (build_options.has_workspaces) {
-            self.frame.ws_count = @intCast(tracking.getWorkspaceCount());
-            self.frame.current_ws = @intCast(m.current.index);
-            self.frame.all_view = m.all_view_active;
+            self.frame.frame.workspace_count = @intCast(tracking.getWorkspaceCount());
+            self.frame.frame.current_workspace = @intCast(m.current.index);
+            self.frame.frame.is_all_view_active = m.all_view_active;
             @memset(&self.frame.ws_has_windows, false);
             self.frame.wins_len = 0;
-            const cur_bit: u64 = if (self.frame.current_ws < self.frame.ws_count)
-                model.bit(model.WSId.fromIndex(self.frame.current_ws))
+            const cur_bit: u64 = if (self.frame.frame.current_workspace < self.frame.frame.workspace_count)
+                model.bit(model.WSId.fromIndex(self.frame.frame.current_workspace))
             else
                 0;
             // OR-accumulate all window masks in a single pass, collecting the
@@ -764,7 +772,7 @@ const State = struct {
                     self.frame.wins_len += 1;
                 }
             }
-            for (0..self.frame.ws_count) |i| {
+            for (0..self.frame.frame.workspace_count) |i| {
                 self.frame.ws_has_windows[i] = combined_mask &
                     model.bit(model.WSId.fromIndex(@intCast(i))) != 0;
             }
@@ -825,26 +833,18 @@ const State = struct {
         const x_before = x;
         const drew_x = self.drawSegmentSafe(ctx, name, x, w);
         const drew = drew_x != x_before;
-        if (!omit_gap) {
-            // On success advance past the drawn text plus the trailing gap.
-            if (drew) {
-                self.paintGap(drew_x, scaled_spacing);
-                return advancedX(drew_x, x_before, w, scaled_spacing);
-            }
-            // On failure drawSegmentSafe returns x unchanged ("drew nothing").
-            // Still consume the full reserved slot + gap so the NEXT segment
-            // leftward starts where the layout pass expects; returning the
-            // unchanged x would let that segment paint over this failed slot
-            // (and, on the follow-up frame, desync the whole cluster). Matches
-            // drawRightSegments' failed-draw handling.
-            return advancedX(drew_x, x_before, w, scaled_spacing);
-        }
-        // Omit-gap (title) path: a draw failure must still consume the full
-        // reserved slot so the next segment leftward starts where the layout
-        // pass expects -- leaving x unchanged would paint that segment over
-        // this failed slot and desync the center cluster, the same trap the
-        // non-omit-gap failure branch above guards against.
-        return if (drew) drew_x else x_before + w;
+        // A successful draw paints its trailing gap (omitted after the title so
+        // the next center segment sits flush). On failure drawSegmentSafe
+        // returned x unchanged, but the full reserved `w` (+ gap unless
+        // omitted) is still consumed so the next segment leftward starts where
+        // the layout pass expects -- leaving x unchanged would let it paint
+        // over this failed slot and desync the cluster (drawRightSegments'
+        // failed-draw handling matches).
+        if (drew and !omit_gap) self.paintGap(drew_x, scaled_spacing);
+        return if (drew)
+            advancedX(drew_x, x_before, w, if (omit_gap) 0 else scaled_spacing)
+        else
+            x_before + w;
     }
 
     /// Slot + trailing-gap accounting for a draw that may have failed: on
@@ -1365,13 +1365,10 @@ fn syncScreenClaim() void {
 /// Title data is sourced from in-process caches (wincache + sync truth-rect),
 /// so no frame blocks or defers under the grab: a click-triggered redraw here
 /// is as cheap as any other frame.
-pub fn redrawInsideGrab() void {
+fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
-    if (s.pendingFullRedraw()) {
-        s.markDirty();
-        return;
-    }
+    if (s.pendingFullRedraw()) return;
     performDraw();
     s.dirty.flag = false;
 }
@@ -1386,10 +1383,7 @@ pub fn redrawInsideGrab() void {
 /// reserved slot even when the draw ran narrow.
 fn redrawSegmentScoped(s: *State, id: usize) void {
     if (!s.vis.shown) return;
-    if (s.pendingFullRedraw()) {
-        s.markDirty();
-        return;
-    }
+    if (s.pendingFullRedraw()) return;
     const tb = s.recordedBound(segAt(id).name) orelse return;
     redrawSlotScoped(s, id, tb.x, tb.w, tb.w, false);
 }
@@ -1424,20 +1418,13 @@ fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, 
     s.clearSegmentDirty(segAt(id).name);
 }
 
-/// Scoped repaint for the in-flight button-1 scrub: repaints the segment the
-/// press anchored (`drag_segment`). Used as the drag motion `redraw` callback.
-fn redrawDraggedSegment() void {
+/// Scoped repaint of the in-flight scrub/scroll target segment (`drag_segment`
+/// for a button-1 drag motion, `scroll_segment` for an onScroll dispatch), so a
+/// drag or fast wheel sweep never forces full-bar redraws. Used as the drag
+/// motion `redraw` callback and the onScroll `redraw` callback.
+fn redrawScopedSegment() void {
     const s = gBar.state orelse return;
-    const id = s.drag_segment orelse return;
-    redrawSegmentScoped(s, id);
-}
-
-/// Scoped repaint for a scroll dispatch: repaints the segment whose `onScroll`
-/// hook is being serviced (`scroll_segment`). Used as the onScroll `redraw`
-/// callback so a fast wheel sweep never forces full-bar redraws.
-fn redrawScrolledSegment() void {
-    const s = gBar.state orelse return;
-    const id = s.scroll_segment orelse return;
+    const id = s.drag_segment orelse s.scroll_segment orelse return;
     redrawSegmentScoped(s, id);
 }
 
@@ -1741,13 +1728,11 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const detail = event.detail;
     if (detail == constants.mouse_button_left) {
         s.drag_segment = id;
-        if (segAt(id).onClick != null)
-            _ = segAt(id).onClick.?(x - h.x, true, false, s, titleClickTrampoline, redrawInsideGrab);
+        dispatchClick(s, id, x - h.x, true, false);
         return;
     }
     if (detail == constants.mouse_button_right) {
-        if (segAt(id).onClick != null)
-            _ = segAt(id).onClick.?(x - h.x, false, true, s, titleClickTrampoline, redrawInsideGrab);
+        dispatchClick(s, id, x - h.x, false, true);
         return;
     }
     // Scroll buttons 4/5: no click semantics, no drag anchor. The repaint is
@@ -1760,7 +1745,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         if (segAt(id).onScroll) |scroll| {
             const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
             s.scroll_segment = id;
-            _ = scroll(dir, redrawScrolledSegment);
+            _ = scroll(dir, redrawScopedSegment);
             s.scroll_segment = null;
             return;
         }
@@ -1783,7 +1768,7 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
         // Scoped repaint, not redrawInsideGrab: a scrub only mutates the
         // dragged segment's slot, and a full-bar redraw per motion is the
         // frame-rate killer for subprocess-bound segments.
-        _ = drag(offset, redrawDraggedSegment);
+        _ = drag(offset, redrawScopedSegment);
     }
 }
 
@@ -1810,14 +1795,11 @@ fn handleTitleClick(s: *State, offset: u16) void {
     const center_id = center_slot_role orelse return;
     const tb = s.recordedBound(segAt(center_id).name) orelse return;
 
-    const target = (segmod.hitTest(
+    const target = segmod.hitTest(
         s.frame.last_ctx.titleRenderContext(tb.x, tb.w),
         s.frame.last_ctx.titleSnapshot(),
         offset,
-    ) catch |e| {
-        debug.warnOnErr(e, "bar title click hitTest");
-        return;
-    }) orelse return;
+    ) orelse return;
 
     // `target.minimized` comes from the title snapshot's minimized set, which
     // the title addon synthesizes fresh; bar.zig never names minimize.

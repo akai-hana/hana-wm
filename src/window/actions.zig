@@ -18,8 +18,8 @@ const utils = @import("utils");
 const tracking = @import("tracking");
 
 // Private transition-layer gate for mutable model access: this module owns
-// model transitions, so it declares its own capability token (tracking no
-// longer exports a shared one, see tracking.gate).
+// model transitions, so it declares its own capability token (see
+// tracking.gate).
 const gate: pipeline.Gate = .{};
 
 /// Registry lookup for the hook `field` (see `plugin.providerOf`), null when

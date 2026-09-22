@@ -272,6 +272,26 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "tiling_latency_test", .gate = has_tiling, .x_gated = false },
     };
     {
+        // Discovered *_test stems; the table below must match them one-to-one.
+        var discovered = std.StringHashMap(void).init(b.allocator);
+        defer discovered.deinit();
+        var discover_it = discovery.modules.iterator();
+        while (discover_it.next()) |entry| {
+            if (std.mem.endsWith(u8, entry.key_ptr.*, "_test"))
+                try discovered.put(entry.key_ptr.*, {});
+        }
+        // Every table key must name a discovered *_test module: a stale row
+        // (renamed/deleted test file) would otherwise sit silent and never
+        // run — no feature gate, no X-serialization.
+        for (test_gates) |g| {
+            if (!discovered.contains(g.name)) {
+                std.debug.print(
+                    "build: test_gates row '{s}' has no discovered *_test module; remove or rename it\n",
+                    .{g.name},
+                );
+                return error.StaleTestGate;
+            }
+        }
         var test_it = discovery.modules.iterator();
         test_loop: while (test_it.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.key_ptr.*, "_test")) continue;
@@ -974,6 +994,25 @@ fn buildOwnerRegistryModule(
         try src.print(b.allocator, "    {s},\n", .{e.expr});
     }
     try src.print(b.allocator, "}};\n", .{});
+
+    // CC-v5-5: single-binder hooks are enforced at comptime, not by prose.
+    // A second module binding a providerOf-style hook would be silently
+    // ignored (first-match dispatch), so the window registry asserts <= 1.
+    if (std.mem.eql(u8, name, "window_modules")) {
+        try src.appendSlice(b.allocator,
+            \\comptime {
+            \\    for (plugin.single_binder_hooks) |hook| {
+            \\        var binders: usize = 0;
+            \\        for (modules) |wm| {
+            \\            if (@field(wm, hook) != null) binders += 1;
+            \\        }
+            \\        if (binders > 1)
+            \\            @compileError("window hook '" ++ hook ++ "' bound by multiple modules; single-binder hook disallows it");
+            \\    }
+            \\}
+            \\
+        );
+    }
 
     const mod = makeGeneratedModule(b, target, optimize, b.fmt("{s}.zig", .{name}), src.items, &[_]Import{});
 

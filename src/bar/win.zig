@@ -16,7 +16,6 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 
-const types = @import("types");
 const drawing = @import("drawing");
 
 /// All atoms needed to declare the bar window as a dock to the compositor.

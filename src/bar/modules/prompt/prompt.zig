@@ -35,7 +35,7 @@ pub const xk_end = @intFromEnum(XK.End);
 
 /// 256 input chars fits a full `.desktop` file path plus arguments, the
 /// longest payload a drun entry can produce.
-pub const default_max_input: usize = 256;
+const default_max_input: usize = 256;
 pub const Action = enum { none, deactivate, spawn };
 
 pub const Mode = enum(u2) {
@@ -74,7 +74,7 @@ pub const EditorState = struct {
     }
 };
 
-pub fn onDeactivate(_: *EditorState) void {}
+fn onDeactivate(_: *EditorState) void {}
 pub fn insertSlice(es: *EditorState, slice: []const u8) void {
     if (es.max_input == 0 or es.len + 1 >= es.max_input) return;
     const n = @min(slice.len, es.max_input - 1 - es.len);
@@ -342,7 +342,7 @@ var g: PromptState = .{};
 /// OLD config's fonts and bar height, and a reload can change both. Without
 /// this the prompt renders with stale widths/geometry until its next full
 /// cycle (the old "constant between reloads" assumption was wrong).
-pub fn invalidateReloadCaches() void {
+fn invalidateReloadCaches() void {
     g.cached_prompt_w = null;
     g.cached_mode_w = .{null} ** num_modes;
     g.cached_caret_top = null;
@@ -362,7 +362,7 @@ fn copyToZ(dest: []u8, src: []const u8) ?[*:0]u8 {
 }
 
 /// Returns true when the prompt is currently active and accepting key input.
-pub fn isActive() bool {
+fn isActive() bool {
     return g.is_active;
 }
 
@@ -370,7 +370,7 @@ pub fn isActive() bool {
 /// isn't running.  Pass this (with the clock timeout) to poll() so the loop
 /// wakes exactly when a redraw is needed.  Non-negative only while the
 /// prompt is active in insert mode.
-pub fn blinkPollTimeoutMs() i32 {
+fn blinkPollTimeoutMs() i32 {
     if (!g.is_active or g.vim_state.mode != .insert) return -1;
     return cursor_blink_ms;
 }
@@ -385,7 +385,7 @@ pub fn blinkPollTimeoutMs() i32 {
 /// not just the blink), so this guard (matching blinkPollTimeoutMs) keeps a
 /// non-blinking prompt from toggling invisible state and queuing repaints off
 /// the clock's cadence.
-pub fn blinkTick() void {
+fn blinkTick() void {
     if (!g.is_active or g.vim_state.mode != .insert) return;
     g.is_blink_visible = !g.is_blink_visible;
     g.blink_repaint = true;
@@ -393,13 +393,13 @@ pub fn blinkTick() void {
 
 /// Overlay repaint query (plugin.BarOverlay.needsRepaint): true while a caret
 /// toggle is waiting to be drawn. Cleared inside `draw`.
-pub fn overlayNeedsRepaint() bool {
+fn overlayNeedsRepaint() bool {
     return g.blink_repaint;
 }
 
 /// Returns true and clears the flag if a prompt-driven redraw is outstanding.
 /// Call once per event-loop iteration from `bar.updateIfDirty`.
-pub fn consumeRedrawRequest() bool {
+fn consumeRedrawRequest() bool {
     const pending = g.redraw_pending;
     g.redraw_pending = false;
     return pending;
@@ -408,7 +408,7 @@ pub fn consumeRedrawRequest() bool {
 /// Initialises prompt state that is needed regardless of whether the prompt
 /// is ever opened: the bar service handles, vim engine, and key-symbol table.
 /// The completion/history/ghost buffers are embedded in the global (~99 KiB).
-pub fn init(
+fn init(
     allocator: std.mem.Allocator,
     conn: core.Connection,
     bar_handlers: ?*const anyopaque,
@@ -430,7 +430,7 @@ pub fn init(
 
 /// Releases all prompt resources including the keyboard grab and vim state.
 /// The completion/history/ghost buffers are embedded in the global (no heap).
-pub fn deinit(allocator: std.mem.Allocator) void {
+fn deinit(allocator: std.mem.Allocator) void {
     inline for (addons) |a| a.deinit(allocator);
     if (g.key_syms) |ks| {
         xcb_key_symbols_free(ks);
@@ -441,7 +441,7 @@ pub fn deinit(allocator: std.mem.Allocator) void {
 }
 
 /// Open the prompt if closed, or close it if open.
-pub fn toggle() void {
+fn toggle() void {
     if (g.is_active) deactivate() else activate();
 }
 
@@ -472,7 +472,7 @@ fn closeWindowOrPromptUnderCursor() bool {
 ///
 /// `bound_action` is whatever the keybind map resolved for this key; pass
 /// `state.map.get(key)` directly; null is fine when there's no binding.
-pub fn handlePromptKeypress(
+fn handlePromptKeypress(
     event: *const xcb.xcb_key_press_event_t,
     bound_action: ?*const types.Action,
 ) bool {
@@ -577,7 +577,7 @@ fn acceptGhost() bool {
 /// Draw the title segment's content when the prompt is active, covering the
 /// whole title slot. Returns the right edge (start_x + width). Only invoked by
 /// the title segment's draw delegation while the prompt is open.
-pub fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
+fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
     // Clearing before the draw (not after) means a draw error still consumes
     // the request, so a persistently failing overlay can't re-request forever.
     g.blink_repaint = false;
@@ -1220,7 +1220,7 @@ fn drawPill(
     // Reserve the pill width on the right; the scrollable region ends here.
     // When the label cannot fit we drop the pill but still give the text the
     // whole region: blanking the prompt because the mode pill didn't fit hid
-    // the user's typing (B2).
+    // the user's typing.
     const scroll_end_x: u16 = if (show_pill and pill_fits)
         text_end_x - pill_w
     else

@@ -38,10 +38,9 @@ fn tileRegion(
 
     const horizontal = r.w >= r.h;
     const dim: u32 = if (horizontal) r.w else r.h;
-    // The pane cannot hold two min-dim children plus the seam gap: the leaf
-    // Pane too small for two min_dim children plus one seam: splitting both
-    // sides to min_dim would push the second past the parent's far edge, so
-    // leaf overflows instead. Gate is a min_dim floor, unlike fibonacci.zig's
+    // The pane cannot hold two min-dim children plus the seam gap: splitting
+    // both sides to min_dim would push the second past the parent's far
+    // edge, so leaf overflows instead. Gate is a min_dim floor, unlike fibonacci.zig's
     // gap+border gate for the recursive spiral. (split_y: dim==h checks the
     // row height; split_x mirrors with dim==w, inset so a tight pane can't
     // overlap its neighbor.) Hand the whole region to the focused window and

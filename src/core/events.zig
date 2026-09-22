@@ -24,10 +24,8 @@ const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("plugins").Surfaces;
-// Window sub-system event hooks are reached through the build-generated
-// `window_modules` registry; `window_mods` is the auto-discovered
-// `[N]WindowModule` array, and the uniform loops below no-op for a tree
-// without a given sub-system.
+// Window sub-system hooks via the build-generated `window_modules` registry
+// (the loops below no-op for a tree without a given sub-system).
 const window_mods = @import("window_modules").modules;
 
 const fd_xcb = 0;
@@ -411,10 +409,10 @@ fn handleReexec() !void {
 
 /// One comptime-parameterized drain shared by the batch poll loop and the
 /// post-batch queued drain (they differ only in pull function, cap, and
-/// charge_tail policy). Each iteration pulls from the caller's `pending`
-/// slot first when `charge_tail` is false, so a coalesced non-motion stashed
+/// with_tail policy). Each iteration pulls from the caller's `pending`
+/// slot first when `with_tail` is false, so a coalesced non-motion stashed
 /// there is re-pulled (and charged) on the following iteration, preserving
-/// order across batches. With `charge_tail` true the terminating non-motion
+/// order across batches. With `with_tail` true the terminating non-motion
 /// is already charged by the collapse and is dispatched in place.
 fn drainEvents(
     pending: *?*xcb.xcb_generic_event_t,
@@ -422,7 +420,7 @@ fn drainEvents(
     budget: *usize,
     comptime cap: usize,
     comptime pull: anytype,
-    comptime charge_tail: bool,
+    comptime with_tail: bool,
 ) void {
     while (budget.* < cap) {
         const event = blk: {
@@ -439,10 +437,10 @@ fn drainEvents(
         }
         var newest = event;
         var pause: ?*xcb.xcb_generic_event_t = null;
-        collapseMotionRun(&newest, &pause, conn, budget, cap, pull, charge_tail);
+        collapseMotionRun(&newest, &pause, conn, budget, cap, pull, with_tail);
         dispatchOwned(newest);
         if (pause) |p| {
-            if (charge_tail) {
+            if (with_tail) {
                 dispatchOwned(p);
             } else {
                 pending.* = p;
@@ -465,7 +463,7 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
 /// stays below `cap`, charging each drained motion into `budget` the same way
 /// the caller's outer loop charges. The first non-motion ends the run and is
 /// stashed to `pause` UNDELIVERED, so the caller emits `newest` before
-/// `pause`, preserving order. `charge_tail` mirrors the two budget
+/// `pause`, preserving order. `with_tail` mirrors the two budget
 /// policies: the drain loop charges every pull (its terminating non-motion
 /// counts against the per-iteration budget), while the batch loop charges
 /// only drained motions -- its terminating non-motion is re-pulled and
@@ -477,12 +475,12 @@ fn collapseMotionRun(
     budget: *usize,
     comptime cap: usize,
     comptime pull: anytype,
-    comptime charge_tail: bool,
+    comptime with_tail: bool,
 ) void {
     while (budget.* < cap) {
         const next = pull(conn) orelse break;
         if (!isMotion(next)) {
-            if (charge_tail) budget.* += 1;
+            if (with_tail) budget.* += 1;
             pause.* = next;
             break;
         }
@@ -545,7 +543,7 @@ fn handleXcbEvents() void {
     // events immediately. Motion runs collapse here too (a motion-heavy
     // read-ahead buffer — the very stream that cap-exited the batch above —
     // collapses to its newest member instead of dispatching up to 256
-    // individual reconciles); charge_tail=true charges the terminating
+    // individual reconciles); with_tail=true charges the terminating
     // non-motion and delivers it in place.
     {
         var queued_pending: ?*xcb.xcb_generic_event_t = null;

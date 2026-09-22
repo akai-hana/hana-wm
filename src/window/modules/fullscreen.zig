@@ -4,9 +4,9 @@
 //! `.covering` presence pattern (or `.parked` while minimized). The module owns
 //! the record (toggle + ws/anchor queries), the persistence seam
 //! (serialize/deserialize), record cleanup for torn-down windows
-//! (`onWindowGone`), and the
-//! protocol-side EWMH `_NET_WM_STATE_FULLSCREEN` advertisement plus the
-//! deferred bar hide/show. The core never names fullscreen.
+//! (`onWindowGone`), and the protocol-side EWMH `_NET_WM_STATE_FULLSCREEN`
+//! advertisement. The deferred bar hide/show is the bar's own response to the
+//! covering presence, not a send this module owns. The core never names fullscreen.
 //!
 //! A fullscreen record is a *ghost* while its window is minimized: minimize
 //! parks the model entry (`presence == .parked`) but does NOT touch the rec,
@@ -216,6 +216,8 @@ fn presentVisibleRecOnWs(m: *const model.Model, ws: model.WSId, skip: ?model.Win
 /// (minimized) return null -- the slot looks free to the bar even though the
 /// rec still exists on-disk. At most one
 /// visible fullscreen per ws is guaranteed by sync (others parked).
+/// (Record-backed AND scan; literal `model.coveringOccupantOnWs` is the pure
+/// OR-scan variant.)
 pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     return presentVisibleRecOnWs(m, ws, null);
 }
@@ -279,18 +281,18 @@ fn readLE(comptime T: type, bytes: []const u8, off: usize) T {
 /// ghost and the single `ext` slot belongs to minimize — return null so the
 /// minimized blob wins (design §6). The returned slice is allocator-owned;
 /// persist frees it after writing.
-fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const Rec, model.Entry } {
+fn serializePreamble(m: *const model.Model, win: u32) ?struct { *const Rec, model.WSId } {
     const idx = g_recs.indexOfByIdField(.win, win) orelse return null;
     const rec = &g_recs.slice()[idx];
     const e = m.store.get(win) orelse return null;
     if (e.presence == .parked) return null; // parked window: minimize owns the blob
-    return .{ rec, e };
+    return .{ rec, e.covering_ws orelse return null };
 }
 
 pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const p = serializePreamble(m, win) orelse return null;
     const rec = p[0];
-    const ws = p[1].covering_ws orelse return null; // model owns the capture target
+    const ws = p[1]; // model owns the capture target
     const len: usize = switch (rec.anchor) {
         .tiled => BLOB_LEN_TILED,
         .floating => BLOB_LEN_FLOATING,

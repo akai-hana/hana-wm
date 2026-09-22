@@ -27,8 +27,11 @@
 //! replaying what the server already has.
 //!
 //! The SENT LEDGER is a WRITE-ONLY record of what was actually sent
-//! ({rect, has_rect, parked} per window; a park flips `parked` and preserves
-//! rect/has_rect). Exactly three reads of it are behavioral contract:
+//! ({rect, has_rect, parked, bw, pixel} per window; a park flips `parked` and
+//! preserves rect/has_rect). Exactly four reads of it are behavioral contract:
+//!   0. OFF-WORKSPACE FAST PATH: reads `parked` to elide windows provably
+//!      already parked (no recompute, no park resend, never a fallback
+//!      winner) -- skipped otherwise by the full path below.
 //!   1. Multi-tag orphans: kept at their previous real geometry
 //!      rather than parking. A history-less orphan parks (first sight /
 //!      registered offscreen).
@@ -41,7 +44,6 @@
 
 const std = @import("std");
 const utils = @import("utils");
-const constants = @import("constants");
 const build_options = @import("build_options");
 const model = @import("model");
 const debug = @import("debug");
@@ -155,12 +157,10 @@ const SentEntry = struct {
 };
 
 pub const State = struct {
-    /// Ledger of sent state (see SentEntry), keyed by `.id`.
+    /// Ledger of sent state (see SentEntry), kept sorted by `.id` with
+    /// ordered insertion/removal, so get-or-put / forget resolve records by
+    /// binary search with no parallel id index to keep in lockstep.
     sent: utils.BoundedList(SentEntry, model.store_capacity) = .{},
-    /// O(1) index from a window id to its `sent` slot (see utils.IdMap), so
-    /// the get-or-put / forget paths resolve a record without scanning the
-    /// ledger. Backed by the same open-addressing recipe as the ICCCM cache.
-    sent_index: utils.IdMap(usize, model.store_capacity) = .{},
 };
 
 /// Owned by the compositor process; re-init() on reconnect. Module-private:
@@ -171,9 +171,27 @@ pub fn init() void {
     st = .{};
 }
 
-/// Ledger slot holding `win`, resolved through the O(1) index; null when absent.
+/// Lower bound of `win` in the id-sorted ledger: the first slot whose record
+/// id is `>= win` — either `win`'s own slot or the insertion point for a new
+/// record.
+fn lowerBound(win: model.WindowId) usize {
+    const items = st.sent.constSlice();
+    var lo: usize = 0;
+    var hi: usize = items.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (items[mid].id < win) lo = mid + 1 else hi = mid;
+    }
+    return lo;
+}
+
+/// Ledger slot holding `win` (records sorted by id), via binary search; null
+/// when absent.
 fn sentSlot(win: model.WindowId) ?usize {
-    return st.sent_index.get(win);
+    const i = lowerBound(win);
+    const items = st.sent.constSlice();
+    if (i < items.len and items[i].id == win) return i;
+    return null;
 }
 
 /// Ledger read of a window's last-sent record. pub because it is also the
@@ -190,27 +208,21 @@ pub fn sentGet(win: model.WindowId) ?SentEntry {
 /// fresh blank record; writes are logged+lost).
 /// pub: production reconcile, plus the test verification seam (perf_test).
 pub fn sentGetOrPut(win: model.WindowId) ?*SentEntry {
-    if (sentSlot(win)) |slot| return &st.sent.items[slot];
-    if (st.sent.len >= model.store_capacity) return null;
-    const idx = st.sent.len;
-    st.sent.len += 1;
-    st.sent.items[idx] = .{ .id = win };
-    _ = st.sent_index.put(win, idx);
-    return &st.sent.items[idx];
+    const i = lowerBound(win);
+    const items = st.sent.constSlice();
+    if (i < items.len and items[i].id == win) return &st.sent.items[i];
+    // Insertion point from the search; keeps the ledger sorted by construction.
+    if (!st.sent.insert(i, .{ .id = win })) return null;
+    return &st.sent.items[i];
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
 /// client can appear with the same id, and a stale record would feed the
 /// orphan keep-last branch geometry belonging to the previous incarnation).
-/// Called from actions.unmanage (pub as the test verification seam too).
-pub fn sentSwapRemove(win: model.WindowId) void {
+/// Called from `forget` (actions.unmanage / test seam).
+fn sentSwapRemove(win: model.WindowId) void {
     const slot = sentSlot(win) orelse return;
-    st.sent.swapRemove(slot);
-    // Keep ledger and index in lockstep. Swap-remove moves the LAST record
-    // into this slot; its id is unchanged but its slot number moved, so drop
-    // the removed id's entry then repoint the moved one.
-    _ = st.sent_index.remove(win);
-    if (slot < st.sent.len) _ = st.sent_index.put(st.sent.items[slot].id, slot);
+    st.sent.orderedRemove(slot);
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -343,20 +355,23 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // its desire will be non-parked (checked here so no earlier store entry
     // can shadow it); else the pass elects the first non-parked desire.
     var winner: ?model.WindowId = fs_win;
-    if (winner == null) if (m.focused) |f| if (m.store.get(f)) |fe| {
+    if (winner == null) if (m.focused) |f| if (m.store.slotOf(f)) |slot| {
+        const fe = m.store.at(slot).val.*;
         // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
         // with has_kept_rect = false: the ledger is unknowable pre-pass, so a
         // placement-less visible orphan is left to the first-desire fallback).
-        if (fe.presence == .present and desireIsNonParked(m, fe, f, fs_win, placementOf(m, &placements, &pl_of_slot, f), false)) {
+        if (fe.presence == .present and desireIsNonParked(m, fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false)) {
             winner = f;
         }
     };
 
     // One fused pass over the store: compute a window's desire, then SEND it
-    // immediately. Send order per window: map -> pixel -> bw -> geometry
-    // (stack merged into that request); parked windows emit ONE merged park
-    // request instead (offscreen X + BELOW). Map precedes geometry so a
-    // first-show/unparking client exposes at its final rect.
+    // immediately. Ordering is via the Sink adapter below (a widening PR
+    // proved the contract survives reordering), honoring two invariants here:
+    // map precedes geometry so a first-show/unparking client exposes at its
+    // final rect, and border width is merged into the geometry configure when
+    // both change (parked windows emit ONE merged park request instead:
+    // offscreen X + BELOW).
     //
     // The ledger reads below are contract, not optimization (header): the
     // orphan branch keeps the last real geometry (read 1), raise triggers
@@ -502,15 +517,14 @@ fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
 fn desireIsNonParked(
     m: *const model.Model,
     e: model.Entry,
-    win: model.WindowId,
     fs_win: ?model.WindowId,
     placement: ?plugin.Placement,
     has_kept_rect: bool,
 ) bool {
     if (fs_win != null) return false;
     switch (e.anchor) {
-        .floating => return model.visibleOn(m, win, m.current),
-        .tiled => return if (placement) |p| p.visible else (model.visibleOn(m, win, m.current) and has_kept_rect),
+        .floating => return model.visibleEntry(m, e, m.current),
+        .tiled => return if (placement) |p| p.visible else (model.visibleEntry(m, e, m.current) and has_kept_rect),
     }
 }
 
@@ -553,7 +567,7 @@ fn computeDesire(
             // desireIsNonParked); the arms below fill geometry, and the
             // orphan/offscreen arm's markParked keeps its border/pixel
             // side effects.
-            parked = !desireIsNonParked(m, e.*, win, fs_win, placement, ledger.has_rect);
+            parked = !desireIsNonParked(m, e.*, fs_win, placement, ledger.has_rect);
             switch (e.anchor) {
                 .floating => |r| rect = r,
                 .tiled => if (placement) |p| {
@@ -589,16 +603,4 @@ fn placementOfSlot(
     const slice = placements.constSlice();
     if (idx >= slice.len) return null;
     return slice[idx];
-}
-
-/// Placement for `win`, resolved id -> store slot -> O(1) table. Only used on
-/// the cold winner-seed path; the hot fused pass passes its known slot.
-fn placementOf(
-    m: *const model.Model,
-    placements: *const plugin.List,
-    pl_of_slot: *const [model.store_capacity]?usize,
-    win: model.WindowId,
-) ?plugin.Placement {
-    const slot = m.store.slotOf(win) orelse return null;
-    return placementOfSlot(placements, pl_of_slot, slot);
 }

@@ -27,8 +27,10 @@ pub const XK = enum(u32) {
 pub const Connection = *xcb.xcb_connection_t;
 pub const Screen = *xcb.xcb_screen_t;
 
-/// Equivalent to xcb_window_t (uint32_t).
-pub const WindowId = u32;
+/// Equivalent to xcb_window_t (uint32_t). Single canonical definition in
+/// core/utils/ids.zig (`model.WindowId` aliases it too), so window ids cross
+/// layers without conversion.
+pub const WindowId = @import("ids").WindowId;
 
 /// Workspace index wrapper. The canonical type for workspace identifiers;
 /// `model.WSId` is the same type (single canonical definition in

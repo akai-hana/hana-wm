@@ -15,9 +15,8 @@ const xcb_sink = @import("sink");
 const screen = @import("screen");
 const build_options = @import("build_options");
 const surfaces = @import("plugins").Surfaces;
-// Fullscreen EWMH/bar-arming hooks are reached through the build-generated
-// `window_modules` registry; `window_mods` is the auto-discovered
-// `[N]WindowModule` array, and the uniform loop below no-ops without fullscreen.
+// Fullscreen EWMH/bar-arming hooks via the build-generated `window_modules`
+// registry (the loop below no-ops without fullscreen).
 const window_mods = @import("window_modules").modules;
 
 /// Layout registry (build-generated); the active layout is a `u8` index into

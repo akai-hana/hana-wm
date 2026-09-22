@@ -53,7 +53,7 @@ test "overflow starts at zero and advances with elapsed time" {
 
 test "offset wraps modulo text width plus gap" {
     reset();
-    // cycle = 100 + gap_px = 148. Advance 1500 px: 1500 mod 148 = 20.
+    // cycle = text_w + inter_title_gap_px = 100 + 48 = 148. Advance 1500 px: 1500 mod 148 = 20.
     _ = tick(1, 100, 50, 1, 0);
     const off = tick(1, 100, 50, 1500, 1000); // speed*dt = 1500 px
     try expectOffset(20, off);

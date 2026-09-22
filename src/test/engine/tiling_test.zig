@@ -11,7 +11,7 @@ const model = @import("model");
 const helpers = @import("helpers");
 
 const build_options = @import("build_options");
-const tiling = if (build_options.has_tiling) @import("tiling") else struct {};
+const tiling = @import("tiling");
 // Scroll-only tests runtime-skip below, but the stub must still expose the
 // two members their bodies reference so a scroll-less tree compiles.
 const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {
@@ -273,7 +273,7 @@ test "scroll strip and parking" {
     var fx: Fixture = undefined;
     try fx.init(&.{ 11, 12, 13, 14, 15 });
 
-    // Caller duties (algo_scroll header): snap right for new windows, clamp.
+    // Caller duties: snap right for new windows, cap the offset at the strip.
     const slot_w = scroll_algo.slotWidth(800);
     const max_off = scroll_algo.maxOffset(5, slot_w, 800);
     try testing.expectEqual(@as(i32, 400), slot_w);

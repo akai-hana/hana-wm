@@ -91,7 +91,7 @@ pub fn deinitKeybinds() void {
     keybind_resolver.deinit(core.getState().alloc);
 }
 
-// Rebuilds the keymap/keysym table after the server changes the keyboard
+/// Rebuilds the keymap/keysym table after the server changes the keyboard
 /// mapping (setxkbmap/xmodmap). Keybinding resolution is keysym-indexed, so
 /// rebuilding the flat keycode->keysym table keeps existing bindings working
 /// under the new layout. However, the per-binding keycodes the key grabs were
@@ -114,8 +114,8 @@ pub fn handleMappingNotify() void {
 // Grab setup
 
 /// Grabs mouse buttons on the root window and applies the user's cursor theme.
-pub fn setup(conn: core.Connection, screen: core.Screen, root: u32) void {
-    setupGrabs(conn, root);
+pub fn setup(conn: core.Connection, screen: core.Screen) void {
+    setupGrabs(conn, screen.root);
     XcbCursor.setupRoot(conn, screen);
 }
 
@@ -195,11 +195,9 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     }
 }
 
-/// Tracks the event timestamp for focus machinery on release. Every repeated
-/// KeyPress of a still-held binding key is dispatched as a fresh action (with
-/// detectable auto-repeat the server replays these without interleaved
-/// KeyRelease), so a held key keeps firing its bound action — e.g. holding a
-/// workspace key re-switches (idempotent), holding a cycle key steps.
+/// Tracks the event timestamp for focus machinery on release.
+/// (Held-key auto-repeat semantics live in xkbcommon's detectable
+/// auto-repeat; see there.)
 pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
     focus.setLastEventTime(event.time);
 }
@@ -343,10 +341,6 @@ inline fn dirSign(dir: types.Dir) i32 {
     return if (dir == .forward) 1 else -1;
 }
 
-inline fn dirSignF(dir: types.Dir) f32 {
-    return if (dir == .forward) 1 else -1;
-}
-
 /// Top-level action dispatcher. Routes each action tag to its handler inline
 /// (single switch, no per-class delegates). Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
@@ -369,9 +363,9 @@ fn executeAction(action: *const types.Action) void {
         .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
         .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(dir)),
         .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(dir)),
-        .set_master_width => |dir| actions.adjustPrimaryWidthAction(dirSignF(dir) * constants.master_width_step),
+        .set_master_width => |dir| actions.adjustPrimaryWidthAction(@as(f32, @floatFromInt(dirSign(dir))) * constants.master_width_step),
         .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(dir)),
-        .grow_stack => |dir| actions.adjustSecondaryBalance(dirSignF(dir) * constants.stack_balance_step),
+        .grow_stack => |dir| actions.adjustSecondaryBalance(@as(f32, @floatFromInt(dirSign(dir))) * constants.stack_balance_step),
         .swap_master => |mode| actions.swapPrimaryAction(mode == .focus_swap),
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),

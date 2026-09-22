@@ -1,11 +1,11 @@
 //! Headless wincache tests (pure cache paths only).
 //!
 //! Everything here runs without an X connection: the cache's entry lifecycle
-//! (hints, applied-border dedup, title ownership, at-capacity drop) is pure
-//! allocation bookkeeping, so the leak-checking testing allocator pins it.
-//! The wire-touching half (fireTitleCookies/collectTitleCookies,
-//! sendBorderColorIfChanged) needs a live display and stays in the
-//! integration layer.
+//! (hints, title ownership, at-capacity drop) is pure allocation bookkeeping,
+//! so the leak-checking testing allocator pins it. The wire-touching half
+//! (fireTitleCookies/collectTitleCookies, sendBorderColorIfChanged, and the
+//! border-width dedup, which lives in the sync ledger now) needs a live
+//! display and stays in the integration layer.
 
 const std = @import("std");
 const testing = std.testing;
@@ -32,22 +32,6 @@ test "size-hints round-trip and empty-hints no-op" {
     try testing.expectEqual(wincache.SizeHints{}, wincache.peekHints(4));
 }
 
-test "applied border width dedup records and reports sameness" {
-    const alloc = std.testing.allocator;
-    wincache.init(alloc);
-    defer wincache.deinit();
-
-    // Unseen window reports "changed" so the first configure is never skipped.
-    try testing.expectEqual(false, wincache.cacheBorderWidth(11, 2));
-    try testing.expectEqual(true, wincache.cacheBorderWidth(11, 2));
-    // A different width reports "changed" again.
-    try testing.expectEqual(false, wincache.cacheBorderWidth(11, 4));
-    try testing.expectEqual(true, wincache.cacheBorderWidth(11, 4));
-    // Eviction resets the applied-width memory.
-    wincache.removeWindow(11);
-    try testing.expectEqual(false, wincache.cacheBorderWidth(11, 4));
-}
-
 test "title ownership: overwrite frees prior, remove frees owned" {
     const alloc = std.testing.allocator;
     wincache.init(alloc);
@@ -72,18 +56,18 @@ test "at-capacity cache drops new entries but keeps overwrites" {
 
     const max = @import("icccm").max_window_cache;
 
-    // Fill past the ceiling with border-width writes (the shared
-    // getOrPutDefault path enforces the cap).
+    // Fill past the ceiling with size-hint writes (the shared getOrPutDefault
+    // path enforces the cap).
     var i: u32 = 0;
     while (i < max) : (i += 1) {
-        try testing.expectEqual(false, wincache.cacheBorderWidth(i, 1));
+        wincache.cacheSizeHints(i, .{ .min_width = @intCast(320 + @as(u32, i)) });
+        try testing.expectEqual(@as(u32, @intCast(320 + i)), wincache.peekHints(i).min_width);
     }
-    // The ceiling+1st NEW window is dropped: write reports unchanged, no
-    // entry materializes.
-    try testing.expectEqual(false, wincache.cacheBorderWidth(max, 1));
-
+    // The ceiling+1st NEW window is dropped: no entry materializes.
+    wincache.cacheSizeHints(max, .{ .min_width = 999 });
     if (wincache.getOpt()) |c|
         try testing.expectEqual(max, c.count());
+    try testing.expectEqual(wincache.SizeHints{}, wincache.peekHints(max));
 
     // Overwrites of an already-cached window remain exempt from the ceiling.
     wincache.storeTitle(0, "still writable");

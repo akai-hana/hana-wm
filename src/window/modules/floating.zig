@@ -247,9 +247,15 @@ fn computeMoveRect(
 /// widths. A zero hint means no constraint: min yields 0 and max yields the
 /// u16 wire-width ceiling.
 fn sizeHintLimits(win: u32) struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 } {
-    const hints = pipeline.model().store.get(win).?.size_hints;
     const bw2: i32 = @as(i32, borders.width()) * 2;
     const unbounded: i32 = @as(i32, std.math.maxInt(u16));
+    // Window may withdraw mid-drag; treat it as hint-less (no constraint).
+    const hints = (pipeline.model().store.get(win) orelse return .{
+        .min_w = 0,
+        .min_h = 0,
+        .max_w = unbounded,
+        .max_h = unbounded,
+    }).size_hints;
     return .{
         .min_w = if (hints.min_width == 0) 0 else @as(i32, hints.min_width) + bw2,
         .min_h = if (hints.min_height == 0) 0 else @as(i32, hints.min_height) + bw2,

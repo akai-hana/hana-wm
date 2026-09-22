@@ -18,14 +18,6 @@ pub fn widthState(comptime tag: []const u8) type {
         var redraw_pending: bool = false;
         const _ = tag;
 
-        pub fn invalidate() void {
-            // Keep the last measured width as the row reservation instead of
-            // zeroing it: zero would make the FIRST measure after a reload
-            // (which runs before this segment's draw re-primes the cache)
-            // reserve a 0-width slot and push downstream segments out of place
-            // for a frame. The reload's own full redraw re-measures the width
-            // (store) immediately afterward.
-        }
         pub fn consumeRedrawRequest() bool {
             const pending = redraw_pending;
             redraw_pending = false;
@@ -62,13 +54,14 @@ pub const Opts = struct {
     /// zero width on a layout transition and must re-lay the row that batch).
     with_collapse: bool = false,
     self_ticking: bool = false,
-    center_slot: bool = false,
     clickable: bool = true,
-    dirty_sources: plugin.DirtySources = .{},
-    needsRepaint: ?*const fn () bool = null,
     pollTimeoutMs: ?*const fn () i32 = null,
-    onPollWakeup: ?*const fn () void = null,
     secondsElapsed: ?*const fn ([]const u8) bool = null,
+    /// Cleared via the uniform invalidate hook on bar (re)creation. Segments
+    /// without a real invalidate (layout/variants) keep their last measured
+    /// width as the row reservation: zeroing it would make the first measure
+    /// after a reload reserve a 0-width slot and push downstream segments out
+    /// of place for a frame.
     invalidate: ?*const fn () void = null,
     /// Clears per-module caches on config reload (font/padding may change).
     invalidateReloadCaches: ?*const fn () void = null,
@@ -120,14 +113,10 @@ pub fn module(
     return .{
         .name = name,
         .self_ticking = opts.self_ticking,
-        .center_slot = opts.center_slot,
         .clickable = opts.clickable,
-        .dirty_sources = opts.dirty_sources,
-        .needsRepaint = opts.needsRepaint,
         .pollTimeoutMs = opts.pollTimeoutMs,
-        .onPollWakeup = opts.onPollWakeup,
         .secondsElapsed = opts.secondsElapsed,
-        .invalidate = opts.invalidate orelse W.invalidate,
+        .invalidate = opts.invalidate,
         .invalidateReloadCaches = opts.invalidateReloadCaches,
         .consumeRedrawRequest = if (opts.with_collapse) W.consumeRedrawRequest else null,
         .measureString = opts.measureString,

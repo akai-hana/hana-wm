@@ -134,7 +134,7 @@ const ELEM_WRITE = iowr('U', 0x13, @sizeOf(ElemValue));
 
 /// Percentage onto the control's [min..max] scale, nearest-rounding like
 /// `amixer set Master N%` (which maps 50 % of 0..87 to 44).
-pub fn rawFromPct(pct: u8, min: c_long, max: c_long) c_long {
+fn rawFromPct(pct: u8, min: c_long, max: c_long) c_long {
     if (max <= min) return min;
     const span: u128 = @intCast(max - min);
     const v: u128 = @as(u128, @min(pct, 100)) * span;
@@ -142,7 +142,7 @@ pub fn rawFromPct(pct: u8, min: c_long, max: c_long) c_long {
 }
 
 /// Inverse of `rawFromPct`: raw value onto the 0-100 scale (nearest-rounding).
-pub fn pctFromRaw(raw: c_long, min: c_long, max: c_long) u8 {
+fn pctFromRaw(raw: c_long, min: c_long, max: c_long) u8 {
     if (max <= min) return 0;
     const span: u128 = @intCast(max - min);
     const v: u128 = std.math.clamp(@as(u128, @intCast(raw - min)), 0, span);

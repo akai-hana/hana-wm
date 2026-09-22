@@ -114,8 +114,7 @@ fn tileColumn(
     var y: u16 = y_offset +| ctx.m.gap +| pad_top;
     const row_pitch = rowPitch(ctx.m);
     for (windows, 0..) |win, i| {
-        const rect = utils.Rect{ .x = tiling.satI16(@intCast(x)), .y = tiling.satI16(@intCast(y)), .width = inner_w, .height = heights[i] };
-        tiling.emitView(ctx.v, ctx.out, win, rect);
+        emitRow(ctx, win, x, y, inner_w, heights[i]);
         y = y +| heights[i] +| row_pitch;
     }
 }
@@ -293,15 +292,22 @@ fn tileStackExtra(
                 tiling.emitHidden(ctx.out, windows[win_idx]);
                 continue;
             }
-            const rect = utils.Rect{
-                .x = tiling.satI16(@intCast(x +| tiling.seamGap(ctx.m) +| col *| (col_w +| ctx.m.gap))),
-                .y = tiling.satI16(@intCast(y_pos)),
-                .width = col_inner_w,
-                .height = row_h,
-            };
-            tiling.emitView(ctx.v, ctx.out, windows[win_idx], rect);
+            emitRow(ctx, windows[win_idx], x +| tiling.seamGap(ctx.m) +| col *| (col_w +| ctx.m.gap), y_pos, col_inner_w, row_h);
         }
     }
+}
+
+/// Shared single-window row emission used by both layout passes (the stack
+/// column and the multi-column grid). The two HEIGHT DISTRIBUTIONS stay at
+/// the call sites on purpose: they differ in the min_dim-floor corner, and
+/// merging them is not behavior-preserving (plan NEW-4 corner).
+inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
+    tiling.emitView(ctx.v, ctx.out, win, .{
+        .x = tiling.satI16(@intCast(px)),
+        .y = tiling.satI16(@intCast(py)),
+        .width = w,
+        .height = h,
+    });
 }
 
 /// Total pixel height available for window content after gaps and borders.

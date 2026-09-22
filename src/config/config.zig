@@ -45,14 +45,22 @@ fn parseWsToken(tok: []const u8) ?usize {
     return std.fmt.parseInt(usize, tok, 10) catch return null;
 }
 
-/// Parses a 1-based workspace number from a bare token, warning on a malformed
-/// token and skipping values outside 1..255 / `max`.
-fn tryParseWsToken(tok: []const u8, max: usize, ctx: []const u8, comptime fmt: []const u8, args: anytype) ?usize {
+/// Parses a 1-based workspace number from a bare token, warning with `fmt` on
+/// a malformed token or a value outside 1..255 / `max` (the callers embed the
+/// section name in `fmt`, so no separate context is needed), and returns null
+/// to skip it.
+fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: anytype) ?usize {
     const ws_1based = parseWsToken(tok) orelse {
         debug.warn(fmt, args);
         return null;
     };
-    if (!checkWorkspaceBound(ws_1based, ctx, max)) return null;
+    if (ws_1based < 1 or
+        ws_1based > constants.max_workspace_number_1based or
+        ws_1based > max)
+    {
+        debug.warn(fmt, args);
+        return null;
+    }
     return ws_1based;
 }
 
@@ -88,8 +96,6 @@ const bar_anchors = [_]BarAnchorInfo{
     .{ .name = "right", .position = .right, .default_seg = "clock" },
 };
 
-const bar_layout_section_prefix = types.section_prefix_bar_layout;
-
 fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void {
     for (bar_anchors) |a| {
         var layout = types.BarLayout{ .position = a.position, .segments = .empty };
@@ -103,8 +109,6 @@ pub const max_file_bytes = 1024 * 1024;
 /// Initial allocation for the read-with-growth path (stat failed or reported
 /// zero, e.g. procfs/sysfs/pipes). Doubles until the whole file is read.
 const read_growth_initial_bytes = 64 * 1024;
-
-const default_tiling_layout = (types.TilingConfig{}).layout;
 
 /// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
 const max_master_count: u8 = 10;
@@ -1094,7 +1098,7 @@ fn parseTilingStructures(
     // aliases layouts.items[0], freed below, so using it would read freed
     // memory when the key is absent).
     if (section.getAs([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
-        const layout_str = schema.getInRange([]const u8, section, "layout", default_tiling_layout, null, null);
+        const layout_str = schema.getInRange([]const u8, section, "layout", types.canon_master_layout, null, null);
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(layout_str)));
     }
     if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
@@ -1163,7 +1167,7 @@ fn parseTilingLayoutSubtables(
                 var inner = counts_sec.orderedIterator();
                 while (inner.next()) |p| {
                     counts_sec.markConsumed(p.key);
-                    if (tryParseWsToken(p.key, constants.max_workspaces, "master-stack.counts", "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
+                    if (tryParseWsToken(p.key, constants.max_workspaces, "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
                         const count_val = p.value.asScalar(i64) orelse {
                             debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
                             continue;
@@ -1271,7 +1275,7 @@ fn parseWorkspaceListInto(
     var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
     while (ws_iter.next()) |ws_tok| {
         const trimmed = std.mem.trim(u8, ws_tok, " \t");
-        const ws_1based = tryParseWsToken(trimmed, constants.max_workspaces, "layouts array", "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
+        const ws_1based = tryParseWsToken(trimmed, constants.max_workspaces, "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
         const variant_copy: ?[]const u8 = if (variant) |v| try allocator.dupe(u8, v) else null;
         try overrides.append(allocator, .{ .workspace_idx = ids.WorkspaceId.fromIndex(@intCast(ws_1based - 1)), .layout_idx = layout_idx, .variant = variant_copy });
     }
@@ -1462,9 +1466,9 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
         for (bar_anchors) |a| longest = @max(longest, a.name.len);
         break :blk longest;
     };
-    var section_buf: [bar_layout_section_prefix.len + max_anchor_name_len]u8 = undefined;
+    var section_buf: [types.section_prefix_bar_layout.len + max_anchor_name_len]u8 = undefined;
     for (bar_anchors) |a| {
-        const layout_section = doc.getSection(std.fmt.bufPrint(&section_buf, "{s}{s}", .{ bar_layout_section_prefix, a.name }) catch unreachable) orelse continue;
+        const layout_section = doc.getSection(std.fmt.bufPrint(&section_buf, "{s}{s}", .{ types.section_prefix_bar_layout, a.name }) catch unreachable) orelse continue;
         var bar_layout = types.BarLayout{ .position = a.position, .segments = .empty };
         if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
             try appendDupedStrings(warn_bad_segment_entries, allocator, seg_arr, &bar_layout.segments);
@@ -1623,7 +1627,7 @@ pub const ConfigChanges = struct {
 
 /// The three detectors below compare per-subsystem content summaries. They
 /// deliberately stay hand-maintained field lists rather than being derived
-/// from `types.schema.knobs` (which declares every scalar knob once):
+/// from `schema.knobs` (which declares every scalar knob once):
 ///
 ///   * keysChanged is entirely bespoke: keybindings/mouse_bindings have no
 ///     knob entries, and their equality is pair-based (modifiers + keysym /
