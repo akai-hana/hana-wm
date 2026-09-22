@@ -877,22 +877,18 @@ pub fn switchTo(ws_idx: u8) void {
 
     const t2 = utils.monotonicNs();
 
-    // Inline the server grab so protocol focus and geometry land atomically.
-    // Only fire-and-forget XCB runs below, so the grab
-    // is held for microseconds — no blocking wait can freeze a next keypress.
-    const c = pipeline.grabCtx();
-    c.sink.grabServer();
-    defer c.sink.ungrabAndFlush();
-
-    // Geometry (map/geom/park) before focus: the arriving window may have been
-    // spawned off-current and never mapped (the spawn path registers but
+    // Reconcile + focus under one server grab, atomically, via the pipeline
+    // seam (grabCtx/reconcile/applyPendingFocus/ungrabAndFlush consolidated).
+    // Only fire-and-forget XCB runs inside the grab, so it is held for
+    // microseconds — no blocking wait can freeze a next keypress.
+    //
+    // Geometry-before-focus (FocusOrder.after): the arriving window may have
+    // been spawned off-current and never mapped (the spawn path registers but
     // defers the map to the first reconcile).  Firing xcb_set_input_focus on
     // an unmapped window is a BadMatch that leaves X focus on the old
-    // workspace's window.  The reconcile's map precedes focus in the same
-    // grab, so the target is viewable when focusNow targets it.
-    sync.reconcile(m, c, .{ .force_restack = true });
-
-    focus.applyPendingFocus(ft);
+    // workspace's window.  The .after order maps the arriving window before
+    // applyPendingFocus targets it, in the same flush.
+    pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft, .after);
 
     const t3 = utils.monotonicNs();
     debug.info("[TIMING] switchTo ws={}: model={d}us rt_prep={d}us grab_body={d}us total={d}us", .{

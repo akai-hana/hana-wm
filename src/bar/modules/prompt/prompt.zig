@@ -1366,8 +1366,8 @@ fn drawActive(
 }
 
 /// This module's bar-segment contribution. The prompt is a runtime overlay
-/// on the title slot: it is NOT configurable from config (configurable =
-/// false) but still joins the bar's uniform lifecycle/poll loops.
+/// on the title slot: it never appears in a config's `[bar] segments` list
+/// but still joins the bar's uniform lifecycle/poll loops.
 fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     const dc = segmod.castDraw(ctx);
     return draw(dc, x);
@@ -1375,7 +1375,6 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
 
 pub const module: @import("plugin").Segment = .{
     .name = "prompt",
-    .configurable = false,
     .init = init,
     .deinit = deinit,
     .pollTimeoutMs = blinkPollTimeoutMs,

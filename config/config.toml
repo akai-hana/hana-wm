@@ -212,7 +212,7 @@ Mod+Shift+Escape = "reload_hana"
 # Launchers
 4 = ["OpenTabletDriver.UX"]
 # Games
-5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe", "java", "Minecraft", "Etterna"]
+5 = ["steam", "steam.exe", "wine", "proton", "noita", "noita.exe", "osu!", "DDNet", "isaac-ng.exe", "java", "Minecraft", "Etterna", "ULTRAKILL", "ULTRAKILL.exe"]
 # Editors
 6 = ["emacs"]
 # Media

@@ -52,12 +52,6 @@ var xkb_state: ?xkbcommon.XkbState = null;
 // entries borrow `*const Action` pointers from the live config's keybindings.
 var keybind_resolver: keybind.KeybindResolver = .{};
 
-// Held binding-key ledger. A passive grab returns a bound key's KeyRelease
-// to the grabbing window only if the mask selects it; keycodes are stable
-// across a gesture regardless of modifier release order, so keying on the
-// raw KEYCODE both suppresses autorepeat and always clears on release.
-var held_keys = std.StaticBitSet(constants.x11_max_keycode).initEmpty();
-
 /// Initialises the XKB context, keymap, and key state
 /// from the server's current keyboard configuration.
 pub fn initXkb(conn: core.Connection) !void {
@@ -108,7 +102,6 @@ pub fn handleMappingNotify() void {
     const cs = core.getState();
     const state = getXkbState() orelse return;
     state.rebuild(cs.conn);
-    held_keys = std.StaticBitSet(constants.x11_max_keycode).initEmpty();
 
     // The dispatch map is keyed on keysym (unaffected by the rebuild), but
     // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
@@ -186,16 +179,6 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // inside it (input flows in, true = consumed, before keybinding dispatch).
     if (build_options.has_bar) if (surfaces.chromeHandleKeypress(event, matched)) return;
 
-    // A held binding key emits repeated KeyPress events: either the server
-    // replays KeyPress (detectable auto-repeat, enabled in xkbcommon.zig) or it
-    // interleaves a deactivating KeyRelease with each repeat. The real
-    // KeyRelease clears the ledger, but an autorepeat KeyPress must not re-fire
-    // the action, so suppress re-dispatch while the keycode is already held.
-    // Only keycodes this WM's grabs intercepted ever reach here, so the set
-    // stays small.
-    if (held_keys.isSet(event.detail)) return;
-    held_keys.set(event.detail);
-
     if (matched) |action| {
         // Per-key dispatch logs are `.debug` so release WMs (default log
         // level `.info`) compile them out of the hot path; folding them into
@@ -212,12 +195,13 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     }
 }
 
-/// Clears the held-key ledger on KeyRelease; the server reports a grabbed
-/// key's release to the grabbing window, so this is what lets a repeat of the
-/// same binding later be recognized as a genuine new press.
+/// Tracks the event timestamp for focus machinery on release. Every repeated
+/// KeyPress of a still-held binding key is dispatched as a fresh action (with
+/// detectable auto-repeat the server replays these without interleaved
+/// KeyRelease), so a held key keeps firing its bound action — e.g. holding a
+/// workspace key re-switches (idempotent), holding a cycle key steps.
 pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
     focus.setLastEventTime(event.time);
-    held_keys.unset(event.detail);
 }
 
 /// Dispatches a priority-ordered button-press event, splitting the two named

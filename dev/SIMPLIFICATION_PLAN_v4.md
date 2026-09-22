@@ -373,3 +373,45 @@ this pass (slider volume/brightness split with native backends, Pango attribute
 enums, schema colour-weight rework — see the `automated sync` commits); the
 simplification items themselves were net-negative per item as estimated, and the
 `bar.zig` empty-registry fix adds ~15 lines of guards.
+## Execution status (2026-09-22, next wave)
+
+**Landed + gate-verified** (fmt/build/tests/check-layers/check-modularity all re-run
+post-change):
+- BARCR-14 — delete `Segment.configurable` (plugin.zig de-config, prompt.zig
+  `configurable` cut, template/segment.zig).
+- IN-14 — keybind.zig:23-51 `map`/`seen` twins → one map; `Entry{owner,
+  first_index}`; resolver returns `entry.owner`.
+- CFG-28 — config.zig `action_map` (action_aliases + direction_entries) → single
+  `action_entries` table; `@setEvalBranchQuota(10000)` restored in regression check.
+- CFG-24 — single-source section-name strings: constants in types.zig; consumers in
+  config.zig (getSection/known_sections) + schema.zig swapped to the constants.
+- WINM-7 — `moveCoveringTo`/`moveFullscreenTo` widened to `*model.Model`;
+  `@constCast` dropped (fullscreen.zig, plugin.zig).
+- BARCR-09 — fold `gBar.force` into `s.dirty.flag` + `markAllSegmentsDirty()`;
+  3 gate predicates remapped; onPollWakeup folds redraw via `s.markDirty()`;
+  `pendingFullRedraw()` guards escalate paths.
+- IN-11 / CC-v4-1 — check-layers.sh pat1 widened to include `xcb_xkb_*` family +
+  allowlist entry for `src/input/xkbcommon.zig` (best-effort detectable-autorepeat
+  setup, WHY commented). Also folded `xkb_state getState` return usage.
+- COREP-07 — resolved by reworded doc (keep-current, documented) as agreed.
+
+**Deferred record — CLOSED (2026-09-22, all eight answered authoritatively in re-ask):**
+- COREP-10 → **do** the sorted-ledger rewrite (drop 2nd id-index / IdMap / tombstone).
+- WINC-09 → **merge now** (fold the border-width/border-size owner structs).
+- WINM-1+2+9 → **do the cluster** (Rec.anchor model twin, fix restart-recreates-ghost,
+  isFullscreenOnWs/pendingFullRedraw gates, restart-ghost test) as ONE coordinated change.
+- BARMOD-11 → **full form** (shared slider contract `Level` state object, touches sealed
+  slider `Sub` contract).
+- CC-v4-4/6 → **do both** (comptime single-binder uniqueness asserts in generated
+  registries + derive check-layers test_gates by scanning `src/test/`).
+- BARCR-16 → **measure→cache→re-measure→decide** (user's criteria: keep iff commensurate,
+  revert if complexity dwarf gain, keep if equal).
+- NEW-4 → **merge** the row-stacking formulations into one body.
+- v3 carry-forward → **re-triage into v4** (re-rank the still-open leftovers).
+These override the earlier keep-current/defer recommendations for COREP-10/WINC-09.
+
+**Gate evidence (final, this wave):** fmt clean; build check green (exit 0);
+xtest 259/260 with the single KNOWN pre-existing `focus_test` no-input baseline fail
+(unchanged); check-layers 31/31; check-modularity 31/31. Tokei tree +183 LOC over the
+post-Phase-2 baseline, dominated by the concurrent feature work already logged; the
+DEF media were net-negative per item.

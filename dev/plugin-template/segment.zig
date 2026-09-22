@@ -12,13 +12,13 @@
 //! configured width/draw/click) start calling your hooks — or skip them while
 //! `null`.
 //!
-//! This file is INTENTIONALLY inert. `configurable = false` means it can
-//! never be selected from config, so the bar never asks it for width or a
-//! draw; its hooks are real, copy-pasteable code that neither claims a slot
-//! nor paints anything. Drop it into `src/bar/modules/` and `zig build test`
-//! stays identical — that is the contract's litmus test. `zig build check`
-//! additionally compiles every file here against the real modules (the
-//! `check-plugin-template` step in build.zig), so contract drift self-fails.
+//! This file is INTENTIONALLY inert. Its `.name` never appears in any shipped
+//! config, so the bar never asks it for width or a draw; its hooks are real,
+//! copy-pasteable code that neither claims a slot nor paints anything. Drop
+//! it into `src/bar/modules/` and `zig build test` stays identical — that is
+//! the contract's litmus test. `zig build check` additionally compiles every
+//! file here against the real modules (the `check-plugin-template` step in
+//! build.zig), so contract drift self-fails.
 //!
 //! The shared bar vocabulary (Frame, Env, DrawCtx, BarHandlers, title
 //! snapshot types) lives in src/bar/segment.zig — import it with
@@ -101,8 +101,9 @@ pub fn invalidate() void {
 
 // ---------------------------------------------------------------------------
 // Configured-segment hooks. The bar invokes these ONLY on segments present
-// in the config's `[bar] segments` list (this template is configurable=false,
-// so none of these fire until you set configurable=true and add a name).
+// in the config's `[bar] segments` list (this template's name is a
+// placeholder, so none of these fire until you set a real name and add it to
+// a config).
 // ---------------------------------------------------------------------------
 
 /// Reserved row width probe (clock's measure string; the bar reserves the
@@ -161,9 +162,11 @@ pub fn onClick(
 
 // ---------------------------------------------------------------------------
 // This segment's bar contribution: the build-generated registry reads this
-// exact export. Only the fields you set are dispatched. `configurable=false`
-// keeps an in-progress segment out of the config surface (the prompt is the
-// shipped non-configurable segment; everything else must be selectable).
+// exact export. Only the fields you set are dispatched. A segment is part of
+// the config surface exactly when its `.name` appears in `[bar] segments` (or
+// a layout) — an in-flight segment simply ships with a non-empty placeholder
+// name and stays out of every shipped config (the prompt is a runtime overlay
+// with its own name; everything else is selectable by name).
 // Role capabilities (all default to false / .{} / true; set only as needed —
 // each "at most one": first-match wins, name-free):
 //   .self_ticking = true,          // drive your own refresh cadence (clock)
@@ -174,14 +177,13 @@ pub fn onClick(
 // ---------------------------------------------------------------------------
 pub const module: @import("plugin").Segment = .{
     .name = "template", // TODO: unique config identity, e.g. "clock"
-    .configurable = false, // TODO: true when selectable from [bar] segments
     .init = init,
     .deinit = deinit,
     .pollTimeoutMs = pollTimeoutMs,
     .onPollWakeup = onPollWakeup,
     .secondsElapsed = secondsElapsed,
     .invalidate = invalidate,
-    // Configured-segment hooks — bind + set configurable=true when ready:
+    // Configured-segment hooks — bind + add the name to a config when ready:
     //   .measureString = measureString,   // (clock convention) reserved width
     //   .naturalWidth = naturalWidth,
     //   .draw = draw,

@@ -23,12 +23,12 @@ const max_xkb_retries: u8 = 3;
 
 /// Detectable auto-repeat. Enabling it makes the server emit a held key's
 /// repeat as repeated KeyPress events WITHOUT the interleaved, deactivating
-/// KeyRelease that X11's default autorepeat produces on every cycle. Without
-/// it, hana's held-key ledger (input.zig) clears a binding key on each
-/// autorepeat KeyRelease, so the very next autorepeat KeyPress is treated as a
-/// fresh press and re-dispatches the action — holding e.g. Super+1 keeps
-/// re-firing switch_to_workspace_1, and a simultaneously-held Super+2 flaps
-/// between the two workspaces (whichever repeat fires last wins).
+/// KeyRelease that X11's default autorepeat produces on every cycle. With it,
+/// a held binding key re-fires its action cleanly: every repeat is a fresh
+/// KeyPress dispatched as a normal press. Without it, each autorepeat cycle
+/// interleaves a deactivating KeyRelease, so holding e.g. Super+1 flaps
+/// between the do/undo of a toggle action every repeat. Detectable auto-repeat
+/// turns the hold into steady, single-sided signalling.
 ///
 /// Set through XkbPerClientFlags (minor opcode 21), the request the XKB
 /// protocol actually defines for this. There is no XkbSetDetectableAutoRepeat
@@ -123,7 +123,7 @@ pub const XkbState = struct {
 
         // Enable detectable auto-repeat after the XKB extension is negotiated.
         // See the constants block above for why this is required for correct
-        // held-key/autorepeat handling.
+        // held-key repeat handling.
         enableDetectableAutoRepeat(xcb_conn);
 
         const device_id = try retryDeviceId(xcb_conn);

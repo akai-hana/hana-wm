@@ -53,6 +53,12 @@ pub const section_rules = "rules";
 pub const section_workspace_rules = "workspace.rules";
 pub const section_tiling_aesthetics = "tiling.aesthetics";
 pub const section_tiling_layouts_master_stack = "tiling.layouts.master-stack";
+pub const section_binds = "binds";
+pub const section_binds_alt = "Keybindings";
+pub const section_drag = "drag";
+pub const section_fullscreen = "fullscreen";
+pub const section_workspaces = "workspaces";
+pub const section_bar_modules_workspaces = "bar.modules.workspaces";
 
 /// Section-name prefixes for the family sweeps (inert-family warnings,
 /// numbered-rule sections, tiling layout subtables).
