@@ -3,9 +3,9 @@
 //!
 //! Rendering uses per-segment dirty tracking: the dirty set is registry-sized
 //! (one bool per bar_modules entry); only dirty segments are repainted on
-//! each draw. The global force flag or a full dirty set triggers a complete
-//! background clear + repaint. Coalescing happens through the dirty-mark
-//! scheduling (scheduleRedraw & friends).
+//! each draw. The whole-bar flag alongside an all-dirty set (the folded "full
+//! redraw" request) triggers a complete background clear + repaint. Coalescing
+//! happens through the dirty-mark scheduling (scheduleRedraw & friends).
 //!
 //! Bar segments are an open, drop-in addon set: the build generates the
 //! `bar_modules.modules` registry and this orchestrator owns NO segment logic.
@@ -196,10 +196,12 @@ pub fn onPollWakeup() void {
     runVoidHook("onPollWakeup");
     // A module's poll hook (e.g. the prompt's caret-blink toggle) must reach
     // the draw's repaint gate: fold any queued module redraw request into the
-    // force flag, exactly as the X-batch update path (updateIfDirty) does, so
-    // the animation is visible even when the loop is waking only on the poll
-    // timer with no X traffic to trigger that path.
-    if (barModsConsumeRedrawRequest()) gBar.force = true;
+    // dirty state as a full redraw, exactly as the X-batch update path
+    // (updateIfDirty) does, so the animation is visible even when the loop is
+    // waking only on the poll timer with no X traffic to trigger that path.
+    if (gBar.state) |s| {
+        if (barModsConsumeRedrawRequest()) s.markDirty();
+    }
     submitDraw();
 }
 
@@ -251,11 +253,6 @@ pub fn chromeToggleOverlay() void {
 /// thread; no mutex protection required.
 const Bar = struct {
     state: ?*State = null,
-    /// Forces the next draw to repaint every segment (full background clear)
-    /// even when the change-detection keys say nothing changed. Set by
-    /// expose/reload/show paths; normal ticks just redraw from live state.
-    /// Consumed by every draw.
-    force: bool = false,
     /// True when presentForPrompt() had to map an otherwise-hidden bar (e.g.
     /// hidden by a fullscreen window, or by the user toggling it off) purely
     /// so the inline prompt would be visible. dismissAfterPrompt() checks this
@@ -619,12 +616,21 @@ const State = struct {
 
     /// True when every registry slot is dirty (the complete-background-clear
     /// trigger). Non-configured segments (e.g. the prompt overlay) are never
-    /// drawn and never cleared, so an all-dirty set only occurs on force.
+    /// drawn and never cleared, so an all-dirty set only occurs on a folded
+    /// full-redraw request.
     fn isFullDirty(self: *const State) bool {
         for (self.dirty.segments) |d| {
             if (!d) return false;
         }
         return true;
+    }
+
+    /// True when a full redraw (every segment) is pending: the whole-bar flag
+    /// AND every slot dirty. A partial wake (a markDirtySource subset or the
+    /// drag hold) sets the flag without the full set, so a region-scoped
+    /// repaint can still run; only genuine full requests pass this.
+    fn pendingFullRedraw(self: *const State) bool {
+        return self.dirty.flag and self.isFullDirty();
     }
 
     /// True when the next draw would repaint at least one layout-rendered
@@ -645,7 +651,7 @@ const State = struct {
     /// opposed to only a self-animated needsRepaint hook). A dirty bit means
     /// the facts backing the drawn content changed, so the frame must be
     /// rescanned and the DrawCtx refilled before drawing; when no dirty bit is
-    /// set and !force and !dirty.flag, the only pending work is a marquee/overlay
+    /// set and !dirty.flag, the only pending work is a marquee/overlay
     /// needsRepaint hook and the cached last_ctx snapshot is still accurate.
     fn hasLayoutSegmentDirty(self: *const State) bool {
         for (self.render.config.layout.items) |lay| {
@@ -912,7 +918,7 @@ const State = struct {
     }
 
     /// Repaints the bar into the off-screen pixmap. When every segment is
-    /// dirty (full redraw / force) the whole background is cleared once;
+    /// dirty (full redraw) the whole background is cleared once;
     /// otherwise only the dirty segments' regions are repainted, leaving
     /// unchanged pixels from the previous frame untouched.
     fn drawAllInner(self: *State, ctx: *segmod.DrawCtx) void {
@@ -1037,17 +1043,18 @@ fn frameCtx(s: *State) segmod.DrawCtx {
 fn performDraw() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
-    // Fold any queued module redraw request into the force flag (the same
-    // gate the poll-wakeup and X-batch paths use) so a direct submitDraw can
-    // never drop it; the onPollWakeup / updateIfDirty callers have typically
-    // already consumed, in which case this is a false no-op.
-    if (!gBar.force and barModsConsumeRedrawRequest()) gBar.force = true;
-    // A timer-only wake with zero repaint work (nothing forced, nothing
-    // whole-bar dirty, no segment dirty or needsRepaint) must not run the full
+    // Fold any queued module redraw request into a full dirty (flag +
+    // every-slot) -- the same gate the poll-wakeup and X-batch paths use -- so
+    // a direct submitDraw can never drop it; the onPollWakeup / updateIfDirty
+    // callers have typically already consumed, in which case this is a false
+    // no-op.
+    if (!s.dirty.flag and barModsConsumeRedrawRequest()) s.markDirty();
+    // A timer-only wake with zero repaint work (nothing whole-bar dirty, no
+    // segment dirty or needsRepaint) must not run the full
     // scan + measure pass. The clock's own repaint on the same wake is handled
     // separately by the region-scoped updateClock blit.
-    if (!gBar.force and !s.dirty.flag and !s.hasPendingRepaintWork()) return;
-    // Marquee/overlay-only wake. With nothing forced, nothing whole-bar
+    if (!s.dirty.flag and !s.hasPendingRepaintWork()) return;
+    // Marquee/overlay-only wake. With nothing whole-bar
     // dirty, and no layout segment carrying a dirty bit, the only pending
     // repaint is a self-animated needsRepaint hook (the scrolling title or a
     // blinking caret). The frame facts backing the drawn content -- workspace
@@ -1057,7 +1064,7 @@ fn performDraw() void {
     // accurate. Reuse it in place of scanLiveFrame + fillDrawCtx: those two
     // re-walk tracking.allWindows() and rebuild the title/minute snapshot on
     // every marquee tick, and the marquee advances 60x/sec.
-    if (!gBar.force and !s.dirty.flag and s.frame.ctx_valid and
+    if (!s.dirty.flag and s.frame.ctx_valid and
         !s.hasLayoutSegmentDirty())
     {
         var ctx = s.frame.last_ctx;
@@ -1067,7 +1074,6 @@ fn performDraw() void {
             s.render.dc.queueBlit(s.dirty.span_x, s.dirty.span_w);
         return;
     }
-    if (gBar.force) s.markAllSegmentsDirty();
     s.scanLiveFrame();
 
     // Titles/geoms are read from in-process caches (wincache + sync
@@ -1087,11 +1093,15 @@ fn performDraw() void {
     // changed. No flush here (queueBlit), matching the grab-path contract.
     if (s.dirty.span_w > 0)
         s.render.dc.queueBlit(s.dirty.span_x, s.dirty.span_w);
-    gBar.force = false;
+    // A draw consumes the folded full request: clear the whole-bar flag so a
+    // bare poll wake (module consume already drained) doesn't re-run a full
+    // redraw. Segment dirty flags were cleared while painting.
+    s.dirty.flag = false;
 }
 
 fn submitDrawBlockingFull() void {
-    gBar.force = true;
+    const s = gBar.state orelse return;
+    s.markDirty();
     performDraw();
 }
 
@@ -1105,12 +1115,11 @@ fn submitDraw() void {
     performDraw();
 }
 
-/// Forces the next draw to repaint every segment and mark the whole bar dirty.
-/// Used by paths that need a full background-clear repaint (layout facts,
-/// module redraw requests, bar re-anchoring).
+/// Requests the next draw to repaint every segment and mark the whole bar
+/// dirty. Used by paths that need a full background-clear repaint (layout
+/// facts, module redraw requests, bar re-anchoring).
 fn requestFullRedraw() void {
-    gBar.force = true;
-    if (gBar.state) |s| s.dirty.flag = true;
+    if (gBar.state) |s| s.markDirty();
 }
 
 /// Everything a fully-initialised bar owns; returned by createBar.
@@ -1359,7 +1368,7 @@ fn syncScreenClaim() void {
 pub fn redrawInsideGrab() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
-    if (gBar.force) {
+    if (s.pendingFullRedraw()) {
         s.markDirty();
         return;
     }
@@ -1377,7 +1386,7 @@ pub fn redrawInsideGrab() void {
 /// reserved slot even when the draw ran narrow.
 fn redrawSegmentScoped(s: *State, id: usize) void {
     if (!s.vis.shown) return;
-    if (gBar.force) {
+    if (s.pendingFullRedraw()) {
         s.markDirty();
         return;
     }
@@ -1528,7 +1537,20 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
         // title marquee resumes from its last shown offset instead of
         // teleporting across the whole hidden gap on this first frame.
         runVoidHook("onBarShown");
-        submitDrawBlockingFull();
+        if (do_reconcile) {
+            // Fullscreen toggle path: render to the off-screen pixmap inside
+            // the grab so the caller's single ungrabAndFlush ships geometry +
+            // blit as exactly one compositor frame.
+            submitDrawBlockingFull();
+        } else {
+            // Workspace-switch path: skip the redundant inline render. The
+            // switch already bumped the window fact, so updateIfDirty repaints
+            // this bar once at end-of-batch (within the same batch as the
+            // switch); an inline draw here would be a full duplicate render AND
+            // would paint the stale pre-switch focused-title (model.focused has
+            // not landed on the new workspace yet).
+            requestFullRedraw();
+        }
     }
     syncScreenClaim();
     if (do_reconcile) {
@@ -1613,7 +1635,7 @@ pub fn updateIfDirty() !void {
     s.facts.window_rev = core.window.rev();
     s.facts.layout_rev = core.layout.rev();
 
-    // Fold any module redraw request into the force flag (as the poll
+    // Fold any module redraw request into a full dirty (as the poll
     // wakeup path does), then draw. Loop: a module may queue another request
     // while drawing (the variants segment collapses to zero width on a layout
     // switch and must re-lay the row in the SAME batch, before the

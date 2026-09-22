@@ -94,6 +94,7 @@ pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
 pub const TestOp = union(enum) {
     map: model.WindowId,
     geom: struct { win: model.WindowId, rect: utils.Rect, stack: ?sync.Stack },
+    geom_bw: struct { win: model.WindowId, rect: utils.Rect, bw: u16, stack: ?sync.Stack },
     bw: struct { win: model.WindowId, w: u16 },
     pixel: struct { win: model.WindowId, p: u32 },
     park: model.WindowId,
@@ -167,6 +168,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
         map: usize = 0,
         park: usize = 0,
         geom: usize = 0,
+        geom_bw: usize = 0,
         bw: usize = 0,
         pixel: usize = 0,
         total: usize = 0,
@@ -192,6 +194,11 @@ pub fn TestSink(comptime mode: SinkMode) type {
         fn geomShim(self_ptr: *anyopaque, win: model.WindowId, rect: utils.Rect, stack: ?sync.Stack) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
             self.bump(.geom, .{ .geom = .{ .win = win, .rect = rect, .stack = stack } });
+        }
+
+        fn geomBorderedShim(self_ptr: *anyopaque, win: model.WindowId, rect: utils.Rect, bw: u16, stack: ?sync.Stack) void {
+            const self: *Self = @ptrCast(@alignCast(self_ptr));
+            self.bump(.geom_bw, .{ .geom_bw = .{ .win = win, .rect = rect, .bw = bw, .stack = stack } });
         }
 
         fn bwShim(self_ptr: *anyopaque, win: model.WindowId, w: u16) void {
@@ -227,6 +234,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
                 .vt = &.{
                     .map = mapShim,
                     .geom = geomShim,
+                    .geom_bordered = geomBorderedShim,
                     .border_width = bwShim,
                     .border_pixel = pixelShim,
                     .park = parkShim,
@@ -287,6 +295,32 @@ pub fn TestSink(comptime mode: SinkMode) type {
         ) !void {
             comptime if (mode != .record) @compileError("expectGeomRect requires record mode");
             try self.expectGeom(i, win, rect.x, rect.y, rect.width, rect.height, stack);
+        }
+
+        /// Asserts op `i` is the MERGED geometry+border-width request.
+        pub fn expectGeomBw(
+            self: *const Self,
+            i: usize,
+            win: model.WindowId,
+            rect: utils.Rect,
+            bw: u16,
+            stack: ?sync.Stack,
+        ) !void {
+            comptime if (mode != .record) @compileError("expectGeomBw requires record mode");
+            const op = self.ops.items[i];
+            try std.testing.expect(op == .geom_bw);
+            try std.testing.expectEqual(win, op.geom_bw.win);
+            try std.testing.expectEqual(rect.x, op.geom_bw.rect.x);
+            try std.testing.expectEqual(rect.y, op.geom_bw.rect.y);
+            try std.testing.expectEqual(rect.width, op.geom_bw.rect.width);
+            try std.testing.expectEqual(rect.height, op.geom_bw.rect.height);
+            try std.testing.expectEqual(bw, op.geom_bw.bw);
+            if (stack) |s| {
+                try std.testing.expect(op.geom_bw.stack != null);
+                try std.testing.expectEqual(s, op.geom_bw.stack.?);
+            } else {
+                try std.testing.expect(op.geom_bw.stack == null);
+            }
         }
 
         pub fn expectPixel(self: *const Self, i: usize, win: model.WindowId, p: u32) !void {

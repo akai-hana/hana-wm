@@ -565,13 +565,13 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
 /// spelling. A section header that differs from one of these only by case is
 /// almost certainly a typo that silently drops the whole section.
 const known_sections = std.StaticStringMap(void).initComptime(.{
-    .{ "binds", {} },                         .{ "Keybindings", {} },
+    .{ types.section_binds, {} },             .{ types.section_binds_alt, {} },
     .{ types.section_workspace_rules, {} },   .{ types.section_rules, {} },
-    .{ "drag", {} },                          .{ "fullscreen", {} },
-    .{ types.section_tiling, {} },            .{ "workspaces", {} },
+    .{ types.section_drag, {} },              .{ types.section_fullscreen, {} },
+    .{ types.section_tiling, {} },            .{ types.section_workspaces, {} },
     .{ types.section_bar, {} },               .{ types.section_bar_properties, {} },
     .{ "bar.layout.left", {} },               .{ "bar.layout.center", {} },
-    .{ "bar.layout.right", {} },              .{ "bar.modules.workspaces", {} },
+    .{ "bar.layout.right", {} },              .{ types.section_bar_modules_workspaces, {} },
     .{ types.section_tiling_aesthetics, {} }, .{ types.section_tiling_layouts_master_stack, {} },
     .{ "tiling.layouts.master_stack", {} },
 });
@@ -636,46 +636,46 @@ const mouse_button_map = std.StaticStringMap(u8).initComptime(.{
     .{ "button5", 5 }, .{ "scroll_down", 5 },  .{ "scrolldown", 5 },
 });
 
-/// Mechanically derived from `types.Action`'s tag names, so every action
-/// is addressable by its own tag name without a hand-maintained entry. Only
-/// genuine ALIASES are listed by hand. Adding an Action union member now
-/// requires exactly one edit (the union); forgetting an intended alias fails
-/// the parser's unknown-action typo detection instead of silently unparsable.
-const action_aliases = [_]struct { key: []const u8, tag: std.meta.Tag(types.Action) }{
-    .{ .key = "close", .tag = .close_window },
-    .{ .key = "kill", .tag = .close_window },
-    .{ .key = "reload", .tag = .reload_config },
-    .{ .key = "fullscreen", .tag = .toggle_fullscreen },
-    .{ .key = "minimize", .tag = .minimize_window },
-    .{ .key = "prompt", .tag = .toggle_prompt },
+/// Every action key, as one hand-maintained table: the `Action` union's
+/// void tag names are usable verbatim (auto-derived below), and these
+/// entries add the aliases / payload-carrying spellings. Adding an Action
+/// union member requires only the union edit for its tag name; forgetting an
+/// intended alias fails the parser's unknown-action typo detection instead
+/// of silently unparsable.
+const action_entries = [_]struct { key: []const u8, action: types.Action }{
+    // Void-variant aliases (old tag names → renamed void variants).
+    .{ .key = "close", .action = .{ .close_window = {} } },
+    .{ .key = "kill", .action = .{ .close_window = {} } },
+    .{ .key = "reload", .action = .{ .reload_config = {} } },
+    .{ .key = "fullscreen", .action = .{ .toggle_fullscreen = {} } },
+    .{ .key = "minimize", .action = .{ .minimize_window = {} } },
+    .{ .key = "prompt", .action = .{ .toggle_prompt = {} } },
+    // Payload variant spellings (one enum payload each).
+    .{ .key = "toggle_layout", .action = .{ .cycle_layout = .forward } },
+    .{ .key = "toggle_layout_reverse", .action = .{ .cycle_layout = .reverse } },
+    .{ .key = "increase_master", .action = .{ .set_master_width = .forward } },
+    .{ .key = "decrease_master", .action = .{ .set_master_width = .reverse } },
+    .{ .key = "increase_master_count", .action = .{ .set_master_count = .forward } },
+    .{ .key = "decrease_master_count", .action = .{ .set_master_count = .reverse } },
+    .{ .key = "stack_top", .action = .{ .grow_stack = .forward } },
+    .{ .key = "stack_bottom", .action = .{ .grow_stack = .reverse } },
+    .{ .key = "swap_master", .action = .{ .swap_master = .normal } },
+    .{ .key = "swap_master_focus_swap", .action = .{ .swap_master = .focus_swap } },
+    .{ .key = "cycle_layout_variants", .action = .{ .cycle_variants = .forward } },
+    .{ .key = "cycle_layout_variants_reverse", .action = .{ .cycle_variants = .reverse } },
+    .{ .key = "cycle_variants", .action = .{ .cycle_variants = .forward } },
+    .{ .key = "focus_next_window", .action = .{ .cycle_focus = .forward } },
+    .{ .key = "focus_prev_window", .action = .{ .cycle_focus = .reverse } },
+    .{ .key = "scroll_view_left", .action = .{ .scroll_view = .reverse } },
+    .{ .key = "scroll_view_right", .action = .{ .scroll_view = .forward } },
+    .{ .key = "unminimize_lifo", .action = .{ .unminimize = .lifo } },
+    .{ .key = "unminimize_fifo", .action = .{ .unminimize = .fifo } },
 };
 
 const action_map: std.StaticStringMap(types.Action) = blk: {
     @setEvalBranchQuota(10000);
     const fields = @typeInfo(types.Action).@"union".fields;
-    const direction_entries = [_]struct { key: []const u8, action: types.Action }{
-        .{ .key = "toggle_layout", .action = .{ .cycle_layout = .forward } },
-        .{ .key = "toggle_layout_reverse", .action = .{ .cycle_layout = .reverse } },
-        .{ .key = "increase_master", .action = .{ .set_master_width = .forward } },
-        .{ .key = "decrease_master", .action = .{ .set_master_width = .reverse } },
-        .{ .key = "increase_master_count", .action = .{ .set_master_count = .forward } },
-        .{ .key = "decrease_master_count", .action = .{ .set_master_count = .reverse } },
-        .{ .key = "stack_top", .action = .{ .grow_stack = .forward } },
-        .{ .key = "stack_bottom", .action = .{ .grow_stack = .reverse } },
-        .{ .key = "swap_master", .action = .{ .swap_master = .normal } },
-        .{ .key = "swap_master_focus_swap", .action = .{ .swap_master = .focus_swap } },
-        .{ .key = "cycle_layout_variants", .action = .{ .cycle_variants = .forward } },
-        .{ .key = "cycle_layout_variants_reverse", .action = .{ .cycle_variants = .reverse } },
-        .{ .key = "cycle_variants", .action = .{ .cycle_variants = .forward } },
-        .{ .key = "focus_next_window", .action = .{ .cycle_focus = .forward } },
-        .{ .key = "focus_prev_window", .action = .{ .cycle_focus = .reverse } },
-        .{ .key = "scroll_view_left", .action = .{ .scroll_view = .reverse } },
-        .{ .key = "scroll_view_right", .action = .{ .scroll_view = .forward } },
-        .{ .key = "unminimize_lifo", .action = .{ .unminimize = .lifo } },
-        .{ .key = "unminimize_fifo", .action = .{ .unminimize = .fifo } },
-    };
-    const total = fields.len + action_aliases.len + direction_entries.len;
-    var kvs: [total]struct { []const u8, types.Action } = undefined;
+    var kvs: [fields.len + action_entries.len]struct { []const u8, types.Action } = undefined;
     var n: usize = 0;
     // Void tag names auto-generated from union fields.
     for (fields) |f| {
@@ -684,22 +684,13 @@ const action_map: std.StaticStringMap(types.Action) = blk: {
             n += 1;
         }
     }
-    // Hand-written void aliases.
-    for (action_aliases) |a| {
+    // Hand entries, checked against everything already in the table.
+    for (action_entries) |a| {
         for (kvs[0..n]) |kv| {
             if (std.mem.eql(u8, kv[0], a.key))
-                @compileError("alias shadows an Action tag name: " ++ a.key);
+                @compileError("action key shadows a union tag name: " ++ a.key);
         }
-        kvs[n] = .{ a.key, @field(types.Action, @tagName(a.tag)) };
-        n += 1;
-    }
-    // Payload-bearing aliases (old tag names → merged variant with payload).
-    for (direction_entries) |de| {
-        for (kvs[0..n]) |kv| {
-            if (std.mem.eql(u8, kv[0], de.key))
-                @compileError("direction entry shadows existing action key: " ++ de.key);
-        }
-        kvs[n] = .{ de.key, de.action };
+        kvs[n] = .{ a.key, a.action };
         n += 1;
     }
     break :blk .initComptime(kvs[0..n]);
@@ -903,7 +894,7 @@ fn resolveModPlaceholder(
 }
 
 fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    const section = doc.getSection("binds") orelse doc.getSection("Keybindings") orelse return;
+    const section = doc.getSection(types.section_binds) orelse doc.getSection(types.section_binds_alt) orelse return;
     var mod_placeholder: ?[]const u8 = null;
     var kill_placeholder: ?[]const u8 = null;
     var iter = section.orderedIterator();

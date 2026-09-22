@@ -79,10 +79,9 @@ secondary_color   = "#52263e" # unfocused title / inactive border
 alternative_color = "#007373" # minimized title
 text_color        = "#ebd9bc" # bar text (matches fg)
 
-## Bar
-## Colors that don't fit the palette stay hardcoded
-bg = "#0d0d14"
-fg = "#ebd9bc"
+# Bar
+bg = "#0d0d14" 
+fg = text_color
 
 ## Workspace tag indicators
 selected_bg = primary_color  # follows primary_color
@@ -105,10 +104,10 @@ title_minimized = alternative_color   # minimized title + slider fill = alternat
 # entry above. A segment with no `_value` entry colors its number like its
 # label. Systatus readouts read secondary; slider text stays alternative,
 # slider fill follows title_minimized (alternative).
-cpu        = secondary_color     # cpu readout text
-mem        = secondary_color     # memory readout text
-volume     = alternative_color   # volume slider text
-brightness = alternative_color   # brightness slider text
+cpu        = secondary_color   # cpu readout text
+mem        = secondary_color   # memory readout text
+volume     = alternative_color # volume slider text
+brightness = alternative_color # brightness slider text
 
 # Readout numbers pop in the focused accent, distinct from their labels
 cpu_value        = primary_color # cpu readout number

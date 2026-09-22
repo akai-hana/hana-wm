@@ -88,15 +88,15 @@ fn barDrunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
 /// colors precede the color_from chain that borrows them as fallbacks.
 pub const knobs = [_]Knob{
     // [drag]
-    knob(&.{place("drag", "enabled")}, "drag_enabled", .b),
-    knob(&.{place("drag", "snap_distance")}, "snap_distance", .{ .scalable = 0.0 }),
+    knob(&.{place(types.section_drag, "enabled")}, "drag_enabled", .b),
+    knob(&.{place(types.section_drag, "snap_distance")}, "snap_distance", .{ .scalable = 0.0 }),
 
     // [fullscreen]
-    knob(&.{place("fullscreen", "enabled")}, "fullscreen_enabled", .b),
+    knob(&.{place(types.section_fullscreen, "enabled")}, "fullscreen_enabled", .b),
 
     // [bar.modules.workspaces] | [workspaces]
-    knob(&.{ place("bar.modules.workspaces", "count"), place("workspaces", "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
-    knob(&.{ place("bar.modules.workspaces", "enabled"), place("workspaces", "enabled") }, "workspaces.enabled", .b),
+    knob(&.{ place(types.section_bar_modules_workspaces, "count"), place(types.section_workspaces, "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
+    knob(&.{ place(types.section_bar_modules_workspaces, "enabled"), place(types.section_workspaces, "enabled") }, "workspaces.enabled", .b),
 
     // [tiling]: functional knobs gated on the section exactly as
     // parseTiling always was -- a lone [tiling.aesthetics] without [tiling]

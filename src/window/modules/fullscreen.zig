@@ -225,9 +225,9 @@ pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Wind
 /// of a minimized window follows the mask) by writing the MODEL's core
 /// `covering_ws` — the single authority on the capture target. The caller has
 /// already confirmed the destination is not occupied.
-pub fn moveFullscreenTo(m: *const model.Model, win: model.WindowId, ws: model.WSId) void {
+pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     if (g_recs.indexOfByIdField(.win, win) == null) return;
-    const eptr = @constCast(m).store.getPtr(win) orelse return;
+    const eptr = m.store.getPtr(win) orelse return;
     eptr.covering_ws = ws;
 }
 

@@ -20,10 +20,11 @@
 //! resending an idempotent configure/map/park request is a pure no-op the X
 //! server would discard. Parked windows get ONE merged park request only on
 //! the park transition; visible windows send only the map/pixel/bw/geometry
-//! requests that actually changed, in the order map -> pixel -> bw -> geometry
-//! (stacking mode merged into the geometry request). Sending full desired
-//! state on change is still drift-proofing; we only avoid replaying what the
-//! server already has.
+//! requests that actually changed, in the order map -> pixel -> geometry
+//! (stacking mode merged into the geometry request, and the border width
+//! folded into it too when both change -- the switch/unpark shape). Sending
+//! full desired state on change is still drift-proofing; we only avoid
+//! replaying what the server already has.
 //!
 //! The SENT LEDGER is a WRITE-ONLY record of what was actually sent
 //! ({rect, has_rect, parked} per window; a park flips `parked` and preserves
@@ -68,6 +69,7 @@ pub const Sink = struct {
     pub const VTable = struct {
         map: *const fn (*anyopaque, model.WindowId) void,
         geom: *const fn (*anyopaque, model.WindowId, utils.Rect, ?Stack) void,
+        geom_bordered: *const fn (*anyopaque, model.WindowId, utils.Rect, u16, ?Stack) void,
         border_width: *const fn (*anyopaque, model.WindowId, u16) void,
         border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,
         park: *const fn (*anyopaque, model.WindowId) void,
@@ -83,6 +85,11 @@ pub const Sink = struct {
     }
     pub inline fn geom(self: Sink, win: model.WindowId, rect: utils.Rect, stack: ?Stack) void {
         self.vt.geom(self.ptr, win, rect, stack);
+    }
+    /// Geometry + border width merged into one configure request; the shape a
+    /// workspace switch emits for every arriving window.
+    pub inline fn geomBordered(self: Sink, win: model.WindowId, rect: utils.Rect, bw: u16, stack: ?Stack) void {
+        self.vt.geom_bordered(self.ptr, win, rect, bw, stack);
     }
     pub inline fn borderWidth(self: Sink, win: model.WindowId, bw: u16) void {
         self.vt.border_width(self.ptr, win, bw);
@@ -414,8 +421,14 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 
             if (need_map) ctx.sink.map(win);
             if (need_pixel) ctx.sink.borderPixel(win, pixel);
-            if (need_bw) ctx.sink.borderWidth(win, bw);
-            if (need_geom) ctx.sink.geom(win, rect, if (raise_winner) .above else null);
+            // Merge border width into the geometry configure when both change
+            // (the common switch/unpark shape): one request instead of two.
+            if (need_bw and need_geom) {
+                ctx.sink.geomBordered(win, rect, bw, if (raise_winner) .above else null);
+            } else {
+                if (need_bw) ctx.sink.borderWidth(win, bw);
+                if (need_geom) ctx.sink.geom(win, rect, if (raise_winner) .above else null);
+            }
         }
 
         // Ledger write: record what we actually sent. A park preserves the

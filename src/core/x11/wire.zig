@@ -38,14 +38,17 @@ pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect 
 // ---------------------------------------------------------------------------
 // Configure/raise/park primitives
 
-/// Moves and resizes `win`, optionally merging a stack mode into the same
-/// request (XCB consumes value slots by mask bit; the extra slot is ignored
-/// when the stack-mode mask bit is clear).
+/// Moves and resizes `win`, optionally merging a stack mode and/or a border
+/// width into the same request (XCB consumes value slots by mask bit; the
+/// extra slots are ignored when their mask bits are clear). Merging the
+/// border width here collapses what would otherwise be a second configure
+/// request per window on a workspace switch.
 pub fn configureWindow(
     conn: Connection,
     win: u32,
     rect: utils.Rect,
     stack_mode: ?u32,
+    border_width: ?u16,
 ) void {
     var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
         xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
@@ -54,11 +57,16 @@ pub fn configureWindow(
         utils.toXcbCoord(rect.y),
         rect.width,
         rect.height,
-        0,
+        0, // border_width slot
+        0, // stack_mode slot
     };
+    if (border_width) |bw| {
+        mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
+        values[4] = bw;
+    }
     if (stack_mode) |sm| {
         mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
-        values[4] = sm;
+        values[5] = sm;
     }
     _ = xcb.xcb_configure_window(conn, win, mask, &values);
 }

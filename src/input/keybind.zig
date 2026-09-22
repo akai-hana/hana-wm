@@ -19,9 +19,15 @@ const xkbcommon = @import("xkbcommon");
 /// X-free; `input.deinitKeybinds` tears it down before the Actions its entries
 /// point into are freed.
 pub const KeybindResolver = struct {
-    map: std.AutoHashMapUnmanaged(u64, *const types.Action) = .empty,
-    /// Conflict-detection set reused across rebuilds to avoid alloc churn on config reload.
-    seen: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    const Entry = struct {
+        owner: *const types.Action,
+        /// Index of the FIRST binding that claimed this key; the warn-on-
+        /// conflict path reports it against the current one. The last write
+        /// wins the map (see rebuildDispatchMap).
+        first_index: usize,
+    };
+
+    map: std.AutoHashMapUnmanaged(u64, Entry) = .empty,
 
     inline fn dispatchKey(modifiers: u16, keysym: u32) u64 {
         return (@as(u64, modifiers) << 32) | keysym;
@@ -35,19 +41,16 @@ pub const KeybindResolver = struct {
         allocator: std.mem.Allocator,
     ) void {
         self.map.clearRetainingCapacity();
-        self.seen.clearRetainingCapacity();
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
-            if (self.seen.get(key)) |first_idx| {
+            if (self.map.get(key)) |first| {
                 debug.warn(
                     "Keybinding conflict: #{} and #{} share mods=0x{x:0>4} " ++
                         "keysym=0x{x}, second wins",
-                    .{ first_idx + 1, i + 1, kb.modifiers, kb.keysym },
+                    .{ first.first_index + 1, i + 1, kb.modifiers, kb.keysym },
                 );
-            } else {
-                self.seen.put(allocator, key, i) catch {};
             }
-            self.map.put(allocator, key, &kb.action) catch |e|
+            self.map.put(allocator, key, .{ .owner = &kb.action, .first_index = i }) catch |e|
                 debug.warnOnErr(e, "keybind map build");
         }
     }
@@ -55,15 +58,16 @@ pub const KeybindResolver = struct {
     /// O(1) keybinding lookup for use on the hot key-press path.
     /// Returns a pointer into the current config's keybindings slice, or null.
     pub inline fn lookup(self: *const KeybindResolver, mods: u16, keysym: u32) ?*const types.Action {
-        return self.map.get(dispatchKey(mods, keysym));
+        if (self.map.get(dispatchKey(mods, keysym))) |entry|
+            return entry.owner;
+        return null;
     }
 
     /// Releases the dispatch map. Called before the keybindings whose Actions
     /// this map's entries point into are freed.
     pub fn deinit(self: *KeybindResolver, allocator: std.mem.Allocator) void {
-        inline for (.{ &self.map, &self.seen }) |m| m.deinit(allocator);
+        self.map.deinit(allocator);
         self.map = .empty;
-        self.seen = .empty;
     }
 };
 

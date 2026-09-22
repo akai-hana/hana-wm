@@ -49,6 +49,18 @@ wire_allowed() {
         # _NET_ACTIVE_WINDOW property write).
         src/window/focus.zig) ;;
 
+        # Detectable auto-repeat enablement (enableDetectableAutoRepeat in
+        # src/input/xkbcommon.zig): a ONE-SHOT, STARTUP-ONLY XKB negotiation
+        # that issues xcb_xkb_per_client_flags + its reply and
+        # xcb_get_extension_data. It is best-effort setup, not per-window wire
+        # mutation: it flips a per-client flag the WM must set once before
+        # keybinding dispatch starts and never again (there is no layout/tiling
+        # geometry being moved). Documented here with the same
+        # "setup, not mutation" warrant as the detect-drag/restack family --
+        # IN-11 / CC-v4-1. Rides pat-wide via the `xcb_xkb_` family; see
+        # enableDetectableAutoRepeat's own comment for the retry contract.
+        src/input/xkbcommon.zig) ;;
+
         # Root-window keygrab installation at startup and click-focus
         # stack-mode: startup is pre-WM-loop; the restack routes through
         # sync force_restack in a later cleanup.
@@ -141,7 +153,7 @@ grab_allowed() {
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
-pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|raiseWindow'
+pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|xcb_xkb_per_client_flags|raiseWindow'
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue

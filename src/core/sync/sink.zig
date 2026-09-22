@@ -48,6 +48,20 @@ pub const XcbSink = struct {
             win,
             rect,
             if (stack) |s| stackMode(s) else null,
+            null,
+        );
+    }
+
+    /// Geometry + border-width in ONE configure: the common workspace-switch
+    /// shape (an arriving window re-sends both), so the two go out as a single
+    /// request instead of two round trips of the config queue.
+    fn geomBorderedShim(ptr: *anyopaque, win: u32, rect: utils.Rect, bw: u16, stack: ?sync.Stack) void {
+        utils.configureWindow(
+            XcbSink.fromPtr(ptr).conn,
+            win,
+            rect,
+            if (stack) |s| stackMode(s) else null,
+            bw,
         );
     }
 
@@ -162,6 +176,7 @@ pub const XcbSink = struct {
 const xcb_vtable: sync.Sink.VTable = .{
     .map = XcbSink.mapShim,
     .geom = XcbSink.geomShim,
+    .geom_bordered = XcbSink.geomBorderedShim,
     .border_width = XcbSink.borderWidthShim,
     .border_pixel = XcbSink.borderPixelShim,
     .park = XcbSink.parkShim,

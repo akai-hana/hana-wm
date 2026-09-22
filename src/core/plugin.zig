@@ -183,7 +183,7 @@ pub const WindowModule = struct {
     /// covering window stays covering across a workspace move/tag change).
     /// Peer-service seam for the workspaces module; the binding module owns
     /// its record guard. At most one module binds this.
-    moveCoveringTo: ?*const fn (*const model.Model, model.WindowId, model.WSId) void = null,
+    moveCoveringTo: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
 
     // ---------- Workspaces family (workspaces module) ----------
     /// Move `win` to a single tag `ws` (mask replaces; home-list
@@ -287,10 +287,6 @@ pub const Segment = struct {
     /// Config identity ("workspaces", "title", "clock", "layout", "variants").
     /// Unique across the registry; config text resolves to the module by name.
     name: []const u8 = "",
-    /// False for segments that exist as runtime overlays (the chrome
-    /// overlay) and must not be selectable from config. Non-configurable
-    /// segments still join the uniform lifecycle/poll loops.
-    configurable: bool = true,
     /// Declares the segment drives its own refresh cadence (the wall-clock
     /// segment), so the bar's second-ticker targets it. At most one module
     /// SHOULD claim it (first-match wins, like idByName today); a bar with no
