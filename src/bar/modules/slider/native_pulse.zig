@@ -173,7 +173,7 @@ fn writeLE(comptime T: type, b: []u8, off: usize, v: T) void {
 
 /// A sink name must start with a letter or underscore and contain only
 /// printable ASCII (checked up to a sane limit).
-pub fn plausibleSinkName(name: []const u8) bool {
+fn plausibleSinkName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
     const first = name[0];
     if (!((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_')) return false;
@@ -185,7 +185,7 @@ pub fn plausibleSinkName(name: []const u8) bool {
 
 /// Extracts `default_sink_name` from raw `pa_server_info` bytes, trying the
 /// pre-16.0 offset (40) and the 16.0+ offset (48).
-pub fn readDefaultSink(info: []const u8) ?[]const u8 {
+fn readDefaultSink(info: []const u8) ?[]const u8 {
     for (server_default_sink_offsets) |off| {
         if (off + @sizeOf(usize) > info.len) continue;
         const ptr_val = readLE(usize, info, off);
@@ -199,7 +199,7 @@ pub fn readDefaultSink(info: []const u8) ?[]const u8 {
 }
 
 /// Parses a raw `pa_sink_info` snapshot into index/channels/muted.
-pub fn parseSinkInfo(buf: []const u8) ?struct { index: u32, channels: u8, muted: bool } {
+fn parseSinkInfo(buf: []const u8) ?struct { index: u32, channels: u8, muted: bool } {
     if (buf.len < sink_info_muted + 4) return null;
     const index = readLE(u32, buf, sink_info_index);
     if (index == PA_INVALID_INDEX) return null;
@@ -210,7 +210,7 @@ pub fn parseSinkInfo(buf: []const u8) ?struct { index: u32, channels: u8, muted:
 }
 
 /// Percentage from the sink's volume snapshot (`pvol` = volume bytes).
-pub fn volumePct(pvol: []const u8, channels: u8) ?u8 {
+fn volumePct(pvol: []const u8, channels: u8) ?u8 {
     const n: usize = if (channels > 32) 32 else @as(usize, channels);
     if (n == 0 or pvol.len < 4 + n * 4) return null;
     var sum: u64 = 0;
@@ -222,7 +222,7 @@ pub fn volumePct(pvol: []const u8, channels: u8) ?u8 {
 /// Builds a `pa_cvolume` (channels byte + per-channel u32 values) for `pct`
 /// into `out` (needs >= 4 + channels*4 bytes). Linear mapping matches
 /// `pa_sw_volume_from_percentage`.
-pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
+fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
     const n: usize = if (channels > 32) 32 else @as(usize, channels);
     if (n == 0) return false;
     if (out.len < 4 + n * 4) return false;
@@ -235,19 +235,15 @@ pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
 
 // --- Operation plumbing ---
 
-fn nowMs() i64 {
-    return utils.realtimeMs();
-}
-
 /// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`.
 fn waitDone(done: *bool, timeout_ms: i64) bool {
     const lib = g_oplib.?;
     const m = g_mainloop.?;
-    const deadline = nowMs() + timeout_ms;
+    const deadline = utils.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
     while (!done.*) {
-        if (nowMs() >= deadline) return false;
+        if (utils.realtimeMs() >= deadline) return false;
         _ = lib.mainloop_wait(m);
     }
     return true;
@@ -376,14 +372,14 @@ fn waitReady(timeout_ms: i64) bool {
     const lib = g_oplib.?;
     const m = g_mainloop.?;
     const ctx = g_ctx.?;
-    const deadline = nowMs() + timeout_ms;
+    const deadline = utils.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
     while (true) {
         const st = lib.context_get_state(ctx);
         if (st == PA_STATE_READY) return true;
         if (st == PA_STATE_FAILED or st == PA_STATE_TERMINATED) return false;
-        if (nowMs() >= deadline) return false;
+        if (utils.realtimeMs() >= deadline) return false;
         _ = lib.mainloop_wait(m);
     }
 }

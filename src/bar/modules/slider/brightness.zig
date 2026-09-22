@@ -111,14 +111,14 @@ fn readRawValue(base: []const u8, class: Class, dev: []const u8) ?u32 {
 
 /// Maps a raw level onto the 0-100 scale; null when the device is unusable
 /// (max unknown or zero).
-pub fn pctFromRaw(raw: u32, max: u32) ?u8 {
+fn pctFromRaw(raw: u32, max: u32) ?u8 {
     if (max == 0) return null;
     const v: u64 = @as(u64, raw) * 100 / max;
     return @intCast(@min(v, 100));
 }
 
 /// Maps a 0-100 percent onto the device's raw scale (nearest rounding).
-pub fn rawFromPct(pct: u8, max: u32) u32 {
+fn rawFromPct(pct: u8, max: u32) u32 {
     const v: u64 = (@as(u64, pct) * max + 50) / 100;
     return @intCast(@min(v, max));
 }
@@ -364,7 +364,7 @@ pub const sub: slider.Sub = .{
     .commit = commitPct,
     .apply = applyPct,
     .label = label,
-    .probe_natural_width = 44,
+    .probeNaturalWidth = 44,
 };
 
 // Tests exercise the pure, sysfs-free geometry, scaling, and formatting

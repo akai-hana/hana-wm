@@ -12,6 +12,12 @@
 //! nothing but std.
 const std = @import("std");
 
+/// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId`
+/// and `model.WindowId` are aliases of this single definition (same precedent
+/// as WorkspaceId), so window ids cross the core/model boundary without
+/// conversion.
+pub const WindowId = u32;
+
 pub const WorkspaceId = struct {
     index: u8,
 

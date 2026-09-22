@@ -275,9 +275,9 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 ### [major] Self-reflecting config change-detection hasher — **FIXED**
 - `config/config.zig` now compares subsystems explicitly (`barChanged`/`tilingChanged`/`keysChanged`); the reflection-based `hashValue`/`detectChanges` hasher is gone.
 
-### [major] Three workspace-id types across layers — **OPEN** (one canonical 0-based id)
+### [major] Three workspace-id types across layers — **FIXED** (one canonical 0-based id)
 
-> Still three spellings in-tree: `model.WSId`, `core.WorkspaceId`, and config's bare `u8 workspace_idx` (src/config/types.zig). CC-v4-8 proposes typing the config field with the pure-shelf core id.
+> `ids.WorkspaceId` (src/ids/) is now the single authority. `model.WSId` and `core.WorkspaceId` are aliases of it, and config's `workspace_idx` is typed `ids.WorkspaceId` (CC-v4-8; `WindowId` gets the same authority treatment in CC-v5-1).
 
 ### [major] Focus truth stored three times — **DEFERRED (Phase 2)**
 - `model.focused` is now the decision source for clear/failover paths; `last_applied` remains the protocol-commit mirror.
@@ -359,8 +359,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 - Import wiring duplication / `catch unreachable` vs `try` — **PARTIAL/FIXED** (nits): `catch unreachable` is gone from all test bodies except the deliberate `void` fixtures/`Sink` vtable shims in `helpers.zig` (`testReset`, `regCur`, `bump`, `stackShim`), which cannot propagate errors; the remaining wiring duplication (build.zig manual module table vs `wireAll`) stays GATED — it is derived and checked at build time, so it can drift no further than the derive scans themselves.
 
 ### Tests — **GATED/OPEN**
-- Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). `bounded` is now covered headless by `src/test/core/bounded_test.zig` (cap/evict/scan for `BoundedList` + `RecStore`), pure keysym parsing by `src/test/input/keysyms_test.zig`, the ICCCM window-hint cache lifecycle by `src/test/window/wincache_test.zig` (gated, x_gated=false), and the click-raise liveness-before-dedup ordering by `focus_test.zig` (destroyed window under a `mouse_click` is never re-focused). The rest of the wishlist is OPEN (borders, config parser malformed cases).
-- Golden harness baselines — **PARTIAL**: S22/S23 recaptured and current; S01–S21 predate the current focus/stacking behavior and need recapture (the CI parity job is `continue-on-error` until then). The harness `Mod+P` bind was also corrected to the current `pin_window` action.
+- Input/bar/window-submodule headless coverage — **PARTIAL**: input modifiers + `KeybindResolver` are now covered by `src/test/input/input_test.zig` (`normalizeModifiers` masking, resolver dispatch/conflict/re-point). `bounded` is now covered headless by `src/test/core/bounded_test.zig` (cap/evict/scan for `BoundedList` + `RecStore`), pure keysym parsing by `src/test/input/keysyms_test.zig`, the ICCCM window-hint cache lifecycle by `src/test/window/wincache_test.zig` (gated, x_gated=false), the click-raise liveness-before-dedup ordering by `focus_test.zig` (destroyed window under a `mouse_click` is never re-focused), the border rule by `borders_test.zig` + `borders_pure_test.zig`, and config parser malformed cases by `parser_test.zig` (malformed lines / color-mix failures).
+- Golden harness baselines — **FIXED**: S01–S23 all recaptured against current focus/stacking behavior; the CI parity job is now GATING (golden drift fails CI). The harness `Mod+P` bind was also corrected to the current `pin_window` action.
 - `persist_test` leak doc/re-point — **FIXED** (testing allocator, doc accurate).
 - `visibility_test` self-skip inversion — **FIXED**.
 - Latency tests print/assert with opt-in bench + coarse bounds — **FIXED**.

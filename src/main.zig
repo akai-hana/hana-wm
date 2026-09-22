@@ -53,7 +53,7 @@ pub fn main() !void {
 
     core.dpi_info.store(scale.detectDpi(x.conn, x.screen), .release);
 
-    input.setup(x.conn, x.screen, x.root);
+    input.setup(x.conn, x.screen);
     try input.initXkb(x.conn);
     defer input.deinitXkb();
 
@@ -78,18 +78,14 @@ pub fn main() !void {
     // request can arrive (restart.init).
     restart.init(alloc);
 
-    // Drop the Config internals and the heap box core.init() owns; the
-    // keybind resolver (input-owned) is deinited separately above.
-    //
-    // The guard matters: a config reload swaps cs.config and the reload path
-    // (events.handleConfigReload) deinits the displaced boot config itself.
-    // Without the identity check this defer would free it a second time at
-    // shutdown, the GP fault seen in reload-then-quit runs.
+    // Drop the Config internals and the heap box core.init() owns; the keybind
+    // resolver (input-owned) is deinited separately above. The identity guard
+    // matters: a config reload swaps cs.config and the reload path
+    // (events.handleConfigReload) deinits AND destroys the displaced boot
+    // config itself, so this safely no-ops after a swap -- without it the
+    // defer would free the box a second time at shutdown, the GP fault seen in
+    // reload-then-quit runs.
     const initial_config = core.getState().config;
-    // Drop the Config INTERNALS and the heap box core.init() owns (both
-    // were allocated with alloc). The identity guard still holds: the reload
-    // path now deinits AND destroys the displaced boot config itself, so this
-    // safely no-ops after a swap.
     defer if (core.getState().config == initial_config) {
         initial_config.deinit(alloc);
         alloc.destroy(initial_config);

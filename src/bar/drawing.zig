@@ -472,7 +472,7 @@ pub const DrawContext = struct {
 
     /// Colors the context and renders the layout's CURRENT text at the
     /// (x, y-baseline) position. Shared tail of the baseline-anchored draw
-    /// variants (`drawText`, `drawTextEllipsis`, `drawSegment`).
+    /// variants (`drawText`, `drawTextEllipsis`).
     inline fn paintText(self: *DrawContext, x: u16, y: u16, color: u32) void {
         self.setColor(color);
         showLayoutAtBaseline(self.ctx, self.font.pango_layout, @floatFromInt(x), y);
@@ -557,7 +557,7 @@ pub const DrawContext = struct {
     }
 
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) !void {
-        try self.drawTextImpl(x, y, text, null, color);
+        try self.drawTextImpl(x, y, text, null, color, .{});
     }
 
     /// Draws `text` at each x position in `x_positions`, clipped to
@@ -597,11 +597,12 @@ pub const DrawContext = struct {
         max_width: u16,
         color: u32,
     ) !void {
-        try self.drawTextImpl(x, y, text, max_width, color);
+        try self.drawTextImpl(x, y, text, max_width, color, .{});
     }
 
-    /// Shared text rendering: set pango text, optionally ellipsize to
-    /// `max_width`, and paint at baseline.
+    /// Shared text rendering: apply `props`' styling (no-op for default props),
+    /// set pango text, optionally ellipsize to `max_width`, and paint at
+    /// baseline.
     inline fn drawTextImpl(
         self: *DrawContext,
         x: u16,
@@ -609,7 +610,10 @@ pub const DrawContext = struct {
         text: []const u8,
         max_width: ?u16,
         color: u32,
+        props: types.SegmentProps,
     ) !void {
+        const list = self.applyStyleProps(props);
+        defer self.restoreStyleProps(list);
         self.setPangoText(text);
         if (max_width) |w| {
             pango_layout_set_width(self.font.pango_layout, @as(i32, w) * pango_scale);
@@ -666,32 +670,7 @@ pub const DrawContext = struct {
         color: u32,
         props: types.SegmentProps,
     ) !void {
-        try self.drawTextImplStyled(x, y, text, null, color, props);
-    }
-
-    /// Shared styled text rendering: apply style props, set pango text,
-    /// optionally ellipsize to `max_width`, paint at baseline.
-    inline fn drawTextImplStyled(
-        self: *DrawContext,
-        x: u16,
-        y: u16,
-        text: []const u8,
-        max_width: ?u16,
-        color: u32,
-        props: types.SegmentProps,
-    ) !void {
-        const list = self.applyStyleProps(props);
-        defer self.restoreStyleProps(list);
-        self.setPangoText(text);
-        if (max_width) |w| {
-            pango_layout_set_width(self.font.pango_layout, @as(i32, w) * pango_scale);
-            pango_layout_set_ellipsize(self.font.pango_layout, PangoEllipsizeMode.END);
-        }
-        defer if (max_width != null) {
-            pango_layout_set_width(self.font.pango_layout, -1);
-            pango_layout_set_ellipsize(self.font.pango_layout, PangoEllipsizeMode.NONE);
-        };
-        self.paintText(x, y, color);
+        try self.drawTextImpl(x, y, text, null, color, props);
     }
 
     /// Shared blit body: cairo_surface_flush + xcb_copy_area of [x, x+w),
@@ -735,9 +714,12 @@ pub const DrawContext = struct {
         return @intCast(top_pad + asc);
     }
 
-    /// Fill background, draw text at baseline, return x + width.
-    /// Sets pango text once for both measure and render.
-    pub fn drawSegment(
+    /// Fill background, measure `text` (with `props` styling applied so
+    /// bold/italic reserve the right slot), draw text at baseline, return
+    /// x + width. Pass `min_w` to force the background to span at least that
+    /// many text pixels (plus padding) so a region-scoped repaint of a
+    /// shrunken segment still wipes its whole previous slot.
+    pub fn paintedSegment(
         self: *DrawContext,
         x: u16,
         height: u16,
@@ -745,70 +727,13 @@ pub const DrawContext = struct {
         padding: u16,
         bg: u32,
         fg: u32,
-    ) !u16 {
-        const width: u16 = self.measureTextWidth(text) + padding * 2;
-        self.fillRect(x, 0, width, height, bg);
-        self.paintText(x + padding, self.baselineY(height), fg);
-        return x + width;
-    }
-
-    /// Like `drawSegment`, but draws `text` with `props`' Pango styling; the
-    /// width is measured with the style applied so bold/italic widths reserve
-    /// the right slot.
-    pub fn drawSegmentStyled(
-        self: *DrawContext,
-        x: u16,
-        height: u16,
-        text: []const u8,
-        padding: u16,
-        bg: u32,
-        fg: u32,
-        props: types.SegmentProps,
-    ) !u16 {
-        const list = self.applyStyleProps(props);
-        defer self.restoreStyleProps(list);
-        const width: u16 = self.measureTextWidth(text) + padding * 2;
-        self.fillRect(x, 0, width, height, bg);
-        self.paintText(x + padding, self.baselineY(height), fg);
-        return x + width;
-    }
-
-    /// Like `drawSegment`, but the background always spans at least `min_w`
-    /// text pixels (plus padding), so a segment whose content shrank in a
-    /// region-scoped repaint still wipes the whole reserved slot.
-    pub fn drawSegmentMin(
-        self: *DrawContext,
-        x: u16,
-        height: u16,
-        text: []const u8,
-        padding: u16,
-        bg: u32,
-        fg: u32,
-        min_w: u16,
-    ) !u16 {
-        const text_w = self.measureTextWidth(text);
-        const width: u16 = @max(text_w, min_w) + padding * 2;
-        self.fillRect(x, 0, width, height, bg);
-        self.paintText(x + padding, self.baselineY(height), fg);
-        return x + width;
-    }
-
-    /// Like `drawSegmentMin`, but styled.
-    pub fn drawSegmentMinStyled(
-        self: *DrawContext,
-        x: u16,
-        height: u16,
-        text: []const u8,
-        padding: u16,
-        bg: u32,
-        fg: u32,
-        min_w: u16,
+        min_w: ?u16,
         props: types.SegmentProps,
     ) !u16 {
         const list = self.applyStyleProps(props);
         defer self.restoreStyleProps(list);
         const text_w = self.measureTextWidth(text);
-        const width: u16 = @max(text_w, min_w) + padding * 2;
+        const width: u16 = (if (min_w) |m| @max(text_w, m) else text_w) + padding * 2;
         self.fillRect(x, 0, width, height, bg);
         self.paintText(x + padding, self.baselineY(height), fg);
         return x + width;
@@ -829,13 +754,14 @@ pub fn drawPaddedSegment(
     text: []const u8,
     props: types.SegmentProps,
 ) !u16 {
-    return dc.drawSegmentStyled(
+    return dc.paintedSegment(
         x,
         height,
         text,
         config.scaledSegmentPadding(height),
         config.bg,
         config.segmentFg(segment_name),
+        null,
         props,
     );
 }
@@ -908,9 +834,7 @@ pub fn drawPaddedSegmentCovering(
     props: types.SegmentProps,
 ) !u16 {
     const padding = config.scaledSegmentPadding(height);
-    const list = dc.applyStyleProps(props);
-    defer dc.restoreStyleProps(list);
-    return dc.drawSegmentMinStyled(
+    return dc.paintedSegment(
         x,
         height,
         text,

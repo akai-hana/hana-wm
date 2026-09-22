@@ -1,5 +1,7 @@
 //! Comptime config schema.
 //! Declares each scalar knob once, driving defaults, interpretation, and the schema tests.
+//! Note: `knobs` itself and `value` stay pub as read-only test seams pinned by
+//! schema_test; nothing in the runtime config-loading path names them.
 
 const std = @import("std");
 const constants = @import("constants");

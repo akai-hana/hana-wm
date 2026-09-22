@@ -8,6 +8,7 @@ const model = @import("model");
 const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
+const sync = @import("sync");
 const wincache = @import("wincache");
 const window = @import("window");
 
@@ -22,6 +23,9 @@ pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
 /// actually lives on. `current` is the current workspace for the
 /// unresolvable-workspace fallback; `has_fullscreen` (comptime) gates the
 /// covering-mode reads for fullscreen-absent builds.
+/// (Occupant query family: pure-scan `model.coveringOccupantOnWs`, module's
+/// record-backed `fullscreen.fullscreenOccupantOnWs`, actions' routed hook
+/// `currentCoveringOccupant`.)
 pub fn coveredByOccupant(
     m: *const model.Model,
     win: u32,
@@ -29,7 +33,7 @@ pub fn coveredByOccupant(
     comptime has_fullscreen: bool,
 ) bool {
     // Only windows present in the store take part in the rule.
-    _ = m.store.get(win) orelse return false;
+    if (!m.store.has(win)) return false;
     if (model.findHome(m, win)) |w| return model.coveringOccupantOnWs(m, w) != null;
     return has_fullscreen and model.coveringOccupantOnWs(m, current) != null;
 }
@@ -57,13 +61,18 @@ pub fn width() u16 {
     return core.borderWidth();
 }
 
-/// Applies the configured border width to `win`, skipping the configure
-/// when the cache shows that exact width is already applied.
+/// Applies the configured border width to `win`, skipping the configure when
+/// the sync ledger shows that exact width is already the last one sent.
+/// (WINC-09: the ledger is the sole "last border width sent" owner; wincache
+/// no longer mirrors it.)
 pub fn applyWidth(conn: core.Connection, win: u32) void {
     const w = width();
     if (w == 0) return;
-    if (wincache.cacheBorderWidth(win, w)) return;
+    if (sync.sentGet(win)) |e| {
+        if (e.bw == w) return;
+    }
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{w});
+    if (build_options.has_tiling) sync.markSentBorderWidth(win, w);
 }
 
 /// Applies both border width and color to `win`. Color goes through the

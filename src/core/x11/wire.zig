@@ -16,7 +16,6 @@ const std = @import("std");
 const xcb = @import("xcb").xcb;
 const Connection = *xcb.xcb_connection_t;
 const Screen = *xcb.xcb_screen_t;
-const constants = @import("constants");
 const utils = @import("utils");
 
 // ---------------------------------------------------------------------------

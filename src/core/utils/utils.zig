@@ -12,7 +12,6 @@
 //! convenience but stay out of model/tiling.
 
 const std = @import("std");
-const constants = @import("constants");
 const masks = @import("masks");
 
 const proc = @import("proc");

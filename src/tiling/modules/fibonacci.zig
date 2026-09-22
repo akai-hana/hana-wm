@@ -47,6 +47,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     var dir: SpiralDirection = .right;
 
     const windows = v.order;
+    const ctx = tiling.LayoutCtx.init(v, out);
     for (windows, 0..) |win, i| {
         const last = i == windows.len - 1;
         // Too small for another split: the seam would leave no room for a
@@ -55,12 +56,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         if (last or cur.w < m.gap *| 2 + border2 or cur.h < m.gap *| 2 + border2) {
             // focusedElse: fallback is the current split-remainder head.
             const top = tiling.focusedElse(v, windows[i..], win);
-            tiling.emitOverflowShare(
-                tiling.LayoutCtx.init(v, out),
-                windows[i..],
-                top,
-                cur,
-            );
+            tiling.emitOverflowShare(ctx, windows[i..], top, cur);
             return;
         }
 

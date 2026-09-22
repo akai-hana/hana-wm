@@ -83,8 +83,7 @@ pub fn consumeReexec() bool {
     return should_reexec.swap(false, .acq_rel);
 }
 
-/// The resolved path of the running image (readLink of `/proc/self/exe`, or
-/// the readLink of `/proc/self/exe`). Null when re-exec was never armed
+/// The resolved path of the running image. Null when re-exec was never armed
 /// (init saw no /proc). The event loop hands this to execNext as argv[0] /
 /// exec path.
 pub fn selfPath() ?[]const u8 {

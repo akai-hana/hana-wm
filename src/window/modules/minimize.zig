@@ -166,7 +166,7 @@ fn bestSeq(
     m: *const model.Model,
     ws: model.WSId,
     order: model.RestoreOrder,
-    comptime skip_covering: bool,
+    skip_covering: bool,
 ) ?model.WindowId {
     var best: ?model.WindowId = null;
     var best_seq: u32 = 0;
@@ -232,7 +232,7 @@ pub fn count() u32 {
 }
 
 /// Fills `set` with every currently minimized window ID, replacing any prior
-/// contents. Called by bar.zig to build the per-frame minimized set.
+/// contents. Consumed by the bar via the module adapter.
 pub fn collectMinimizedIntoSet(
     m: *const model.Model,
     set: *std.AutoHashMapUnmanaged(model.WindowId, void),

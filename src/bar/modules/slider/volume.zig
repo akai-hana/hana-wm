@@ -261,7 +261,7 @@ pub const sub: slider.Sub = .{
     .apply = applyPct,
     .label = label,
     .secondary = toggleMute,
-    .probe_natural_width = 56,
+    .probeNaturalWidth = 56,
 };
 
 // Tests exercise the pure, subprocess-free parsing and formatting helpers.

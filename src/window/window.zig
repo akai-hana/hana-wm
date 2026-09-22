@@ -24,8 +24,8 @@ const plugin = @import("plugin");
 const model_mod = @import("model");
 const sync = @import("sync");
 
-// Private transition-layer gate for mutable model access (tracking no longer
-// exports a shared one; each transition owner declares its own token).
+// Private transition-layer gate for mutable model access (per-owner token,
+// see tracking.gate).
 const gate: pipeline.Gate = .{};
 
 /// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
@@ -321,7 +321,7 @@ pub inline fn isInvalidWindow(win: u32) bool {
     return win == 0 or win == core.getState().root or screen_mod.isSurfaceWindow(win);
 }
 
-pub inline fn isValidManagedWindow(win: u32) bool {
+inline fn isValidManagedWindow(win: u32) bool {
     return !isInvalidWindow(win) and tracking.isManaged(win);
 }
 
@@ -1044,7 +1044,6 @@ fn handleManagedConfigureRequest(
             null,
     };
     const wm = providerOf(.honorConfigureRequest) orelse return;
-    const has_bw = build_options.has_tiling and mask & xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH != 0;
     switch (wm.honorConfigureRequest.?(pipeline.mut(&gate), win, req)) {
         .geometry_applied => {
             // ICCCM 4.1.5: a border-width-only request applied by the module
@@ -1053,7 +1052,6 @@ fn handleManagedConfigureRequest(
             // doesn't re-assert the WM width (reverting the honored value).
             if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
                 if (build_options.has_tiling) sync.markSentBorderWidth(win, event.border_width);
-                if (has_bw) _ = wincache.cacheBorderWidth(win, event.border_width);
                 sendSyntheticConfigureNotify(win);
                 return;
             }
@@ -1079,7 +1077,6 @@ fn handleManagedConfigureRequest(
         },
         .ignored => {},
     }
-    if (has_bw) _ = wincache.cacheBorderWidth(win, event.border_width);
     // ICCCM 4.1.5: echo a synthetic ConfigureNotify so the client observes
     // its denied geometry / new border width.
     sendSyntheticConfigureNotify(win);

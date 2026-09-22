@@ -186,7 +186,7 @@ fn gatherAndSortWindowInfos(
     windows: []const u32,
     win_count: usize,
     out_window_info_buf: *[max_visible_windows]WindowInfo,
-) !?[]WindowInfo {
+) ?[]WindowInfo {
     var info_count: usize = 0;
     for (windows[0..win_count], 0..) |win, i| {
         const geom = snapshot.geoms[i] orelse continue;
@@ -239,7 +239,7 @@ pub const GatherScratch = struct {
         snapshot: TitleSnapshot,
         windows: []const u32,
         win_count: usize,
-    ) !?[]WindowInfo {
+    ) ?[]WindowInfo {
         return gatherAndSortWindowInfos(snapshot, windows, win_count, &self.window_infos);
     }
 };
@@ -258,7 +258,7 @@ pub fn hitTest(
     ctx: TitleRenderContext,
     snapshot: TitleSnapshot,
     offset_x: u16,
-) !?ClickTarget {
+) ?ClickTarget {
     const windows = snapshot.current_ws_wins;
     if (windows.len == 0) return null;
 
@@ -271,7 +271,7 @@ pub fn hitTest(
     const win_count = @min(windows.len, max_visible_windows);
 
     var scratch: GatherScratch = .{};
-    const sorted = (try scratch.gather(snapshot, windows, win_count)) orelse
+    const sorted = scratch.gather(snapshot, windows, win_count) orelse
         return null;
 
     const n: u32 = @intCast(sorted.len);

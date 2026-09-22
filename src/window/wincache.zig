@@ -26,12 +26,6 @@ pub const SizeHints = model_mod.SizeHints;
 pub const WindowData = struct {
     border: u32 = 0,
     hints: SizeHints = .{},
-    /// Last BORDER_WIDTH value sent for this window; null until first sent.
-    /// The optional matters: 0 is a legitimate configured width, and treating
-    /// it as "never sent" would re-issue the configure forever, while treating
-    /// "never sent" as 0 could skip the first send and leave a client-created
-    /// non-zero width standing.
-    applied_border_width: ?u16 = null,
     /// Cached _NET_WM_NAME / WM_NAME, duped into `title_alloc`. Owned: freed
     /// on overwrite (storeTitle), on removeWindow, and on deinit. The only
     /// non-POD field in the entry; every other writer touches only its own
@@ -119,19 +113,6 @@ fn dataFor(win: u32) ?*const WindowData {
 pub fn peekHints(win: u32) SizeHints {
     const wd = dataFor(win) orelse return .{};
     return wd.hints;
-}
-
-/// Record `w` as the BORDER_WIDTH last sent to `win`. Returns true when the
-/// entry already held exactly that value, letting callers skip a redundant
-/// configure_window. Windows without a cache entry always report "changed"
-/// (and gain one) so the first apply after registration is never skipped.
-pub fn cacheBorderWidth(win: u32, w: u16) bool {
-    const wd = getOrPutDefault(win) catch return false;
-    if (wd.applied_border_width) |applied| {
-        if (applied == w) return true;
-    }
-    wd.applied_border_width = w;
-    return false;
 }
 
 /// Evict a window's entire cache entry: geometry, border dedup data, the

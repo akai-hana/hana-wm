@@ -34,7 +34,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// is true, or null if none matches. `context` is typically the search
         /// key (e.g. a window ID) and `match` a plain (non-closure) function,
         /// the same context+comptime-predicate shape `std.sort.pdq` uses.
-        pub fn indexOf(
+        fn indexOf(
             self: *const Self,
             context: anytype,
             comptime match: fn (@TypeOf(context), T) bool,

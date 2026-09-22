@@ -187,15 +187,13 @@ pub const XkbState = struct {
     }
 };
 
-const xkb_retry_delay_ms = constants.xkb_retry_delay_ms;
-
 /// Sleeps between retry attempts (skipped on the final one). Uses nanosleep
 /// directly; std.time.sleep is absent in this Zig build. Resumes on EINTR
 /// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
 /// shorten the delay.
 fn retryDelay(attempt: u8) void {
     if (attempt >= max_xkb_retries - 1) return;
-    const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
+    const ns = constants.xkb_retry_delay_ms * std.time.ns_per_ms;
     var req = std.os.linux.timespec{
         .sec = @intCast(ns / std.time.ns_per_s),
         .nsec = @intCast(ns % std.time.ns_per_s),

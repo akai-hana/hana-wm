@@ -22,7 +22,7 @@ const c = @cImport(@cInclude("time.h"));
 const ns_per_s = std.time.ns_per_s;
 
 /// Measurement string used to pre-compute the clock segment width.
-pub const clock_measure_string: []const u8 = "0000-00-00 00:00:00";
+const clock_measure_string: []const u8 = "0000-00-00 00:00:00";
 
 /// Width probes for the narrower display modes, so the segment reserves the
 /// span of the ACTIVE view rather than always the full date-time span.
@@ -43,7 +43,7 @@ pub fn measureStringFor(m: DisplayMode) []const u8 {
 
 /// The clock's reserved-width probe: the string the bar measures at
 /// layout width. At most one module provides a `measureString` hook.
-pub fn measureString() []const u8 {
+fn measureString() []const u8 {
     return measureStringFor(mode);
 }
 
@@ -109,7 +109,7 @@ fn stale(sec: i64, fmt: []const u8) bool {
 /// and the next bar.updateClock repaints the clock. Drawing clears staleness
 /// as a side effect of rendering; a failed draw leaves it stale so the next
 /// boundary retries.
-pub fn secondElapsed(base_fmt: []const u8) bool {
+fn secondElapsed(base_fmt: []const u8) bool {
     return stale(currentEpochSeconds(), effectiveFormatFor(base_fmt, mode));
 }
 
@@ -124,7 +124,7 @@ pub fn deadlineFromMs(now_ms: i64) i32 {
 }
 
 /// ms until the next whole-second boundary, contributed via bar.pollTimeoutMs().
-pub fn tickDeadlineMs() i32 {
+fn tickDeadlineMs() i32 {
     return deadlineFromMs(utils.realtimeMs());
 }
 
@@ -135,7 +135,7 @@ pub fn tickDeadlineMs() i32 {
 /// here on the main thread. Covers the reserved slot with the active mode's
 /// own probe so a region-scoped repaint (mode cycle) leaves no stale pixels
 /// from the previous wider view.
-pub fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
+fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(drawing.clockFormat(config), mode);

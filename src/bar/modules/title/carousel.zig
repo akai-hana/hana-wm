@@ -32,11 +32,11 @@ pub const addon: title_mod.Scroller = .{
 };
 
 /// Horizontal gap between the repeating copies of a title, in pixels.
-pub const inter_title_gap_px: u16 = 48;
+const inter_title_gap_px: u16 = 48;
 
 /// Center-to-center distance between the repeating copies of a title (text
 /// width plus the inter-copy gap): the wrap period of the marquee cycle.
-pub fn cyclePx(text_w: u16) f32 {
+fn cyclePx(text_w: u16) f32 {
     return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(inter_title_gap_px));
 }
 
@@ -129,7 +129,7 @@ pub fn pollDeadlineMs(now_ms: i64, enabled: bool, hz: f64) i32 {
 /// Called by the bar on show (map). Flags the next offsetFor call to pivot its
 /// elapsed-time base at that frame, so resuming a scroll across a hidden gap
 /// continues from the last shown offset instead of teleporting.
-pub fn resetForShow() void {
+fn resetForShow() void {
     bar_shown = true;
 }
 

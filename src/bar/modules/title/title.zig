@@ -347,7 +347,7 @@ fn drawSegmentedTitles(
 
     if (!segmentedTitlesCached(ctx, snapshot, windows, win_count)) {
         var scratch: segmod.GatherScratch = .{};
-        const sorted = (try scratch.gather(snapshot, windows, win_count)) orelse return;
+        const sorted = scratch.gather(snapshot, windows, win_count) orelse return;
         // Cache is keyed on the input-order slices (windows/titles/geoms/
         // minimized come from the snapshot in input order); the sorted list and
         // measured widths are stored in sorted order, aligned to `sorted`.
