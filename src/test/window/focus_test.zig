@@ -88,8 +88,7 @@ test "focus: no_input window refuses focus (none transition)" {
 
     const win = fx.createWindow();
     fx.setNoInput(win); // WM_HINTS input=False
-    try admit(win);
-
+    admitViaMapRequest(win); // real map path seeds the ICCCM focus cache
     const t = focus.prepareFocus(win, .user_command);
     try std.testing.expect(t == .none);
     // A no_input window can never hold X input focus, so it must not take
