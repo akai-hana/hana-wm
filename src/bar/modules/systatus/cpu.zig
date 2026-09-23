@@ -15,12 +15,8 @@ var cpu_has_baseline: bool = false;
 /// since boot over total) is reported instead -- never null when /proc/stat
 /// is readable.
 fn read() ?u8 {
-    const io = std.Options.debug_io;
-    var f = std.Io.Dir.openFileAbsolute(io, "/proc/stat", .{}) catch return null;
-    defer f.close(io);
     var buf: [512]u8 = undefined;
-    const n = f.readPositionalAll(io, &buf, 0) catch return null;
-    const s = buf[0..n];
+    const s = systatus.readSmallFile("/proc/stat", &buf) orelse return null;
     if (!std.mem.startsWith(u8, s, "cpu ")) return null;
 
     var nums: [8]u64 = undefined;
@@ -36,20 +32,22 @@ fn read() ?u8 {
     var total: u64 = 0;
     for (nums[0..count]) |v| total += v;
 
-    if (!cpu_has_baseline or cpu_prev_total == 0 or total < cpu_prev_total) {
-        cpu_prev_total = total;
-        cpu_prev_idle = idle;
-        cpu_has_baseline = true;
-        if (total == 0) return 0;
-        const busy = (total -| idle) * 100 / total;
-        return @intCast(@min(busy, 100));
-    }
-    const d_total = total - cpu_prev_total;
-    const d_idle = idle -| cpu_prev_idle;
+    // Delta vs the previous sample when a baseline exists and the counters
+    // moved forward (VM suspend/resume resets the counters: total < prev, so
+    // fall back to the boot-cumulative average for that read).
+    const use_delta = cpu_has_baseline and cpu_prev_total != 0 and total >= cpu_prev_total;
+    const d_total = if (use_delta) total - cpu_prev_total else 0;
+    const d_idle = if (use_delta) idle -| cpu_prev_idle else 0;
     cpu_prev_total = total;
     cpu_prev_idle = idle;
-    if (d_total == 0) return 0;
-    const busy = (d_total - d_idle) * 100 / d_total;
+    cpu_has_baseline = true;
+
+    if (use_delta and d_total == 0) return 0;
+    if (total == 0) return 0;
+    const busy = if (use_delta)
+        (d_total - d_idle) * 100 / d_total
+    else
+        (total -| idle) * 100 / total;
     return @intCast(@min(busy, 100));
 }
 

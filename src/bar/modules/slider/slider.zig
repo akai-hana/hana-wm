@@ -88,14 +88,21 @@ pub const Throttle = struct {
     last_ms: i64 = 0,
     pending: bool = false,
 
+    /// Commits `pct` through `write`, restarts the commit clock, and clears
+    /// any owed value. Shared by the immediate path, the owed flush, and the
+    /// drag-end release.
+    fn land(self: *Throttle, pct: u8, write: anytype) void {
+        write(pct);
+        self.last_ms = nowMs();
+        self.pending = false;
+    }
+
     /// Decides one event. `write` is the control's commit callback, comptime
     /// so the scheduler inlines into the caller (factoring it here costs
     /// nothing at runtime).
     pub fn apply(self: *Throttle, native: bool, pct: u8, write: anytype) void {
         if (native or nowMs() -| self.last_ms >= self.interval_ms) {
-            write(pct);
-            self.last_ms = nowMs();
-            self.pending = false;
+            self.land(pct, write);
         } else {
             self.pending = true;
         }
@@ -113,20 +120,14 @@ pub const Throttle = struct {
     /// (the newest value lands exactly once per window).
     pub fn flushOwed(self: *Throttle, pct: u8, write: anytype) void {
         if (self.pending and nowMs() -| self.last_ms >= self.interval_ms) {
-            write(pct);
-            self.last_ms = nowMs();
-            self.pending = false;
+            self.land(pct, write);
         }
     }
 
     /// Drag end: force-lands the final value when one is still owed (the
     /// authoritative release of a scrub), regardless of the window.
     pub fn finish(self: *Throttle, pct: u8, write: anytype) void {
-        if (self.pending) {
-            write(pct);
-            self.last_ms = nowMs();
-            self.pending = false;
-        }
+        if (self.pending) self.land(pct, write);
     }
 };
 

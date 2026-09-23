@@ -37,11 +37,6 @@ fn invalidate() void {
     cache_valid = false;
 }
 
-// Returns the last-computed workspace cell width in pixels (0 until first draw).
-fn getCachedWorkspaceWidth() u16 {
-    return ws_width;
-}
-
 // Rebuilds the label-width and geometry cache if stale.
 fn ensureCache(
     dc: *drawing.DrawContext,
@@ -90,23 +85,21 @@ fn indicatorPos(
     const cw: f32 = @floatFromInt(cell_w);
     const bh: f32 = @floatFromInt(bar_height);
 
-    // [x, y] anchoring fractions, one per indicator location. The two slots
-    // are the horizontal and vertical anchoring axes respectively.
-    const corner_x_axis: u8 = 0;
-    const corner_y_axis: u8 = 1;
-    const corner: [2]f32 = switch (location) {
-        .left => .{ 0.0, 0.5 },
-        .right => .{ 1.0, 0.5 },
-        .up => .{ 0.5, 0.0 },
-        .down => .{ 0.5, 1.0 },
-        .up_left => .{ 0.0, 0.0 },
-        .up_right => .{ 1.0, 0.0 },
-        .down_left => .{ 0.0, 1.0 },
-        .down_right => .{ 1.0, 1.0 },
+    // (x, y) anchoring fractions, one per indicator location: the horizontal
+    // and vertical anchoring axes respectively.
+    const corner: struct { x: f32, y: f32 } = switch (location) {
+        .left => .{ .x = 0.0, .y = 0.5 },
+        .right => .{ .x = 1.0, .y = 0.5 },
+        .up => .{ .x = 0.5, .y = 0.0 },
+        .down => .{ .x = 0.5, .y = 1.0 },
+        .up_left => .{ .x = 0.0, .y = 0.0 },
+        .up_right => .{ .x = 1.0, .y = 0.0 },
+        .down_left => .{ .x = 0.0, .y = 1.0 },
+        .down_right => .{ .x = 1.0, .y = 1.0 },
     };
 
-    const ax: f32 = corner[corner_x_axis] + padding * (0.5 - corner[corner_x_axis]);
-    const ay: f32 = corner[corner_y_axis] + padding * (0.5 - corner[corner_y_axis]);
+    const ax: f32 = corner.x + padding * (0.5 - corner.x);
+    const ay: f32 = corner.y + padding * (0.5 - corner.y);
 
     const iw: f32 = @floatFromInt(item_w);
     const ih: f32 = @floatFromInt(item_h);
@@ -184,12 +177,12 @@ fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
 fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
     const f: *const segmod.Frame = @ptrCast(@alignCast(frame));
     if (f.workspace_count > 0)
-        return @intCast(f.workspace_count * getCachedWorkspaceWidth());
+        return @intCast(f.workspace_count * ws_width);
     return fallback_width;
 }
 
 fn resolveWorkspaceClick(offset: u16) ?usize {
-    const cell_w = getCachedWorkspaceWidth();
+    const cell_w = ws_width;
     if (cell_w == 0) return null;
     if (!build_options.has_workspaces) return null;
     const idx: usize = @intCast(offset / cell_w);
