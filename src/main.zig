@@ -16,8 +16,7 @@ const debug = @import("debug");
 const build_options = @import("build_options");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
 // through the core-owned `surfaces` composition root, never by importing the
-// bar module here. When the bar is absent `surfaces` is the comptime `null`
-// type and the guarded calls below compile away.
+// bar module here.
 const surfaces = @import("surfaces").Surfaces;
 const input = @import("input");
 const window = @import("window");
@@ -103,7 +102,7 @@ pub fn main() !void {
     try window.init(alloc);
     defer window.deinit();
 
-    pipeline.init(); // owns the model; the model path IS the path
+    pipeline.init(); // owns the model; must run before seedParamsFromConfig/model()
 
     // Boot-time config seeding. Without this the config's layout kind,
     // variants, master count, and per-workspace overrides stay inert until

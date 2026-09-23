@@ -780,14 +780,6 @@ pub fn drawPaddedSegment(
 /// null or not a subslice of `text`. The width comes from the whole string,
 /// exactly like `drawSegment`, so a segment's reserved slot never changes when
 /// a value color is added.
-/// Like `drawPaddedSegment`, but paints the `value` subslice of `text` (the
-/// numeric readout, e.g. "42%") in the segment's NUMBER color -- the
-/// `[bar.properties] <segment>_value` override (`segmentValueFg`), falling
-/// back to the segment foreground -- and everything else in the segment
-/// foreground. Collapses into `drawPaddedSegment` behavior when `value` is
-/// null or not a subslice of `text`. The width comes from the whole string,
-/// exactly like `drawSegment`, so a segment's reserved slot never changes when
-/// a value color is added.
 pub fn drawPaddedSegmentValue(
     dc: *DrawContext,
     config: types.BarConfig,

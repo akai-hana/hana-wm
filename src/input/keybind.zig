@@ -35,15 +35,18 @@ pub const KeybindResolver = struct {
         self.map.clearRetainingCapacity();
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
-            if (self.map.contains(key))
+            const gop = self.map.getOrPut(allocator, key) catch |e| {
+                debug.warnOnErr(e, "keybind map build");
+                continue;
+            };
+            if (gop.found_existing)
                 debug.warn(
                     "Keybinding conflict: binding #{} (mods=0x{x:0>4} " ++
                         "keysym=0x{x}) is shadowed; a later binding with the " ++
                         "same key wins",
                     .{ i + 1, kb.modifiers, kb.keysym },
                 );
-            self.map.put(allocator, key, &kb.action) catch |e|
-                debug.warnOnErr(e, "keybind map build");
+            gop.value_ptr.* = &kb.action;
         }
     }
 

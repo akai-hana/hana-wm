@@ -92,7 +92,7 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     // Resolve the atom from the shared cache; a property request with atom 0
     // just comes back empty, so a cache miss reads as "no Xft.dpi".
     const atom = utils.getAtomOrZero("RESOURCE_MANAGER");
-    const root = screen.*.root;
+    const root = screen.root;
 
     // Xft.dpi is almost always near the start; a smaller first fetch is
     // faster and sufficient for the common case.

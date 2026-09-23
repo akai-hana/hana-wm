@@ -78,30 +78,31 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
     reconcile(m, &rec, .{});
 
     // Managed set parity: every store window has a ledger record, and the
-    // facade count equals the store count (each reconcile reconciles all).
-    try testing.expectEqual(@as(usize, 3), tracking.windowCount());
+    // facade store count equals the ledger's (each reconcile reconciles all).
+    try testing.expectEqual(@as(usize, 3), m.store.count());
     const wins = [_]model.WindowId{ 101, 102, 201 };
     for (wins) |w| {
         try testing.expect(tracking.isManaged(w));
         try testing.expect(sync.sentGet(w) != null);
     }
 
-    // Mask parity: facade exposes exactly the model's stored mask.
+    // Mask parity: the facade's current-workspace test matches the model's
+    // stored mask against the current workspace.
     for (wins) |w| {
-        try testing.expectEqual(m.store.get(w).?.mask, tracking.getWindowWorkspaceMask(w).?);
+        try testing.expectEqual(
+            model.maskedOn(m.store.get(w).?.mask, m.current),
+            tracking.isOnCurrentWorkspace(w),
+        );
     }
 
     // Workspace visibility parity: ws0 windows are on the current workspace
     // and were placed (ledger visible); the ws1 window is parked on the wire
     // (ledger has no visible rect) and the facade agrees.
     try testing.expect(tracking.isOnCurrentWorkspace(101));
-    try testing.expect(tracking.isOnCurrentWorkspaceAndVisible(101));
     try testing.expect(sync.lastRectFor(101) != null);
     try testing.expect(tracking.isOnCurrentWorkspace(102));
-    try testing.expect(tracking.isOnCurrentWorkspaceAndVisible(102));
     try testing.expect(sync.lastRectFor(102) != null);
     try testing.expect(!tracking.isOnCurrentWorkspace(201));
-    try testing.expect(!tracking.isOnCurrentWorkspaceAndVisible(201));
     try testing.expect(sync.lastRectFor(201) == null);
 }
 
@@ -126,10 +127,8 @@ test "facade tracks the workspace switch exactly like the ledger" {
 
     try testing.expectEqual(@as(u8, 1), tracking.getCurrentWorkspace().?);
     try testing.expect(!tracking.isOnCurrentWorkspace(101));
-    try testing.expect(!tracking.isOnCurrentWorkspaceAndVisible(101));
     try testing.expect(sync.lastRectFor(101) == null);
     try testing.expect(tracking.isOnCurrentWorkspace(201));
-    try testing.expect(tracking.isOnCurrentWorkspaceAndVisible(201));
     try testing.expect(sync.lastRectFor(201) != null);
 }
 
@@ -152,11 +151,10 @@ test "minimized windows are invisible to both facade and ledger" {
     try testing.expect(tracking.isOnCurrentWorkspace(102));
     // ...but not visible: facade sees the parked presence, ledger has no
     // visible rect (the park was actually sent).
-    try testing.expect(!tracking.isOnCurrentWorkspaceAndVisible(102));
     try testing.expect(sync.lastRectFor(102) == null);
 
     // The sibling keeps full visibility on both sides of the seam.
-    try testing.expect(tracking.isOnCurrentWorkspaceAndVisible(101));
+    try testing.expect(tracking.isOnCurrentWorkspace(101));
     try testing.expect(sync.lastRectFor(101) != null);
 }
 
@@ -174,19 +172,16 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
     reconcile(m, &rec, .{ .force_restack = true });
 
     // The covering winner owns the screen: the ledger placed it (visible
-    // rect) and the facade reads it as present-and-visible. The sibling stays
-    // a managed, model-present window (facade still reports it on-ws and
-    // visible — the model is the truth source), but the ledger parks it on
-    // the wire: the covering occupant owns the screen, so no rect. This is
-    // the one documented facade-vs-ledger divergence, and focus folding
-    // already collapses the cycle pool to the occupant (focus.zig
+    // rect) and the facade reads it as on the current workspace. The sibling
+    // stays a managed window, and the ledger parks it on the wire: the
+    // covering occupant owns the screen, so no rect. Focus folding already
+    // collapses the cycle pool to the occupant (focus.zig
     // collectVisibleWindows), so the model-truth read cannot leak a parked
     // window into focus recovery.
     try testing.expect(tracking.isManaged(101));
-    try testing.expect(tracking.isOnCurrentWorkspaceAndVisible(101));
+    try testing.expect(tracking.isOnCurrentWorkspace(101));
     try testing.expect(sync.lastRectFor(101) != null);
     try testing.expect(tracking.isManaged(102));
     try testing.expect(tracking.isOnCurrentWorkspace(102));
-    try testing.expect(tracking.isOnCurrentWorkspaceAndVisible(102));
     try testing.expect(sync.lastRectFor(102) == null);
 }

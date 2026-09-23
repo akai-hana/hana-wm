@@ -88,11 +88,6 @@ fn handleExpose(event: *anyopaque) void {
 
 fn handlePropertyNotify(event: *anyopaque) void {
     const e = utils.eventCast(*xcb.xcb_property_notify_event_t, event);
-    if (build_options.has_bar)
-        // Null when the surface chose not to bind the hook (the bar does
-        // not: the window layer owns PropertyNotify handling for managed
-        // windows). Skip the forward instead of forcing a slot-filler.
-        if (surfaces.handlePropertyNotify) |f| f(e);
     window.handlePropertyNotify(e);
 }
 
@@ -180,9 +175,9 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 
     // RandR extension events (base and base+1) trigger refresh re-detection
     // here; they sit above the fixed dispatch table and would otherwise be
-    // dropped by the bounds guard below. The `has_bar` conductor prunes the
-    // branch (and the `surfaces` calls) in bar-less trees.
-    if (build_options.has_bar and isRandrEvent(event_type)) {
+    // dropped by the bounds guard below. isRandrEvent already returns false
+    // when the bar is absent, pruning the branch (and the `surfaces` calls).
+    if (isRandrEvent(event_type)) {
         // Pass the raw event: a CRTC-change payload carries the active mode id,
         // letting the bar resolve the rate from its cached mode table with zero
         // XCB round-trips (see refresh.handleRandrNotifyEvent).
