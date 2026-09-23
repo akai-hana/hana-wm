@@ -85,8 +85,13 @@ bg = "#0d0d14"
 fg = text_color
 
 ## Workspace tag indicators
-selected_bg = primary_color  # follows primary_color
-selected_fg = "#eeeeee"
+# The selected tag's icon TEXT and INDICATOR colors are set individually:
+# selected_fg colors the icon text; selected_indicator_color colors the
+# activity glyph inside the selected tag on its own (unset follows
+# indicator_color, then selected_fg).
+selected_bg              = primary_color # follows primary_color
+selected_fg              = "#eeeeee"     # selected icon text color
+selected_indicator_color = "#eeeeee"     # selected icon indicator color (individually set)
 
 # Per-segment accent colors inherit from the palette by reference
 [bar.properties]
@@ -109,6 +114,12 @@ cpu        = secondary_color   # cpu readout text
 mem        = secondary_color   # memory readout text
 volume     = alternative_color # volume slider text
 brightness = alternative_color # brightness slider text
+
+# Workspace tags use two of these composite keys in the same format: the base
+# `workspaces` entry styles EVERY tag (use it to color the unselected icons);
+# the `workspaces_selected` overlay applies only to the CURRENT tag, on top of
+# it. The current tag's text falls back to selected_fg, the rest to text_color.
+workspaces_selected = bold # bolds only the selected tag's icon text (color falls back to selected_fg)
 
 # Readout numbers pop in the focused accent, distinct from their labels
 cpu_value        = primary_color # cpu readout number

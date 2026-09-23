@@ -43,11 +43,22 @@ fn getCachedWorkspaceWidth() u16 {
 }
 
 // Rebuilds the label-width and geometry cache if stale.
-fn ensureCache(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) void {
+fn ensureCache(
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    ws_current: u8,
+    ws_all_active: bool,
+) void {
     if (cache_valid) return;
     const count = @min(tracking.getWorkspaceCount(), label_widths.len);
-    const props = config.segmentProps("workspaces");
-    for (label_widths[0..count], 0..) |*w, i| w.* = dc.measureTextWidthStyled(getLabel(i, config), props);
+    // Measure each label with ITS per-state styling: the selected tag may
+    // render bold (workspaces_selected), so its glyph is wider than its
+    // neighbors.
+    for (label_widths[0..count], 0..) |*w, i| {
+        const is_current = ws_all_active or (i == ws_current);
+        w.* = dc.measureTextWidthStyled(getLabel(i, config), config.workspaceIconProps(is_current));
+    }
     ws_width = config.scaledWorkspaceWidth(height);
     cache_valid = true;
 
@@ -119,7 +130,7 @@ fn drawFrame(
     ws_all_active: bool,
 ) !u16 {
     if (ws_has_windows.len == 0) return start_x;
-    ensureCache(dc, config, height);
+    ensureCache(dc, config, height, ws_current, ws_all_active);
     const ind_size = config.scaledIndicatorSize(height);
     var x = start_x;
 
@@ -129,21 +140,21 @@ fn drawFrame(
     for (ws_has_windows, 0..) |has_windows, i| {
         const is_current = ws_all_active or (i == ws_current);
         const bg = if (is_current) config.selected_bg else config.bg;
-        const fg = if (is_current) config.selected_fg else config.fg;
+        const fg = config.workspaceTextFg(is_current);
 
         dc.fillRect(x, 0, ws_width, height, bg);
 
         const label = getLabel(i, config);
         const label_w = label_widths[i];
         const text_x = x + (ws_width -| label_w) / 2;
-        try dc.drawTextStyled(text_x, baseline_y, label, fg, config.segmentProps("workspaces"));
+        try dc.drawTextStyled(text_x, baseline_y, label, fg, config.workspaceIconProps(is_current));
 
         if (has_windows) {
             const glyph = if (is_current)
                 config.indicator_focused orelse types.default_indicator_focused
             else
                 config.indicator_unfocused orelse types.default_indicator_unfocused;
-            const color = config.indicator_color orelse fg;
+            const color = config.workspaceIndicatorColor(is_current);
             // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
             try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, ind_size, color);
         }
@@ -208,7 +219,7 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     return draw(segmod.castDraw(ctx), x);
 }
 
-pub const module: @import("plugin").Segment = .{
+pub const module: @import("contract").Segment = .{
     .name = "workspaces",
     .clickable = true,
     .dirty_sources = .{ .frame = true },

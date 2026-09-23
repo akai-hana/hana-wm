@@ -20,7 +20,7 @@ const borders = @import("borders");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const persist = @import("persist");
-const plugin = @import("plugin");
+const contract = @import("contract");
 const model_mod = @import("model");
 const sync = @import("sync");
 
@@ -28,53 +28,45 @@ const sync = @import("sync");
 // see tracking.gate).
 const gate: pipeline.Gate = .{};
 
-/// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
+/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
 /// no module binds it; shared by the window layer (actions/borders alias this).
+/// Thin typed forward onto the single canonical `contract` dispatch family.
 pub fn providerOf(
-    comptime field: std.meta.FieldEnum(plugin.WindowModule),
-) ?plugin.WindowModule {
-    return plugin.providerOf(window_mods[0..], field);
+    comptime field: std.meta.FieldEnum(contract.WindowModule),
+) ?contract.WindowModule {
+    return contract.providerOf(contract.WindowModule, window_mods[0..], field);
 }
 
 pub fn callHook(
-    comptime field: std.meta.FieldEnum(plugin.WindowModule),
+    comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
 ) void {
-    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
-        @call(.auto, f, args);
-        break;
-    };
+    contract.callFirst(contract.WindowModule, window_mods[0..], field, args);
 }
 
 pub fn callHookBool(
-    comptime field: std.meta.FieldEnum(plugin.WindowModule),
+    comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
 ) bool {
-    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
-        return @call(.auto, f, args);
-    };
-    return false;
+    return contract.callFirstBool(contract.WindowModule, window_mods[0..], field, args);
 }
 
 /// Runs a hook on EVERY module that binds it, not just the first (callHook
 /// returns after the first provider). Dispatch loops shared by actions.
 pub fn dispatchAll(
-    comptime field: std.meta.FieldEnum(plugin.WindowModule),
+    comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
 ) void {
-    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| @call(.auto, f, args);
+    contract.callAll(contract.WindowModule, window_mods[0..], field, args);
 }
 
 /// Like dispatchAll but returns true at the first provider whose hook does;
 /// false when no provider binds the hook or none returns true.
 pub fn dispatchFirstTrue(
-    comptime field: std.meta.FieldEnum(plugin.WindowModule),
+    comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
 ) bool {
-    inline for (window_mods[0..]) |m| if (@field(m, @tagName(field))) |f| {
-        if (@call(.auto, f, args)) return true;
-    };
-    return false;
+    return contract.callFirstTrue(contract.WindowModule, window_mods[0..], field, args);
 }
 
 /// True when `win` is currently screen-covering via a covering-mode module
@@ -744,9 +736,26 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
     // same pass. When no module claims the blob (the feature was stripped, or
     // the record carried no ext), the entry stays present and reconciles
     // on-screen -- the graceful degrade.
-    if (record.ext) |blob| {
+    //
+    // Claim resolution: the blob is stamped with the claiming module's
+    // registry ordinal at save time (persist.ext_format_version). Adoption
+    // FAST-PATHS on that ordinal; when it no longer resolves (module removed,
+    // registry shifted) or its hook declines, the magic-byte scan over every
+    // module's self-identifying format tag claims it instead.
+    if (record.ext) |stored| {
+        const stamped = stored.len >= persist.ext_header_len and
+            stored[0] == persist.ext_format_version;
+        const payload: []const u8 = if (stamped) stored[persist.ext_header_len..] else stored;
+        if (stamped) {
+            const ordinal: usize = stored[1];
+            if (ordinal < window_mods.len) {
+                if (window_mods[ordinal].deserializeWindow) |f| {
+                    if (f(win, payload, model)) return;
+                }
+            }
+        }
         for (window_mods) |mod| if (mod.deserializeWindow) |f| {
-            if (f(win, blob, model)) break; // claimed
+            if (f(win, payload, model)) return; // claimed
         };
     }
 }

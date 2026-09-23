@@ -1850,6 +1850,7 @@ fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
         !std.meta.eql(old.indicator_focused, new.indicator_focused) or
         !std.meta.eql(old.indicator_unfocused, new.indicator_unfocused) or
         old.indicator_color != new.indicator_color or
+        old.selected_indicator_color != new.selected_indicator_color or
         !std.meta.eql(old.clock_format, new.clock_format) or
         !std.meta.eql(old.volume_format, new.volume_format) or
         !std.meta.eql(old.volume_muted_format, new.volume_muted_format) or

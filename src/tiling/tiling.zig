@@ -6,7 +6,7 @@ const utils = @import("utils");
 const model = @import("model");
 const debug = @import("debug");
 
-const plugin = @import("plugin");
+const contract = @import("contract");
 
 /// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
 /// clamp, then aspect clamp (with a re-snap, since a client may declare both).
@@ -69,15 +69,15 @@ inline fn snapDimToIncrement(dim: u16, inc: u16) u16 {
     return if (snapped == 0 and dim > 0) 1 else snapped;
 }
 
-// The layout interchange vocabulary lives on the tiling CONTRACT (plugin.zig)
+// The layout interchange vocabulary lives on the tiling CONTRACT (contract.zig)
 // so the always-compiled reconciler can name it even without this tiling engine;
 // here we only re-export it so modules keep referring to `tiling.List` etc.
-pub const Placement = plugin.Placement;
-pub const parked_rect = plugin.parked_rect;
-pub const HintsView = plugin.HintsView;
-pub const Env = plugin.Env;
-pub const View = plugin.View;
-pub const List = plugin.List;
+pub const Placement = contract.Placement;
+pub const parked_rect = contract.parked_rect;
+pub const HintsView = contract.HintsView;
+pub const Env = contract.Env;
+pub const View = contract.View;
+pub const List = contract.List;
 /// Working context for a layout module pass: the input view and output list,
 /// with the env's outer margins and min-pane dimension copied in so modules
 /// that need them don't re-read `v.env`.
@@ -336,7 +336,7 @@ pub fn variantParse(comptime names: []const []const u8) fn ([]const u8) ?u8 {
     }.parse;
 }
 
-pub fn layoutModule(comptime name: []const u8, comptime icon: []const u8, comptime f: anytype, comptime extra: plugin.Layout) plugin.Layout {
+pub fn layoutModule(comptime name: []const u8, comptime icon: []const u8, comptime f: anytype, comptime extra: contract.Layout) contract.Layout {
     var m = extra;
     m.name = name;
     m.icon = icon;

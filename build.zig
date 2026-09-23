@@ -61,10 +61,13 @@ pub fn build(b: *std.Build) !void {
     // filesystem.
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
 
-    // Optional module detection — file-based has_* flags are derived from
-    // discovery.modules (which already walked src/) rather than re-probing
-    // the filesystem. Directory and compound checks still use pathExists.
-    const has_tiling = pathExists(b.build_root.handle, b.graph.io, source_root ++ "tiling");
+    // Optional module detection — every has_* flag is derived from
+    // discovery.modules (which already walked src/) rather than re-probing the
+    // filesystem, so a flag can never disagree with what was actually
+    // discovered (a directory left behind with its module files removed no
+    // longer claims the flag). The /usr probes below keep pathExists because
+    // they are about host tooling, not discovered sources.
+    const has_tiling = discovery.modules.contains("tiling");
     build_opts.addOption(bool, "has_tiling", has_tiling);
     const has_floating = discovery.modules.contains("floating");
     build_opts.addOption(bool, "has_floating", has_floating);
@@ -82,8 +85,8 @@ pub fn build(b: *std.Build) !void {
     const has_drawing = discovery.modules.contains("drawing");
     const has_bar_win = discovery.modules.contains("win");
     const has_bar_segment = discovery.modules.contains("segment");
-    const has_bar_dir = pathExists(b.build_root.handle, b.graph.io, source_root ++ "bar");
-    const has_bar = has_bar_dir and has_drawing and has_bar_win and has_bar_segment;
+    const has_bar_orchestrator = discovery.modules.contains("bar");
+    const has_bar = has_bar_orchestrator and has_drawing and has_bar_win and has_bar_segment;
     build_opts.addOption(bool, "has_bar", has_bar);
 
     // Segment presence flags are consumed only by the test gate table below;
@@ -106,7 +109,7 @@ pub fn build(b: *std.Build) !void {
         build_opts.addOption(bool, feature.option, discovery.modules.contains(feature.stem));
     }
 
-    // Generated registration modules. Built after discovery (the plugin
+    // Generated registration modules. Built after discovery (the contract-bound
     // modules must exist to be imported by name) but before injectShared
     // wires root + every discovered module with the generated imports: a
     // module can't hand its own import to itself.
@@ -118,10 +121,10 @@ pub fn build(b: *std.Build) !void {
     };
 
     const build_opts_mod = build_opts.createModule();
-    // `plugins` is reduced to the chrome-surface (bar) contract; the window
+    // `surfaces` is reduced to the chrome-surface (bar) contract; the window
     // behaviors moved to per-owner `modules` registries below.
-    const plugins_mod = buildPluginsModule(b, &discovery.modules, build_opts_mod, target, optimize);
-    finalizeModule(plugins_mod, optimize, has_usr);
+    const surfaces_mod = buildSurfacesModule(b, &discovery.modules, build_opts_mod, target, optimize);
+    finalizeModule(surfaces_mod, optimize, has_usr);
 
     // Owner-registry discovery: `modules/` dirs found during the single src/
     // walk above populate per-owner stem lists, which are sorted here for
@@ -132,7 +135,9 @@ pub fn build(b: *std.Build) !void {
     try validateRegistryNames(b, &registry, &discovery.modules);
     // Contract names are read from the modules' own `pub const module`
     // declarations (typed or via segdraw), never from a hand-written table.
-    try deriveOwnerContracts(b, &discovery.source_paths, &registry);
+    // The classification is single-read memoized during discovery, so this
+    // pass adds no source re-reads.
+    try deriveOwnerContracts(b, &discovery, &registry);
     // Precompute each package's bound-sub list (siblings self-declaring the
     // binding, sorted alphabetically) BEFORE either consumer needs it: every
     // generated `<package>_subs` registry is one such list, and the
@@ -172,7 +177,7 @@ pub fn build(b: *std.Build) !void {
     // subsystem can't leave a named import dangling in sync/pipeline/actions/
     // input: the absent case is an empty type, only ever reached through the
     // same `has_tiling` gates that already guard every registry-driven call
-    // site (mirroring `plugin.tiling_mods`).
+    // site (mirroring `contract.tiling_mods`).
     try owner_modules.put(
         b.allocator,
         "tiling_seam",
@@ -187,7 +192,7 @@ pub fn build(b: *std.Build) !void {
     const shared_ctx: SharedBuildContext = .{
         .build_opts = build_opts_mod,
         .fallback_toml = fallback_toml_mod,
-        .plugins = plugins_mod,
+        .surfaces = surfaces_mod,
         .owner_modules = owner_modules,
         .optimize = optimize,
     };
@@ -374,20 +379,20 @@ pub fn build(b: *std.Build) !void {
 // Shared context
 
 /// Names claimed by `injectShared` that would collide with the generated
-/// import every module receives. `plugins` is reserved for the chrome-surface
-/// registration module; no `src/plugins.zig` may exist.
-const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml", "plugins" };
+/// import every module receives. `surfaces` is reserved for the chrome-surface
+/// registration module; no `src/surfaces.zig` may exist.
+const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml", "surfaces" };
 
 /// Shared artefacts injected into every module, root and discovered alike.
 const SharedBuildContext = struct {
     build_opts: *std.Build.Module,
     fallback_toml: *std.Build.Module,
     /// The build-generated chrome-surface registration module created by
-    /// `buildPluginsModule` (exports `Surfaces`). Injected into every module
-    /// so core source can `@import("plugins").Surfaces` without ever naming
+    /// `buildSurfacesModule` (exports `Surfaces`). Injected into every module
+    /// so core source can `@import("surfaces").Surfaces` without ever naming
     /// the bar. Kept separate from the per-owner `modules` registries so the
     /// bar family stays byte-identical.
-    plugins: *std.Build.Module,
+    surfaces: *std.Build.Module,
     /// The build-generated per-owner `modules` registries created by
     /// `buildOwnerRegistries`, keyed by their injectable import name
     /// (`<owner>_modules`, e.g. `window_modules`). Injected into every module
@@ -452,7 +457,7 @@ fn buildFallbackTomlModule(
 /// Generated source for the chrome-surface (bar) registration module. Kept
 /// separate from per-owner `modules` registries so the bar's `Surfaces` seam
 /// stays byte-identical.
-const plugins_generated_source =
+const surfaces_generated_source =
     \\const build_options = @import("build_options");
     \\
     \\/// The active chrome-surface hook set, or the comptime `null` type when no
@@ -487,7 +492,7 @@ fn makeGeneratedModule(
     return mod;
 }
 
-/// Generates the build-owned `plugins` module alongside its source file, and
+/// Generates the build-owned `surfaces` module alongside its source file, and
 /// returns the module to inject everywhere via `injectShared`.
 ///
 /// This is the single seam that concentrates core to chrome-surface coupling.
@@ -496,14 +501,14 @@ fn makeGeneratedModule(
 /// generated module is deliberately given only the imports its source
 /// references (unlike discovered modules, which are cross-wired with
 /// everything).
-fn buildPluginsModule(
+fn buildSurfacesModule(
     b: *std.Build,
     discovered: *std.StringHashMap(*std.Build.Module),
     build_opts: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Module {
-    const mod = makeGeneratedModule(b, target, optimize, "plugins.zig", plugins_generated_source, &[_]Import{
+    const mod = makeGeneratedModule(b, target, optimize, "surfaces.zig", surfaces_generated_source, &[_]Import{
         .{ .name = "build_options", .module = build_opts },
     });
     // The chrome-surface module is referenceable (`@import("bar")`) only when
@@ -557,7 +562,7 @@ const OwnerRegistry = struct {
     /// and reaches `bar_modules` only through its derived `segmentFor(i)` entries.
     owners: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{},
 
-    /// owner name -> the `plugin.*` contract its modules bind (`window` ->
+    /// owner name -> the `contract.*` contract its modules bind (`window` ->
     /// WindowModule, `bar` -> Segment, `tiling` -> Layout). Derived from each
     /// owner's module files by `deriveOwnerContracts` (no hand table to
     /// drift from the modules' actual declarations).
@@ -575,15 +580,20 @@ const OwnerRegistry = struct {
             var list = std.ArrayListUnmanaged([]const u8).empty;
             for (entry.value_ptr.items) |stem| {
                 // Only files SELF-DECLARING the owner's module binding
-                // (`pub const module`) are registry members. A package core
-                // WITHOUT one -- systatus/slider once their aggregate belt
+                // (`pub const module`) are registry members. The walk already
+                // reserved those stems (single-pass); this reuses the memoized
+                // classification instead of re-reading every file. A package
+                // core WITHOUT one -- systatus/slider once their aggregate belt
                 // module is gone -- contributes its readouts/controls to the
                 // bar as standalone `segmentFor(i)` segments via
                 // `ownerModuleEntries` instead (they stay discovered and
                 // importable by stem; they just no longer ride one belt).
                 const rel_path = discovery.source_paths.get(stem) orelse continue;
-                if (try declaresBinding(discovery.b, rel_path, "module"))
-                    try list.append(discovery.b.allocator, stem);
+                // The walk classified every owner-tree file (single read); a
+                // stem without a record is defensive-non-owner.
+                const fc = discovery.classified.get(rel_path) orelse continue;
+                if (!fc.pub_module) continue;
+                try list.append(discovery.b.allocator, stem);
             }
             try reg.owners.put(discovery.b.allocator, dup_owner, list);
         }
@@ -645,23 +655,26 @@ fn validateRegistryNames(
 /// The registry element type per owner is DERIVED from each owner's module
 /// files instead of a hand-maintained table, so the generated
 /// `<owner>_modules` typing cannot drift from the contracts the modules
-/// actually bind to. Two declaration shapes are recognized, both yielding
-/// the `plugin.*` contract the file binds its `module` value to:
+/// actually bind to. `classifyFile` scans each file ONCE (source reads are a
+/// single-pass: the walk's reservation and this derivation share the memoized
+/// classification, see `DiscoveryContext.ensureClassified`). Three declaration
+/// shapes are recognized, all yielding the `contract.*` contract the file
+/// binds its `module` value to:
 ///
-///   1. `pub const module: @import("plugin").<Contract> = ...` — the typed
+///   1. `pub const module: @import("contract").<Contract> = ...` — the typed
 ///      form used by the window/tiling sub-systems (floating, fullscreen,
 ///      minimize, workspaces, the tiling layouts) and by the explicitly
 ///      typed bar segments (prompt, systatus, tags, title, slider).
 ///   2. `pub const module = segdraw.module(...)` — the bar-core convenience
 ///      shim (clock, layout, variants); `segdraw.module` returns
-///      `plugin.Segment` by construction, so the contract is the same name.
+///      `contract.Segment` by construction, so the contract is the same name.
 ///   3. `pub const module = tiling.layoutModule(...)` — the tiling layouts;
-///      `layoutModule` returns `plugin.Layout` by construction.
+///      `layoutModule` returns `contract.Layout` by construction.
 ///
-/// A brand-new `modules/` tree must declare one of these shapes or it is a
-/// loud build error (the generated registry would otherwise mis-type every
-/// module's `module` value). Across one owner, all modules must agree.
-fn deriveOwnerContract(b: *std.Build, rel_path: []const u8) !?[]const u8 {
+/// A module file declaring `pub const module` in ANOTHER shape (a bare alias
+/// or a foreign shim) is a LOUD build error — the generated registry would
+/// otherwise mis-type its `module` value against a sibling's contract.
+fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
     const src = try b.build_root.handle.readFileAlloc(
         b.graph.io,
         rel_path,
@@ -670,9 +683,12 @@ fn deriveOwnerContract(b: *std.Build, rel_path: []const u8) !?[]const u8 {
     );
     defer b.allocator.free(src);
 
-    const typed_needle = "pub const module: @import(\"plugin\").";
+    const typed_needle = "pub const module: @import(\"contract\").";
     const segdraw_needle = "pub const module = segdraw.module(";
     const layout_needle = "pub const module = tiling.layoutModule(";
+    // Any `pub const module` declaration in an unrecognized spelling.
+    const module_needle = "pub const module";
+    var saw_unrecognized: bool = false;
     var it = std.mem.splitScalar(u8, src, '\n');
     while (it.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t");
@@ -686,15 +702,27 @@ fn deriveOwnerContract(b: *std.Build, rel_path: []const u8) !?[]const u8 {
                     (c >= '0' and c <= '9');
                 if (!is_name_char) break;
             }
-            if (n == 0) return null;
-            return try b.allocator.dupe(u8, rest[0..n]);
+            if (n == 0) {
+                saw_unrecognized = true;
+                continue;
+            }
+            return .{ .pub_module = true, .contract = try b.allocator.dupe(u8, rest[0..n]) };
         }
         if (std.mem.indexOf(u8, trimmed, segdraw_needle) != null)
-            return try b.allocator.dupe(u8, "Segment");
+            return .{ .pub_module = true, .contract = "Segment" };
         if (std.mem.indexOf(u8, trimmed, layout_needle) != null)
-            return try b.allocator.dupe(u8, "Layout");
+            return .{ .pub_module = true, .contract = "Layout" };
+        if (std.mem.indexOf(u8, trimmed, module_needle) != null)
+            saw_unrecognized = true;
     }
-    return null;
+    if (saw_unrecognized) {
+        std.debug.print(
+            "Error: module '{s}' declares `pub const module` in an unrecognized shape; bind one of the typed forms (`pub const module: @import(\"contract\").<Contract> = ...`, `pub const module = segdraw.module(...)`, or `pub const module = tiling.layoutModule(...)`).\n",
+            .{rel_path},
+        );
+        return error.UnrecognizedModuleSpelling;
+    }
+    return .{};
 }
 
 const empty_owner_defaults = [_]struct { owner: []const u8, contract: []const u8 }{
@@ -712,18 +740,18 @@ fn emptyOwnerDefaultContract(owner: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Fills `registry.contracts` (owner -> contract name) by scanning each
-/// discovered module under the owner's `modules/` tree; every module must
-/// agree on the contract, and at least one module must declare one. An owner
-/// whose `modules/` tree holds ZERO modules binds a default: an empty registry
-/// binds no module values, so its element type is consumer-binding metadata
-/// (the typed `[]const plugin.X` a core tier casts the empty array to), not a
-/// module-declared contract — nothing exists to derive it from, and only the
-/// three known owners can ever appear empty (`window` when every behavior
-/// module is removed).
+/// Fills `registry.contracts` (owner -> contract name) from the OWNER's
+/// module files' memoized classifications (see `DiscoveryContext.ensureClassified`
+/// and `classifyFile`): every module must agree on the contract, and at least
+/// one module must declare one. An owner whose `modules/` tree holds ZERO
+/// modules binds a default: an empty registry binds no module values, so its
+/// element type is consumer-binding metadata (the typed `[]const contract.X` a
+/// core tier casts the empty array to), not a module-declared contract —
+/// nothing exists to derive it from, and only the three known owners can ever
+/// appear empty (`window` when every behavior module is removed).
 fn deriveOwnerContracts(
     b: *std.Build,
-    source_paths: *const std.StringHashMap([]const u8),
+    discovery: *const Module.DiscoveryContext,
     registry: *OwnerRegistry,
 ) !void {
     var it = registry.owners.iterator();
@@ -747,12 +775,15 @@ fn deriveOwnerContracts(
         var contract: ?[]const u8 = null;
         var from: []const u8 = "";
         for (entry.value_ptr.items) |stem| {
-            const rel_path = source_paths.get(stem) orelse continue;
-            const c = (try deriveOwnerContract(b, rel_path)) orelse continue;
+            const rel_path = discovery.source_paths.get(stem) orelse continue;
+            // The walk classified every owner-tree file (single read); a stem
+            // without a record can't declare a contract.
+            const fc = discovery.classified.get(rel_path) orelse continue;
+            const c = fc.contract orelse continue;
             if (contract) |known| {
                 if (!std.mem.eql(u8, known, c)) {
                     std.debug.print(
-                        "Error: owner '{s}' binds mixed contracts: '{s}' (via {s}) vs '{s}' (via {s}). All modules in a <owner>/modules/ tree must bind the same plugin contract.\n",
+                        "Error: owner '{s}' binds mixed contracts: '{s}' (via {s}) vs '{s}' (via {s}). All modules in a <owner>/modules/ tree must bind the same contract.\n",
                         .{ entry.key_ptr.*, known, from, c, rel_path },
                     );
                     return error.MixedOwnerContract;
@@ -794,7 +825,7 @@ const sub_registry_specs = [_]struct {
     /// readout/control is individually selectable, orderable, and spaced in
     /// `[bar.layout.*]` rather than riding one aggregate "systatus"/"slider"
     /// belt. The package core exports `pub fn segmentFor(comptime i: usize)
-    /// plugin.Segment`, and the entry index `i` always equals the sub's index
+    /// contract.Segment`, and the entry index `i` always equals the sub's index
     /// in the generated `<package>_subs` registry (both consume the same
     /// sorted bound-sub list), so `segmentFor(i)` selects exactly `subs[i]`.
     bar_segments: bool = false,
@@ -810,7 +841,7 @@ const sub_registry_specs = [_]struct {
 /// bound addon. A sibling WITHOUT the declaration is a private implementation
 /// file (native_alsa.zig beside the slider package): still registered as a
 /// named module and importable by stem, but excluded from the generated
-/// `<package>_subs` registry. Mirrors deriveOwnerContract's line-scan: the
+/// `<package>_subs` registry. Mirrors classifyFile's line-scan: the
 /// declaration must be a real top-level decl of the binding name, not a
 /// doc-comment reference.
 fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bool {
@@ -964,7 +995,7 @@ fn ownerModuleEntries(
 }
 
 /// Generates a single `<owner>_modules` registry module alongside its source
-/// file. Imports are added only for what the source references: `plugin` (the
+/// file. Imports are added only for what the source references: `contract` (the
 /// interface contract), every discovered sub-system stem it lists, and -- for
 /// a bar registry -- each bar_segments package whose `segmentFor` entries it
 /// lists. A stem that isn't discovered can't be listed (the scan walked the
@@ -979,7 +1010,7 @@ fn buildOwnerRegistryModule(
     entries: []const OwnerEntry,
 ) !*std.Build.Module {
     var src = std.ArrayList(u8).empty;
-    try src.print(b.allocator, "const plugin = @import(\"plugin\");\n\n", .{});
+    try src.print(b.allocator, "const contract = @import(\"contract\");\n\n", .{});
     try src.print(b.allocator, "/// The auto-discovered `{s}` sub-system modules, in deterministic\n", .{name});
     try src.print(b.allocator, "/// filesystem scan order (dispatch order == this array's order).\n", .{});
     if (std.mem.eql(u8, name, "bar_modules")) {
@@ -987,34 +1018,72 @@ fn buildOwnerRegistryModule(
         try src.appendSlice(b.allocator, "/// (`segmentFor(i)`, see build.zig `bar_segments`) after the stems.\n");
     }
     try src.appendSlice(b.allocator, "/// Generated by build.zig; never committed.\n");
-    try src.print(b.allocator, "pub const modules = [_]plugin.{s}{{\n", .{contract});
+    try src.print(b.allocator, "pub const modules = [_]contract.{s}{{\n", .{contract});
     for (entries) |e| {
         try src.print(b.allocator, "    {s},\n", .{e.expr});
     }
     try src.print(b.allocator, "}};\n", .{});
 
-    // Single-binder hooks are enforced at comptime, not by prose.
-    // A second module binding a providerOf-style hook would be silently
-    // ignored (first-match dispatch), so the window registry asserts <= 1.
-    if (std.mem.eql(u8, name, "window_modules")) {
-        try src.appendSlice(b.allocator,
-            \\comptime {
-            \\    for (plugin.single_binder_hooks) |hook| {
-            \\        var binders: usize = 0;
-            \\        for (modules) |wm| {
-            \\            if (@field(wm, hook) != null) binders += 1;
-            \\        }
-            \\        if (binders > 1)
-            \\            @compileError("window hook '" ++ hook ++ "' bound by multiple modules; single-binder hook disallows it");
-            \\    }
-            \\}
-            \\
-        );
-    }
+    // Registry-wide invariants, enforced at comptime instead of by prose.
+    // Both checks key off the DERIVED element contract (never a per-owner
+    // magic string), so they follow a contract wherever an owner binds it:
+    // any element type carrying a `name` identity field gets the uniqueness
+    // check (Segment, Layout: config resolves those by name), and any contract
+    // package declaring `single_binder_hooks` gets the at-most-one check
+    // (WindowModule: a second first-match binder would be silently ignored).
+    try src.appendSlice(b.allocator,
+        \\comptime {
+        \\    // `modules` is a statically-typed `[_]contract.<T>` array; peel the
+        \\    // element contract via the builtin (the generated module imports no
+        \\    // std, so no std.meta.Elem here).
+        \\    const T = @typeInfo(@TypeOf(modules)).array.child;
+        \\    if (@hasField(T, "name")) {
+        \\        var names: [modules.len][]const u8 = undefined;
+        \\        var n: usize = 0;
+        \\        for (modules) |m| {
+        \\            for (names[0..n]) |nm| {
+        \\                var eql = nm.len == m.name.len;
+        \\                if (eql) {
+        \\                    var i: usize = 0;
+        \\                    while (i < nm.len) : (i += 1) {
+        \\                        if (nm[i] != m.name[i]) {
+        \\                            eql = false;
+        \\                            break;
+        \\                        }
+        \\                    }
+        \\                }
+        \\                if (eql and m.name.len != 0)
+        \\                    @compileError("duplicate registry name: '" ++ m.name ++ "'");
+        \\            }
+        \\            if (m.name.len != 0) {
+        \\                names[n] = m.name;
+        \\                n += 1;
+        \\            }
+        \\        }
+        \\        // Role capabilities (self_ticking, center_slot) are deliberately
+        \\        // multi-binder (fan-out tick / even center split), so no
+        \\        // at-most-one assert applies to them.
+        \\    }
+        \\    if (@hasDecl(contract, "single_binder_hooks")) {
+        \\        for (contract.single_binder_hooks) |hook| {
+        \\            // The list is owner-agnostic; only the element contract
+        \\            // that actually carries the hook is asserted on.
+        \\            if (!@hasField(T, hook)) continue;
+        \\            var binders: usize = 0;
+        \\            for (modules) |wm| {
+        \\                if (@field(wm, hook) != null) binders += 1;
+        \\            }
+        \\            if (binders > 1)
+        \\                @compileError("single-binder hook '" ++ hook ++ "' bound by multiple modules; disallowed");
+        \\        }
+        \\    }
+        \\}
+        \\
+    );
 
     const mod = makeGeneratedModule(b, target, optimize, b.fmt("{s}.zig", .{name}), src.items, &[_]Import{});
 
-    if (discovered.get("plugin")) |m| mod.addImport("plugin", m);
+    if (discovered.get("contract")) |m| mod.addImport("contract", m);
     var added = std.StringHashMapUnmanaged(void){};
     defer added.deinit(b.allocator);
     for (entries) |e| {
@@ -1177,7 +1246,7 @@ fn stripIfRelease(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode) vo
 
 /// Injects the artefacts every module needs, regardless of where it lives in
 /// the tree: build options, the fallback-config stub, the chrome-surface
-/// registration (`plugins`), and every per-owner `modules` registry
+/// registration (`surfaces`), and every per-owner `modules` registry
 /// (`<owner>_modules`, this round `window_modules`). Shared by the root
 /// module and every discovered module so there's exactly one place that
 /// knows what "every module gets this" means. Generated registries are NOT
@@ -1186,7 +1255,7 @@ fn stripIfRelease(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode) vo
 fn injectShared(mod: *std.Build.Module, ctx: SharedBuildContext) void {
     mod.addImport("build_options", ctx.build_opts);
     mod.addImport("fallback_toml", ctx.fallback_toml);
-    mod.addImport("plugins", ctx.plugins);
+    mod.addImport("surfaces", ctx.surfaces);
     var it = ctx.owner_modules.iterator();
     while (it.next()) |entry| mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
 }
@@ -1226,6 +1295,16 @@ const Module = struct {
     /// build process.
     const max_scan_source_bytes = 4 * 1024 * 1024;
 
+    /// Facts one source read extracts from a module file's `pub const module`
+    /// declaration: whether the file binds the owner's module contract (owner-
+    /// stem reservation) and which `contract.*` contract it binds (registry
+    /// typing). Capture both in a single scan so the walk, the owner registry,
+    /// and the contract derivation never re-read a file.
+    const FileClass = struct {
+        pub_module: bool = false,
+        contract: ?[]const u8 = null,
+    };
+
     /// Mutable state threaded through the entire discovery pass.
     ///
     /// Grouping it here means discoverAll and registerModule take only the arguments
@@ -1247,6 +1326,12 @@ const Module = struct {
         /// `<package>_subs` registries (systatus_subs, prompt_subs,
         /// title_subs), mirroring owner_stems.
         sub_stems: std.StringHashMap(std.ArrayListUnmanaged([]const u8)),
+        /// ONE source read per owner-tree file, split three ways: the walk
+        /// uses it to reserve owner stems vs private siblings, `OwnerRegistry`
+        /// re-uses it instead of re-scanning, and the contract derivation
+        /// consumes the same classification. Every fact the build needs from a
+        /// module's `pub const module` declaration is captured here.
+        classified: std.StringHashMap(FileClass),
 
         fn init(
             b: *std.Build,
@@ -1263,6 +1348,7 @@ const Module = struct {
                 .source_paths = std.StringHashMap([]const u8).init(b.allocator),
                 .owner_stems = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(b.allocator),
                 .sub_stems = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(b.allocator),
+                .classified = std.StringHashMap(FileClass).init(b.allocator),
             };
         }
 
@@ -1332,7 +1418,12 @@ const Module = struct {
                         if (owner) |o| {
                             const is_core = in_modules_root or
                                 std.mem.eql(u8, std.fs.path.stem(entry.name), std.fs.path.basename(dir_path));
-                            if (is_core or try declaresBinding(b, rel_path, "module")) {
+                            // Classify ONCE per file (reservation + contract,
+                            // see FileClass); the walk's owner-vs-sibling
+                            // decision and every later reader share the result.
+                            try ctx.ensureClassified(rel_path);
+                            const fc = ctx.classified.get(rel_path).?;
+                            if (is_core or fc.pub_module) {
                                 try ctx.addOwnerStem(o, std.fs.path.stem(entry.name));
                             } else {
                                 // A private sibling of a dir-named package
@@ -1400,6 +1491,17 @@ const Module = struct {
             if (!gop.found_existing) gop.value_ptr.* = .empty;
         }
 
+        /// Idempotent per-file classification (see `FileClass`): reads and
+        /// scans `rel_path` once, memoizes the result, and errors loudly on a
+        /// `pub const module` in an unrecognized spelling. Every owner-tree
+        /// file the walk classifies is reused by `OwnerRegistry` and the
+        /// contract derivation instead of being re-read.
+        fn ensureClassified(ctx: *DiscoveryContext, rel_path: []const u8) !void {
+            const b = ctx.b;
+            const gop = try ctx.classified.getOrPut(try b.allocator.dupe(u8, rel_path));
+            if (!gop.found_existing) gop.value_ptr.* = try classifyFile(b, rel_path);
+        }
+
         /// Appends `stem` to `owner`'s list unless already present. Called
         /// from `discoverAll`'s file case (the single walk), never from a
         /// second directory iteration.
@@ -1430,7 +1532,7 @@ const Module = struct {
     /// every name that corresponds to a discovered module to `out` (each name
     /// is dupe'd for the caller, which must free it). Imports that are NOT
     /// discovered modules — `std`, `builtin`, and the shared-injected names
-    /// from `injectShared` (build_options, fallback_toml, plugins,
+    /// from `injectShared` (build_options, fallback_toml, surfaces,
     /// `<owner>_modules`) — are skipped: they either need no wiring or are
     /// already present in the module's import_table.
     ///
@@ -1522,7 +1624,7 @@ const Module = struct {
     /// utility shelf is xcb-free by construction and safe for every layer;
     /// `model` is the shared data model; the per-layer extras are the pure
     /// neighborhoods each layer legitimately reaches (tiling's own seam plus
-    /// the `plugin` contract decls; config's own parsing siblings plus the
+    /// the `contract` decls; config's own parsing siblings plus the
     /// pure `keysyms`). Anything else is hub wiring and belongs behind an
     /// interface, not an import.
     fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
@@ -1533,7 +1635,7 @@ const Module = struct {
         if (std.mem.eql(u8, dep, "model")) return true;
         if (std.mem.eql(u8, layer, "model")) return false;
         if (std.mem.eql(u8, layer, "tiling")) {
-            return std.mem.eql(u8, dep, "tiling") or std.mem.eql(u8, dep, "plugin");
+            return std.mem.eql(u8, dep, "tiling") or std.mem.eql(u8, dep, "contract");
         }
         if (std.mem.eql(u8, layer, "config")) {
             const siblings = [_][]const u8{ "parser", "schema", "types", "fallback", "keysyms" };

@@ -19,7 +19,6 @@ const screen = @import("screen");
 
 const model = @import("model");
 const sync = @import("sync");
-const plugin = @import("plugin");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
@@ -418,7 +417,7 @@ pub fn honorConfigureRequest(
 
 /// This module's window sub-system contribution: the floating drag/resize
 /// commands floating owns.
-pub const module: plugin.WindowModule = .{
+pub const module: @import("contract").WindowModule = .{
     .startDrag = startDrag,
     .stopDrag = stopDrag,
     .updateDrag = updateDrag,

@@ -29,7 +29,7 @@ const tiling = @import("tiling_seam").tiling;
 // root, never by importing the bar module here. When the bar is absent it is
 // the comptime `null` type, so every `if (build_options.has_bar)` call below
 // compiles away.
-const surfaces = @import("plugins").Surfaces;
+const surfaces = @import("surfaces").Surfaces;
 // `grabKeybindings` lives in the event layer (it owns the X connection and
 // reads the live config). events.zig also imports this module, so the two
 // share a mutual runtime-only dependency; no comptime cycle is formed because

@@ -251,6 +251,94 @@ test "fallback chains: title/drun colors follow their siblings" {
     try testing.expectEqual(@as(?u32, null), with_title.bar.indicator_color);
 }
 
+test "selected workspace tag: per-state composite styling + indicator color" {
+    // The selected tag's icon TEXT is styled like any segment: the
+    // [bar.properties] "workspaces_selected" entry overlays "workspaces" on the
+    // current tag only. Its composite color wins over selected_fg, its flags
+    // layer on top of the base entry's; selected_indicator_color stays an
+    // independent indicator-glyph knob.
+    var cfg = try loadToml(testing.allocator, "selected-tag",
+        \\[bar]
+        \\primary_color     = "#aa0000"
+        \\fg = "#070809"
+        \\selected_bg       = primary_color
+        \\selected_fg       = "#eeeeee"
+        \\selected_indicator_color = "#00ff00"
+        \\
+        \\[bar.properties]
+        \\workspaces_selected = #00ff00 bold
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0xEEEEEE), cfg.bar.selected_fg);
+    try testing.expectEqual(@as(?u32, 0x00FF00), cfg.bar.selected_indicator_color);
+    // Composite entry landed in the segment maps, not a scalar knob field.
+    try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.segment_fg.get("workspaces_selected").?);
+    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segment_props.get("workspaces_selected").?);
+    // The selected tag uses the composite color and bold weight...
+    try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.workspaceTextFg(true));
+    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.workspaceIconProps(true));
+    // ...while unselected tags keep the bar-wide fg and no style.
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.workspaceTextFg(false));
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.workspaceIconProps(false));
+    // The selected tag's glyph uses its own color; unselected tags keep the
+    // shared indicator/bar-fg fallback.
+    try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.workspaceIndicatorColor(true));
+    try testing.expectEqual(@as(u32, 0x070809), cfg.bar.workspaceIndicatorColor(false));
+
+    // The base "workspaces" entry styles every tag; "workspaces_selected" is a
+    // pure style-only overlay on top of it for the current tag.
+    var layered = try loadToml(testing.allocator, "selected-tag-layered",
+        \\[bar]
+        \\fg = "#070809"
+        \\selected_fg = "#eeeeee"
+        \\
+        \\[bar.properties]
+        \\workspaces          = #ff0000 italic
+        \\workspaces_selected = bold
+        \\
+    );
+    defer layered.deinit(testing.allocator);
+    // No color in the selected overlay: selected text follows the base entry.
+    try testing.expectEqual(@as(u32, 0xFF0000), layered.bar.workspaceTextFg(true));
+    try testing.expectEqual(@as(u32, 0xFF0000), layered.bar.workspaceTextFg(false));
+    // Flags layer: base italic OR'd with the selected tag's bold.
+    try testing.expectEqual(
+        types.SegmentProps{ .italic = true, .bold = true },
+        layered.bar.workspaceIconProps(true),
+    );
+    try testing.expectEqual(types.SegmentProps{ .italic = true }, layered.bar.workspaceIconProps(false));
+
+    // Absent knobs keep the defaults; with no composite entries the selected
+    // tag falls back to selected_fg, the rest to fg, and the selected indicator
+    // falls back to indicator_color, then the tag's text color.
+    var fallback = try loadToml(testing.allocator, "selected-tag-fallback",
+        \\[bar]
+        \\fg = "#070809"
+        \\selected_fg = "#eeeeee"
+        \\indicator_color = "#123456"
+        \\
+    );
+    defer fallback.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, null), fallback.bar.selected_indicator_color);
+    try testing.expectEqual(@as(u32, 0x123456), fallback.bar.workspaceIndicatorColor(true));
+    try testing.expectEqual(@as(u32, 0x123456), fallback.bar.workspaceIndicatorColor(false));
+    try testing.expectEqual(@as(u32, 0xEEEEEE), fallback.bar.workspaceTextFg(true));
+    try testing.expectEqual(@as(u32, 0x070809), fallback.bar.workspaceTextFg(false));
+
+    // With no indicator color at all, the current tag follows the same text
+    // color chain and the rest follow fg.
+    var fg_fallback = try loadToml(testing.allocator, "selected-tag-fg",
+        \\[bar]
+        \\fg = "#070809"
+        \\selected_fg = "#eeeeee"
+        \\
+    );
+    defer fg_fallback.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0xEEEEEE), fg_fallback.bar.workspaceIndicatorColor(true));
+    try testing.expectEqual(@as(u32, 0x070809), fg_fallback.bar.workspaceIndicatorColor(false));
+}
+
 test "palette references resolve by full name cross-section" {
     // The four palette vars are the source of truth; color knobs reference
     // them by full name from ANY section, and changing one variable updates

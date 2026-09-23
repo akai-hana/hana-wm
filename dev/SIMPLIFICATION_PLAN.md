@@ -2,7 +2,7 @@
 
 Produced from a parallel, line-by-line audit of all 77 production files (16 698 non-test LOC) by 6 specialist agents (core, window, bar, config/model, input/tiling, build/tests). Every dead-code / dead-parameter / duplication claim was verified with repo-wide `rg` against the live tree.
 
-The mandate: **reduce LOC while preserving identical behavior**, or **improve human readability**, with zero regard for risk/effort so long as the end result is the best codebase achievable. The project's modularity-by-deletion ideology (whole-file optional modules behind the open contracts in `core/plugin.zig`, cores that never name modules, pure layers kept XCB-free, no runtime feature flags, no `TODO`/`FIXME` markers) is treated as inviolable.
+The mandate: **reduce LOC while preserving identical behavior**, or **improve human readability**, with zero regard for risk/effort so long as the end result is the best codebase achievable. The project's modularity-by-deletion ideology (whole-file optional modules behind the open contracts in `core/contract.zig` — formerly `plugin.zig` —, cores that never name modules, pure layers kept XCB-free, no runtime feature flags, no `TODO`/`FIXME` markers) is treated as inviolable.
 
 ## Contents
 
@@ -91,7 +91,7 @@ Realistic LOC recovery: **~600–900 lines** (≈4–5% of the tree) with equal-
 #### `src/core/sync/sink.zig`
 - **[OVER-COMPLEXITY (minor)]** `stackOnlyShim` (`sink.zig:76-80`) switches over a single-tag enum (`Stack = struct { above }`); a structural no-op today. Either collapse to a direct raise or annotate.
 
-**core — explicitly NOT changed (verified intentional):** `core.zig`'s `factAccessors` comptime factory and bundled `State` singleton; `plugin.zig`'s contract surface (every hook binds a module); the mode-table/rate-pipeline in `refresh.zig`; `signals.zig`'s async-signal-safe hex formatter.
+**core — explicitly NOT changed (verified intentional):** `core.zig`'s `factAccessors` comptime factory and bundled `State` singleton; `contract.zig`'s contract surface (every hook binds a module); the mode-table/rate-pipeline in `refresh.zig`; `signals.zig`'s async-signal-safe hex formatter.
 
 ### B2. window
 

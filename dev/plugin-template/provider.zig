@@ -23,14 +23,14 @@
 //!
 //! Mirror the shipped modules (fullscreen.zig and minimize.zig are the two
 //! reference implementations) rather than this template alone: the template
-//! must always compile against the same `plugin.WindowModule` contract they
+//! must always compile against the same `contract.WindowModule` contract they
 //! bind.
 
 const std = @import("std");
 const constants = @import("constants");
 const utils = @import("utils");
 const model = @import("model");
-const plugin = @import("plugin");
+const contract = @import("contract");
 
 // ---------------------------------------------------------------------------
 // Module-owned state. Every sub-system is allocation-free: a fixed,
@@ -102,7 +102,7 @@ pub fn onWindowGone(win: u32) void {
     }.match);
 }
 
-/// Persistence — write side (plugin.WindowModule.serializeWindow).
+/// Persistence — write side (contract.WindowModule.serializeWindow).
 ///
 /// Returns an opaque per-window blob for the session file, or null when this
 /// module does NOT own the window's `ext` slot.
@@ -138,7 +138,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
     return held;
 }
 
-/// Persistence — read side (plugin.WindowModule.deserializeWindow).
+/// Persistence — read side (contract.WindowModule.deserializeWindow).
 ///
 /// Called during adoption for EVERY record whose `ext` is non-null (parked,
 /// covering, or anything a module wrote). Return true iff this module
@@ -171,7 +171,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
 // null and every dispatch loop skips this module for that hook.
 // ---------------------------------------------------------------------------
 
-/// Screen-cover seam (plugin.WindowModule.coveringOccupantOnWs): "which
+/// Screen-cover seam (contract.WindowModule.coveringOccupantOnWs): "which
 /// window owns the screen on `ws`, if any". sync resolves coverage directly
 /// from the model's core `coveringOccupantOnWs` scan; this hook exists for
 /// the ACTIONS/workspaces layer, which asks the same question per workspace
@@ -232,7 +232,7 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
 //   .setEwmhFullscreenState / .armPendingBarHide / .armPendingBarShow /
 //   .notifyConfigureIfPending
 // ---------------------------------------------------------------------------
-pub const module: @import("plugin").WindowModule = .{
+pub const module: @import("contract").WindowModule = .{
     .init = init,
     .deinit = deinit,
     .onWindowGone = onWindowGone,

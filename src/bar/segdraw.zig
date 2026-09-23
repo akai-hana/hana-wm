@@ -5,7 +5,7 @@
 //! parameterized by an `Opts` struct.
 
 const segmod = @import("segment");
-const plugin = @import("plugin");
+const contract = @import("contract");
 
 /// Per-module width cache: the ACTUAL drawn width from the last render, read
 /// by the default naturalWidth for the row reservation (0 until the first
@@ -47,7 +47,7 @@ const OnClick = *const fn (
     *const fn () void,
 ) bool;
 
-/// Optional bindings for the segment, one field per plugin.Segment hook the
+/// Optional bindings for the segment, one field per contract.Segment hook the
 /// icon-ish modules can set. Unset fields keep the builder defaults.
 pub const Opts = struct {
     /// Wires the collapse/expand redraw-request path (variants collapses to
@@ -108,7 +108,7 @@ pub fn module(
     comptime draw: anytype,
     comptime action: anytype,
     comptime opts: Opts,
-) plugin.Segment {
+) contract.Segment {
     const W = widthState(name);
     return .{
         .name = name,
