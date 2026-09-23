@@ -3,7 +3,8 @@
 //! Shared shape used by the window module's caches, the minimize module's
 //! minimized-window record, and the spawn module's pending-spawn table: a
 //! fixed-capacity array plus a length, with linear-scan find, append, and
-//! remove-and-compact.
+//! remove-and-compact. Plus the sorted-key binary-search store (Store) that
+//! backs the model's window entries and the sync ledger.
 //!
 //! Layer note: xcb-free by construction, safe for model/tiling to import.
 
@@ -119,6 +120,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             std.mem.copyForwards(T, self.items[i..self.len], self.items[i + 1 .. self.len + 1]);
         }
 
+        /// Removes the first item matching `match`, order-preserving. pub for
+        /// the plugin templates (a sample provider's per-window record
+        /// cleanup) and the id-keyed form below.
         pub fn removeWhere(
             self: *Self,
             context: anytype,
@@ -153,7 +157,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             }.match);
         }
 
-        pub fn removeAllWhere(
+        fn removeAllWhere(
             self: *Self,
             context: anytype,
             comptime match: fn (@TypeOf(context), T) bool,
@@ -189,6 +193,130 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// Resets to empty without touching capacity or contents of unused slots.
         pub fn clear(self: *Self) void {
             self.len = 0;
+        }
+    };
+}
+
+/// Bounded, allocation-free key-value collection with sorted-key binary
+/// search. Parameterised by key type, value type, and a hard capacity
+/// ceiling (stack-allocated arrays). Keys stay sorted at all times: get /
+/// getPtr / has use O(log n) binary search; put and remove shift arrays to
+/// keep sorted order. Single-threaded like BoundedList (event-loop thread).
+/// Capacity is absolute: put returns error.StoreFull once full, no eviction.
+///
+/// The backing arrays are contiguous, so a *V from getPtr/put stays valid as
+/// long as its key's slot does not move; slots move only on remove(k), a
+/// wholesale reload, or inserting a NEW key before k (updating an existing
+/// key rewrites in place).
+pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
+    return struct {
+        const Self = @This();
+
+        keys: [capacity]K = undefined,
+        vals: [capacity]V = undefined,
+        len: usize = 0,
+
+        fn exactAt(self: *const Self, k: K) ?usize {
+            const pos = self.lowerBound(k);
+            if (pos < self.len and self.keys[pos] == k) return pos;
+            return null;
+        }
+
+        fn lowerBound(self: *const Self, k: K) usize {
+            var lo: usize = 0;
+            var hi: usize = self.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (self.keys[mid] < k) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return lo;
+        }
+
+        pub fn getPtr(self: *Self, k: K) ?*V {
+            if (self.exactAt(k)) |i| return &self.vals[i];
+            return null;
+        }
+
+        pub fn get(self: *const Self, k: K) ?V {
+            if (self.exactAt(k)) |i| return self.vals[i];
+            return null;
+        }
+
+        pub fn has(self: *const Self, k: K) bool {
+            return self.exactAt(k) != null;
+        }
+
+        pub fn put(self: *Self, k: K, v: V) error{StoreFull}!*V {
+            // One lowerBound for both the in-place update and the insertion
+            // position (exactAt would re-scan after the miss).
+            const pos = self.lowerBound(k);
+            if (pos < self.len and self.keys[pos] == k) {
+                self.vals[pos] = v;
+                return &self.vals[pos];
+            }
+            if (self.len == capacity) return error.StoreFull;
+            std.mem.copyBackwards(K, self.keys[pos + 1 .. self.len + 1], self.keys[pos..self.len]);
+            std.mem.copyBackwards(V, self.vals[pos + 1 .. self.len + 1], self.vals[pos..self.len]);
+            self.keys[pos] = k;
+            self.vals[pos] = v;
+            self.len += 1;
+            return &self.vals[pos];
+        }
+
+        /// Sorted-shift-remove: elements after `i` shift left to fill the gap.
+        /// O(n); iteration order stays sorted-by-key.
+        pub fn remove(self: *Self, k: K) bool {
+            if (self.exactAt(k)) |i| {
+                const last = self.len - 1;
+                std.mem.copyForwards(K, self.keys[i..last], self.keys[i + 1 .. self.len]);
+                std.mem.copyForwards(V, self.vals[i..last], self.vals[i + 1 .. self.len]);
+                self.len = last;
+                return true;
+            }
+            return false;
+        }
+
+        pub const Item = struct { key: K, val: *const V };
+
+        /// Sorted-key row iterator: yields every stored (key, value) in order,
+        /// so scans never hand-roll the `0..count()`/`, at(k)` bounds dance.
+        /// The row pointer is valid until the store mutates (see the pointer
+        /// contract on getPtr). Early-exit mid-iteration is safe.
+        pub const Iterator = struct {
+            store: *const Self,
+            pos: usize = 0,
+            pub fn next(self: *Iterator) ?Item {
+                if (self.pos >= self.store.len) return null;
+                const i = self.pos;
+                self.pos += 1;
+                return .{ .key = self.store.keys[i], .val = &self.store.vals[i] };
+            }
+        };
+        pub fn iterator(self: *const Self) Iterator {
+            return .{ .store = self };
+        }
+
+        /// Indexed accessor: `seq` beyond count() clamps to the
+        /// last stored row (real check, not a debug-only assert), so an
+        /// off-by-one index can't OOB the backing arrays in ReleaseFast.
+        /// Empty map → row 0 of the fixed-capacity storage (always
+        /// addressable, capacity >= 1).
+        pub fn at(self: *const Self, seq: usize) Item {
+            const idx = @min(seq, self.len -| 1);
+            return .{ .key = self.keys[idx], .val = &self.vals[idx] };
+        }
+
+        pub fn count(self: *const Self) usize {
+            return self.len;
+        }
+
+        /// Index of the entry keyed `k`, or null when absent.
+        pub inline fn indexOf(self: *const Self, k: K) ?usize {
+            return self.exactAt(k);
         }
     };
 }

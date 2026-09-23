@@ -403,8 +403,9 @@ pub const Segment = struct {
 ///
 /// `compute` receives the interchange vocabulary typed directly: `view` is
 /// `*const View` and `out` a `*List` to append placements to (both defined
-/// next to this contract below). `params` is `*model.LayoutParams` for the
-/// per-layout pre-reconcile duty (scroll viewport snapping).
+/// next to this contract below). Layouts with a per-layout pre-reconcile
+/// duty (scroll viewport snapping) bind `preReconcile`, which takes the
+/// workspace's `LayoutParams` BY VALUE (see its doc).
 pub const Layout = struct {
     /// Canonical name ("master", "monocle", ...). Config text resolves to the
     /// module by name; names also drive the cycle order (config order wins).

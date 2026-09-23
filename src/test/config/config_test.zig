@@ -146,6 +146,69 @@ test "S1c: sequence array elements containing {kill} substitute" {
     try testing.expectEqual(types.Action.close_window, seq[2]);
 }
 
+test "S1e: reload chain parses as a reload_config + reload_hana sequence" {
+    var cfg = try loadToml(testing.allocator, "s1e",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\Mod+Escape = ["reload_config", "reload_hana"]
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
+    const seq = cfg.keybindings.items[0].action.sequence;
+    try testing.expectEqual(@as(usize, 2), seq.len);
+    try testing.expectEqual(types.Action.reload_config, seq[0]);
+    try testing.expectEqual(types.Action.reload_hana, seq[1]);
+}
+
+test "S1g: a '+' batch parses as one parallel group" {
+    var cfg = try loadToml(testing.allocator, "s1g",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\Mod+Escape = ["reload_config + reload_hana"]
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
+    const par = cfg.keybindings.items[0].action.parallel;
+    try testing.expectEqual(@as(usize, 2), par.len);
+    try testing.expectEqual(types.Action.reload_config, par[0]);
+    try testing.expectEqual(types.Action.reload_hana, par[1]);
+}
+
+test "S1h: commas sequence batches, '+' runs a batch in parallel" {
+    var cfg = try loadToml(testing.allocator, "s1h",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\Mod+Escape = ["close", "reload_config + reload_hana", "dump_state"]
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
+    const seq = cfg.keybindings.items[0].action.sequence;
+    try testing.expectEqual(@as(usize, 3), seq.len);
+    try testing.expectEqual(types.Action.close_window, seq[0]);
+    const par = seq[1].parallel;
+    try testing.expectEqual(@as(usize, 2), par.len);
+    try testing.expectEqual(types.Action.reload_config, par[0]);
+    try testing.expectEqual(types.Action.reload_hana, par[1]);
+    try testing.expectEqual(types.Action.dump_state, seq[2]);
+}
+
+test "S1i: unspaced literal '+' in an exec command is preserved" {
+    var cfg = try loadToml(testing.allocator, "s1i",
+        \\[binds]
+        \\Mod = "Mod4"
+        \\Mod+X = "xdotool key ctrl+plus"
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
+    const act = cfg.keybindings.items[0].action;
+    try testing.expect(act == .exec);
+    try testing.expectEqualStrings("xdotool key ctrl+plus", act.exec);
+}
+
 test "S4: array filtering to zero actions yields no binding" {
     var cfg = try loadToml(testing.allocator, "s4",
         \\[binds]

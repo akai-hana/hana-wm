@@ -275,7 +275,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     // scan in one place; both the classification and prev_fs_win need
     // the same result, saving one full store scan.
     const prev_fs_win = currentCoveringOccupant(m);
-    const kind: enum { enter, exit, switch_ } =
+    const kind: pipeline.FullscreenKind =
         if (isCoveringOnWs(m, win)) .exit else if (prev_fs_win != null) .switch_ else .enter;
 
     if (!wm.toggleCovering.?(m, win)) return;
@@ -286,8 +286,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
         .{ .force_restack = true },
         win,
         prev_fs_win,
-        kind == .exit,
-        kind == .switch_,
+        kind,
     );
 
     // Deterministic fullscreen-exit reaction: the model no longer has a
@@ -537,9 +536,13 @@ pub fn adjustPrimaryWidthAction(delta: f32) void {
 }
 
 pub fn adjustPrimaryCount(delta: i32) void {
+    // Primary-column capacity: a sane handful of slots, capped at a quarter
+    // of the managed-window ceiling so one workspace can't statically claim
+    // the store.
+    const max_primary_count = model_mod.store_capacity / 4;
     const m = pipeline.mut(&gate);
     const p = &m.ws[m.current.index].params;
-    p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, model_mod.store_capacity / 4)));
+    p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, max_primary_count)));
     pipeline.reconcileUnderGrabNow(.{});
 }
 

@@ -142,7 +142,7 @@ fn probeMetrics(size_override: ?u16) ?struct { asc: i32, desc: i32 } {
     defer drawing.freeSizedFontList(cs.alloc, sized);
     const m = drawing.probeFontMetrics(
         cs.alloc,
-        core.dpi_info.load(.acquire),
+        core.dpi_info,
         sized,
     ) orelse return null;
     return .{ .asc = m.ascent, .desc = m.descent };
@@ -203,7 +203,7 @@ pub fn onPollWakeup() void {
     if (gBar.state) |s| {
         if (barModsConsumeRedrawRequest()) s.markDirty();
     }
-    submitDraw();
+    performDraw();
 }
 
 /// Combines every module's poll deadline (clock tick, prompt caret blink,
@@ -406,7 +406,8 @@ const Dirty = struct {
     /// x/w of every repainted segment + gap, tracked by extendDirtySpan so
     /// flushRender copies only the changed region.
     span_x: u16 = 0,
-    /// Width of the current draw's dirty span. 0 means "whole bar".
+    /// Width of the current draw's dirty span. 0 = empty span (nothing to
+    /// blit); set non-zero by the first extendDirtySpan of a draw.
     span_w: u16 = 0,
 };
 
@@ -756,8 +757,9 @@ const State = struct {
             self.frame.frame.is_all_view_active = m.all_view_active;
             @memset(&self.frame.ws_has_windows, false);
             self.frame.wins_len = 0;
+            const cur_ws: model.WSId = model.WSId.fromIndex(self.frame.frame.current_workspace);
             const cur_bit: u64 = if (self.frame.frame.current_workspace < self.frame.frame.workspace_count)
-                model.bit(model.WSId.fromIndex(self.frame.frame.current_workspace))
+                model.bit(cur_ws)
             else
                 0;
             // OR-accumulate all window masks in a single pass, collecting the
@@ -765,7 +767,7 @@ const State = struct {
             var combined_mask: u64 = 0;
             for (tracking.allWindows()) |entry| {
                 combined_mask |= entry.mask;
-                if (cur_bit != 0 and entry.mask & cur_bit != 0 and
+                if (cur_bit != 0 and model.maskedOn(entry.mask, cur_ws) and
                     self.frame.wins_len < max_frame_windows)
                 {
                     self.frame.wins[self.frame.wins_len] = entry.win;
@@ -773,8 +775,7 @@ const State = struct {
                 }
             }
             for (0..self.frame.frame.workspace_count) |i| {
-                self.frame.ws_has_windows[i] = combined_mask &
-                    model.bit(model.WSId.fromIndex(@intCast(i))) != 0;
+                self.frame.ws_has_windows[i] = model.maskedOn(combined_mask, model.WSId.fromIndex(@intCast(i)));
             }
         }
     }
@@ -794,27 +795,23 @@ const State = struct {
     /// Draws a segment by registry dispatch, catching and logging errors
     /// instead of propagating them. On failure returns `x` unchanged (the
     /// "drew nothing" signal) so a broken segment can't corrupt the layout.
-    fn drawSegmentSafe(
-        self: *State,
-        ctx: *segmod.DrawCtx,
-        name: []const u8,
-        x: u16,
-        width: ?u16,
-    ) u16 {
-        return self.drawSegment(ctx, name, x, width) catch |e| {
-            debug.warnOnErr(e, "bar drawSegment");
+    fn drawSegment(self: *State, ctx: *segmod.DrawCtx, name: []const u8, x: u16, width: ?u16) u16 {
+        const id = segId(name) orelse {
+            debug.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
             return x;
         };
-    }
-
-    fn drawSegment(self: *State, ctx: *segmod.DrawCtx, name: []const u8, x: u16, width: ?u16) !u16 {
-        const id = segId(name) orelse return error.DrewInvalidSegment;
-        if (segAt(id).draw == null) return error.DrewInvalidSegment;
+        if (segAt(id).draw == null) {
+            debug.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
+            return x;
+        }
         // The DrawCtx is shared mutable scratch: pin the reserved width into it
         // immediately before the draw so width-reading renderers (the title)
         // advance correctly.
         ctx.width = width orelse self.measureSegmentWidth(&ctx.frame, name);
-        return segAt(id).draw.?(ctx, x);
+        return segAt(id).draw.?(ctx, x) catch |e| {
+            debug.warnOnErr(e, "bar drawSegment");
+            return x;
+        };
     }
 
     /// Draws one segment of a left-to-right row, painting the inter-segment gap
@@ -831,29 +828,19 @@ const State = struct {
         scaled_spacing: u16,
     ) u16 {
         const x_before = x;
-        const drew_x = self.drawSegmentSafe(ctx, name, x, w);
+        const drew_x = self.drawSegment(ctx, name, x, w);
         const drew = drew_x != x_before;
         // A successful draw paints its trailing gap (omitted after the title so
-        // the next center segment sits flush). On failure drawSegmentSafe
-        // returned x unchanged, but the full reserved `w` (+ gap unless
-        // omitted) is still consumed so the next segment leftward starts where
-        // the layout pass expects -- leaving x unchanged would let it paint
-        // over this failed slot and desync the cluster (drawRightSegments'
-        // failed-draw handling matches).
+        // the next center segment sits flush). On failure drawSegment returned
+        // x unchanged, but the full reserved `w` (+ gap unless omitted) is
+        // still consumed so the next segment leftward starts where the layout
+        // pass expects -- leaving x unchanged would let it paint over this
+        // failed slot and desync the cluster.
         if (drew and !omit_gap) self.paintGap(drew_x, scaled_spacing);
         return if (drew)
-            advancedX(drew_x, x_before, w, if (omit_gap) 0 else scaled_spacing)
+            drew_x + (if (omit_gap) 0 else scaled_spacing)
         else
             x_before + w;
-    }
-
-    /// Slot + trailing-gap accounting for a draw that may have failed: on
-    /// success the row advances past `drew_x` plus `gap`; on failure
-    /// `drawSegmentSafe` returned `x_before` unchanged, so the full reserved
-    /// `w` + gap is still consumed (see the failure comments in both draw
-    /// paths). Shared by drawRowSegment and drawRightSegments.
-    inline fn advancedX(drew_x: u16, x_before: u16, w: u16, gap: u16) u16 {
-        return if (drew_x != x_before) drew_x + gap else x_before + w + gap;
     }
 
     fn paintGap(self: *State, gap_x: u16, scaled_spacing: u16) void {
@@ -895,11 +882,10 @@ const State = struct {
                 if (!is_full_redraw) {
                     self.clearRegion(cur_x, seg_w);
                 }
-                const drew = self.drawSegmentSafe(ctx, names[i], cur_x, null) != cur_x;
+                const drew = self.drawSegment(ctx, names[i], cur_x, null) != cur_x;
                 if (drew) {
                     self.extendDirtySpan(cur_x, seg_w);
                     if (pending_gap) {
-                        self.extendDirtySpan(cur_x + seg_w, scaled_spacing);
                         self.paintGap(cur_x + seg_w, scaled_spacing);
                     }
                 }
@@ -1109,12 +1095,6 @@ inline fn ungrabAndFlush() void {
     utils.ungrabAndFlush(core.getState().conn);
 }
 
-/// Draws and blits to the window. Drawing always happens inline on the
-/// calling thread.
-fn submitDraw() void {
-    performDraw();
-}
-
 /// Requests the next draw to repaint every segment and mark the whole bar
 /// dirty. Used by paths that need a full background-clear repaint (layout
 /// facts, module redraw requests, bar re-anchoring).
@@ -1170,7 +1150,7 @@ pub fn init() !void {
     // an unmapped window is discarded, and compositors start remapped windows
     // blank until first damage).
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
-    submitDraw();
+    performDraw();
     _ = xcb.xcb_flush(cs.conn);
     // Uniform lifecycle: every registered mechanism segment (incl. the prompt,
     // whose init owns the vim addon lifecycle) is initialised with the
@@ -1200,7 +1180,7 @@ pub fn deinit() void {
         s.deinit();
         gBar.state = null;
     }
-    screen.releaseClaim(screen.bar_id.?);
+    screen.releaseClaim(screen.bar_id);
     screen.clearSurfaceWindow();
 }
 
@@ -1351,7 +1331,7 @@ fn syncScreenClaim() void {
     const cs = core.getState();
     const edge: screen.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
     const px: u16 = if (s.vis.shown) s.render.height else 0;
-    screen.setClaim(screen.bar_id.?, edge, px);
+    screen.setClaim(screen.bar_id, edge, px);
 }
 
 /// Synchronous bar update safe to call inside xcb_grab_server.
@@ -1370,7 +1350,6 @@ fn redrawInsideGrab() void {
     if (!s.vis.shown) return;
     if (s.pendingFullRedraw()) return;
     performDraw();
-    s.dirty.flag = false;
 }
 
 /// Phase-1 repaint of ONLY the segment `id` at its last recorded bound. A
@@ -1407,7 +1386,7 @@ fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, 
     var ctx = frameCtx(s);
     // Shared harness: catches/logs draw errors; returns x unchanged
     // ("drew nothing") on failure, which must skip the blit below.
-    const drawn_end = s.drawSegmentSafe(&ctx, segAt(id).name, x, pinned_w);
+    const drawn_end = s.drawSegment(&ctx, segAt(id).name, x, pinned_w);
     if (drawn_end == x) return;
     const drawn_w: u16 = drawn_end -| x;
     if (flush_blit) {
@@ -1555,11 +1534,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
 /// visibility update. The reconcile comes from the caller's own switch
 /// reconcile; the bar merely updates its occupancy state here.
 pub fn updateBarVisibilityForWorkspace(ws: u8) void {
-    const s = gBar.state orelse return;
-    const decision = visibility.desiredVisibility(ws, s.vis.shown, s.vis.preferred);
-    if (!decision.needs_change) return;
-    applyVisibility(s, decision.should_be_visible, false);
-    debug.info("Bar {s} for workspace {}", .{ if (decision.should_be_visible) "shown" else "hidden", ws });
+    applyVisibilityDecision(ws, false);
 }
 
 /// Immediately unmaps the bar and updates the screen claim, without a
@@ -1569,10 +1544,7 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
 pub fn hideBarForFullscreen() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
-    s.vis.shown = false;
-    const conn = core.getState().conn;
-    _ = xcb.xcb_unmap_window(conn, s.win.win_id);
-    syncScreenClaim();
+    applyVisibility(s, false, false);
 }
 
 /// Reacts to a change in core's fullscreen-occupancy fact: recomputes whether
@@ -1583,14 +1555,21 @@ pub fn hideBarForFullscreen() void {
 /// usable area geometry changed (a write-path side effect from a rendering
 /// module: documented in the check-layers.sh allowlist).
 pub fn applyFullscreenVisibility() void {
+    applyVisibilityDecision(tracking.getCurrentWorkspace() orelse 0, true);
+}
+
+/// Computes the desired visibility for `ws` via the shared visibility policy
+/// and, when it differs from current state, applies the change. `do_reconcile`
+/// selects the workspace-switch flavor (no reconcile; the caller reconciles)
+/// vs the fullscreen-fact reaction (reconciles inside the claim).
+fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
     const s = gBar.state orelse return;
-    const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const decision = visibility.desiredVisibility(current_ws, s.vis.shown, s.vis.preferred);
+    const decision = visibility.desiredVisibility(ws, s.vis.shown, s.vis.preferred);
     if (!decision.needs_change) return;
-    applyVisibility(s, decision.should_be_visible, true);
+    applyVisibility(s, decision.should_be_visible, do_reconcile);
     debug.info(
-        "Bar {s} due to fullscreen-occupancy fact change",
-        .{if (decision.should_be_visible) "shown" else "hidden"},
+        "Bar {s} for workspace {d}",
+        .{ if (decision.should_be_visible) "shown" else "hidden", ws },
     );
 }
 
@@ -1637,8 +1616,7 @@ pub fn updateIfDirty() !void {
             requestFullRedraw();
         }
         if (!s.dirty.flag) break;
-        s.dirty.flag = false;
-        submitDraw();
+        performDraw();
     }
     if (redraw_iter == max_batched_redraws)
         debug.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
@@ -1687,7 +1665,7 @@ pub fn updateClock() void {
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
-        if (build_options.has_floating and actions.isDragging()) s.dirty.flag = true else submitDraw();
+        if (build_options.has_floating and actions.isDragging()) s.dirty.flag = true else performDraw();
     };
 }
 

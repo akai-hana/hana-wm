@@ -148,7 +148,6 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 ///   - bw: the last border width sent for a visible window (0 while parked/never);
 ///   - pixel: the last border pixel sent for a visible window (0 while parked/never).
 const SentEntry = struct {
-    id: model.WindowId = 0,
     rect: utils.Rect = plugin.parked_rect,
     has_rect: bool = false,
     parked: bool = false,
@@ -157,10 +156,10 @@ const SentEntry = struct {
 };
 
 pub const State = struct {
-    /// Ledger of sent state (see SentEntry), kept sorted by `.id` with
-    /// ordered insertion/removal, so get-or-put / forget resolve records by
-    /// binary search with no parallel id index to keep in lockstep.
-    sent: utils.BoundedList(SentEntry, model.store_capacity) = .{},
+    /// Ledger of sent state (see SentEntry), keyed by window id in the
+    /// model.Store's sorted-key array: get-or-put / forget resolve records
+    /// by binary search with no parallel id index to keep in lockstep.
+    sent: model.Store(model.WindowId, SentEntry, model.store_capacity) = .{},
 };
 
 /// Owned by the compositor process; re-init() on reconnect. Module-private:
@@ -171,35 +170,11 @@ pub fn init() void {
     st = .{};
 }
 
-/// Lower bound of `win` in the id-sorted ledger: the first slot whose record
-/// id is `>= win` — either `win`'s own slot or the insertion point for a new
-/// record.
-fn lowerBound(win: model.WindowId) usize {
-    const items = st.sent.constSlice();
-    var lo: usize = 0;
-    var hi: usize = items.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (items[mid].id < win) lo = mid + 1 else hi = mid;
-    }
-    return lo;
-}
-
-/// Ledger slot holding `win` (records sorted by id), via binary search; null
-/// when absent.
-fn sentSlot(win: model.WindowId) ?usize {
-    const i = lowerBound(win);
-    const items = st.sent.constSlice();
-    if (i < items.len and items[i].id == win) return i;
-    return null;
-}
-
 /// Ledger read of a window's last-sent record. pub because it is also the
 /// test verification seam (sync_test/tracking_test assert what a pass sent);
 /// production reads at lastRectFor/truthRect.
 pub fn sentGet(win: model.WindowId) ?SentEntry {
-    const slot = sentSlot(win) orelse return null;
-    return st.sent.items[slot];
+    return st.sent.get(win);
 }
 
 /// Ledger get-or-create for `win`: pointer to its record, or null when the
@@ -208,29 +183,16 @@ pub fn sentGet(win: model.WindowId) ?SentEntry {
 /// fresh blank record; writes are logged+lost).
 /// pub: production reconcile, plus the test verification seam (perf_test).
 pub fn sentGetOrPut(win: model.WindowId) ?*SentEntry {
-    const i = lowerBound(win);
-    const items = st.sent.constSlice();
-    if (i < items.len and items[i].id == win) return &st.sent.items[i];
-    // Insertion point from the search; keeps the ledger sorted by construction.
-    if (!st.sent.insert(i, .{ .id = win })) return null;
-    return &st.sent.items[i];
+    if (st.sent.getPtr(win)) |r| return r;
+    return st.sent.put(win, .{}) catch null;
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
 /// client can appear with the same id, and a stale record would feed the
 /// orphan keep-last branch geometry belonging to the previous incarnation).
 /// Called from `forget` (actions.unmanage / test seam).
-fn sentSwapRemove(win: model.WindowId) void {
-    const slot = sentSlot(win) orelse return;
-    st.sent.orderedRemove(slot);
-}
-
-/// Drop a window's ledger record (X ids recycle: after a destroy, a new
-/// client can appear with the same id, and a stale record would feed the
-/// orphan keep-last branch geometry belonging to the previous incarnation).
-/// Called from actions.unmanage.
 pub fn forget(win: model.WindowId) void {
-    sentSwapRemove(win);
+    _ = st.sent.remove(win);
 }
 
 /// Record a border width sent for `win` without disturbing the ledger's
@@ -245,8 +207,8 @@ pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
 
 /// Record a visible (non-parked) send in the ledger. Shared by the full
 /// reconcile (border width/pixel known) and the drag-tick fast path (0,0).
-fn markSentVisible(e: *SentEntry, win: model.WindowId, rect: utils.Rect, bw: u16, pixel: u32) void {
-    e.* = .{ .id = win, .rect = rect, .has_rect = true, .parked = false, .bw = bw, .pixel = pixel };
+fn markSentVisible(e: *SentEntry, rect: utils.Rect, bw: u16, pixel: u32) void {
+    e.* = .{ .rect = rect, .has_rect = true, .parked = false, .bw = bw, .pixel = pixel };
 }
 
 /// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
@@ -300,7 +262,7 @@ pub fn reconcileDragTick(m: *const model.Model, sink: Sink, win: model.WindowId)
     // border the server already has -- a visible repaint flash on the
     // dragged window every tick.
     const gop = sentGetOrPut(win) orelse return;
-    markSentVisible(gop, win, rect, gop.bw, gop.pixel);
+    markSentVisible(gop, rect, gop.bw, gop.pixel);
 }
 
 pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
@@ -330,9 +292,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         var n: usize = 0;
         const tiled = &m.ws[m.current.index].tiled_order;
         for (tiled.constSlice()) |w| {
-            // One binary search per window: slotOf locates the row once; the
+            // One binary search per window: indexOf locates the row once; the
             // entry comes from `at` instead of a second `get` lookup.
-            const slot = m.store.slotOf(w) orelse continue;
+            const slot = m.store.indexOf(w) orelse continue;
             const e = m.store.at(slot).val;
             if (!model.taggedOn(e.*, m.current)) continue;
             // First write wins, mirroring the removed findPlacement's
@@ -355,15 +317,22 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // its desire will be non-parked (checked here so no earlier store entry
     // can shadow it); else the pass elects the first non-parked desire.
     var winner: ?model.WindowId = fs_win;
-    if (winner == null) if (m.focused) |f| if (m.store.slotOf(f)) |slot| {
-        const fe = m.store.at(slot).val.*;
-        // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
-        // with has_kept_rect = false: the ledger is unknowable pre-pass, so a
-        // placement-less visible orphan is left to the first-desire fallback).
-        if (fe.presence == .present and desireIsNonParked(m, fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false)) {
-            winner = f;
+    if (winner == null) {
+        if (m.focused) |f| {
+            if (m.store.indexOf(f)) |slot| {
+                const fe = m.store.at(slot).val.*;
+                // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
+                // with has_kept_rect = false: the ledger is unknowable pre-pass, so a
+                // placement-less visible orphan is left to the first-desire fallback).
+                // The fast-path visibility is derived here exactly once (shared with
+                // the fused pass below; the seed spans only this focused-window test).
+                const on_current = model.visibleEntry(m, fe, m.current);
+                if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, on_current)) {
+                    winner = f;
+                }
+            }
         }
-    };
+    }
 
     // One fused pass over the store: compute a window's desire, then SEND it
     // immediately. Ordering is via the Sink adapter below (a widening PR
@@ -379,6 +348,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // here feeds lastRectFor/truthRect (read 3). Sends never consult the
     // ledger to SKIP anything.
     const count = m.store.count();
+    // One warn per pass when any window's record couldn't be written, not one
+    // per window: the condition is structural (ledger at store_capacity), so
+    // a full pass would otherwise log per window.
+    var ledger_overflow = false;
     for (0..count) |i| {
         const it = m.store.at(i);
         const win = it.key;
@@ -390,7 +363,8 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // after, so raises still derive from what we last sent, never from
         // this pass's sends. When the ledger is full and `win` has no record
         // yet, `gop` is null: reads see a fresh blank entry and the write is
-        // logged+lost, exactly as before (sends never depend on the ledger).
+        // lost (one per-pass warning at the loop's end; sends never depend on
+        // the ledger).
         const gop = sentGetOrPut(win);
         const ledger = (if (gop) |g| g.* else SentEntry{});
 
@@ -411,7 +385,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             placementOfSlot(&placements, &pl_of_slot, i)
         else
             null;
-        const desire = computeDesire(m, ctx, e, win, fs_win, placement, &winner, ledger);
+        const desire = computeDesire(m, ctx, e, win, fs_win, placement, &winner, ledger, on_current);
         const rect = desire.rect;
         const bw = desire.bw;
         const pixel = desire.pixel;
@@ -449,9 +423,10 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
         if (gop) |g| {
-            if (parked) g.parked = true else markSentVisible(g, win, rect, bw, pixel);
-        } else debug.err("sync.reconcile: ledger full; sends applied, record lost", .{});
+            if (parked) g.parked = true else markSentVisible(g, rect, bw, pixel);
+        } else ledger_overflow = true;
     }
+    if (ledger_overflow) debug.err("sync.reconcile: ledger full; some sends applied, records lost", .{});
 
     // force_restack additionally raises bar/top.
     if (opts.force_restack) {
@@ -461,11 +436,18 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // DO NOT FLUSH HERE. Caller owns flushing.
 }
 
+/// The ledger record for `win` when a visible (non-parked) geometry was
+/// ever sent; null otherwise.
+fn visibleSent(win: model.WindowId) ?SentEntry {
+    const e = sentGet(win) orelse return null;
+    if (!e.has_rect or e.parked) return null;
+    return e;
+}
+
 /// Pipeline: last visible geometry we sent to `win`, or null when never sent
 /// / currently parked.
 pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
-    const e = sentGet(win) orelse return null;
-    if (!e.has_rect or e.parked) return null;
+    const e = visibleSent(win) orelse return null;
     return e.rect;
 }
 
@@ -474,8 +456,7 @@ pub fn lastRectFor(win: model.WindowId) ?utils.Rect {
 /// reports matches the window's actual X border rather than the global config
 /// default.
 pub fn lastBorderWidthFor(win: model.WindowId) ?u16 {
-    const e = sentGet(win) orelse return null;
-    if (!e.has_rect or e.parked) return null;
+    const e = visibleSent(win) orelse return null;
     return e.bw;
 }
 
@@ -515,16 +496,16 @@ fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
 /// there, so placement-less orphans stay on the pass's first-desire
 /// fallback).
 fn desireIsNonParked(
-    m: *const model.Model,
     e: model.Entry,
     fs_win: ?model.WindowId,
     placement: ?plugin.Placement,
     has_kept_rect: bool,
+    on_current: bool,
 ) bool {
     if (fs_win != null) return false;
     switch (e.anchor) {
-        .floating => return model.visibleEntry(m, e, m.current),
-        .tiled => return if (placement) |p| p.visible else (model.visibleEntry(m, e, m.current) and has_kept_rect),
+        .floating => return on_current,
+        .tiled => return if (placement) |p| p.visible else (on_current and has_kept_rect),
     }
 }
 
@@ -540,6 +521,7 @@ fn computeDesire(
     placement: ?plugin.Placement,
     winner: *?model.WindowId,
     ledger: SentEntry,
+    on_current: bool,
 ) Desire {
     var rect: utils.Rect = plugin.parked_rect;
     var bw: u16 = ctx.cfg_bw;
@@ -567,12 +549,12 @@ fn computeDesire(
             // desireIsNonParked); the arms below fill geometry, and the
             // orphan/offscreen arm's markParked keeps its border/pixel
             // side effects.
-            parked = !desireIsNonParked(m, e.*, fs_win, placement, ledger.has_rect);
+            parked = !desireIsNonParked(e.*, fs_win, placement, ledger.has_rect, on_current);
             switch (e.anchor) {
                 .floating => |r| rect = r,
                 .tiled => if (placement) |p| {
                     rect = p.rect;
-                } else if (model.visibleOn(m, win, m.current) and ledger.has_rect) {
+                } else if (on_current and ledger.has_rect) {
                     // Multi-tagged orphan never hidden; keep last-sent rect,
                     // parked only when nothing was ever sent (first sight /
                     // offscreen) -- exactly what desireIsNonParked saw.

@@ -386,6 +386,106 @@ pub const DefaultSource = enum {
     fallback,
 };
 
+/// Re-exec config hand-off: on every successful load/reload the winning user
+/// config source is frozen into a snapshot dir, and a re-exec (`reload_hana`)
+/// boots from that snapshot via `HANA_CONFIG_DIR`. A re-exec therefore swaps
+/// ONLY the binary; config file edits land exclusively through
+/// `reload_config`. Because the snapshot is refreshed only on *successful*
+/// loads, it is the last-known-good config: a mid-edit (or outright broken)
+/// config tree at re-exec time cannot take the successor down with it.
+const GoodSource = struct {
+    /// Heap-allocated copy of the winning search location (a dir or a file).
+    path: []u8,
+    is_dir: bool,
+};
+
+/// The most recently loaded-and-validated user config location. Mutated by
+/// every successful load/reload; read by refreshSnapshot at re-exec time.
+/// Allocated with the caller's (c_allocator) arena semantics, process-lifetime
+/// after the winning load holds it.
+var last_good_source: ?GoodSource = null;
+
+fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir: bool) void {
+    if (allocator.dupe(u8, path)) |duped| {
+        if (last_good_source) |g| allocator.free(g.path);
+        last_good_source = .{ .path = duped, .is_dir = is_dir };
+    } else |_| {}
+}
+
+/// Snapshot dir a re-exec boots from. XDG_RUNTIME_DIR is already per-user, so
+/// no uid suffix is needed there; the /tmp fallback carries the uid, mirroring
+/// persist.zig. Caller owns the returned slice.
+pub fn snapshotDirPath(allocator: std.mem.Allocator) ![]u8 {
+    if (std.c.getenv("XDG_RUNTIME_DIR")) |dir| {
+        return std.fmt.allocPrint(allocator, "{s}/hana-config", .{std.mem.span(dir)});
+    }
+    return std.fmt.allocPrint(allocator, "/tmp/hana-config-{d}", .{std.os.linux.getuid()});
+}
+
+/// NUL-terminated snapshot path on c_allocator for `setenv`, or null when no
+/// snapshot has ever been written (nothing to hand a re-exec). One-shot: the
+/// result is intentionally leaked -- it rides the execv environ to the end of
+/// the process, mirroring restart.mustDupeZ.
+pub fn reexecSnapshotPathZ() ?[:0]const u8 {
+    const snap = snapshotDirPath(std.heap.c_allocator) catch return null;
+    defer std.heap.c_allocator.free(snap);
+    const io = std.Options.debug_io;
+    const d = std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch return null;
+    defer d.close(io);
+    var it = d.iterate();
+    if ((it.next(io) catch null) == null) return null;
+    return std.heap.c_allocator.dupeZ(u8, snap) catch null;
+}
+
+/// Best-effort empty of `d`'s immediate entries (recursive via deleteTree), so
+/// a refresh that lost a file never leaves a stale copy behind.
+fn clearDir(io: std.Io, d: std.Io.Dir) void {
+    var it = d.iterate();
+    while (it.next(io) catch return) |entry| {
+        d.deleteTree(io, entry.name) catch {};
+    }
+}
+
+/// Freezes the last-good config source into the snapshot dir, so a re-exec
+/// boots an identical config without re-reading the live config tree.
+/// Best-effort: a failed copy keeps the previous snapshot, still self-consistent.
+pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
+    const g = last_good_source orelse return;
+    const io = std.Options.debug_io;
+    const snap = snapshotDirPath(allocator) catch return;
+    defer allocator.free(snap);
+    // A re-exec boot whose own source IS the snapshot has nothing to copy.
+    if (std.mem.eql(u8, g.path, snap)) return;
+
+    var dest = std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            std.Io.Dir.createDirAbsolute(io, snap, std.Io.File.Permissions.default_dir) catch return;
+            break :blk std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch return;
+        },
+        else => return,
+    };
+    defer dest.close(io);
+    clearDir(io, dest);
+
+    if (g.is_dir) {
+        const src = std.Io.Dir.openDirAbsolute(io, g.path, .{ .iterate = true }) catch return;
+        defer src.close(io);
+        var w = src.walk(allocator) catch return;
+        defer w.deinit();
+        while (w.next(io) catch return) |entry| {
+            // createDirPath for the entry's parents is implied by make_path.
+            if (entry.kind == .directory) continue;
+            // Every file is copied (not just .toml): includes resolve relative
+            // to the config dir and may reference non-.toml assets.
+            std.Io.Dir.copyFile(src, entry.path, dest, entry.path, io, .{ .make_path = true, .replace = true }) catch {};
+        }
+    } else {
+        // A single-file config becomes <snapshot>/config.toml, which the
+        // directory loader picks up (fallback.toml is skipped by name).
+        std.Io.Dir.copyFile(std.Io.Dir.cwd(), g.path, dest, "config.toml", io, .{ .replace = true }) catch return;
+    }
+}
+
 /// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
 /// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
 /// `source` receives where the config actually came from (user vs fallback),
@@ -395,10 +495,30 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource) !
     const paths = try searchPaths(allocator);
     defer paths.deinit(allocator);
 
+    // A re-exec hand-off (reload_hana, restart.execNext) pins HANA_CONFIG_DIR
+    // to the frozen last-good snapshot, so the successor boots an identical
+    // config WITHOUT re-reading the live config tree. Any failure falls
+    // through to the normal search (a broken snapshot must not silently swap
+    // in the embedded fallback over an otherwise-fine user config).
+    if (std.c.getenv("HANA_CONFIG_DIR")) |env_z| {
+        const env = std.mem.span(env_z);
+        if (loadConfigFromDir(allocator, env)) |cfg| {
+            rememberGoodSource(allocator, env, true);
+            source.* = .user;
+            return cfg;
+        } else |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.ConfigParseFailed => {
+                debug.warn("Re-exec config snapshot {s} unusable ({s}); falling back to the user's config", .{ env, @errorName(err) });
+            },
+            else => return err,
+        }
+    }
+
     // Try directories first (contain multiple .toml files), then single files.
     const dir_attempts = [_][]const u8{ paths.xdg_dir, paths.local_dir };
     for (dir_attempts) |dir|
         if (try tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| {
+            rememberGoodSource(allocator, dir, true);
             source.* = .user;
             return cfg;
         };
@@ -406,6 +526,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource) !
     const file_attempts = [_][]const u8{ paths.xdg_file, paths.local_file };
     for (file_attempts) |path|
         if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back", &.{error.FileNotFound})) |cfg| {
+            rememberGoodSource(allocator, path, false);
             source.* = .user;
             return cfg;
         };
@@ -650,7 +771,6 @@ const action_entries = [_]struct { key: []const u8, action: types.Action }{
     // Void-variant aliases (old tag names → renamed void variants).
     .{ .key = "close", .action = .{ .close_window = {} } },
     .{ .key = "kill", .action = .{ .close_window = {} } },
-    .{ .key = "reload", .action = .{ .reload_config = {} } },
     .{ .key = "fullscreen", .action = .{ .toggle_fullscreen = {} } },
     .{ .key = "minimize", .action = .{ .minimize_window = {} } },
     .{ .key = "prompt", .action = .{ .toggle_prompt = {} } },
@@ -846,7 +966,8 @@ fn resolveAndParseAction(
 /// Resolves one `binds` value into a single Action, or null when the entry
 /// should be skipped (empty array, or a value that is neither string nor
 /// array). A one-element array unwraps to its sole action; a multi-element
-/// array becomes a `.sequence`.
+/// array becomes a `.sequence`. Within an element a `+` links a parallel
+/// batch (`[a, b + c, d]` = a, then b and c together, then d).
 fn actionFromValue(
     allocator: std.mem.Allocator,
     value: parser.Value,
@@ -863,7 +984,7 @@ fn actionFromValue(
             }
             for (arr.items) |elem|
                 if (elem.asScalar([]const u8)) |cmd|
-                    try acts.append(allocator, try resolveAndParseAction(allocator, cmd, ws_idx, kill));
+                    try acts.append(allocator, try resolveElement(allocator, cmd, ws_idx, kill));
             // A non-empty array whose elements were all non-strings
             // filters down to zero actions; return null (no binding) instead
             // of a dead empty sequence.
@@ -878,9 +999,63 @@ fn actionFromValue(
             }
             return .{ .sequence = try acts.toOwnedSlice(allocator) };
         },
-        .string => |command| try resolveAndParseAction(allocator, command, ws_idx, kill),
+        .string => |command| try resolveElement(allocator, command, ws_idx, kill),
         else => null,
     };
+}
+
+/// A `+` is a parallel separator only when whitespace sits on at least one
+/// side, so literal plus signs in exec commands (`xdotool key ctrl+plus`)
+/// are never split.
+fn parallelSepAt(cmd: []const u8, i: usize) bool {
+    if (cmd[i] != '+') return false;
+    if (i > 0 and (cmd[i - 1] == ' ' or cmd[i - 1] == '\t')) return true;
+    if (i + 1 < cmd.len and (cmd[i + 1] == ' ' or cmd[i + 1] == '\t')) return true;
+    return false;
+}
+
+/// Splits `cmd` on parallel separators, appending the trimmed, non-empty
+/// fragments to `out`. Slices alias `cmd` (no copies).
+fn splitParallel(allocator: std.mem.Allocator, cmd: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var start: usize = 0;
+    for (cmd, 0..) |c, i| if (c == '+' and parallelSepAt(cmd, i)) {
+        const frag = std.mem.trim(u8, cmd[start..i], " \t");
+        if (frag.len > 0) try out.append(allocator, frag);
+        start = i + 1;
+    };
+    const tail = std.mem.trim(u8, cmd[start..], " \t");
+    if (tail.len > 0) try out.append(allocator, tail);
+}
+
+/// Resolves one config-list element (or a lone string value) into its Action.
+/// A `+`-linked batch becomes a `.parallel` group; without separators the
+/// result is a single action (byte-for-byte the previous element behavior).
+fn resolveElement(
+    allocator: std.mem.Allocator,
+    cmd: []const u8,
+    ws_idx: u16,
+    kill: ?[]const u8,
+) !types.Action {
+    var has_sep = false;
+    for (cmd, 0..) |c, i| if (c == '+' and parallelSepAt(cmd, i)) {
+        has_sep = true;
+        break;
+    };
+    if (!has_sep) return resolveAndParseAction(allocator, cmd, ws_idx, kill);
+
+    var frags: std.ArrayList([]const u8) = .empty;
+    defer frags.deinit(allocator);
+    try splitParallel(allocator, cmd, &frags);
+    if (frags.items.len <= 1)
+        return resolveAndParseAction(allocator, if (frags.items.len == 1) frags.items[0] else cmd, ws_idx, kill);
+
+    var group: std.ArrayList(types.Action) = .empty;
+    errdefer {
+        for (group.items) |*a| a.deinit(allocator);
+        group.deinit(allocator);
+    }
+    for (frags.items) |frag| try group.append(allocator, try resolveAndParseAction(allocator, frag, ws_idx, kill));
+    return .{ .parallel = try group.toOwnedSlice(allocator) };
 }
 
 /// Resolves the `Mod+` placeholder in a keybind key: when `mod_placeholder` is
@@ -1062,6 +1237,10 @@ pub fn load(allocator: std.mem.Allocator) !types.Config {
     };
     errdefer cfg.deinit(allocator);
     try validate(&cfg);
+    // A successful boot config becomes the re-exec hand-off snapshot (binary-
+    // only reload). Guarded to a valid config so a parse-error fallback never
+    // overwrites the previous good snapshot.
+    refreshSnapshot(allocator);
     return cfg;
 }
 

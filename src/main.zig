@@ -51,7 +51,7 @@ pub fn main() !void {
     // first or Xft.dpi would never be read.
     try utils.initAtomCache(x.conn);
 
-    core.dpi_info.store(scale.detectDpi(x.conn, x.screen), .release);
+    core.dpi_info = scale.detectDpi(x.conn, x.screen);
 
     input.setup(x.conn, x.screen);
     try input.initXkb(x.conn);
@@ -76,7 +76,7 @@ pub fn main() !void {
 
     // Arm the unified reload: resolve the exec path before any reload/reexec
     // request can arrive (restart.init).
-    restart.init(alloc);
+    restart.init();
 
     // Drop the Config internals and the heap box core.init() owns; the keybind
     // resolver (input-owned) is deinited separately above. The identity guard

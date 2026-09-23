@@ -59,12 +59,9 @@ pub const State = struct {
     root: WindowId,
     alloc: std.mem.Allocator,
     config: *types.Config,
-    /// Monotonic fact revisions. Bumped by the module that owns each fact
-    /// (focus, window/workspace state, layout) whenever that fact changes.
-    /// Consumers (e.g. the bar, over its draw poll) diff these revisions
-    /// against their last-seen value to decide what to redraw, instead of
-    /// being poked by name. Non-core modules never mutate core's facts;
-    /// they bump the revision of the fact they changed.
+    /// Monotonic fact revisions, bumped by the module owning each fact (see
+    /// Facts); consumers diff against their last-seen value to decide what
+    /// to redraw.
     facts: Facts = .{},
 };
 
@@ -147,4 +144,4 @@ pub fn init(
 /// Stays outside State: unlike State's fields it has a safe default
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
-pub var dpi_info: std.atomic.Value(f32) = std.atomic.Value(f32).init(constants.baseline_dpi);
+pub var dpi_info: f32 = constants.baseline_dpi;

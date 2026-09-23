@@ -11,7 +11,7 @@ Line numbers were verified by the auditing agents against the live tree unless m
 A follow-on campaign executed the recommended first-pass scope across four tiers; the X-gated suite runs headless under `dev/scripts/xtest.sh` (`HANA_REQUIRE_X=1` to fail when X is unavailable).
 
 Status key used inline:
-- **FIXED** — verified in the current tree (fmt + `zig build check` + `zig build test` + X-gated pass; the 26-scenario deletion-modularity matrix passes).
+- **FIXED** — verified in the current tree (fmt + `zig build check` + `zig build test` + X-gated pass; the 31-scenario deletion-modularity matrix passes — 26 `run_scenario` calls, with the per-layout delete loop expanding to 6 runs).
 - **GATED** — resolved with a deliberately behavior-neutral deviation, documented at the site.
 - **DEFERRED** — intentionally not done; the tradeoff is documented (mostly structural "Phase 2" work, per the constraint that god-files are not to be split for size alone).
 - **OPEN** — still outstanding.
@@ -217,7 +217,7 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 
 ## III. Architecture & structure
 
-> Status: the structural overview and the Phase-2 items remain accurate. Most Phase-2 refactors were deliberately NOT pursued (god-file constraint: don't split for size alone; high blast radius with little user-visible payoff). DELETION-MODULARITY: `check-modularity` is now an explicit build step + script mode (26 scenarios green) but deliberately not a dependency of the default `check`.
+> Status: the structural overview and the Phase-2 items remain accurate. Most Phase-2 refactors were deliberately NOT pursued (god-file constraint: don't split for size alone; high blast radius with little user-visible payoff). DELETION-MODULARITY: `check-modularity` is now an explicit build step + script mode (31 scenarios green — 26 `run_scenario` calls, the tiling-layout loop expanding to 6) but deliberately not a dependency of the default `check`.
 
 ### Structural overview (from architecture audit)
 - Hub-and-spoke around a single core `Model` + a sync boundary; `core/sync/sink.zig` is the only sanctioned raw-XCB surface; `model/`+`tiling/` are xcb-free; `core/plugin.zig` defines the `WindowModule`/`Segment`/`Layout`/`Surfaces` contracts.

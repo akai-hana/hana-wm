@@ -8,6 +8,14 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const masks = @import("masks");
 
+// libc setenv for the re-exec hand-off's config-snapshot pin (HANA_CONFIG_DIR).
+// Mirroring restart.zig's pattern: the stdlib has no setenv wrapper, and the
+// re-exec path already relies on libc for exec/setenv. The value is freed by
+// no one by design -- it must outlive execv (which inherits environ).
+const c = @cImport({
+    @cInclude("stdlib.h");
+});
+
 const debug = @import("debug");
 const config = @import("config");
 const input = @import("input");
@@ -345,6 +353,11 @@ fn handleConfigReload() !void {
     cs.config = new_ptr;
     committed = true;
 
+    // Freeze the now-live config as the re-exec source: a later reload_hana
+    // (binary-only reload) boots from this snapshot rather than from the
+    // (possibly mid-edit or broken) config files.
+    config.refreshSnapshot(cs.alloc);
+
     // Per-subsystem change detection: only tear down and rebuild the
     // subsystems whose config actually changed.  E.g. a bar color tweak
     // should not regrab keybindings, and a keybinding change should not
@@ -383,7 +396,7 @@ fn handleConfigReload() !void {
 }
 
 // Re-exec hand-off, driven by restart.consumeReexec() in run(). The sequence
-// is fixed: resolve the exec path, persist the live session FIRST (a failed
+// is fixed: pin the config snapshot, persist the live session FIRST (a failed
 // save aborts the hand-off and the WM keeps running on its live connection),
 // then drop the X connection so the successor cannot inherit a live
 // connection holding the root SubstructureRedirect grab, then execNext
@@ -402,6 +415,13 @@ fn handleReexec() !void {
     // live for the rest of the process lifetime.
     defer cs.alloc.free(path);
     try persist.save(cs.alloc, pipeline.model(), path);
+
+    // Hand the successor the frozen last-good config via HANA_CONFIG_DIR, so
+    // this re-exec swaps ONLY the binary. A re-exec boot that finds no
+    // snapshot (no user config was ever loaded) falls back to the normal
+    // search, which reproduces today's fallback-only behavior.
+    if (config.reexecSnapshotPathZ()) |snap_z|
+        _ = c.setenv("HANA_CONFIG_DIR", snap_z, 1);
 
     xcb.xcb_disconnect(cs.conn);
     restart.execNext(self_path, path);
@@ -627,19 +647,23 @@ pub fn run() !void {
         if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
             signals.drainAndDispatch(signal_fd);
 
-        // The reload flag is set only by SIGHUP (a pure config reload via
-        // proc.reload, which writes a wake byte to the pipe; the byte can be
+        // The reload flag is set by SIGHUP and the reload_config keybinding
+        // (proc.reload, which writes a wake byte to the pipe; the byte can be
         // dropped if the pipe is full). Consume it every iteration, BEFORE the
         // ready split: confining it to the ready>0 branch let a flag-only
         // request stall on timeout wakeups until unrelated X traffic arrived.
         //
-        // Re-exec supersedes config reload: consumed first so a hand-off is
-        // never deferred behind an in-flight reload.
-        if (restart.consumeReexec())
-            handleReexec() catch |err| debug.err("Re-exec failed: {}", .{err});
-
+        // Config reload is consumed BEFORE re-exec: a chained bind
+        // (["reload_config", "reload_hana"]) sets both flags in one dispatch,
+        // and reload_config must apply + validate (and refresh the re-exec
+        // snapshot) before the successor boots from that snapshot. A reload
+        // that fails keeps the last-good snapshot, so the re-exec still lands
+        // on the previously live config.
         if (utils.consumeReload())
             handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
+
+        if (restart.consumeReexec())
+            handleReexec() catch |err| debug.err("Re-exec failed: {}", .{err});
 
         if (ready == 0 and poll_timeout_ms >= 0) {
             if (build_options.has_bar) surfaces.onPollWakeup();

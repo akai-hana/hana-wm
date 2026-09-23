@@ -47,7 +47,6 @@ min_window_dim   = 50
 #   grid          "rigid" (default) | "relaxed"    — incomplete last row: leave gaps or expand
 #   fibonacci     (no variants)
 #
-# Layout indicator overrides (shown in bar): see [tiling.layouts.<name>].indicator
 layouts = [
     "master-stack",                            # lifo / fifo
     "monocle",      "gaps",                    # gapless / gaps
@@ -65,27 +64,20 @@ side  = "left"   # "left" / "right" — master area on this side of the screen
 width = 50%      # Master area width [5%-95%] or exact pixels (0-N]px
 variants = "lifo" # "lifo" = new window spawns in master; "fifo" = spawns in stack
 
-# Override the 3-character indicator shown in the bar for this layout.
-# Defaults to the variant name ("LIF" or "FIF") when not set.
-# indicator = "M-S"
-
 [tiling.layouts.monocle]
 variants = "gaps" # "gapless" (true fullscreen) | "gaps" (honour gap settings)
-# indicator = "MON"
 
 [tiling.layouts.grid]
 variants = "relaxed" # "rigid" (strict grid) | "relaxed" (last window expands)
-# indicator = "GRD"
 
 [tiling.layouts.fibonacci]
 # Fibonacci has no behavioral variants.
-# indicator = "FIB"
 
 # -- Window aesthetics --
 # Defaults below; the theme file (themes/akai.toml) typically overrides these.
 # [tiling.aesthetics]
-# gap_width        = 10px  # Window gap size [0%-200%] or [0-N]px
-# border_width     = 2px   # Window border width [0%-200%] or [0-N]px
+# gap_width        = 10    # Window gap size [0%-200%] or a bare number of px
+# border_width     = 2     # Window border width [0%-200%] or a bare number of px
 # border_focused   = "#5294E2"
 # border_unfocused = "#383C4A"
 
@@ -180,12 +172,14 @@ Mod+Shift+5 = "pin_window"            # Pin/unpin focused window to every worksp
 Mod+B       = "toggle_bar_visibility"  # Show / hide
 Mod+Shift+B = "toggle_bar_position"    # Top / bottom
 
-# -- Emergency --
-# Unconditionally re-exec hana, replacing the running binary at its resolved
-# executable path (for after a rebuild). reload_config (Mod+Shift+R elsewhere)
-# hot-reloads the config instead.
-Mod+Shift+R = "reload"                 # Hot-reload config
-Mod+Shift+Escape = "reload_hana"
+
+# reload_config hot-reloads the config in place (validated first; a parse
+# error keeps the live config). reload_hana re-execs the current binary and
+# boots from the last-good config snapshot -- i.e. it reloads ONLY the binary,
+# never touching the config files. Chained on one key, the two give a full
+# reload: the config is applied + validated in-process, then the binary swaps.
+Mod+Shift+Escape = ["reload_config", "reload_hana"]
+# Mod+Shift+R = "reload_config" # Hot-reload config only (no binary swap)
 
 # ---------------------------------------------------------------------------
 # Workspace rules

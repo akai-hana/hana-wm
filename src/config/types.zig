@@ -89,10 +89,13 @@ pub const Action = union(enum) {
     close_window,
     /// In-place config reload: re-reads config.toml and applies the diff to
     /// the live model, without restarting the process (proc.reload flag).
+    /// On success the live config is also frozen into the re-exec snapshot.
     reload_config,
     /// Unconditional in-place re-exec of the current binary at the resolved
     /// executable path (restart.requestReexec): reloads the whole process,
-    /// no binary-change check.
+    /// no binary-change check. BINARY-ONLY: the successor boots from the
+    /// frozen last-good config snapshot (HANA_CONFIG_DIR), never re-reading
+    /// the config files; chain with reload_config for a full reload.
     reload_hana,
     cycle_layout: Dir,
     toggle_bar_visibility,
@@ -108,7 +111,16 @@ pub const Action = union(enum) {
     move_to_workspace: u8,
     toggle_tag: u8,
     /// Ordered list of actions executed left-to-right (owned slice).
+    /// A `+`-linked group in a config list becomes a `.parallel` step (see
+    /// below); the enclosing `.sequence` runs steps in order, so a mixed list
+    /// like `[a, b + c, d]` is a, then b+c, then d.
     sequence: []Action,
+    /// One batch of sub-actions launched together: every member is dispatched
+    /// before the enclosing sequence proceeds to its next step, and no member
+    /// waits on another (owned slice). The WM is single-threaded, so this is
+    /// the same-batch form of parallelism: sync actions complete back-to-back
+    /// and `exec` children run as concurrent processes.
+    parallel: []Action,
     dump_state,
     minimize_window,
     unminimize: RestoreOrder,
@@ -131,7 +143,7 @@ pub const Action = union(enum) {
     pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .exec => |cmd| allocator.free(cmd),
-            .sequence => |acts| {
+            .sequence, .parallel => |acts| {
                 for (acts) |*a| a.deinit(allocator);
                 allocator.free(acts);
             },
@@ -438,30 +450,12 @@ pub inline fn freeBarLayouts(
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }
 
-/// Frees the owned segment-name keys of a [bar.properties] segment-color map,
-/// then deinits the map itself. Values are scalars (colors); only keys need
-/// freeing.
-pub fn freeSegmentColors(
-    map: *std.StringHashMapUnmanaged(Color),
-    allocator: std.mem.Allocator,
-) void {
-    var it = map.iterator();
-    while (it.next()) |e| allocator.free(e.key_ptr.*);
-    map.deinit(allocator);
-    // Zig 0.16's HashMapUnmanaged.deinit leaves the struct `undefined` rather
-    // than reusable; reset so a later freeSegmentColors/put on the same map
-    // (config reload reuses the field) stays safe.
-    map.* = .empty;
-}
-
-/// Frees the owned segment-name keys of the [bar.properties] segment-style
-/// map, then deinits the map itself. Values are scalars (SegmentProps); only
-/// keys need freeing. Mirrors freeSegmentColors, including the deinit reset
-/// so a config reload can reuse the field.
-pub fn freeSegmentProps(
-    map: *std.StringHashMapUnmanaged(SegmentProps),
-    allocator: std.mem.Allocator,
-) void {
+/// Frees the owned segment-name keys of a [bar.properties] segment map, then
+/// deinits the map itself. Values are scalars (Color / SegmentProps); only
+/// the keys need freeing. Zig 0.16's HashMapUnmanaged.deinit leaves the struct
+/// `undefined` rather than reusable, so reset to `.empty` — the config reload
+/// reuses the field.
+pub fn freeSegmentMap(comptime V: type, map: *std.StringHashMapUnmanaged(V), allocator: std.mem.Allocator) void {
     var it = map.iterator();
     while (it.next()) |e| allocator.free(e.key_ptr.*);
     map.deinit(allocator);
@@ -577,9 +571,9 @@ pub const BarConfig = struct {
         freeStrings(&self.workspace_icons, allocator, free_storage);
         freeStrings(&self.fonts, allocator, free_storage);
         freeBarLayouts(&self.layout, allocator, free_storage);
-        freeSegmentColors(&self.segment_fg, allocator);
-        freeSegmentColors(&self.segment_value_fg, allocator);
-        freeSegmentProps(&self.segment_props, allocator);
+        freeSegmentMap(Color, &self.segment_fg, allocator);
+        freeSegmentMap(Color, &self.segment_value_fg, allocator);
+        freeSegmentMap(SegmentProps, &self.segment_props, allocator);
         inline for (.{ &self.clock_format, &self.drun_prompt, &self.indicator_focused, &self.indicator_unfocused, &self.volume_format, &self.volume_muted_format, &self.brightness_format, &self.brightness_device }) |f| if (f.*) |s| allocator.free(s);
     }
 

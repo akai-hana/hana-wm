@@ -8,7 +8,7 @@ const std = @import("std");
 /// Directories probed BEFORE the general $PATH walk: the handful of
 /// well-known install locations checked first. A dir appearing both here and
 /// in $PATH is probed exactly once (see `common_paths`).
-pub const common_dirs = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
+const common_dirs = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
 
 /// Membership set derived from `common_dirs` so the two stay in sync: $PATH
 /// segments equal to one of these are skipped during the general walk because

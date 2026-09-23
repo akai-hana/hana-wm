@@ -1206,29 +1206,30 @@ test "setFloatingRect updates floating window geometry" {
     try testing.expect(m.store.get(6).?.anchor == .tiled);
 }
 
-// The coverage seam claims the covering winner per ws and excludes parked
+// The occupant scan claims the covering winner per ws and excludes parked
 // ghosts (minimized-from-fullscreen windows never claim the screen). A
 // switch claim (new window covers while another owns the ws) releases the
-// previous occupant, so one ws never has two live covering claims.
-test "coverageOn winner resolution and parked-ghost exclusion" {
+// previous occupant, so one ws never has two live covering claims. The module
+// seam delegates to the pure model scan; the two agree by construction.
+test "occupant scan winner resolution and parked-ghost exclusion" {
     var m = makeModel();
 
     try initModules();
     defer deinitModules();
     regCur(&m, 60);
     regCur(&m, 61);
-    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
-    _ = fullscreen.toggleFullscreen(&m, 60); // rec on ws 0, covering
-    try testing.expectEqual(@as(?model.WindowId, 60), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
+    _ = fullscreen.toggleFullscreen(&m, 60); // covering on ws 0
+    try testing.expectEqual(@as(?model.WindowId, 60), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
     _ = fullscreen.toggleFullscreen(&m, 61); // switch: 61 releases 60's claim
-    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.coverageOn(&m, WSId.fromIndex(1)));
-    // Parked ghost: the record survives but never claims the screen.
+    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(1)));
+    // Parked ghost: the covering intent survives but never claims the screen.
     try minimize.minimize(&m, 61);
-    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), fullscreen.fullscreenWsOf(&m, 61).?);
     minimize.restore(&m, 61);
-    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
 }
 
 // Minimize blob round trip -- parked-only serialization, magic claim,
@@ -1263,34 +1264,6 @@ test "minimize serialize/deserialize round-trip" {
     try testing.expect(minimize.serializeWindow(@ptrCast(&m), 70, testing.allocator) == null);
 }
 
-// Fullscreen blob round trip -- non-parked serialization, anchor
-// retention, and re-adoption through the deserialize seam.
-test "fullscreen serialize/deserialize round-trip" {
-    var m = makeModel();
-
-    try initModules();
-    defer deinitModules();
-    regCur(&m, 80);
-    _ = fullscreen.toggleFullscreen(&m, 80); // covering on ws 0
-    const blob = fullscreen.serializeWindow(@ptrCast(&m), 80, testing.allocator) orelse
-        return error.TestUnexpectedResult;
-    defer testing.allocator.free(blob);
-    // Parked (minimize owns the slot) => fullscreen refuses to serialize.
-    _ = fullscreen.toggleFullscreen(&m, 80);
-    try minimize.minimize(&m, 80);
-    try testing.expect(fullscreen.serializeWindow(@ptrCast(&m), 80, testing.allocator) == null);
-    // Clear module state + presence, then re-adopt from the blob.
-    minimize.onWindowGone(80);
-    m.store.getPtr(80).?.presence = .present;
-    try testing.expect(fullscreen.deserializeWindow(80, blob, &m));
-    try testing.expect(fullscreen.isFullscreenMode(&m, 80));
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), fullscreen.fullscreenWsOf(&m, 80));
-    try testing.expect(m.store.get(80).?.presence == .covering);
-    try testing.expectEqual(@as(?model.WindowId, 80), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
-    // A foreign-magic blob is not claimed.
-    try testing.expect(!fullscreen.deserializeWindow(80, &foreign_blob, &m));
-}
-
 // -- Core intents: covering_ws is a model-authoritative core intent -----
 
 // toggleFullscreen drives the model's covering_ws core intent in lockstep
@@ -1320,9 +1293,9 @@ test "toggleFullscreen writes covering_ws core intent" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
 }
 
-// coveringOccupantOnWs mirrors coverageOn's parked-ghost exclusion and
-// agrees with the module's coverage seam.
-test "model.coveringOccupantOnWs excludes parked ghosts" {
+// The module occupant seam delegates to the model scan and agrees with it on
+// the parked-ghost exclusion.
+test "coveringOccupantOnWs excludes parked ghosts" {
     var m = makeModel();
 
     try initModules();
@@ -1330,7 +1303,7 @@ test "model.coveringOccupantOnWs excludes parked ghosts" {
     regCur(&m, 91);
     _ = fullscreen.toggleFullscreen(&m, 91);
     try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, 91), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 91), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
 
     // Minimize-from-fullscreen: covering_ws is KEPT (ghost) but presence is
     // parked, so neither the module seam nor the model helper reports an
@@ -1339,7 +1312,7 @@ test "model.coveringOccupantOnWs excludes parked ghosts" {
     try testing.expect(m.store.get(91).?.presence == .parked);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(91).?.covering_ws);
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, null), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
 
     // Restore re-surfaces the window: it re-enters covering (the model's
     // covering intent is the single authority for re-claiming the screen).
@@ -1347,30 +1320,7 @@ test "model.coveringOccupantOnWs excludes parked ghosts" {
     try testing.expect(m.store.get(91).?.presence == .covering);
     try testing.expect(fullscreen.isFullscreenMode(&m, 91));
     try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, 91), fullscreen.coverageOn(&m, WSId.fromIndex(0)));
-}
-
-// deserializeWindow (re-adoption) restores covering_ws on the model.
-test "fullscreen deserialize restores covering_ws" {
-    var m = makeModel();
-
-    try initModules();
-    defer deinitModules();
-    regCur(&m, 92);
-    _ = fullscreen.toggleFullscreen(&m, 92);
-    const blob = fullscreen.serializeWindow(@ptrCast(&m), 92, testing.allocator) orelse
-        return error.TestUnexpectedResult;
-    defer testing.allocator.free(blob);
-
-    // Simulate adoption onto a fresh entry: clear module state + presence, keep
-    // the store entry present (as registration creates it), then re-adopt.
-    fullscreen.onWindowGone(92);
-    m.store.getPtr(92).?.presence = .present;
-    m.store.getPtr(92).?.covering_ws = null;
-    try testing.expect(fullscreen.deserializeWindow(92, blob, &m));
-    try testing.expect(m.store.get(92).?.presence == .covering);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(92).?.covering_ws);
-    try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), fullscreen.fullscreenWsOf(&m, 92));
+    try testing.expectEqual(@as(?WindowId, 91), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
 }
 
 // A move/tag retarget (workspaces path) keeps the model's covering_ws in

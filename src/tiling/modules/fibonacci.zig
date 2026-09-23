@@ -60,20 +60,19 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             return;
         }
 
-        splitAndAdvance(v, out, win, dir, border2, m.gap, &cur);
+        splitAndAdvance(ctx, win, dir, m.gap, &cur);
         dir = dir.next();
     }
 }
 
 inline fn splitAndAdvance(
-    v: *const tiling.View,
-    out: *tiling.List,
+    ctx: tiling.LayoutCtx,
     win: model.WindowId,
     dir: SpiralDirection,
-    border2: u16,
     gap: u16,
     cur: *Region,
 ) void {
+    const border2 = utils.doubledBorder(ctx.m);
     const step = dir.step();
     const split_x = step.split_x;
     const forward = step.forward;
@@ -84,17 +83,18 @@ inline fn splitAndAdvance(
     const off: u16 = if (forward) 0 else dim - win_dim;
     const off_x: i32 = if (split_x) @intCast(off) else 0;
     const off_y: i32 = if (split_x) 0 else @intCast(off);
-    const advance: i32 = if (forward) @intCast(win_dim + gap) else 0;
 
-    const rect = utils.Rect{
-        .x = tiling.satI16(cur.x + off_x),
-        .y = tiling.satI16(cur.y + off_y),
-        .width = (if (split_x) win_dim else cur.w) -| border2,
-        .height = (if (split_x) cur.h else win_dim) -| border2,
-    };
-    tiling.emitView(v, out, win, rect);
-    if (forward and split_x) cur.x += advance;
-    if (forward and !split_x) cur.y += advance;
+    tiling.emitRect(
+        ctx.v,
+        ctx.out,
+        win,
+        cur.x + off_x,
+        cur.y + off_y,
+        (if (split_x) win_dim else cur.w) -| border2,
+        (if (split_x) cur.h else win_dim) -| border2,
+    );
+    if (forward and split_x) cur.x += @intCast(win_dim + gap);
+    if (forward and !split_x) cur.y += @intCast(win_dim + gap);
     if (split_x) {
         cur.w = cur.w -| (win_dim + gap);
     } else {

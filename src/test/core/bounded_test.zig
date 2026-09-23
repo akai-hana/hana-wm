@@ -83,27 +83,6 @@ test "bounded: insert clamps index and refuses when full" {
     try std.testing.expectEqualSlices(u32, &.{ 5, 10, 20 }, list.constSlice());
 }
 
-test "bounded: removeWhere and removeAllWhere prune matching items" {
-    var list = bounded.BoundedList(Row, 4){};
-    _ = list.append(.{ .win = 1, .value = 1 });
-    _ = list.append(.{ .win = 2, .value = 1 });
-    _ = list.append(.{ .win = 3, .value = 2 });
-    _ = list.append(.{ .win = 4, .value = 2 });
-
-    const matchValue = struct {
-        fn match(v: u8, item: Row) bool {
-            return item.value == v;
-        }
-    }.match;
-
-    try std.testing.expect(list.removeWhere(@as(u8, 2), matchValue));
-    try std.testing.expectEqual(@as(usize, 3), list.len);
-
-    try std.testing.expectEqual(@as(usize, 2), list.removeAllWhere(@as(u8, 1), matchValue));
-    try std.testing.expectEqual(@as(usize, 1), list.len);
-    try std.testing.expectEqual(@as(u32, 4), list.constSlice()[0].win);
-}
-
 test "bounded: removeById and removeAllById act on the key field" {
     var rows = bounded.BoundedList(Row, 4){};
     _ = rows.append(.{ .win = 1, .value = 1 });

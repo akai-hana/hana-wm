@@ -11,6 +11,12 @@
 
 const std = @import("std");
 
+/// Three sites sort module/stem name lists; the sort comparator stays in one
+/// place so the byte-identical bodies don't drift.
+fn lessStrings(_: void, a: []const u8, b_: []const u8) bool {
+    return std.mem.lessThan(u8, a, b_);
+}
+
 // Configuration
 //
 // Every path (and path-adjacent limit) this build script depends on,
@@ -582,11 +588,7 @@ const OwnerRegistry = struct {
             try reg.owners.put(discovery.b.allocator, dup_owner, list);
         }
         for (reg.owners.values()) |*list| {
-            std.mem.sort([]const u8, list.items, {}, struct {
-                fn lessThan(_: void, a: []const u8, b_: []const u8) bool {
-                    return std.mem.lessThan(u8, a, b_);
-                }
-            }.lessThan);
+            std.mem.sort([]const u8, list.items, {}, lessStrings);
         }
         return reg;
     }
@@ -862,11 +864,7 @@ fn boundSubStems(
                 try filtered.append(b.allocator, stem);
         }
     }
-    std.mem.sortUnstable([]const u8, filtered.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b_: []const u8) bool {
-            return std.mem.lessThan(u8, a, b_);
-        }
-    }.lessThan);
+    std.mem.sortUnstable([]const u8, filtered.items, {}, lessStrings);
     const dup = try b.allocator.dupe(u8, spec.package);
     try out.put(b.allocator, dup, filtered);
     return out.getPtr(dup).?;
@@ -1055,11 +1053,7 @@ fn buildSubsRegistryModule(
     sub_stems: []const []const u8,
 ) !*std.Build.Module {
     const stems = try b.allocator.dupe([]const u8, sub_stems);
-    std.mem.sortUnstable([]const u8, stems, {}, struct {
-        fn lessThan(_: void, a: []const u8, b_: []const u8) bool {
-            return std.mem.lessThan(u8, a, b_);
-        }
-    }.lessThan);
+    std.mem.sortUnstable([]const u8, stems, {}, lessStrings);
 
     var src = std.ArrayList(u8).empty;
     try src.print(b.allocator, "const {s} = @import(\"{s}\");\n\n", .{ package, package });

@@ -74,9 +74,7 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 /// into de-fullscreen rather than clobbering the resident. Ghost records
 /// (minimized-from-fullscreen) move their ws too, following the parked mask.
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
-    const covering_mode = providerOf(.isCoveringMode) orelse return;
     const covering_ws = providerOf(.coveringWsOf) orelse return;
-    if (!covering_mode.isCoveringMode.?(m, win)) return;
     const fws = covering_ws.coveringWsOf.?(m, win) orelse return;
     if (fws.eql(ws)) return;
     retargetOrDropFullscreen(m, win, ws);

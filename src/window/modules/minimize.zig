@@ -232,16 +232,18 @@ pub fn count() u32 {
 }
 
 /// Fills `set` with every currently minimized window ID, replacing any prior
-/// contents. Consumed by the bar via the module adapter.
-pub fn collectMinimizedIntoSet(
+/// contents. Infallible: an allocation failure leaves that window's entry out
+/// (every call site downstream swallows it the same way — the bar omits a
+/// hidden window rather than abort). Binds the collectHiddenSet seam.
+pub fn collectHiddenSet(
     m: *const model.Model,
     set: *std.AutoHashMapUnmanaged(model.WindowId, void),
     allocator: std.mem.Allocator,
-) !void {
+) void {
     _ = m;
     set.clearRetainingCapacity();
     for (g_recs.constSlice()) |rec|
-        try set.put(allocator, rec.win, {});
+        set.put(allocator, rec.win, {}) catch {};
 }
 
 /// Persistence seam (plugin.WindowModule.serializeWindow): marshals this
@@ -279,8 +281,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (g_recs.len >= MAX_MINIMIZED) return false;
     // Slice the payload back out via a byte-aligned copy (persist buffers are
     // byte-aligned; the extern struct's align(1) u32s load unaligned safely).
-    var raw: PackedMinimize align(@alignOf(PackedMinimize)) = undefined;
-    @memcpy(std.mem.asBytes(&raw), bytes[0..@sizeOf(PackedMinimize)]);
+    const raw = std.mem.bytesToValue(PackedMinimize, bytes[0..@sizeOf(PackedMinimize)]);
     const slot: ?usize = if (raw.slot == std.math.maxInt(u32)) null else raw.slot;
     const seq = raw.seq;
     // Replay the minimize park (shared with minimize()): drop the tiled slot,
@@ -303,16 +304,6 @@ pub fn onWindowGone(win: u32) void {
 /// coerces; this wrapper keeps the binding explicit).
 pub fn hideWindow(m: *model.Model, win: model.WindowId) anyerror!void {
     return minimize(m, win);
-}
-
-/// collectHiddenSet adapter: widens the internal `anyerror!void` synthesis to
-/// the contract's infallible `void` (the bar swallows allocation failures).
-pub fn collectHiddenSet(
-    m: *const model.Model,
-    set: *std.AutoHashMapUnmanaged(model.WindowId, void),
-    allocator: std.mem.Allocator,
-) void {
-    collectMinimizedIntoSet(m, set, allocator) catch {};
 }
 
 /// This module's window sub-system contribution: lifecycle + persistence

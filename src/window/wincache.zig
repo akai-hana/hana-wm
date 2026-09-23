@@ -23,7 +23,7 @@ const model_mod = @import("model");
 /// entries directly, so the actions.mapRequest bridge needs no conversion.
 pub const SizeHints = model_mod.SizeHints;
 
-pub const WindowData = struct {
+const WindowData = struct {
     border: u32 = 0,
     hints: SizeHints = .{},
     /// Cached _NET_WM_NAME / WM_NAME, duped into `title_alloc`. Owned: freed
@@ -33,7 +33,7 @@ pub const WindowData = struct {
     title: []const u8 = "",
 };
 
-pub const CacheMap = std.AutoHashMap(u32, WindowData);
+const CacheMap = std.AutoHashMap(u32, WindowData);
 
 /// Hard upper bound on cached windows.  A normal desktop never exceeds a
 /// few dozen managed windows; 512 is a generous ceiling that prevents
@@ -115,9 +115,9 @@ pub fn peekHints(win: u32) SizeHints {
     return wd.hints;
 }
 
-/// Evict a window's entire cache entry: geometry, border dedup data, the
-/// embedded WM_NORMAL_HINTS AND the cached title in one operation. No-op when
-/// never cached.
+/// Evict a window's entire cache entry: border dedup data, the embedded
+/// WM_NORMAL_HINTS and the cached title in one operation. No-op when never
+/// cached.
 pub fn removeWindow(window_id: u32) void {
     const c = live();
     if (c.getPtr(window_id)) |wd| {

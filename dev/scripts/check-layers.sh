@@ -57,8 +57,9 @@ wire_allowed() {
         # keybinding dispatch starts and never again (there is no layout/tiling
         # geometry being moved). Documented here with the same
         # "setup, not mutation" warrant as the detect-drag/restack family --
-        # IN-11 / CC-v4-1. Rides pat-wide via the `xcb_xkb_` family; see
-        # enableDetectableAutoRepeat's own comment for the retry contract.
+        # IN-11 / CC-v4-1. Rides pat-wide via the `xcb_xkb_` family plus
+        # `xcb_get_extension_data`; see enableDetectableAutoRepeat's own
+        # comment for the retry contract.
         src/input/xkbcommon.zig) ;;
 
         # Root-window keygrab installation at startup and click-focus
@@ -67,11 +68,12 @@ wire_allowed() {
         src/main.zig|src/input/input.zig) ;;
 
         # Wire PRIMITIVES: sync/sink.zig dispatches through
-        # core/x11/wire.zig's configureWindow / raiseWindow / setBorderPixel /
-        # pushWindowOffscreen*. Primitive home is not a policy violation --
-        # grep cannot distinguish definition from rogue send. These
-        # definitions were moved out of utils.zig into core/x11/wire.zig so
-        # the model/tiling layer only ever sees xcb-free utils decls.
+        # core/x11/wire.zig's configureWindow / raiseWindow / setBorderPixel
+        # (park rides an offscreen+below configure in sink.zig). Primitive
+        # home is not a policy violation -- grep cannot distinguish
+        # definition from rogue send. These definitions were moved out of
+        # utils.zig into core/x11/wire.zig so the model/tiling layer only
+        # ever sees xcb-free utils decls.
         src/core/x11/wire.zig) ;;
 
         # Re-export DECLARATIONS only: utils.zig's `pub const raiseWindow =
@@ -153,7 +155,7 @@ grab_allowed() {
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
-pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|xcb_xkb_per_client_flags|raiseWindow'
+pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|xcb_xkb_per_client_flags|xcb_get_extension_data|raiseWindow'
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue

@@ -42,13 +42,15 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         // relaxed cells don't overlap each other.
         const spacing_w: u16 = if (is_partial_row) partial_cell_w else cell_w;
 
-        const rect = utils.Rect{
-            .x = tiling.satI16(@intCast(m.gap +| col *| (spacing_w +| m.gap))),
-            .y = tiling.satI16(@intCast(wa_y +| m.gap +| row *| (cell_h +| m.gap))),
-            .width = if (is_partial_row) partial_win_w else win_w,
-            .height = win_h,
-        };
-        tiling.emitView(v, out, win, rect);
+        tiling.emitRect(
+            v,
+            out,
+            win,
+            @intCast(m.gap +| col *| (spacing_w +| m.gap)),
+            @intCast(wa_y +| m.gap +| row *| (cell_h +| m.gap)),
+            if (is_partial_row) partial_win_w else win_w,
+            win_h,
+        );
     }
 }
 

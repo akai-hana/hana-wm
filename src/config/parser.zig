@@ -101,16 +101,21 @@ pub const Section = struct {
     // sections carry their source name through the shared-value merge.
     name: []const u8 = "",
 
+    /// Reserves 4 slots in a string map, warning with `label` on OOM
+    /// (best-effort: losing the reserve just means an extra rehash).
+    fn reserve(allocator: std.mem.Allocator, comptime V: type, comptime label: []const u8) std.StringHashMap(V) {
+        var map = std.StringHashMap(V).init(allocator);
+        map.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, label);
+        return map;
+    }
+
     pub fn init(allocator: std.mem.Allocator) Section {
-        var map = std.StringHashMap(Value).init(allocator);
-        map.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section pair map reserve");
-        var consumed = std.StringHashMap(void).init(allocator);
-        consumed.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section consumed-set reserve");
-        var duplicated = std.StringHashMap(void).init(allocator);
-        duplicated.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section duplicate tracking reserve");
-        var dup_warned = std.StringHashMap(void).init(allocator);
-        dup_warned.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, "section duplicate-diagnostic reserve");
-        return .{ .pairs = map, .consumed = consumed, .duplicated_keys = duplicated, .scalar_dup_warned = dup_warned };
+        return .{
+            .pairs = reserve(allocator, Value, "section pair map reserve"),
+            .consumed = reserve(allocator, void, "section consumed-set reserve"),
+            .duplicated_keys = reserve(allocator, void, "section duplicate tracking reserve"),
+            .scalar_dup_warned = reserve(allocator, void, "section duplicate-diagnostic reserve"),
+        };
     }
 
     // Records `key` as the newest document-order key together with the source
@@ -193,17 +198,13 @@ pub const Section = struct {
             (std.mem.eql(u8, self.name, types.section_tiling) and std.mem.eql(u8, key, "layouts"));
         if (exempt) return;
         self.scalar_dup_warned.put(key, {}) catch {};
+        // Root pairs (no section header) warn under a "[root]" label so one
+        // format serves both cases.
         const decls: usize = val.array.items.len;
-        if (self.name.len == 0)
-            debug.warn(
-                "Duplicate key '{s}' accumulates into an array ({d} declarations); scalar reads use the last value",
-                .{ key, decls },
-            )
-        else
-            debug.warn(
-                "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations); scalar reads use the last value",
-                .{ key, self.name, decls },
-            );
+        debug.warn(
+            "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations); scalar reads use the last value",
+            .{ key, if (self.name.len == 0) "root" else self.name, decls },
+        );
     }
 
     // Generic typed getter: dispatches to the matching `Value.asScalar`
@@ -318,14 +319,24 @@ const palette_var_names = [_][]const u8{
     types.palette_text_color,
 };
 
-/// Single decoder for the color-literal / in-range-integer / hex-string forms
-/// a color knob accepts. `null` means "not a color"; callers layer their own
-/// palette-reference lookup and warning policy on top (schema's
-/// getColorFromValue).
+/// Single decoder for the color-literal / hex-integer / hex-string forms a
+/// color knob accepts. A bare all-digit spelling is only a color when it has
+/// exactly 6 (`RRGGBB`) or 8 (`RRGGBBAA`) digits, read as hex; any other bare
+/// number is rejected (CFG-46) rather than coerced to a decimal color.
+/// `null` means "not a color"; callers layer their own palette-reference
+/// lookup and warning policy on top (schema's getColorFromValue).
 pub fn colorFromValue(val: Value) ?u32 {
     if (val.asScalar(u32)) |c| return c;
     if (val.asScalar(i64)) |i| {
-        if (i >= 0 and i <= types.max_color) return @intCast(i);
+        if (i < 0) return null;
+        // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB, 8
+        // digits = #RRGGBBAA (e.g. `112233` -> 0x112233). Any other bare
+        // integral value in a color context is INVALID (no silent decimal
+        // coerce); spell a value-color via 0xRRGGBB instead.
+        var buf: [20]u8 = undefined;
+        const digits = std.fmt.bufPrint(&buf, "{d}", .{@as(u64, @intCast(i))}) catch return null;
+        if (digits.len == 6 or digits.len == 8) return std.fmt.parseInt(u32, digits, 16) catch null;
+        return null;
     }
     if (val.asScalar([]const u8)) |s| {
         return parseColor(s) catch null;
@@ -413,14 +424,20 @@ fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(u32)) ?u
     return null;
 }
 
-/// Parses `val` (either the one-token spelling `a+(weight:20%)b` or the
-/// spaced array spelling `[a, "+", (weight:20%), b]`) as a `+` color-mix
-/// expression, resolving every operand against `palette`. null when `val` is
-/// not a valid mix: no `+`, malformed structure (two operands without an
-/// operator, stray/trailing `+`, a weight before the head operand), more than
-/// max_mix_operands operands, or an operand that isn't a color.
-fn extractMixOperands(val: Value, palette: *const std.StringHashMap(u32)) ?[]MixOperand {
-    var operands: [max_mix_operands]MixOperand = undefined;
+/// Parses `val` (the one-token spelling `a+(weight:20%)b`, the spaced array
+/// spelling `[a, "+", (weight:20%), b]`, or a bare operand list `[a, b, c]`
+/// with no operator or weights) as a color-mix expression, resolving every
+/// operand against `palette`, storing them into `out`. A bare list mixes its
+/// operands equally (the same no-weight rule as the unspaced spelling). null
+/// when `val` is not a valid mix: no `+` in a scalar, malformed structure
+/// (stray/trailing `+`, a weight before the head operand), more than
+/// max_mix_operands operands, or an operand that isn't a color. Returns the
+/// valid operand count.
+fn extractMixOperands(
+    val: Value,
+    palette: *const std.StringHashMap(u32),
+    out: *[max_mix_operands]MixOperand,
+) ?usize {
     var count: usize = 0;
 
     // Match on the variant directly: asScalar would descend into an array's
@@ -434,13 +451,36 @@ fn extractMixOperands(val: Value, palette: *const std.StringHashMap(u32)) ?[]Mix
                 const tagged = splitWeightPrefix(part);
                 const color = resolveMixOperand(tagged.operand, palette) orelse return null;
                 if (count == max_mix_operands) return null;
-                operands[count] = .{ .color = color, .weight = tagged.weight };
+                out[count] = .{ .color = color, .weight = tagged.weight };
                 count += 1;
             }
-            return operands[0..count];
+            return count;
         },
-        // Spaced spelling: an array alternating operand and "+"([weight]) tokens.
         .array => |arr| {
+            if (arr.items.len < 2) return null;
+            // Bare operand list: no `+` and no weight tokens, every element a
+            // color operand. These mix equally (all weights null -> equal
+            // share in mixColors), e.g. `[red, green]` = 50/50.
+            var has_marker = false;
+            for (arr.items) |elem| {
+                if (elem == .string) {
+                    const s = elem.string;
+                    if (std.mem.eql(u8, s, "+") or isWeightToken(s)) {
+                        has_marker = true;
+                        break;
+                    }
+                }
+            }
+            if (!has_marker) {
+                for (arr.items) |elem| {
+                    const color = resolveMixOperandValue(elem, palette) orelse return null;
+                    if (count == max_mix_operands) return null;
+                    out[count] = .{ .color = color, .weight = null };
+                    count += 1;
+                }
+                return count;
+            }
+            // Spaced spelling: an array alternating operand and "+"([weight]) tokens.
             if (arr.items.len < 3) return null;
             var last_was_operand = false;
             var pending_weight: ?u32 = null;
@@ -473,7 +513,7 @@ fn extractMixOperands(val: Value, palette: *const std.StringHashMap(u32)) ?[]Mix
                 if (last_was_operand) return null;
                 const color = resolveMixOperandValue(elem, palette) orelse return null;
                 if (count == max_mix_operands) return null;
-                operands[count] = .{
+                out[count] = .{
                     .color = color,
                     .weight = if (expecting_operand_after_plus) pending_weight else null,
                 };
@@ -483,10 +523,23 @@ fn extractMixOperands(val: Value, palette: *const std.StringHashMap(u32)) ?[]Mix
                 pending_weight = null;
             }
             if (!last_was_operand) return null;
-            return operands[0..count];
+            return count;
         },
         else => return null,
     }
+}
+
+/// Single weight scan over mix operands: whether any carries an explicit
+/// weight and what those total. Shared by mixColors (head-remainder math)
+/// and resolveColorExpr (bounds validation before mixing).
+fn scanWeights(parts: []const MixOperand) struct { any_explicit: bool, sum: u64 } {
+    var any_explicit = false;
+    var explicit_sum: u64 = 0;
+    for (parts) |p| if (p.weight) |w| {
+        any_explicit = true;
+        explicit_sum += w;
+    };
+    return .{ .any_explicit = any_explicit, .sum = explicit_sum };
 }
 
 /// Weighted channel average of `parts`: the head operand absorbs the weight
@@ -499,16 +552,10 @@ fn mixColors(parts: []const MixOperand) u32 {
     if (n == 0) return 0;
     if (n == 1) return parts[0].color;
 
-    var any_explicit = false;
-    var explicit_sum: u64 = 0;
-    for (parts[1..]) |p| if (p.weight) |w| {
-        any_explicit = true;
-        explicit_sum += w;
-    };
-
+    const stats = scanWeights(parts[1..]);
     var weights: [max_mix_operands]u64 = undefined;
-    if (any_explicit) {
-        weights[0] = 100 - explicit_sum;
+    if (stats.any_explicit) {
+        weights[0] = 100 - stats.sum;
         for (parts[1..], 0..) |p, i| weights[i + 1] = p.weight orelse 0;
     } else {
         for (parts, 0..) |_, i| weights[i] = 1;
@@ -542,16 +589,13 @@ fn mixColors(parts: []const MixOperand) u32 {
 /// must each sit in 0-100 and their explicit sum must not exceed 100, so a
 /// `+(weight:N%)` chain always produces a valid, fully-determined mix.
 pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
-    const parts = extractMixOperands(val, palette) orelse return null;
+    var operands: [max_mix_operands]MixOperand = undefined;
+    const count = extractMixOperands(val, palette, &operands) orelse return null;
+    const parts = operands[0..count];
     if (parts.len == 0) return null;
     if (parts[0].weight != null) return null;
-    var any_explicit = false;
-    var explicit_sum: u64 = 0;
-    for (parts) |p| if (p.weight) |w| {
-        any_explicit = true;
-        explicit_sum += w;
-    };
-    if (any_explicit and explicit_sum > 100) return null;
+    const stats = scanWeights(parts);
+    if (stats.any_explicit and stats.sum > 100) return null;
     for (parts) |p| if (p.weight) |w| if (w > 100) return null;
     return mixColors(parts);
 }

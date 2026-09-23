@@ -33,7 +33,7 @@ const Claim = struct {
 const max_claims = if (build_options.has_bar) 1 else 0;
 
 // The bar is surface id 0 (present only when has_bar).
-pub const bar_id: ?u8 = if (build_options.has_bar) 0 else null;
+pub const bar_id: u8 = 0;
 
 var claims: [max_claims]Claim = [_]Claim{.{}} ** max_claims;
 

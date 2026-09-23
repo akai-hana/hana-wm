@@ -14,7 +14,8 @@
 # Sizes take exact pixels (N / Npx) or a percentage (N%); the reversed '%N'
 # spelling is not supported yet. A percentage resolves against HALF the screen
 # height, because gaps and borders inset a window on two sides: e.g. 100% =
-# half the display height, 0% = disabled. Use exact px for absolute control.
+# half the display height, 0% = disabled. Use a bare number of pixels for
+# absolute control.
 gap_width      = 2%
 border_width   = 1%
 

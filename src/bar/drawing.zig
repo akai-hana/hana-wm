@@ -215,7 +215,7 @@ pub const FontState = struct {
         if (self.current_font_desc) |desc| pango_font_description_free(desc);
     }
 
-    pub fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
+    fn loadFonts(self: *FontState, font_names: []const []const u8) !void {
         if (font_names.len == 0) return self.loadFont(fallbackFont);
         const font_list = try std.mem.join(self.allocator, ",", font_names);
         defer self.allocator.free(font_list);
@@ -719,7 +719,7 @@ pub const DrawContext = struct {
     /// x + width. Pass `min_w` to force the background to span at least that
     /// many text pixels (plus padding) so a region-scoped repaint of a
     /// shrunken segment still wipes its whole previous slot.
-    pub fn paintedSegment(
+    fn paintedSegment(
         self: *DrawContext,
         x: u16,
         height: u16,
@@ -742,9 +742,13 @@ pub const DrawContext = struct {
 
 /// Draws `text` at `x` using the config's scaled segment padding and bar
 /// colors (a `[bar.properties]` override for segment `segment_name` when set,
-/// bar `fg` otherwise), optionally with `props`' Pango styling. Collapses the
-/// identical drawSegment argument list the icon-ish segment modules (layout,
-/// variants, clock) would otherwise repeat.
+/// bar `fg` otherwise), optionally with `props`' Pango styling. When
+/// `cover_text` is set, the background fill always spans at least its measured
+/// width plus padding: the clock uses this so a region-scoped repaint of a
+/// NARROWER display mode repaints the whole reserved slot instead of leaving
+/// stale pixels from the previous wider frame. Collapses the otherwise
+/// repeated drawSegment argument list of the icon-ish segment modules (layout,
+/// variants, clock).
 pub fn drawPaddedSegment(
     dc: *DrawContext,
     config: types.BarConfig,
@@ -752,20 +756,30 @@ pub fn drawPaddedSegment(
     x: u16,
     segment_name: []const u8,
     text: []const u8,
+    cover_text: ?[]const u8,
     props: types.SegmentProps,
 ) !u16 {
+    const padding = config.scaledSegmentPadding(height);
     return dc.paintedSegment(
         x,
         height,
         text,
-        config.scaledSegmentPadding(height),
+        padding,
         config.bg,
         config.segmentFg(segment_name),
-        null,
+        if (cover_text) |ct| dc.measureTextWidth(ct) else null,
         props,
     );
 }
 
+/// Like `drawPaddedSegment`, but paints the `value` subslice of `text` (the
+/// numeric readout, e.g. "42%") in the segment's NUMBER color -- the
+/// `[bar.properties] <segment>_value` override (`segmentValueFg`), falling
+/// back to the segment foreground -- and everything else in the segment
+/// foreground. Collapses into `drawPaddedSegment` behavior when `value` is
+/// null or not a subslice of `text`. The width comes from the whole string,
+/// exactly like `drawSegment`, so a segment's reserved slot never changes when
+/// a value color is added.
 /// Like `drawPaddedSegment`, but paints the `value` subslice of `text` (the
 /// numeric readout, e.g. "42%") in the segment's NUMBER color -- the
 /// `[bar.properties] <segment>_value` override (`segmentValueFg`), falling
@@ -816,34 +830,6 @@ pub fn drawPaddedSegmentValue(
     }
     try dc.drawText(x + padding, baseline, text, config.segmentFg(segment_name));
     return x + width;
-}
-
-/// Like `drawPaddedSegment`, but the background fill always spans at least
-/// `cover_text`'s measured width plus padding. Used by the clock so a
-/// region-scoped repaint of a NARROWER display mode (time-only or date-only
-/// vs the full date-time view) repaints the whole reserved slot instead of
-/// leaving stale pixels from the previous wider frame.
-pub fn drawPaddedSegmentCovering(
-    dc: *DrawContext,
-    config: types.BarConfig,
-    height: u16,
-    x: u16,
-    segment_name: []const u8,
-    text: []const u8,
-    cover_text: []const u8,
-    props: types.SegmentProps,
-) !u16 {
-    const padding = config.scaledSegmentPadding(height);
-    return dc.paintedSegment(
-        x,
-        height,
-        text,
-        padding,
-        config.bg,
-        config.segmentFg(segment_name),
-        dc.measureTextWidth(cover_text),
-        props,
-    );
 }
 
 // ---------------------------------------------------------------------------

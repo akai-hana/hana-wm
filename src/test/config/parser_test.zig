@@ -78,6 +78,23 @@ test "parseColor accepts forms and rejects out-of-range" {
     try testing.expectError(error.InvalidColor, parser.parseColor("zzz"));
 }
 
+test "colorFromValue: bare all-digit spellings are hex (6 or 8 digits), others invalid" {
+    // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA hex
+    // (CFG-46). Any other bare integral value in a color context is rejected
+    // instead of silently coerced to a decimal color.
+    try testing.expectEqual(@as(u32, 0x112233), parser.colorFromValue(.{ .integer = 112233 }).?);
+    try testing.expectEqual(@as(u32, 0x11223344), parser.colorFromValue(.{ .integer = 11223344 }).?);
+    try testing.expectEqual(@as(u32, 0x99999999), parser.colorFromValue(.{ .integer = 99999999 }).?);
+    try testing.expectEqual(@as(u32, 0x16777215), parser.colorFromValue(.{ .integer = 16777215 }).?);
+    try testing.expect(parser.colorFromValue(.{ .integer = 300 }) == null);
+    try testing.expect(parser.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits: neither RGB nor RGBA
+    try testing.expect(parser.colorFromValue(.{ .integer = -1 }) == null);
+    // The .color and string forms are unchanged.
+    try testing.expectEqual(@as(u32, 0x61AFEF), parser.colorFromValue(.{ .color = 0x61AFEF }).?);
+    try testing.expectEqual(@as(u32, 0x112233), parser.colorFromValue(.{ .string = "112233" }).?);
+    try testing.expectEqual(@as(u32, 0x61AFEF), parser.colorFromValue(.{ .string = "#61AFEF" }).?);
+}
+
 test "mergeDocumentsInto: later document wins for scalars" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -300,7 +317,7 @@ test "color-mix: malformed expressions resolve to null, not garbage" {
     // An unknown operand is invalid.
     try testing.expect(parser.resolveColorExpr(.{ .string = "pa+nope" }, &palette) == null);
     // Stray structure in the array spelling.
-    const cases = [_][]const parser.Value{ &.{ .{ .string = "pa" }, .{ .string = "pb" } }, &.{ .{ .string = "+" }, .{ .string = "pa" }, .{ .string = "pb" } }, &.{ .{ .string = "pa" }, .{ .string = "+" } }, &.{ .{ .string = "pa" }, .{ .string = "+" }, .{ .string = "pb" }, .{ .string = "c" } } };
+    const cases = [_][]const parser.Value{ &.{ .{ .string = "+" }, .{ .string = "pa" }, .{ .string = "pb" } }, &.{ .{ .string = "pa" }, .{ .string = "+" } }, &.{ .{ .string = "pa" }, .{ .string = "+" }, .{ .string = "pb" }, .{ .string = "c" } } };
     for (cases) |cs| {
         var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, cs.len);
         defer arr.deinit(testing.allocator);
@@ -309,6 +326,25 @@ test "color-mix: malformed expressions resolve to null, not garbage" {
     }
     // The head operand may never carry a weight.
     try testing.expect(parser.resolveColorExpr(.{ .string = "(weight:50%)pa+pb" }, &palette) == null);
+}
+
+test "color-mix: a bare operand list mixes equally" {
+    var palette = std.StringHashMap(u32).init(testing.allocator);
+    defer palette.deinit();
+    try palette.put("pa", 0xA00000);
+    try palette.put("pb", 0x802000);
+
+    // `[pa, pb]` with no operator or weights is a 50/50 equal-weight mix.
+    var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 2);
+    defer arr.deinit(testing.allocator);
+    try arr.appendSlice(testing.allocator, &.{ .{ .string = "pa" }, .{ .string = "pb" } });
+    const mixed = parser.resolveColorExpr(.{ .array = arr }, &palette) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u32, 0x901000), mixed);
+    // A single-element list is not a mix; the alias fallback handles it.
+    var one = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 1);
+    defer one.deinit(testing.allocator);
+    try one.append(testing.allocator, .{ .string = "pa" });
+    try testing.expect(parser.resolveColorExpr(.{ .array = one }, &palette) == null);
 }
 
 test "collectPalette: aliases and + mixes resolve through a fixpoint" {
