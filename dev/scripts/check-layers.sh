@@ -56,8 +56,8 @@ wire_allowed() {
         # mutation: it flips a per-client flag the WM must set once before
         # keybinding dispatch starts and never again (there is no layout/tiling
         # geometry being moved). Documented here with the same
-        # "setup, not mutation" warrant as the detect-drag/restack family --
-        # IN-11 / CC-v4-1. Rides pat-wide via the `xcb_xkb_` family plus
+        # "setup, not mutation" warrant as the detect-drag/restack family.
+        # Rides pat-wide via the `xcb_xkb_` family plus
         # `xcb_get_extension_data`; see enableDetectableAutoRepeat's own
         # comment for the retry contract.
         src/input/xkbcommon.zig) ;;

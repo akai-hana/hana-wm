@@ -509,7 +509,7 @@ pub fn cycleLayoutKind(dir: i32) void {
 }
 
 /// Step the active layout within the config layout-name list (config order
-/// is the cycle order, S20), reproducing the old model.cycleLayout
+/// is the cycle order), reproducing the old model.cycleLayout
 /// wrap-around while resetting the variant index. Defaults/overrides always
 /// come from config names, so the active kind is always resolvable.
 fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {

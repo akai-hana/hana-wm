@@ -89,7 +89,7 @@ fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !ty
     return try config.loadConfig(alloc, path);
 }
 
-test "S1a: plain {kill} bind substitutes before parseAction" {
+test "plain {kill} bind substitutes before parseAction" {
     var cfg = try loadToml(testing.allocator, "s1a",
         \\[binds]
         \\Mod = "Mod4"
@@ -104,7 +104,7 @@ test "S1a: plain {kill} bind substitutes before parseAction" {
     try testing.expectEqualStrings("pkill -9 ghostty", kb.action.exec);
 }
 
-test "S1b: workspace/_N actions still resolve after the substitution hoist" {
+test "workspace/_N actions still resolve after the substitution hoist" {
     var cfg = try loadToml(testing.allocator, "s1b",
         \\[binds]
         \\Mod = "Mod4"
@@ -128,7 +128,7 @@ test "S1b: workspace/_N actions still resolve after the substitution hoist" {
     try testing.expectEqual(types.Action{ .switch_workspace = 0 }, cfg.keybindings.items[16].action);
 }
 
-test "S1c: sequence array elements containing {kill} substitute" {
+test "sequence array elements containing {kill} substitute" {
     var cfg = try loadToml(testing.allocator, "s1c",
         \\[binds]
         \\Mod = "Mod4"
@@ -146,7 +146,7 @@ test "S1c: sequence array elements containing {kill} substitute" {
     try testing.expectEqual(types.Action.close_window, seq[2]);
 }
 
-test "S1e: reload chain parses as a reload_config + reload_hana sequence" {
+test "reload chain parses as a reload_config + reload_hana sequence" {
     var cfg = try loadToml(testing.allocator, "s1e",
         \\[binds]
         \\Mod = "Mod4"
@@ -161,7 +161,7 @@ test "S1e: reload chain parses as a reload_config + reload_hana sequence" {
     try testing.expectEqual(types.Action.reload_hana, seq[1]);
 }
 
-test "S1g: a '+' batch parses as one parallel group" {
+test "a '+' batch parses as one parallel group" {
     var cfg = try loadToml(testing.allocator, "s1g",
         \\[binds]
         \\Mod = "Mod4"
@@ -176,7 +176,7 @@ test "S1g: a '+' batch parses as one parallel group" {
     try testing.expectEqual(types.Action.reload_hana, par[1]);
 }
 
-test "S1h: commas sequence batches, '+' runs a batch in parallel" {
+test "commas sequence batches, '+' runs a batch in parallel" {
     var cfg = try loadToml(testing.allocator, "s1h",
         \\[binds]
         \\Mod = "Mod4"
@@ -195,7 +195,7 @@ test "S1h: commas sequence batches, '+' runs a batch in parallel" {
     try testing.expectEqual(types.Action.dump_state, seq[2]);
 }
 
-test "S1i: unspaced literal '+' in an exec command is preserved" {
+test "unspaced literal '+' in an exec command is preserved" {
     var cfg = try loadToml(testing.allocator, "s1i",
         \\[binds]
         \\Mod = "Mod4"
@@ -209,7 +209,7 @@ test "S1i: unspaced literal '+' in an exec command is preserved" {
     try testing.expectEqualStrings("xdotool key ctrl+plus", act.exec);
 }
 
-test "S4: array filtering to zero actions yields no binding" {
+test "array filtering to zero actions yields no binding" {
     var cfg = try loadToml(testing.allocator, "s4",
         \\[binds]
         \\Mod = "Mod4"
@@ -220,7 +220,7 @@ test "S4: array filtering to zero actions yields no binding" {
     try testing.expectEqual(@as(usize, 0), cfg.keybindings.items.len);
 }
 
-test "C1: a document with skipped (broken) lines fails the load" {
+test "a document with skipped (broken) lines fails the load" {
     // "[broken header" is warn-and-skipped; buildConfigFromDoc must refuse to
     // build a partial config from a flagged Document, so reload keeps the
     // live config instead of half-applying a broken one.
@@ -231,7 +231,7 @@ test "C1: a document with skipped (broken) lines fails the load" {
     ));
 }
 
-// -- lowerSlice out-buffer safety (F-16b regression) --
+// -- lowerSlice out-buffer safety --
 
 test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
     var buf8: [8]u8 = undefined;
@@ -255,7 +255,7 @@ test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
     try testing.expectEqual(@as(usize, 0), empty.len);
 }
 
-// -- Config reload change detection deltas (F-05) --
+// -- Config reload change detection deltas --
 
 test "detectChanges: identical configs report no subsystem changes" {
     var a = types.Config{};

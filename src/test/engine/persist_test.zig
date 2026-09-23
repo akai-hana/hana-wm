@@ -1,7 +1,7 @@
-//! Persist module round-trip tests (F-10). The save wire format and the
+//! Persist module round-trip tests. The save wire format and the
 //! model-level restore path are xcb-free, so they run headless; the full
 //! save-on-quit / adopt-on-exec cycle needs the live X connection and is
-//! covered end-to-end by the S22 harness scenario.
+//! covered end-to-end by the restore harness scenario.
 //!
 //! `loadToGlobal` installs a process-lifetime global (`loaded_parsed`) with no
 //! public free, so this suite loads state through `std.heap.page_allocator`:

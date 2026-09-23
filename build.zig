@@ -993,7 +993,7 @@ fn buildOwnerRegistryModule(
     }
     try src.print(b.allocator, "}};\n", .{});
 
-    // CC-v5-5: single-binder hooks are enforced at comptime, not by prose.
+    // Single-binder hooks are enforced at comptime, not by prose.
     // A second module binding a providerOf-style hook would be silently
     // ignored (first-match dispatch), so the window registry asserts <= 1.
     if (std.mem.eql(u8, name, "window_modules")) {

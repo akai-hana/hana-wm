@@ -15,7 +15,7 @@ pub fn makeModel() model.Model {
 /// Deterministically re-arms the process-global module stores (minimize,
 /// fullscreen) that back the model transitions, so a test's first assertions
 /// never depend on which earlier tests left records behind ("pass in any
-/// order", F-20). Both modules' init()/deinit() are idempotent resets (they
+/// order"). Both modules' init()/deinit() are idempotent resets (they
 /// only clear their static stores), so calling this redundantly is harmless.
 /// No-ops for modules absent from this build.
 pub fn testReset() void {

@@ -68,7 +68,7 @@ fn printStdout(comptime fmt: []const u8, args: anytype) void {
 /// HANA_REQUIRE_X flips the skip into a hard failure: any environment set
 /// (e.g. `HANA_REQUIRE_X=1`) makes a headless or WM-owned run abort with a
 /// panic instead of silently self-passing, so a CI that believes it runs the
-/// integration layer can't be green while those tests actually skipped (F-18).
+/// integration layer can't be green while those tests actually skipped.
 pub fn setUp(name: []const u8) ?*Fx {
     const fx = Fx.connect(std.testing.allocator) orelse {
         switch (g_skip_reason) {

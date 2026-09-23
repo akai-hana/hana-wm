@@ -45,7 +45,7 @@ const foreign_blob = [_]u8{ 0x00, 1, 2 };
 
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
-/// what records an earlier test left behind (F-20).
+/// what records an earlier test left behind.
 const makeModel = helpers.setUpModel;
 
 /// init/deinit for the two module stores (minimize + fullscreen) most tests

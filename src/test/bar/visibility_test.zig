@@ -1,4 +1,4 @@
-//! Bar visibility policy tests (F-03). The policy half of the bar subsystem
+//! Bar visibility policy tests. The policy half of the bar subsystem
 //! (`bar/visibility.zig`) issues no X11 requests, so its decisions run over
 //! the core model, not the wire. The pure-predicate and absent-module checks
 //! are fully headless; the live fullscreen-occupancy branch needs a live

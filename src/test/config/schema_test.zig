@@ -455,7 +455,7 @@ test "bar.position is case-insensitive; unknown spellings keep .top" {
     try testing.expectEqual(types.BarScreenPosition.bottom, mixed.bar.bar_position);
 }
 
-test "S2: layouts array caps at 256 entries" {
+test "layouts array caps at 256 entries" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     // Each layout name takes an optional workspace-list ("1") group slot, so
@@ -480,7 +480,7 @@ test "S2: layouts array caps at 256 entries" {
     try testing.expectEqualStrings("l255", cfg.tiling.layouts.items[255]);
 }
 
-test "C11: config/fallback.toml loads cleanly through the real pipeline" {
+test "config/fallback.toml loads cleanly through the real pipeline" {
     // The shipped fallback doubles as a fixture: it must parse and apply with
     // no skipped lines (no source_path/fallback drift) and produce sane values.
     const io = std.Options.debug_io;
