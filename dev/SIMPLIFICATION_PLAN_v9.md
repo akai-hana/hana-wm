@@ -463,8 +463,56 @@ WCD-01/12/13, CORE-03 (owner gate), TIL-N6/10.
   - TIL-N5 (dangling `split_y`/`split_x` splice removed), TIL-N7 (`satI16` de-pubbed,
     doc renamed "Internal narrow/clamp used by emitRect and insetRect").
 
-- **Phase 1.5 (core mech, folded into wave 1, gates verified)**: CORE-06 (`resolveCmdZ`
+- **Phase 1.5 (core mech, folded into wave 1, gates verified)**:   CORE-06 (`resolveCmdZ`
   single-sources the stack/heap `[:0]` cmd copy in spawn.zig, −10), CORE-09 (`failWithTag`
   dedups the post-fork failure tail, −4), CORE-08 (redundant `has_bar and` conjunct dropped),
   CORE-10 (`screen.\*.root` → `screen.root` deref), CORE-11 (signals param rename),
   CORE-12 (`syncSink()` rename).
+
+- **Bar-module Phase 2 (gates green after each line)**: S-01 (`Throttle.land` folds the
+  pct + write application, used by apply/reset/flushOwed/finish), CL-01 (`stale()` inlined
+  into `secondElapsed`), SY-02 (cpu.zig baseline/delta branches merged into one state-write
+  tail + single clamp via `use_delta`), SY-01 (`systatus.readSmallFile` single-sources the
+  open-read-close stanza, adopted by mem/cpu/batt readouts, −18), TG-02 (`[2]f32` +
+  `corner_x_axis`/`corner_y_axis` index consts → 2-field `.x/.y` struct in tags.zig:97-110,
+  − resistant to index-swap), T-01 (title.zig:250-252/268 ellipsis arm → single trailing
+  `drawTextEllipsis`; carousel-off + active-off paths fold). **TG-01 folded into TG-02
+  prep** (`getCachedWorkspaceWidth` → `ws_width`, both call sites; see below).
+
+- **Wave 1 bar batch — DONE, gates green**: BAR01 (already resolved in tree; added clarifying
+  comment only), BAR02 (`updateClock` single `anyBoolHook` gate), BAR03 (comptime
+  `hasRegisteredSegments` guard + segAt/segDirty/setSegDirty single-source), BAR05
+  (`anyLayoutSegment(self, comptime pred)`; anonymous-struct pred shadow named `.dirty`),
+  BAR06 (`roleIndexOf`+`isRole`+`selfTickerIndex` single source), BAR08 (updateIfDirty reads
+  each core rev once), BAR09 (redundant post-draw `extendDirtySpan` dropped in drawRightSegments),
+  BAR11 (`minimizedApiFromRegistry` inlined into fillDrawCtx), BAR12 (`@splat(.{})` struct-array
+  default validated in Zig 0.16).
+  **Records**: BAR14 deferred (Q2), BAR10 folded into Phase 1 (dead guard).
+
+- **Wave 1 systatus/tags/title Phase-2 DONE, gates green**: SY-01 (`systatus.readSmallFile`
+  shared by mem 4096B / cpu 512B / batt 64B carries, −18), TG-01 (`getCachedWorkspaceWidth`
+  trivial getter deleted; `ws_width` at both call sites −3), TG-02 (`[2]f32`+axis index consts
+  → 2-field struct in tags.zig −3), T-01 (title.zig duplicated ellipsis arm single-sourced −2).
+  T-01 folds the carousel-head comment so static mode stays the one spell.
+  **Intentionally not folded** (WCD-06/08/09/11 — premise failed against current tree; each is
+  LOW and owner-deferred, see §C):
+
+  - **WCD-06** (`window.providerOf` re-export): the re-export IS the dependency seam — leaf
+    window modules must not know `window_mods`, only window.zig (the registry owner) may. Folding
+    moves the seam, does not remove it. Keep.
+  - **WCD-08** (per-module atom mini-caches): systatus/mem paths already single-source through
+    the shared `utils.getAtomCached` AtomCache; systatus's capability probe uses raw read only
+    (no atom). No standalone mini-cache remains to fold. Keep.
+  - **WCD-09** (property-reply validation 3 ways): icccm's format-8 (string) vs wire's
+    format-32 u32 reply correctness differ in want_format; `takePropertyReply(…, want_format,
+    want_type)` already centralizes format+type in wire. Remaining trio is the caller-side
+    `want_*` spelling, not a duplicate of the check. Keep.
+  - **WCD-11** (ws-number parse trio): `tryParseWsToken` (1-based, contextual warn) vs
+    `tryParseWorkspace` (0-based, different bound const + silent-null) genuinely differ in
+    return base, bound constant, and warn behavior; trying to fold to one shape would mean a
+    behavior change, not a dedup. Keep both; deferred to owner (already noted in WCD-11's plan).
+
+  - **(parenthetical) TG-01/TG-02 should be read together**: the audit listed them as
+    independent; in the tree `getCachedWorkspaceWidth` (TG-01) and the `[2]f32` corner//y
+    (TG-02) are in the same 300-line tags.zig, and both are now folded to plain fields. Either
+    one alone would be −3; together the win composes in one pass over one file.

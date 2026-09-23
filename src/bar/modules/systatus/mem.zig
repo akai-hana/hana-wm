@@ -20,13 +20,10 @@ fn parseMemField(s: []const u8, key: []const u8) ?u64 {
 /// Used memory %: 100 * (total - available) / total. Null when meminfo is
 /// unreadable.
 fn read() ?u8 {
-    const io = std.Options.debug_io;
-    var f = std.Io.Dir.openFileAbsolute(io, "/proc/meminfo", .{}) catch return null;
-    defer f.close(io);
     var buf: [4096]u8 = undefined;
-    const n = f.readPositionalAll(io, &buf, 0) catch return null;
-    const total = parseMemField(buf[0..n], "MemTotal:") orelse return null;
-    const avail = parseMemField(buf[0..n], "MemAvailable:") orelse return null;
+    const s = systatus.readSmallFile("/proc/meminfo", &buf) orelse return null;
+    const total = parseMemField(s, "MemTotal:") orelse return null;
+    const avail = parseMemField(s, "MemAvailable:") orelse return null;
     if (total == 0) return null;
     const used = total -| avail;
     return @intCast(@min((used * 100) / total, 100));

@@ -63,6 +63,17 @@ pub const Sub = struct {
 /// entry becomes one standalone bar segment named `sub.name`.
 pub const subs = @import("systatus_subs").subs;
 
+/// Opens `path` and reads its full contents into `buf`, returning the
+/// bytes read, or null when the file is absent/unreadable. Shared open+read
+/// stanza behind every readout's /proc or /sys probe.
+pub fn readSmallFile(path: []const u8, buf: []u8) ?[]const u8 {
+    const io = std.Options.debug_io;
+    var f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer f.close(io);
+    const n = f.readPositionalAll(io, buf, 0) catch return null;
+    return buf[0..n];
+}
+
 /// Per-segment state, indexed by registry position (segment i == subs[i]).
 var g_armed: [subs.len]bool = @splat(false);
 var g_pending_redraw: [subs.len]bool = @splat(false);

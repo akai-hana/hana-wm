@@ -993,6 +993,15 @@ fn measureBound(dc: *drawing.DrawContext, text: []const u8, t: u16, comptime rel
     return lo;
 }
 
+/// On-screen origin of a `w`-wide span at pen `px` clipped to the visible
+/// window `[tl, se)`, or null when the span lies fully off-screen. Shared by
+/// the pre-cursor span draw and the block cursor: both must skip the
+/// invisible prefix and start painting at `max(px, tl)`.
+inline fn clipOrigin(px: i32, w: u32, tl: i32, se: i32) ?i32 {
+    if (px + @as(i32, @intCast(w)) <= tl or px >= se) return null;
+    return @max(px, tl);
+}
+
 /// Draw `text` from the virtual pen `px` clipped to `[text_left_x, scroll_end_x)`.
 /// Non-post (`post=false`) is the pre-cursor span: hard-clips both edges without
 /// ellipsis and always advances `px.*` by the full text width, using the caller's
@@ -1023,15 +1032,13 @@ inline fn drawScrollSpan(
 
     const tl: i32 = text_left_x;
     const se: i32 = scroll_end_x;
-
-    // Fully off-screen to the left or right: nothing to draw.
-    if (px.* + @as(i32, w) <= tl or px.* >= se) return;
+    const origin = clipOrigin(px.*, w, tl, se) orelse return;
 
     // Skip the prefix that lies off-screen to the left.
     const start: usize = if (px.* < tl) measureBound(dc, text, @intCast(tl - px.*), .ge) else 0;
 
-    const draw_x: u16 = @intCast(@max(px.*, tl));
-    const available: u16 = @intCast(se - @as(i32, draw_x));
+    const draw_x: u16 = @intCast(origin);
+    const available: u16 = @intCast(se - origin);
 
     // Clip the visible suffix to the available width on the right.  When no
     // left clip occurred and the full text fits, `w` (already measured) skips
@@ -1073,8 +1080,8 @@ inline fn drawBlockCursor(
     const block_text = if (hi > lo) buf[lo..hi] else " ";
     const block_w = @max(text_w orelse dc.measureTextWidth(block_text), min_cursor_px);
 
-    if (px.* + @as(i32, block_w) > @as(i32, style.text_left_x) and px.* < @as(i32, style.scroll_end_x)) {
-        const draw_x: u16 = @intCast(@max(px.*, @as(i32, style.text_left_x)));
+    if (clipOrigin(px.*, block_w, style.text_left_x, style.scroll_end_x)) |origin| {
+        const draw_x: u16 = @intCast(origin);
         const vis_w: u16 = @intCast(@min(@as(i32, block_w), @as(i32, style.scroll_end_x) - px.*));
         if (vis_w > 0) {
             dc.fillRect(
