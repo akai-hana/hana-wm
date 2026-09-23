@@ -38,19 +38,12 @@ fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     return true;
 }
 
-/// Parses a 1-based workspace number from a bare token, with no warning or
-/// bound checking (the caller owns `checkWorkspaceBound`). The pure-parse
-/// core behind `tryParseWsToken`.
-fn parseWsToken(tok: []const u8) ?usize {
-    return std.fmt.parseInt(usize, tok, 10) catch return null;
-}
-
 /// Parses a 1-based workspace number from a bare token, warning with `fmt` on
 /// a malformed token or a value outside 1..255 / `max` (the callers embed the
 /// section name in `fmt`, so no separate context is needed), and returns null
 /// to skip it.
 fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: anytype) ?usize {
-    const ws_1based = parseWsToken(tok) orelse {
+    const ws_1based = std.fmt.parseInt(usize, tok, 10) catch {
         debug.warn(fmt, args);
         return null;
     };
@@ -118,20 +111,9 @@ const max_master_count: u8 = 10;
 const max_key_name_bytes = 64;
 
 /// Reads `path`, returning `error.FileTooLarge` when it exceeds
-/// `max_file_bytes`. The returned slice may alias a larger allocation
-/// (loading is arena-backed, so all ownership is released together by the
-/// arena reset; a bare caller's free of the slice frees the whole buffer).
-///
-/// One read loop for both the size-known fast path and the stat-less/zero
-/// growth path (procfs/sysfs/pipes): the initial buffer is the positive
-/// stat-reported size when there is one (allocating exactly that much and
-/// reading once), otherwise `read_growth_initial_bytes` with doubling until
-/// EOF. A stat result of 0 is as untrustworthy as a failed stat, so both
-/// take the growth path. Routing the stat'd case through the same loop also
-/// closes the stat-then-read race: if the file grew after stat, the overflow
-/// beyond the first known_size bytes is picked up by the growth machinery
-/// instead of being silently dropped. The buffer is realloc'd down to the
-/// exact size before ownership is handed to the caller.
+/// `max_file_bytes`. The returned slice may alias a larger allocation (loading
+/// is arena-backed, so all ownership is released together by the arena reset).
+/// Growth-path rationale sits inline below.
 pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
@@ -149,7 +131,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         break :size @intCast(st.size);
     } else 0;
 
-    const initial: usize = if (stat != null and known_size > 0) known_size else read_growth_initial_bytes;
+    const initial: usize = if (known_size > 0) known_size else read_growth_initial_bytes;
     // Single ownership throughout: the armed errdefer frees the whole buffer
     // exactly once on every error path, and the success path hands ownership
     // (possibly after a shrinking realloc) to the caller.
@@ -415,7 +397,7 @@ fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir: bo
 /// Snapshot dir a re-exec boots from. XDG_RUNTIME_DIR is already per-user, so
 /// no uid suffix is needed there; the /tmp fallback carries the uid, mirroring
 /// persist.zig. Caller owns the returned slice.
-pub fn snapshotDirPath(allocator: std.mem.Allocator) ![]u8 {
+fn snapshotDirPath(allocator: std.mem.Allocator) ![]u8 {
     if (std.c.getenv("XDG_RUNTIME_DIR")) |dir| {
         return std.fmt.allocPrint(allocator, "{s}/hana-config", .{std.mem.span(dir)});
     }
@@ -1684,7 +1666,7 @@ fn parseNumberedRuleSections(
     while (section_iter.next()) |entry| {
         const name = entry.key_ptr.*;
         const suffix_len = if (std.mem.startsWith(u8, name, types.section_prefix_workspace_rules)) types.section_prefix_workspace_rules.len else if (std.mem.startsWith(u8, name, types.section_prefix_rules)) types.section_prefix_rules.len else continue;
-        const ws_num = parseWsToken(name[suffix_len..]) orelse {
+        const ws_num = std.fmt.parseInt(usize, name[suffix_len..], 10) catch {
             debug.warn("Section [{s}]: workspace suffix is not a number, skipping", .{name});
             continue;
         };
@@ -1804,23 +1786,12 @@ pub const ConfigChanges = struct {
     keys: bool = false,
 };
 
-/// The three detectors below compare per-subsystem content summaries. They
-/// deliberately stay hand-maintained field lists rather than being derived
-/// from `schema.knobs` (which declares every scalar knob once):
-///
-///   * keysChanged is entirely bespoke: keybindings/mouse_bindings have no
-///     knob entries, and their equality is pair-based (modifiers + keysym /
-///     button, action deliberately excluded) -- not field equality.
-///   * bar/tiling carry non-knob content anyway (fonts, workspace icons,
-///     per-segment color overrides, layout/override tables, workspace rules)
-///     that a knob scan could not see, so a derivation would replace these
-///     plain scalar comparisons with reflection plus a second hand-built
-///     overlay -- more machinery for a residual list.
-///
-/// The per-shape comparators were already consolidated (std.meta.eql for
-/// unit/map/rule/string/override shapes, eqlStringMap and eqlBarLayouts for
-/// the two compound shapes), which keeps the lists drift-resistant without a
-/// reflection layer.
+/// The three detectors compare per-subsystem content summaries. They
+/// deliberately stay hand-maintained field lists, not derivations from
+/// `schema.knobs`: keysChanged is entirely bespoke (bindings have no knob
+/// entries and compare pair-based), while bar/tiling carry non-knob content
+/// (fonts, workspace icons, color overrides, layout/rule tables) a knob scan
+/// could not see.
 /// Bar-subsystem content: every field of BarConfig compared logically
 /// (arrays by items, optionals by inner value, strings by contents).
 fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {

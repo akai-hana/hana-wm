@@ -35,14 +35,8 @@ const surfaces = @import("surfaces").Surfaces;
 // share a mutual runtime-only dependency; no comptime cycle is formed because
 // both references are plain runtime function calls.
 const events = @import("events");
-// Floating drag commands are reached through actions (single command layer),
-// not by naming the floating module here, keeping the loop layer free of
-// the optional module import. The drag state (model-backed) is queried via
-// the same action wrappers.
 
 // Constants
-
-const mouse_buttons = [_]u8{ constants.mouse_button_left, constants.mouse_button_middle, constants.mouse_button_right, constants.mouse_button_scroll_up, constants.mouse_button_scroll_down };
 
 var xkb_state: ?xkbcommon.XkbState = null;
 
@@ -103,10 +97,8 @@ pub fn handleMappingNotify() void {
     const state = getXkbState() orelse return;
     state.rebuild(cs.conn);
 
-    // The dispatch map is keyed on keysym (unaffected by the rebuild), but
-    // `grabKeybindings` grabs the keycodes stored on each binding. Refresh
-    // those keycodes from the new table, then let grabKeybindings() atomically
-    // ungrab all and re-grab the updated set, avoiding duplicate/leaked grabs.
+    // Re-resolve per-binding keycodes from the new table, then atomically
+    // re-grab (ungrab all, grab the updated set).
     keybind.resolveKeycodes(cs.config.keybindings.items, state);
     events.grabKeybindings();
 }
@@ -123,6 +115,7 @@ pub fn setup(conn: core.Connection, screen: core.Screen) void {
 /// window for all lock_modifiers combinations (NumLock, CapsLock,
 /// ScrollLock, and their combinations).
 fn setupGrabs(conn: core.Connection, root: u32) void {
+    const mouse_buttons = [_]u8{ constants.mouse_button_left, constants.mouse_button_middle, constants.mouse_button_right, constants.mouse_button_scroll_up, constants.mouse_button_scroll_down };
     for (mouse_buttons) |button| {
         for (masks.lock_modifiers) |lock| {
             _ = xcb.xcb_grab_button(
@@ -312,29 +305,22 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 /// The timestamp in data32[1] is the time passed to the client per §4.1.2.7.
 fn closeWindow(win: u32) void {
     const conn = core.getState().conn;
-    if (!window.supportsWMDeleteCached(conn, win)) {
-        _ = xcb.xcb_destroy_window(conn, win);
+    if (window.supportsWMDeleteCached(conn, win)) blk: {
+        const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch break :blk;
+        const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch break :blk;
+
+        var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+        event.response_type = xcb.XCB_CLIENT_MESSAGE;
+        event.format = 32;
+        event.window = win;
+        event.type = protocols_atom;
+        event.data.data32[0] = delete_atom;
+        event.data.data32[1] = focus.getLastEventTime();
+
+        _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
         return;
     }
-
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
-        _ = xcb.xcb_destroy_window(conn, win);
-        return;
-    };
-    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
-        _ = xcb.xcb_destroy_window(conn, win);
-        return;
-    };
-
-    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-    event.response_type = xcb.XCB_CLIENT_MESSAGE;
-    event.format = 32;
-    event.window = win;
-    event.type = protocols_atom;
-    event.data.data32[0] = delete_atom;
-    event.data.data32[1] = focus.getLastEventTime();
-
-    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+    _ = xcb.xcb_destroy_window(conn, win);
 }
 
 // Action dispatch
@@ -345,20 +331,6 @@ inline fn dirSign(dir: types.Dir) i32 {
     return if (dir == .forward) 1 else -1;
 }
 
-/// A `,`-sequence advances strictly one step at a time. A raw exec step is the
-/// one that needs real waiting: the next step must not begin until the command
-/// has actually finished, so it goes through spawn.execSynchronous, which keeps
-/// the child a direct child and blocks on waitpid until it exits (freezing the
-/// WM for the duration -- see its doc). Every other step kind completes
-/// instantly and is dispatched with the normal non-blocking path.
-fn executeSequenceStep(action: *const types.Action) void {
-    if (action.* == .exec) {
-        spawn.execSynchronous(action.exec);
-        return;
-    }
-    executeAction(action);
-}
-
 /// Top-level action dispatcher. Routes each action tag to its handler inline
 /// (single switch, no per-class delegates). Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
@@ -366,7 +338,8 @@ fn executeAction(action: *const types.Action) void {
         // A `,`-sequence runs steps in strict order: each step fully finishes
         // (for a raw exec step, that means waiting until the command exits,
         // see spawn.execSynchronous) before the next one begins.
-        .sequence => |acts| for (acts) |*a| executeSequenceStep(a),
+        .sequence => |acts| for (acts) |*a|
+            if (a.* == .exec) spawn.execSynchronous(a.exec) else executeAction(a),
         // Core
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => utils.reload(),
@@ -440,21 +413,25 @@ inline fn tilingOp(comptime op: anytype, arg: anytype) void {
 
 /// Logs a full WM state snapshot at info level. Used for diagnostics only.
 fn dumpState() void {
+    const all = tracking.allWindows();
+
     debug.info("========== STATE DUMP ==========", .{});
     debug.info("Focused:        {?x}", .{focus.getFocused()});
-    debug.info("Total windows:  {}", .{tracking.windowCount()});
+    debug.info("Total windows:  {}", .{all.len});
     debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
 
     if (build_options.has_workspaces) {
         const ws_count = tracking.getWorkspaceCount();
-        for (0..ws_count) |i|
+        for (0..ws_count) |i| {
+            var n: usize = 0;
+            for (all) |e| {
+                if (model.maskedOn(e.mask, core.WorkspaceId.fromIndex(@intCast(i)))) n += 1;
+            }
             debug.info(
                 "  WS{}: {} windows",
-                .{
-                    i + 1,
-                    tracking.countWindowsOnWorkspace(core.WorkspaceId.fromIndex(@intCast(i))),
-                },
+                .{ i + 1, n },
             );
+        }
     }
 
     if (build_options.has_tiling and core.tilingEnabled()) {

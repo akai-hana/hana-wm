@@ -348,8 +348,7 @@ pub fn getInRange(
     comptime max: ?T,
 ) T {
     const val = switch (T) {
-        bool => section.getAsOrWarn(bool, key) orelse return default,
-        []const u8 => section.getAsOrWarn([]const u8, key) orelse return default,
+        bool, []const u8 => section.getAsOrWarn(T, key) orelse return default,
         u8, u16 => blk: {
             const i = section.getAsOrWarn(i64, key) orelse return default;
             // A negative int would trap on the @intCast below; warn-and-default
@@ -506,15 +505,14 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
         if (comptime k.requires.len > 0) {
             if (doc.getSection(k.requires) == null) break :knob;
         }
-        // Places probe in order; the FIRST section present in the document
-        // wins and only its paired key spelling is read. Presence of
-        // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]
-        // master_count` unrecognized, matching the old orelse chains.
         var hit: ?struct { sec: *parser.Section, key: []const u8 } = null;
-        inline for (k.places) |pl| {
-            if (hit == null) {
-                if (doc.getSection(pl.section)) |sec| hit = .{ .sec = sec, .key = pl.key };
-            }
+        inline for (k.places) |pl| probe: {
+            // Places probe in order; the FIRST section present in the document
+            // wins and only its paired key spelling is read. Presence of
+            // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]
+            // master_count` unrecognized, matching the old orelse chains.
+            if (hit != null) break :probe;
+            if (doc.getSection(pl.section)) |sec| hit = .{ .sec = sec, .key = pl.key };
         }
         const p = ptr(cfg, k.target);
         switch (k.kind) {
@@ -668,6 +666,22 @@ fn firstColorInItems(
     return null;
 }
 
+/// Inserts one segment-keyed entry: dupes `seg_key`, hands ownership to `map`
+/// on success, and rolls the key back on OOM so the map never holds a
+/// dangling key. The six put sites in `applySegmentEntry` share this exact
+/// contract.
+fn putSegmentEntry(
+    comptime V: type,
+    allocator: std.mem.Allocator,
+    map: *std.StringHashMapUnmanaged(V),
+    seg_key: []const u8,
+    item: V,
+) !void {
+    const k = try allocator.dupe(u8, seg_key);
+    errdefer allocator.free(k);
+    try map.put(allocator, k, item);
+}
+
 /// Applies one [bar.properties] segment entry: `_value` keys are color-only
 /// (unchanged decoding); base keys take the composite color+style decoding.
 fn applySegmentEntry(
@@ -696,9 +710,7 @@ fn applySegmentEntry(
             }
             if (recognized) {
                 if (!props.isDefault()) {
-                    const k = try allocator.dupe(u8, seg_key);
-                    errdefer allocator.free(k);
-                    try cfg.bar.segment_props.put(allocator, k, props);
+                    try putSegmentEntry(types.SegmentProps, allocator, &cfg.bar.segment_props, seg_key, props);
                 }
                 return;
             }
@@ -706,9 +718,7 @@ fn applySegmentEntry(
         // Plain scalar: color only, exactly as the pre-properties behavior.
         const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
         const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
-        const k = try allocator.dupe(u8, seg_key);
-        errdefer allocator.free(k);
-        try map.put(allocator, k, color);
+        try putSegmentEntry(types.Color, allocator, map, seg_key, color);
         return;
     }
 
@@ -719,9 +729,7 @@ fn applySegmentEntry(
     // Pure mixes are color-only, exactly as the pre-properties decoding.
     if (parser.resolveColorExpr(raw, palette)) |mix| {
         const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
-        const k = try allocator.dupe(u8, seg_key);
-        errdefer allocator.free(k);
-        try map.put(allocator, k, mix);
+        try putSegmentEntry(types.Color, allocator, map, seg_key, mix);
         return;
     }
 
@@ -771,22 +779,16 @@ fn applySegmentEntry(
 
     if (found) |f| {
         const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
-        const k = try allocator.dupe(u8, seg_key);
-        errdefer allocator.free(k);
-        try map.put(allocator, k, f.color);
+        try putSegmentEntry(types.Color, allocator, map, seg_key, f.color);
     } else if (is_value) {
         // A `_value` key is color-only: an array with no color is invalid.
         const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
-        const k = try allocator.dupe(u8, seg_key);
-        errdefer allocator.free(k);
-        try cfg.bar.segment_value_fg.put(allocator, k, color);
+        try putSegmentEntry(types.Color, allocator, &cfg.bar.segment_value_fg, seg_key, color);
     }
     // Else: style-only base entry; the segment color stays default fg (no
     // map entry), so segmentFg's orelse fallback yields exactly that.
 
     if (!is_value and !props.isDefault()) {
-        const k = try allocator.dupe(u8, seg_key);
-        errdefer allocator.free(k);
-        try cfg.bar.segment_props.put(allocator, k, props);
+        try putSegmentEntry(types.SegmentProps, allocator, &cfg.bar.segment_props, seg_key, props);
     }
 }

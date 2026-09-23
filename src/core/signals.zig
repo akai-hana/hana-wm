@@ -240,9 +240,10 @@ pub fn readFd() std.posix.fd_t {
     return signal_pipe[pipe_read];
 }
 
-// Dispatches a single signal byte to the appropriate handler.
-fn dispatchSignal(byte: u8) void {
-    switch (@as(std.posix.SIG, @enumFromInt(byte))) {
+// Dispatches a single pending signal (a byte value from the pipe, one per
+// set bit in the pending-signals bitmap).
+fn dispatchSignal(pending_sig: u8) void {
+    switch (@as(std.posix.SIG, @enumFromInt(pending_sig))) {
         .HUP => utils.reload(),
         // Unconditional in-place re-exec of the current binary (no change
         // check). Dispatch runs on the event loop, NOT in the signal

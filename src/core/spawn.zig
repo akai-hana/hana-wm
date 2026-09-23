@@ -31,6 +31,15 @@ const tag_failed: u8 = 1;
 /// Byte length of a tag_pid message: the tag plus a raw c_int.
 const pid_msg_len: usize = 1 + @sizeOf(c_int);
 
+/// Writes the tag_failed byte to the spawn pipe and exits: the signal that
+/// resolves this spawn as failed. Used on both post-fork failure paths.
+fn failWithTag(pipe_write: c_int) noreturn {
+    const msg = [1]u8{tag_failed};
+    _ = c.write(pipe_write, &msg, msg.len);
+    _ = c.close(pipe_write);
+    std.process.exit(1);
+}
+
 /// Grandchild: detaches from the session and execs the command.
 /// On execvp failure, writes a tag_failed byte to pipe_write before exiting.
 /// On success this function never returns far enough to write anything;
@@ -38,9 +47,7 @@ const pid_msg_len: usize = 1 + @sizeOf(c_int);
 fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     _ = c.setsid();
     _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
-    const msg = [1]u8{tag_failed};
-    _ = c.write(pipe_write, &msg, msg.len);
-    std.process.exit(1);
+    failWithTag(pipe_write);
 }
 
 /// Intermediate child: forks the grandchild, forwards its PID over the
@@ -68,10 +75,11 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     // delivers a pid. In that case declare the spawn failed and exit
     // non-zero; the grandchild (if any) still runs, just unrouted.
     if (c.write(pipe_write, &msg, msg.len) != pid_msg_len) {
-        const failed_msg = [1]u8{tag_failed};
-        _ = c.write(pipe_write, &failed_msg, failed_msg.len);
-        _ = c.close(pipe_write);
-        std.process.exit(1);
+        // A short/failed write (e.g. EPIPE after the WM closed the read end
+        // on shutdown) would leave the WM waiting on a conversation that never
+        // delivers a pid. In that case declare the spawn failed; the grandchild
+        // (if any) still runs, just unrouted.
+        failWithTag(pipe_write);
     }
     _ = c.close(pipe_write);
     std.process.exit(0);
@@ -85,6 +93,23 @@ const max_pending_spawns: usize = 16;
 /// are copied to the heap so executeShellCommand stays allocation-free for
 /// the common short-command case.
 const stack_cmd_capacity: usize = 256;
+
+/// Nul-terminated command resolved by `resolveCmdZ`. `heap` is the owning
+/// allocation when the command was too long for the stack buffer (the caller
+/// frees it); `z` then aliases it.
+const ResolvedCmd = struct {
+    z: [:0]const u8,
+    heap: ?[:0]const u8 = null,
+};
+
+/// Copies `cmd` into a nul-terminated form: the provided stack buffer when it
+/// fits, otherwise a heap dupe the caller must free.
+fn resolveCmdZ(alloc: std.mem.Allocator, cmd: []const u8, buf: *[stack_cmd_capacity]u8) !ResolvedCmd {
+    if (cmd.len < buf.len)
+        return .{ .z = try std.fmt.bufPrintZ(buf, "{s}", .{cmd}) };
+    const heap = try alloc.dupeZ(u8, cmd);
+    return .{ .z = heap, .heap = heap };
+}
 
 /// Largest possible spawn-pipe conversation: a tag_pid message plus an
 /// optional trailing (or leading) tag_failed byte.
@@ -113,14 +138,9 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     const spawn_ws = tracking.getCurrentWorkspace();
 
     var cmd_buf: [stack_cmd_capacity]u8 = undefined;
-    var heap_cmd_z: ?[:0]const u8 = null;
-    defer if (heap_cmd_z) |h| core.getState().alloc.free(h);
-    const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len)
-        std.fmt.bufPrintZ(&cmd_buf, "{s}", .{cmd}) catch return error.CommandTooLong
-    else blk: {
-        heap_cmd_z = try core.getState().alloc.dupeZ(u8, cmd);
-        break :blk heap_cmd_z.?.ptr;
-    };
+    const resolved = try resolveCmdZ(core.getState().alloc, cmd, &cmd_buf);
+    defer if (resolved.heap) |h| core.getState().alloc.free(h);
+    const cmd_z = resolved.z.ptr;
 
     // Refuse up front instead of fork-then-discover-the-table-is-full. The
     // old path logged past the append and, once the table filled, fell back
@@ -277,14 +297,9 @@ pub fn execSynchronous(cmd: []const u8) void {
     const alloc = core.getState().alloc;
 
     var cmd_buf: [stack_cmd_capacity]u8 = undefined;
-    var heap_cmd_z: ?[:0]const u8 = null;
-    defer if (heap_cmd_z) |h| alloc.free(h);
-    const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len)
-        std.fmt.bufPrintZ(&cmd_buf, "{s}", .{cmd}) catch return
-    else blk: {
-        heap_cmd_z = alloc.dupeZ(u8, cmd) catch return;
-        break :blk heap_cmd_z.?;
-    };
+    const resolved = resolveCmdZ(alloc, cmd, &cmd_buf) catch return;
+    defer if (resolved.heap) |h| alloc.free(h);
+    const cmd_z = resolved.z.ptr;
 
     const pid = c.fork();
     if (pid < 0) {

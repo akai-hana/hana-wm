@@ -263,7 +263,7 @@ fn tileStackExtra(
     const stack_n: u16 = @intCast(windows.len);
     const row_avail = calcAvailableHeight(h, max_fit, ctx.m, ctx.min_dim);
 
-    const min_col_w: u16 = ctx.min_dim +| 2 *| ctx.m.border;
+    const min_col_w: u16 = ctx.min_dim +| utils.doubledBorder(ctx.m);
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
@@ -309,7 +309,9 @@ inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, 
 /// Total pixel height available for window content after gaps and borders.
 /// Falls back to count * min_dim when margins exceed total_h.
 inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins, min_dim: u16) u16 {
-    const overhead = m.gap *| (count + 1) +| m.border *| 2 *| count;
+    // gap + count * rowPitch: the row seam gaps (one leading, count+1 with the
+    // trailing gap folded in) plus each row's doubled border.
+    const overhead = m.gap +| count *| rowPitch(m);
     return if (total_h > overhead) total_h - overhead else @min(count *| min_dim, total_h);
 }
 

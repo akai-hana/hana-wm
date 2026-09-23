@@ -85,7 +85,7 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
 var g_sink: xcb_sink.XcbSink = undefined;
 
 /// The shared XCB sink: inited once in init(), then free across every use.
-inline fn sink() sync.Sink {
+inline fn syncSink() sync.Sink {
     return (&g_sink).sink();
 }
 
@@ -124,7 +124,7 @@ fn ctx() *sync.Ctx {
     const p = &model().ws[model().current.index].params;
     const env = tilingEnv(p);
     g_ctx = .{
-        .sink = sink(),
+        .sink = syncSink(),
         .screen = .{
             .x = 0,
             .y = 0,
@@ -150,7 +150,7 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
 }
 
 pub inline fn dragTick(win: model_mod.WindowId) void {
-    sync.reconcileDragTick(&instance, sink(), win);
+    sync.reconcileDragTick(&instance, syncSink(), win);
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke

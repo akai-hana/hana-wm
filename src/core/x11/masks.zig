@@ -73,8 +73,9 @@ pub const EventMasks = struct {
     //    detectable auto-repeat held binding keys re-fire their action on
     //    every repeat (a passive grab reports the release to the grab window,
     //    but the root mask, not the grab, decides which events the WM actually
-    //    receives — without the release bit, the ledger-less repeat path in
-    //    input.zig would still work for presses but releases would be lost).
+    //    receives — without the release bit, the detectable-auto-repeat
+    //    press/release stream in input.zig would still work for presses but
+    //    releases would be lost).
     pub const root_window = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
         xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
         xcb.XCB_EVENT_MASK_KEY_PRESS |

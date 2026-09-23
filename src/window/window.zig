@@ -316,11 +316,6 @@ inline fn isValidManagedWindow(win: u32) bool {
     return !isInvalidWindow(win) and tracking.isManaged(win);
 }
 
-inline fn isOnCurrentWorkspace(win: u32) bool {
-    if (isInvalidWindow(win)) return false;
-    return tracking.isOnCurrentWorkspace(win);
-}
-
 // Button grab management is owned by focus.zig (a focus-protocol concern).
 // Off-workspace windows that need initial grab setup call focus.initWindowGrabs.
 
@@ -1183,7 +1178,7 @@ inline fn maybeFocusWindow(win: u32) void {
     // In all-view mode every window is visible on the current workspace
     // regardless of its tag mask, so hover must be able to focus it too; a
     // bare membership check made all-view windows un-focusable by ENTER.
-    if (!isOnCurrentWorkspace(win) and !pipeline.model().all_view_active) return;
+    if (!tracking.isOnCurrentWorkspace(win) and !pipeline.model().all_view_active) return;
     if (callHookBool(.isWindowHidden, .{ pipeline.model(), win })) return;
     focus.grabFocus(win, .mouse_enter);
 }

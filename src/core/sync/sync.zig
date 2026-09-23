@@ -317,22 +317,16 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // its desire will be non-parked (checked here so no earlier store entry
     // can shadow it); else the pass elects the first non-parked desire.
     var winner: ?model.WindowId = fs_win;
-    if (winner == null) {
-        if (m.focused) |f| {
-            if (m.store.indexOf(f)) |slot| {
-                const fe = m.store.at(slot).val.*;
-                // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
-                // with has_kept_rect = false: the ledger is unknowable pre-pass, so a
-                // placement-less visible orphan is left to the first-desire fallback).
-                // The fast-path visibility is derived here exactly once (shared with
-                // the fused pass below; the seed spans only this focused-window test).
-                const on_current = model.visibleEntry(m, fe, m.current);
-                if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, on_current)) {
-                    winner = f;
-                }
-            }
-        }
-    }
+    // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
+    // with has_kept_rect = false: the ledger is unknowable pre-pass, so a
+    // placement-less visible orphan is left to the first-desire fallback).
+    // The fast-path visibility is derived here exactly once (shared with
+    // the fused pass below; the seed spans only this focused-window test).
+    if (winner == null) if (m.focused) |f| blk: {
+        const slot = m.store.indexOf(f) orelse break :blk;
+        const fe = m.store.at(slot).val.*;
+        if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, model.visibleEntry(m, fe, m.current))) winner = f;
+    };
 
     // One fused pass over the store: compute a window's desire, then SEND it
     // immediately. Ordering is via the Sink adapter below (a widening PR

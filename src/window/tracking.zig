@@ -52,12 +52,6 @@ pub fn removeWindow(win: u32) void {
     model_mod.unregister(pipeline.mut(&gate), win);
 }
 
-pub inline fn getWindowWorkspaceMask(win: u32) ?u64 {
-    const mm = m() orelse return null;
-    const e = mm.store.get(win) orelse return null;
-    return e.mask;
-}
-
 pub inline fn windowCount() usize {
     const mm = m() orelse return 0;
     return mm.store.count();
@@ -137,17 +131,6 @@ pub inline fn getWorkspaceCount() usize {
     return state.workspace_count;
 }
 
-/// Count of visible windows on a workspace (`mask` tag membership over every
-/// managed window; the same tag test `model.tiledCountOnWs` applies to tiled
-/// slots, which also counts any non-tiled window visible there).
-pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
-    var n: usize = 0;
-    for (allWindows()) |e| {
-        if (model_mod.maskedOn(e.mask, ws_idx)) n += 1;
-    }
-    return n;
-}
-
 // ---------------------------------------------------------------------------
 // Workspace bitmask helpers
 // ---------------------------------------------------------------------------
@@ -162,11 +145,6 @@ pub const workspace_labels: [constants.max_workspaces][]const u8 = blk: {
     break :blk labels;
 };
 
-inline fn isWindowOnWorkspace(win: u32, ws_idx: core.WorkspaceId) bool {
-    const mask = getWindowWorkspaceMask(win) orelse return false;
-    return model_mod.maskedOn(mask, ws_idx);
-}
-
 /// True when `win` has a tiled anchor (not floating, covering or
 /// minimized); reads the model entry directly.
 pub fn isTiledMode(win: u32) bool {
@@ -176,15 +154,10 @@ pub fn isTiledMode(win: u32) bool {
 }
 
 pub inline fn isOnCurrentWorkspace(win: u32) bool {
-    const cur = getCurrentWorkspace() orelse return false;
-    return isWindowOnWorkspace(win, core.WorkspaceId.fromIndex(cur));
-}
-
-/// Combined predicate for focus recovery: on current workspace and not
-/// parked (presence check; extensions hide windows via `.parked`).
-pub fn isOnCurrentWorkspaceAndVisible(win: u32) bool {
-    if (!isOnCurrentWorkspace(win)) return false;
-    const mm = m() orelse return false;
-    const e = mm.store.get(win) orelse return false;
-    return e.presence != .parked;
+    if (getCurrentWorkspace()) |cur| {
+        const mm = m() orelse return false;
+        const e = mm.store.get(win) orelse return false;
+        return model_mod.maskedOn(e.mask, core.WorkspaceId.fromIndex(cur));
+    }
+    return false;
 }

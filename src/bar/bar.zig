@@ -77,53 +77,54 @@ inline fn segId(name: []const u8) ?usize {
 /// Registry entry at a resolved `id`. Callers reach this only after `segId`
 /// (or a registry capability/role lookup) matched a name, which is impossible
 /// when the registry is empty, so the zero-length branch is statically
-/// unreachable -- and, being comptime-selected, it keeps the runtime index
-/// expression out of the all-segments-removed build (indexing a zero-length
-/// array is otherwise a compile error, not a runtime panic).
+/// Comptime-selected empty-registry guard: indexing a zero-length array is a
+/// compile error, so the runtime index expression is elided entirely when no
+/// segments are registered. `hasRegisteredSegments` is false only in that
+/// build; every guard below becomes `unreachable` at comptime and the removed
+/// bodies never reach codegen.
+inline fn hasRegisteredSegments() bool {
+    return comptime bar_mods.len != 0;
+}
+
+/// Resolved-segment getter (comptime guarded by hasRegisteredSegments).
 inline fn segAt(id: usize) *const contract.Segment {
-    if (comptime bar_mods.len == 0) {
-        unreachable;
-    } else {
-        return &bar_mods[id];
-    }
+    if (comptime !hasRegisteredSegments()) unreachable;
+    return &bar_mods[id];
 }
 
-/// Dirty-bit read for a resolved `id` (same empty-registry guard as segAt).
+/// Dirty-bit read for a resolved `id` (comptime guarded as segAt).
 inline fn segDirty(self: *const State, id: usize) bool {
-    if (comptime bar_mods.len == 0) {
-        unreachable;
-    } else {
-        return self.dirty.segments[id];
-    }
+    if (comptime !hasRegisteredSegments()) unreachable;
+    return self.dirty.segments[id];
 }
 
-/// Dirty-bit write for a resolved `id` (same empty-registry guard as segAt).
+/// Dirty-bit write for a resolved `id` (comptime guarded as segAt).
 inline fn setSegDirty(self: *State, id: usize, v: bool) void {
-    if (comptime bar_mods.len == 0) {
-        unreachable;
-    } else {
-        self.dirty.segments[id] = v;
-    }
+    if (comptime !hasRegisteredSegments()) unreachable;
+    self.dirty.segments[id] = v;
 }
 
-/// True when `name` resolves to a segment in the registry role set `comptime
-/// ids` (the self-ticking and center-slot capability sets today). Name-free:
-/// membership is by declared capability, and the set is resolved from the
-/// generated registry.
+/// Index of `name` within the registry-id set `comptime ids` (the
+/// self-ticking and center-slot capability sets today), or null when it is
+/// not a member. Name-free: membership is by declared capability, and the set
+/// is resolved from the generated registry.
+fn roleIndexOf(name: []const u8, comptime ids: []const usize) ?usize {
+    const id = segId(name) orelse return null;
+    inline for (ids, 0..) |rid, i| {
+        if (id == rid) return i;
+    }
+    return null;
+}
+
+/// True when `name` resolves to a segment in the registry role set `ids`.
 fn isRole(name: []const u8, comptime ids: []const usize) bool {
-    const id = segId(name) orelse return false;
-    inline for (ids) |r| if (id == r) return true;
-    return false;
+    return roleIndexOf(name, ids) != null;
 }
 
 /// Position of `name` within `self_ticking_ids` (the key into
 /// `Clock.segs`), or null when it is not a self-ticking segment.
 fn selfTickerIndex(name: []const u8) ?usize {
-    const id = segId(name) orelse return null;
-    inline for (self_ticking_ids, 0..) |rid, i| {
-        if (id == rid) return i;
-    }
-    return null;
+    return roleIndexOf(name, self_ticking_ids);
 }
 
 /// Even split of `remaining` among `count` center slots, distributed left to
@@ -227,6 +228,7 @@ pub fn onPollWakeup() void {
     // dirty state as a full redraw, exactly as the X-batch update path
     // (updateIfDirty) does, so the animation is visible even when the loop is
     // waking only on the poll timer with no X traffic to trigger that path.
+    // performDraw consumes the redraw request itself; no consume here.
     if (gBar.state) |s| {
         if (barModsConsumeRedrawRequest()) s.markDirty();
     }
@@ -459,11 +461,7 @@ const Clock = struct {
     width: u16 = 0,
     /// Per self-ticking segment last-bound scratch, keyed by position in
     /// `self_ticking_ids`. Only `valid` entries are ever read.
-    segs: [self_ticking_ids.len]SelfTickerScope = blk: {
-        var a: [self_ticking_ids.len]SelfTickerScope = undefined;
-        for (&a) |*e| e.* = .{};
-        break :blk a;
-    },
+    segs: [self_ticking_ids.len]SelfTickerScope = @splat(.{}),
 };
 
 const Clicks = struct {
@@ -608,9 +606,11 @@ const State = struct {
         alloc.destroy(self);
     }
 
+    /// Flags a full redraw: dirty flag + every segment slot (the
+    /// background-clear trigger).
     fn markDirty(self: *State) void {
         self.dirty.flag = true;
-        self.markAllSegmentsDirty();
+        @memset(&self.dirty.segments, true);
     }
 
     fn clearSegmentDirty(self: *State, name: []const u8) void {
@@ -671,10 +671,6 @@ const State = struct {
         return false;
     }
 
-    fn markAllSegmentsDirty(self: *State) void {
-        @memset(&self.dirty.segments, true);
-    }
-
     /// True when every registry slot is dirty (the complete-background-clear
     /// trigger). Non-configured segments (e.g. the prompt overlay) are never
     /// drawn and never cleared, so an all-dirty set only occurs on a folded
@@ -694,18 +690,23 @@ const State = struct {
         return self.dirty.flag and self.isFullDirty();
     }
 
-    /// True when the next draw would repaint at least one layout-rendered
-    /// segment: a dirty flag or a live needsRepaint hook (the title marquee).
-    /// Iterates only segments that actually render -- the overlay-only prompt
-    /// slot's dirty flag is never cleared, so a registry-wide scan would
-    /// always report work and defeat the fast-path draw early-exit.
-    fn hasPendingRepaintWork(self: *const State) bool {
+    /// Scans the configured layout tree, returning true as soon as a segment
+    /// matches `pred`. Layout-rendered segments only: the overlay-only prompt
+    /// slot is excluded (its dirty flag is never cleared, so a registry-wide
+    /// scan would always match and defeat the fast-path early-exit).
+    inline fn anyLayoutSegment(self: *const State, comptime pred: anytype) bool {
         for (self.render.config.layout.items) |lay| {
             for (lay.segments.items) |seg| {
-                if (self.isSegmentRepaintable(seg)) return true;
+                if (pred(self, seg)) return true;
             }
         }
         return false;
+    }
+
+    /// True when the next draw would repaint at least one layout-rendered
+    /// segment: a dirty flag or a live needsRepaint hook (the title marquee).
+    fn hasPendingRepaintWork(self: *const State) bool {
+        return self.anyLayoutSegment(State.isSegmentRepaintable);
     }
 
     /// True when any layout-rendered segment carries a set dirty bit (as
@@ -715,13 +716,13 @@ const State = struct {
     /// set and !dirty.flag, the only pending work is a marquee/overlay
     /// needsRepaint hook and the cached last_ctx snapshot is still accurate.
     fn hasLayoutSegmentDirty(self: *const State) bool {
-        for (self.render.config.layout.items) |lay| {
-            for (lay.segments.items) |seg| {
-                const id = segId(seg) orelse continue;
-                if (segDirty(self, id)) return true;
+        const pred = struct {
+            fn dirty(state: *const State, name: []const u8) bool {
+                const id = segId(name) orelse return false;
+                return segDirty(state, id);
             }
-        }
-        return false;
+        }.dirty;
+        return self.anyLayoutSegment(pred);
     }
 
     /// Records the on-screen bounds of a clickable segment as the layout pass
@@ -756,9 +757,6 @@ const State = struct {
     /// for every configured self-ticker in ANY cluster (left/center/right);
     /// unconfigured self-tickers stay invalid and are never repainted.
     fn recordSelfTickerScope(self: *State, frame: *const segmod.Frame, name: []const u8, x: u16) void {
-        // Cut short when no self-ticker is compiled in (empty registry): the
-        // scope buffer is then zero-length and must not be indexed at all.
-        if (self_ticking_ids.len == 0) return;
         if (selfTickerIndex(name)) |i| {
             self.clock.segs[i] = .{
                 .x = x,
@@ -775,9 +773,12 @@ const State = struct {
         ctx.frame.workspace_has_windows = self.frame.ws_has_windows[0..self.frame.frame.workspace_count];
         // The minimized-state service is drawn from the window module registry
         // here (upfront, per frame) so the title segment need not name the
-        // addon that owns it. All hooks null => empty api => scanLiveFrame
-        // no-ops, matching prior boot ordering.
-        ctx.minimized_api = minimizedApiFromRegistry();
+        // addon that owns it. No provider compiled in => empty api =>
+        // scanLiveFrame no-ops, matching prior boot ordering.
+        var minimized_api: segmod.MinimizedApi = .{};
+        if (contract.providerOf(contract.WindowModule, window_mods[0..], .collectHiddenSet) != null)
+            minimized_api.collect = minimizedCollect;
+        ctx.minimized_api = minimized_api;
         // Titles/geoms below come from the WM-owned title cache and the sync
         // truth-rect -- neither performs X11 work, so the draw path is
         // non-blocking and no positional batch exists to scramble. The backing
@@ -857,18 +858,19 @@ const State = struct {
 
     // -- Drawing ---------------------------------------------------------------
 
+    /// Warns on a draw failure and reports the position unchanged, so a broken
+    /// segment can't corrupt the layout.
+    inline fn reportDrewNothing(x: u16) u16 {
+        debug.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
+        return x;
+    }
+
     /// Draws a segment by registry dispatch, catching and logging errors
     /// instead of propagating them. On failure returns `x` unchanged (the
     /// "drew nothing" signal) so a broken segment can't corrupt the layout.
     fn drawSegment(self: *State, ctx: *segmod.DrawCtx, name: []const u8, x: u16, width: ?u16) u16 {
-        const id = segId(name) orelse {
-            debug.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
-            return x;
-        };
-        if (segAt(id).draw == null) {
-            debug.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
-            return x;
-        }
+        const id = segId(name) orelse return reportDrewNothing(x);
+        if (segAt(id).draw == null) return reportDrewNothing(x);
         // The DrawCtx is shared mutable scratch: pin the reserved width into it
         // immediately before the draw so width-reading renderers (the title)
         // advance correctly.
@@ -949,7 +951,6 @@ const State = struct {
                 }
                 const drew = self.drawSegment(ctx, names[i], cur_x, null) != cur_x;
                 if (drew) {
-                    self.extendDirtySpan(cur_x, seg_w);
                     if (pending_gap) {
                         self.paintGap(cur_x + seg_w, scaled_spacing);
                     }
@@ -1325,18 +1326,6 @@ fn applyReload(old: *State, height: u16) !void {
 
 // Public event handlers & queries
 
-/// Builds the minimized-state service the title segment consumes, from the
-/// window module registry's hide family. The bar never names the addon;
-/// it only forwards the registry's `collectHiddenSet` hook through the
-/// shared DrawCtx. The hook null (no hide module compiled in) =>
-/// the empty api, so the bar's synthesis loops no-op.
-fn minimizedApiFromRegistry() segmod.MinimizedApi {
-    var api: segmod.MinimizedApi = .{};
-    if (contract.providerOf(contract.WindowModule, window_mods[0..], .collectHiddenSet) != null)
-        api.collect = minimizedCollect;
-    return api;
-}
-
 /// Full hidden-set synthesis forwarded to the hide-family provider
 /// (DrawCtx api signature).
 fn minimizedCollect(
@@ -1668,15 +1657,19 @@ pub fn updateIfDirty() !void {
     // facts; we react over a one-way signal (revision counters) rather than
     // being poked by name. Layout changes force a full redraw; window/workspace
     // changes repaint all segments (split-view titles/tile counts); focus
-    // changes cheaply mark only the title.
-    if (s.facts.focus_rev != core.focus.rev()) s.markDirtySource(.focus);
-    if (s.facts.window_rev != core.window.rev()) s.markDirty();
-    if (s.facts.layout_rev != core.layout.rev()) {
+    // changes cheaply mark only the title. Each revision is read once and
+    // reused for both the check and the assignment below.
+    const focus_rev = core.focus.rev();
+    const window_rev = core.window.rev();
+    const layout_rev = core.layout.rev();
+    if (s.facts.focus_rev != focus_rev) s.markDirtySource(.focus);
+    if (s.facts.window_rev != window_rev) s.markDirty();
+    if (s.facts.layout_rev != layout_rev) {
         requestFullRedraw();
     }
-    s.facts.focus_rev = core.focus.rev();
-    s.facts.window_rev = core.window.rev();
-    s.facts.layout_rev = core.layout.rev();
+    s.facts.focus_rev = focus_rev;
+    s.facts.window_rev = window_rev;
+    s.facts.layout_rev = layout_rev;
 
     // Fold any module redraw request into a full dirty (as the poll
     // wakeup path does), then draw. Loop: a module may queue another request
@@ -1713,16 +1706,7 @@ pub fn updateClock() void {
     if (!s.vis.shown) return;
     if (self_ticking_ids.len == 0) return;
     const fmt = drawing.clockFormat(core.getState().config.bar);
-    var redraw_clock = false;
-    for (bar_mods) |m| {
-        if (m.secondsElapsed) |h| {
-            if (h(fmt)) {
-                redraw_clock = true;
-                break;
-            }
-        }
-    }
-    if (!redraw_clock) return;
+    if (!anyBoolHook(.secondsElapsed, .{fmt})) return;
     s.drawClockOnly();
     // A display-mode cycle also changes a self-ticking segment's slot width:
     // re-derive the merged clock display width (max across the tickers'
