@@ -98,10 +98,6 @@ pub fn cycledMode(m: DisplayMode, forward: bool) DisplayMode {
 var rendered_sec: i64 = -1;
 var rendered_fmt: []const u8 = "";
 
-fn stale(sec: i64, fmt: []const u8) bool {
-    return sec != rendered_sec or fmt.ptr != rendered_fmt.ptr;
-}
-
 /// True when the segment on screen no longer matches (sec, fmt).
 /// Callers pass the base configured format so reloads invalidate without a
 /// separate flag; the segment folds its own display-mode format in on top of
@@ -110,7 +106,9 @@ fn stale(sec: i64, fmt: []const u8) bool {
 /// as a side effect of rendering; a failed draw leaves it stale so the next
 /// boundary retries.
 fn secondElapsed(base_fmt: []const u8) bool {
-    return stale(currentEpochSeconds(), effectiveFormatFor(base_fmt, mode));
+    const sec = currentEpochSeconds();
+    const fmt = effectiveFormatFor(base_fmt, mode);
+    return sec != rendered_sec or fmt.ptr != rendered_fmt.ptr;
 }
 
 /// Deadline arithmetic, factored out pure so tests can drive the clock.

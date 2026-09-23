@@ -356,16 +356,14 @@ fn execDirectSym(vs: *EditorState, sym: u8, cnt: u32) void {
     applyOperator(vs, op, .{ .pos = pos });
 }
 
-/// Treat a count of 0 as 1 (vim convention: no count = repeat once).
-inline fn resolveCount(n: u32) u32 {
-    return if (n == 0) 1 else n;
-}
-
+/// Counts of 0 mean 1 (vim convention: no count = repeat once). Saturating
+/// multiply: chained count prefixes can push the product past u32 max (1e6 x
+/// 1e6); consumers clamp against buffer bounds anyway, so saturate instead of
+/// overflowing.
 fn effectiveCount() u32 {
-    // Saturating multiply: chained count prefixes can push the product past
-    // u32 max (1e6 x 1e6); consumers clamp against buffer bounds anyway, so
-    // saturate instead of overflowing.
-    return resolveCount(prefix.count) *| resolveCount(prefix.op_count);
+    const p = prefix.count;
+    const o = prefix.op_count;
+    return (if (p == 0) 1 else p) *| (if (o == 0) 1 else o);
 }
 
 inline fn isWordChar(ch: u8) bool {
