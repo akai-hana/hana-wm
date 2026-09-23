@@ -5,7 +5,7 @@
 //! live connection or the bar runtime. Expected values are hand-traced from
 //! the engine's formulas (word-scan classes, operator ranges, paste offsets).
 //!
-//! F-20 order independence: the engine keeps process-global state (`pending`,
+//! Order independence: the engine keeps process-global state (`pending`,
 //! `yank_buf`/`yank_len`), so each test resets the pending command via
 //! `onDeactivate` and re-seeds its own yank register (yy) before any paste.
 

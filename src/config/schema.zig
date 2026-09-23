@@ -70,17 +70,17 @@ fn barPlainColor(key: []const u8) Knob {
 /// [bar.properties] color_from chain: reads a sibling bar field as fallback,
 /// gated on "bar". `copy_when_absent` (title variant) also assigns the
 /// fallback when [bar.properties] is absent; the drun variant keeps null so
-/// the read-time fallbacks in BarConfig apply (R2).
+/// the read-time fallbacks in BarConfig apply.
 fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) Knob {
     return .{ .places = &.{place(types.section_bar_properties, key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = types.section_bar, .copy_when_absent = copy_when_absent };
 }
 
-/// Title accent color: copies `sibling` when [bar.properties] is absent (R2).
+/// Title accent color: copies `sibling` when [bar.properties] is absent.
 fn barTitleColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
     return barColor(key, target, sibling, true);
 }
 
-/// Drun accent color: stays null when [bar.properties] is absent (R2).
+/// Drun accent color: stays null when [bar.properties] is absent.
 fn barDrunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
     return barColor(key, target, sibling, false);
 }

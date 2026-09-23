@@ -301,7 +301,7 @@ fn tileStackExtra(
 /// Shared single-window row emission used by both layout passes (the stack
 /// column and the multi-column grid). The two HEIGHT DISTRIBUTIONS stay at
 /// the call sites on purpose: they differ in the min_dim-floor corner, and
-/// merging them is not behavior-preserving (plan NEW-4 corner).
+/// merging them is not behavior-preserving.
 inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
     tiling.emitRect(ctx.v, ctx.out, win, @intCast(px), @intCast(py), w, h);
 }

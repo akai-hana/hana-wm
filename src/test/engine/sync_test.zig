@@ -30,7 +30,7 @@ const Fixture = struct {
     fn init(self: *Fixture) void {
         // setUpModel resets the minimize/fullscreen module stores, so
         // capacity/seq bookkeeping never leaks across scenarios and the
-        // tests pass in any order (F-20).
+        // tests pass in any order.
         self.* = .{
             .m = helpers.setUpModel(),
             .rec = .{},

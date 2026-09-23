@@ -63,7 +63,7 @@ pub fn width() u16 {
 
 /// Applies the configured border width to `win`, skipping the configure when
 /// the sync ledger shows that exact width is already the last one sent.
-/// (WINC-09: the ledger is the sole "last border width sent" owner; wincache
+/// (The ledger is the sole "last border width sent" owner; wincache
 /// no longer mirrors it.)
 pub fn applyWidth(conn: core.Connection, win: u32) void {
     const w = width();

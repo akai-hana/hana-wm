@@ -79,9 +79,9 @@ test "parseColor accepts forms and rejects out-of-range" {
 }
 
 test "colorFromValue: bare all-digit spellings are hex (6 or 8 digits), others invalid" {
-    // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA hex
-    // (CFG-46). Any other bare integral value in a color context is rejected
-    // instead of silently coerced to a decimal color.
+    // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA hex. Any
+    // other bare integral value in a color context is rejected instead of
+    // silently coerced to a decimal color.
     try testing.expectEqual(@as(u32, 0x112233), parser.colorFromValue(.{ .integer = 112233 }).?);
     try testing.expectEqual(@as(u32, 0x11223344), parser.colorFromValue(.{ .integer = 11223344 }).?);
     try testing.expectEqual(@as(u32, 0x99999999), parser.colorFromValue(.{ .integer = 99999999 }).?);

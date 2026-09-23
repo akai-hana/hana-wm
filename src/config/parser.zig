@@ -322,7 +322,7 @@ const palette_var_names = [_][]const u8{
 /// Single decoder for the color-literal / hex-integer / hex-string forms a
 /// color knob accepts. A bare all-digit spelling is only a color when it has
 /// exactly 6 (`RRGGBB`) or 8 (`RRGGBBAA`) digits, read as hex; any other bare
-/// number is rejected (CFG-46) rather than coerced to a decimal color.
+/// number is rejected rather than coerced to a decimal color.
 /// `null` means "not a color"; callers layer their own palette-reference
 /// lookup and warning policy on top (schema's getColorFromValue).
 pub fn colorFromValue(val: Value) ?u32 {
