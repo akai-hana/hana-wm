@@ -22,7 +22,7 @@ const tracking = @import("tracking");
 // tracking.gate).
 const gate: pipeline.Gate = .{};
 
-/// Registry lookup for the hook `field` (see `plugin.providerOf`), null when
+/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
 const providerOf = window.providerOf;
 
@@ -58,10 +58,10 @@ fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it, never a closed enum. Empty when the tiling subsystem is absent.
-const plugins = @import("plugins");
+const surfaces = @import("surfaces").Surfaces;
 const wincache = @import("wincache");
-const plugin = @import("plugin");
-const tiling_mods = plugin.tiling_mods;
+const contract = @import("contract");
+const tiling_mods = contract.tiling_mods;
 const tiling = @import("tiling_seam").tiling;
 
 /// Withdrawal facts for actions.unmanage. The sole caller (window.
@@ -661,7 +661,7 @@ const viewport_inactive: ViewportContext =
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
     if (!build_options.has_tiling) return viewport_inactive;
     const p = &m.ws[m.current.index].params;
-    const mod: ?plugin.Layout =
+    const mod: ?contract.Layout =
         if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
     const md = mod orelse return viewport_inactive;
     if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
@@ -781,7 +781,7 @@ fn resolveVariant(
     override_variant: ?[]const u8,
 ) u8 {
     var value_string: ?[]const u8 = override_variant;
-    const active_mod: ?plugin.Layout =
+    const active_mod: ?contract.Layout =
         if (kind < tiling_mods.len) tiling_mods[kind] else null;
     var v_idx: u8 = 0;
     if (active_mod) |md| {
@@ -851,7 +851,7 @@ pub fn switchTo(ws_idx: u8) void {
     // deferred visibility update would require a SECOND reconcile on this
     // workspace, retiling Discord's geometry twice and causing a flicker.
     if (build_options.has_bar)
-        plugins.Surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
+        surfaces.updateBarVisibilityForWorkspace(@intCast(ws_idx));
     // Bump the core fullscreen fact only when the target workspace actually
     // carries a covering occupant: the bar's reactive path derives its claim
     // from the fact, so spuriously bumping it on every switch would churn a

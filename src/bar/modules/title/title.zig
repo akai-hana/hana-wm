@@ -16,7 +16,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const plugin = @import("plugin");
+const contract = @import("contract");
 // The scrolling title addon (the carousel) binds its motion, cycle and
 // frame-pacing hooks to this contract; membership in the generated
 // `title_subs` registry is driven by file presence alone, so this module
@@ -34,11 +34,11 @@ const scroller: ?Scroller = if (@import("title_subs").addons.len != 0)
 else
     null;
 // The prompt overlays this slot when active: it binds a runtime-overlay
-// value (plugin.BarOverlay) on its Segment, which this module finds through
+// value (contract.BarOverlay) on its Segment, which this module finds through
 // the generated bar segment registry -- name-free, like every other registry
 // capability. Nothing in the closed core names the overlay module.
 const bar_mods = @import("bar_modules").modules;
-const overlay: ?plugin.BarOverlay = for (bar_mods) |m| {
+const overlay: ?contract.BarOverlay = for (bar_mods) |m| {
     if (m.overlay) |o| break o;
 } else null;
 
@@ -508,7 +508,7 @@ fn invalidateReloadCaches() void {
 }
 
 /// This module's bar-segment contribution (registry binding).
-pub const module: @import("plugin").Segment = .{
+pub const module: @import("contract").Segment = .{
     .name = "title",
     .center_slot = true,
     .dirty_sources = .{ .focus = true, .frame = true },

@@ -14,7 +14,7 @@ const focus = @import("focus");
 const xcb_sink = @import("sink");
 const screen = @import("screen");
 const build_options = @import("build_options");
-const surfaces = @import("plugins").Surfaces;
+const surfaces = @import("surfaces").Surfaces;
 // Fullscreen EWMH/bar-arming hooks via the build-generated `window_modules`
 // registry (the loop below no-ops without fullscreen).
 const window_mods = @import("window_modules").modules;
@@ -22,8 +22,8 @@ const window_mods = @import("window_modules").modules;
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile.
-const plugin = @import("plugin");
-const tiling_mods = plugin.tiling_mods;
+const contract = @import("contract");
+const tiling_mods = contract.tiling_mods;
 const tiling = @import("tiling_seam").tiling;
 
 /// True after init(); tracking's facade gates every model access on this so
@@ -95,7 +95,7 @@ var g_ctx: sync.Ctx = undefined;
 /// from live config (scaled margins, min_dim, master side, variant index).
 /// Shared by `ctx()` and the test fixture's placement expectations, so the
 /// fixture mirrors production env resolution instead of hand-building it.
-pub fn tilingEnv(p: *const model_mod.LayoutParams) plugin.Env {
+pub fn tilingEnv(p: *const model_mod.LayoutParams) contract.Env {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     return .{

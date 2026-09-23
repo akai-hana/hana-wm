@@ -5,12 +5,13 @@ const types = @import("types");
 const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
-const segmod = @import("segment");
+const contract = @import("contract");
 const segdraw = @import("segdraw");
 
-// Layout registry (build-generated); each module carries its own variant
-// indicator list. Empty when the tiling subsystem is absent.
-const tiling_mods = @import("plugin").tiling_mods;
+// Layout registry (build-generated); the active layout is a `u8` index into
+// it, and each module carries its own variant indicator list. Empty when the
+// tiling subsystem is absent.
+const tiling_mods = contract.tiling_mods;
 
 const W = segdraw.widthState("variants");
 
@@ -19,10 +20,12 @@ const W = segdraw.widthState("variants");
 const no_variant_icon = "";
 
 /// Resolves the active layout's variant indicator from metadata, by the
-/// current workspace's variant_idx.
+/// current workspace's variant_idx. The live kind comes from the model
+/// (pipeline); the contract's pure `activeLayoutKind` applies the
+/// registry/tiling gates for both this module and its layout sibling.
 fn getIndicator() []const u8 {
     if (tiling_mods.len == 0) return no_variant_icon;
-    const kind = segmod.currentLayoutKind() orelse return no_variant_icon;
+    const kind = contract.activeLayoutKind(pipeline.getCurrentLayout()) orelse return no_variant_icon;
     const mod = tiling_mods[kind];
     const inds = mod.indicators orelse return no_variant_icon;
     const m = pipeline.model();

@@ -23,7 +23,7 @@ const std = @import("std");
 const utils = @import("utils");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const plugin = @import("plugin");
+const contract = @import("contract");
 
 const read_interval_ms: i64 = 2000;
 
@@ -186,7 +186,7 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
 /// a distinct segment with its own hooks into `subs[i]`'s state). Emitted by
 /// build.zig per discovered readout with a `pub const sub`, in the same
 /// alphabetical order as `subs`.
-pub fn segmentFor(comptime i: usize) plugin.Segment {
+pub fn segmentFor(comptime i: usize) contract.Segment {
     const Hooks = struct {
         fn poll() i32 {
             return pollDeadlineMsFor(i);

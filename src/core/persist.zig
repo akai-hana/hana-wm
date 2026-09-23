@@ -8,11 +8,13 @@
 //! focused). home_ws is derived (with presence) and NOT serialized.
 //!
 //! Seam: each WindowRecord carries `presence` (model.Presence) and
-//! an opaque `ext` blob. Only `presence` and the identity/mode survive in the
-//! model; `ext` is feature-owned bytes carried verbatim and handed back to
-//! the owning module (via the window_modules registry) during adoption/wire
-//! deserialize. The raw bytes are serialized with std.json as a []const u8
-//! (an array of numbers; ~8 bytes/window, deterministic round-trip).
+//! an opaque `ext` blob (stamped as `[version][registry ordinal][payload]`,
+//! see `ext_format_version`). Only `presence` and the identity/mode survive in
+//! the model; `ext` is feature-owned bytes (plus the ownership stamp) carried
+//! verbatim and handed back to the owning module (via the window_modules
+//! registry) during adoption/wire deserialize. The raw bytes are serialized
+//! with std.json as a []const u8 (an array of numbers; ~10 bytes/window,
+//! deterministic round-trip).
 //!
 //! Wire format: std.json over the shadow records below, which mirror the
 //! model types field-for-field. Floats round-trip exactly: std.json prints an
@@ -33,7 +35,7 @@ const model = @import("model");
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
 /// scenario matrix removes the tiling subsystem entirely).
-const tiling_mods = @import("plugin").tiling_mods;
+const tiling_mods = @import("contract").tiling_mods;
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
 const pipeline_mod = @import("pipeline");
@@ -44,8 +46,24 @@ const window_mods = @import("window_modules").modules;
 const MAX_WS = constants.max_workspaces;
 
 /// Wire-format revision of the restore file. Failed or older revisions are
-/// rejected in loadToGlobal rather than migrated.
-const persist_version: u32 = 4;
+/// rejected in loadToGlobal rather than migrated. Bumped whenever the durable
+/// record shape changes; v5 adds the per-blob header (registry-ordinal
+/// stamping, see `ext_format_version`), so only v5+ restore files are
+/// accepted.
+const persist_version: u32 = 5;
+
+/// The per-window feature blob header format. Every blob persist stores is
+/// wrapped as `[ext_format_version][claiming registry ordinal][payload]` where
+/// the ordinal is the claiming module's index into the build-generated
+/// `window_modules` registry AT SAVE TIME. Adoption (window.applyRestoredRecord)
+/// fast-paths on that ordinal and falls back to the magic-byte scan when the
+/// ordinal no longer resolves (module removed, registry shifted) — the
+/// self-identifying format tags each module embeds in its payload keep the
+/// fallback unambiguous.
+pub const ext_format_version: u8 = 1;
+
+/// Header byte length of a stamped blob (version + ordinal).
+pub const ext_header_len: usize = 2;
 
 /// Cap on the restore file's size. The file is a bounded JSON dump of the
 /// model (bounded stores/workspaces), so a file beyond this is junk (or a
@@ -152,16 +170,24 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
     var it = m.store.iterator();
     while (it.next()) |item| : (widx += 1) {
         // Opaque feature blob: ask each module in registry order whether it
-        // owns this window; the first module that returns bytes claims it.
-        // The model is handed across the seam AS-IS (a `*const` handle --
-        // serialization never mutates, and the contract type is const so this
-        // save path can't even @constCast: writing through it is a compile
-        // error).
+        // owns this window; the first module that returns bytes claims it, and
+        // the blob is stamped with its registry ordinal so adoption can
+        // fast-path on it (delete-modularity still falls back to the magic-byte
+        // scan when the ordinal no longer resolves). The model is handed across
+        // the seam AS-IS (a `*const` handle -- serialization never mutates, and
+        // the contract type is const so this save path can't even @constCast:
+        // writing through it is a compile error).
         var blob: ?[]const u8 = null;
-        for (window_mods) |mod| {
+        for (window_mods, 0..) |mod, idx| {
             if (mod.serializeWindow) |f| {
-                if (f(m, item.key, allocator)) |b| {
-                    blob = b;
+                if (f(m, item.key, allocator)) |body| {
+                    defer allocator.free(body);
+                    const wrapped = try allocator.alloc(u8, ext_header_len + body.len);
+                    errdefer allocator.free(wrapped);
+                    wrapped[0] = ext_format_version;
+                    wrapped[1] = @intCast(idx);
+                    @memcpy(wrapped[ext_header_len..], body);
+                    blob = wrapped;
                     break;
                 }
             }

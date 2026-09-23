@@ -54,9 +54,9 @@ const debug = @import("debug");
 /// reconcile path still runs (park/map/stack) with the layout-computation
 /// block skipped and the placement lookup table left empty. The interchange
 /// TYPES (View/List/Placement/Env/HintsView/parked_rect) come from the tiling
-/// contract (plugin.zig), which both the tiling engine and this reconciler
+/// contract (contract.zig), which both the tiling engine and this reconciler
 /// reference — no mirrored duplicate to keep in lockstep, and no local stub.
-const plugin = @import("plugin");
+const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
 
 pub const Stack = enum { above };
@@ -128,7 +128,7 @@ pub const Ctx = struct {
     workarea: utils.Rect,
     /// config.tiling.border_width, already scaled at load.
     cfg_bw: u16,
-    env: plugin.Env = .{},
+    env: contract.Env = .{},
     /// Focus/mode border color; ported from borders.resolveBorderColor minus
     /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
@@ -148,7 +148,7 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 ///   - bw: the last border width sent for a visible window (0 while parked/never);
 ///   - pixel: the last border pixel sent for a visible window (0 while parked/never).
 const SentEntry = struct {
-    rect: utils.Rect = plugin.parked_rect,
+    rect: utils.Rect = contract.parked_rect,
     has_rect: bool = false,
     parked: bool = false,
     bw: u16 = 0,
@@ -279,7 +279,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // owns the screen, or when the tiling subsystem is absent).
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
-    var placements: plugin.List = .{};
+    var placements: contract.List = .{};
     // Per-window placement lookup: `pl_of_slot[i]` is the index into
     // `placements` of the placement for store slot `i`, or null when that
     // window has no placement this pass. Built alongside the layout compute
@@ -305,9 +305,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             hints_buf[n] = e.size_hints;
             n += 1;
         }
-        const hv = plugin.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
+        const hv = contract.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
         const params = &m.ws[m.current.index].params;
-        const view: plugin.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
+        const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
         if (n > 0) {
             tiling.compute(params.kind, &view, &placements);
         }
@@ -498,7 +498,7 @@ fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
 fn desireIsNonParked(
     e: model.Entry,
     fs_win: ?model.WindowId,
-    placement: ?plugin.Placement,
+    placement: ?contract.Placement,
     has_kept_rect: bool,
     on_current: bool,
 ) bool {
@@ -518,12 +518,12 @@ fn computeDesire(
     e: *const model.Entry,
     win: model.WindowId,
     fs_win: ?model.WindowId,
-    placement: ?plugin.Placement,
+    placement: ?contract.Placement,
     winner: *?model.WindowId,
     ledger: SentEntry,
     on_current: bool,
 ) Desire {
-    var rect: utils.Rect = plugin.parked_rect;
+    var rect: utils.Rect = contract.parked_rect;
     var bw: u16 = ctx.cfg_bw;
     var pixel: u32 = ctx.color_of(win, m);
     var parked = false;
@@ -577,10 +577,10 @@ fn computeDesire(
 /// emits fewer placements than ordered windows degrades to null (same as the
 /// removed linear scan) instead of indexing out of bounds.
 fn placementOfSlot(
-    placements: *const plugin.List,
+    placements: *const contract.List,
     pl_of_slot: *const [model.store_capacity]?usize,
     slot: usize,
-) ?plugin.Placement {
+) ?contract.Placement {
     const idx = pl_of_slot[slot] orelse return null;
     const slice = placements.constSlice();
     if (idx >= slice.len) return null;

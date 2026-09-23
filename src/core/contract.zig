@@ -5,8 +5,8 @@
 //! does.
 //!
 //! `Surfaces` is the interface the chrome-surface module (today: the bar)
-//! binds to. It stays the sole export of the build-generated `plugins` module
-//! (`plugins.Surfaces`), injected into every module, so chrome-surface
+//! binds to. It stays the sole export of the build-generated `surfaces` module
+//! (`surfaces.Surfaces`), injected into every module, so chrome-surface
 //! consumers never name the bar module directly.
 //!
 //! `WindowModule` is the flat, all-optional-hook interface every module under
@@ -22,13 +22,17 @@
 //!     READ-ONLY `*const model.Model` (writing through it is a compile error),
 //!     cast from persist's const handle -- no `@constCast`. Each module
 //!     decides from the model state whether it owns the window's blob
-//!     (presence-driven), so at most one blob exists per window.
-//!   - `deserializeWindow(win, blob, m)` -- returns a "claimed"
+//!     (presence-driven), so at most one blob exists per window. The generic
+//!     persist/wire layer stamps the claiming module's REGISTRY ORDINAL onto
+//!     every blob (plus a format version), so adoption fast-paths on it.
+//!   - `deserializeWindow(win, blob-payload, m)` -- returns a "claimed"
 //!     bool. Hooks self-identify via a format tag (magic byte) inside the
-//!     blob, so the registry adoption loop can't mis-claim another module's
-//!     blob; unclaimed blobs leave the window in its default state. Adoption
-//!     MAY WRITE model state, so the model arrives as a mutable `*model.Model`;
-//!     it is dispatched only from the window layer's gate-holding restore path.
+//!     payload, so the adoption loop can't mis-claim another module's blob;
+//!     the ordinal stamped at save time is tried FIRST and the magic-byte scan
+//!     is the fallback when the ordinal no longer resolves (module removed
+//!     between runs). Adoption MAY WRITE model state, so the model arrives as
+//!     a mutable `*model.Model`; it is dispatched only from the window layer's
+//!     gate-holding restore path.
 
 const std = @import("std");
 const core = @import("core");
@@ -44,12 +48,25 @@ const model = @import("model");
 pub const tiling_mods =
     if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
+/// The active tiling layout registry index, when the model-derived `kind` is
+/// live for the built layout registry under the tiling-enabled config fact;
+/// null otherwise (disabled, or the tiling subsystem absent: all windows float
+/// by definition). Pure, so the contract stays free of an
+/// implementation-module edge: callers pass the live kind from
+/// `pipeline.getCurrentLayout()` (the layout/variants bar segments), and this
+/// applies the registry/tiling gates they would otherwise each repeat.
+pub fn activeLayoutKind(kind: u8) ?u8 {
+    if (!core.tilingEnabled()) return null;
+    if (kind >= tiling_mods.len) return null;
+    return kind;
+}
+
 /// The chrome-surface hook set a surface module binds to. The bar binds its
 /// `surfaces` value to this; when no surface is compiled in, core's
-/// generated `plugins.Surfaces` is the comptime `null` type and every
+/// generated `surfaces.Surfaces` is the comptime `null` type and every
 /// `if (build_options.has_bar)` call site compiles away.
 pub const Surfaces = struct {
-    // Boot lifecycle, invoked from startup through plugins.Surfaces so the
+    // Boot lifecycle, invoked from startup through surfaces.Surfaces so the
     // boot sequence never needs to name the bar module directly.
     init: *const fn () anyerror!void,
     deinit: *const fn () void,
@@ -123,8 +140,10 @@ pub const WindowModule = struct {
     // handle and does NOT @constCast), and each module decides from that
     // state whether it owns the window's blob (at most one module returns
     // bytes per window). `deserializeWindow` returns whether this module
-    // claimed the blob; hooks self-identify via a format tag so the registry
-    // loop can't mis-claim.
+    // claimed the blob; persist stamps the claiming module's registry ordinal
+    // (plus a version) onto every blob, so adoption fast-paths on that ordinal
+    // and falls back to the hooks' self-identifying format tag (magic byte)
+    // when the ordinal no longer resolves.
     serializeWindow: ?*const fn (*const model.Model, u32, std.mem.Allocator) ?[]const u8 = null,
     deserializeWindow: ?*const fn (u32, []const u8, *model.Model) bool = null,
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
@@ -224,7 +243,7 @@ pub const WindowModule = struct {
 };
 
 /// The `WindowModule` hooks whose contract is "at most one module binds
-/// this": dispatch is first-match (`providerOf`/`callHook`/`callHookBool`), so
+/// this": dispatch is first-match (`providerOf`/`callFirst`/`callFirstBool`), so
 /// a second binder would be silently ignored. Every other hook is adopted
 /// by explicit registry loops (init/deinit, notifyConfigureIfPending,
 /// onWindowGone, the serialize/deserialize persistence seam,
@@ -243,19 +262,75 @@ pub const single_binder_hooks = [_][]const u8{
     "isResizingWindow", "getDragLastRect",       "cancelDragForWindow",
 };
 
+/// Dispatch family for every generated registry element type (`WindowModule`,
+/// `Segment`, ...). The SINGLE canonical loops every owner layer routes its
+/// adopt-claims through, so a hook's dispatch semantics live here once and
+/// are shared by name across otherwise-unrelated owner tiers: an owner never
+/// reimplements a scan, only binds values. All loops honor the registry's
+/// deterministic scan order.
 /// The single canonical registry-lookup entry: the first module in `registry`
 /// that binds the hook `field`, in the registry's deterministic scan order.
 /// Returns null when no compiled-in module provides
 /// the hook (the "no owner" fallback). Core callers use this to reach a
-/// window subsystem through the build-generated registry, never by naming a
+/// window/bar subsystem through the build-generated registry, never by naming a
 /// module. The registry is passed in (not captured) so the contract module
 /// stays free of an import edge into the generated-registry layer.
 pub fn providerOf(
-    registry: []const WindowModule,
-    comptime field: std.meta.FieldEnum(WindowModule),
-) ?WindowModule {
-    for (registry) |wm| if (@field(wm, @tagName(field)) != null) return wm;
+    comptime T: type,
+    registry: []const T,
+    comptime field: std.meta.FieldEnum(T),
+) ?T {
+    for (registry) |m| if (@field(m, @tagName(field)) != null) return m;
     return null;
+}
+
+/// First-match dispatch: calls the first module in `registry` that binds
+/// `field` with the tuple `args`; does nothing when none does. This is the
+/// "adopt by name" seam for single-binder hooks (see `single_binder_hooks`).
+pub fn callFirst(
+    comptime T: type,
+    registry: []const T,
+    comptime field: std.meta.FieldEnum(T),
+    args: anytype,
+) void {
+    if (providerOf(T, registry, field)) |m| @call(.auto, @field(m, @tagName(field)).?, args);
+}
+
+/// Like `callFirst` but returns the first provider's hook result; false when
+/// no module binds the hook.
+pub fn callFirstBool(
+    comptime T: type,
+    registry: []const T,
+    comptime field: std.meta.FieldEnum(T),
+    args: anytype,
+) bool {
+    if (providerOf(T, registry, field)) |m| return @call(.auto, @field(m, @tagName(field)).?, args);
+    return false;
+}
+
+/// Fan-out dispatch: calls EVERY module in `registry` that binds `field`, in
+/// registry order. Used for lifecycle and multi-binder-capable hooks.
+pub fn callAll(
+    comptime T: type,
+    registry: []const T,
+    comptime field: std.meta.FieldEnum(T),
+    args: anytype,
+) void {
+    for (registry) |m| if (@field(m, @tagName(field))) |f| @call(.auto, f, args);
+}
+
+/// Fan-out bool dispatch: true as soon as any module whose hook binds `field`
+/// returns true; false when none binds it or none returns true.
+pub fn callFirstTrue(
+    comptime T: type,
+    registry: []const T,
+    comptime field: std.meta.FieldEnum(T),
+    args: anytype,
+) bool {
+    for (registry) |m| if (@field(m, @tagName(field))) |f| {
+        if (@call(.auto, f, args)) return true;
+    };
+    return false;
 }
 
 /// The bar-segment hook set. Every module under a bar-owner's `modules/`
@@ -273,8 +348,8 @@ pub fn providerOf(
 /// contract free of an import edge into the bar layer.
 /// Which core fact-revisions repaint a segment. A bitmask; a dirty segment is
 /// repainted on the next draw. Declared per module; the bar marks dirty by
-/// bit, name-free. At most one segment SHOULD claim any given role (see the
-/// single-bit role fields below).
+/// bit, name-free. The role capabilities (`self_ticking`, `center_slot`) are
+/// multi-binder sets (see their fields); everything else is free-binding.
 pub const DirtySources = packed struct(u2) {
     /// A focus change (focus_rev diff) repaints this segment.
     focus: bool = false,
@@ -308,13 +383,17 @@ pub const Segment = struct {
     /// Unique across the registry; config text resolves to the module by name.
     name: []const u8 = "",
     /// Declares the segment drives its own refresh cadence (the wall-clock
-    /// segment), so the bar's second-ticker targets it. At most one module
-    /// SHOULD claim it (first-match wins, like idByName today); a bar with no
+    /// segment), so the bar's secondsElapsed ticker targets it. Multi-binder:
+    /// every self-ticking segment is ticked fan-out on each second boundary
+    /// and receives a region-scoped repaint of its own slot. A bar with no
     /// self-ticking segment skips the whole timer path.
     self_ticking: bool = false,
-    /// Declares the segment claims the reserved center slot (the title
-    /// segment): the bar reserves/clamps that slot's width and omits the gap
-    /// after it in the center cluster. At most one module SHOULD claim it.
+    /// Declares the segment claims a share of the reserved center slot (the
+    /// title segment). A center row's center-slot segments split the clamped
+    /// center budget EVENLY, left-to-right in config order, with no
+    /// inter-segment gap inside the cluster. The first binder (config order)
+    /// additionally owns the title-centric bar behaviors (click-to-focus,
+    /// chrome-overlay toggle).
     center_slot: bool = false,
     /// Which core fact-revisions repaint this segment (title: focus+frame;
     /// workspaces/tags: frame; everything else: none).

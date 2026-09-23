@@ -17,12 +17,10 @@ const std = @import("std");
 const core = @import("core");
 const constants = @import("constants");
 const utils = @import("utils");
-const build_options = @import("build_options");
 
 const drawing = @import("drawing");
 const types = @import("types");
-const pipeline = @import("pipeline");
-const plugin = @import("plugin");
+const contract = @import("contract");
 
 /// Service handles the bar passes into mechanism segments (the prompt) at
 /// init. Passed once so segments never import the bar orchestrator;
@@ -289,7 +287,7 @@ pub fn hitTest(
 pub const DirtySourcesSource = enum { focus, frame };
 
 /// True when `sources` has the `source` bit set.
-pub fn hasSource(sources: plugin.DirtySources, source: DirtySourcesSource) bool {
+pub fn hasSource(sources: contract.DirtySources, source: DirtySourcesSource) bool {
     return switch (source) {
         .focus => sources.focus,
         .frame => sources.frame,
@@ -298,37 +296,29 @@ pub fn hasSource(sources: plugin.DirtySources, source: DirtySourcesSource) bool 
 
 /// Resolves a configured segment name to its registry index, or null when no
 /// module with that name is compiled in (segment removed or unknown).
-pub fn idByName(modules: []const @import("plugin").Segment, name: []const u8) ?usize {
+pub fn idByName(modules: []const @import("contract").Segment, name: []const u8) ?usize {
     for (modules, 0..) |m, i| {
         if (std.mem.eql(u8, m.name, name)) return i;
     }
     return null;
 }
 
-/// Resolves the registry index of the first module whose capability field
-/// `name` is set (e.g. "self_ticking"), or null when no module claims it
-/// (first-match wins, like `idByName`). Used by the bar to locate role-bearing
-/// segments without naming them. Comptime-friendly: the returned index can
-/// feed `const` role ids so role-null guards dead-code-eliminate.
-pub fn findByCapability(
-    modules: []const @import("plugin").Segment,
+/// Resolves the registry index of every module whose capability field `name`
+/// is set (e.g. "self_ticking"), in registry order. Used by the bar as its
+/// ROLE SET: capabilities with multiple binders (self_ticking, center_slot)
+/// fan out / split evenly over the whole set rather than first-match wins.
+/// Comptime-friendly: when `modules` is comptime-known (a generated registry)
+/// the returned slice is a comptime value, so empty-set guards
+/// (`.len == 0`) dead-code-eliminate.
+pub fn findAllByCapability(
+    modules: []const @import("contract").Segment,
     comptime name: []const u8,
-) ?usize {
-    for (modules, 0..) |m, i| {
-        if (@field(m, name)) return i;
+) []const usize {
+    var result: []const usize = &.{};
+    for (modules, 0..) |m, idx| {
+        if (@field(m, name)) {
+            result = result ++ [_]usize{idx};
+        }
     }
-    return null;
-}
-
-/// Index of the currently active tiling layout in the build-generated layout
-/// registry, or null when tiling is disabled or the tiling subsystem is absent
-/// (all windows float by definition). Bounded to the registry length so the
-/// caller can index `tiling_mods` directly. Shared by the layout/variants bar
-/// segments, which disagree only on what metadata they render from it.
-pub fn currentLayoutKind() ?u8 {
-    if (!core.getState().config.tiling.enabled) return null;
-    if (!build_options.has_tiling) return null;
-    const kind = pipeline.getCurrentLayout();
-    if (kind >= plugin.tiling_mods.len) return null;
-    return kind;
+    return result;
 }

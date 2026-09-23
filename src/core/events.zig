@@ -31,7 +31,7 @@ const spawn = @import("spawn");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
-const surfaces = @import("plugins").Surfaces;
+const surfaces = @import("surfaces").Surfaces;
 // Window sub-system hooks via the build-generated `window_modules` registry
 // (the loops below no-op for a tree without a given sub-system).
 const window_mods = @import("window_modules").modules;
