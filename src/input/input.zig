@@ -345,10 +345,28 @@ inline fn dirSign(dir: types.Dir) i32 {
     return if (dir == .forward) 1 else -1;
 }
 
+/// A `,`-sequence advances strictly one step at a time. A raw exec step is the
+/// one that needs real waiting: the next step must not begin until the command
+/// has actually finished, so it goes through spawn.execSynchronous, which keeps
+/// the child a direct child and blocks on waitpid until it exits (freezing the
+/// WM for the duration -- see its doc). Every other step kind completes
+/// instantly and is dispatched with the normal non-blocking path.
+fn executeSequenceStep(action: *const types.Action) void {
+    if (action.* == .exec) {
+        spawn.execSynchronous(action.exec);
+        return;
+    }
+    executeAction(action);
+}
+
 /// Top-level action dispatcher. Routes each action tag to its handler inline
 /// (single switch, no per-class delegates). Errors are handled internally.
 fn executeAction(action: *const types.Action) void {
     switch (action.*) {
+        // A `,`-sequence runs steps in strict order: each step fully finishes
+        // (for a raw exec step, that means waiting until the command exits,
+        // see spawn.execSynchronous) before the next one begins.
+        .sequence => |acts| for (acts) |*a| executeSequenceStep(a),
         // Core
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => utils.reload(),
@@ -356,7 +374,10 @@ fn executeAction(action: *const types.Action) void {
         .dump_state => dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
             debug.err("exec failed: {}", .{err}),
-        .sequence, .parallel => |acts| for (acts) |*a| executeAction(a),
+        // A `+` batch is fire-and-forget: members are launched together, no
+        // member waits on another, and execs spawn as detached children that
+        // keep running after the batch moves on.
+        .parallel => |acts| for (acts) |*a| executeAction(a),
 
         // Fullscreen: keybind path resolves the focused window, then shares
         // the chrome-click transition.

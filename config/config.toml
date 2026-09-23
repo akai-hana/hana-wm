@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------------------- #
 
 # In here lies all of hana's functional behavior.
-# See the `[binds]` section below for the bind list, and `themes/akai.toml` for visual behavior.
+# See `binds.toml` for the bind list, and `themes/akai.toml` for visual behavior.
 
 # Files can be structured however the user wants; I decided on this structure in order
 # to make quick theme swapping viable, and functional behavior swappable without affecting
@@ -117,69 +117,7 @@ segments = ["cpu", "mem", "volume", "brightness", "clock"]
 # ---------------------------------------------------------------------------
 # Keybindings
 # ---------------------------------------------------------------------------
-[binds]
-# -- Modifier & value placeholders --
-Mod   = "Super"   # Super/Mod4, Alt/Mod1
-kill  = "pkill -9" # Replaced where {kill} appears in action values
-
-# -- Window management --
-Mod+F       = "toggle_fullscreen"
-Mod+Shift+F = "close_window"
-
-Mod+T           = "minimize_window"
-Mod+Shift+T     = "unminimize_lifo"
-Mod+Alt+T       = "unminimize_fifo"
-Mod+Shift+Alt+T = "unminimize_all"
-
-# -- Tiling --
-Mod+space        = "toggle_layout"          # Cycle layouts forward
-Mod+Shift+space  = "toggle_layout_reverse"  # Cycle layouts backward
-Mod+Alt+space         = "cycle_layout_variants"          # Cycle current layout's variants
-Mod+Alt+Shift+space   = "cycle_layout_variants_reverse"  # Cycle current layout's variants backwards
-Mod+Tab          = "swap_master_focus_swap" # Swap position of current and previous windows
-Mod+Shift+Tab    = "swap_master"            # Swap positions and focus of current and previous windows
-Mod+grave        = "toggle_prompt"
-Mod+Middle_click = "toggle_floating_window" # Toggle clicked window between tiled and floating
-Mod+scroll_up    = "scroll_view_right"
-Mod+scroll_down  = "scroll_view_left"
-
-# -- Master-stack layout --
-Mod+H       = "decrease_master"      # Shrink master area width
-Mod+L       = "increase_master"      # Grow master area width
-Mod+Shift+H = "decrease_master_count"
-Mod+Shift+L = "increase_master_count"
-Mod+N       = "grow_stack_top"       # Grow topmost slave, shrink the rest evenly
-Mod+O       = "grow_stack_bottom"    # Grow bottommost slave, shrink the rest evenly
-
-# -- Focus cycling --
-Mod+j         = "focus_prev_window"
-Mod+k         = "focus_next_window"
-Mod+Shift+j   = "move_window_next"
-Mod+Shift+k   = "move_window_prev"
-
-# -- Workspaces --
-# Glob expansion: Mod+{1-4,Q,W,E,R} expands into individual binds.
-# Workspace-indexed actions get a _N suffix appended automatically.
-Mod+{1-4,Q,W,E,R} = "workspace"
-Mod+5 = "all_workspaces"
-
-# -- Workspace window sending --
-Mod+Shift+{1-4,Q,W,E,R} = "move_to_workspace"
-Mod+Alt+{1-4,Q,W,E,R}   = "toggle_tag"
-Mod+Shift+5 = "pin_window"            # Pin/unpin focused window to every workspace
-
-# -- Bar --
-Mod+B       = "toggle_bar_visibility"  # Show / hide
-Mod+Shift+B = "toggle_bar_position"    # Top / bottom
-
-
-# reload_config hot-reloads the config in place (validated first; a parse
-# error keeps the live config). reload_hana re-execs the current binary and
-# boots from the last-good config snapshot -- i.e. it reloads ONLY the binary,
-# never touching the config files. Chained on one key, the two give a full
-# reload: the config is applied + validated in-process, then the binary swaps.
-Mod+Shift+Escape = ["reload_config", "reload_hana"]
-# Mod+Shift+R = "reload_config" # Hot-reload config only (no binary swap)
+# All binds live in binds.toml.
 
 # ---------------------------------------------------------------------------
 # Workspace rules
