@@ -9,9 +9,9 @@ The stock split (arbitrary, and entirely up to you):
 
 | file                 | role                                        |
 | -------------------- | ------------------------------------------- |
-| `config.toml`        | functional behavior, binds, bar, rules      |
+| `config.toml`        | functional behavior, bar, rules                 |
 | `themes/akai.toml`   | visual palette & appearance                 |
-| `programs.toml`      | personal program binds                      |
+| `binds.toml`         | keybindings, incl. personal program binds   |
 | `fallback.toml`      | built-in config used when no file is found  |
 
 > `fallback.toml` is a compile-time default, not a file you edit; edit
@@ -169,7 +169,7 @@ Key-to-action map. Actions include `toggle_layout`, `workspace`,
 `move_to_workspace`, `toggle_tag`, `pin_window`, `all_workspaces`,
 `toggle_floating_window`, `minimize_window`, `close_window`,
 `toggle_bar_visibility`, `toggle_bar_position`, `reload_config` (hot config reload)
-and `reload_hana` (re-exec). See the `[binds]` section of `config.toml`.
+and `reload_hana` (re-exec). See the `[binds]` section of `binds.toml`.
 
 ### Window rules
 

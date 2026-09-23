@@ -262,3 +262,52 @@ pub fn reapPendingChildren() void {
             entry.pid = -1;
     }
 }
+
+/// Runs `cmd` to completion before returning, for `,`-sequenced exec steps.
+///
+/// Unlike executeShellCommand (fire-and-forget detach), this single-fork keeps
+/// the child a direct child and BLOCKS the caller -- and therefore the WM
+/// event loop -- on waitpid until the command exits. That is the whole point:
+/// a `,` sequence step is only "done" once its exec has fully finished, so
+/// the next step starts against a completed state. The WM is frozen for the
+/// duration; an exec that never exits (a terminal emulator, a game) freezes
+/// hana until it does. This is deliberately a config-author opt-in, never the
+/// path for a bare single-action binding.
+pub fn execSynchronous(cmd: []const u8) void {
+    const alloc = core.getState().alloc;
+
+    var cmd_buf: [stack_cmd_capacity]u8 = undefined;
+    var heap_cmd_z: ?[:0]const u8 = null;
+    defer if (heap_cmd_z) |h| alloc.free(h);
+    const cmd_z: [*:0]const u8 = if (cmd.len < cmd_buf.len)
+        std.fmt.bufPrintZ(&cmd_buf, "{s}", .{cmd}) catch return
+    else blk: {
+        heap_cmd_z = alloc.dupeZ(u8, cmd) catch return;
+        break :blk heap_cmd_z.?;
+    };
+
+    const pid = c.fork();
+    if (pid < 0) {
+        debug.err("Fork failed (synchronous exec): {s}", .{cmd});
+        return;
+    }
+    if (pid == 0) {
+        // Single-fork child: inherits stdio, stays re-parentable to the WM
+        // so waitpid below actually observes its exit. No detach, no pipe.
+        _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
+        std.process.exit(127);
+    }
+
+    var status: c_int = 0;
+    while (true) {
+        const rc = c.waitpid(pid, &status, 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break,
+            .INTR => continue, // SIGCHLD from an unrelated child interrupts; retry.
+            else => {
+                debug.err("waitpid failed (synchronous exec): {s}", .{cmd});
+                return;
+            },
+        }
+    }
+}
