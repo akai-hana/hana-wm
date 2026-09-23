@@ -26,7 +26,7 @@ pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
 /// (Occupant query family: pure-scan `model.coveringOccupantOnWs`, module's
 /// record-backed `fullscreen.fullscreenOccupantOnWs`, actions' routed hook
 /// `currentCoveringOccupant`.)
-pub fn coveredByOccupant(
+pub fn isBehindCoveringWindow(
     m: *const model.Model,
     win: u32,
     current: model.WSId,
@@ -52,7 +52,7 @@ pub fn resolveBorderColor(win: u32) u32 {
     // real workspace from its covering state or (re)place home; a stray or
     // unfindable window falls back to whether the CURRENT workspace has a
     // covering occupant.
-    if (coveredByOccupant(m, win, m.current, build_options.has_fullscreen)) return 0;
+    if (isBehindCoveringWindow(m, win, m.current, build_options.has_fullscreen)) return 0;
     return borderColorOf(focus.getFocused() == win, cfg.border_focused, cfg.border_unfocused);
 }
 

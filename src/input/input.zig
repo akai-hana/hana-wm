@@ -173,7 +173,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 
     // O(1) dispatch via the (modifiers << 32 | keysym) map built by
     // input.buildKeybinds.
-    const matched: ?*const types.Action = keybind_resolver.lookup(mods, keysym);
+    const matched = keybind_resolver.lookup(mods, keysym);
 
     // The chrome overlay owns all key input while active; routing is handled
     // inside it (input flows in, true = consumed, before keybinding dispatch).
@@ -202,6 +202,13 @@ pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
     focus.setLastEventTime(event.time);
 }
 
+/// True when the press/release/motion target is the bar window (bar path);
+/// always false in a bar-less build, where `surfaces` compiles to the null
+/// plugin type and the shape is pruned at comptime.
+inline fn onBarWindow(win: u32) bool {
+    return build_options.has_bar and surfaces.isBarWindow(win);
+}
+
 /// Dispatches a priority-ordered button-press event, splitting the two named
 /// paths: a plain click on the bar window routes to the bar; every other
 /// press goes through the managed-window mouse machinery.
@@ -221,7 +228,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 /// normal mouse-binding/drag path. Returns true when the event was consumed.
 fn handleBarButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) bool {
     if (super_held) return false;
-    if (!build_options.has_bar or !surfaces.isBarWindow(clicked_window)) return false;
+    if (!onBarWindow(clicked_window)) return false;
     surfaces.handleButtonPress(event);
     return true;
 }
@@ -241,7 +248,7 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
     }
 
     const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
-    if (clicked_window == 0 or clicked_window == cs.root or managed_window == 0) return releaseGrab(event.time);
+    if (clicked_window == cs.root or managed_window == 0) return releaseGrab(event.time);
 
     if (!super_held) {
         focus.grabFocus(managed_window, .mouse_click);
@@ -269,7 +276,7 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
     // Releases on the bar window terminate a segment scrub (the bar clears
     // its drag anchor). Routed before the managed-window path, as clicks are.
-    if (build_options.has_bar and surfaces.isBarWindow(event.event)) {
+    if (onBarWindow(event.event)) {
         surfaces.handleButtonRelease(event);
         return;
     }
@@ -285,7 +292,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     // Press-hold motion on the bar window feeds the scrub-drag path: it is
     // routed before the managed-window drag engine, which targets a client
     // window grab, never the bar.
-    if (build_options.has_bar and surfaces.isBarWindow(event.event)) {
+    if (onBarWindow(event.event)) {
         surfaces.handleButtonMotion(event);
         return;
     }
@@ -300,37 +307,34 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 
 // Window operations
 
-/// Sends a WM_DELETE_WINDOW client message per ICCCM §4.1.2.7.
-fn sendWmDelete(conn: core.Connection, win: u32, protos_atom: u32, del_atom: u32) void {
+/// Closes a window gracefully via WM_DELETE_WINDOW (ICCCM §4.1.2.7), falling
+/// back to xcb_destroy_window for clients that don't advertise the protocol.
+/// The timestamp in data32[1] is the time passed to the client per §4.1.2.7.
+fn closeWindow(win: u32) void {
+    const conn = core.getState().conn;
+    if (!window.supportsWMDeleteCached(conn, win)) {
+        _ = xcb.xcb_destroy_window(conn, win);
+        return;
+    }
+
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch {
+        _ = xcb.xcb_destroy_window(conn, win);
+        return;
+    };
+    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch {
+        _ = xcb.xcb_destroy_window(conn, win);
+        return;
+    };
+
     var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
     event.response_type = xcb.XCB_CLIENT_MESSAGE;
     event.format = 32;
     event.window = win;
-    event.type = protos_atom;
-    event.data.data32[0] = del_atom;
-    event.data.data32[1] = focus.getLastEventTime(); // ICCCM §4.1.7
+    event.type = protocols_atom;
+    event.data.data32[0] = delete_atom;
+    event.data.data32[1] = focus.getLastEventTime();
 
     _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-}
-
-/// Force-destroys a window unconditionally via xcb_destroy_window.
-fn forceDestroy(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_destroy_window(conn, win);
-}
-
-/// Closes a window gracefully via WM_DELETE_WINDOW (ICCCM §4.1.2.7), falling
-/// back to xcb_destroy_window for clients that don't advertise the protocol.
-fn closeWindow(win: u32) void {
-    const conn = core.getState().conn;
-    if (!window.supportsWMDeleteCached(conn, win)) {
-        forceDestroy(conn, win);
-        return;
-    }
-
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return forceDestroy(conn, win);
-    const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch return forceDestroy(conn, win);
-
-    sendWmDelete(conn, win, protocols_atom, delete_atom);
 }
 
 // Action dispatch
@@ -352,7 +356,7 @@ fn executeAction(action: *const types.Action) void {
         .dump_state => dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
             debug.err("exec failed: {}", .{err}),
-        .sequence => |acts| for (acts) |*a| executeAction(a),
+        .sequence, .parallel => |acts| for (acts) |*a| executeAction(a),
 
         // Fullscreen: keybind path resolves the focused window, then shares
         // the chrome-click transition.
@@ -376,7 +380,7 @@ fn executeAction(action: *const types.Action) void {
         // actions.snapViewportFocusedDuty), so a cycle that scrolls the
         // viewport is still one grab+reconcile, not focus-then-snap's two.
         .cycle_focus => |dir| {
-            if (focus.cycleTarget(dir == .forward)) |target|
+            if (focus.cycleTarget(dir)) |target|
                 focus.grabFocusWithDuty(target, .user_command, &actions.snapViewportFocusedDuty);
         },
 
@@ -433,9 +437,10 @@ fn dumpState() void {
     }
 
     if (build_options.has_tiling and core.tilingEnabled()) {
+        const m = pipeline.model();
         debug.info("Tiling enabled: true", .{});
         debug.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
-        debug.info("Tiled windows:  {}", .{model.tiledCountOnWs(pipeline.model(), pipeline.model().current)});
+        debug.info("Tiled windows:  {}", .{model.tiledCountOnWs(m, m.current)});
     }
 
     debug.info("================================", .{});
@@ -514,7 +519,7 @@ const XcbCursor = struct {
 
         const cookie = xcb.xcb_change_window_attributes_checked(
             conn,
-            screen.*.root,
+            screen.root,
             xcb.XCB_CW_CURSOR,
             &[_]u32{cursor},
         );

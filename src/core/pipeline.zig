@@ -68,9 +68,7 @@ pub inline fn mut(g: *const Gate) *model_mod.Model {
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
     if (initialized) return model().ws[model().current.index].params.kind;
-    const cs = core.getState();
-    if (!build_options.has_tiling) return 0;
-    return defaultIndexForLayoutName(cs.config.tiling.layout);
+    return defaultIndexForLayoutName(core.getState().config.tiling.layout);
 }
 
 /// Resolves a config layout name to a registry index (see
@@ -255,6 +253,12 @@ pub inline fn focusOnlyCommit(t: focus.FocusTransition) void {
     }{ .t = t });
 }
 
+/// Fullscreen transition classification for the atomic grab path (the fn
+/// below): a named kind instead of a bool-pair so enter/exit/switch_ can't be
+/// passed inconsistently. Drives the EWMH state writes and the bar
+/// hide/show arming inside the grab.
+pub const FullscreenKind = enum { enter, exit, switch_ };
+
 /// Grab server, reconcile, do EWMH + bar hide, then ungrabAndFlush, atomically.
 /// Specialised for the fullscreen toggle path so EWMH writes and the bar
 /// unmap/hide land inside the same grab as geometry (grouped atomicity); the
@@ -263,16 +267,14 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     o: sync.ReconcileOpts,
     win: model_mod.WindowId,
     prev_fs_win: ?model_mod.WindowId,
-    was_exit: bool,
-    was_switch: bool,
+    kind: FullscreenKind,
 ) void {
     preReconcileDuties();
     withServerGrab(struct {
         o: sync.ReconcileOpts,
         win: model_mod.WindowId,
         prev_fs_win: ?model_mod.WindowId,
-        was_exit: bool,
-        was_switch: bool,
+        kind: FullscreenKind,
         fn call(self: @This(), c: *sync.Ctx) void {
             sync.reconcile(&instance, c, self.o);
             // EWMH advertisement inside the grab: clear for whoever left
@@ -282,13 +284,13 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             // fullscreen does, preserving the old gated single hook call
             // exactly; the loop just makes the dispatch mechanism uniform
             // rather than a merged struct. Ordering and the
-            // was_switch/was_exit/instance.focused logic is unchanged.
+            // kind/prev_fs_win/instance.focused logic is unchanged.
             for (window_mods) |m| {
                 if (m.setEwmhFullscreenState) |hook| {
-                    if (self.was_switch) {
+                    if (self.kind == .switch_) {
                         if (self.prev_fs_win) |old| hook(old, false);
                     }
-                    hook(self.win, !self.was_exit);
+                    hook(self.win, self.kind != .exit);
                 }
             }
             // Bar hide/show inside the grab: no separate grab/reconcile cycle.
@@ -301,7 +303,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             //
             // EXIT: arm the deferred show. The bar reappears after the
             // client's ConfigureNotify confirms non-fullscreen dimensions.
-            if (!self.was_exit) {
+            if (self.kind != .exit) {
                 // Immediate bar unmap when fullscreen claims the screen.
                 if (build_options.has_bar) surfaces.hideBarForFullscreen();
             } else {
@@ -313,7 +315,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
                 }
             }
         }
-    }{ .o = o, .win = win, .prev_fs_win = prev_fs_win, .was_exit = was_exit, .was_switch = was_switch });
+    }{ .o = o, .win = win, .prev_fs_win = prev_fs_win, .kind = kind });
 }
 
 /// Flushless reconcile against the current ctx (drag tick path).

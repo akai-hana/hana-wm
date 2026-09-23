@@ -34,19 +34,20 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const screen_h = v.workarea.height;
     const master_n: u16 = @intCast(@min(v.params.primary_count, n));
     const stack_n: u16 = @intCast(n - master_n);
+    const stack_windows = windows[master_n..];
     const y = tiling.waY(v);
 
     // When no stack exists the master pane takes the full width.
-    const master_w_frac: u16 = if (stack_n > 0) blk: {
-        const raw = @as(f32, @floatFromInt(screen_w)) * v.params.primary_width;
-        break :blk utils.scaling.roundToU16(raw, 0.0);
-    } else screen_w;
+    const master_w_frac: u16 = if (stack_n > 0)
+        utils.scaling.roundToU16(@as(f32, @floatFromInt(screen_w)) * v.params.primary_width, 0.0)
+    else
+        screen_w;
 
     // Shrink the stack pane to the widest bounded slave's max_width
     // (dialogs/small windows no longer leave a dead gap beside them).
     const is_primary_on_right = v.env.primary_on_right;
     const stack_pane_w: u16 = screen_w -| master_w_frac;
-    const natural_stack_w: u16 = minStackWidth(ctx, windows[master_n..]);
+    const natural_stack_w: u16 = minStackWidth(ctx, stack_windows);
     const stack_w: u16 = if (natural_stack_w > 0 and natural_stack_w < stack_pane_w)
         natural_stack_w
     else
@@ -79,7 +80,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const stack_origin: u16 = if (is_primary_on_right) m.gap else master_w;
     tileStack(
         ctx,
-        windows[master_n..],
+        stack_windows,
         stack_origin,
         y,
         stack_w,
@@ -302,12 +303,7 @@ fn tileStackExtra(
 /// the call sites on purpose: they differ in the min_dim-floor corner, and
 /// merging them is not behavior-preserving (plan NEW-4 corner).
 inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
-    tiling.emitView(ctx.v, ctx.out, win, .{
-        .x = tiling.satI16(@intCast(px)),
-        .y = tiling.satI16(@intCast(py)),
-        .width = w,
-        .height = h,
-    });
+    tiling.emitRect(ctx.v, ctx.out, win, @intCast(px), @intCast(py), w, h);
 }
 
 /// Total pixel height available for window content after gaps and borders.

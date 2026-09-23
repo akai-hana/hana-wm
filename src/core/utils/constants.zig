@@ -104,8 +104,8 @@ pub const mouse_button_scroll_down: u8 = 5;
 /// Standard DPI for a 1x display. All scale factors are computed relative to this value.
 pub const baseline_dpi: f32 = 96.0;
 
-/// Maximum number of tiled windows across the whole WM (all workspaces combined),
-/// not per workspace. Buffers sized from this are indexed by usize/u16,
-/// so raising it only costs memory; keep it a compile-time bound so
-/// stack buffers stay stack buffers.
+/// Maximum tiled windows on a single workspace (per-workspace tiled_order
+/// capacity, applied per ws). Buffers sized from this are indexed by
+/// usize/u16, so raising it only costs memory; keep it a compile-time bound
+/// so stack buffers stay stack buffers.
 pub const max_tiled_windows = 64;

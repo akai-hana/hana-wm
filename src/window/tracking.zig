@@ -1,13 +1,11 @@
 //! Window tracking facade over the model, the single source of truth.
-//! Every query reads pipeline.model(), so window predicates match actions/sync.
+//! Queries read pipeline.model() (counts via the store, scans via the
+//! per-call snapshot in allWindows), so window predicates match actions/sync.
 
 const std = @import("std");
 
 const core = @import("core");
 const constants = @import("constants");
-const build_options = @import("build_options");
-const wincache = @import("wincache");
-const utils = @import("utils");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
 const debug = @import("debug");
@@ -139,11 +137,13 @@ pub inline fn getWorkspaceCount() usize {
     return state.workspace_count;
 }
 
+/// Count of visible windows on a workspace (`mask` tag membership over every
+/// managed window; the same tag test `model.tiledCountOnWs` applies to tiled
+/// slots, which also counts any non-tiled window visible there).
 pub fn countWindowsOnWorkspace(ws_idx: core.WorkspaceId) usize {
-    const bit = model_mod.bit(ws_idx);
     var n: usize = 0;
     for (allWindows()) |e| {
-        if (e.mask & bit != 0) n += 1;
+        if (model_mod.maskedOn(e.mask, ws_idx)) n += 1;
     }
     return n;
 }
@@ -164,7 +164,7 @@ pub const workspace_labels: [constants.max_workspaces][]const u8 = blk: {
 
 inline fn isWindowOnWorkspace(win: u32, ws_idx: core.WorkspaceId) bool {
     const mask = getWindowWorkspaceMask(win) orelse return false;
-    return mask & model_mod.bit(ws_idx) != 0;
+    return model_mod.maskedOn(mask, ws_idx);
 }
 
 /// True when `win` has a tiled anchor (not floating, covering or

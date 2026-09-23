@@ -61,7 +61,7 @@ Mod+Space     = "toggle_layout"
 Mod+E         = "cycle_variants"
 
 # Config reload
-Mod+Shift+Y = "reload"
+Mod+Shift+Y = "reload_config"
 Mod+Shift+R = "reload_hana"   # unconditional in-place re-exec (S22)
 
 # State introspection (harness gold: lands in hana.log)

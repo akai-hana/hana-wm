@@ -13,6 +13,11 @@
 //! pointless when the intent is "run the current file", and a stale
 //! comparison could silently keep the old code running.
 //!
+//! Binary-only by construction: the re-exec hand-off pins HANA_CONFIG_DIR to
+//! the frozen last-good config snapshot (config.refreshSnapshot), so the
+//! successor never re-reads the user's config files. Config changes land
+//! exclusively through the `reload_config` action / SIGHUP.
+//!
 //! This is the *re-exec* coordinator only. Config-only reloads (the
 //! `reload_config` keybind, SIGHUP) stay in proc.zig's flag surface and never
 //! re-exec the process.
@@ -52,7 +57,7 @@ var should_reexec = std.atomic.Value(bool).init(false);
 
 /// Resolves the binary to exec on re-exec: the readLink of `/proc/self/exe`.
 /// One-shot at startup, before any reload/reexec request can arrive.
-pub fn init(alloc: std.mem.Allocator) void {
+pub fn init() void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
     // readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
@@ -66,7 +71,7 @@ pub fn init(alloc: std.mem.Allocator) void {
         );
         exec_path_z = null;
     } else {
-        exec_path_z = alloc.dupeZ(u8, buf[0..n]) catch null;
+        exec_path_z = std.heap.c_allocator.dupeZ(u8, buf[0..n]) catch null;
     }
 }
 

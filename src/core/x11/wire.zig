@@ -3,9 +3,9 @@
 //! sink.zig), plus a documented allowlist for bar lifecycle, client-protocol,
 //! and non-mutation flushes (dev/scripts/check-layers.sh Rules 1-2).
 //! Atom cache, EWMH root advertisement, property fetchers, and the
-//! configure/raise/grab/offscreen request shims live here. Pure geometry
-//! (Rect/Margins/scaling) stays in utils.zig so model/tiling never imports
-//! this file.
+//! configure/raise/grab request shims live here; window parking lives in
+//! sync/sink.zig. Pure geometry (Rect/Margins/scaling) stays in utils.zig so
+//! model/tiling never imports this file.
 
 const std = @import("std");
 
@@ -84,13 +84,13 @@ pub inline fn setBorderPixel(conn: Connection, win: u32, pixel: u32) void {
 // every reconcile batch so the queued request run reaches the server
 // atomically (zero-round-trip rule).
 
-/// Always pair with ungrabServer()/ungrabAndFlush().
+/// Always pair with ungrabAndFlush().
 pub inline fn grabServer(conn: Connection) void {
     _ = xcb.xcb_grab_server(conn);
 }
 
 /// Releases the X server grab without flushing pending requests.
-pub inline fn ungrabServer(conn: Connection) void {
+inline fn ungrabServer(conn: Connection) void {
     _ = xcb.xcb_ungrab_server(conn);
 }
 
@@ -229,6 +229,23 @@ const supported_atoms = [_][]const u8{
     "_NET_WM_WINDOW_TYPE_DOCK",
     "_NET_WM_STRUT_PARTIAL",
 };
+
+// Both lists must stay in sync at compile time: a misspelt/advertised atom
+// without an AtomCache field would intern XCB_ATOM_NONE (0) and silently
+// claim support for nothing. Catalogue: the advertised set is a strict
+// subset of the cached fields (RESOURCE_MANAGER & friends are fetched but
+// never advertised, and vice versa is a compile error).
+comptime {
+    @setEvalBranchQuota(100000);
+    const fields = std.meta.fieldNames(AtomCache);
+    for (supported_atoms) |name| {
+        var found = false;
+        for (fields) |f| {
+            if (std.mem.eql(u8, f, name)) found = true;
+        }
+        if (!found) @compileError("supported_atoms has no AtomCache field: " ++ name);
+    }
+}
 
 /// Publishes hana's EWMH conformance on the root window: per the spec a
 /// conformant WM creates a small identity ("check") window, tags it and the

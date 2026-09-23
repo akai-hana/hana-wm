@@ -5,6 +5,7 @@
 //! intrinsics.
 const std = @import("std");
 const utils = @import("utils");
+const bounded = @import("bounded");
 const constants = @import("constants");
 
 /// Alias of the canonical WindowId (`@import("ids").WindowId`; xcb_window_t).
@@ -16,17 +17,26 @@ pub const WindowId = @import("ids").WindowId;
 pub const WSId = @import("ids").WorkspaceId;
 pub const Mask = u64;
 
+/// Mask bit for workspace `ws`. Precondition: `ws.index < 64` (u64 mask);
+/// workspace ids are far below that, so this is structural, not a clamp.
 pub inline fn bit(ws: WSId) Mask {
     return @as(Mask, 1) << @intCast(ws.index);
+}
+
+/// Whether `mask` carries the tag bit for `ws`.
+pub inline fn maskedOn(mask: Mask, ws: WSId) bool {
+    return mask & bit(ws) != 0;
 }
 
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
 /// Single canonical size-hints record. Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
-    /// PMinSize / PBaseSize floor. Tiling deliberately ignores this (the layout
-    /// engine owns tiled dimensions), but the floating drag-resize path honours
-    /// it as a user-facing floor.
+    /// PMinSize / PBaseSize floor. Policy: TILING deliberately ignores
+    /// declared minimums -- the layout engine owns tiled dimensions, and
+    /// honouring them would pin the rect and block mod_h/mod_l resizing
+    /// (`tiling.applyHints` is the tiled-side delegate). Only the floating
+    /// drag-resize path honours this as a user-facing floor.
     min_width: u16 = 0,
     min_height: u16 = 0,
     max_width: u16 = 0, // PMaxSize limit
@@ -103,151 +113,16 @@ const WsState = struct {
     params: LayoutParams = .{},
 };
 
-/// Bounded, stack-allocated key-value collection with sorted-key binary search.
-///
-/// Parameterised by key type, value type, and a hard capacity ceiling
-/// (stack-allocated arrays, no heap allocation). Keys are kept in sorted
-/// order at all times: lookups (get, getPtr, has) use O(log n) binary search;
-/// put and remove use binary search for the position and then shift arrays to
-/// maintain sorted order.
-///
-/// Threading model: single-threaded, no locking needed; all access occurs
-/// on the event-loop thread.
-///
-/// When the capacity is reached, put returns error.StoreFull; there is no
-/// eviction or overflow, the ceiling is absolute.
-pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
-    return struct {
-        const Self = @This();
+/// Bounded sorted-key collection: the factory lives in core/utils/bounded.zig
+/// (Store, next to BoundedList) and is re-exported here so the model's window
+/// store and the sync ledger share one xcb-free container without either
+/// naming core (see bounded.zig for the sorted-order and pointer contracts).
+pub const Store = bounded.Store;
 
-        keys: [capacity]K = undefined,
-        vals: [capacity]V = undefined,
-        len: usize = 0,
-
-        fn exactAt(self: *const Self, k: K) ?usize {
-            var lo: usize = 0;
-            var hi: usize = self.len;
-            while (lo < hi) {
-                const mid = lo + (hi - lo) / 2;
-                if (self.keys[mid] == k) return mid;
-                if (self.keys[mid] < k) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            return null;
-        }
-
-        fn lowerBound(self: *const Self, k: K) usize {
-            var lo: usize = 0;
-            var hi: usize = self.len;
-            while (lo < hi) {
-                const mid = lo + (hi - lo) / 2;
-                if (self.keys[mid] < k) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            return lo;
-        }
-
-        pub fn getPtr(self: *Self, k: K) ?*V {
-            if (self.exactAt(k)) |i| return &self.vals[i];
-            return null;
-        }
-
-        // Pointer-relocation contract: the Store is a contiguous array, so a
-        // *V returned by getPtr/put remains valid across get/put/remove of
-        // OTHER keys (those shift slots but never reallocate). It is
-        // invalidated ONLY by put(k) on a different entry, remove(k), or
-        // clear() -- each of which may move the slot that k occupies -- or by
-        // a reload into self.keys/self.vals wholesale. Callers must not cache
-        // a *V across such an operation on its own key.
-
-        pub fn get(self: *const Self, k: K) ?V {
-            if (self.exactAt(k)) |i| return self.vals[i];
-            return null;
-        }
-
-        pub fn has(self: *const Self, k: K) bool {
-            return self.exactAt(k) != null;
-        }
-
-        pub fn put(self: *Self, k: K, v: V) error{StoreFull}!*V {
-            if (self.exactAt(k)) |i| {
-                self.vals[i] = v;
-                return &self.vals[i];
-            }
-            if (self.len == capacity) return error.StoreFull;
-            const pos = self.lowerBound(k);
-            std.mem.copyBackwards(K, self.keys[pos + 1 .. self.len + 1], self.keys[pos..self.len]);
-            std.mem.copyBackwards(V, self.vals[pos + 1 .. self.len + 1], self.vals[pos..self.len]);
-            self.keys[pos] = k;
-            self.vals[pos] = v;
-            self.len += 1;
-            return &self.vals[pos];
-        }
-
-        /// Sorted-shift-remove: elements after `i` shift left to fill the gap.
-        /// O(n); iteration order stays sorted-by-key.
-        pub fn remove(self: *Self, k: K) bool {
-            if (self.exactAt(k)) |i| {
-                const last = self.len - 1;
-                std.mem.copyForwards(K, self.keys[i..last], self.keys[i + 1 .. self.len]);
-                std.mem.copyForwards(V, self.vals[i..last], self.vals[i + 1 .. self.len]);
-                self.len = last;
-                return true;
-            }
-            return false;
-        }
-
-        pub const Item = struct { key: K, val: *const V };
-
-        /// Sorted-key row iterator: yields every stored (key, value) in order,
-        /// so scans never hand-roll the `0..count()`/`, at(k)` bounds dance.
-        /// The row pointer is valid until the store mutates (see the pointer
-        /// contract on getPtr). Early-exit mid-iteration is safe.
-        pub const Iterator = struct {
-            store: *const Self,
-            pos: usize = 0,
-            pub fn next(self: *Iterator) ?Item {
-                if (self.pos >= self.store.len) return null;
-                const i = self.pos;
-                self.pos += 1;
-                return .{ .key = self.store.keys[i], .val = &self.store.vals[i] };
-            }
-        };
-        pub fn iterator(self: *const Self) Iterator {
-            return .{ .store = self };
-        }
-
-        /// Indexed accessor: `seq` beyond count() clamps to the
-        /// last stored row (real check, not a debug-only assert), so an
-        /// off-by-one index can't OOB the backing arrays in ReleaseFast.
-        /// Empty map → row 0 of the fixed-capacity storage (always
-        /// addressable, capacity >= 1).
-        pub fn at(self: *const Self, seq: usize) Item {
-            const idx = @min(seq, self.len -| 1);
-            return .{ .key = self.keys[idx], .val = &self.vals[idx] };
-        }
-
-        pub fn count(self: *const Self) usize {
-            return self.len;
-        }
-
-        /// Index of the entry keyed `k`, or null when absent.
-        pub inline fn slotOf(self: *const Self, k: K) ?usize {
-            return self.exactAt(k);
-        }
-
-        pub fn clear(self: *Self) void {
-            self.len = 0;
-        }
-    };
-}
-
+/// Store and MRU capacities. 128 managed windows bounds the sorted-key store
+/// (stack-allocated; X ids are 32-bit, so the ceiling is arbitrary but far
+/// beyond real window counts). 16 keeps the per-workspace focus MRU small
+/// enough to iterate on every focus/fallback path.
 pub const store_capacity = 128;
 pub const mru_capacity = 16;
 /// Bounded per-workspace tiled membership list (defined capacity; total
@@ -339,14 +214,15 @@ pub inline fn isPinned(e: Entry) bool {
 /// visible/tiled-count predicates. `pub inline` so window/sync layers share
 /// one spelling instead of re-deriving `e.mask & bit(ws)`.
 pub inline fn taggedOn(e: Entry, ws: WSId) bool {
-    return e.mask & bit(ws) != 0;
+    return maskedOn(e.mask, ws);
 }
 
 /// Number of windows placed in tiled slots of `ws`: entries of `ws`'s
 /// tiled_order whose tag mask includes `ws`. Viewport slot math (actions) and
 /// diagnostics (input dump_state) share this single model read; recomputing
 /// the count from store-wide base-tiled entries would disagree on multi-tagged
-/// windows.
+/// windows. (The window layer's countWindowsOnWorkspace is the same tag test
+/// over ALL windows; this one counts tiled slots specifically.)
 pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     var n: usize = 0;
     for (m.ws[ws.index].tiled_order.constSlice()) |w| {
@@ -362,12 +238,11 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
 /// without enumerating optional subsystems. At most one occupant per ws by the
 /// reconciler.
 ///
-/// Contrast with the fullscreen module's own occupant query
-/// (`fullscreen.fullscreenOccupantOnWs`, AND semantics): it scans the module's
-/// record registry and requires an entry to be present-not-parked AND
-/// recorded on `ws`, whereas this pure store scan unions anchor-or-visibility.
-/// Use the module query when you need the record-backed presence check; use
-/// this when you must stay inside pure layers (sync, borders, bar).
+/// Contrast with the fullscreen module's occupant hook
+/// (`fullscreen.fullscreenOccupantOnWs`): that is a pure store-order AND scan
+/// requiring covering + anchored to `ws` + visible on it, whereas this scan
+/// unions anchor-or-visibility. Neither consults a module record registry
+/// anymore (the model entry is the fullscreen record).
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -497,7 +372,8 @@ pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
 
 /// Slot swap: exchanges the first two tiled slots of the current workspace
 /// (primary head and the following slot). No-op with fewer than two tiled
-/// windows.
+/// windows. Test seam: the actions layer transitions run
+/// `swapFocusedWithPrevious`; production never calls this.
 pub fn swapPrimary(m: *Model) void {
     const list = &m.ws[m.current.index].tiled_order;
     if (list.len < 2) return;

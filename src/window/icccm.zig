@@ -318,15 +318,7 @@ pub fn discardProtocolCookie(conn: core.Connection, opt: anytype) void {
 
 /// Returns true when absent (assume True per ICCCM) or explicitly True.
 fn queryWMHintsAcceptsInput(conn: core.Connection, win: u32) bool {
-    return extractWMHintsInput(conn, xcb.xcb_get_property(
-        conn,
-        constants.property_no_delete,
-        win,
-        xcb.XCB_ATOM_WM_HINTS,
-        xcb.XCB_ATOM_WM_HINTS,
-        0,
-        wm_hints_long_length,
-    ));
+    return extractWMHintsInput(conn, firePropQuery(conn, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, wm_hints_long_length));
 }
 
 /// Refresh one half of CachedProps after a PropertyNotify, keeping the other

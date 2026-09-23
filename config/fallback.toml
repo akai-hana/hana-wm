@@ -45,7 +45,7 @@ Mod+B = "toggle_bar_visibility"
 Mod+Shift+B = "toggle_bar_position"
 
 # Config reload
-Mod+Shift+T = "reload"
+Mod+Shift+T = "reload_config"
 
 [bar]
 position = "bottom"

@@ -19,22 +19,14 @@ const xkbcommon = @import("xkbcommon");
 /// X-free; `input.deinitKeybinds` tears it down before the Actions its entries
 /// point into are freed.
 pub const KeybindResolver = struct {
-    const Entry = struct {
-        owner: *const types.Action,
-        /// Index of the FIRST binding that claimed this key; the warn-on-
-        /// conflict path reports it against the current one. The last write
-        /// wins the map (see rebuildDispatchMap).
-        first_index: usize,
-    };
-
-    map: std.AutoHashMapUnmanaged(u64, Entry) = .empty,
+    map: std.AutoHashMapUnmanaged(u64, *const types.Action) = .empty,
 
     inline fn dispatchKey(modifiers: u16, keysym: u32) u64 {
         return (@as(u64, modifiers) << 32) | keysym;
     }
 
-    /// Warns about conflicting bindings (same effective mods+keysym the map
-    /// is keyed on) and rebuilds the dispatch map from scratch.
+    /// Rebuilds the dispatch map from scratch, warning when two bindings
+    /// resolve to the same effective mods+keysym (the later one wins).
     pub fn rebuildDispatchMap(
         self: *KeybindResolver,
         keybindings: []types.Keybind,
@@ -43,14 +35,14 @@ pub const KeybindResolver = struct {
         self.map.clearRetainingCapacity();
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
-            if (self.map.get(key)) |first| {
+            if (self.map.contains(key))
                 debug.warn(
-                    "Keybinding conflict: #{} and #{} share mods=0x{x:0>4} " ++
-                        "keysym=0x{x}, second wins",
-                    .{ first.first_index + 1, i + 1, kb.modifiers, kb.keysym },
+                    "Keybinding conflict: binding #{} (mods=0x{x:0>4} " ++
+                        "keysym=0x{x}) is shadowed; a later binding with the " ++
+                        "same key wins",
+                    .{ i + 1, kb.modifiers, kb.keysym },
                 );
-            }
-            self.map.put(allocator, key, .{ .owner = &kb.action, .first_index = i }) catch |e|
+            self.map.put(allocator, key, &kb.action) catch |e|
                 debug.warnOnErr(e, "keybind map build");
         }
     }
@@ -58,9 +50,7 @@ pub const KeybindResolver = struct {
     /// O(1) keybinding lookup for use on the hot key-press path.
     /// Returns a pointer into the current config's keybindings slice, or null.
     pub inline fn lookup(self: *const KeybindResolver, mods: u16, keysym: u32) ?*const types.Action {
-        if (self.map.get(dispatchKey(mods, keysym))) |entry|
-            return entry.owner;
-        return null;
+        return self.map.get(dispatchKey(mods, keysym));
     }
 
     /// Releases the dispatch map. Called before the keybindings whose Actions

@@ -17,7 +17,6 @@ const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
 });
 
-const xkb_keysym_case_insensitive = xkb.XKB_KEYSYM_CASE_INSENSITIVE;
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 
 /// Keysym for `name` under case-insensitive lookup (so `"super_l"` and
@@ -25,7 +24,7 @@ pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 /// may carry trailing NUL bytes; parsing stops at the first NUL.
 pub fn keysymFromName(name: []const u8) u32 {
     const z = std.mem.sliceTo(name, 0);
-    return xkb.xkb_keysym_from_name(@ptrCast(z.ptr), xkb_keysym_case_insensitive);
+    return xkb.xkb_keysym_from_name(@ptrCast(z.ptr), xkb.XKB_KEYSYM_CASE_INSENSITIVE);
 }
 
 /// XKB name for `keysym` (e.g. XKB_KEY_at -> "at") into `buf`, returning a

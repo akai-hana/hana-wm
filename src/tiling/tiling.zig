@@ -10,8 +10,8 @@ const plugin = @import("plugin");
 
 /// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
 /// clamp, then aspect clamp (with a re-snap, since a client may declare both).
-/// Declared minimums are intentionally NOT enforced; tiling owns window size,
-/// and honouring them would pin the rect and block mod_h/mod_l resizing.
+/// Declared minimums are intentionally NOT enforced: tiling owns window size
+/// (the policy lives on `model.SizeHints.min_width`).
 pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
     if (h.isEmpty()) return rect;
     var width: u16 = rect.width;
@@ -79,8 +79,8 @@ pub const Env = plugin.Env;
 pub const View = plugin.View;
 pub const List = plugin.List;
 /// Working context for a layout module pass: the input view and output list,
-/// plus the two environment scalars every module needs (outer margins and the
-/// minimum pane dimension).
+/// with the env's outer margins and min-pane dimension copied in so modules
+/// that need them don't re-read `v.env`.
 pub const LayoutCtx = struct {
     v: *const View,
     out: *List,
@@ -200,6 +200,18 @@ pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: ut
     appendPlacement(out, win, applyHints(rect, v.hints.forWin(win)), true);
 }
 
+/// Emit a visible placement built from integer tiling coordinates, narrowing
+/// x/y through satI16. The shared row-emission shape every module used to
+/// hand-build as `utils.Rect{ .x = satI16(...), ... }` + emitView.
+pub inline fn emitRect(v: *const View, out: *List, win: model.WindowId, x: i32, y: i32, w: u16, h: u16) void {
+    emitView(v, out, win, .{
+        .x = satI16(x),
+        .y = satI16(y),
+        .width = w,
+        .height = h,
+    });
+}
+
 /// Emit a parked placement (the parked position sync applies via Sink.park).
 pub inline fn emitHidden(out: *List, win: model.WindowId) void {
     appendPlacement(out, win, parked_rect, false);
@@ -227,9 +239,8 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
 /// is a `u8` index into this table; the engine never owns a closed enum.
 const tiling_mods = @import("tiling_modules").modules;
 
-/// Resolve a config layout name (case-insensitive) to its registry index.
-/// Names are canonicalized at the config boundary, so this is an exact
-/// lowercased match on module names.
+/// Resolve a config layout name to its registry index (case-insensitive match
+/// on module names), or null when unregistered.
 pub fn layoutByName(name: []const u8) ?usize {
     for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return i;
     return null;
@@ -251,17 +262,13 @@ pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
 }
 
 /// Resolve a config layout name to a registry index, collapsing to the
-/// neutral default (index 0) when the name does not resolve.
+/// neutral last-resort default (index 0, the first registered module) when
+/// the name does not resolve. The effective default is config-driven
+/// (cfg.tiling.layout resolves at every seeding site); 0 only stands in when
+/// that name fails to resolve (a removed/unknown module), keeping dispatch ids
+/// always resolvable.
 pub fn layoutKindOf(name: []const u8) u8 {
-    return layoutKindFallingBack(name, defaultKind());
-}
-
-/// Neutral last-resort default layout: the first registered module (index 0).
-/// The effective default is config-driven (cfg.tiling.layout resolves at every
-/// seeding site); this only stands in when that name fails to resolve (a
-/// removed/unknown module), keeping dispatch ids always resolvable.
-fn defaultKind() u8 {
-    return 0;
+    return layoutKindFallingBack(name, 0);
 }
 
 /// The registry module name for `kind` ("" when out of range).
@@ -301,6 +308,13 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
 /// binds its `compute` hook to the module's placement function and must
 /// append exactly one placement per window in `v.order` (off-viewport/hidden
 /// windows are parked via emitHidden).
+///
+/// Contract: `v.order` is non-empty and canonical. The engine always invokes
+/// compute with the FULL ordered window set of the workspace (`n > 0` guard
+/// in reconcile); a layout module may rely on seeing the whole set at once
+/// and must not assume a sliced subset — module counters/boosts that mirror
+/// per-window state (e.g. pending-count) depend on this. The empty-check in
+/// the engine below is defensive only (reconcile guards first).
 pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
     if (kind >= tiling_mods.len) return;

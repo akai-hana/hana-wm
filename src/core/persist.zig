@@ -277,10 +277,11 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) bool {
     }
 
     if (loaded_parsed) |old| old.deinit();
+    const p = parsed.value;
     loaded_parsed = parsed;
     debug.info("persist: loaded session state ({} windows, {d} workspaces)", .{
-        loaded_parsed.?.value.windows.len,
-        loaded_parsed.?.value.workspaces.len,
+        p.windows.len,
+        p.workspaces.len,
     });
     return true;
 }
@@ -325,10 +326,10 @@ pub fn applyModelLevel(m: *model.Model) void {
     const f = loaded() orelse return;
 
     // Restore the model-authoritative covering intent (presence + covering_ws)
-    // from the window records, independent of module blobs. A `.parked` record
-    // that still carries covering_ws (minimized-from-fullscreen) keeps presence
-    // intact while restoring the capture target. Idempotent with what the
-    // fullscreen module's deserializeWindow already applied.
+    // from the window records. Fullscreen needs no module blob (its state IS
+    // the model intent), so this pass is the fullscreen restore path. A
+    // `.parked` record that still carries covering_ws (minimized-from-fullscreen)
+    // keeps presence intact while restoring the capture target.
     for (f.windows) |r| {
         if (r.covering_ws == null and r.presence != .covering) continue;
         const e = m.store.getPtr(r.win) orelse continue;

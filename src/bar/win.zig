@@ -19,7 +19,7 @@ const utils = @import("utils");
 const drawing = @import("drawing");
 
 /// All atoms needed to declare the bar window as a dock to the compositor.
-pub const BarAtoms = struct {
+const BarAtoms = struct {
     strut_partial: xcb.xcb_atom_t = 0,
     window_type: xcb.xcb_atom_t = 0,
     window_type_dock: xcb.xcb_atom_t = 0,
@@ -176,7 +176,7 @@ pub fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawConte
         cs.screen.width_in_pixels,
         height,
         setup.visual_id,
-        core.dpi_info.load(.acquire),
+        core.dpi_info,
         setup.has_argb,
         cs.config.bar.transparency,
     );

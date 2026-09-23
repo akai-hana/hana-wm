@@ -154,7 +154,7 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     // one extra second, exactly as the cadence design intends.
     rendered_sec = sec;
     rendered_fmt = fmt;
-    return drawing.drawPaddedSegmentCovering(dc, config, height, start_x, "clock", str, measureStringFor(mode), config.segmentProps("clock"));
+    return drawing.drawPaddedSegment(dc, config, height, start_x, "clock", str, measureStringFor(mode), config.segmentProps("clock"));
 }
 
 /// Reserved row width: the current mode's slot (measured once per mode) once
@@ -225,7 +225,6 @@ pub const module = segdraw.module(
     null,
     .{
         .self_ticking = true,
-        .clickable = true,
         .on_click = onClickHook,
         .pollTimeoutMs = tickDeadlineMs,
         .secondsElapsed = secondElapsed,

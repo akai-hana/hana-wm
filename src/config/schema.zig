@@ -398,7 +398,7 @@ fn getColorFromValue(
     }
     // Unresolvable value (boolean, size, bare float, out-of-range int, ...)
     // would otherwise silently use the default without a trace.
-    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', an integer, a palette reference, or a + mix), using default", .{key});
+    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', a bare 6/8-digit hex number, a palette reference, or a + mix), using default", .{key});
     return default;
 }
 
@@ -596,9 +596,9 @@ fn applyBarProperties(
     doc: *parser.Document,
     cfg: *types.Config,
 ) !void {
-    types.freeSegmentColors(&cfg.bar.segment_fg, allocator);
-    types.freeSegmentColors(&cfg.bar.segment_value_fg, allocator);
-    types.freeSegmentProps(&cfg.bar.segment_props, allocator);
+    types.freeSegmentMap(types.Color, &cfg.bar.segment_fg, allocator);
+    types.freeSegmentMap(types.Color, &cfg.bar.segment_value_fg, allocator);
+    types.freeSegmentMap(types.SegmentProps, &cfg.bar.segment_props, allocator);
     if (doc.getSection(types.section_bar) == null) return;
     const sec = doc.getSection(types.section_bar_properties) orelse return;
     var it = sec.orderedIterator();

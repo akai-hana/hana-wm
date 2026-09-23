@@ -33,17 +33,22 @@ The stock split (arbitrary, and entirely up to you):
 
 ## Value formats
 
-Most sizing knobs accept a `ScalableValue`: a percentage, or exact pixels.
+Most sizing knobs accept a `ScalableValue`: a percentage, or a bare number of
+exact pixels.
 
 | example    | meaning          |
 | ---------- | ---------------- |
 | `50%`      | percent of the relevant base (screen, bar, …) |
-| `12px` / `12` | exact pixels       |
+| `12`       | exact pixels (a bare number IS the pixel value; no `px` suffix is parsed) |
 
 - Ratio knobs (e.g. `transparency`) additionally accept a plain `0.0–1.0`
   float. Mind the bare-`1` ambiguity rule: for these knobs `1` means **1%**,
   not 1.0 — write `1.0` or `100%` for fully opaque.
-- Colors accept `"#RRGGBB"`, bare `RRGGBB`, or `0xRRGGBB`, quoted or not.
+- Colors accept `"#RRGGBB"`, `#RRGGBB`, or `0xRRGGBB`, quoted or not. A bare
+  all-digit spelling is hex too when it has exactly 6 (`RRGGBB`) or 8
+  (`RRGGBBAA`) digits — e.g. `112233` reads as `0x112233`; any other bare
+  number in a color slot is invalid (never silently coerced to a decimal
+  color).
 - Colors can also be built by **mixing** other colors with `+`, where the
   first operand carries the remaining weight:
   `primary_color +(weight:25%) secondary_color` = 75%/25%; a bare `+` is an
@@ -59,6 +64,14 @@ Most sizing knobs accept a `ScalableValue`: a percentage, or exact pixels.
   set of binds. Workspace-indexed actions get a `_N` suffix automatically.
 - Bound commands may reference placeholders: `{kill}` is replaced by the
   `[binds] kill` value, and `{state}` in volume formats by `mute`/`unmute`.
+- A bind value may be an **array of actions**: commas run actions sequentially
+  (`[a, b]` = a then b), and `+` groups actions into a parallel batch
+  (`b + c` = b and c together). Mixed lists compose: `[a, b + c, d]` runs a,
+  then b and c as one batch, then d. A `+` only splits when whitespace
+  touches it, so literal plus signs in commands (`xdotool key ctrl+plus`)
+  survive intact. The WM is single-threaded: a "parallel" batch is dispatched
+  before the next step runs, sync actions completing back-to-back and `exec`
+  children running as concurrent processes.
 
 ## Sections
 
@@ -155,7 +168,7 @@ absent.
 Key-to-action map. Actions include `toggle_layout`, `workspace`,
 `move_to_workspace`, `toggle_tag`, `pin_window`, `all_workspaces`,
 `toggle_floating_window`, `minimize_window`, `close_window`,
-`toggle_bar_visibility`, `toggle_bar_position`, `reload` (hot config reload)
+`toggle_bar_visibility`, `toggle_bar_position`, `reload_config` (hot config reload)
 and `reload_hana` (re-exec). See the `[binds]` section of `config.toml`.
 
 ### Window rules

@@ -19,10 +19,9 @@ var should_reload = std.atomic.Value(bool).init(false);
 /// immediately instead of waiting for an unrelated signal.
 var signal_write_fd: std.posix.fd_t = -1;
 
-/// Byte `reload()` writes to the signal pipe to wake the event loop. Must not
-/// be a real signal number: `signals.drainAndDispatch` dispatches every byte
-/// it reads, and re-dispatching the wake byte as SIGHUP would make the drain
-/// loop call `reload()` again; writing another wake byte and spinning forever.
+/// Byte `reload()` writes to the signal pipe to wake the event loop out of
+/// poll. A pure wake token: the drain discards it and dispatches from the
+/// real-signal bitmap, so no byte value collides with a signal.
 const wake_byte: u8 = 0xff;
 
 /// Registers the write end of the signal self-pipe so `reload()` can wake the

@@ -86,7 +86,6 @@ pub fn isCoveringMode(m: *const model_mod.Model, win: u32) bool {
 
 // ICCCM protocol surface (ICCCM 4.1.2/4.1.7) lives in icccm.zig; window.zig
 // re-exports the pub API so `window.*` stays the stable external facade.
-pub const fireWMProtocolsQuery = icccm.fireWMProtocolsQuery;
 pub const peekInputModelResolved = icccm.peekInputModelResolved;
 pub const provisionalResolution = icccm.provisionalResolution;
 pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
@@ -343,7 +342,7 @@ pub inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core
 /// A matched class rule: either a workspace target or the float marker. The
 /// float bit is set for "float" rules, in which case `workspace` is null and
 /// the window is admitted floating on the current workspace.
-pub const AdmissionRule = struct {
+const AdmissionRule = struct {
     workspace: ?u8,
     float: bool,
 };
@@ -437,7 +436,7 @@ fn findSpawnQueueWorkspace(
 /// The admission policy for a brand-new spawn: the target workspace (class
 /// rule, then spawn-queue PID rule, else current) plus whether the class rule
 /// floats the window.
-pub const AdmissionDecision = struct {
+const AdmissionDecision = struct {
     workspace: core.WorkspaceId,
     float: bool,
 };
@@ -522,7 +521,7 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
 
     // Property cookies (always fired).
     const normal_hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, wm_normal_hints_long_length);
-    const protocols_cookie = fireWMProtocolsQuery(conn, win) orelse
+    const protocols_cookie = icccm.fireWMProtocolsQuery(conn, win) orelse
         icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, constants.property_max_length);
     const hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, icccm.wm_hints_long_length);
 
@@ -1258,15 +1257,7 @@ fn extractFieldPair(
 /// via parseSizeHintsIntoCache, saving one round trip per spawn.
 fn refreshSizeHints(win: u32) void {
     const conn = core.getState().conn;
-    const cookie = xcb.xcb_get_property(
-        conn,
-        constants.property_no_delete,
-        win,
-        xcb.XCB_ATOM_WM_NORMAL_HINTS,
-        xcb.XCB_ATOM_WM_SIZE_HINTS,
-        0,
-        wm_normal_hints_long_length,
-    );
+    const cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, wm_normal_hints_long_length);
     parseSizeHintsIntoCache(win, cookie);
 }
 
@@ -1283,10 +1274,9 @@ fn parseSizeHintsIntoCache(
     const flags = fields[0];
 
     // PMinSize/PBaseSize are cached for the floating drag-resize floor only:
-    // `tiling.applyHints` still ignores declared minimums (the layout engine
-    // owns tiled dimensions, and honouring them there would pin the rect and
-    // block mod_h/mod_l). The max/increment/aspect constraints are forwarded
-    // so hint-constrained windows behave correctly in both modes.
+    // tiling ignores declared minimums outright (policy on model.SizeHints).
+    // The max/increment/aspect constraints are forwarded so hint-constrained
+    // windows behave correctly in both modes.
     const want_min = flags & p_min_size != 0;
     const want_base = flags & p_base_size != 0;
     const want_max = flags & p_max_size != 0;
@@ -1347,12 +1337,12 @@ fn parseSizeHintsIntoCache(
 ///   sweep generates zero XCB traffic.
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
-    const cur_bit = model_mod.bit(model_mod.WSId.fromIndex(cur));
+    const cur_ws = model_mod.WSId.fromIndex(cur);
     const cs = core.getState();
     const conn = cs.conn;
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
-        if (entry.mask & cur_bit == 0) continue;
+        if (!model_mod.maskedOn(entry.mask, cur_ws)) continue;
         // Parked (offscreen/minimized) windows are invisible; recoloring
         // them is pointless XCB traffic and can race the park position. The
         // unpark reconcile re-establishes their border color.

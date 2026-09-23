@@ -79,7 +79,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             tiling.emitHidden(out, win);
             continue;
         }
-        tiling.emitView(v, out, win, .{ .x = tiling.satI16(x), .y = tiling.satI16(win_y), .width = content_w, .height = content_h });
+        tiling.emitRect(v, out, win, x, win_y, content_w, content_h);
     }
 }
 

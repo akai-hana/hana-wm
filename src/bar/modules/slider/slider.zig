@@ -416,10 +416,9 @@ fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
         dc.dc.fillRect(x + pad, pad, fill_w, inner_h, dc.config.title_minimized_accent);
 
     var b: [8]u8 = undefined;
-    if (std.fmt.bufPrint(&b, "{d}", .{pct})) |ps| {
-        const tw = dc.dc.measureTextWidth(ps);
-        dc.dc.drawText(x +| slot / 2 -| tw / 2, dc.dc.baselineY(height), ps, dc.config.fg) catch {};
-    } else |_| {}
+    const ps = std.fmt.bufPrint(&b, "{d}", .{pct}) catch return x + slot;
+    const tw = dc.dc.measureTextWidth(ps);
+    dc.dc.drawText(x +| slot / 2 -| tw / 2, dc.dc.baselineY(height), ps, dc.config.fg) catch {};
     return x + slot;
 }
 

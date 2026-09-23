@@ -69,6 +69,8 @@ setup_copy() {
         --exclude='.git/' \
         --exclude='.zig-cache/' \
         --exclude='zig-out/' \
+        --exclude='.opencode/' \
+        --exclude='*.swp*' \
         --exclude='dev/harness/out/' \
         --exclude='dev/harness/.cache/' \
         --exclude='dev/demonstration.gif' \

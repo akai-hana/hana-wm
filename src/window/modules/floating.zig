@@ -241,12 +241,14 @@ fn computeMoveRect(
     };
 }
 
-/// Min/max outer size for `win` from its PMinSize/PBaseSize and PMaxSize
-/// hints (the drag-resize envelope). An X11 configured width/height excludes
-/// the frame, so the outer bound is the client-declared value plus both border
-/// widths. A zero hint means no constraint: min yields 0 and max yields the
-/// u16 wire-width ceiling.
-fn sizeHintLimits(win: u32) struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 } {
+/// Min/max outer size for `win` (the drag-resize envelope).
+const HintLimits = struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 };
+
+/// Computes `win`'s HintLimits from its PMinSize/PBaseSize and PMaxSize hints.
+/// An X11 configured width/height excludes the frame, so the outer bound is
+/// the client-declared value plus both border widths. A zero hint means no
+/// constraint: min yields 0 and max yields the u16 wire-width ceiling.
+fn sizeHintLimits(win: u32) HintLimits {
     const bw2: i32 = @as(i32, borders.width()) * 2;
     const unbounded: i32 = @as(i32, std.math.maxInt(u16));
     // Window may withdraw mid-drag; treat it as hint-less (no constraint).

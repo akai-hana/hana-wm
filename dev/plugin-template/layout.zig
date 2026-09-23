@@ -30,6 +30,9 @@ const tiling = @import("tiling");
 /// Compute this layout into `out` (already cleared by the engine). MUST
 /// append exactly one placement per window in `v.order` — either a real
 /// placement (`tiling.emitView`) or a parked one (`tiling.emitHidden`).
+/// Contract: `v.order` is non-empty and canonical — the engine always calls
+/// compute with the FULL ordered workspace set, so a module sees every
+/// window at once and must not assume sliced input.
 /// Origin top-left, y-down; use the engine's `outerArea`/`shrinkClamped`/
 /// `waY` helpers (see monocle.zig, the smallest shipped layout).
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {

@@ -25,7 +25,8 @@ fn getIndicator() []const u8 {
     const kind = segmod.currentLayoutKind() orelse return no_variant_icon;
     const mod = tiling_mods[kind];
     const inds = mod.indicators orelse return no_variant_icon;
-    const idx = pipeline.model().ws[pipeline.model().current.index].params.variant_idx;
+    const m = pipeline.model();
+    const idx = m.ws[m.current.index].params.variant_idx;
     if (idx >= inds.len) return no_variant_icon;
     return inds[idx];
 }
@@ -36,7 +37,7 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     const indicator = getIndicator();
     var end_x = start_x;
     if (indicator.len != 0) {
-        end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, "variants", indicator, config.segmentProps("variants"));
+        end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, "variants", indicator, null, config.segmentProps("variants"));
     }
     W.store(end_x - start_x);
     return end_x;

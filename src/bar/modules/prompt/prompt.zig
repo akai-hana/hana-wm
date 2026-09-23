@@ -251,7 +251,7 @@ const min_cursor_px: u16 = 8;
 // Cursor blink half-period: cursor is visible for this many ms, then
 // invisible for the same duration.
 const cursor_blink_ms: u64 = 300;
-// Number of editing modes (derived from vim.Mode at comptime).
+// Number of editing modes (derived from prompt's Mode enum at comptime).
 const num_modes = @typeInfo(Mode).@"enum".fields.len;
 
 const cursor_width: u16 = 1;
@@ -593,15 +593,11 @@ fn handleAction(action: Action) void {
         .none => {},
         .deactivate => deactivate(),
         .spawn => {
-            runPromptCommand();
+            const cmd = g.vim_state.buf[0..g.vim_state.len];
+            if (cmd.len > 0) spawnCommand(cmd);
             deactivate();
         },
     }
-}
-
-fn runPromptCommand() void {
-    const cmd = g.vim_state.buf[0..g.vim_state.len];
-    if (cmd.len > 0) spawnCommand(cmd);
 }
 
 fn resetPromptEditing() void {

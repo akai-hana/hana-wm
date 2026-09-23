@@ -194,8 +194,7 @@ const MotionKeyResult = struct {
     op: u8 = 0,
 };
 
-inline fn commitMotion(vs: *EditorState, mr: MotionResult) MotionKeyResult {
-    _ = vs;
+inline fn commitMotion(mr: MotionResult) MotionKeyResult {
     const op = prefix.op;
     resetPrefix();
     return .{ .mr = mr, .op = op };
@@ -213,14 +212,14 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
     if (sym == ';' or sym == ',') {
         if (last_find_kind != 0) {
             const kind = if (sym == ',') reverseFindKind(last_find_kind) else last_find_kind;
-            return commitMotion(vs, motionFind(vs, kind, last_find_ch, cnt));
+            return commitMotion(motionFind(vs, kind, last_find_ch, cnt));
         }
         resetPrefix();
         return .{};
     }
 
     if (resolveSimpleMotion(vs, sym, cnt)) |mr| {
-        return commitMotion(vs, mr);
+        return commitMotion(mr);
     }
 
     if (tryArmFindPrefix(sym)) return .{};
@@ -238,7 +237,7 @@ fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyRes
     last_find_kind = kind;
     last_find_ch = ch;
     const mr = motionFind(vs, kind, ch, effectiveCount());
-    return commitMotion(vs, mr);
+    return commitMotion(mr);
 }
 
 fn resolvePendingGPrefix(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
@@ -247,7 +246,7 @@ fn resolvePendingGPrefix(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResu
         return .{};
     };
     const mr = MotionResult{ .pos = pos, .inclusive = (sym == 'e' or sym == 'E') };
-    return commitMotion(vs, mr);
+    return commitMotion(mr);
 }
 
 fn resolveSimpleMotion(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) ?MotionResult {

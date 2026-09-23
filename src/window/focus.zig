@@ -5,8 +5,8 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
 const utils = @import("utils");
+const types = @import("types");
 const window = @import("window");
 const tracking = @import("tracking");
 const debug = @import("debug");
@@ -367,17 +367,18 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
     // re-grab of that same window's buttons (a button-regrab flash).
     const force = reason == .workspace_switch;
+    const raise = shouldRaise(reason, win);
     if (state.?.last_applied == win) {
-        if (!shouldRaise(reason, win)) return .none;
+        if (!raise) return .none;
         return setIntent(win, null, resolved, .{
-            .raise = shouldRaise(reason, win),
+            .raise = raise,
             .new_suppress = suppressionFor(reason, state.?.suppress_reason),
             .force_set_input_focus = force,
         });
     }
 
     return setIntent(win, state.?.last_applied, resolved, .{
-        .raise = shouldRaise(reason, win),
+        .raise = raise,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
         .force_set_input_focus = force,
     });
@@ -462,41 +463,6 @@ inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
     const reply = xcb.xcb_get_window_attributes_reply(conn, xcb.xcb_get_window_attributes(conn, win), null) orelse return false;
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
-}
-
-/// Non-blocking cookie poll shared by the deferred async drains. Returns:
-///  - `.pending` reply not ready; cookie kept alive for the next batch
-///  - `.error`   request failed; the error was already freed, cookie consumed
-///  - `.raw`     a ready reply (heap), cookie consumed; the caller must free it
-const PollResult = struct {
-    pending: bool = true,
-    errored: bool = false,
-    raw: ?*anyopaque = null,
-};
-
-/// Non-blocking cookie poll. Never blocks; `pending` keeps the cookie alive.
-fn pollCookie(conn: core.Connection, seq: u32) PollResult {
-    var reply: ?*anyopaque = null;
-    var err: ?*xcb.xcb_generic_error_t = null;
-    _ = xcb.xcb_poll_for_reply(conn, seq, &reply, &err);
-    if (reply == null and err == null) return .{};
-    if (err) |e| {
-        std.c.free(e);
-        return .{ .pending = false, .errored = true };
-    }
-    return .{ .pending = false, .raw = reply };
-}
-
-/// Shared drain preamble for the deferred async reply fields. Polls the
-/// cookie in `field`; on a ready/errored reply clears the field (the cookie
-/// is then consumed) and returns the outcome. When nothing is pending or the
-/// reply hasn't arrived, `pending` is set and the cookie stays in flight.
-fn drainCookie(comptime T: type, field: *?T) PollResult {
-    const cookie = field.* orelse return .{ .pending = true, .errored = true };
-    const res = pollCookie(core.getState().conn, cookie.sequence);
-    if (res.pending) return res;
-    field.* = null;
-    return res;
 }
 
 /// Shared post-model-clear tail of the focus-clear paths: prepare the clear
@@ -601,13 +567,21 @@ pub fn beginTilingOpSettle() void {
 /// Only clears suppression while it is still .tiling_operation, so a different
 /// reason set meanwhile (e.g. window_spawn) is never clobbered.
 pub fn drainTilingOpSettle() void {
-    const res = drainCookie(xcb.xcb_get_input_focus_cookie_t, &state.?.tiling_op_cookie);
-    if (res.pending or res.errored) return;
+    const cookie = state.?.tiling_op_cookie orelse return;
+    var reply: ?*anyopaque = null;
+    var err: ?*xcb.xcb_generic_error_t = null;
+    _ = xcb.xcb_poll_for_reply(core.getState().conn, cookie.sequence, &reply, &err);
+    if (reply == null and err == null) return; // still pending; cookie stays in flight
+    state.?.tiling_op_cookie = null; // consumed either way
+    if (err) |e| {
+        std.c.free(e);
+        return;
+    }
 
     // The reply's content is unused; only its arrival signals that the server
     // has processed everything queued before it. It must be consumed to drain
     // the XCB queue.
-    if (res.raw) |r| std.c.free(r);
+    std.c.free(reply.?);
     if (state.?.suppress_reason == .tiling_operation) state.?.suppress_reason = .none;
 }
 
@@ -620,24 +594,19 @@ pub fn drainTilingOpSettle() void {
 
 var cycle_buf: [model_mod.store_capacity]u32 = undefined;
 
-/// Append `w` to cycle_buf if there is room and it is on the current workspace
-/// and visible (not minimised).  Shared by both paths in collectVisibleWindows.
-inline fn appendVisible(w: u32, len: *usize) void {
-    if (len.* < cycle_buf.len and tracking.isOnCurrentWorkspaceAndVisible(w)) {
-        cycle_buf[len.*] = w;
-        len.* += 1;
-    }
-}
-
 /// Build an ordered list of currently-visible windows for cycling.
 ///
 /// A covering (fullscreen) occupant owns the viewed workspace's screen: it
 /// is the only window actually on screen, so the cycle pool collapses to it.
 /// Cycling then re-focuses/re-raises the occupant instead of fading focus
 /// into windows parked behind fullscreen.
-/// Otherwise, all visible windows in tracking-table order; the pool list is
-/// never fed. Emits only windows that are on the current workspace and not
-/// minimized.
+/// Otherwise, all visible windows in tracking-table order (the store scan's
+/// per-entry mask/presence, so no per-window re-lookups); the pool list is
+/// never fed. Emits exactly the predicate `visibleEntry` uses -- skipped when
+/// parked, tagged-on-current OR in view-all (`all_view_active`) -- so the
+/// cycle pool can never disagree with the focus-visible model (this was the
+/// prior divergence: the pool tested the tag bit while visibleEntry honored
+/// view-all).
 /// Returns the count written into `cycle_buf`, or 0 if none.
 fn collectVisibleWindows() usize {
     const m = pipeline.model();
@@ -646,7 +615,15 @@ fn collectVisibleWindows() usize {
         return 1;
     }
     var len: usize = 0;
-    for (tracking.allWindows()) |entry| appendVisible(entry.win, &len);
+    for (tracking.allWindows()) |entry| {
+        if (len == cycle_buf.len) break;
+        // Mirrors model.visibleEntry: parked never cycles, and the tag test is
+        // relaxed while all_view_active drives visibility (see the parent doc).
+        if (entry.presence == .parked) continue;
+        if (!m.all_view_active and !model_mod.maskedOn(entry.mask, m.current)) continue;
+        cycle_buf[len] = entry.win;
+        len += 1;
+    }
     return len;
 }
 
@@ -661,7 +638,8 @@ inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
 /// already focused). Pure read: no focus change, no grab. The Mod+k/Mod+j
 /// input path folds the target's viewport snap into the SAME grab as the
 /// focus transition (one grab+reconcile instead of focus-then-snap).
-pub fn cycleTarget(forward: bool) ?u32 {
+pub fn cycleTarget(dir: types.Dir) ?u32 {
+    const forward = dir == .forward;
     const len = collectVisibleWindows();
     if (len == 0) return null;
     const wins = cycle_buf[0..len];
