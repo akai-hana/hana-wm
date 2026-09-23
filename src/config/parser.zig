@@ -105,7 +105,7 @@ pub const Section = struct {
     /// (best-effort: losing the reserve just means an extra rehash).
     fn reserve(allocator: std.mem.Allocator, comptime V: type, comptime label: []const u8) std.StringHashMap(V) {
         var map = std.StringHashMap(V).init(allocator);
-        map.ensureTotalCapacity(4) catch |err| debug.warnOnErr(err, label);
+        map.ensureTotalCapacity(section_keys_reserve) catch |err| debug.warnOnErr(err, label);
         return map;
     }
 
@@ -295,7 +295,7 @@ pub const Document = struct {
 
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
-        sections.ensureTotalCapacity(8) catch |err| debug.warnOnErr(err, "document section map reserve");
+        sections.ensureTotalCapacity(document_sections_reserve) catch |err| debug.warnOnErr(err, "document section map reserve");
         var palette = std.StringHashMap(u32).init(allocator);
         palette.ensureTotalCapacity(palette_var_names.len) catch |err| debug.warnOnErr(err, "document palette reserve");
         return .{ .sections = sections, .root = Section.init(allocator), .palette = palette };
@@ -318,6 +318,12 @@ const palette_var_names = [_][]const u8{
     types.palette_alternative_color,
     types.palette_text_color,
 };
+
+/// Pre-reserve capacities for the two string-keyed maps so a typical
+/// document builds without rehashing: 8 sections in the document map
+/// (theme + 7 core sections), 4 keys per section.
+const document_sections_reserve: usize = 8;
+const section_keys_reserve: usize = 4;
 
 /// Single decoder for the color-literal / hex-integer / hex-string forms a
 /// color knob accepts. A bare all-digit spelling is only a color when it has
@@ -358,55 +364,54 @@ const MixOperand = struct {
     weight: ?u32 = null,
 };
 
-/// True when `raw` is a weight-marker token (`+(weight:50%)`, `(weight:50%)`,
-/// or the `%`-less `(weight:50)`) rather than a value. Kept syntax-only so
-/// the bare-token interpreter can classify a `%`-suffixed weight token as a
-/// string before the generic percentage branch mistakes its non-numeric
-/// prefix for an invalid ratio and errors the whole line.
-pub fn isWeightToken(raw: []const u8) bool {
-    var s = raw;
-    if (s.len == 0) return false;
-    if (s[0] == '+') s = s[1..];
+/// Core parser for a `(weight:DIGITS[%])` prefix at the head of `s`, where `s`
+/// is the token with any leading `+` already stripped. Returns the weight and
+/// the index just past the closing `)`; null when `s` does not open with a
+/// well-formed weight marker. All three weight helpers (`isWeightToken`,
+/// `weightFromToken`, `splitWeightPrefix`) are expressed on top of this so the
+/// marker grammar is spelled exactly once.
+fn parseWeightPrefix(s: []const u8) ?struct { weight: u32, end: usize } {
     const prefix = "(weight:";
-    if (!std.mem.startsWith(u8, s, prefix)) return false;
+    if (!std.mem.startsWith(u8, s, prefix)) return null;
     var i: usize = prefix.len;
     const digits_start = i;
     while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
-    if (i == digits_start) return false;
+    if (i == digits_start) return null;
+    const digits_end = i;
     if (i < s.len and s[i] == '%') i += 1;
-    return i == s.len - 1 and s[i] == ')';
+    if (i >= s.len or s[i] != ')') return null;
+    const weight = std.fmt.parseInt(u32, s[digits_start..digits_end], 10) catch return null;
+    return .{ .weight = weight, .end = i + 1 };
 }
 
-/// The weight (0-100) carried by a weight-marker token; null when `raw` is
-/// not one. `+(weight:N%)` annotates the operand RIGHT after the `+`; the
+/// True when `raw` is a whole weight-marker token (`+(weight:50%)`,
+/// `(weight:50%)`, or the `%`-less `(weight:50)`) rather than a value. Kept
+/// syntax-only so the bare-token interpreter can classify a `%`-suffixed
+/// weight token as a string before the generic percentage branch mistakes its
+/// non-numeric prefix for an invalid ratio and errors the whole line.
+pub fn isWeightToken(raw: []const u8) bool {
+    const s = if (raw.len > 0 and raw[0] == '+') raw[1..] else raw;
+    const p = parseWeightPrefix(s) orelse return false;
+    return p.end == s.len;
+}
+
+/// The weight (0-100) carried by a whole weight-marker token; null when `raw`
+/// is not one. `+(weight:N%)` annotates the operand RIGHT after the `+`; the
 /// operand at the head of the chain absorbs the remaining weight.
 /// Test seam: pure parse core pinned by parser_test.
 pub fn weightFromToken(raw: []const u8) ?u32 {
-    if (!isWeightToken(raw)) return null;
-    var s = raw;
-    if (s[0] == '+') s = s[1..];
-    const body = s["(weight:".len .. s.len - 1];
-    const digits = if (std.mem.endsWith(u8, body, "%")) body[0 .. body.len - 1] else body;
-    return std.fmt.parseInt(u32, digits, 10) catch null;
+    const s = if (raw.len > 0 and raw[0] == '+') raw[1..] else raw;
+    const p = parseWeightPrefix(s) orelse return null;
+    if (p.end != s.len) return null;
+    return p.weight;
 }
 
 /// Splits a `+`-separated chain part like `(weight:25%)secondary_color` into
 /// its weight annotation and the operand it annotates. A part with no
 /// annotation yields weight null and the part unchanged.
 fn splitWeightPrefix(part: []const u8) struct { weight: ?u32, operand: []const u8 } {
-    const prefix = "(weight:";
-    if (!std.mem.startsWith(u8, part, prefix)) return .{ .weight = null, .operand = part };
-    var i: usize = prefix.len;
-    const digits_start = i;
-    while (i < part.len and std.ascii.isDigit(part[i])) i += 1;
-    if (i == digits_start) return .{ .weight = null, .operand = part };
-    const digits_end = i;
-    if (i < part.len and part[i] == '%') i += 1;
-    if (i >= part.len or part[i] != ')') return .{ .weight = null, .operand = part };
-    i += 1;
-    const weight = std.fmt.parseInt(u32, part[digits_start..digits_end], 10) catch
-        return .{ .weight = null, .operand = part };
-    return .{ .weight = weight, .operand = part[i..] };
+    const p = parseWeightPrefix(part) orelse return .{ .weight = null, .operand = part };
+    return .{ .weight = p.weight, .operand = part[p.end..] };
 }
 
 /// Resolves a single mix operand (a hex string or a palette variable name)
@@ -422,6 +427,15 @@ fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(u32)) ?u
     if (colorFromValue(val)) |c| return c;
     if (val.asScalar([]const u8)) |s| return resolveMixOperand(s, palette);
     return null;
+}
+
+/// Cap-checked store of one resolved mix operand. Returns false when `count`
+/// is already at the operand cap, so every mix branch shares one spill guard.
+fn pushMixOperand(out: *[max_mix_operands]MixOperand, count: *usize, color: u32, weight: ?u32) bool {
+    if (count.* == max_mix_operands) return false;
+    out[count.*] = .{ .color = color, .weight = weight };
+    count.* += 1;
+    return true;
 }
 
 /// Parses `val` (the one-token spelling `a+(weight:20%)b`, the spaced array
@@ -450,9 +464,7 @@ fn extractMixOperands(
             while (it.next()) |part| {
                 const tagged = splitWeightPrefix(part);
                 const color = resolveMixOperand(tagged.operand, palette) orelse return null;
-                if (count == max_mix_operands) return null;
-                out[count] = .{ .color = color, .weight = tagged.weight };
-                count += 1;
+                if (!pushMixOperand(out, &count, color, tagged.weight)) return null;
             }
             return count;
         },
@@ -474,9 +486,7 @@ fn extractMixOperands(
             if (!has_marker) {
                 for (arr.items) |elem| {
                     const color = resolveMixOperandValue(elem, palette) orelse return null;
-                    if (count == max_mix_operands) return null;
-                    out[count] = .{ .color = color, .weight = null };
-                    count += 1;
+                    if (!pushMixOperand(out, &count, color, null)) return null;
                 }
                 return count;
             }
@@ -512,12 +522,7 @@ fn extractMixOperands(
                 }
                 if (last_was_operand) return null;
                 const color = resolveMixOperandValue(elem, palette) orelse return null;
-                if (count == max_mix_operands) return null;
-                out[count] = .{
-                    .color = color,
-                    .weight = if (expecting_operand_after_plus) pending_weight else null,
-                };
-                count += 1;
+                if (!pushMixOperand(out, &count, color, if (expecting_operand_after_plus) pending_weight else null)) return null;
                 last_was_operand = true;
                 expecting_operand_after_plus = false;
                 pending_weight = null;
@@ -851,27 +856,30 @@ const Parser = struct {
         }
     }
 
-    // Skips inline whitespace (' ', '\t', '\r') only; a newline or comment
-    // stops the scan.
-    inline fn skipWhitespace(self: *Parser) void {
+    // Skips whitespace up to the next payload char; `comptime full` selects the
+    // narrower scan (inline whitespace only) or the full inter-token run (also
+    // newlines and comments). Two comptime-flagged arms of one skipper.
+    inline fn skipInline(self: *Parser, comptime full: bool) void {
         while (self.pos < self.content.len) {
             switch (self.content[self.pos]) {
                 ' ', '\t', '\r' => self.advanceChar(),
+                '\n' => if (full) self.advanceChar() else break,
+                '#' => if (full) self.skipToNewline() else break,
                 else => break,
             }
         }
     }
 
+    // Skips inline whitespace (' ', '\t', '\r') only; a newline or comment
+    // stops the scan.
+    inline fn skipWhitespace(self: *Parser) void {
+        self.skipInline(false);
+    }
+
     // Skips whitespace, newlines, and comments (the full inter-token run
     // consumed inside arrays and at line starts).
     inline fn skipWhitespaceAndNewlines(self: *Parser) void {
-        while (self.pos < self.content.len) {
-            switch (self.content[self.pos]) {
-                ' ', '\t', '\r', '\n' => self.advanceChar(),
-                '#' => self.skipToNewline(),
-                else => break,
-            }
-        }
+        self.skipInline(true);
     }
 
     fn skipToNewline(self: *Parser) void {

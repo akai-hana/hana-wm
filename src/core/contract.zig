@@ -72,10 +72,6 @@ pub const Surfaces = struct {
     deinit: *const fn () void,
     // Event-loop hooks.
     handleExpose: *const fn (*const xcb.xcb_expose_event_t) void,
-    /// Optional: the window layer already handles PropertyNotify for managed
-    /// windows, so a surface only binds this if it needs the notification
-    /// (the bar does not). Null skips the forward.
-    handlePropertyNotify: ?*const fn (*const xcb.xcb_property_notify_event_t) void = null,
     updateIfDirty: *const fn () anyerror!void,
     pollTimeoutMs: *const fn () i32,
     onPollWakeup: *const fn () void,

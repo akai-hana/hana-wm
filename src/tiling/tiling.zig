@@ -124,9 +124,9 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
 
 /// Saturating i16 coordinate clamp: narrows an i32 tiling coordinate into the
 /// i16 `Rect` range, clamping instead of wrapping so a single pathological
-/// layout can't cross the whole screen in ReleaseFast. Shared by every module
-/// that builds `utils.Rect` from computed geometry.
-pub inline fn satI16(v: i32) i16 {
+/// layout can't cross the whole screen in ReleaseFast. Internal to the engine;
+/// modules reach it through `emitRect`/`insetRect`.
+inline fn satI16(v: i32) i16 {
     return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
 }
 
@@ -289,7 +289,9 @@ pub fn variantCount(kind: u8) u8 {
 /// When `cur` is not in the list (safety net — defaults/overrides always come
 /// from config names) it lands on the first/last edge by direction.
 pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
-    var indices: [256]u8 = undefined;
+    // Names list is the config layout-name list (fits model.max_layouts);
+    // a larger registry-resolved set would spill here.
+    var indices: [model.max_layouts]u8 = undefined;
     var n: usize = 0;
     for (names) |nm| if (layoutByName(nm)) |idx| {
         if (n < indices.len) {

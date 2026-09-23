@@ -60,7 +60,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             return;
         }
 
-        splitAndAdvance(ctx, win, dir, m.gap, &cur);
+        splitAndAdvance(ctx, win, dir, &cur);
         dir = dir.next();
     }
 }
@@ -69,10 +69,11 @@ inline fn splitAndAdvance(
     ctx: tiling.LayoutCtx,
     win: model.WindowId,
     dir: SpiralDirection,
-    gap: u16,
     cur: *Region,
 ) void {
-    const border2 = utils.doubledBorder(ctx.m);
+    const m = ctx.m;
+    const border2 = utils.doubledBorder(m);
+    const gap = m.gap;
     const step = dir.step();
     const split_x = step.split_x;
     const forward = step.forward;

@@ -36,6 +36,10 @@ pub const xk_end = @intFromEnum(XK.End);
 /// 256 input chars fits a full `.desktop` file path plus arguments, the
 /// longest payload a drun entry can produce.
 const default_max_input: usize = 256;
+
+/// drun history path relative to $HOME; shared by the append and the
+/// load-order list so both spell the same file.
+const drun_history_suffix = ".local/share/drun/history";
 pub const Action = enum { none, deactivate, spawn };
 
 pub const Mode = enum(u2) {
@@ -354,13 +358,6 @@ fn vimModeEnabled() bool {
     return core.getState().config.bar.vim_mode;
 }
 
-fn copyToZ(dest: []u8, src: []const u8) ?[*:0]u8 {
-    if (src.len >= dest.len) return null;
-    @memcpy(dest[0..src.len], src);
-    dest[src.len] = 0;
-    return @ptrCast(dest.ptr);
-}
-
 /// Returns true when the prompt is currently active and accepting key input.
 fn isActive() bool {
     return g.is_active;
@@ -600,18 +597,11 @@ fn handleAction(action: Action) void {
     }
 }
 
-fn resetPromptEditing() void {
+fn activate() void {
     g.vim_state.reset();
     g.ghost_len = 0;
     g.has_space = false;
     g.layout_dirty = true;
-}
-
-/// Acquires the keyboard grab and marks the prompt active.  Completion and
-/// history buffers are embedded in the global, so no per-activation setup
-/// beyond loading (once) from disk.
-fn activate() void {
-    resetPromptEditing();
     // Load completions and history on first activation.
     if (!g.is_completions_loaded) loadCompletions();
     if (!g.is_hist_loaded) loadHistory();
@@ -678,7 +668,9 @@ fn loadCompletions() void {
 
     var dir_it = paths.dirIterator(path_env);
     outer: while (dir_it.next()) |dir_path| {
-        _ = copyToZ(&dir_buf, dir_path) orelse continue;
+        if (dir_path.len >= dir_buf.len) continue;
+        @memcpy(dir_buf[0..dir_path.len], dir_path);
+        dir_buf[dir_path.len] = 0;
 
         const dirp = c.opendir(&dir_buf) orelse continue;
         defer _ = c.closedir(dirp);
@@ -817,8 +809,8 @@ fn histAppendToFile(cmd: []const u8) void {
     var path_buf: [history_path_buf_len:0]u8 = undefined;
     const file_path = std.fmt.bufPrintZ(
         &path_buf,
-        "{s}/.local/share/drun/history",
-        .{home},
+        "{s}/{s}",
+        .{ home, drun_history_suffix },
     ) catch return;
 
     const last_sep = std.mem.lastIndexOfScalar(u8, file_path, '/') orelse return;
@@ -942,7 +934,7 @@ fn loadHistory() void {
     const home = std.mem.span(c.getenv("HOME") orelse return);
 
     const history_suffixes = [_][]const u8{
-        ".local/share/drun/history",
+        drun_history_suffix,
         ".bash_history",
         ".zsh_history",
         ".local/share/fish/fish_history",

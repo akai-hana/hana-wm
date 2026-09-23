@@ -93,7 +93,7 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 /// Keycodes below 8 are reserved by X11 and produce no real keysym.
 fn buildKeysymTable(km: *xkb_keymap) [constants.x11_max_keycode]u32 {
     var table: [constants.x11_max_keycode]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
-    for (@as(usize, constants.x11_min_keycode)..constants.x11_max_keycode) |kc| {
+    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
         table[kc] = baseSymbol(km, @intCast(kc));
     }
     return table;
@@ -180,7 +180,7 @@ pub const XkbState = struct {
     /// truly symmetric multi-keycode keysyms are rare in WM bindings (modifier
     /// left/right pairs have distinct keysyms: Shift_L ≠ Shift_R, etc.).
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
-        for (@as(usize, constants.x11_min_keycode)..constants.x11_max_keycode) |kc| {
+        for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
         }
         return null;

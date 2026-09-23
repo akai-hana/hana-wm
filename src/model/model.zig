@@ -113,10 +113,9 @@ const WsState = struct {
     params: LayoutParams = .{},
 };
 
-/// Bounded sorted-key collection: the factory lives in core/utils/bounded.zig
-/// (Store, next to BoundedList) and is re-exported here so the model's window
-/// store and the sync ledger share one xcb-free container without either
-/// naming core (see bounded.zig for the sorted-order and pointer contracts).
+/// Bounded sorted-key collection re-exported from core/utils/bounded.zig so
+/// the model's window store and the sync ledger share one xcb-free container
+/// without either naming core.
 pub const Store = bounded.Store;
 
 /// Store and MRU capacities. 128 managed windows bounds the sorted-key store
@@ -177,13 +176,12 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
     // home_ws cache: set AFTER tiled_order append succeeds so the cache
     // is only valid when the window actually has a tiled slot.
     ptr.home_ws = target;
-    // Fifo spawn placement lives in actions.mapRequest; this primitive is a
-    // dumb membership insert.
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
+    const home = findHome(m, win);
     if (!m.store.remove(win)) return;
-    if (findHome(m, win)) |h| removeValue(&m.ws[h.index].tiled_order, win);
+    if (home) |h| removeValue(&m.ws[h.index].tiled_order, win);
     for (&m.ws) |*s| removeValue(&s.focus_mru, win);
     if (m.focused == win) m.focused = null;
 }
@@ -211,8 +209,8 @@ pub inline fn isPinned(e: Entry) bool {
 }
 
 /// Whether `e` is tagged on `ws`: the tag-membership test behind the
-/// visible/tiled-count predicates. `pub inline` so window/sync layers share
-/// one spelling instead of re-deriving `e.mask & bit(ws)`.
+/// visible/tiled-count predicates, re-exported via `maskedOn` for facades that
+/// hold only a raw mask (tracking/window re-derive `maskedOn(e.mask, ws)`).
 pub inline fn taggedOn(e: Entry, ws: WSId) bool {
     return maskedOn(e.mask, ws);
 }
@@ -232,17 +230,11 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     return n;
 }
 
-/// The covering occupant owning the screen on `ws`: a covering entry whose
-/// capture anchors to `ws`, or a covering entry visible on `ws` (multi-tag) —
-/// OR semantics. Pure core computation, so sync/bar resolve the screen owner
-/// without enumerating optional subsystems. At most one occupant per ws by the
-/// reconciler.
-///
-/// Contrast with the fullscreen module's occupant hook
-/// (`fullscreen.fullscreenOccupantOnWs`): that is a pure store-order AND scan
-/// requiring covering + anchored to `ws` + visible on it, whereas this scan
-/// unions anchor-or-visibility. Neither consults a module record registry
-/// anymore (the model entry is the fullscreen record).
+/// The covering occupant owning the screen on `ws`: anchor-or-visibility OR
+/// union. Pure core computation, so sync/bar resolve the screen owner without
+/// enumerating optional subsystems. At most one occupant per ws by the
+/// reconciler. (fullscreen's occupant hook is a stricter AND scan: covering +
+/// anchored + visible — see fullscreen.fullscreenOccupantOnWs.)
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -311,24 +303,22 @@ fn qualifies(m: *const Model, cand: WindowId, ws: WSId, excluded: ?WindowId) boo
 
 /// Minimize-fallback target policy. The window layer's focusFallback
 /// delegates here, and tests exercise the same logic without linking the
-/// protocol layers. Tier order on workspace `ws`:
-///   1. focus MRU, newest first,
-///   2. reversed tiled_order,
-///   3. any visible floating-base window not in tiled_order.
-/// First visibleOn(ws) candidate wins; null when nothing qualifies.
-/// `excluded` is a candidate the caller already rejected (e.g. a no_input
-/// window that can never hold X focus) — it is skipped across all tiers so
-/// the caller can re-scan for the next focusable window.
+/// protocol layers. Tier order on workspace `ws`: focus MRU (newest first),
+/// reversed tiled_order, then any visible floating-base window not in
+/// tiled_order. First visibleOn(ws) candidate wins; null when nothing
+/// qualifies. `excluded` is a candidate the caller already rejected (e.g. a
+/// no_input window that can never hold X focus) — it is skipped across all
+/// tiers so the caller can re-scan for the next focusable window.
 pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?WindowId {
-    // 1. focus MRU, NEWEST first: mru[0] is the MOST RECENT focus,
-    //    so minimizing the focused window falls back to the previously
-    //    focused one. visibleOn rejects parked entries, including the
-    //    just-parked window itself.
+    // 1. focus MRU, newest first (mru[0] is the MOST RECENT focus, so
+    //    minimizing the focused window falls back to the previously focused
+    //    one). visibleOn rejects parked entries, including the just-parked
+    //    window itself.
     const mru = &m.ws[ws.index].focus_mru;
     for (mru.constSlice()) |cand| {
         if (qualifies(m, cand, ws, excluded)) return cand;
     }
-    // 2. reversed tiled_order of the workspace.
+    // 2. reversed tiled_order.
     var j = m.ws[ws.index].tiled_order.len;
     while (j > 0) {
         j -= 1;
