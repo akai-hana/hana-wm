@@ -391,7 +391,7 @@ fn blinkTick() void {
     g.blink_repaint = true;
 }
 
-/// Overlay repaint query (plugin.BarOverlay.needsRepaint): true while a caret
+/// Overlay repaint query (contract.BarOverlay.needsRepaint): true while a caret
 /// toggle is waiting to be drawn. Cleared inside `draw`.
 fn overlayNeedsRepaint() bool {
     return g.blink_repaint;
@@ -1369,7 +1369,7 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     return draw(dc, x);
 }
 
-pub const module: @import("plugin").Segment = .{
+pub const module: @import("contract").Segment = .{
     .name = "prompt",
     .init = init,
     .deinit = deinit,

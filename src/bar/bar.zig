@@ -51,7 +51,7 @@ const visibility = @import("visibility");
 // through the collectHiddenSet seam instead of naming the minimize or
 // fullscreen module directly.
 const window_mods = @import("window_modules").modules;
-const plugin = @import("plugin");
+const contract = @import("contract");
 
 // Registry-resolved segment identity (comptime): the bar locates modules by
 // name through the generated registry instead of importing them directly.
@@ -59,8 +59,14 @@ const plugin = @import("plugin");
 // bar still compiles and no-ops when ALL segments are removed.
 const bar_mods = @import("bar_modules").modules;
 
-const self_ticking_role: ?usize = segmod.findByCapability(&bar_mods, "self_ticking");
-const center_slot_role: ?usize = segmod.findByCapability(&bar_mods, "center_slot");
+const self_ticking_ids: []const usize = segmod.findAllByCapability(&bar_mods, "self_ticking");
+const center_slot_ids: []const usize = segmod.findAllByCapability(&bar_mods, "center_slot");
+
+/// Primary center-slot segment: the FIRST center-slot binder in registry
+/// order (config order within a center layout). Title-centric bar behaviors
+/// (click-to-focus, chrome-overlay toggle) route through it; with a single
+/// binder this is exactly the title, with several it is the leftmost one.
+const title_id: ?usize = if (center_slot_ids.len != 0) center_slot_ids[0] else null;
 
 /// Registry index for `name`, or null when absent (also when the registry is
 /// empty: `bar_mods` is then a zero-length array and idByName finds nothing).
@@ -74,7 +80,7 @@ inline fn segId(name: []const u8) ?usize {
 /// unreachable -- and, being comptime-selected, it keeps the runtime index
 /// expression out of the all-segments-removed build (indexing a zero-length
 /// array is otherwise a compile error, not a runtime panic).
-inline fn segAt(id: usize) *const plugin.Segment {
+inline fn segAt(id: usize) *const contract.Segment {
     if (comptime bar_mods.len == 0) {
         unreachable;
     } else {
@@ -100,21 +106,42 @@ inline fn setSegDirty(self: *State, id: usize, v: bool) void {
     }
 }
 
-/// True when `name` resolves to the segment claiming the registry role `role`
-/// (name-free; roles are the self-ticking clock and the reserved center
-/// slot/title capabilities today).
-fn isRole(name: []const u8, comptime role: ?usize) bool {
+/// True when `name` resolves to a segment in the registry role set `comptime
+/// ids` (the self-ticking and center-slot capability sets today). Name-free:
+/// membership is by declared capability, and the set is resolved from the
+/// generated registry.
+fn isRole(name: []const u8, comptime ids: []const usize) bool {
     const id = segId(name) orelse return false;
-    return role != null and id == role.?;
-}
-
-fn runVoidHook(comptime hook: []const u8) void {
-    inline for (bar_mods) |m| if (@field(m, hook)) |h| h();
-}
-
-fn anyBoolHook(comptime hook: []const u8, args: anytype) bool {
-    inline for (bar_mods) |m| if (@field(m, hook)) |h| if (@call(.auto, h, args)) return true;
+    inline for (ids) |r| if (id == r) return true;
     return false;
+}
+
+/// Position of `name` within `self_ticking_ids` (the key into
+/// `Clock.segs`), or null when it is not a self-ticking segment.
+fn selfTickerIndex(name: []const u8) ?usize {
+    const id = segId(name) orelse return null;
+    inline for (self_ticking_ids, 0..) |rid, i| {
+        if (id == rid) return i;
+    }
+    return null;
+}
+
+/// Even split of `remaining` among `count` center slots, distributed left to
+/// right in config order: every slot gets `remaining / count`, and the leading
+/// `remaining % count` slots (the leftmost) carry one extra pixel, so the
+/// shares sum exactly to `remaining` with no fractional residue.
+fn centerShare(remaining: u16, count: u16, idx: u16) u16 {
+    const base = @divFloor(remaining, count);
+    const extra: u16 = @intCast(@rem(remaining, count));
+    return if (idx < extra) base + 1 else base;
+}
+
+fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
+    contract.callAll(contract.Segment, bar_mods[0..], hook, .{});
+}
+
+fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytype) bool {
+    return contract.callFirstTrue(contract.Segment, bar_mods[0..], hook, args);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +221,7 @@ fn calcBarHeightAndFontSize() u16 {
 /// blink, marquee repaint-marking, ...) then submits a draw. The bar never
 /// names a segment.
 pub fn onPollWakeup() void {
-    runVoidHook("onPollWakeup");
+    runVoidHook(.onPollWakeup);
     // A module's poll hook (e.g. the prompt's caret-blink toggle) must reach
     // the draw's repaint gate: fold any queued module redraw request into the
     // dirty state as a full redraw, exactly as the X-batch update path
@@ -236,7 +263,7 @@ pub fn chromeHandleKeypress(
     event: *const xcb.xcb_key_press_event_t,
     matched: ?*const types.Action,
 ) bool {
-    return anyBoolHook("handleKeypress", .{ event, matched });
+    return anyBoolHook(.handleKeypress, .{ event, matched });
 }
 
 /// Toggles the chrome overlay. Routed through the resolved title module's
@@ -244,7 +271,7 @@ pub fn chromeHandleKeypress(
 /// and the bar must not name it.
 pub fn chromeToggleOverlay() void {
     const s = gBar.state orelse return;
-    if (center_slot_role) |tid|
+    if (title_id) |tid|
         dispatchClick(s, tid, 0, false, true);
 }
 
@@ -411,12 +438,32 @@ const Dirty = struct {
     span_w: u16 = 0,
 };
 
-const Clock = struct {
-    /// Reserved width of the clock segment (measure string + padding).
+/// Region scratch for one self-ticking segment, indexed by position in
+/// `self_ticking_ids` (the registry order the capability set was built in).
+const SelfTickerScope = struct {
+    /// Left edge of the segment's reserved slot from the last layout pass.
+    x: u16 = 0,
+    /// Reserved width from the same pass (its natural width at that frame's
+    /// clock budget).
     width: u16 = 0,
-    /// Left edge of the clock from the last layout pass; enables the
-    /// region-scoped clock blit in drawClockOnly.
-    x: ?u16 = null,
+    /// True once a layout pass placed the segment (a self-ticker that never
+    /// made it into a layout is never repainted region-scoped).
+    valid: bool = false,
+};
+
+const Clock = struct {
+    /// Shared clock-display width scratch: the bar-wide MERGED display width
+    /// of the self-ticking segments (max across them), read by every
+    /// naturalWidth hook as its clock budget and re-derived on a clock
+    /// display-mode cycle.
+    width: u16 = 0,
+    /// Per self-ticking segment last-bound scratch, keyed by position in
+    /// `self_ticking_ids`. Only `valid` entries are ever read.
+    segs: [self_ticking_ids.len]SelfTickerScope = blk: {
+        var a: [self_ticking_ids.len]SelfTickerScope = undefined;
+        for (&a) |*e| e.* = .{};
+        break :blk a;
+    },
 };
 
 const Clicks = struct {
@@ -519,12 +566,13 @@ const State = struct {
         config: types.BarConfig,
     ) !*State {
         const s = try allocator.create(State);
-        // Reserved clock width comes from the resolved clock module's
-        // measureString hook (at most one module provides it).
+        // The merged clock display width comes from the self-ticking segments'
+        // measureString hooks (max across them; a segment with no hook
+        // contributes 0).
         var clock_width: u16 = 0;
-        if (self_ticking_role) |cid| {
+        for (self_ticking_ids) |cid| {
             if (segAt(cid).measureString) |ms|
-                clock_width = dc.measureTextWidth(ms()) + 2 * config.scaledSegmentPadding(height);
+                clock_width = @max(clock_width, dc.measureTextWidth(ms()) + 2 * config.scaledSegmentPadding(height));
         }
         s.* = .{
             .win = .{
@@ -549,7 +597,7 @@ const State = struct {
         }
         // Width caches for size-varying segments (workspaces/layout/variants)
         // are invalidated per bar creation via their uniform invalidate hooks.
-        runVoidHook("invalidate");
+        runVoidHook(.invalidate);
         return s;
     }
 
@@ -701,6 +749,23 @@ const State = struct {
         const id = segId(name) orelse return 0;
         if (segAt(id).naturalWidth) |nw| return nw(frame, self.clock.width);
         return 0;
+    }
+
+    /// Records the last layout-pass bound of a self-ticking segment so its
+    /// end-of-batch tick can region-scope a repaint (drawClockOnly). Written
+    /// for every configured self-ticker in ANY cluster (left/center/right);
+    /// unconfigured self-tickers stay invalid and are never repainted.
+    fn recordSelfTickerScope(self: *State, frame: *const segmod.Frame, name: []const u8, x: u16) void {
+        // Cut short when no self-ticker is compiled in (empty registry): the
+        // scope buffer is then zero-length and must not be indexed at all.
+        if (self_ticking_ids.len == 0) return;
+        if (selfTickerIndex(name)) |i| {
+            self.clock.segs[i] = .{
+                .x = x,
+                .width = self.measureSegmentWidth(frame, name),
+                .valid = true,
+            };
+        }
     }
 
     /// Fills the shared per-frame DrawCtx the bar hands to every segment's
@@ -875,7 +940,7 @@ const State = struct {
             cur_x = cur_x -| seg_w;
             if (pending_gap) cur_x = cur_x -| scaled_spacing;
 
-            if (isRole(names[i], self_ticking_role)) self.clock.x = cur_x;
+            if (isRole(names[i], self_ticking_ids)) self.recordSelfTickerScope(frame, names[i], cur_x);
             self.recordClickBound(names[i], cur_x, seg_w);
 
             if (self.isSegmentRepaintable(names[i])) {
@@ -934,6 +999,9 @@ const State = struct {
                     // Available horizontal space before the right cluster.
                     const avail = r.width -| x -| right.total;
                     var remaining: u16 = 0;
+                    // Center-slot segment count for this row, used to split
+                    // the budget evenly below.
+                    var center_count: u16 = 0;
                     if (lay.position == .center) {
                         // Reserve the layout's own non-center segments (their
                         // widths plus trailing gaps) before the center-slot
@@ -945,24 +1013,32 @@ const State = struct {
                         );
                         var claim: u16 = 0;
                         for (lay.segments.items) |s| {
-                            if (isRole(s, center_slot_role)) continue;
+                            if (isRole(s, center_slot_ids)) {
+                                center_count += 1;
+                                continue;
+                            }
                             claim +|= self.measureSegmentWidth(frame, s);
                             claim +|= scaled_spacing;
                         }
                         remaining = clamped -| claim;
                     }
+                    var center_idx: u16 = 0;
                     for (lay.segments.items) |seg| {
-                        const is_center = isRole(seg, center_slot_role);
-                        const omit_gap = (lay.position == .center) and is_center;
-                        const w = if (is_center)
-                            remaining
+                        const is_center = (lay.position == .center) and isRole(seg, center_slot_ids);
+                        const omit_gap = is_center;
+                        // Center-slot segments in a center row split the whole
+                        // remaining budget evenly, left-to-right in config
+                        // order (centerShare); widths stay contiguous (no gap),
+                        // so duplicates can't overlap the right cluster.
+                        const w: u16 = if (is_center)
+                            centerShare(remaining, center_count, center_idx)
                         else
                             self.measureSegmentWidth(frame, seg);
                         self.recordClickBound(seg, x, w);
-                        // clock.x must be recorded for a self-ticking segment
-                        // in ANY cluster (not just right): drawClockOnly relies
-                        // on it regardless of where the clock is laid out.
-                        if (isRole(seg, self_ticking_role)) self.clock.x = x;
+                        // The self-ticker bound must be recorded in ANY
+                        // cluster (not just right): drawClockOnly relies on it
+                        // regardless of where the clock is laid out.
+                        if (isRole(seg, self_ticking_ids)) self.recordSelfTickerScope(frame, seg, x);
                         if (self.isSegmentRepaintable(seg)) {
                             if (!is_full_redraw) {
                                 const clear_w = if (omit_gap) w else w + scaled_spacing;
@@ -983,11 +1059,7 @@ const State = struct {
                             x += w;
                             if (!omit_gap) x += scaled_spacing;
                         }
-                        // A center-slot segment consumes the whole remaining
-                        // budget; later center-slot segments in the same row
-                        // get whatever is left (typically zero -> invisible)
-                        // so duplicates can't overlap the right cluster.
-                        if (is_center) remaining -|= w;
+                        if (is_center) center_idx += 1;
                     }
                 },
                 .right => {
@@ -997,12 +1069,14 @@ const State = struct {
         }
     }
 
-    /// Redraws just the clock segment when its on-screen content is stale
-    /// (second rolled over). Cheap region-scoped blit.
+    /// Repaints every self-ticking segment whose on-screen content is stale
+    /// (second rolled over). Cheap region-scoped blits, one per ticker.
     fn drawClockOnly(self: *State) void {
-        const clock_x = self.clock.x orelse return;
-        const cid = self_ticking_role orelse return;
-        redrawSlotScoped(self, cid, clock_x, self.clock.width, null, true);
+        for (self_ticking_ids, 0..) |cid, i| {
+            const sc = self.clock.segs[i];
+            if (!sc.valid) continue;
+            redrawSlotScoped(self, cid, sc.x, sc.width, null, true);
+        }
     }
 };
 
@@ -1219,7 +1293,7 @@ fn applyReload(old: *State, height: u16) !void {
     // config; the new one is live from here on either way, so drop them up
     // front, including on the failure path below, where the surviving bar
     // re-points at the NEW live config too.
-    runVoidHook("invalidateReloadCaches");
+    runVoidHook(.invalidateReloadCaches);
     // calcBarHeightAndFontSize already re-derived the scaled font size from
     // the NEW config (percentage sizes refine against the new height); if the
     // new bar fails to materialize, the surviving bar must keep whatever font
@@ -1258,7 +1332,7 @@ fn applyReload(old: *State, height: u16) !void {
 /// the empty api, so the bar's synthesis loops no-op.
 fn minimizedApiFromRegistry() segmod.MinimizedApi {
     var api: segmod.MinimizedApi = .{};
-    if (plugin.providerOf(window_mods[0..], .collectHiddenSet) != null)
+    if (contract.providerOf(contract.WindowModule, window_mods[0..], .collectHiddenSet) != null)
         api.collect = minimizedCollect;
     return api;
 }
@@ -1271,7 +1345,7 @@ fn minimizedCollect(
     allocator: std.mem.Allocator,
 ) void {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (plugin.providerOf(window_mods[0..], .collectHiddenSet)) |wm|
+    if (contract.providerOf(contract.WindowModule, window_mods[0..], .collectHiddenSet)) |wm|
         wm.collectHiddenSet.?(mm, set, allocator);
 }
 
@@ -1285,7 +1359,10 @@ pub fn toggleBarSegmentAnchor() void {
     const new_y = barwin.calcBarYPos(s.render.height);
     barwin.setWindowProperties(s.win.win_id, s.render.height);
     requestFullRedraw();
-    s.clock.x = null;
+    // The shared bar window is being re-anchored; drop every recorded
+    // self-ticker bound so a stale tick cannot region-scope a repaint before
+    // the layout pass re-records them.
+    for (&s.clock.segs) |*sc| sc.valid = false;
     utils.grabServer(cs.conn);
     _ = xcb.xcb_configure_window(
         cs.conn,
@@ -1435,7 +1512,7 @@ pub fn presentForPrompt() void {
         // compositor never presents an empty frame.
         gBar.prompt_forced_visible = true;
         s.vis.shown = true;
-        runVoidHook("onBarShown");
+        runVoidHook(.onBarShown);
         _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
         submitDrawBlockingFull();
     }
@@ -1502,7 +1579,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
         // Tell continuous-motion segments the bar is (re)appearing, so the
         // title marquee resumes from its last shown offset instead of
         // teleporting across the whole hidden gap on this first frame.
-        runVoidHook("onBarShown");
+        runVoidHook(.onBarShown);
         if (do_reconcile) {
             // Fullscreen toggle path: render to the off-screen pixmap inside
             // the grab so the caller's single ungrabAndFlush ships geometry +
@@ -1625,7 +1702,7 @@ pub fn updateIfDirty() !void {
 /// Asks each module whether it queued a redraw request the bar should honour
 /// (e.g. the prompt's blink-tick reactivity).
 fn barModsConsumeRedrawRequest() bool {
-    return anyBoolHook("consumeRedrawRequest", .{});
+    return anyBoolHook(.consumeRedrawRequest, .{});
 }
 
 /// Redraws just the clock segment when its on-screen content is stale
@@ -1634,7 +1711,7 @@ fn barModsConsumeRedrawRequest() bool {
 pub fn updateClock() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
-    if (self_ticking_role == null) return;
+    if (self_ticking_ids.len == 0) return;
     const fmt = drawing.clockFormat(core.getState().config.bar);
     var redraw_clock = false;
     for (bar_mods) |m| {
@@ -1647,19 +1724,25 @@ pub fn updateClock() void {
     }
     if (!redraw_clock) return;
     s.drawClockOnly();
-    // A display-mode cycle also changes the clock's slot width: the freshly
-    // reported natural width IS the new reservation. Fold it in and re-lay the
-    // row so neighboring segments shift to the narrowed/widened slot. Within a
-    // mode the reported width is stable (the mode's probe), so the normal
-    // once-per-second clock repaint never trips this re-layout.
-    if (self_ticking_role) |cid| {
+    // A display-mode cycle also changes a self-ticking segment's slot width:
+    // re-derive the merged clock display width (max across the tickers'
+    // natural widths) and re-lay the row so neighboring segments shift to the
+    // narrowed/widened slot. Within a mode the reported width is stable (the
+    // mode's probe), so the normal once-per-second clock repaint never trips
+    // this re-layout.
+    var merged = s.clock.width;
+    for (self_ticking_ids, 0..) |cid, i| {
+        const sc = &s.clock.segs[i];
+        if (!sc.valid) continue;
         if (segAt(cid).naturalWidth) |nw| {
             const fresh = nw(&s.frame, s.clock.width);
-            if (fresh != s.clock.width) {
-                s.clock.width = fresh;
-                requestFullRedraw();
-            }
+            sc.width = fresh;
+            merged = @max(merged, fresh);
         }
+    }
+    if (merged != s.clock.width) {
+        s.clock.width = merged;
+        requestFullRedraw();
     }
 }
 
@@ -1770,7 +1853,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
 ///   - otherwise -> focuses it
 fn handleTitleClick(s: *State, offset: u16) void {
     if (s.frame.wins_len == 0) return;
-    const center_id = center_slot_role orelse return;
+    const center_id = title_id orelse return;
     const tb = s.recordedBound(segAt(center_id).name) orelse return;
 
     const target = segmod.hitTest(
@@ -1796,12 +1879,12 @@ fn titleClickTrampoline(ptr: *anyopaque, offset: u16) void {
 
 /// Comptime-registered UI-surface hooks for core's event loop (comptime
 /// reference point: the one place the loop knows the bar exists). Core calls
-/// these through a single `plugins.Surfaces` alias; when the bar is absent the
+/// these through a single `surfaces.Surfaces` alias; when the bar is absent the
 /// whole set is `null` and every such call site compiles away. The emitter
 /// lives in this module, so detaching the bar detaches its handlers. The hook
 /// types themselves live in the core-owned `plugin` interface contract, not
 /// here: this module only binds its functions to that contract.
-pub const surfaces = @import("plugin").Surfaces{
+pub const surfaces = @import("contract").Surfaces{
     .init = init,
     .deinit = deinit,
     .handleExpose = handleExpose,

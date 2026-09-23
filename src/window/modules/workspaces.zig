@@ -114,7 +114,7 @@ pub fn allViewToggle(m: *model.Model) bool {
 
 /// This module's window sub-system contribution: lifecycle only, since
 /// workspace state lives in the model.
-pub const module: @import("plugin").WindowModule = .{
+pub const module: @import("contract").WindowModule = .{
     .init = init,
     .deinit = deinit,
     .sendToWs = moveWindowToWs,

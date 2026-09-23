@@ -4,14 +4,15 @@
 const types = @import("types");
 const drawing = @import("drawing");
 const actions = @import("actions");
-const segmod = @import("segment");
+const pipeline = @import("pipeline");
+const contract = @import("contract");
 const segdraw = @import("segdraw");
 
 // Layout registry (build-generated); the active layout is a `u8` index into
 // it, and each module carries its own bar icon metadata. Empty (and
 // unreachable: the icon falls back to "><>") when the tiling subsystem is
 // absent.
-const tiling_mods = @import("plugin").tiling_mods;
+const tiling_mods = contract.tiling_mods;
 
 const W = segdraw.widthState("layout");
 
@@ -21,10 +22,12 @@ const fallback_icon = "><>";
 
 /// Resolves the active layout's bar icon from metadata; "><>" when tiling is
 /// disabled or the tiling subsystem is absent (all windows float by
-/// definition).
+/// definition). The live kind comes from the model (pipeline); the contract's
+/// pure `activeLayoutKind` applies the registry/tiling gates for both this
+/// module and its variants sibling.
 fn getIcon() []const u8 {
     if (tiling_mods.len == 0) return fallback_icon;
-    const kind = segmod.currentLayoutKind() orelse return fallback_icon;
+    const kind = contract.activeLayoutKind(pipeline.getCurrentLayout()) orelse return fallback_icon;
     return tiling_mods[kind].icon orelse fallback_icon;
 }
 

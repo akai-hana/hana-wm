@@ -88,7 +88,7 @@ wire sends stay behind `src/core/sync/` + `check-layers.sh` allowlist), pure
 
 | ID | Location | Axis | Issue | Fix | Est. LOC | Conf. |
 |----|----------|------|-------|------|----------|-------|
-| EVS-01 | plugin.zig:61; events.zig:81-89 | 1 | `Surfaces.handlePropertyNotify` bound by no module; dead forward | delete field + forward | −6 | H |
+| EVS-01 | contract.zig:61; events.zig:81-89 | 1 | `Surfaces.handlePropertyNotify` bound by no module; dead forward | delete field + forward | −6 | H |
 | PIP-01 | pipeline.zig:69-79 | 2 | `getCurrentLayout` redundant `!has_tiling` guard (delegated fn guards already) | drop guard, delegate | −2 | H |
 | EVS-02 | events.zig:548-558 | 1 | queued-drain `queued_pending` local dead-by-construction | comptime-gate drain's `pending` param | −1 | M |
 | CR-01 | core.zig:62-73 | 6 | `State.facts` doc block restates `Facts` struct intro | shrink to one line | −2 | H |
@@ -148,7 +148,7 @@ wire sends stay behind `src/core/sync/` + `check-layers.sh` allowlist), pure
 
 | ID | Location | Axis | Issue | Fix | Est. LOC | Conf. |
 |----|----------|------|-------|------|----------|-------|
-| TIL-01 | plugin.zig:404-407 | 10 | `Layout.compute` doc names a `params` param that does not exist (stale; real preReconcile is by-value) | fix doc | −1 | H |
+| TIL-01 | contract.zig:404-407 | 10 | `Layout.compute` doc names a `params` param that does not exist (stale; real preReconcile is by-value) | fix doc | −1 | H |
 | TIL-02 | tiling.zig:231-233 | 6 | `layoutByName` doc self-contradicts (case-insensitive vs exact lowercased) | collapse to one sentence | 0 | H |
 | TIL-03 | tiling.zig:263-265 | 3/7 | `defaultKind()` 3-line fn returning literal 0 | fold into `layoutKindOf` doc/fallback | −3 | M |
 | TIL-04 | master.zig:304-311; grid.zig:45-51; fibonacci.zig:89-94; scroll.zig:82 | 2/8/9 | 5× hand-built `utils.Rect` + `satI16` + `emitView` (master-local emitRow) | shared `tiling.emitRect` helper | −10..−13 | M |

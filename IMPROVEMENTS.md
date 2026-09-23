@@ -220,9 +220,9 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 > Status: the structural overview and the Phase-2 items remain accurate. Most Phase-2 refactors were deliberately NOT pursued (god-file constraint: don't split for size alone; high blast radius with little user-visible payoff). DELETION-MODULARITY: `check-modularity` is now an explicit build step + script mode (31 scenarios green — 26 `run_scenario` calls, the tiling-layout loop expanding to 6) but deliberately not a dependency of the default `check`.
 
 ### Structural overview (from architecture audit)
-- Hub-and-spoke around a single core `Model` + a sync boundary; `core/sync/sink.zig` is the only sanctioned raw-XCB surface; `model/`+`tiling/` are xcb-free; `core/plugin.zig` defines the `WindowModule`/`Segment`/`Layout`/`Surfaces` contracts.
-- Build-generated registration modules (`plugins`, `window_modules`, `tiling_modules`, `bar_modules`) make files drop-in; `has_*` booleans gate ~90 sites (the `has_seg_*` dead features were pruned).
-- The good parts to preserve: `plugins.Surfaces` seam, fact revisions, the drift-proof reconcile + sent ledger, bounded-work discipline, comptime-gated registries, and now the O(1) sent-ledger index.
+- Hub-and-spoke around a single core `Model` + a sync boundary; `core/sync/sink.zig` is the only sanctioned raw-XCB surface; `model/`+`tiling/` are xcb-free; `src/core/contract.zig` (renamed from `plugin.zig`) defines the `WindowModule`/`Segment`/`Layout`/`Surfaces` contracts.
+- Build-generated registration modules (`surfaces`, `window_modules`, `tiling_modules`, `bar_modules`) make files drop-in; `has_*` booleans gate ~90 sites (the `has_seg_*` dead features were pruned).
+- The good parts to preserve: `Surfaces` seam, fact revisions, the drift-proof reconcile + sent ledger, bounded-work discipline, comptime-gated registries, and now the O(1) sent-ledger index.
 
 ### [critical] Hard import cycle config ↔ input via xkbcommon — **FIXED**
 - `config.zig` no longer imports `xkbcommon.zig` (the X-wired input module) or `core`; binding keysym resolution moved to the pure `src/input/keysyms.zig`, and the wire path is guarded by build-time `assertPureLayerImports` so config and the other pure layers can never re-learn a hub import.

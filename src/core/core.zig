@@ -102,7 +102,7 @@ pub const layout = factAccessors("layout_rev");
 // ---------------------------------------------------------------------------
 // Config-derived windowing facts (owned by core).
 // These are the only tiling facts other modules need; they read them here
-// instead of importing `tiling`, so `tiling` stays a true plugin. They are
+// instead of importing `tiling`, so `tiling` stays a true contract. They are
 // thin config reads core can answer from its own config.
 
 /// Whether the tiling windowing paradigm is enabled (config fact).

@@ -167,15 +167,17 @@ pub fn onClick(
 // a layout) — an in-flight segment simply ships with a non-empty placeholder
 // name and stays out of every shipped config (the prompt is a runtime overlay
 // with its own name; everything else is selectable by name).
-// Role capabilities (all default to false / .{} / true; set only as needed —
-// each "at most one": first-match wins, name-free):
+// Role capabilities (all default to false / .{} / true; set only as needed).
+// Both role capabilities are multi-binder -- the bar ticks EVERY self-ticker
+// fan-out and splits the center evenly among every center-slot segment,
+// left-to-right in config order:
 //   .self_ticking = true,          // drive your own refresh cadence (clock)
-//   .center_slot = true,           // claim the reserved center slot (title)
+//   .center_slot = true,           // claim a share of the reserved center (title)
 //   .dirty_sources = .{ .focus = true, .frame = true }, // repaint on fact-revs
 //   .clickable = false,            // skip click-hit bounds (clock)
 //   .needsRepaint = needsRepaint,  // "repaint me every draw while active"
 // ---------------------------------------------------------------------------
-pub const module: @import("plugin").Segment = .{
+pub const module: @import("contract").Segment = .{
     .name = "template", // TODO: unique config identity, e.g. "clock"
     .init = init,
     .deinit = deinit,

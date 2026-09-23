@@ -15,7 +15,7 @@
 | CORE-2 canonical seam headers | Landed. x11/wire.zig and other seam headers carry the shared "no code beyond this point" sentence. |
 | CORE-6 marker removal | Landed **in core scope**: no `C#`/`P#`/`Gap N`/`W#` marker remains in `src/core/` (only false positives: idmap.zig's hash constant `0x9E3779B97F4A7C15` and utils.zig prose "Gap and border widths"). NOTE: `(Gap 1/2/3/4 atomicity fix)` markers still live in `src/window/actions.zig:282,869,965,992` and `src/window/focus.zig:262` — window-layer remit, not reported here. |
 | Contract is real, not a mandated no-op | Confirmed FALSE-to-claim. Every `Surfaces` hook has ≥1 consumer (grep-verified, e.g. `updateBarVisibilityForWorkspace` at window/actions.zig:839); every `WindowModule` field has ≥1 binder AND ≥1 consumer. |
-| Closed-core holds structurally | Confirmed. events.zig/pipeline.zig reach optional subsystems ONLY via generated `plugins.Surfaces`, `window_modules`, `tiling_seam` (build.zig:163-182, generated, collision-guarded at build.zig:590). Core never names an optional subsystem by module. |
+| Closed-core holds structurally | Confirmed. events.zig/pipeline.zig reach optional subsystems ONLY via generated `Surfaces`, `window_modules`, `tiling_seam` (build.zig:163-182, generated, collision-guarded at build.zig:590). Core never names an optional subsystem by module. |
 | No TODO/FIXME in src/ | Confirmed (rg, exit 0). |
 | fmt clean | Confirmed baseline; no formatting-only edits proposed. |
 

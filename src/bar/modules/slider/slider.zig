@@ -9,7 +9,7 @@
 //!   - `subs` comes from the generated `slider_subs` registry (file presence +
 //!     self-declared role: a sibling without `pub const sub` is a private
 //!     implementation file, never a bound addon).
-//!   - `segmentFor(i)` builds the `plugin.Segment` the bar places for control
+//!   - `segmentFor(i)` builds the `contract.Segment` the bar places for control
 //!     `i`, config identity `subs[i].name`. build.zig emits one entry per
 //!     discovered control with a `pub const sub`.
 //!
@@ -53,7 +53,7 @@ const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const plugin = @import("plugin");
+const contract = @import("contract");
 const utils = @import("utils");
 
 const c = @cImport({
@@ -540,7 +540,7 @@ fn onDragEndFor(idx: usize, redraw: *const fn () void) void {
 /// a distinct segment with its own hooks into `subs[i]`'s state). Emitted by
 /// build.zig per discovered control with a `pub const sub`, in the same
 /// alphabetical order as `subs`.
-pub fn segmentFor(comptime i: usize) plugin.Segment {
+pub fn segmentFor(comptime i: usize) contract.Segment {
     const Hooks = struct {
         fn poll() i32 {
             return pollDeadlineMsFor(i);

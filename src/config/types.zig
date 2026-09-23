@@ -60,6 +60,14 @@ pub const section_fullscreen = "fullscreen";
 pub const section_workspaces = "workspaces";
 pub const section_bar_modules_workspaces = "bar.modules.workspaces";
 
+/// Composite `[bar.properties]` keys for the workspaces segment's icon text:
+/// a base entry styling every tag and a `_selected` overlay applying only to
+/// the CURRENT (selected) tag, each decoded by the same color+underline/
+/// bold/italic composite path as any segment (`workspaces_selected = bold`).
+/// The tags module reads them through `workspaceTextFg`/`workspaceIconProps`.
+pub const seg_workspaces = "workspaces";
+pub const seg_workspaces_selected = "workspaces_selected";
+
 /// Section-name prefixes for the family sweeps (inert-family warnings,
 /// numbered-rule sections, tiling layout subtables).
 pub const section_prefix_tiling = "tiling.";
@@ -505,6 +513,11 @@ pub const BarConfig = struct {
     indicator_focused: ?[]const u8 = null,
     indicator_unfocused: ?[]const u8 = null,
     indicator_color: ?Color = null,
+    /// Indicator glyph color when its workspace tag is the CURRENT (selected)
+    /// one -- set independently of the icon text color. Unset follows
+    /// `indicator_color`, then the tag's text color (see
+    /// `workspaceIndicatorColor`).
+    selected_indicator_color: ?Color = null,
 
     clock_format: ?[]const u8 = null,
 
@@ -604,6 +617,46 @@ pub const BarConfig = struct {
     /// bold/italic overrides, or all-false plain text when none is set.
     pub inline fn segmentProps(self: *const BarConfig, name: []const u8) SegmentProps {
         return self.segment_props.get(name) orelse .{};
+    }
+
+    /// Indicator glyph color for workspace tag `is_current`: the selected-state
+    /// override when set (current tag only), else the shared `indicator_color`,
+    /// else the tag's text color (`workspaceTextFg`).
+    pub inline fn workspaceIndicatorColor(self: *const BarConfig, is_current: bool) Color {
+        if (is_current) {
+            if (self.selected_indicator_color) |c| return c;
+            if (self.indicator_color) |c| return c;
+            return self.workspaceTextFg(true);
+        }
+        if (self.indicator_color) |c| return c;
+        return self.workspaceTextFg(false);
+    }
+
+    /// Text color for workspace icon label `is_current`: the per-state
+    /// `[bar.properties]` composite entry -- `workspaces_selected` on the
+    /// current tag, the base `workspaces` entry elsewhere -- or the tag's
+    /// default (selected_fg on the current tag, the bar-wide fg otherwise).
+    /// The base entry colors every tag; the selected overlay recolors the
+    /// current one on top of it.
+    pub inline fn workspaceTextFg(self: *const BarConfig, is_current: bool) Color {
+        if (is_current)
+            return self.segment_fg.get(seg_workspaces_selected) orelse self.segment_fg.get(seg_workspaces) orelse self.selected_fg;
+        return self.segment_fg.get(seg_workspaces) orelse self.fg;
+    }
+
+    /// Pango style flags for workspace icon label `is_current`: the base
+    /// `[bar.properties] "workspaces"` entry for every tag, overlaid with any
+    /// non-default flags of the `workspaces_selected` entry on the current tag
+    /// (so the selected icon may render bold/italic/underlined on top of the
+    /// shared styling, without new knob shapes).
+    pub inline fn workspaceIconProps(self: *const BarConfig, is_current: bool) SegmentProps {
+        var props = self.segmentProps(seg_workspaces);
+        if (!is_current) return props;
+        const sel = self.segmentProps(seg_workspaces_selected);
+        props.underline = props.underline or sel.underline;
+        props.bold = props.bold or sel.bold;
+        props.italic = props.italic or sel.italic;
+        return props;
     }
 
     /// Derives horizontal segment padding from font_size.

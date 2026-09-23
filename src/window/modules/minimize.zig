@@ -7,7 +7,7 @@
 //! (onWindowGone). The core never names minimize.
 //!
 //! The deserialize hook receives the wire layer's `*model.Model` directly
-//! (see plugin.WindowModule); the core interface file carries the model type,
+//! (see contract.WindowModule); the core interface file carries the model type,
 //! and adoption rewrites model state only through the window layer's
 //! gate-holding restore path.
 
@@ -15,7 +15,6 @@ const std = @import("std");
 const constants = @import("constants");
 const utils = @import("utils");
 const model = @import("model");
-const plugin = @import("plugin");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
@@ -246,7 +245,7 @@ pub fn collectHiddenSet(
         set.put(allocator, rec.win, {}) catch {};
 }
 
-/// Persistence seam (plugin.WindowModule.serializeWindow): marshals this
+/// Persistence seam (contract.WindowModule.serializeWindow): marshals this
 /// window's parked record as an opaque 9-byte blob ([0]=0x5A 'Z' magic,
 /// {slot-or-maxInt:u32, seq:u32}). The magic lets the registry deserialize
 /// loop self-identify (minimize claims only parked windows). Returns null
@@ -272,7 +271,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
     return held;
 }
 
-/// Persistence seam (plugin.WindowModule.deserializeWindow): adopts the blob
+/// Persistence seam (contract.WindowModule.deserializeWindow): adopts the blob
 /// written by `serializeWindow` and replays the park on the live model.
 pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (bytes.len != 9 or bytes[0] != min_magic) return false; // not our blob; let the loop continue
@@ -308,7 +307,7 @@ pub fn hideWindow(m: *model.Model, win: model.WindowId) anyerror!void {
 
 /// This module's window sub-system contribution: lifecycle + persistence
 /// seam + record cleanup for torn-down windows.
-pub const module: @import("plugin").WindowModule = .{
+pub const module: @import("contract").WindowModule = .{
     .init = init,
     .deinit = deinit,
     .onWindowGone = onWindowGone,

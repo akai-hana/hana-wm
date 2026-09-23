@@ -164,6 +164,13 @@ pub const knobs = [_]Knob{
     // Falls back to the bar-wide fg (its historical default) -- but only
     // when the key is present; absent keeps the field null.
     knob(&.{place(types.section_bar, "indicator_color")}, "bar.indicator_color", .{ .color_opt = "fg" }),
+    // Selected workspace tag: an individually-set indicator glyph color for the
+    // current tag. It falls back at read time to indicator_color, then the
+    // tag's text color. The selected tag's icon TEXT color/styles are NOT a
+    // scalar knob -- they use the same color+underline/bold/italic composite
+    // path as any segment, via the [bar.properties] entry "workspaces_selected"
+    // (see BarConfig.workspaceTextFg/workspaceIconProps).
+    knob(&.{place(types.section_bar, "selected_indicator_color")}, "bar.selected_indicator_color", .{ .color_opt = "fg" }),
 
     // [bar.properties] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
@@ -278,6 +285,7 @@ pub const Knob = struct {
 /// Shared by every dotted-path accessor so their splitting cannot drift.
 const PathParts = struct { group: []const u8, leaf: []const u8 };
 inline fn splitPath(comptime path: []const u8) PathParts {
+    @setEvalBranchQuota(2000);
     if (std.mem.indexOfScalar(u8, path, '.')) |dot| {
         return .{ .group = path[0..dot], .leaf = path[dot + 1 ..] };
     }
@@ -287,6 +295,7 @@ inline fn splitPath(comptime path: []const u8) PathParts {
 /// Resolves a dotted "group.leaf" (or bare root-level) target path to its
 /// field type. Groups are exactly one level deep on types.Config.
 fn PathType(comptime path: []const u8) type {
+    @setEvalBranchQuota(2000);
     const parts = comptime splitPath(path);
     if (parts.group.len == 0) return @TypeOf(@field(@as(types.Config, undefined), path));
     const Group = @TypeOf(@field(@as(types.Config, undefined), parts.group));
@@ -295,6 +304,7 @@ fn PathType(comptime path: []const u8) type {
 
 /// Mutable pointer to a knob's target field.
 fn ptr(cfg: *types.Config, comptime path: []const u8) *PathType(path) {
+    @setEvalBranchQuota(2000);
     const parts = comptime splitPath(path);
     if (parts.group.len == 0) return &@field(cfg, path);
     return &@field(@field(cfg, parts.group), parts.leaf);
@@ -302,6 +312,7 @@ fn ptr(cfg: *types.Config, comptime path: []const u8) *PathType(path) {
 
 /// Read-only view of a knob's target field.
 pub fn value(cfg: *const types.Config, comptime path: []const u8) PathType(path) {
+    @setEvalBranchQuota(2000);
     const parts = comptime splitPath(path);
     if (parts.group.len == 0) return @field(cfg, path);
     return @field(@field(cfg, parts.group), parts.leaf);

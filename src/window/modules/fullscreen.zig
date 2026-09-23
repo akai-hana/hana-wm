@@ -19,7 +19,6 @@ const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
 const model = @import("model");
-const plugin = @import("plugin");
 const pipeline = @import("pipeline");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
@@ -158,7 +157,7 @@ fn releaseCovering(m: *model.Model, win: model.WindowId) void {
 /// record, so there is no separate registry to scan. At most one visible
 /// occupant per ws is guaranteed by sync (others parked).
 /// Contrast `model.coveringOccupantOnWs` (OR: anchor-or-visibility union).
-/// Routed through plugin.coveringOccupantOnWs for the workspaces move/tag seam.
+/// Routed through contract.coveringOccupantOnWs for the workspaces move/tag seam.
 pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -266,7 +265,7 @@ pub fn onWindowGone(win: u32) void {
 
 /// This module's window sub-system contribution: lifecycle + coverage seam +
 /// the EWMH/bar protocol hooks.
-pub const module: @import("plugin").WindowModule = .{
+pub const module: @import("contract").WindowModule = .{
     .init = init,
     .deinit = deinit,
     .notifyConfigureIfPending = notifyConfigureIfPending,

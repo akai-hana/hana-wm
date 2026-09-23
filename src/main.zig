@@ -18,7 +18,7 @@ const build_options = @import("build_options");
 // through the core-owned `surfaces` composition root, never by importing the
 // bar module here. When the bar is absent `surfaces` is the comptime `null`
 // type and the guarded calls below compile away.
-const surfaces = @import("plugins").Surfaces;
+const surfaces = @import("surfaces").Surfaces;
 const input = @import("input");
 const window = @import("window");
 const actions = @import("actions");

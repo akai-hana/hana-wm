@@ -151,6 +151,11 @@ Segment behavior knobs:
 - `clock_format` (strftime), `drun_prompt`, `carousel_enabled`,
   `carousel_speed_px_s`, `indicator_*` and the appearance/color knobs
   (usually themed).
+- Selected workspace tag: `selected_fg` colors the current tag's **icon text**
+  and `selected_indicator_color` colors its **indicator glyph** independently
+  (unset follows `indicator_color`, then the tag's text color). The selected
+  tag's text styling uses the same composite format as any segment -- see the
+  `workspaces`/`workspaces_selected` entries below.
 
 Per-segment accents live in `[bar.properties]` (`title`, `title_unfocused`,
 `title_minimized`, `drun_bg`, `drun_fg`, `drun_prompt_color`). Any other key
@@ -162,6 +167,14 @@ A bare flag means `true`; `name=bool` and `name=0|1` spellings work too.
 A `<segment>_value` key is color-only and separately colors its numeric
 readout (the `42%` in `Cpu 42%`), falling back to the segment text color when
 absent.
+
+Workspace tags take two of these composite keys: `workspaces` styles **every**
+tag (the first color-carrying item colors all the unselected icons), and
+`workspaces_selected` is a per-state overlay applied on top for the **current**
+tag in the same format -- e.g. `workspaces_selected = bold` bolds only the
+selected icon, or `workspaces_selected = #ff0000 bold` recolors and bolds it.
+The selected tag's text falls back to `selected_fg`; the rest to the bar-wide
+`fg`.
 
 ### `[binds]`
 
