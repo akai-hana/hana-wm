@@ -1,6 +1,6 @@
 //! Systatus readout segments.
 //! Every readout sub in this directory is promoted to its OWN bar segment
-//! ("cpu", "mem", "batt", ...) via `segmentFor(i)`, so each readout is
+//! ("cpu", "ram", "batt", ...) via `segmentFor(i)`, so each readout is
 //! selected, ordered, and spaced independently in `[bar.layout.*]` -- there
 //! is no aggregate "systatus" belt any more. Readouts refresh on a 2 s poll.
 //! All reads are plain file reads on the main thread -- no subprocesses, no
@@ -27,32 +27,26 @@ const contract = @import("contract");
 
 const read_interval_ms: i64 = 2000;
 
+/// Length of the per-segment rendered-text buffers: room for "<label> <pct>%"
+/// (worst-case label plus a 3-digit readout). Larger than any rendered slot.
+const render_buf_len: usize = 128;
+
 // ---------------------------------------------------------------------------
-// The systatus surface is a closed-core / open-module system, like every
-// surface interface in this tree:
-//
-//   - The CLOSED CORE is this file: the `Sub` contract plus the generic
-//     per-segment poll/render machinery in `segmentFor`. It never names a
-//     readout module; every readout is reached through the `subs` registry,
-//     which is a generated array (see build.zig's `buildSubsRegistryModule`).
-//
-//   - The OPEN MODULES are the sibling `.zig` files in this directory. Each
-//     binds `pub const sub: Sub`, and membership in `subs` -- and therefore a
-//     bar segment named after it -- comes from FILE PRESENCE alone: build.zig
-//     scans this dir, regenerates `systatus_subs`, and appends one
-//     `segmentFor(i)` entry per readout to `bar_modules`. Adding a readout =
-//     drop a file; deleting one = delete the file. No source edit in the
-//     core, and no dead reference lingers after a readout is removed.
+// The systatus surface is a closed-core / open-module system: the CLOSED CORE
+// is this file (`Sub` + the per-segment poll/render machinery); the OPEN
+// MODULES are the sibling `.zig` files, each binding `pub const sub: Sub`, and
+// membership in `subs` -- and therefore a bar segment named after it -- comes
+// from FILE PRESENCE alone.
 //
 // To add a readout: drop `foo.zig` beside this file exporting
 // `pub const sub: Sub`. Every file here besides systatus.zig must export it.
 // ---------------------------------------------------------------------------
 
 pub const Sub = struct {
-    /// Config identity ("mem", "cpu", ...): the name its bar segment is
+    /// Config identity ("ram", "cpu", ...): the name its bar segment is
     /// selected by in `[bar.layout.*]`.
     name: []const u8,
-    /// Label prefix rendered before the value ("Mem", "Cpu", ...).
+    /// Label prefix rendered before the value ("RAM", "CPU", ...).
     label: []const u8,
     /// Current readout as a 0-100 percent, or null when unreadable / not
     /// present this tick (the segment then renders nothing, zero width).
@@ -79,9 +73,12 @@ var g_armed: [subs.len]bool = @splat(false);
 var g_pending_redraw: [subs.len]bool = @splat(false);
 var g_next_read_ms: [subs.len]i64 = @splat(0);
 var g_slot_width: [subs.len]u16 = @splat(0);
-/// Cached rendered text and its length; a redraw is only requested when this
-/// actually changes, so the 2 s poll doesn't repaint the bar unconditionally.
-var g_last: [subs.len][128]u8 = undefined;
+/// Last drawn width of readout `idx` (the row reservation): 0 until the first
+/// draw (and forever when a readout has no value to show, e.g. `batt` with no
+/// battery), so an absent readout's slot fully collapses and never opens a
+/// gap -- the bar lays out exactly what the segment paints. Mirrors segdraw's
+/// widthState default. Read by the segment's naturalWidth hook.
+var g_last: [subs.len][render_buf_len]u8 = undefined;
 var g_len: [subs.len]usize = @splat(0);
 /// Byte range of the numeric readout ("42%") inside `g_last`; `g_value_len ==
 /// 0` when there is no value this tick. The number is painted with the
@@ -103,7 +100,7 @@ fn appendText(dst: []u8, start: usize, text: []const u8) usize {
 fn refresh(idx: usize) bool {
     const sub = subs[idx];
 
-    var buf: [128]u8 = undefined;
+    var buf: [render_buf_len]u8 = undefined;
     var n: usize = 0;
     var value_start: usize = 0;
     var value_len: usize = 0;
@@ -149,15 +146,6 @@ fn consumeRedrawRequestFor(idx: usize) bool {
     return p;
 }
 
-/// Row reservation for readout `idx`: the last drawn width. 0 until the first
-/// draw (and forever when a readout has no value to show, e.g. `batt` with no
-/// battery), so an absent readout's slot fully collapses and never opens a
-/// gap -- the bar lays out exactly what the segment paints. Mirrors
-/// segdraw's widthState default.
-fn naturalWidthFor(idx: usize) u16 {
-    return g_slot_width[idx];
-}
-
 fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     const c = segmod.castDraw(ctx);
     if (!g_armed[idx]) {
@@ -185,7 +173,7 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
 
     // Track the ACTUAL painted width, not the row reservation: the row must
     // follow the text or the segment locks onto the startup probe and paints
-    // over its right neighbors ("Mem 42%" clipped by the next slot). A width
+    // over its right neighbors ("RAM 42%" clipped by the next slot). A width
     // change marks the segment dirty so the bar re-lays out.
     const drawn = end_x - x;
     if (drawn != g_slot_width[idx]) g_pending_redraw[idx] = true;
@@ -209,7 +197,7 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
             return consumeRedrawRequestFor(i);
         }
         fn naturalWidth(_: *const anyopaque, _: u16) u16 {
-            return naturalWidthFor(i);
+            return g_slot_width[i];
         }
         fn draw(ctx: *anyopaque, x: u16) anyerror!u16 {
             return drawFor(i, ctx, x);

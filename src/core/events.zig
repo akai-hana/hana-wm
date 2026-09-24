@@ -32,9 +32,6 @@ const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
-// Window sub-system hooks via the build-generated `window_modules` registry
-// (the loops below no-op for a tree without a given sub-system).
-const window_mods = @import("window_modules").modules;
 
 const fd_xcb = 0;
 const fd_signal = 1;
@@ -94,7 +91,7 @@ fn handlePropertyNotify(event: *anyopaque) void {
 // Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
     const e = utils.eventCast(*xcb.xcb_configure_notify_event_t, event);
-    for (window_mods) |m| if (m.notifyConfigureIfPending) |f| f(e.window, e.width, e.height);
+    window.dispatchAll(.notifyConfigureIfPending, .{ e.window, e.width, e.height });
 }
 
 // Notifies fullscreen of the destroyed window before delegating to window.zig.
@@ -102,7 +99,7 @@ fn handleConfigureNotify(event: *anyopaque) void {
 // and is then destroyed before it can send a ConfigureNotify.
 fn handleDestroyNotify(event: *anyopaque) void {
     const e = utils.eventCast(*xcb.xcb_destroy_notify_event_t, event);
-    for (window_mods) |m| if (m.onWindowGone) |f| f(e.window);
+    window.dispatchAll(.onWindowGone, .{e.window});
     window.handleDestroyNotify(e);
 }
 
@@ -200,7 +197,14 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 /// (stack- or heap-allocated by XCB), so they all funnel through here.
 fn dispatchOwned(event: *anyopaque) void {
     defer std.c.free(event);
-    dispatch(@as(*u8, @ptrCast(event)).*, event);
+    dispatch(eventType(event), event);
+}
+
+/// The X11 event type byte (response_type) read off a generic event: the
+/// first byte of every XCB event. Shared by the dispatcher (dispatchOwned) and
+/// isMotion instead of re-spelling the raw `@as(*u8, @ptrCast(e)).*` read.
+inline fn eventType(e: anytype) u8 {
+    return @as(*u8, @ptrCast(e)).*;
 }
 
 const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
@@ -288,20 +292,12 @@ fn handleConfigReload() !void {
 
     var source: config.DefaultSource = .fallback;
     const new_config = config.loadConfigDefault(cs.alloc, &source) catch |err| {
-        // A TOML parse error already reported per-line warnings; treat it
-        // as a hard failure and keep the live config rather than swapping in a
+        // A TOML parse error already reported per-line warnings; treat it as
+        // a hard failure and keep the live config rather than swapping in a
         // partially-merged one. Nothing to deinit here: the load failed before
         // new_ptr existed, and the load path's own errdefers released its
-        // internals. The early return also skips keybind regrabbing.
-        if (err == error.ConfigParseFailed) {
-            debug.err(
-                "Config reload rejected: parse error in a config file. " ++
-                    "Keeping current config; fix the file, reload again",
-                .{},
-            );
-            return err;
-        }
-        debug.err("Failed to load: {}, keeping old", .{err});
+        // internals. The early return also skips keybind regrabbing. The
+        // failure is reported once, at the caller (the sole reload reporter).
         return err;
     };
     // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
@@ -334,13 +330,8 @@ fn handleConfigReload() !void {
     }
 
     try config.validate(new_ptr);
-    if (input.getXkbState() == null) {
-        // XKB was torn down (deinit/init window during a reload); reusing the
-        // old config here prevents the rebuilt keybind resolver from running
-        // on stale XKB. The defer above frees the not-yet-live allocation.
-        debug.warn("Config reload before XKB init; keeping old config", .{});
-        return;
-    }
+    // XKB exists for the whole process lifetime (init at boot, deinit only at
+    // shutdown), so this reload never sees a null state.
     input.buildKeybinds(new_ptr.keybindings.items);
 
     // Swap pointers: new config becomes live, old config is isolated.
@@ -465,7 +456,7 @@ fn drainEvents(
 }
 
 fn isMotion(e: *xcb.xcb_generic_event_t) bool {
-    const t = @as(*u8, @ptrCast(e)).*;
+    const t = eventType(e);
     // Exclude the RandR window before stripping the send_event bit; see
     // isRandrEvent for the raw-compare-before-mask rationale.
     if (isRandrEvent(t)) return false;
@@ -560,18 +551,16 @@ fn handleXcbEvents() void {
     // collapses to its newest member instead of dispatching up to 256
     // individual reconciles); with_tail=true charges the terminating
     // non-motion and delivers it in place.
-    {
-        var queued_pending: ?*xcb.xcb_generic_event_t = null;
-        var extra: usize = 0;
-        drainEvents(
-            &queued_pending,
-            conn,
-            &extra,
-            max_queued_drain,
-            xcb.xcb_poll_for_queued_event,
-            true,
-        );
-    }
+    var queued_pending: ?*xcb.xcb_generic_event_t = null;
+    var extra: usize = 0;
+    drainEvents(
+        &queued_pending,
+        conn,
+        &extra,
+        max_queued_drain,
+        xcb.xcb_poll_for_queued_event,
+        true,
+    );
 
     // Drain any spawn pipes that became readable during this event batch.
     // This catches the common case where SIGCHLD and the MapRequest arrive in

@@ -45,7 +45,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
             regCur(&m, win_id);
             // Override home to target the specific workspace
             if (win_id != 1) {
-                workspaces.moveWindowToWs(&m, win_id, model.WSId.fromIndex(@intCast(ws)));
+                workspaces.moveWindowToWs(&m, win_id, model.WSId.fromIndex(ws));
             }
             win_id += 1;
         }
@@ -172,7 +172,7 @@ test "bench: reconcile pass (50 windows)" {
     sync.init();
     defer sync.init();
 
-    var ctx = makeCtx(recorder.sink(), testColor);
+    var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
 
     const iterations: usize = if (bench) 1_000 else 1;
     const t0 = nowNs();
@@ -199,7 +199,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     defer sync.init();
 
     var recorder = helpers.TestSink(.none){};
-    var ctx = makeCtx(recorder.sink(), testColor);
+    var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
 
     // Warm once so the sent ledger is seeded (steady-state drag).
     sync.reconcile(&m, &ctx, .{});

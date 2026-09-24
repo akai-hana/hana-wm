@@ -40,11 +40,10 @@ fn tileRegion(
     const dim: u32 = if (horizontal) r.w else r.h;
     // The pane cannot hold two min-dim children plus the seam gap: splitting
     // both sides to min_dim would push the second past the parent's far edge,
-    // so leaf overflows instead. Gate is a min_dim floor, unlike fibonacci.zig's
-    // gap+border gate for the recursive spiral. Hand the whole region to the
-    // focused window and park the rest, the same overflow-share shape
-    // fibonacci uses.
-    if (dim < @as(@TypeOf(dim), ctx.min_dim) * 2 +| @as(@TypeOf(dim), gap)) {
+    // so leaf overflows instead. Gate is a min_dim floor, unlike fibonacci's
+    // gap+border spiral gate. Hand the whole region to the focused window and
+    // park the rest, the same overflow-share shape fibonacci uses.
+    if (dim < @as(u32, ctx.min_dim) * 2 +| @as(u32, gap)) {
         // focusedElse: fallback is the list head (first window).
         const top = tiling.focusedElse(ctx.v, windows, windows[0]);
         tiling.emitOverflowShare(ctx, windows, top, r);

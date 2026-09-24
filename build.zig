@@ -274,6 +274,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "masks_test", .gate = true, .x_gated = false },
         .{ .name = "bounded_test", .gate = true, .x_gated = false },
         .{ .name = "idmap_test", .gate = true, .x_gated = false },
+        .{ .name = "ids_test", .gate = true, .x_gated = false },
         .{ .name = "input_test", .gate = true, .x_gated = false },
         .{ .name = "keysyms_test", .gate = true, .x_gated = false },
         .{ .name = "borders_test", .gate = true, .x_gated = true },
@@ -1097,7 +1098,7 @@ fn buildOwnerRegistryModule(
 }
 
 /// Generates a `<package>_subs` registry module for a dir-named package's
-/// private siblings (`systatus/{cpu,mem,...}.zig` beside systatus.zig,
+/// private siblings (`systatus/{cpu,ram,...}.zig` beside systatus.zig,
 /// `prompt/vim.zig` beside prompt.zig, `title/carousel.zig` beside
 /// title.zig). Lists every discovered sibling that SELF-DECLARES the binding
 /// (`pub const <binding>`) as the package's addon binding value (`sub`,
@@ -1427,7 +1428,7 @@ const Module = struct {
                                 try ctx.addOwnerStem(o, std.fs.path.stem(entry.name));
                             } else {
                                 // A private sibling of a dir-named package
-                                // (systatus/{cpu,mem,...}.zig beside
+                                // (systatus/{cpu,ram,...}.zig beside
                                 // systatus.zig): parked under the package stem
                                 // for its generated `<package>_subs` registry
                                 // rather than becoming an owner stem. A sibling

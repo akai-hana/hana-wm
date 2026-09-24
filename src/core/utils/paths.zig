@@ -23,12 +23,12 @@ const common_paths = std.StaticStringMap(void).initComptime(blk: {
 /// probe order: `common_dirs` first, then each non-empty $PATH segment not
 /// already covered by a common dir. `env_val` aliases the caller's $PATH
 /// buffer (getenv or the config arena) and must outlive the iterator.
-pub fn dirIterator(env_val: ?[]const u8) DirIterator {
+pub fn dirIterator(env_val: []const u8) DirIterator {
     return .{ .env = env_val };
 }
 
 pub const DirIterator = struct {
-    env: ?[]const u8,
+    env: []const u8,
     common_idx: usize = 0,
     path_it: ?std.mem.SplitIterator(u8, .scalar) = null,
 
@@ -38,12 +38,7 @@ pub const DirIterator = struct {
             self.common_idx += 1;
             return dir;
         }
-        if (self.path_it == null) {
-            self.path_it = if (self.env) |env|
-                std.mem.splitScalar(u8, env, ':')
-            else
-                return null;
-        }
+        self.path_it = self.path_it orelse std.mem.splitScalar(u8, self.env, ':');
         while (self.path_it.?.next()) |dir| {
             if (dir.len == 0) continue;
             if (common_paths.has(dir)) continue;
@@ -52,3 +47,25 @@ pub const DirIterator = struct {
         return null;
     }
 };
+
+/// True when `dir/name` resolves to an executable file. `buf` must have room
+/// for the joined path (and is reused by the caller for the next probe, so the
+/// whole scan stays allocation-free). A single faccessat X_OK checks existence
+/// and executability in one syscall; openFileAbsolute checks readability only,
+/// so a non-executable file named like a command is not misreported as
+/// "available" and left to fail later with EACCES.
+pub fn exeInDir(buf: []u8, dir: []const u8, name: []const u8) bool {
+    const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, name }) catch return false;
+    const rc: isize = @bitCast(std.os.linux.faccessat(
+        std.os.linux.AT.FDCWD,
+        full_path,
+        std.posix.X_OK,
+        0,
+    ));
+    return rc == 0;
+}
+
+/// POSIX mode for files that must never be world/group-writable: the session
+/// restore file and the prompt's history file both call this out explicitly
+/// so the magic literal isn't re-spelled at each call site.
+pub const restricted_file_mode: u32 = 0o600;

@@ -3,7 +3,6 @@
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const model = @import("model");
 const focus = @import("focus");
 const pipeline = @import("pipeline");
@@ -56,17 +55,12 @@ pub fn resolveBorderColor(win: u32) u32 {
     return borderColorOf(focus.getFocused() == win, cfg.border_focused, cfg.border_unfocused);
 }
 
-/// Returns the effective border width for tiled windows.
-pub fn width() u16 {
-    return core.borderWidth();
-}
-
 /// Applies the configured border width to `win`, skipping the configure when
 /// the sync ledger shows that exact width is already the last one sent.
 /// (The ledger is the sole "last border width sent" owner; wincache
 /// no longer mirrors it.)
 pub fn applyWidth(conn: core.Connection, win: u32) void {
-    const w = width();
+    const w = core.borderWidth();
     if (w == 0) return;
     if (sync.sentGet(win)) |e| {
         if (e.bw == w) return;
@@ -79,13 +73,10 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
 /// layout-cache dedup so repeated sweeps don't spam ChangeWindowAttributes;
 /// that dedup always records the sent/verified color, keeping the cache
 /// truthful across forced values applied outside it (fullscreen's pixel 0)
-/// so the next real color change is never stale-skipped. When tiling state
-/// is unavailable, the send is unconditional.
+/// so the next real color change is never stale-skipped. The dedup owns the
+/// unconditional-send fallback when the cache is full.
 pub fn apply(conn: core.Connection, win: u32) void {
     applyWidth(conn, win);
     const c = resolveBorderColor(win);
-    if (build_options.has_tiling) {
-        if (wincache.sendBorderColorIfChanged(win, c)) return;
-    }
-    utils.setBorderPixel(conn, win, c);
+    wincache.sendBorderColorIfChanged(win, c);
 }

@@ -5,20 +5,18 @@
 //! intrinsics.
 const std = @import("std");
 const utils = @import("utils");
-const bounded = @import("bounded");
 const constants = @import("constants");
 
-/// Alias of the canonical WindowId (`@import("ids").WindowId`; xcb_window_t).
+/// Alias of the canonical WindowId (`@import("ids").WindowId`; see ids.zig).
 pub const WindowId = @import("ids").WindowId;
 /// Alias of the canonical WorkspaceId (`@import("ids").WorkspaceId`). Model
-/// never imports core (xcb-free layer rule); inside the model, ws values are
-/// used directly as array indices via `.index`, with the integer form only at
-/// boundaries (wire formats, counters).
+/// never imports core (xcb-free layer rule); within the model, ws values are
+/// read as array indices via `.index`. See the ids.zig header for the
+/// single-definition rationale.
 pub const WSId = @import("ids").WorkspaceId;
 pub const Mask = u64;
 
-/// Mask bit for workspace `ws`. Precondition: `ws.index < 64` (u64 mask);
-/// workspace ids are far below that, so this is structural, not a clamp.
+/// Mask bit for workspace `ws`. Precondition: `ws.index < 64` (u64 mask).
 pub inline fn bit(ws: WSId) Mask {
     return @as(Mask, 1) << @intCast(ws.index);
 }
@@ -97,7 +95,7 @@ pub const Entry = struct {
     anchor: BaseMode,
     size_hints: SizeHints = .{},
     /// Cached workspace whose tiled_order holds this window (single-membership
-    /// invariant); null when the window has no tiled slot.
+    /// invariant); null when the window has no tiled slot. See findHome.
     home_ws: ?WSId = null,
     presence: Presence = .present,
     /// Core covering intent: the workspace this window's coverage anchors to.
@@ -113,29 +111,25 @@ const WsState = struct {
     params: LayoutParams = .{},
 };
 
-/// Bounded sorted-key collection re-exported from core/utils/bounded.zig so
-/// the model's window store and the sync ledger share one xcb-free container
-/// without either naming core.
-pub const Store = bounded.Store;
+/// Bounded sorted-key collection re-exported via the utils facade; the model's
+/// window store and the sync ledger share it without either naming core.
+pub const Store = utils.Store;
 
-/// Store and MRU capacities. 128 managed windows bounds the sorted-key store
-/// (stack-allocated; X ids are 32-bit, so the ceiling is arbitrary but far
-/// beyond real window counts). 16 keeps the per-workspace focus MRU small
-/// enough to iterate on every focus/fallback path.
+/// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated);
+/// 16 keeps the per-workspace focus MRU small. Per-workspace tiled membership
+/// is bounds from constants. Transitions never allocate (defined capacities).
 pub const store_capacity = 128;
 pub const mru_capacity = 16;
-/// Bounded per-workspace tiled membership list (defined capacity; total
-/// operations, so transitions never allocate and have no OOM rollback paths).
 pub const max_tiled_per_ws = constants.max_tiled_windows;
 const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
 const MruList = utils.BoundedList(WindowId, mru_capacity);
 const StoreT = Store(WindowId, Entry, store_capacity);
 
-/// Index (workspace id) of the lowest set bit in `m`. Returns null when `m`
-/// is zero (`@ctz(0)` = 64 is out of the [0, constants.max_workspaces) range).
+/// Index (workspace id) of the lowest set bit in `m`, or null for the zero
+/// mask (`@ctz(0)` = 64, out of the u64 bit range — see `bit`).
 pub fn lowestBit(m: Mask) ?WSId {
     if (m == 0) return null;
-    return WSId.fromIndex(@intCast(@ctz(m)));
+    return WSId.fromIndex(@ctz(m));
 }
 
 pub const Model = struct {
@@ -159,7 +153,7 @@ pub fn removeValue(list: anytype, win: WindowId) void {
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     if (m.store.get(win)) |e| if (e.home_ws) |h| return h;
     for (0..m.ws.len) |i| {
-        if (m.ws[i].tiled_order.indexOfScalar(win) != null) return WSId.fromIndex(@intCast(i));
+        if (m.ws[i].tiled_order.indexOfScalar(win) != null) return WSId.fromIndex(i);
     }
     return null;
 }
@@ -173,8 +167,7 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
         _ = m.store.remove(win);
         return error.CapacityFull;
     }
-    // home_ws cache: set AFTER tiled_order append succeeds so the cache
-    // is only valid when the window actually has a tiled slot.
+    // home_ws cache set only after a tiled slot exists (see findHome).
     ptr.home_ws = target;
 }
 
@@ -188,16 +181,16 @@ pub fn unregister(m: *Model, win: WindowId) void {
 
 pub fn visibleOn(m: *const Model, win: WindowId, ws: WSId) bool {
     const e = m.store.get(win) orelse return false;
-    return visibleEntry(m, e, ws);
+    return visibleEntry(m, &e, ws);
 }
 
 /// Whether entry `e` is visible on `ws`: the exact predicate behind
 /// `visibleOn`, minus the store lookup, so callers that already hold the
 /// entry avoid a second binary search. `pub inline` so the sync layer's
 /// fast-path derives visibility with no spelling drift.
-pub inline fn visibleEntry(m: *const Model, e: Entry, ws: WSId) bool {
+pub inline fn visibleEntry(m: *const Model, e: *const Entry, ws: WSId) bool {
     if (e.presence == .parked) return false;
-    return m.all_view_active or taggedOn(e, ws);
+    return m.all_view_active or taggedOn(e.*, ws);
 }
 
 /// Whether `e` is pinned: its mask carries the soft all-workspaces sentinel
@@ -240,7 +233,7 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     while (it.next()) |row| {
         if (row.val.presence != .covering) continue;
         const anchored = if (row.val.covering_ws) |cws| cws.eql(ws) else false;
-        if (anchored or visibleEntry(m, row.val.*, ws)) return row.key;
+        if (anchored or visibleEntry(m, row.val, ws)) return row.key;
     }
     return null;
 }
@@ -270,10 +263,9 @@ pub const ConfigureReq = struct {
 pub const HonorDecision = enum { geometry_applied, border_only, ignored };
 
 // ---------------------------------------------------------------------------
-// Core intrinsics: focus (MRU + fallback) and tiling-param transitions. These
-// are pure model operations and are the ONLY transition logic that lives in
-// the core; every other feature transition lives in the window layer's
-// optional modules.
+// Core intrinsics: focus (setFocus/clearFocus, MRU upkeep, fallback candidate)
+// and tiling-order transitions (reorder/step/swap, primary width). Pure model
+// operations; feature transitions live in the window layer's optional modules.
 // ---------------------------------------------------------------------------
 
 pub fn setFocus(m: *Model, win: WindowId) void {
@@ -332,19 +324,25 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?W
     var it = m.store.iterator();
     while (it.next()) |row| {
         if (row.val.anchor != .floating or row.val.presence == .covering) continue;
-        if (!qualifies(m, row.key, ws, excluded)) continue;
+        if (row.key == excluded or !visibleEntry(m, row.val, ws)) continue;
         if (m.ws[ws.index].tiled_order.indexOfScalar(row.key) == null) return row.key;
     }
     return null;
+}
+
+/// Moves `win` within `list` from `from` to `to`. Shared by reorderTiled and
+/// stepTiled (who already resolved both indices) to keep the single mutation
+/// in one place.
+fn moveTiled(list: *OrderList, win: WindowId, from: usize, to: usize) void {
+    list.orderedRemove(from);
+    _ = list.insert(to, win); // cannot fail: removal freed a slot
 }
 
 pub fn reorderTiled(m: *Model, win: WindowId, idx_in: usize) void {
     const h = findHome(m, win) orelse return;
     const list = &m.ws[h.index].tiled_order;
     const from = list.indexOfScalar(win) orelse return;
-    const idx = @min(idx_in, list.len - 1);
-    list.orderedRemove(from);
-    _ = list.insert(idx, win); // cannot fail: removal freed a slot
+    moveTiled(list, win, from, @min(idx_in, list.len - 1));
 }
 
 /// Moves `win` one slot in `dir` within its home workspace's tiled order,
@@ -355,9 +353,8 @@ pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
     const list = &m.ws[h.index].tiled_order;
     const len = list.len;
     if (len < 2) return;
-    const idx = list.indexOfScalar(win) orelse return;
-    const next = utils.wrapIndex(idx, dir, len);
-    reorderTiled(m, win, next);
+    const from = list.indexOfScalar(win) orelse return;
+    moveTiled(list, win, from, utils.wrapIndex(from, dir, len));
 }
 
 /// Slot swap: exchanges the first two tiled slots of the current workspace
@@ -396,7 +393,11 @@ pub fn swapFocusedWithPrevious(m: *Model) void {
 /// clamped to the shared master-width bounds in constants.
 pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {
     const p = &m.ws[m.current.index].params;
-    p.primary_width = std.math.clamp(p.primary_width + delta, constants.min_master_width, constants.max_master_width);
+    p.primary_width = std.math.clamp(
+        p.primary_width + delta,
+        constants.min_master_width,
+        constants.max_master_width,
+    );
 }
 
 /// Stamp one `LayoutParams` template across every workspace (the config

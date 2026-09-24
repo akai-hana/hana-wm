@@ -1,7 +1,6 @@
 //! Monocle tiling layout. Stacks all windows fullscreen, showing only the
 //! topmost one, with optional gap insets.
 
-const utils = @import("utils");
 const tiling = @import("tiling");
 
 // Variant index of the "gaps" variant; must match variantParse order below.

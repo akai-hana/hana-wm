@@ -1,16 +1,17 @@
 //! Border policy tests (resolution half, X-gated).
 //!
-//! `borders.resolveBorderColor()`/`width()` are the pure public reads: color resolves the
-//! covering-mode policy + config colors against live MODEL focus, width
-//! resolves the tiling border width against the screen height. Both run over
-//! the shared window fixture (real core/pipeline/model state), self-skipping
-//! when no X display is reachable. The X-issuing half (`apply/applyWidth`,
-//! border cache) requires a live connection and is covered by the integration
-//! layer instead.
+//! `borders.resolveBorderColor()` and `core.borderWidth()` are the pure public
+//! reads: color resolves the covering-mode policy + config colors against live
+//! MODEL focus, width resolves the tiling border width against the screen
+//! height. Both run over the shared window fixture (real core/pipeline/model
+//! state), self-skipping when no X display is reachable. The X-issuing half
+//! (`apply/applyWidth`, border cache) requires a live connection and is
+//! covered by the integration layer instead.
 
 const std = @import("std");
 const testing = std.testing;
 
+const core = @import("core");
 const pipeline = @import("pipeline");
 const borders = @import("borders");
 const fixture = @import("fixture");
@@ -19,12 +20,12 @@ const parser = @import("parser");
 const utils = @import("utils");
 const types = @import("types");
 
-test "borders.width resolves absolute and percentage border widths" {
+test "core.borderWidth resolves absolute and percentage border widths" {
     const fx = fixture.setUp("borders.width") orelse return;
     defer fx.deinit();
 
     // Default config: absolute 2px, percentage disabled.
-    try testing.expectEqual(@as(u16, 2), borders.width());
+    try testing.expectEqual(@as(u16, 2), core.borderWidth());
 
     // A percentage is half the reference dimension (a border insets two
     // sides). Derive the expectation from the LIVE screen height so any
@@ -34,11 +35,11 @@ test "borders.width resolves absolute and percentage border widths" {
         types.ScalableValue.percentage(2.0),
         fx.scr.*.height_in_pixels,
     );
-    try testing.expectEqual(expected, borders.width());
+    try testing.expectEqual(expected, core.borderWidth());
 
     // Absolute mode ignores the reference dimension entirely.
     fx.config.tiling.border_width = types.ScalableValue.absolute(7.0);
-    try testing.expectEqual(@as(u16, 7), borders.width());
+    try testing.expectEqual(@as(u16, 7), core.borderWidth());
 }
 
 test "borders.resolveBorderColor resolves focused vs unfocused config colors" {

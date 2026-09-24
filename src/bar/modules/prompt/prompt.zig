@@ -499,7 +499,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     //
     // Returning true (not false) keeps the release from falling through to WM
     // keybind dispatch.
-    if (event.response_type & 0x7F != xcb.XCB_KEY_PRESS) return true;
+    if (event.response_type & masks.synthetic_event_mask != xcb.XCB_KEY_PRESS) return true;
 
     const syms = g.key_syms orelse return false;
 
@@ -518,7 +518,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     //
     // Modifier keysyms occupy 0xFFE1-0xFFEE; the check widens that band by
     // one key on each side, none of which are valid editing keys.
-    if (sym >= masks.modifier_keysym_lo and sym <= masks.modifier_keysym_hi) return true;
+    if (masks.isModifierKeysym(sym)) return true;
 
     // Ctrl-modified keys. Route EVERY Ctrl key through the mode handler,
     // not just in vim mode: otherwise Ctrl-C (and Ctrl-W with vim on) is
@@ -704,8 +704,7 @@ fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
     if (name[0] == '.') return false;
 
     var full_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    _ = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ dir_path, name }) catch return false;
-    return c.access(&full_path_buf, c.X_OK) == 0;
+    return paths.exeInDir(&full_path_buf, dir_path, name);
 }
 
 /// Stores `name` into the next completion slot.  Returns true when the table is
@@ -818,7 +817,7 @@ fn histAppendToFile(cmd: []const u8) void {
     _ = c.mkdir(@ptrCast(&path_buf), 0o700);
     path_buf[last_sep] = '/';
 
-    const fd = c.open(@ptrCast(&path_buf), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, 0o600));
+    const fd = c.open(@ptrCast(&path_buf), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, @intCast(paths.restricted_file_mode)));
     if (fd < 0) return;
     defer _ = c.close(fd);
     _ = c.write(fd, cmd.ptr, cmd.len);

@@ -25,12 +25,12 @@
 //! workspace that was never saved.
 
 const std = @import("std");
-const build_options = @import("build_options");
 const config_mod = @import("config");
 const constants = @import("constants");
 const core = @import("core");
 const debug = @import("debug");
 const model = @import("model");
+const paths = @import("paths");
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
@@ -250,10 +250,10 @@ fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8
     // name, so we never write through a planted entry. A stale temp left by a
     // crashed run is the one legitimate occupant; remove it and retry once.
     const file = blk: {
-        const attempt = std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true, .permissions = @enumFromInt(0o600) }) catch |err| switch (err) {
+        const attempt = createExclusive(io, tmp) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 std.Io.Dir.deleteFileAbsolute(io, tmp) catch {};
-                break :blk try std.Io.Dir.createFileAbsolute(io, tmp, .{ .exclusive = true, .permissions = @enumFromInt(0o600) });
+                break :blk try createExclusive(io, tmp);
             },
             else => return err,
         };
@@ -264,6 +264,11 @@ fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8
     // POSIX rename replaces the name while the fd stays open; the defer's
     // close lands after the rename moved the temp into place.
     try std.Io.Dir.renameAbsolute(tmp, path, io);
+}
+
+/// Exclusive, owner-only create (no-follow): see atomicWrite's comment.
+fn createExclusive(io: std.Io, path: []const u8) !std.Io.File {
+    return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = @enumFromInt(paths.restricted_file_mode) });
 }
 
 /// Serializes the live model to `path`. Any error returns to the caller,
@@ -324,7 +329,6 @@ pub fn loaded() ?*const StateFile {
 /// last resort as tiling.defaultKind. Runs only on the removed-layout path
 /// (applyModelLevel) where core is already initialized and config is live.
 fn resumableDefaultKind() u8 {
-    if (!build_options.has_tiling) return 0;
     const layout_name = core.getState().config.tiling.layout;
     return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }

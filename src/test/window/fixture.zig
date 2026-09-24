@@ -114,7 +114,7 @@ pub const Geometry = struct {
 /// Reads the `_NET_SUPPORTING_WM_CHECK` property of `win` as a window id, or
 /// null when the property is absent/empty.
 fn wmCheckWindow(conn: core.Connection, win: u32) ?u32 {
-    const atom = wire.getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return null;
+    const atom = wire.getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return null;
     const reply = xcb.xcb_get_property_reply(
         conn,
         xcb.xcb_get_property(conn, 0, win, atom, 0, 0, 1),
@@ -325,7 +325,7 @@ pub const Fx = struct {
     /// XCB_ATOM_WINDOW), so the read must filter by XCB_ATOM_ANY, not by the
     /// property's own name atom.
     pub fn rootActiveWindow(self: *const Fx) ?u32 {
-        const atom = wire.getAtomCached("_NET_ACTIVE_WINDOW") catch return null;
+        const atom = wire.getAtomCached("_NET_ACTIVE_WINDOW") orelse return null;
         const reply = xcb.xcb_get_property_reply(
             self.conn,
             xcb.xcb_get_property(self.conn, 0, self.root, atom, 0, 0, 1),
@@ -340,9 +340,9 @@ pub const Fx = struct {
     /// WM_PROTOCOLS = [WM_TAKE_FOCUS, WM_DELETE_WINDOW] (input=True +
     /// WM_TAKE_FOCUS -> ICCCM locally_active).
     pub fn setWmTakeFocus(self: *const Fx, win: u32) void {
-        const wm_protocols = wire.getAtomCached("WM_PROTOCOLS") catch return;
-        const take = wire.getAtomCached("WM_TAKE_FOCUS") catch return;
-        const del = wire.getAtomCached("WM_DELETE_WINDOW") catch return;
+        const wm_protocols = wire.getAtomCached("WM_PROTOCOLS") orelse return;
+        const take = wire.getAtomCached("WM_TAKE_FOCUS") orelse return;
+        const del = wire.getAtomCached("WM_DELETE_WINDOW") orelse return;
         const list = [2]u32{ take, del };
         _ = xcb.xcb_change_property(
             self.conn,

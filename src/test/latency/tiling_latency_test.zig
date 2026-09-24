@@ -54,7 +54,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         // What a single CHANGED pass costs: flip the layout kind so every
         // rect changes -> geometry requests sent for every visible window.
         var move = CountingSink{};
-        var move_ctx = makeCtx(move.sink(), colorOfFocused);
+        var move_ctx = makeCtx(move.sink(), colorOfFocused, helpers.std_wa);
         m.ws[m.current.index].params.kind = 1;
         const t1 = nowNs();
         sync.reconcile(&m, &move_ctx, .{});
@@ -78,7 +78,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         var id: WindowId = 1;
         for (0..10) |ws| {
             for (0..per_ws) |_| {
-                _ = try model.register(&m, id, model.WSId.fromIndex(@intCast(ws)));
+                _ = try model.register(&m, id, model.WSId.fromIndex(ws));
                 id += 1;
             }
         }
@@ -159,11 +159,11 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         defer sync.init();
 
         var warm = CountingSink{};
-        var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
+        var warm_ctx = makeCtx(warm.sink(), colorOfFocused, helpers.std_wa);
         sync.reconcile(&m, &warm_ctx, .{});
 
         var sink = CountingSink{};
-        var ctx = makeCtx(sink.sink(), colorOfFocused);
+        var ctx = makeCtx(sink.sink(), colorOfFocused, helpers.std_wa);
         m.ws[m.current.index].params.kind = 1;
         ctx.sink.grabServer();
         sync.reconcile(&m, &ctx, .{});

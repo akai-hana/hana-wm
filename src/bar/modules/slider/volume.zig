@@ -184,20 +184,19 @@ fn commitPct(v: u8) void {
     }
 }
 
-const level = slider.Level{ .pct = &g_pct, .commit = commitPct, .reread = readVolume };
-
 /// One-shot apply (press, drag end): commit then re-read so the display
 /// follows the sink immediately rather than on the next poll tick. The
 /// scroll/drag motion paths use the core's preview + throttle and their own
 /// optimistic display.
 fn applyPct(v: u8) void {
-    level.apply(v);
+    commitPct(v);
+    _ = readVolume();
 }
 
 /// Optimistic display update from a scroll/drag motion: the label follows
 /// immediately while the backend write is committed by the core's scheduler.
 fn previewPct(v: u8) void {
-    level.preview(v);
+    g_pct = v;
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}` and
@@ -242,7 +241,7 @@ fn toggleMute() void {
 
 // Current displayed level / write-gate hooks for the core.
 fn currentPct() u8 {
-    return level.current();
+    return g_pct;
 }
 
 fn writable() bool {

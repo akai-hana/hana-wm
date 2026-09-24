@@ -65,13 +65,12 @@ pub fn testColor(win: model.WindowId, m: *const model.Model) u32 {
 pub fn makeCtx(
     sink: sync.Sink,
     color_of: *const fn (model.WindowId, *const model.Model) u32,
+    screen: utils.Rect,
 ) sync.Ctx {
-    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
     return .{
         .sink = sink,
         .screen = screen,
         .workarea = screen,
-        .cfg_bw = cfg_bw,
         .color_of = color_of,
         .env = std_env,
     };
@@ -82,10 +81,10 @@ pub fn makeCtx(
 /// benchmarks (the identical warm+bench pattern in the latency tests).
 pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
     var warm = TestSink(.count){};
-    var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
+    var warm_ctx = makeCtx(warm.sink(), colorOfFocused, std_wa);
     sync.reconcile(m, &warm_ctx, .{});
     var bench = TestSink(.count){};
-    var bench_ctx = makeCtx(bench.sink(), colorOfFocused);
+    var bench_ctx = makeCtx(bench.sink(), colorOfFocused, std_wa);
     const t0 = utils.monotonicNs();
     for (0..iterations) |_| sync.reconcile(m, &bench_ctx, .{});
     return @as(f64, @floatFromInt(utils.monotonicNs() - t0)) / @as(f64, @floatFromInt(iterations));

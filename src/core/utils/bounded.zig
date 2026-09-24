@@ -46,6 +46,17 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             return null;
         }
 
+        /// A plain (non-capturing) `item.field_name == key` predicate for
+        /// `indexOf`/`removeWhere`/`removeAllWhere`. Shared by the three
+        /// id-keyed methods below instead of restating the match struct.
+        fn fieldEq(comptime field_name: std.meta.FieldEnum(T)) type {
+            return struct {
+                fn match(key: u32, item: T) bool {
+                    return @field(item, @tagName(field_name)) == key;
+                }
+            };
+        }
+
         /// Returns the index of the first item whose `.id` field equals `id`,
         /// or null. For element types keyed by a single `id` field.
         pub fn indexOfById(self: *const Self, id: u32) ?usize {
@@ -59,11 +70,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             comptime field_name: std.meta.FieldEnum(T),
             id: u32,
         ) ?usize {
-            return self.indexOf(id, struct {
-                fn match(i: u32, item: T) bool {
-                    return @field(item, @tagName(field_name)) == i;
-                }
-            }.match);
+            return self.indexOf(id, fieldEq(field_name).match);
         }
 
         /// Returns the index of the first item equal to `scalar`, or null.
@@ -139,22 +146,14 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// preserving). The id-keyed form of `removeWhere` the record stores
         /// used to hand-roll via `item.win == key` match structs.
         pub fn removeById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) bool {
-            return self.removeWhere(id, struct {
-                fn match(key: u32, item: T) bool {
-                    return @field(item, @tagName(field_name)) == key;
-                }
-            }.match);
+            return self.removeWhere(id, fieldEq(field_name).match);
         }
 
         /// Removes every item whose `field_name` equals `id`, compacting in
         /// place (unordered). Used when several entries share one key (e.g.
         /// every child-window cache row pointing at the same toplevel).
         pub fn removeAllById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) usize {
-            return self.removeAllWhere(id, struct {
-                fn match(key: u32, item: T) bool {
-                    return @field(item, @tagName(field_name)) == key;
-                }
-            }.match);
+            return self.removeAllWhere(id, fieldEq(field_name).match);
         }
 
         fn removeAllWhere(

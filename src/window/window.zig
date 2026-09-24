@@ -96,8 +96,8 @@ const wm_normal_hints_long_length: u32 = 18; // flags + 17 fields (up to base_si
 const max_window_tree_depth = constants.max_window_tree_depth;
 
 // Spawn queue: pending (workspace, pid) assignments for newly-mapped windows,
-// consumed by resolveTargetWorkspace. Capped at spawn_queue_capacity; overflow
-// logs and drops the entry rather than growing unbounded.
+// consumed by actions.mapRequest at admission. Capped at spawn_queue_capacity;
+// overflow logs and drops the entry rather than growing unbounded.
 
 const SpawnEntry = struct {
     workspace: u8,
@@ -275,7 +275,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
             .{@errorName(err)},
         );
     };
-    icccm.reset(true);
+    icccm.setCacheArmed(true);
     buildRulesMap();
 }
 
@@ -293,7 +293,7 @@ pub fn deinit() void {
     }
     // Clear the focus-property cache before focus/tracking deinit, whose
     // managed-window sweeps must not encounter a partially-valid cache.
-    icccm.reset(false);
+    icccm.setCacheArmed(false);
     focus.deinit();
     tracking.deinit();
     // Set to null so any accidental post-deinit access null-derefs instead of
@@ -536,7 +536,7 @@ fn claimManagedEventMask(conn: core.Connection, win: u32) void {
 /// Drains the three unconditionally-fired admission cookies; with
 /// `discard_workspace` the two conditional workspace-resolution replies are
 /// discarded instead (adoption never resolves from them; the MapRequest path
-/// has already drained them via resolveTargetWorkspace).
+/// has already drained them via mapRequest).
 fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: AdmissionCookies, comptime discard_workspace: bool) void {
     if (comptime discard_workspace) {
         discardProtocolCookie(conn, cookies.c_wm_class);
@@ -656,8 +656,8 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 /// is no map-request event), so both paths funnel through the same cache write,
 /// an entry keyed on the (now-managed) toplevel itself, which
 /// findManagedWindow's direct `is_managed` hit short-circuits anyway.
-/// target workspace + float flag (mirror of resolveTargetWorkspace's role at
-/// the MapRequest site). The float seed's geometry is fetched here: at
+/// `target_ws` is the already-resolved target workspace and `float` mirrors the
+/// MapRequest admission decision. The float seed's geometry is fetched here: at
 /// admission there is no LastSent entry yet (no reconcile has run), so
 /// detachTiledToFloating's `sync.lastRectFor` would find nothing; the one
 /// extra xcb_get_geometry round-trip supplies the window's natural rect.
@@ -943,7 +943,7 @@ fn unmanageWindow(win: u32) void {
     // (UnmapNotify / wm_close, XID still alive); a DestroyNotify already
     // fired it from events.zig first, and every hook is idempotent
     // (find-then-clear), so the repeat for the same window is harmless.
-    for (window_mods) |mod| if (mod.onWindowGone) |f| f(win);
+    dispatchAll(.onWindowGone, .{win});
     if (build_options.has_workspaces) tracking.removeWindow(win);
 
     // Drop the MODEL entry, resolve the post-close focus target (fallback
@@ -1017,13 +1017,7 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
     }
 
     const conn = core.getState().conn;
-    const reply = xcb.xcb_get_geometry_reply(
-        conn,
-        xcb.xcb_get_geometry(conn, win),
-        null,
-    ) orelse return null;
-    defer std.c.free(reply);
-    return utils.rectFromXcb(reply);
+    return getGeometry(conn, win);
 }
 
 fn sendSyntheticConfigureNotify(win: u32) void {
@@ -1054,7 +1048,7 @@ fn handleManagedConfigureRequest(
             // observable) AND the reconcile ledger updated so the next pass
             // doesn't re-assert the WM width (reverting the honored value).
             if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
-                if (build_options.has_tiling) sync.markSentBorderWidth(win, event.border_width);
+                noteHonoredBorderWidth(win, event.border_width);
                 sendSyntheticConfigureNotify(win);
                 return;
             }
@@ -1076,13 +1070,20 @@ fn handleManagedConfigureRequest(
                     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
                     &[_]u32{event.border_width},
                 );
-            if (build_options.has_tiling) sync.markSentBorderWidth(win, event.border_width);
+            noteHonoredBorderWidth(win, event.border_width);
         },
         .ignored => {},
     }
     // ICCCM 4.1.5: echo a synthetic ConfigureNotify so the client observes
     // its denied geometry / new border width.
     sendSyntheticConfigureNotify(win);
+}
+
+/// Record an honored border width in the reconcile ledger so the next pass
+/// doesn't re-assert the WM default (reverting the honored value). No-op on
+/// non-tiling builds.
+fn noteHonoredBorderWidth(win: u32, bw: u16) void {
+    if (build_options.has_tiling) sync.markSentBorderWidth(win, bw);
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
@@ -1102,7 +1103,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
                 .y = last.y,
                 .width = last.width,
                 .height = last.height,
-                .border_width = borders.width(),
+                .border_width = core.borderWidth(),
             });
         } else {
             sendSyntheticConfigureNotify(win);
@@ -1335,15 +1336,15 @@ fn parseSizeHintsIntoCache(
 /// iteration loop for workspace border sweeps:
 ///
 /// - `skip_tiled` true (updateFloatingWindowBorders): skip tiled windows,
-///   configureWithHints already updated their borders via get_border_color.
+///   `configureWithHints` already updated their borders via get_border_color;
+///   when tiling is absent or disabled it falls back to a full sweep because
+///   there are no tiled windows to skip.
 /// - `skip_tiled` false (updateWorkspaceBorders): dedup via the tiling
 ///   CacheMap (sendBorderColorIfChanged), so the steady-state focused-window
 ///   sweep generates zero XCB traffic.
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_ws = model_mod.WSId.fromIndex(cur);
-    const cs = core.getState();
-    const conn = cs.conn;
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (!model_mod.maskedOn(entry.mask, cur_ws)) continue;
@@ -1358,8 +1359,7 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         // Same CacheMap dedup in both sweep variants: windows with a cache
         // entry skip the XCB call when their color is unchanged; uncached
         // ones get an entry created and colored in one step.
-        if (wincache.sendBorderColorIfChanged(win, color)) continue;
-        utils.setBorderPixel(conn, win, color);
+        wincache.sendBorderColorIfChanged(win, color);
     }
 }
 
@@ -1367,10 +1367,6 @@ pub fn updateWorkspaceBorders() void {
     sweepWorkspaceBorders(false);
 }
 
-/// Called after a retile: `configureWithHints` already updated tiled-window
-/// borders via the `get_border_color` callback, so re-sending them here would
-/// be redundant. When tiling is absent or disabled, falls back to a full sweep
-/// because there are no tiled windows to skip.
 pub fn updateFloatingWindowBorders() void {
     sweepWorkspaceBorders(true);
 }
@@ -1391,12 +1387,8 @@ pub fn updateWorkspaceBordersIfNeeded() void {
 
 /// Warn-once latches for client-message diagnostics (see
 /// handleClientMessage): pager loops would otherwise flood the log.
-var warned_once: u8 = 0;
-inline fn warnOnce(comptime bit: u3, msg: []const u8, args: anytype) void {
-    if (warned_once & (@as(u8, 1) << bit) != 0) return;
-    warned_once |= @as(u8, 1) << bit;
-    debug.warn(msg, args);
-}
+var warned_active_ignore: bool = false;
+var warned_unmanaged_state: bool = false;
 
 pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (event.format != 32) return;
@@ -1405,7 +1397,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     // fire once per process so a looping pager cannot flood the log.
     const net_active = utils.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
-        warnOnce(0, "Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
+        if (!warned_active_ignore) {
+            warned_active_ignore = true;
+            debug.warn("Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
+        }
         return;
     }
 
@@ -1420,7 +1415,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     const win = event.window;
     if (!isValidManagedWindow(win)) {
-        warnOnce(1, "Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
+        if (!warned_unmanaged_state) {
+            warned_unmanaged_state = true;
+            debug.warn("Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
+        }
         return;
     }
 

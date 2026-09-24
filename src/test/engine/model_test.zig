@@ -48,18 +48,6 @@ const foreign_blob = [_]u8{ 0x00, 1, 2 };
 /// what records an earlier test left behind.
 const makeModel = helpers.setUpModel;
 
-/// init/deinit for the two module stores (minimize + fullscreen) most tests
-/// pair together.
-fn initModules() !void {
-    try minimize.init();
-    try fullscreen.init();
-}
-
-fn deinitModules() void {
-    minimize.deinit();
-    fullscreen.deinit();
-}
-
 fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
     try testing.expectEqualSlices(WindowId, expected, m.ws[ws.index].tiled_order.constSlice());
 }
@@ -261,8 +249,6 @@ test "minimize/restore floating preserves rect" {
 test "fullscreen toggling and minimize-from-fullscreen" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     // Tiled round trip.
     regCur(&m, 1);
     try testing.expect(fullscreen.toggleFullscreen(&m, 1));
@@ -365,8 +351,6 @@ test "moveWindowToWs for tiled, minimized, and pinned" {
 test "pinToggle across all modes" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 1); // tiled
     const r: utils.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
     try addFloating(&m, 2, r); // floating
@@ -529,8 +513,6 @@ test "stepTiled wraps at both ends" {
 test "unregister cleans all references" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 1);
     regCur(&m, 2);
     model.setFocus(&m, 1);
@@ -573,8 +555,6 @@ test "unregister cleans all references" {
 test "ConfigureRequest honoring per mode" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 1); // tiled
     const r0: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 2, r0);
@@ -774,8 +754,6 @@ test "capacity refusals happen before any mutation" {
 
 // determinism -- same op sequence => identical model state, twice.
 test "identical operation sequences produce identical models" {
-    try initModules();
-    defer deinitModules();
     const seq = struct {
         fn run(m: *Model) !void {
             for ([_]WindowId{ 1, 2, 3, 4, 5 }) |w| try model.register(m, w, null);
@@ -849,8 +827,6 @@ test "minimize seq stamps drive LIFO/FIFO restore candidates" {
 test "latestMinimizedBase skips fullscreen-current and other workspaces" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     try model.register(&m, 20, WSId.fromIndex(0));
     try model.register(&m, 21, WSId.fromIndex(0));
     _ = fullscreen.toggleFullscreen(&m, 21);
@@ -866,8 +842,6 @@ test "latestMinimizedBase skips fullscreen-current and other workspaces" {
 test "fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 1);
     regCur(&m, 2);
     _ = fullscreen.toggleFullscreen(&m, 1);
@@ -900,8 +874,6 @@ test "fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
 test "floating-base fullscreen minimize/restore never joins a list" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 5);
     const r: utils.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
     try addFloating(&m, 6, r);
@@ -982,8 +954,6 @@ test "fallbackFocusCandidate exclusion skips to the next focusable" {
 test "fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 30);
     regCur(&m, 31);
     try testing.expectEqual(@as(?WSId, null), fullscreen.fullscreenWsOf(&m, 30));
@@ -1031,9 +1001,6 @@ test "close-fallback candidate after unregister is the previous focus" {
 // RECORD's workspace only, and occupancy also requires visibility.
 test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     var m = makeModel();
-
-    try initModules();
-    defer deinitModules();
 
     regCur(&m, 50);
     try testing.expect(!fullscreen.isFullscreenMode(&m, 50));
@@ -1214,8 +1181,6 @@ test "setFloatingRect updates floating window geometry" {
 test "occupant scan winner resolution and parked-ghost exclusion" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 60);
     regCur(&m, 61);
     try testing.expectEqual(@as(?model.WindowId, null), fullscreen.fullscreenOccupantOnWs(&m, WSId.fromIndex(0)));
@@ -1271,8 +1236,6 @@ test "minimize serialize/deserialize round-trip" {
 test "toggleFullscreen writes covering_ws core intent" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 90);
 
     // Before entering fullscreen the core intent is absent.
@@ -1298,8 +1261,6 @@ test "toggleFullscreen writes covering_ws core intent" {
 test "coveringOccupantOnWs excludes parked ghosts" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 91);
     _ = fullscreen.toggleFullscreen(&m, 91);
     try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
@@ -1328,8 +1289,6 @@ test "coveringOccupantOnWs excludes parked ghosts" {
 test "move/tag retarget tracks covering_ws to the new ws" {
     var m = makeModel();
 
-    try initModules();
-    defer deinitModules();
     regCur(&m, 93); // home ws 0
     _ = fullscreen.toggleFullscreen(&m, 93); // covering ws 0
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(93).?.covering_ws);

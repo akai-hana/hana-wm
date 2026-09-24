@@ -131,36 +131,27 @@ pub const Throttle = struct {
     }
 };
 
-/// Shared scalar-level plumbing for the Sub contract's `apply`/`preview`/
-/// `pct` hooks: one-shot commit-then-reread, optimistic preview, current
-/// read. A control backs its three hooks off its own level storage and
-/// commit/reread pair (only the reread source differs across controls).
-pub const Level = struct {
-    /// The control's displayed 0-100 level (its `g_pct`).
-    pct: *u8,
-    /// The control's backend write.
-    commit: *const fn (u8) void,
-    /// The control's post-commit re-read (sink/device truth).
-    reread: *const fn () bool,
+/// The single pct↔range linear map shared by every control backend: maps a
+/// raw level on the control's [min..max] scale onto 0-100 percent (and back),
+/// nearest-rounding in both directions so a round trip is stable and 50 % of
+/// 0..87 lands on 44 (what `amixer set Master 50%` writes). A degenerate
+/// (zero-length or inverted) range maps the range floor on write and 0 on
+/// read.
+pub fn rawFromPct(comptime T: type, pct: u8, min: T, max: T) T {
+    if (max <= min) return min;
+    const span: i128 = @as(i128, max) - @as(i128, min);
+    const lead: i128 = @min(@divTrunc(@as(i128, @min(pct, 100)) * span + 50, 100), span);
+    return @intCast(@as(i128, min) + lead);
+}
 
-    /// One-shot apply: commit then re-read so the display follows the sink
-    /// immediately rather than on the next poll tick (press, drag end).
-    pub fn apply(self: *const Level, v: u8) void {
-        self.commit(v);
-        _ = self.reread();
-    }
-
-    /// Optimistic display update from a scroll/drag motion: the label follows
-    /// immediately while the backend write is committed by the throttle.
-    pub fn preview(self: *const Level, v: u8) void {
-        self.pct.* = v;
-    }
-
-    /// The currently displayed 0-100 level.
-    pub fn current(self: *const Level) u8 {
-        return self.pct.*;
-    }
-};
+/// Inverse of `rawFromPct` (the shared map): raw value onto the 0-100 scale.
+pub fn pctFromRaw(comptime T: type, raw: T, min: T, max: T) u8 {
+    if (max <= min) return 0;
+    const span: i128 = @as(i128, max) - @as(i128, min);
+    const off: i128 = std.math.clamp(@as(i128, raw) - @as(i128, min), 0, span);
+    const pct: i128 = @divTrunc(off * 100 + @divTrunc(span, 2), span);
+    return @intCast(@min(pct, 100));
+}
 
 /// Runs `cmd` via /bin/sh, drains its stdout into `sink` (so `pclose` never
 /// blocks on a full pipe), and reports the bytes captured plus whether the

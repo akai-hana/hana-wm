@@ -40,13 +40,19 @@ fn failWithTag(pipe_write: c_int) noreturn {
     std.process.exit(1);
 }
 
+/// execvp of `cmd` through `/bin/sh -c`; failures fall through to the caller's
+/// own exit/tag path.
+fn execShell(cmd_z: [*:0]const u8) void {
+    _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
+}
+
 /// Grandchild: detaches from the session and execs the command.
 /// On execvp failure, writes a tag_failed byte to pipe_write before exiting.
 /// On success this function never returns far enough to write anything;
 /// pipe_write's O_CLOEXEC copy closes itself as part of the exec.
 fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     _ = c.setsid();
-    _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
+    execShell(cmd_z);
     failWithTag(pipe_write);
 }
 
@@ -75,10 +81,6 @@ fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     // delivers a pid. In that case declare the spawn failed and exit
     // non-zero; the grandchild (if any) still runs, just unrouted.
     if (c.write(pipe_write, &msg, msg.len) != pid_msg_len) {
-        // A short/failed write (e.g. EPIPE after the WM closed the read end
-        // on shutdown) would leave the WM waiting on a conversation that never
-        // delivers a pid. In that case declare the spawn failed; the grandchild
-        // (if any) still runs, just unrouted.
         failWithTag(pipe_write);
     }
     _ = c.close(pipe_write);
@@ -172,9 +174,8 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     // Parent: close the write end so our read end eventually sees EOF.
     _ = c.close(pipe_fds[1]);
 
-    // Cursor position for spawn-crossing suppression is queried synchronously
-    // in window.handleMapRequest when the MapRequest arrives; MapRequest fires
-    // once per window, so the round-trip isn't worth pipelining here.
+    // Spawn-crossing suppression queries the cursor in window.handleMapRequest
+    // when the MapRequest arrives (once per window), so no round-trip here.
 
     // The capacity pre-check above guarantees room, so append cannot fail.
     std.debug.assert(g_pending.append(.{
@@ -309,7 +310,7 @@ pub fn execSynchronous(cmd: []const u8) void {
     if (pid == 0) {
         // Single-fork child: inherits stdio, stays re-parentable to the WM
         // so waitpid below actually observes its exit. No detach, no pipe.
-        _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
+        execShell(cmd_z);
         std.process.exit(127);
     }
 

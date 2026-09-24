@@ -37,14 +37,7 @@ const Fixture = struct {
             .ctx = undefined,
         };
         sync.init();
-        self.ctx = .{
-            .sink = self.rec.sink(),
-            .screen = helpers.std_wa,
-            .workarea = helpers.std_wa,
-            .cfg_bw = cfg_bw,
-            .color_of = testColor,
-            .env = helpers.std_env,
-        };
+        self.ctx = helpers.makeCtx(self.rec.sink(), testColor, helpers.std_wa);
     }
 
     fn deinit(self: *Fixture) void {

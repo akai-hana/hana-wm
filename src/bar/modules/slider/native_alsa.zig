@@ -30,6 +30,7 @@
 //! scale.
 
 const std = @import("std");
+const slider = @import("slider");
 
 const c = @cImport({
     @cInclude("fcntl.h");
@@ -133,21 +134,16 @@ const ELEM_READ = iowr('U', 0x12, @sizeOf(ElemValue));
 const ELEM_WRITE = iowr('U', 0x13, @sizeOf(ElemValue));
 
 /// Percentage onto the control's [min..max] scale, nearest-rounding like
-/// `amixer set Master N%` (which maps 50 % of 0..87 to 44).
+/// `amixer set Master N%` (which maps 50 % of 0..87 to 44). The linear map
+/// is the shared `slider.rawFromPct`.
 fn rawFromPct(pct: u8, min: c_long, max: c_long) c_long {
-    if (max <= min) return min;
-    const span: u128 = @intCast(max - min);
-    const v: u128 = @as(u128, @min(pct, 100)) * span;
-    return @intCast(min + @as(c_long, @intCast(@min(@divTrunc(v + 50, 100), span))));
+    return slider.rawFromPct(c_long, pct, min, max);
 }
 
-/// Inverse of `rawFromPct`: raw value onto the 0-100 scale (nearest-rounding).
+/// Inverse of `rawFromPct`: raw value onto the 0-100 scale (nearest-rounding);
+/// the shared `slider.pctFromRaw`.
 fn pctFromRaw(raw: c_long, min: c_long, max: c_long) u8 {
-    if (max <= min) return 0;
-    const span: u128 = @intCast(max - min);
-    const v: u128 = std.math.clamp(@as(u128, @intCast(raw - min)), 0, span);
-    const pct: u128 = @divTrunc(v * 100 + span / 2, span);
-    return @intCast(@min(pct, 100));
+    return slider.pctFromRaw(c_long, raw, min, max);
 }
 
 /// Reads the current value of element `numid` into `out` (up to `*count`

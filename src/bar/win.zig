@@ -49,7 +49,7 @@ pub fn initAtoms() void {
         .{ "action_stick", "_NET_WM_ACTION_STICK" },
     };
     inline for (entries) |e|
-        @field(atoms, e[0]) = utils.getAtomCached(e[1]) catch 0;
+        @field(atoms, e[0]) = utils.getAtomCached(e[1]) orelse 0;
 }
 
 pub fn calcBarYPos(height: u16) i16 {

@@ -118,46 +118,50 @@ pub fn main() !void {
     _ = xcb.xcb_flush(x.conn);
     debug.info("hana booted up successfully!", .{});
 
-    // Re-exec session hand-off (restart.execNext sets HANA_RESTORE before
-    // execv; a plain boot has no such var). The session's windows survive a
-    // re-exec because hana never reparents: clients are direct root
-    // children, so the successor adopts them, re-applies the persisted
-    // model level, then runs ONE reconcile that places everything exactly
-    // as it was. Adoption runs AFTER bar.init() so the bar-aware workarea is
-    // live.
+    // Re-exec session hand-off (restart.execNext sets HANA_RESTORE).
     if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
-        const restore_path = std.mem.span(restore_path_z);
-        if (persist.loadToGlobal(alloc, restore_path)) {
-            const n = window.adoptRootWindows() catch |err| blk: {
-                debug.err("Window adoption failed: {}", .{err});
-                break :blk 0;
-            };
-            if (n > 0) {
-                actions.applyRestoredLevel();
-                // Restore X input focus on the session's focused window;
-                // the mapRequest path uses the same focus-after-geometry
-                // entry (the adopted window is already mapped).
-                if (pipeline.model().focused) |focused| {
-                    const ft = focus.prepareFocus(focused, .window_spawn);
-                    pipeline.reconcileGrabFocus(.{}, ft, .after);
-                } else {
-                    pipeline.reconcileUnderGrabNow(.{});
-                }
-            }
-        }
+        adoptRestoredSession(std.mem.span(restore_path_z));
     }
 
     try events.run();
     debug.info("Shutting down gracefully...", .{});
 }
 
-const X = struct {
+/// Re-exec session hand-off (restart.execNext sets HANA_RESTORE before execv;
+/// a plain boot has no such var). The session's windows survive a re-exec
+/// because hana never reparents: clients are direct root children, so the
+/// successor adopts them, re-applies the persisted model level, then runs ONE
+/// reconcile that places everything exactly as it was. Called after bar init
+/// so the bar-aware workarea is live.
+fn adoptRestoredSession(restore_path: []const u8) void {
+    const alloc = std.heap.c_allocator;
+    if (persist.loadToGlobal(alloc, restore_path)) {
+        const n = window.adoptRootWindows() catch |err| blk: {
+            debug.err("Window adoption failed: {}", .{err});
+            break :blk 0;
+        };
+        if (n > 0) {
+            actions.applyRestoredLevel();
+            // Restore X input focus on the session's focused window;
+            // the mapRequest path uses the same focus-after-geometry
+            // entry (the adopted window is already mapped).
+            if (pipeline.model().focused) |focused| {
+                const ft = focus.prepareFocus(focused, .window_spawn);
+                pipeline.reconcileGrabFocus(.{}, ft, .after);
+            } else {
+                pipeline.reconcileUnderGrabNow(.{});
+            }
+        }
+    }
+}
+
+const XSession = struct {
     conn: core.Connection,
     screen: core.Screen,
     root: core.WindowId,
 };
 
-fn connectToX() !X {
+fn connectToX() !XSession {
     const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
 
     if (xcb.xcb_connection_has_error(conn) != 0) {

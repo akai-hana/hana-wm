@@ -81,10 +81,10 @@ pub const max_workspaces: usize = 64;
 pub const max_workspace_number_1based: usize = 255;
 
 /// Largest 1-based workspace number tolerated by the action/command parser
-/// before subtracting 1. Distinct from max_workspace_number_1based: command
-/// parsing is intentionally one more lenient so `workspace_N` verbs map
-/// cleanly onto the top 1-based index (255 -> index 255 via 256 - 1).
-pub const max_workspace_command_1based: usize = 256;
+/// before subtracting 1. Command parsing is intentionally one more lenient
+/// than max_workspace_number_1based: `workspace_N` verbs map cleanly onto the
+/// top 1-based index (255 -> index 255 via 256 - 1).
+pub const max_workspace_command_1based: usize = max_workspace_number_1based + 1;
 
 // XCB property helpers
 /// Maximum number of 32-bit words to request when fetching an XCB window property.

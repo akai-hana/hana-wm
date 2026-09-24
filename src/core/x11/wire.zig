@@ -160,19 +160,19 @@ pub fn initAtomCache(conn: Connection) !void {
     atom_cache = cache;
 }
 
-/// Looks up a cached atom by name.
+/// Looks up a cached atom by name, or null when the atom cache isn't ready.
 /// Unknown names produce a compile error rather than a silent runtime failure.
-pub inline fn getAtomCached(comptime name: []const u8) error{AtomCacheNotInitialized}!u32 {
+pub inline fn getAtomCached(comptime name: []const u8) ?u32 {
     comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
-    const cache = atom_cache orelse return error.AtomCacheNotInitialized;
+    const cache = atom_cache orelse return null;
     return @field(cache, name);
 }
 
 /// Like getAtomCached but returns 0 (the X11 "no atom" sentinel) instead of
-/// erroring when the cache isn't ready. Callers guard `if (atom != 0)` before
+/// null when the cache isn't ready. Callers guard `if (atom != 0)` before
 /// issuing an X request.
 pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
-    return getAtomCached(name) catch 0;
+    return getAtomCached(name) orelse 0;
 }
 
 /// Fires a replace-mode xcb_change_property for `value` typed `[]const T`.
@@ -275,10 +275,10 @@ comptime {
 /// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
 ///   `_NET_STRUT_PARTIAL` feedback instead.
 pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
-    const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") catch return;
-    const net_wm_name = getAtomCached("_NET_WM_NAME") catch return;
-    const utf8_string = getAtomCached("UTF8_STRING") catch return;
-    const net_supported = getAtomCached("_NET_SUPPORTED") catch return;
+    const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return;
+    const net_wm_name = getAtomCached("_NET_WM_NAME") orelse return;
+    const utf8_string = getAtomCached("UTF8_STRING") orelse return;
+    const net_supported = getAtomCached("_NET_SUPPORTED") orelse return;
 
     // A small, invisible identity window. Override-redirect so hana's own
     // SubstructureRedirect handling never tries to manage it as a client.
@@ -297,7 +297,7 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
 
     var supported: [supported_atoms.len]xcb.xcb_atom_t = undefined;
     inline for (supported_atoms, 0..) |name, i|
-        supported[i] = getAtomCached(name) catch xcb.XCB_ATOM_NONE;
+        supported[i] = getAtomCached(name) orelse xcb.XCB_ATOM_NONE;
     changeProperty(conn, root, net_supported, xcb.xcb_atom_t, xcb.XCB_ATOM_ATOM, &supported);
 }
 

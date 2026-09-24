@@ -24,7 +24,6 @@ const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
-const providerOf = window.providerOf;
 
 /// Window configured fullscreen but awaiting ConfigureNotify confirmation.
 /// Zero when none pending. Set by armPendingBarHide; cleared in
@@ -78,9 +77,7 @@ pub fn deinit() void {
 /// feature->feature guard). The model store's capacity is the ceiling, so no
 /// separate fullscreen-store capacity check exists.
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
-    if (providerOf(.isWindowHidden)) |wm| {
-        if (wm.isWindowHidden.?(m, win)) return false;
-    }
+    if (window.callHookBool(.isWindowHidden, .{ m, win })) return false;
     const e = m.store.getPtr(win) orelse return false;
     if (e.covering_ws != null) {
         // OFF: leave fullscreen; clearing the core intent replays the
@@ -88,15 +85,10 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
         releaseCovering(m, win);
         return true;
     }
-    // Covering SWITCH: claiming the screen while another window already
-    // owns it on this workspace releases the previous occupant's claim
-    // first. sync's occupant scan (model.coveringOccupantOnWs) elects the
-    // covering winner by store order, so a stale second claim would keep
-    // the OLD window covering and park the entrant — the switch could never
-    // take effect. Exactly one covering intent per workspace. The release
-    // is gated on the ENTERING window being able to claim this workspace
-    // (present-not-parked and visible on it): a stray intent targeting a
-    // ws the entrant is not on must not displace the resident owner.
+    // Covering SWITCH: a resident occupant of this ws yields first
+    // (sync's store-order scan, model.coveringOccupantOnWs). The release
+    // is gated on the entrant being able to claim this ws (present and
+    // visible here): a stray intent elsewhere never displaces the owner.
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
         if (model.coveringOccupantOnWs(m, m.current)) |occupant| {
@@ -163,11 +155,8 @@ pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Wind
     while (it.next()) |row| {
         const e = row.val;
         if (e.presence != .covering) continue;
-        if (e.covering_ws) |cws| {
-            if (!cws.eql(ws)) continue;
-        } else {
-            continue;
-        }
+        const cws = e.covering_ws orelse continue;
+        if (!cws.eql(ws)) continue;
         if (!model.visibleOn(m, row.key, ws)) continue;
         return row.key;
     }

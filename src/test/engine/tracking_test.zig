@@ -35,7 +35,7 @@ var gate: pipeline.Gate = .{};
 /// the sync/capacity module stores, returning the mutable instance handle.
 /// Then every reconcile in a test runs over `pipeline.model()` so facade and
 /// ledger observe the identical state.
-fn setUpModel() *model.Model {
+fn pipelineModel() *model.Model {
     pipeline.initialized = true;
     const m = pipeline.mut(&gate);
     m.* = helpers.makeModel();
@@ -46,14 +46,7 @@ fn setUpModel() *model.Model {
 }
 
 fn reconcile(m: *model.Model, rec: *Recorder, opts: sync.ReconcileOpts) void {
-    var ctx: sync.Ctx = .{
-        .sink = rec.sink(),
-        .screen = helpers.std_wa,
-        .workarea = helpers.std_wa,
-        .cfg_bw = cfg_bw,
-        .color_of = testColor,
-        .env = helpers.std_env,
-    };
+    var ctx = helpers.makeCtx(rec.sink(), testColor, helpers.std_wa);
     sync.reconcile(m, &ctx, opts);
 }
 
@@ -62,7 +55,7 @@ fn reg(m: *model.Model, win: model.WindowId, ws_idx: u8) !void {
 }
 
 test "facade agrees with ledger on managed set, masks, and ws visibility" {
-    var m = setUpModel();
+    var m = pipelineModel();
     var rec = Recorder{};
     defer rec.deinit();
 
@@ -107,7 +100,7 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
 }
 
 test "facade tracks the workspace switch exactly like the ledger" {
-    var m = setUpModel();
+    var m = pipelineModel();
     var rec = Recorder{};
     defer rec.deinit();
 
@@ -133,7 +126,7 @@ test "facade tracks the workspace switch exactly like the ledger" {
 }
 
 test "minimized windows are invisible to both facade and ledger" {
-    const m = setUpModel();
+    const m = pipelineModel();
     var rec = Recorder{};
     defer rec.deinit();
 
@@ -159,7 +152,7 @@ test "minimized windows are invisible to both facade and ledger" {
 }
 
 test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
-    const m = setUpModel();
+    const m = pipelineModel();
     var rec = Recorder{};
     defer rec.deinit();
 

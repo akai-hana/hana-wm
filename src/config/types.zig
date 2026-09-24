@@ -5,6 +5,7 @@ const std = @import("std");
 const constants = @import("constants");
 const ids = @import("ids");
 const model = @import("model");
+const utils = @import("utils");
 
 /// A value that can be expressed as either an absolute pixel count or a
 /// percentage of some reference dimension. Defined here (not in the parser)
@@ -336,7 +337,9 @@ const default_bar_fg: Color = 0xBBBBBB;
 const default_bar_selected_bg: Color = 0x005577;
 const default_bar_selected_fg: Color = 0xEEEEEE;
 
-/// Where in the workspace cell the activity indicator is drawn.
+/// Where in the workspace cell the activity indicator is drawn. The `string_map`
+/// below is the accepted TOML spelling: cardinal names verbatim; diagonal names
+/// with hyphens or underscores in either axis order ("left-up" == "up_left").
 pub const IndicatorLocation = enum {
     up,
     down,
@@ -347,32 +350,18 @@ pub const IndicatorLocation = enum {
     down_left,
     down_right,
 
-    // Accepts hyphens or underscores and both orderings of diagonal names
-    // (e.g. "left-up" == "up-left"). Cardinal entries + diagonal entries are
-    // generated at comptime from a compact table.
-    const string_map = blk: {
-        @setEvalBranchQuota(2000);
-        const cardinals = [_]struct { []const u8, IndicatorLocation }{
-            .{ "up", .up }, .{ "down", .down }, .{ "left", .left }, .{ "right", .right },
-        };
-        const diags = [_]struct { []const u8, []const u8, IndicatorLocation }{
-            .{ "up", "left", .up_left },     .{ "up", "right", .up_right },
-            .{ "down", "left", .down_left }, .{ "down", "right", .down_right },
-        };
-        var kvs: [cardinals.len + diags.len * 4]struct { []const u8, IndicatorLocation } = undefined;
-        var n: usize = 0;
-        for (cardinals) |c| {
-            kvs[n] = c;
-            n += 1;
-        }
-        for (diags) |d| for (.{ "-", "_" }) |sep| {
-            kvs[n] = .{ d[0] ++ sep ++ d[1], d[2] };
-            n += 1;
-            kvs[n] = .{ d[1] ++ sep ++ d[0], d[2] };
-            n += 1;
-        };
-        break :blk std.StaticStringMap(IndicatorLocation).initComptime(kvs[0..n]);
-    };
+    const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
+        .{ "up", .up },                 .{ "down", .down },
+        .{ "left", .left },             .{ "right", .right },
+        .{ "up-left", .up_left },       .{ "up_left", .up_left },
+        .{ "left-up", .up_left },       .{ "left_up", .up_left },
+        .{ "up-right", .up_right },     .{ "up_right", .up_right },
+        .{ "right-up", .up_right },     .{ "right_up", .up_right },
+        .{ "down-left", .down_left },   .{ "down_left", .down_left },
+        .{ "left-down", .down_left },   .{ "left_down", .down_left },
+        .{ "down-right", .down_right }, .{ "down_right", .down_right },
+        .{ "right-down", .down_right }, .{ "right_down", .down_right },
+    });
 };
 
 /// Vertical placement of the bar on screen: top or bottom edge.
@@ -551,7 +540,7 @@ pub const BarConfig = struct {
     drun_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
 
     /// Per-segment text-color overrides, keyed by bar segment registry name
-    /// ("cpu", "mem", "volume", "brightness", ...). Populated from
+    /// ("cpu", "ram", "volume", "brightness", ...). Populated from
     /// `[bar.properties].<segment>` entries; a segment with no entry paints its
     /// text in `fg` (see `segmentFg`). Colors for absent segments are
     /// tolerated and simply never match a live segment, so a theme may carry
@@ -672,15 +661,15 @@ pub const BarConfig = struct {
         return scaleToU16((h - font_px) / 2.0);
     }
 
-    /// Scales a ScalableValue to pixels. `factor` multiplies the percentage path.
+    /// Resolves a ScalableValue to pixels: the percentage path multiplies the
+    /// reference dimension by `factor`, the absolute path is used verbatim
+    /// (canonical formula lives in `utils.scaling`).
     inline fn scaleValue(sv: ScalableValue, bar_height: u16, factor: f32) f32 {
-        const h: f32 = @floatFromInt(bar_height);
-        return if (sv.is_percentage) h * factor * (sv.value / 100.0) else sv.value;
+        return utils.scaling.scaleToPixels(sv, @as(f32, @floatFromInt(bar_height)) * factor);
     }
 
     inline fn scaleToU16(val: f32) u16 {
-        const clamped = std.math.clamp(val, 0.0, @as(f32, std.math.maxInt(u16)));
-        return @as(u16, @intFromFloat(@round(clamped)));
+        return utils.scaling.roundToU16(val, 0.0);
     }
     /// Scale factor applied to the spacing percentage path (`spacing` widens
     /// with the bar); the absolute-px path is used verbatim.
@@ -688,11 +677,15 @@ pub const BarConfig = struct {
     pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
         return scaleToU16(scaleValue(self.spacing, bar_height, spacing_scale_factor));
     }
+    /// Scales one size ScalableValue against the bar height, floor 1.
+    inline fn scaledUnit(sv: ScalableValue, bar_height: u16) u16 {
+        return @max(1, scaleToU16(scaleValue(sv, bar_height, 1.0)));
+    }
     pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, scaleToU16(scaleValue(self.indicator_size, bar_height, 1.0)));
+        return scaledUnit(self.indicator_size, bar_height);
     }
     pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
-        return @max(1, scaleToU16(scaleValue(self.workspace_tag_width, bar_height, 1.0)));
+        return scaledUnit(self.workspace_tag_width, bar_height);
     }
 
     /// The 16-bit alpha ceiling: `transparency` (0.0-1.0) maps into 0x0000-0xFFFF.

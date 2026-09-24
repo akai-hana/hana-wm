@@ -73,7 +73,7 @@ icons = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 #                                     # the lexicographically smallest backlight
 
 # Systatus readouts and slider controls are their OWN bar segments, selected
-# per-item via [bar.layout.*].segments: "batt", "cpu", "mem" (readouts),
+# per-item via [bar.layout.*].segments: "batt", "cpu", "ram" (readouts),
 # "volume", "brightness" (controls). Each may be ordered/spaced anywhere.
 
 [bar.layout.left]

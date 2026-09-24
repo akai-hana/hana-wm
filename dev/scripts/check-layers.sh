@@ -164,12 +164,11 @@ done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/sync/' | 
 
 # Rule 2: server grabs belong behind the sync boundary (+ allowlist). Comment
 # mentions of xcb_grab_server are stripped so documentation doesn't trip the
-# guard. Match BOTH the raw XCB primitive and the utils.grabServer/ungrabServer
-# wrappers.
+# guard. Match BOTH the raw XCB primitive and the utils.grabServer wrapper.
 # Siblings like sync.zig route grabs through the Sink vtable (sink.grabServer,
 # never literally `utils.grabServer`), so a wrapper match isolates files that
 # grab the server directly, which is exactly the policy being enforced.
-pat2='xcb\.xcb_grab_server|utils\.grabServer|utils\.ungrabServer'
+pat2='xcb\.xcb_grab_server|utils\.grabServer'
 while IFS= read -r line; do
     f=${line%%:*}
     grab_allowed "$f" && continue

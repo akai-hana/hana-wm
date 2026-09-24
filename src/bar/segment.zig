@@ -182,10 +182,10 @@ pub const TitleSnapshot = struct {
 fn gatherAndSortWindowInfos(
     snapshot: TitleSnapshot,
     windows: []const u32,
-    win_count: usize,
     out_window_info_buf: *[max_visible_windows]WindowInfo,
 ) ?[]WindowInfo {
     var info_count: usize = 0;
+    const win_count = @min(windows.len, max_visible_windows);
     for (windows[0..win_count], 0..) |win, i| {
         const geom = snapshot.geoms[i] orelse continue;
         out_window_info_buf[info_count] = .{
@@ -236,9 +236,8 @@ pub const GatherScratch = struct {
         self: *GatherScratch,
         snapshot: TitleSnapshot,
         windows: []const u32,
-        win_count: usize,
     ) ?[]WindowInfo {
-        return gatherAndSortWindowInfos(snapshot, windows, win_count, &self.window_infos);
+        return gatherAndSortWindowInfos(snapshot, windows, &self.window_infos);
     }
 };
 
@@ -247,6 +246,25 @@ pub const ClickTarget = struct {
     window: u32,
     minimized: bool,
 };
+
+/// Pixel-perfect equal tiling shared by the title render and hit-testing:
+/// segment `i` of `count` spans [i*W/count, (i+1)*W/count). The tile width
+/// x-bounds sum exactly to `total_width` with no fractional residue.
+pub fn segmentBounds(total_width: u16, i: usize, count: u32) struct { x: u16, w: u16 } {
+    const x0: u16 = @intCast(@divFloor(@as(u32, @intCast(i)) * total_width, count));
+    const x1: u16 = @intCast(@divFloor(@as(u32, @intCast(i + 1)) * total_width, count));
+    return .{ .x = x0, .w = x1 - x0 };
+}
+
+/// Inverse of segmentBounds: the segment index under `offset_x` pixels, i.e.
+/// `partitionPoint(total_width, offset_x, count)` is the smallest `i` with
+/// `segmentBounds(total_width, i, count).x > offset_x`, clamped to `count-1`.
+pub fn segmentIndexOfX(total_width: u16, offset_x: u16, count: u32) usize {
+    return @intCast(@min(
+        count - 1,
+        @divFloor(@as(u32, offset_x) * count, @as(u32, total_width)),
+    ));
+}
 
 /// Resolves which window (if any) is displayed at `offset_x` pixels into the
 /// title segment, relative to the segment's start_x.
@@ -266,17 +284,13 @@ pub fn hitTest(
     }
 
     if (ctx.width == 0) return null;
-    const win_count = @min(windows.len, max_visible_windows);
 
     var scratch: GatherScratch = .{};
-    const sorted = scratch.gather(snapshot, windows, win_count) orelse
+    const sorted = scratch.gather(snapshot, windows) orelse
         return null;
 
     const n: u32 = @intCast(sorted.len);
-    const idx: usize = @intCast(@min(
-        n - 1,
-        @divFloor(@as(u32, offset_x) * n, @as(u32, ctx.width)),
-    ));
+    const idx = segmentIndexOfX(ctx.width, offset_x, n);
     const info = sorted[idx];
     return .{ .window = info.window, .minimized = info.minimized };
 }
@@ -296,7 +310,7 @@ pub fn hasSource(sources: contract.DirtySources, source: DirtySourcesSource) boo
 
 /// Resolves a configured segment name to its registry index, or null when no
 /// module with that name is compiled in (segment removed or unknown).
-pub fn idByName(modules: []const @import("contract").Segment, name: []const u8) ?usize {
+pub fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
     for (modules, 0..) |m, i| {
         if (std.mem.eql(u8, m.name, name)) return i;
     }
@@ -311,7 +325,7 @@ pub fn idByName(modules: []const @import("contract").Segment, name: []const u8) 
 /// the returned slice is a comptime value, so empty-set guards
 /// (`.len == 0`) dead-code-eliminate.
 pub fn findAllByCapability(
-    modules: []const @import("contract").Segment,
+    modules: []const contract.Segment,
     comptime name: []const u8,
 ) []const usize {
     var result: []const usize = &.{};

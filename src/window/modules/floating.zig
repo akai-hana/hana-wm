@@ -22,7 +22,6 @@ const sync = @import("sync");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
-const providerOf = window.providerOf;
 
 const DragMode = enum { move, resize };
 
@@ -71,7 +70,7 @@ fn snapDistance() i32 {
 fn workarea() WaEdges {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
-    const bw2: i32 = @as(i32, borders.width()) * 2;
+    const bw2: i32 = @as(i32, core.borderWidth()) * 2;
     const work = screen.workArea(cs.screen);
     return .{
         .left = 0,
@@ -88,15 +87,6 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     if (@abs(pos - near) < snap) return near;
     if (@abs((pos + dim) - far) < snap) return far - dim;
     return pos;
-}
-
-inline fn snapEdge(edge: i32, boundary: i32, snap: i32) i32 {
-    if (snap > 0 and @abs(edge - boundary) < snap) return boundary;
-    return edge;
-}
-
-inline fn clampI16(v: i32) i32 {
-    return std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16));
 }
 
 const State = struct {
@@ -157,9 +147,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (screen.isSurfaceWindow(win)) return;
-    if (providerOf(.isCoveringMode)) |wm| {
-        if (wm.isCoveringMode.?(pipeline.model(), win)) return;
-    }
+    if (window.isCoveringMode(pipeline.model(), win)) return;
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
@@ -224,17 +212,17 @@ fn computeMoveRect(
     // Raw drag coords are unbounded i32; pin down to the i16 wire range
     // before the narrowing cast so a window dragged beyond +/-32767 (or into
     // negative X11 coords) can't UB in ReleaseFast.
-    const mx: i32 = clampI16(if (was_pending_float)
+    const mx: i16 = utils.satI16(if (was_pending_float)
         raw_x
     else
         snapAxis(raw_x, win_w, wa.left, wa.right, snap));
-    const my: i32 = clampI16(if (was_pending_float)
+    const my: i16 = utils.satI16(if (was_pending_float)
         raw_y
     else
         snapAxis(raw_y, win_h, wa.top, wa.bottom, snap));
     return .{
-        .x = @intCast(mx),
-        .y = @intCast(my),
+        .x = mx,
+        .y = my,
         .width = drag.start_win_width,
         .height = drag.start_win_height,
     };
@@ -248,7 +236,7 @@ const HintLimits = struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 };
 /// the client-declared value plus both border widths. A zero hint means no
 /// constraint: min yields 0 and max yields the u16 wire-width ceiling.
 fn sizeHintLimits(win: u32) HintLimits {
-    const bw2: i32 = @as(i32, borders.width()) * 2;
+    const bw2: i32 = @as(i32, core.borderWidth()) * 2;
     const unbounded: i32 = @as(i32, std.math.maxInt(u16));
     // Window may withdraw mid-drag; treat it as hint-less (no constraint).
     const hints = (pipeline.model().store.get(win) orelse return .{
@@ -294,8 +282,8 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect 
     const moving_y0: i32 = start_y + @as(i32, if (axes.top) 0 else start_h);
     const raw_moving_x: i32 = moving_x0 + dx;
     const raw_moving_y: i32 = moving_y0 + dy;
-    const moving_x: i32 = snapEdge(snapEdge(raw_moving_x, wa.left, snap), wa.right, snap);
-    const moving_y: i32 = snapEdge(snapEdge(raw_moving_y, wa.top, snap), wa.bottom, snap);
+    const moving_x: i32 = snapAxis(raw_moving_x, 0, wa.left, wa.right, snap);
+    const moving_y: i32 = snapAxis(raw_moving_y, 0, wa.top, wa.bottom, snap);
 
     const new_left: i32 = @min(anchor_x, moving_x);
     const new_right: i32 = @max(anchor_x, moving_x);
@@ -316,8 +304,8 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect 
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
     return .{
-        .x = @intCast(clampI16(pinned_x)),
-        .y = @intCast(clampI16(pinned_y)),
+        .x = utils.satI16(pinned_x),
+        .y = utils.satI16(pinned_y),
         .width = @intCast(clamped_w),
         .height = @intCast(clamped_h),
     };
@@ -395,9 +383,7 @@ pub fn honorConfigureRequest(
     win: model.WindowId,
     req: model.ConfigureReq,
 ) model.HonorDecision {
-    if (providerOf(.isWindowHidden)) |wm| {
-        if (wm.isWindowHidden.?(m, win)) return .ignored;
-    }
+    if (window.callHookBool(.isWindowHidden, .{ m, win })) return .ignored;
     const e = m.store.getPtr(win) orelse return .ignored;
     if (e.presence == .covering) return .ignored; // fullscreen owns geometry
     switch (e.anchor) {

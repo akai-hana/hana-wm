@@ -27,18 +27,12 @@ pub const XK = enum(u32) {
 pub const Connection = *xcb.xcb_connection_t;
 pub const Screen = *xcb.xcb_screen_t;
 
-/// Equivalent to xcb_window_t (uint32_t). Single canonical definition in
-/// core/utils/ids.zig (`model.WindowId` aliases it too), so window ids cross
-/// layers without conversion.
+/// Alias of the canonical @import("ids").WindowId (xcb_window_t); see the
+/// ids.zig header for the single-definition rationale.
 pub const WindowId = @import("ids").WindowId;
 
-/// Workspace index wrapper. The canonical type for workspace identifiers;
-/// `model.WSId` is the same type (single canonical definition in
-/// core/utils/ids.zig), so workspace ids cross the core/model boundary
-/// without conversion. The `.index` member doubles as the array index for
-/// model internals; integer-typed boundaries (wire formats, counters) use
-/// `fromIndex` / `.index`. Prevents confusing indices with unrelated u8
-/// values (counts, layout indices, etc.) at call sites.
+/// Workspace index wrapper. `model.WSId` is this same type; see the ids.zig
+/// header for the single-definition rationale.
 pub const WorkspaceId = @import("ids").WorkspaceId;
 
 /// Why keyboard focus is temporarily withheld from a window.
@@ -120,6 +114,12 @@ pub inline fn borderWidth() u16 {
 }
 
 var state: ?State = null;
+
+/// True once init() ran. Guards boot-time config latches (e.g. the tracking
+/// workspace-count latch) that a test harness may invoke before core.is ready.
+pub inline fn isReady() bool {
+    return state != null;
+}
 
 /// Panics if called before init().
 pub inline fn getState() *State {

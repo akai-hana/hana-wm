@@ -185,36 +185,16 @@ pub const knobs = [_]Knob{
     barDrunColor("drun_prompt_color", "bar.drun_prompt_color", types.palette_primary_color),
 };
 
-/// Keys the [bar.properties] scalar knobs own; every OTHER key in that table
-/// is a bar segment name (a per-segment color + style override, see
-/// `applyBarProperties`). Derived from `knobs` so a future [bar.properties]
-/// knob can never desync the map pass.
-const bar_properties_knob_keys_len = blk: {
-    var n: usize = 0;
-    for (knobs) |k| {
-        for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, types.section_bar_properties)) n += 1;
-        }
-    }
-    break :blk n;
-};
-const bar_properties_knob_keys: [bar_properties_knob_keys_len][]const u8 = blk: {
-    var keys: [bar_properties_knob_keys_len][]const u8 = undefined;
-    var i: usize = 0;
-    for (knobs) |k| {
-        for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, types.section_bar_properties)) {
-                keys[i] = pl.key;
-                i += 1;
-            }
-        }
-    }
-    break :blk keys;
-};
-
+/// True when `key` is one of the [bar.properties] scalar knobs; every OTHER
+/// key in that table is a bar segment name (a per-segment color + style
+/// override, see `applyBarProperties`). Scanned from `knobs` so a future
+/// [bar.properties] knob can never desync the map pass.
 fn isBarPropertiesKnobKey(key: []const u8) bool {
-    for (bar_properties_knob_keys) |k| {
-        if (std.mem.eql(u8, k, key)) return true;
+    inline for (knobs) |k| {
+        for (k.places) |pl| {
+            if (std.mem.eql(u8, pl.section, types.section_bar_properties) and
+                std.mem.eql(u8, pl.key, key)) return true;
+        }
     }
     return false;
 }
@@ -320,8 +300,8 @@ pub fn value(cfg: *const types.Config, comptime path: []const u8) PathType(path)
 
 // Generic readers.
 
-/// Warn-and-return-default for an out-of-range value, shared by getInRange
-/// and getScalableInRange so the warning wording (and its boilerplate) lives once.
+/// Warn-and-return-default for an out-of-range value, shared by getInRange's
+/// integer path so the warning wording lives once.
 fn reject(
     comptime T: type,
     key: []const u8,
@@ -506,24 +486,26 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             if (doc.getSection(k.requires) == null) break :knob;
         }
         var hit: ?struct { sec: *parser.Section, key: []const u8 } = null;
-        inline for (k.places) |pl| probe: {
+        for (k.places) |pl| {
             // Places probe in order; the FIRST section present in the document
             // wins and only its paired key spelling is read. Presence of
             // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]
             // master_count` unrecognized, matching the old orelse chains.
-            if (hit != null) break :probe;
-            if (doc.getSection(pl.section)) |sec| hit = .{ .sec = sec, .key = pl.key };
+            if (doc.getSection(pl.section)) |sec| {
+                hit = .{ .sec = sec, .key = pl.key };
+                break;
+            }
         }
         const p = ptr(cfg, k.target);
         switch (k.kind) {
             .b => if (hit) |h| {
-                p.* = h.sec.getAsOrWarn(bool, h.key) orelse p.*;
+                if (h.sec.getAsOrWarn(bool, h.key)) |v| p.* = v;
             },
             .int => |spec| if (hit) |h| {
                 p.* = getInRange(spec.T, h.sec, h.key, p.*, if (spec.min) |m| @as(spec.T, m) else null, if (spec.max) |m| @as(spec.T, m) else null);
             },
             .scalable => |min| if (hit) |h| {
-                p.* = getScalableInRange(h.sec, h.key, p.*, min, "default") orelse p.*;
+                if (getScalableInRange(h.sec, h.key, p.*, min, "default")) |v| p.* = v;
             },
             .scalable_free => if (hit) |h| {
                 if (h.sec.getAsOrWarn(types.ScalableValue, h.key)) |v| p.* = v;
@@ -582,7 +564,7 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
 /// `segment_props`.
 ///
 /// A key with the `_value` suffix (`cpu_value`) is that segment's NUMBER
-/// color: the numeric readout ("42%" in "Cpu 42%") is painted with it while
+/// color: the numeric readout ("42%" in "CPU 42%") is painted with it while
 /// the rest of the segment keeps the plain entry (`cpu`) -- see
 /// `segmentValueFg`. `_value` entries are color-only.
 ///
@@ -682,6 +664,12 @@ fn putSegmentEntry(
     try map.put(allocator, k, item);
 }
 
+/// The color map a segment entry writes to: `_value` keys own the segment's
+/// number color, everything else the plain color override.
+inline fn segmentColorMap(cfg: *types.Config, is_value: bool) *std.StringHashMapUnmanaged(types.Color) {
+    return if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
+}
+
 /// Applies one [bar.properties] segment entry: `_value` keys are color-only
 /// (unchanged decoding); base keys take the composite color+style decoding.
 fn applySegmentEntry(
@@ -716,8 +704,8 @@ fn applySegmentEntry(
             }
         }
         // Plain scalar: color only, exactly as the pre-properties behavior.
+        const map = segmentColorMap(cfg, is_value);
         const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
-        const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
         try putSegmentEntry(types.Color, allocator, map, seg_key, color);
         return;
     }
@@ -728,8 +716,7 @@ fn applySegmentEntry(
     // tokens (the per-item scan below would grab just the head operand).
     // Pure mixes are color-only, exactly as the pre-properties decoding.
     if (parser.resolveColorExpr(raw, palette)) |mix| {
-        const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
-        try putSegmentEntry(types.Color, allocator, map, seg_key, mix);
+        try putSegmentEntry(types.Color, allocator, segmentColorMap(cfg, is_value), seg_key, mix);
         return;
     }
 
@@ -747,17 +734,12 @@ fn applySegmentEntry(
                 i += 1;
                 continue;
             };
-            if (boolFromEqualsToken(token)) |eq| {
-                if (!setStyleFlag(&props, eq.name, eq.value))
-                    debug.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
-                i += 1;
-                continue;
-            }
-            // Bare `name` spelling: true by default; a following boolean or
-            // 0/1 integer item sets the value instead.
-            var set: bool = true;
+            // `name=true|false`, `name true`, `name 1|0`, or bare `name`
+            // (true by default). Unified so the invalid-style warning lives once.
+            const eq = boolFromEqualsToken(token);
+            var set: bool = if (eq) |e| e.value else true;
             var consumed_next = false;
-            if (i + 1 < items.len) {
+            if (eq == null and i + 1 < items.len) {
                 if (items[i + 1].asScalar(bool)) |b| {
                     set = b;
                     consumed_next = true;
@@ -768,7 +750,8 @@ fn applySegmentEntry(
                     }
                 }
             }
-            if (setStyleFlag(&props, token, set)) {
+            const flag = if (eq) |e| e.name else token;
+            if (setStyleFlag(&props, flag, set)) {
                 if (consumed_next) i += 1;
             } else {
                 debug.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
@@ -778,8 +761,7 @@ fn applySegmentEntry(
     }
 
     if (found) |f| {
-        const map = if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
-        try putSegmentEntry(types.Color, allocator, map, seg_key, f.color);
+        try putSegmentEntry(types.Color, allocator, segmentColorMap(cfg, is_value), seg_key, f.color);
     } else if (is_value) {
         // A `_value` key is color-only: an array with no color is invalid.
         const color = getColorFromValue(key, raw, cfg.bar.fg, palette);

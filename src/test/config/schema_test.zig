@@ -392,7 +392,7 @@ test "per-segment text colors: bar.properties keys override segment fg" {
         \\[bar.properties]
         \\title               = primary_color
         \\cpu                 = primary_color italic=true
-        \\mem                 = primary_color
+        \\ram                 = primary_color
         \\volume              = alternative_color underline
         \\brightness          = alternative_color bold
         \\brightness_value    = primary_color
@@ -404,7 +404,7 @@ test "per-segment text colors: bar.properties keys override segment fg" {
 
     // Systatus readouts read primary; slider controls read alternative.
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("cpu"));
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("mem"));
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("ram"));
     try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("volume"));
     try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentFg("brightness"));
     // A segment without an entry falls back to the bar-wide fg.
@@ -419,7 +419,7 @@ test "per-segment text colors: bar.properties keys override segment fg" {
     try testing.expectEqual(@as(u32, 0x00AA00), cfg.bar.segmentValueFg("cpu"));
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("brightness"));
     try testing.expectEqual(@as(u32, 0x0000CC), cfg.bar.segmentValueFg("volume"));
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("mem"));
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentValueFg("ram"));
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentValueFg("batt"));
     try testing.expectEqual(@as(usize, 2), cfg.bar.segment_value_fg.count());
     // Style flags ride the same composite entry: `underline`/`bold`/`italic`
@@ -430,7 +430,7 @@ test "per-segment text colors: bar.properties keys override segment fg" {
     try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segmentProps("brightness"));
     try testing.expectEqual(types.SegmentProps{ .bold = true, .underline = true }, cfg.bar.segmentProps("clock"));
     // Everything else stays plain; the map holds only non-default entries.
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("mem"));
+    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("ram"));
     try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("batt"));
     try testing.expectEqual(@as(usize, 4), cfg.bar.segment_props.count());
 }
@@ -668,7 +668,7 @@ test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette
         \\[bar.properties]
         \\title = alternative_color
         \\cpu   = primary_color +(weight:40%) secondary_color
-        \\mem   = primary_color
+        \\ram   = primary_color
         \\
     );
     defer cfg.deinit(testing.allocator);
@@ -686,7 +686,7 @@ test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette
     //   r = (10200 + 50)/100 = 102 (0x66), g = (5440 + 50)/100 = 54 (0x36).
     try testing.expectEqual(@as(u32, 0x663600), cfg.bar.segmentFg("cpu"));
     // A plain palette reference through the same path stays literal.
-    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("mem"));
+    try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("ram"));
 }
 
 test "color-mix: over-budget and head weights revert to the default" {
@@ -707,4 +707,34 @@ test "color-mix: over-budget and head weights revert to the default" {
     defer cfg.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 0x5294E2), cfg.tiling.border_focused);
     try testing.expectEqual(@as(u32, 0x383C4A), cfg.tiling.border_unfocused);
+}
+
+test "color-mix: literal array spelling mixes equally, duplicate palette-name declarations later-win" {
+    // C-16 regression: a LITERAL array (bracket spelling) read at a color
+    // knob is a bare-operand mix, never corrupted into solid-last via the
+    // scalar descent; duplicate palette-*name* declarations keep later-wins
+    // (they are NOT a mix to be averaged).
+    var cfg = try loadToml(testing.allocator, "c16-literal-vs-dup",
+        \\[tiling]
+        \\[tiling.aesthetics]
+        \\border_focused   = [0xaa0000, 0x008800]
+        \\
+        \\[bar]
+        \\primary_color     = "#aa0000"
+        \\secondary_color   = "#008800"
+        \\alternative_color = primary_color
+        \\alternative_color = secondary_color
+        \\
+        \\[bar.properties]
+        \\title = alternative_color
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+
+    // border_focused: a literal 2-element array = 50/50 bare-list mix.
+    //   r = (170 + 1)/2 = 85 (0x55), g = (136 + 1)/2 = 68 (0x44).
+    try testing.expectEqual(@as(u32, 0x554400), cfg.tiling.border_focused);
+    // alternative_color declared twice: later-wins (secondary), not a 50/50
+    // average of the two palette references.
+    try testing.expectEqual(@as(u32, 0x008800), cfg.bar.title_accent_color);
 }

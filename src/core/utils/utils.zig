@@ -1,10 +1,11 @@
 //! Core utilities: FACADE.
 //!
-//! Geometric/collection/timing helpers plus re-exports of every public decl
-//! from the modules below so existing `utils.X` call sites are unchanged:
+//! Geometric/collection/timing helpers plus re-exports from the modules below
+//! so existing `utils.X` call sites are unchanged:
 //!
-//!   bounded   BoundedList                       (xcb-free)
-//!   proc      lifecycle flags, wake pipe, pipes  (xcb-free)
+//!   bounded   BoundedList, Store             (xcb-free)
+//!   idmap     IdMap                          (xcb-free)
+//!   proc      lifecycle flags, wake pipe     (xcb-free)
 //!
 //! Layer note: model/tiling reference only the xcb-free decls here and in
 //! this file's own pure section (wrapIndex, scaling, Rect).
@@ -14,6 +15,7 @@
 const std = @import("std");
 const masks = @import("masks");
 
+const idmap = @import("idmap");
 const proc = @import("proc");
 const bounded = @import("bounded");
 const x11wire = @import("wire");
@@ -27,8 +29,10 @@ pub const wake = proc.wake;
 pub const consumeReload = proc.consumeReload;
 pub const makePipe = proc.makePipe;
 
-// --- time (inlined from former time.zig) ----------------------------------
-inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
+// --- time ---------------------------------------------------------------
+// clock_gettime with a best-effort fallback to the other clock id (a
+// monotonic-realtime node or similar), then nanos.
+fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
     var ts: std.os.linux.timespec = undefined;
     if (std.os.linux.clock_gettime(clock_id, &ts) != 0) {
         const fallback_id: std.os.linux.clockid_t =
@@ -36,11 +40,6 @@ inline fn clockTs(clock_id: std.os.linux.clockid_t) std.os.linux.timespec {
         if (std.os.linux.clock_gettime(fallback_id, &ts) != 0)
             ts = .{ .sec = 0, .nsec = 0 };
     }
-    return ts;
-}
-
-fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
-    const ts = clockTs(clock_id);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
@@ -100,7 +99,8 @@ pub fn WindowedProfiler(
 
 // --- bounded collections (re-exports) ---------------------------------------
 pub const BoundedList = bounded.BoundedList;
-pub const IdMap = @import("idmap").IdMap;
+pub const IdMap = idmap.IdMap;
+pub const Store = bounded.Store;
 
 // --- X11 wire primitives (re-exports; xcb-dependent live in the x11 wire module) ---
 pub const initAtomCache = x11wire.initAtomCache;
@@ -142,6 +142,13 @@ pub const Margins = struct {
 /// Twice the border width (left+right / top+bottom inset).
 pub inline fn doubledBorder(m: Margins) u16 {
     return 2 *| m.border;
+}
+
+/// Saturating i16 coordinate clamp: narrows an i32 coordinate into the i16
+/// `Rect` range, clamping instead of wrapping so a single pathological value
+/// can't cross the whole screen in ReleaseFast.
+pub inline fn satI16(v: i32) i16 {
+    return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
 }
 
 /// Reinterprets a signed X11 coordinate (i16 on the wire) as the u32 value

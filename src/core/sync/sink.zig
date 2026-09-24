@@ -135,7 +135,6 @@ pub const XcbSink = struct {
                 const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, atoms.len)];
                 for (existing) |a| {
                     if (a == fs_atom or a == 0) continue;
-                    if (count == atoms.len) break;
                     atoms[count] = a;
                     count += 1;
                 }
