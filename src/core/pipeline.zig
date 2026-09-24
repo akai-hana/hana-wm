@@ -79,7 +79,7 @@ pub inline fn getCurrentLayout() u8 {
 /// config names identically.
 pub fn defaultIndexForLayoutName(name: []const u8) u8 {
     if (!build_options.has_tiling) return 0;
-    return tiling.layoutKindOf(name);
+    return tiling.layoutKindFallingBack(name, 0);
 }
 
 var g_sink: xcb_sink.XcbSink = undefined;
@@ -132,7 +132,6 @@ fn ctx() *sync.Ctx {
             .height = screen_h,
         },
         .workarea = screen.workArea(cs.screen),
-        .cfg_bw = env.margins.border,
         .env = env,
         .color_of = colorOf,
         .bar_win = screen.mappedSurfaceWindow(),
@@ -309,9 +308,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             } else {
                 // Exit: deferred bar show (unchanged path).
                 if (instance.focused) |w| {
-                    for (window_mods) |m| {
-                        if (m.armPendingBarShow) |show| show(w);
-                    }
+                    contract.callAll(contract.WindowModule, window_mods[0..], .armPendingBarShow, .{w});
                 }
             }
         }

@@ -177,8 +177,10 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     fx.flush();
     const e2 = m.store.get(win) orelse return error.UnknownWindow;
     try std.testing.expect(e2.anchor == .tiled);
-    // home_ws stays null here: in isolation the window was never removed from
-    // tiled_order (findHome still resolves it), so repairStrandedHome no-ops.
+    // The detach removed the tiled_order membership for real; re-entry
+    // re-adds it (repairStrandedHome), so the window is a tiled member again.
+    try std.testing.expect(e2.home_ws != null);
+    try std.testing.expectEqual(@as(usize, 1), model.tiledCountOnWs(m, m.current));
     try fx.expectTiledGeometry(win); // back on the tiling grid
 }
 

@@ -55,6 +55,6 @@ fn read() ?u8 {
 /// config name, the rendered label, and the readout function.
 pub const sub: systatus.Sub = .{
     .name = "cpu",
-    .label = "Cpu",
+    .label = "CPU",
     .read = read,
 };

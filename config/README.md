@@ -118,7 +118,7 @@ segments = ["clock"]
 ```
 
 Available segments: `workspaces`, `title`, `clock`, `layout`, `variants`,
-`batt`, `cpu`, `mem`, `volume`, `brightness`. A segment is compiled in only
+`batt`, `cpu`, `ram`, `volume`, `brightness`. A segment is compiled in only
 when its `src/bar/modules/*` file (or, for a readout/control sub, its file in
 `src/bar/modules/systatus/` or `src/bar/modules/slider/`) is present; the
 above list is the full stock set.
@@ -126,7 +126,7 @@ above list is the full stock set.
 Every systatus readout and slider control is its OWN segment — there is no
 aggregate `systatus`/`slider` belt anymore. Each is selected, ordered, and
 spaced independently through `segments`:
-- readouts `batt`, `cpu`, `mem` (systatus; a readout absent on this machine —
+- readouts `batt`, `cpu`, `ram` (systatus; a readout absent on this machine —
   e.g. `batt` with no battery — renders nothing and takes no space);
 - controls `volume`, `brightness` (slider; a control present only when its
   source file was dropped into the package directory).
@@ -165,7 +165,7 @@ item (`cpu = primary_color`) sets the text color and trailing
 `volume = #ff0000 underline bold` or a style-only `clock = underline`.
 A bare flag means `true`; `name=bool` and `name=0|1` spellings work too.
 A `<segment>_value` key is color-only and separately colors its numeric
-readout (the `42%` in `Cpu 42%`), falling back to the segment text color when
+readout (the `42%` in `CPU 42%`), falling back to the segment text color when
 absent.
 
 Workspace tags take two of these composite keys: `workspaces` styles **every**

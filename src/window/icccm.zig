@@ -55,7 +55,7 @@ pub const max_window_cache: usize = constants.max_window_cache;
 /// entries. Callers must not touch the cache outside the active window.
 /// deinit runs before focus/tracking teardown, whose managed-window sweeps
 /// must not encounter a partially-valid cache.
-pub fn reset(active: bool) void {
+pub fn setCacheArmed(active: bool) void {
     cache_slots.clear();
     cache_ready = active;
 }
@@ -66,12 +66,13 @@ pub fn evictCache(win: u32) void {
     _ = cache_slots.remove(win);
 }
 
-/// Called from handleMapRequest, which fires both cookies synchronously.
-/// MapRequest is a one-time event per window, not a hot path worth pipelining.
-///
-/// The WM_PROTOCOLS reply is scanned once for both WM_TAKE_FOCUS and
-/// WM_DELETE_WINDOW, and both halves are cached (mask-first map ordering makes
-/// take_focus staleness impossible, see the section comment above).
+/// Shared admission drain: the MapRequest and boot-adoption routes fire their
+/// admission cookies up-front and land here (via window.drainAdmissionCookies)
+/// to consume the focus-relevant pair. The WM_PROTOCOLS reply is drained
+/// through the same protocolPropsFromReply path as the live query, so the
+/// pipelined verdict is byte-identical; both halves are cached (mask-first map
+/// ordering makes take_focus staleness impossible, see the section comment
+/// above).
 pub fn populateFocusCacheFromCookies(
     conn: core.Connection,
     win: u32,
@@ -112,7 +113,7 @@ pub fn fireWMProtocolsQuery(
     conn: core.Connection,
     win: u32,
 ) ?xcb.xcb_get_property_cookie_t {
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch return null;
+    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") orelse return null;
     return firePropQuery(conn, win, protocols_atom, xcb.XCB_ATOM_ATOM, constants.property_max_length);
 }
 
@@ -228,8 +229,8 @@ fn sendTakeFocusEvent(
 /// share, or null when the atom cache is not ready. The atom set is atomic
 /// (one cache), so a partial failure is impossible.
 fn focusAtoms() ?FocusAtoms {
-    const protocols = utils.getAtomCached("WM_PROTOCOLS") catch return null;
-    const take_focus = utils.getAtomCached("WM_TAKE_FOCUS") catch return null;
+    const protocols = utils.getAtomCached("WM_PROTOCOLS") orelse return null;
+    const take_focus = utils.getAtomCached("WM_TAKE_FOCUS") orelse return null;
     return .{ .protocols = protocols, .take_focus = take_focus };
 }
 
@@ -332,14 +333,16 @@ pub fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
     const is_protocols = atom == utils.getAtomOrZero("WM_PROTOCOLS");
     const existing: ?CachedProps = peekCachedProps(win);
 
-    const protocols: WMProtocolsProps = if (existing) |p|
-        if (is_protocols) queryWMProtocolsProps(conn, win) else .{ .wm_delete = p.wm_delete, .take_focus = p.take_focus }
+    // Refresh only the half the notify invalidated; the other half reuses the
+    // cache when present, otherwise both halves query live.
+    const protocols: WMProtocolsProps = if (existing == null or is_protocols)
+        queryWMProtocolsProps(conn, win)
     else
-        queryWMProtocolsProps(conn, win);
-    const accepts_input: bool = if (existing) |p|
-        if (is_protocols) p.accepts_input else queryWMHintsAcceptsInput(conn, win)
+        .{ .wm_delete = existing.?.wm_delete, .take_focus = existing.?.take_focus };
+    const accepts_input: bool = if (existing == null or !is_protocols)
+        queryWMHintsAcceptsInput(conn, win)
     else
-        queryWMHintsAcceptsInput(conn, win);
+        existing.?.accepts_input;
 
     putCachedProps(win, .{
         .accepts_input = accepts_input,

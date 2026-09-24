@@ -21,29 +21,21 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
 const model = @import("model");
-// Layout-name resolution for diagnostics. Reached through the build-generated
-// `tiling_seam` (empty struct when tiling is absent); every member use is
-// gated on has_tiling, so the tiling-less build still compiles.
+// Layout-name resolution for diagnostics; via the build-generated tiling_seam.
 const tiling = @import("tiling_seam").tiling;
-// The bar's hook set is reached through the core-owned `surfaces` composition
-// root, never by importing the bar module here. When the bar is absent it is
-// the comptime `null` type, so every `if (build_options.has_bar)` call below
-// compiles away.
+// Bar hook set; the core-owned `surfaces` composition root, absent-safe.
 const surfaces = @import("surfaces").Surfaces;
-// `grabKeybindings` lives in the event layer (it owns the X connection and
-// reads the live config). events.zig also imports this module, so the two
-// share a mutual runtime-only dependency; no comptime cycle is formed because
-// both references are plain runtime function calls.
+// `grabKeybindings` lives in events.zig (mutual runtime-only dependency).
 const events = @import("events");
 
 // Constants
 
 var xkb_state: ?xkbcommon.XkbState = null;
 
-// The (modifiers, keysym) -> Action dispatch map. Owned here, not by Config:
-// building it needs the live XKB state, which the pure config layer must not
-// depend on. Rebuilt on startup and every config reload (buildKeybinds); the
-// entries borrow `*const Action` pointers from the live config's keybindings.
+// The (modifiers, keysym) -> Action dispatch map. Owned here, not by Config,
+// to keep the pure config layer X-free (see the rationale in keybind.zig).
+// Rebuilt on startup and every config reload (buildKeybinds); the entries
+// borrow `*const Action` pointers from the live config's keybindings.
 var keybind_resolver: keybind.KeybindResolver = .{};
 
 /// Initialises the XKB context, keymap, and key state
@@ -58,21 +50,17 @@ pub fn deinitXkb() void {
     xkb_state = null;
 }
 
-/// Returns a pointer to the module-owned XkbState, used by events.zig during
-/// config reloads, or null before initXkb has run or after deinitXkb (e.g.
-/// during a config reload's deinit/init window).
-///
-/// The returned pointer is invalidated by deinitXkb/initXkb (e.g. during a
-/// config reload); callers must not cache it across those calls.
+/// Returns a pointer to the module-owned XkbState, or null only at boot before
+/// initXkb has run and at shutdown after deinitXkb (there is no reload window;
+/// see events.zig's reload path). The pointer is invalidated by deinitXkb and
+/// must not be cached across it.
 pub fn getXkbState() ?*xkbcommon.XkbState {
     return if (xkb_state) |*s| s else null;
 }
 
 /// Resolves `keybindings` against the live XKB state and rebuilds the dispatch
 /// map. Call once at startup (after `initXkb` and config load) and again on
-/// every config reload with the new config's keybindings. No-op without XKB;
-/// callers that must not run on stale XKB (the reload path) should check
-/// `getXkbState` themselves and abort first.
+/// every config reload with the new config's keybindings. No-op without XKB.
 pub fn buildKeybinds(keybindings: []types.Keybind) void {
     const state = getXkbState() orelse return;
     keybind.resolveKeycodes(keybindings, state);
@@ -156,7 +144,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 
     focus.setLastEventTime(event.time);
 
-    const state = xkb_state orelse {
+    const state = getXkbState() orelse {
         debug.warn("[KEY] keypress before XKB init; ignoring", .{});
         return;
     };
@@ -181,7 +169,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         });
         if (key_profile.enabled) key_profile.note(utils.monotonicNs() - key_t0);
         executeAction(action);
-    } else if (mods != 0 or keysym < masks.modifier_keysym_lo or keysym > masks.modifier_keysym_hi) {
+    } else if (mods != 0 or !masks.isModifierKeysym(keysym)) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R) can never
         // match a binding; staying silent keeps logs free of keystroke noise.
         debug.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
@@ -306,8 +294,8 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 fn closeWindow(win: u32) void {
     const conn = core.getState().conn;
     if (window.supportsWMDeleteCached(conn, win)) blk: {
-        const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") catch break :blk;
-        const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") catch break :blk;
+        const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") orelse break :blk;
+        const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") orelse break :blk;
 
         var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
         event.response_type = xcb.XCB_CLIENT_MESSAGE;
@@ -329,6 +317,11 @@ fn closeWindow(win: u32) void {
 /// tiling ops (`.forward` = +1, `.reverse` = -1).
 inline fn dirSign(dir: types.Dir) i32 {
     return if (dir == .forward) 1 else -1;
+}
+
+/// Float form of dirSign, for scaled-step actions that multiply a f32 rate.
+inline fn dirSignFloat(dir: types.Dir) f32 {
+    return if (dir == .forward) 1.0 else -1.0;
 }
 
 /// Top-level action dispatcher. Routes each action tag to its handler inline
@@ -361,9 +354,9 @@ fn executeAction(action: *const types.Action) void {
         .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
         .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(dir)),
         .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(dir)),
-        .set_master_width => |dir| actions.adjustPrimaryWidthAction(@as(f32, @floatFromInt(dirSign(dir))) * constants.master_width_step),
+        .set_master_width => |dir| actions.adjustPrimaryWidthAction(dirSignFloat(dir) * constants.master_width_step),
         .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(dir)),
-        .grow_stack => |dir| actions.adjustSecondaryBalance(@as(f32, @floatFromInt(dirSign(dir))) * constants.stack_balance_step),
+        .grow_stack => |dir| actions.adjustSecondaryBalance(dirSignFloat(dir) * constants.stack_balance_step),
         .swap_master => |mode| actions.swapPrimaryAction(mode == .focus_swap),
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),
@@ -425,7 +418,7 @@ fn dumpState() void {
         for (0..ws_count) |i| {
             var n: usize = 0;
             for (all) |e| {
-                if (model.maskedOn(e.mask, core.WorkspaceId.fromIndex(@intCast(i)))) n += 1;
+                if (model.maskedOn(e.mask, core.WorkspaceId.fromIndex(i))) n += 1;
             }
             debug.info(
                 "  WS{}: {} windows",

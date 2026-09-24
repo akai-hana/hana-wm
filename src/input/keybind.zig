@@ -71,6 +71,7 @@ pub fn resolveKeycodes(keybindings: []types.Keybind, state: *xkbcommon.XkbState)
     for (keybindings) |*kb| {
         kb.keycode = state.keysymToKeycode(kb.keysym);
         if (kb.keycode == null) {
+            // 64 bytes covers any XKB keysym name (longest is ~20 chars).
             var name_buf: [64]u8 = undefined;
             const name = keysyms.keysymGetName(kb.keysym, &name_buf);
             debug.warn(

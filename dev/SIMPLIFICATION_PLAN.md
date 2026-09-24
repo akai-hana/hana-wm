@@ -180,7 +180,7 @@ Realistic LOC recovery: **~600–900 lines** (≈4–5% of the tree) with equal-
 - **[DEAD (comptime)]** `clickHook`'s null-action branch (`97-98`) is unreachable (all `module()` sites pass non-null actions and the `orelse` short-circuits first).
 
 #### `src/bar/modules/systatus/*`
-- **[DUPLICATION]** cpu/mem/batt re-implement the third "open file → trim → parse u64" pattern (`cpu:39-62`, `mem:20-42`, batt). A tiny systatus-side reader helper collapses the trio.
+- **[DUPLICATION]** cpu/ram/batt re-implement the third "open file → trim → parse u64" pattern (`cpu:39-62`, `ram:20-42`, batt). A tiny systatus-side reader helper collapses the trio.
 - **[MAGIC]** batt's BAT0..BAT7 probe bound unnamed.
 
 #### `src/bar/modules/title/carousel.zig`

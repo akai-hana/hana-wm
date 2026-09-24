@@ -21,19 +21,12 @@ const xkb_keymap = xkb.struct_xkb_keymap;
 /// being established.
 const max_xkb_retries: u8 = 3;
 
-/// Detectable auto-repeat. Enabling it makes the server emit a held key's
-/// repeat as repeated KeyPress events WITHOUT the interleaved, deactivating
-/// KeyRelease that X11's default autorepeat produces on every cycle. With it,
-/// a held binding key re-fires its action cleanly: every repeat is a fresh
-/// KeyPress dispatched as a normal press. Without it, each autorepeat cycle
-/// interleaves a deactivating KeyRelease, so holding e.g. Super+1 flaps
-/// between the do/undo of a toggle action every repeat. Detectable auto-repeat
-/// turns the hold into steady, single-sided signalling.
-///
-/// Set through XkbPerClientFlags (minor opcode 21), the request the XKB
-/// protocol actually defines for this. There is no XkbSetDetectableAutoRepeat
-/// request: the old hand-marshalled minor opcode 34 does not exist, so the
-/// feature was silently never enabled.
+/// Detectable auto-repeat: the server emits a held key's repeat as KeyPress
+/// events WITHOUT the deactivating KeyRelease X11's default autorepeat elides
+/// between them. Without it a held binding key flaps between do/undo of a
+/// toggle action every repeat. Set via XkbPerClientFlags (minor opcode 21):
+/// there is no XkbSetDetectableAutoRepeat request — the old hand-marshalled
+/// minor opcode 34 does not exist, so the feature was silently never enabled.
 const xkb_detectable_auto_repeat_mask: u32 = 1; // XkbPCF_DetectableAutoRepeatMask
 
 /// Enables detectable auto-repeat on the XKB core device. Must be called after
@@ -42,10 +35,10 @@ const xkb_detectable_auto_repeat_mask: u32 = 1; // XkbPCF_DetectableAutoRepeatMa
 /// failure to look up the opcode or to send the request is logged and ignored —
 /// the WM still functions, it just reverts to the flappy autorepeat behaviour
 /// this is meant to eliminate.
-fn enableDetectableAutoRepeat(conn: *anyopaque) void {
+fn enableDetectableAutoRepeat(conn: core.Connection) void {
     const c = core.xcb;
 
-    const xconn: ?*c.struct_xcb_connection_t = @ptrCast(@alignCast(conn));
+    const xconn: ?*c.struct_xcb_connection_t = conn;
     const ext = c.xcb_get_extension_data(xconn, &c.xcb_xkb_id) orelse {
         debug.warn("XKB: extension data unavailable; detectable auto-repeat not enabled", .{});
         return;
@@ -110,11 +103,10 @@ pub const XkbState = struct {
     /// X connection. Retries up to max_xkb_retries times to handle early-startup
     /// races.
     ///
-    /// No xkb_state/keymap handles are retained; nothing ever read them
-    /// (dispatch resolves from the flat table by design, so CapsLock at
-    /// startup cannot pin shifted symbols); they were write+unref-only
-    /// lifecycle weight. The keymap is used transiently here and released.
-    pub fn init(xcb_conn: *anyopaque) !XkbState {
+    /// No xkb_state/keymap handles are retained: dispatch resolves from the
+    /// flat table by design, so (CapsLock at startup aside) lock state cannot
+    /// pin shifted symbols.
+    pub fn init(xcb_conn: core.Connection) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
         errdefer xkb.xkb_context_unref(ctx);
@@ -128,12 +120,9 @@ pub const XkbState = struct {
 
         const device_id = try retryDeviceId(xcb_conn);
 
-        const km = try retryKeymap(ctx, xcb_conn, device_id);
-        defer xkb.xkb_keymap_unref(km);
-
         return XkbState{
             .context = ctx,
-            .keysym_by_keycode = buildKeysymTable(km),
+            .keysym_by_keycode = try tableForDevice(ctx, xcb_conn, device_id),
         };
     }
 
@@ -146,17 +135,15 @@ pub const XkbState = struct {
     /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
     /// from the table, so it must track the new mapping or bindings silently
     /// stop matching; on failure the old mapping is kept.
-    pub fn rebuild(self: *XkbState, xcb_conn: *anyopaque) void {
+    pub fn rebuild(self: *XkbState, xcb_conn: core.Connection) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) return;
-        const km = retryKeymap(self.context, xcb_conn, device_id) catch {
+        // Table swapped only after the new keymap built successfully, so a
+        // failed rebuild leaves dispatch fully functional on the old mapping.
+        self.keysym_by_keycode = tableForDevice(self.context, xcb_conn, device_id) catch {
             debug.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
             return;
         };
-        defer xkb.xkb_keymap_unref(km);
-        // Table swapped only after the new keymap built successfully, so a
-        // failed rebuild leaves dispatch fully functional on the old mapping.
-        self.keysym_by_keycode = buildKeysymTable(km);
     }
 
     /// Returns the level-0 keysym for `keycode`, unaffected by lock modifiers
@@ -168,17 +155,9 @@ pub const XkbState = struct {
     /// Reverse-look up a keysym to its keycode (config parsing only). Scans the
     /// flat table (248 entries, all in L1 cache).
     ///
-    /// The table holds level-0 symbols, so a Shift-only keysym, e.g. `@` on a
-    /// US layout, resolves to null; callers should warn, since such a binding
-    /// cannot be grabbed.
-    ///
-    /// Returns only the FIRST (lowest) keycode if multiple keycodes map to the
-    /// same keysym (e.g. duplicate Enter keys). Dispatch is keysym-based, so
-    /// pressing the other physical key would still match the binding in theory,
-    /// but the X11 grab covers only the returned keycode — the other key's
-    /// press goes ungrabbed and is never delivered. This is acceptable because
-    /// truly symmetric multi-keycode keysyms are rare in WM bindings (modifier
-    /// left/right pairs have distinct keysyms: Shift_L ≠ Shift_R, etc.).
+    /// The table holds level-0 symbols, so a Shift-only keysym (e.g. `@`) can
+    /// resolve to null; callers should warn, since such a binding cannot be
+    /// grabbed. Returns only the first keycode when several map to the keysym.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
             if (self.keysym_by_keycode[kc] == keysym) return @intCast(kc);
@@ -208,7 +187,7 @@ fn retryDelay(attempt: u8) void {
 
 /// Retries xkb_x11_setup_xkb_extension up to max_xkb_retries times; the
 /// extension may not be ready immediately at WM startup.
-fn retrySetup(xcb_conn: *anyopaque) !void {
+fn retrySetup(xcb_conn: core.Connection) !void {
     for (0..max_xkb_retries) |i| {
         const ok = xkb.xkb_x11_setup_xkb_extension(
             @ptrCast(xcb_conn),
@@ -229,7 +208,7 @@ fn retrySetup(xcb_conn: *anyopaque) !void {
 /// Retries xkb_x11_get_core_keyboard_device_id up to max_xkb_retries times;
 /// the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
-fn retryDeviceId(xcb_conn: *anyopaque) !i32 {
+fn retryDeviceId(xcb_conn: core.Connection) !i32 {
     for (0..max_xkb_retries) |i| {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id != -1) return device_id;
@@ -258,9 +237,18 @@ fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
     return valid_keys >= min_keymap_symbols;
 }
 
+/// Builds a fresh keysym table for the connection's current keymap.
+/// Shared by init and rebuild: both acquire a device keymap and convert it to
+/// the flat table, differing only in how a failure is handled.
+fn tableForDevice(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) ![constants.x11_max_keycode]u32 {
+    const km = try retryKeymap(ctx, xcb_conn, device_id);
+    defer xkb.xkb_keymap_unref(km);
+    return buildKeysymTable(km);
+}
+
 /// Retries keymap creation up to max_xkb_retries times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
-fn retryKeymap(ctx: *xkb_context, xcb_conn: *anyopaque, device_id: i32) !*xkb_keymap {
+fn retryKeymap(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) !*xkb_keymap {
     for (0..max_xkb_retries) |i| {
         const km = xkb.xkb_x11_keymap_new_from_device(
             ctx,

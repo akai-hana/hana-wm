@@ -143,11 +143,10 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
         pinned = false;
         for (windows, 0..) |_, i| {
             if (capped[i]) continue;
-            const w_i: f32 = if (zero_boost) 1.0 else windowWeight(@intCast(i), n, boost);
-            const fair: u16 = if (rem_weight > 0)
-                @intFromFloat(@as(f32, @floatFromInt(rem_avail)) * w_i / rem_weight)
-            else
-                0;
+            const w_i: f32 = windowWeight(@intCast(i), n, boost);
+            // rem_weight ≥ rem_count here (windowWeight ≥ 1.0, boost ≥ 0), so
+            // the division never divides by zero — no `else 0` arm needed.
+            const fair: u16 = @intFromFloat(@as(f32, @floatFromInt(rem_avail)) * w_i / rem_weight);
             if (max_h[i] > 0 and max_h[i] <= fair) {
                 out[i] = @max(ctx.min_dim, max_h[i]);
                 capped[i] = true;
@@ -175,7 +174,8 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
             seen += 1;
         } else {
             cum += windowWeight(@intCast(i), n, boost);
-            const px: f32 = if (rem_weight > 0) @round(@as(f32, @floatFromInt(rem_avail)) * cum / rem_weight) else 0;
+            // Same rem_weight ≥ rem_count invariant as the pin pass above.
+            const px: f32 = @round(@as(f32, @floatFromInt(rem_avail)) * cum / rem_weight);
             out[i] = @max(ctx.min_dim, @as(u16, @intFromFloat(@max(@as(f32, 0), px - prev_px))));
             prev_px = px;
         }
@@ -236,8 +236,8 @@ fn tileStack(
 ) void {
     const stack_n: u16 = @intCast(windows.len);
 
-    const space_per_window: u32 =
-        @max(1, @as(u32, ctx.min_dim) + @as(u32, utils.doubledBorder(ctx.m)) + @as(u32, ctx.m.gap));
+    // Fits per window: min pane dim plus the row pitch (gap + doubled border).
+    const space_per_window: u16 = ctx.min_dim +| rowPitch(ctx.m);
     const available: u32 = @as(u32, h) -| @as(u32, ctx.m.gap);
     const max_fit: u16 = @intCast(@max(1, available / space_per_window));
 
@@ -293,7 +293,7 @@ fn tileStackExtra(
                 tiling.emitHidden(ctx.out, windows[win_idx]);
                 continue;
             }
-            emitRow(ctx, windows[win_idx], x +| tiling.seamGap(ctx.m) +| col *| (col_w +| ctx.m.gap), y_pos, col_inner_w, row_h);
+            emitRow(ctx, windows[win_idx], x +| tiling.seamGap(ctx.m) +| tiling.cellStride(col_w, ctx.m.gap, col), y_pos, col_inner_w, row_h);
         }
     }
 }

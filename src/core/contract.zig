@@ -342,6 +342,7 @@ pub fn callFirstTrue(
 /// the title render/snapshot scratch) pass `*anyopaque`; the segment casts to
 /// the shared bar vocabulary it imports (`@import("segment")`). This keeps the
 /// contract free of an import edge into the bar layer.
+///
 /// Which core fact-revisions repaint a segment. A bitmask; a dirty segment is
 /// repainted on the next draw. Declared per module; the bar marks dirty by
 /// bit, name-free. The role capabilities (`self_ticking`, `center_slot`) are

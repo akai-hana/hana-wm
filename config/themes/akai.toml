@@ -100,18 +100,18 @@ title_unfocused = secondary_color     # unfocused title = secondary_color
 title_minimized = alternative_color   # minimized title + slider fill = alternative_color
 
 # Per-segment text properties: any key that isn't a named color knob above is
-# a segment registry name ("cpu", "mem", "volume", "brightness", "batt", ...).
+# a segment registry name ("cpu", "ram", "volume", "brightness", "batt", ...).
 # The first color-carrying item sets the text color; trailing style flags
 # (underline/bold/italic, bare = true or name=true/1) set its style, e.g.
 # `volume = alternative_color bold`. A style-only entry keeps the default fg.
 # A segment with no entry falls back to the bar-wide fg (text_color).
 # Per-segment NUMBER colors: the segment name + "_value" recolors just the
-# numeric readout (the "42%" in "Cpu 42%"); the rest of the segment keeps its
+# numeric readout (the "42%" in "CPU 42%"); the rest of the segment keeps its
 # entry above. A segment with no `_value` entry colors its number like its
 # label. Systatus readouts read secondary; slider text stays alternative,
 # slider fill follows title_minimized (alternative).
 cpu        = secondary_color   # cpu readout text
-mem        = secondary_color   # memory readout text
+ram        = secondary_color   # memory readout text
 volume     = alternative_color # volume slider text
 brightness = alternative_color # brightness slider text
 
@@ -123,7 +123,7 @@ workspaces_selected = bold # bolds only the selected tag's icon text (color fall
 
 # Readout numbers pop in the focused accent, distinct from their labels
 cpu_value        = primary_color # cpu readout number
-mem_value        = primary_color # memory readout number
+ram_value        = primary_color # memory readout number
 volume_value     = primary_color # volume slider number
 brightness_value = primary_color # brightness slider number
 

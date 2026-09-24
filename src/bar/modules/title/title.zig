@@ -7,11 +7,10 @@
 //! the rendering of the title slot and the prompt overlay.
 
 const core = @import("core");
-const std = @import("std");
+
 const utils = @import("utils");
 const refresh = @import("refresh");
 
-const constants = @import("constants");
 const types = @import("types");
 
 const drawing = @import("drawing");
@@ -37,104 +36,13 @@ else
 // value (contract.BarOverlay) on its Segment, which this module finds through
 // the generated bar segment registry -- name-free, like every other registry
 // capability. Nothing in the closed core names the overlay module.
-const bar_mods = @import("bar_modules").modules;
-const overlay: ?contract.BarOverlay = for (bar_mods) |m| {
-    if (m.overlay) |o| break o;
-} else null;
+const overlay: ?contract.BarOverlay = if (contract.providerOf(contract.Segment, @import("bar_modules").modules[0..], .overlay)) |m|
+    m.overlay.?
+else
+    null;
 
 fn overlayActive() bool {
     return if (overlay) |o| o.is_active() else false;
-}
-
-/// Memoized width of the focused title. While the carousel scrolls, the title
-/// segment redraws every frame, and each frame would otherwise run a full
-/// Pango shape pass over the (unchanged) focused title. Keyed on window,
-/// buffer identity, length and bar height; the buffer contents are compared on
-/// a hit so a reused allocation (X id + address reuse) can't return a stale
-/// width. `invalidateReloadCaches` clears it when the font changes.
-const TitleWidthMemo = struct {
-    win: u32 = 0,
-    ptr: [*]const u8 = undefined,
-    len: usize = 0,
-    height: u16 = 0,
-    width: u16 = 0,
-};
-var focused_title_memo: TitleWidthMemo = .{};
-
-fn focusedTitleWidth(
-    dc: *drawing.DrawContext,
-    height: u16,
-    win: u32,
-    txt: []const u8,
-) u16 {
-    if (focused_title_memo.win == win and
-        focused_title_memo.len == txt.len and
-        focused_title_memo.height == height and
-        focused_title_memo.ptr == txt.ptr and
-        std.mem.eql(u8, focused_title_memo.ptr[0..focused_title_memo.len], txt))
-    {
-        return focused_title_memo.width;
-    }
-    const w = dc.measureTextWidth(txt);
-    focused_title_memo = .{
-        .win = win,
-        .ptr = txt.ptr,
-        .len = txt.len,
-        .height = height,
-        .width = w,
-    };
-    return w;
-}
-
-/// Memoized split-view gather: the sorted WindowInfo list plus the measured
-/// width of every cell. The title segment redraws every frame while the
-/// carousel scrolls, and each frame would otherwise re-sort up to
-/// `max_visible_windows` windows and re-run a Pango shape pass over every
-/// non-focused title. Cache keyed on the exact inputs the gather depends on
-/// (window ids, title identities, geoms, minimized membership, bar height);
-/// the sorting itself is a pure function of those, so a full-match key makes
-/// the cached list and widths stale-free. `invalidateReloadCaches` clears it
-/// when the font changes.
-const SegmentedTitlesMemo = struct {
-    win_count: usize = 0,
-    height: u16 = 0,
-    windows: [constants.max_tiled_windows]u32 = undefined,
-    titles: [constants.max_tiled_windows][]const u8 = undefined,
-    geoms: [constants.max_tiled_windows]?utils.Rect = undefined,
-    minimized: [constants.max_tiled_windows]bool = undefined,
-    sorted: [constants.max_tiled_windows]segmod.WindowInfo = undefined,
-    widths: [constants.max_tiled_windows]u16 = undefined,
-    sorted_len: usize = 0,
-};
-var segmented_titles_memo: SegmentedTitlesMemo = .{};
-
-/// True when the cached gathered list matches the live snapshot inputs on
-/// every dependency of the sort + width pass: same windows in the same order,
-/// same title identity, same geometry, same minimized membership, same bar
-/// height (fonts scale with height). The window ids pin the slice identity, so
-/// a title buffer reused by address+content is caught by the per-entry title
-/// compare below.
-fn segmentedTitlesCached(
-    ctx: segmod.TitleRenderContext,
-    snapshot: segmod.TitleSnapshot,
-    windows: []const u32,
-    win_count: usize,
-) bool {
-    const memo = segmented_titles_memo;
-    if (win_count != memo.win_count) return false;
-    if (ctx.height != memo.height) return false;
-    for (0..win_count) |i| {
-        if (windows[i] != memo.windows[i]) return false;
-        if (!std.mem.eql(u8, snapshot.titles[i], memo.titles[i])) return false;
-        const live_geom = snapshot.geoms[i];
-        const memo_geom = memo.geoms[i];
-        if ((live_geom == null) != (memo_geom == null)) return false;
-        if (live_geom) |lg| {
-            if (memo_geom) |mg| if (!lg.eql(mg)) return false;
-        }
-        if (snapshot.minimized_set.contains(windows[i]) != memo.minimized[i]) return false;
-    }
-    return true;
 }
 
 // The minimized-state service (set synthesis + per-window checks) is provided
@@ -161,7 +69,11 @@ fn drawInner(
 ) !u16 {
     refresh.ensureRefreshRateDetected(ctx.conn);
     const window_count = snapshot.current_ws_wins.len;
-    if (emptyWorkspace(ctx, window_count)) |end_x| return end_x;
+    // Empty workspace: fill the background and return the segment's end x.
+    if (window_count == 0) {
+        ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
+        return ctx.start_x + ctx.width;
+    }
 
     if (window_count == 1) {
         try drawSingleWindow(ctx, snapshot);
@@ -220,7 +132,7 @@ fn drawSingleWindow(
         geom,
         single_win,
         snapshot.focused_title,
-        focusedTitleWidth(ctx.dc, ctx.height, single_win, snapshot.focused_title),
+        ctx.dc.measureTextWidth(snapshot.focused_title),
         fg,
         workspace_has_focus,
     );
@@ -247,32 +159,23 @@ fn drawMarqueeCell(
             ctx.config.carousel_speed_px_s,
             now,
         );
-        if (!s.scrollingActive()) {
-            try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
+        if (s.scrollingActive()) {
+            const cycle = s.cyclePx(text_w);
+            // Anchor the scroll at the padded text start (same spot static mode uses),
+            // so enabling the carousel continues seamlessly from where the head sat.
+            const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
+            try ctx.dc.drawTextScrolled(
+                geom.seg_x,
+                geom.seg_w,
+                baseline_y,
+                .{ x0, x0 + cycle },
+                txt,
+                fg,
+            );
             return;
         }
-        const cycle = s.cyclePx(text_w);
-        // Anchor the scroll at the padded text start (same spot static mode uses),
-        // so enabling the carousel continues seamlessly from where the head sat.
-        const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
-        try ctx.dc.drawTextScrolled(
-            geom.seg_x,
-            geom.seg_w,
-            baseline_y,
-            .{ x0, x0 + cycle },
-            txt,
-            fg,
-        );
-        return;
     }
     try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
-}
-
-/// Pixel-perfect tiling: segment i of `count` spans [i*W/count, (i+1)*W/count).
-fn segmentBounds(total_width: u16, i: usize, count: u32) struct { x: u16, w: u16 } {
-    const x0: u16 = @intCast(@divFloor(@as(u32, @intCast(i)) * total_width, count));
-    const x1: u16 = @intCast(@divFloor(@as(u32, @intCast(i + 1)) * total_width, count));
-    return .{ .x = x0, .w = x1 - x0 };
 }
 
 /// Accent colour for a title segment: focused wins, then minimized, then the
@@ -331,54 +234,25 @@ fn drawFittedTitle(
 /// Renders one title segment per window in a horizontal split-view layout.
 /// The gather (gatherAndSortWindowInfos: build + sort up to max_visible_windows
 /// entries) and the width pass (Pango measureTextWidth per non-focused cell)
-/// dominate per-frame cost while the carousel scrolls, when this redraws every
-/// frame from an unchanged snapshot. Memoize both: when the memo matches the
-/// live inputs (window ids, titles, geoms, minimized, height), reuse the cached
-/// sorted list and widths instead of re-sorting + re-shaping.
+/// are computed fresh each frame.
 fn drawSegmentedTitles(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
 ) !void {
     const windows = snapshot.current_ws_wins;
-    // The snapshot list is built into the bar-wide scratch (max_visible_windows,
-    // shared with the gather buffer), so it can never exceed that cap in count.
-    const win_count = windows.len;
-    if (win_count == 0) return;
+    // The gather clamps to max_visible_windows internally; the snapshot list
+    // is also built into the same bar-wide cap, so the count can never drift.
+    if (windows.len == 0) return;
 
-    if (!segmentedTitlesCached(ctx, snapshot, windows, win_count)) {
-        var scratch: segmod.GatherScratch = .{};
-        const sorted = scratch.gather(snapshot, windows, win_count) orelse return;
-        // Cache is keyed on the input-order slices (windows/titles/geoms/
-        // minimized come from the snapshot in input order); the sorted list and
-        // measured widths are stored in sorted order, aligned to `sorted`.
-        var next: SegmentedTitlesMemo = .{
-            .win_count = win_count,
-            .height = ctx.height,
-            .sorted_len = sorted.len,
-        };
-        for (0..win_count) |i| {
-            next.windows[i] = windows[i];
-            next.titles[i] = snapshot.titles[i];
-            next.geoms[i] = snapshot.geoms[i];
-            next.minimized[i] = snapshot.minimized_set.contains(windows[i]);
-        }
-        @memcpy(next.sorted[0..sorted.len], sorted);
-        for (sorted, 0..) |info, i| {
-            next.widths[i] = if (snapshot.focused_window == info.window)
-                focusedTitleWidth(ctx.dc, ctx.height, info.window, info.title)
-            else
-                ctx.dc.measureTextWidth(info.title);
-        }
-        segmented_titles_memo = next;
-    }
+    var scratch: segmod.GatherScratch = .{};
+    const sorted = scratch.gather(snapshot, windows) orelse return;
 
-    const sorted = segmented_titles_memo.sorted[0..segmented_titles_memo.sorted_len];
     const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
     const min_cell_w = ctx.config.scaledSegmentPadding(ctx.height) *| 2;
 
     for (sorted, 0..) |info, i| {
-        const bounds = segmentBounds(ctx.width, i, window_count);
+        const bounds = segmod.segmentBounds(ctx.width, i, window_count);
         if (bounds.w == 0) continue;
         const segment_x = ctx.start_x + bounds.x;
 
@@ -394,27 +268,17 @@ fn drawSegmentedTitles(
         if (info.title.len == 0 or bounds.w <= min_cell_w) continue;
 
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
-        // Widths ride the memoized sorted list (reused verbatim on a memo hit);
-        // the focused cell's width also flows through focusedTitleWidth's own
-        // cross-frame memo, so the shape pass never repeats on an unchanged cell.
         try drawFittedTitle(
             ctx,
             baseline_y,
             titleTextGeom(ctx, segment_x, bounds.w),
             info.window,
             info.title,
-            segmented_titles_memo.widths[i],
+            ctx.dc.measureTextWidth(info.title),
             text_fg,
             is_focused_win,
         );
     }
-}
-
-/// If `count` is zero: fills the segment background and returns the segment's end x.
-inline fn emptyWorkspace(ctx: segmod.TitleRenderContext, count: usize) ?u16 {
-    if (count != 0) return null;
-    ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
-    return ctx.start_x + ctx.width;
 }
 
 // -- Segment hooks -----------------------------------------------------------
@@ -500,13 +364,6 @@ fn onBarShownHook() void {
     if (scroller) |s| s.resetForShow();
 }
 
-/// Config reload can swap the font (and with it every measured width) without
-/// changing the bar height, so the focused-title memo must be dropped here.
-fn invalidateReloadCaches() void {
-    focused_title_memo = .{};
-    segmented_titles_memo = .{};
-}
-
 /// This module's bar-segment contribution (registry binding).
 pub const module: @import("contract").Segment = .{
     .name = "title",
@@ -518,5 +375,4 @@ pub const module: @import("contract").Segment = .{
     .draw = drawHook,
     .onClick = onClickHook,
     .onBarShown = onBarShownHook,
-    .invalidateReloadCaches = invalidateReloadCaches,
 };

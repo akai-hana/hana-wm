@@ -110,17 +110,17 @@ fn readRawValue(base: []const u8, class: Class, dev: []const u8) ?u32 {
 }
 
 /// Maps a raw level onto the 0-100 scale; null when the device is unusable
-/// (max unknown or zero).
+/// (max unknown or zero). The linear map itself is the shared
+/// `slider.pctFromRaw` (nearest-rounding).
 fn pctFromRaw(raw: u32, max: u32) ?u8 {
     if (max == 0) return null;
-    const v: u64 = @as(u64, raw) * 100 / max;
-    return @intCast(@min(v, 100));
+    return slider.pctFromRaw(u32, raw, 0, max);
 }
 
-/// Maps a 0-100 percent onto the device's raw scale (nearest rounding).
+/// Maps a 0-100 percent onto the device's raw scale (the shared
+/// `slider.rawFromPct`, nearest-rounding).
 fn rawFromPct(pct: u8, max: u32) u32 {
-    const v: u64 = (@as(u64, pct) * max + 50) / 100;
-    return @intCast(@min(v, max));
+    return slider.rawFromPct(u32, pct, 0, max);
 }
 
 /// Reads the normalized 0-100 level of `dev` from the fabricated-or-real
@@ -303,18 +303,17 @@ fn commitPct(v: u8) void {
     g_read_only = !ok;
 }
 
-const level = slider.Level{ .pct = &g_pct, .commit = commitPct, .reread = readBrightness };
-
 /// One-shot apply (press, drag end): commit then re-read so the display
 /// follows the device immediately rather than on the next poll tick.
 fn applyPct(v: u8) void {
-    level.apply(v);
+    commitPct(v);
+    _ = readBrightness();
 }
 
 /// Optimistic display update from a scroll/drag motion: the label follows
 /// immediately while the backend write is committed by the core's scheduler.
 fn previewPct(v: u8) void {
-    level.preview(v);
+    g_pct = v;
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}`
@@ -341,7 +340,7 @@ fn label(config: types.BarConfig, buf: []u8) slider.Label {
 
 // Current level / presence / write-gate hooks for the core.
 fn currentPct() u8 {
-    return level.current();
+    return g_pct;
 }
 
 fn hasValue() bool {

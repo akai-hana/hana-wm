@@ -55,7 +55,7 @@ test "latency: reconcile cost + request count at focus change" {
 
         // Count requests in one representative pass (fresh sink).
         var probe = CountingSink{};
-        var probe_ctx = makeCtx(probe.sink(), colorOfFocused);
+        var probe_ctx = makeCtx(probe.sink(), colorOfFocused, helpers.std_wa);
         sync.reconcile(&m, &probe_ctx, .{});
 
         if (bench)
@@ -84,14 +84,14 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     defer sync.init();
 
     var warm = CountingSink{};
-    var warm_ctx = makeCtx(warm.sink(), colorOfFocused);
+    var warm_ctx = makeCtx(warm.sink(), colorOfFocused, helpers.std_wa);
     sync.reconcile(&m, &warm_ctx, .{});
 
     const iters: usize = if (bench) 5_000 else 1;
 
     // Phase 1: the focus transition reconcile.
     var s1 = CountingSink{};
-    var c1 = makeCtx(s1.sink(), colorOfFocused);
+    var c1 = makeCtx(s1.sink(), colorOfFocused, helpers.std_wa);
     model.setFocus(&m, 2);
     const t0 = nowNs();
     for (0..iters) |_| {
@@ -104,7 +104,7 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     // path would pay IF it regressed to two grabs per Mod+k. The folded path
     // never runs this: it reconciles once, with the snap already applied.
     var s2 = CountingSink{};
-    var c2 = makeCtx(s2.sink(), colorOfFocused);
+    var c2 = makeCtx(s2.sink(), colorOfFocused, helpers.std_wa);
     const t1 = nowNs();
     for (0..iters) |_| sync.reconcile(&m, &c2, .{});
     const snap_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters));

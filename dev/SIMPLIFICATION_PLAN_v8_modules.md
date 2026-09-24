@@ -38,11 +38,11 @@ backends.
 | S-02 | brightness.zig:114-124 + native_alsa.zig:137-151 | `pctFromRaw`/`rawFromPct` implement the same linear 0-100↔[min..max] map twice; acts of `max==0`/`max<=min` and clamp are duplicated (rounding differs: sysfs brute-truncates the read, alsa rounds-nearest both directions for amixer parity) | one shared slider-core `pctFromRange`/`rangeFromPct` with a comptime `nearest_rounding: bool`, used by both controls (does NOT merge the backends) | −5..−7 | M |
 | S-03 | volume.zig:160-185 + 220-241 | per-`.pulse`/`.alsa` branches in `commitPct`/`toggleMute` duplicate the native-else-spawn shape (differing native fn per arm) | [DEFERRED] see §C #2 | — | — |
 
-### systatus/{systatus,cpu,mem,batt}.zig — 2 findings
+### systatus/{systatus,cpu,ram,batt}.zig — 2 findings
 
 | ID | Location | Issue | Fix | Est. LOC | Conf. |
 |----|----------|-------|------|----------|-------|
-| SY-01 | cpu.zig:18-23, mem.zig:23-28, batt.zig:23-27 | the `std.Options.debug_io` + `openFileAbsolute` + `readPositionalAll` stanza is repeated across the three readouts (all already import `systatus`) | add `systatus.readSmallFile(path, buf) ?usize`; callers keep their parse | −5..−8 | H |
+| SY-01 | cpu.zig:18-23, ram.zig:23-28, batt.zig:23-27 | the `std.Options.debug_io` + `openFileAbsolute` + `readPositionalAll` stanza is repeated across the three readouts (all already import `systatus`) | add `systatus.readSmallFile(path, buf) ?usize`; callers keep their parse | −5..−8 | H |
 | SY-02 | cpu.zig:39-53 | baseline and delta branches duplicate the state write (`cpu_prev_total/idle = …` twice, :41-42 and :49-50) and both end in `@intCast(@min(busy,100))` | write the baseline state once, then compute `d_total = total -| prev`; when `d_total==0` report the boot-cumulative busy (the current baseline arm), else the delta — single exit tail | −3..−4 | M |
 
 ### clock.zig — 1 finding

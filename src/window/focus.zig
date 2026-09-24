@@ -64,7 +64,7 @@ var state: ?State = null;
 pub fn init() void {
     // Reset every field so a deinit()+init() cycle starts from a clean slate.
     state = .{};
-    state.?.net_active_window = utils.getAtomCached("_NET_ACTIVE_WINDOW") catch 0;
+    state.?.net_active_window = utils.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0;
 }
 
 pub fn deinit() void {
@@ -80,8 +80,7 @@ pub fn deinit() void {
 /// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
     if (pipeline.initialized) {
-        if (pipeline.model().focused) |w| return @intCast(w);
-        return null;
+        return pipeline.model().focused;
     }
     return state.?.last_applied;
 }
@@ -100,9 +99,7 @@ pub inline fn getSuppressReason() core.FocusSuppressReason {
 /// assigned focus. Lives in-module (not the test) because it reads the
 /// private `state`.
 pub fn protocolParityHolds() bool {
-    if (!pipeline.initialized) return true;
-    const truth: ?u32 = if (pipeline.model().focused) |w| @intCast(w) else null;
-    return state.?.last_applied == truth;
+    return getFocused() == state.?.last_applied;
 }
 
 /// True when the most recent prepareFocus returned `.none` because the
@@ -231,9 +228,9 @@ pub const Reason = enum {
 };
 
 // CommitFlags: controls which side effects applyPendingFocus applies.
-// All fields are non-defaulted (except take_focus_known, see below) so every
-// call site must be explicit; an accidental zero-flags call fails to compile,
-// preventing silent no-protocol transitions that are hard to debug.
+// All fields are non-defaulted so every call site must be explicit; an
+// accidental zero-flags call fails to compile, preventing silent
+// no-protocol transitions that are hard to debug.
 const CommitFlags = struct {
     /// Send xcb_set_input_focus. False for no_input (never receives focus
     /// protocol) and globally_active (manages its own focus, ICCCM 4.1.7).
@@ -250,10 +247,8 @@ const CommitFlags = struct {
     send_wm_take_focus: bool,
 
     /// Authoritative WM_TAKE_FOCUS advertisement from the caller's own live
-    /// protocol query (setFocus path, one round trip saved). Null keeps the
-    /// pre-fired-cookie pipeline; defaulted unlike its siblings because it
-    /// refines `send_wm_take_focus` rather than gating a side effect.
-    take_focus_known: ?bool = null,
+    /// protocol query (setFocus path, one round trip saved).
+    take_focus_known: bool,
 
     /// Bump the core focus fact so focus-consuming surfaces (e.g. the bar's
     /// title segment) redraw. False only inside a server grab; the caller
@@ -368,16 +363,10 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // re-grab of that same window's buttons (a button-regrab flash).
     const force = reason == .workspace_switch;
     const raise = shouldRaise(reason, win);
-    if (state.?.last_applied == win) {
-        if (!raise) return .none;
-        return setIntent(win, null, resolved, .{
-            .raise = raise,
-            .new_suppress = suppressionFor(reason, state.?.suppress_reason),
-            .force_set_input_focus = force,
-        });
-    }
-
-    return setIntent(win, state.?.last_applied, resolved, .{
+    const same_applied = state.?.last_applied == win;
+    if (same_applied and !raise) return .none;
+    const old: ?u32 = if (same_applied) null else state.?.last_applied;
+    return setIntent(win, old, resolved, .{
         .raise = raise,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
         .force_set_input_focus = force,
@@ -390,16 +379,15 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
 /// The clear target derives from the protocol cache (last_applied), and the
 /// MODEL is the truth source for callers. A window teardown legitimately
 /// clears model.focused while last_applied still holds the (now-removed)
-/// window, so `m.focused == null` is a normal reason to clear, not a
+/// window, so `model.focused == null` is a normal reason to clear, not a
 /// divergence. Only a live model.focused that disagrees with last_applied is
 /// worth a diagnostic; it still proceeds -- every clear caller nulls
 /// model.focused right after, and skipping would strand X input focus on a
 /// stale window the model no longer claims. Callers MUST run model.clearFocus
 /// after this call.
 pub fn prepareClearFocus() FocusTransition {
-    const m = pipeline.model();
     const applied = state.?.last_applied;
-    const focused: ?u32 = if (m.focused) |w| @as(u32, @intCast(w)) else null;
+    const focused = getFocused();
 
     if (applied == null) return .none; // model-only focus (none) -- nothing applied to clear
     if (focused) |f| {
@@ -415,7 +403,7 @@ pub fn prepareClearFocus() FocusTransition {
 }
 
 /// Shared shutdown tail of the focus-clear paths (applyPendingFocus's `.clear`
-/// limb and applyClear): drop applied focus, reset suppression, refocus root.
+/// limb): drop applied focus, reset suppression, refocus root.
 fn clearTail() void {
     state.?.last_applied = null;
     state.?.suppress_reason = .none;
@@ -441,9 +429,8 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             if (intent.flags.set_input_focus) focusNow(conn, intent.win);
             if (intent.flags.raise) utils.raiseWindow(conn, intent.win);
 
-            if (intent.flags.send_wm_take_focus) {
-                if (intent.flags.take_focus_known) |advertises| window.sendWMTakeFocusKnown(conn, intent.win, 0, advertises);
-            }
+            if (intent.flags.send_wm_take_focus and intent.flags.take_focus_known)
+                window.sendWMTakeFocusKnown(conn, intent.win, 0, true);
 
             if (intent.flags.schedule_bar) core.focus.bump();
 
@@ -463,20 +450,6 @@ inline fn isWindowMapped(conn: core.Connection, win: u32) bool {
     const reply = xcb.xcb_get_window_attributes_reply(conn, xcb.xcb_get_window_attributes(conn, win), null) orelse return false;
     defer std.c.free(reply);
     return reply.*.map_state == xcb.XCB_MAP_STATE_VIEWABLE;
-}
-
-/// Shared post-model-clear tail of the focus-clear paths: prepare the clear
-/// transition and replay it locally.
-fn applyClear() void {
-    // prepareClearFocus reads the MODEL as the focus truth, so it must run
-    // BEFORE model.clearFocus clears that decision source.
-    const ft = prepareClearFocus();
-    if (pipeline.initialized) model_mod.clearFocus(pipeline.mut(&gate));
-    if (ft == .none) {
-        clearTail();
-        return;
-    }
-    applyPendingFocus(ft);
 }
 
 /// Write `_NET_ACTIVE_WINDOW` to the root window so EWMH clients stay in sync.
@@ -630,7 +603,7 @@ fn collectVisibleWindows() usize {
 /// Returns the next (forward=true) or previous (forward=false) index in a
 /// circular list of `len` elements, starting from `idx`.
 inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
-    return if (forward) (idx + 1) % len else (idx + len - 1) % len;
+    return utils.wrapIndex(idx, if (forward) 1 else -1, len);
 }
 
 /// Resolve the visible window a focus-cycle step would land on, or null when

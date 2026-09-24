@@ -24,7 +24,7 @@ const model_mod = @import("model");
 pub const SizeHints = model_mod.SizeHints;
 
 const WindowData = struct {
-    border: u32 = 0,
+    border_color: u32 = 0,
     hints: SizeHints = .{},
     /// Cached _NET_WM_NAME / WM_NAME, duped into `title_alloc`. Owned: freed
     /// on overwrite (storeTitle), on removeWindow, and on deinit. The only
@@ -132,19 +132,19 @@ pub fn removeWindow(window_id: u32) void {
 /// recording is load-bearing, not just an optimization: values forced
 /// outside this function (fullscreen's pixel 0) must end up in the cache,
 /// or the next real color change dedups against a stale value and is
-/// silently skipped -- the un-fullscreen "lost borders" bug. Returns false
-/// when the cache is unavailable (not initialized; bounded by max_entries
-/// like every other writer); callers then fall back to an unconditional
-/// send.
-pub fn sendBorderColorIfChanged(win: u32, color: u32) bool {
+/// silently skipped -- the un-fullscreen "lost borders" bug. Sends
+/// unconditionally when the cache is full (bounded by max_entries like every
+/// other writer), so callers never need their own fallback.
+pub fn sendBorderColorIfChanged(win: u32, color: u32) void {
     const conn = core.getState().conn;
-    // Refuse to grow past the ceiling so WM-churn of distinct windows can't
-    // bloat the cache (the caller falls back to an unconditional send).
-    const wd = getOrPutDefault(win) catch return false;
-    if (wd.border == color) return true;
-    wd.border = color;
+    const wd = getOrPutDefault(win) catch {
+        // Cache full (bounded by max_entries): refuse to grow, send anyway.
+        utils.setBorderPixel(conn, win, color);
+        return;
+    };
+    if (wd.border_color == color) return;
+    wd.border_color = color;
     utils.setBorderPixel(conn, win, color);
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +171,8 @@ pub const TitleCookies = struct {
 fn ensureAtoms() void {
     if (atoms_resolved) return;
     atoms_resolved = true;
-    net_wm_name = utils.getAtomCached("_NET_WM_NAME") catch null;
-    utf8_string = utils.getAtomCached("UTF8_STRING") catch null;
+    net_wm_name = utils.getAtomCached("_NET_WM_NAME") orelse null;
+    utf8_string = utils.getAtomCached("UTF8_STRING") orelse null;
 }
 
 /// Fires both title queries without waiting (no flush: the caller's batch

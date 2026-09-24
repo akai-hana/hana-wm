@@ -21,6 +21,25 @@ const font_baseline_height: f32 = 1080.0;
 /// before passing them to scaleBarHeight.
 pub const bar_min_height_px: u16 = 20;
 
+/// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured bar
+/// derives its height from font metrics, and this bounds that derivation so
+/// a huge fallback font can't take over the whole screen.
+pub const bar_max_height_px: u16 = 200;
+
+/// Fallback bar height when even font metrics are unavailable: a small
+/// strip-sized default that stays in proportion on any screen.
+pub const default_bar_height_px: u16 = 24;
+
+/// Clamps an auto-derived bar height (from font metrics, in pixels) into
+/// [bar_min_height_px, bar_max_height_px].
+pub fn clampBarHeight(px: i32) u16 {
+    return @intCast(std.math.clamp(
+        px,
+        @as(i32, @intCast(bar_min_height_px)),
+        @as(i32, @intCast(bar_max_height_px)),
+    ));
+}
+
 /// Reasonable-DPI band applied to both the geometry-derived and Xft.dpi paths.
 /// Values outside this range (or non-finite) are rejected as misconfiguration
 /// rather than being fed straight into Pango, where 0/negative/NaN DPI would
@@ -152,6 +171,9 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 /// Scales a font size value against the screen height, clamped to a minimum of 1px.
 /// Percentage values are relative to font_baseline_height (1080px) rather than the
 /// screen baseline, so font sizes degrade more gracefully on smaller screens.
+/// Note the asymmetry with scaleBarHeight below: that sibling delegates to
+/// utils.scaling.scaleToPixels because bar height is an absolute figure against
+/// the screen baseline, while font size keeps this inline relative-to-1080 form.
 pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
     const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
     const raw = if (value.is_percentage)

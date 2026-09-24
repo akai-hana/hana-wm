@@ -1,12 +1,13 @@
 //! Sends are planned in sync.zig and dispatched by sync/sink.zig's shims
-//! (the sanctioned seam); the raw XCB primitives those shims call are defined
+//! (the sanctioned seam); sync.Sink's inline methods are thin dispatchers
+//! over that seam; the raw XCB primitives those shims call are defined
 //! in core/x11/wire.zig (allowlisted primitive home); a small documented
 //! allowlist covers bar lifecycle, client-protocol, and non-mutation flushes
 //! (see dev/scripts/check-layers.sh Rules 1-2).
 //!
 //! Scroll viewport caller duties (snap-right-on-new, clamp, prev_count update)
-//! happen in ACTIONS before they call reconcile; this module never mutates
-//! model params (m is const).
+//! run in pipeline.preReconcileDuties -- the single choke point -- before any
+//! reconcile; this module never mutates model params (m is const).
 //!
 //! RECONCILE ALGORITHM - UNCONDITIONAL COMPUTE, DELTA SEND. Every pass
 //! computes the desired state for every stored window that needs it (an
@@ -126,8 +127,6 @@ pub const Ctx = struct {
     /// Screen minus bar; computed by the caller with the existing
     /// bar-offset helper (workArea(ctx)). Used for tiled geometry.
     workarea: utils.Rect,
-    /// config.tiling.border_width, already scaled at load.
-    cfg_bw: u16,
     env: contract.Env = .{},
     /// Focus/mode border color; ported from borders.resolveBorderColor minus
     /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
@@ -138,7 +137,7 @@ pub const Ctx = struct {
 
 pub const ReconcileOpts = struct { force_restack: bool = false };
 
-/// What we last sent per window; WRITE-ONLY bookkeeping whose three contract
+/// What we last sent per window; WRITE-ONLY bookkeeping whose four contract
 /// reads are documented in the header:
 ///   - has_rect: whether a visible geometry was EVER sent (an explicit flag,
 ///     not a sentinel rect: a legitimately placed zero-size window at the
@@ -155,7 +154,7 @@ const SentEntry = struct {
     pixel: u32 = 0,
 };
 
-pub const State = struct {
+const State = struct {
     /// Ledger of sent state (see SentEntry), keyed by window id in the
     /// model.Store's sorted-key array: get-or-put / forget resolve records
     /// by binary search with no parallel id index to keep in lockstep.
@@ -178,9 +177,7 @@ pub fn sentGet(win: model.WindowId) ?SentEntry {
 }
 
 /// Ledger get-or-create for `win`: pointer to its record, or null when the
-/// ledger is full and `win` has no slot yet. Null replaces the former
-/// `.found_existing` struct: callers treat both cases the same (reads see a
-/// fresh blank record; writes are logged+lost).
+/// ledger is full and `win` has no slot yet. Callers treat both cases the same.
 /// pub: production reconcile, plus the test verification seam (perf_test).
 pub fn sentGetOrPut(win: model.WindowId) ?*SentEntry {
     if (st.sent.getPtr(win)) |r| return r;
@@ -325,7 +322,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     if (winner == null) if (m.focused) |f| blk: {
         const slot = m.store.indexOf(f) orelse break :blk;
         const fe = m.store.at(slot).val.*;
-        if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, model.visibleEntry(m, fe, m.current))) winner = f;
+        if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, model.visibleEntry(m, &fe, m.current))) winner = f;
     };
 
     // One fused pass over the store: compute a window's desire, then SEND it
@@ -369,7 +366,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // already true), never be a fallback winner, and rewrite the same
         // parked=true.
         const is_fs = win == fs_win;
-        const on_current = model.visibleEntry(m, e.*, m.current);
+        const on_current = model.visibleEntry(m, e, m.current);
         const definitely_parked_desire = e.presence == .parked or !on_current;
         if (!is_fs and definitely_parked_desire and ledger.parked) continue;
 
@@ -384,22 +381,21 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const bw = desire.bw;
         const pixel = desire.pixel;
         const parked = desire.parked;
-        const is_winner = desire.is_winner;
+        const is_winner = winner == win;
 
         if (parked) {
             if (!ledger.parked) ctx.sink.park(win);
         } else {
             // Raise triggers per the ledger contract (header read 2): winner
             // .above on geometry motion, unpark, or restack pressure only.
-            const last = ledger;
-            const first_send = !last.has_rect;
-            const moved = first_send or !last.rect.eql(rect);
-            const unpark_transition = last.parked;
+            const first_send = !ledger.has_rect;
+            const moved = first_send or !ledger.rect.eql(rect);
+            const unpark_transition = ledger.parked;
             const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
 
             const need_map = first_send or unpark_transition;
-            const need_bw = !last.has_rect or last.bw != bw;
-            const need_pixel = !last.has_rect or last.pixel != pixel;
+            const need_bw = !ledger.has_rect or ledger.bw != bw;
+            const need_pixel = !ledger.has_rect or ledger.pixel != pixel;
             const need_geom = moved or unpark_transition or raise_winner;
 
             if (need_map) ctx.sink.map(win);
@@ -468,11 +464,10 @@ const Desire = struct {
     bw: u16,
     pixel: u32,
     parked: bool,
-    is_winner: bool,
 };
 
 /// Park a desire: zero the border width/pixel and set the parked flag.
-/// Shared trailer of the four parked arms of computeDesire.
+/// Shared trailer of computeDesire's parking arms.
 fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
     bw.* = 0;
     pixel.* = 0;
@@ -518,7 +513,7 @@ fn computeDesire(
     on_current: bool,
 ) Desire {
     var rect: utils.Rect = contract.parked_rect;
-    var bw: u16 = ctx.cfg_bw;
+    var bw: u16 = ctx.env.margins.border;
     var pixel: u32 = ctx.color_of(win, m);
     var parked = false;
 
@@ -560,8 +555,7 @@ fn computeDesire(
 
     // Fallback winner: first non-parked desire in store order.
     if (winner.* == null and !parked) winner.* = win;
-    const is_winner = winner.* == win;
-    return .{ .rect = rect, .bw = bw, .pixel = pixel, .parked = parked, .is_winner = is_winner };
+    return .{ .rect = rect, .bw = bw, .pixel = pixel, .parked = parked };
 }
 
 /// O(1) placement lookup: placement for store slot `slot`, or null when the window
