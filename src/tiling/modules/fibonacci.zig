@@ -37,10 +37,11 @@ const SpiralDirection = enum(u2) {
 
 /// Compute Fibonacci spiral layout. Outer gap stripped first; each split
 /// halves the remaining dimension with one gap at the seam. Drawn by pointer;
-/// helpers take the pointer to avoid copies in the recursive path.
+/// helpers take the pointer to avoid copies in the recursion.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     const border2 = utils.doubledBorder(m);
+    const min_region = m.gap *| 2 +| border2;
 
     const outer = tiling.outerArea(v.workarea, m.gap);
     var cur = outer;
@@ -53,7 +54,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         // Too small for another split: the seam would leave no room for a
         // border either side. Gate is geometry-only (gap+borders), unlike
         // leaf.zig's 2*min_dim+gap floor for a flat two-child pane.
-        if (last or cur.w < m.gap *| 2 + border2 or cur.h < m.gap *| 2 + border2) {
+        if (last or cur.w < min_region or cur.h < min_region) {
             // focusedElse: fallback is the current split-remainder head.
             const top = tiling.focusedElse(v, windows[i..], win);
             tiling.emitOverflowShare(ctx, windows[i..], top, cur);
@@ -94,11 +95,13 @@ inline fn splitAndAdvance(
         (if (split_x) win_dim else cur.w) -| border2,
         (if (split_x) cur.h else win_dim) -| border2,
     );
-    if (forward and split_x) cur.x += @intCast(win_dim + gap);
-    if (forward and !split_x) cur.y += @intCast(win_dim + gap);
+    // Advance the remainder origin along the split axis (forward only), then
+    // shrink the remainder along that axis by the taken strip.
     if (split_x) {
+        if (forward) cur.x += @intCast(win_dim + gap);
         cur.w = cur.w -| (win_dim + gap);
     } else {
+        if (forward) cur.y += @intCast(win_dim + gap);
         cur.h = cur.h -| (win_dim + gap);
     }
 }

@@ -19,7 +19,6 @@ const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
-const providerOf = window.providerOf;
 
 fn resetState() void {
     g_recs.clear();
@@ -132,10 +131,7 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // through the minimize — minimize only remapped presence to `.parked`), so
     // core's model-based coverage read (`coveringOccupantOnWs`) recognizes it
     // again as the screen owner. Plain windows restore to `.present`.
-    const covering = if (providerOf(.isCoveringMode)) |wm|
-        wm.isCoveringMode.?(m, win)
-    else
-        false;
+    const covering = window.isCoveringMode(m, win);
     e.presence = if (covering) .covering else .present;
     _ = g_recs.orderedRemove(idx);
 }
@@ -172,9 +168,7 @@ fn bestSeq(
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
         if (skip_covering) {
-            if (providerOf(.isCoveringMode)) |wm| {
-                if (wm.isCoveringMode.?(m, rec.win)) continue;
-            }
+            if (window.isCoveringMode(m, rec.win)) continue;
         }
         const better = switch (order) {
             .fifo => best == null or rec.seq < best_seq,
@@ -298,13 +292,6 @@ pub fn onWindowGone(win: u32) void {
     _ = g_recs.removeById(.win, win);
 }
 
-/// Adapter for the hide seam: widens the module's `MinimizeError!void`
-/// return set to the contract's uniform `anyerror!void` (the error set
-/// coerces; this wrapper keeps the binding explicit).
-pub fn hideWindow(m: *model.Model, win: model.WindowId) anyerror!void {
-    return minimize(m, win);
-}
-
 /// This module's window sub-system contribution: lifecycle + persistence
 /// seam + record cleanup for torn-down windows.
 pub const module: @import("contract").WindowModule = .{
@@ -313,7 +300,7 @@ pub const module: @import("contract").WindowModule = .{
     .onWindowGone = onWindowGone,
     .serializeWindow = serializeWindow,
     .deserializeWindow = deserializeWindow,
-    .hideWindow = hideWindow,
+    .hideWindow = minimize,
     .restoreWindow = restore,
     .restoreCandidateOn = restoreCandidate,
     .restoreOnWs = restoreAllOnWs,

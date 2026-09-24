@@ -40,14 +40,14 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const sw_i32: i32 = @intCast(screen_w);
 
-    // Clamp internally so compute is self-contained; callers that pre-clamp
-    // (pipeline.preReconcileDuties) are still correct but no longer required.
+    // Clamped internally (self-contained); the optional pre-clamp grow duty is
+    // described at the module header.
     const max_off = maxOffset(windows.len, slot_w, screen_w);
     const scroll: i32 = @max(0, @min(v.params.viewport_offset, max_off));
 
     // Border subtracted here (once); emitView's applyHints never touches it.
     const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.totalInset(m.gap, m), v.env.min_dim);
-    const win_y: i32 = @as(i32, @intCast(tiling.waY(v))) + @as(i32, @intCast(m.gap));
+    const win_y: i32 = @as(i32, tiling.waY(v) +| m.gap);
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
     // adjacent windows together share exactly one full gap.

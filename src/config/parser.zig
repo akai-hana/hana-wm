@@ -18,20 +18,28 @@ pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
     string: []const u8,
-    array: std.ArrayList(Value),
+    // A list of values. `accumulated` is true only for arrays formed by
+    // duplicate-key accumulation (`accumulate`): scalar reads then implement
+    // "later declaration wins" (the latest value is the LAST element) while
+    // array consumers see the full accumulation. A *literal* array (a `[...]`
+    // bracket list or a bare multi-token spelling, both created once at parse
+    // time) is `accumulated == false`: it is never a scalar -- `resolveColorExpr`
+    // owns it as a color-mix (bare lists mix equally) and array consumers read
+    // it as-is. Keeps "genuinely duplicated keys" distinct from "one author
+    // wrote a list".
+    array: struct { list: std.ArrayList(Value), accumulated: bool = false },
     color: u32,
     scalable: types.ScalableValue,
 
-    // Duplicate keys accumulate into a flat array (see `accumulate`), so
-    // scalar reads implement "later declaration wins": the latest value is
-    // the LAST element. Array consumers see the full accumulation. Not
-    // `inline` because recursion into an accumulated duplicate array is
-    // rejected. Routes every scalar accessor through one shared
-    // last-element descent.
+    // Scalar reads resolve through the last element ONLY for accumulated
+    // duplicate arrays (later declaration wins). A literal array is not a
+    // scalar, so it yields null here and callers fall back to their own
+    // array handling (resolveColorExpr for colors). Not `inline` because
+    // recursion into an accumulated duplicate array is rejected.
     fn lastScalar(self: Value) ?Value {
         return switch (self) {
-            .array => |arr| if (arr.items.len > 0)
-                arr.items[arr.items.len - 1].lastScalar()
+            .array => |arr| if (arr.accumulated and arr.list.items.len > 0)
+                arr.list.items[arr.list.items.len - 1].lastScalar()
             else
                 null,
             else => self,
@@ -68,7 +76,7 @@ pub const Value = union(enum) {
     }
     pub inline fn asArray(self: Value) ?[]const Value {
         return switch (self) {
-            .array => |arr| arr.items,
+            .array => |arr| arr.list.items,
             else => null,
         };
     }
@@ -200,24 +208,20 @@ pub const Section = struct {
         self.scalar_dup_warned.put(key, {}) catch {};
         // Root pairs (no section header) warn under a "[root]" label so one
         // format serves both cases.
-        const decls: usize = val.array.items.len;
+        const decls: usize = val.array.list.items.len;
         debug.warn(
             "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations); scalar reads use the last value",
             .{ key, if (self.name.len == 0) "root" else self.name, decls },
         );
     }
 
-    // Generic typed getter: dispatches to the matching `Value.asScalar`
-    // accessor for the requested type.
+    // Generic typed getter: dispatches to `Value.asScalar` (which owns the
+    // last-declaration descent), plus the array view for sequence reads.
     pub fn getAs(self: *Section, comptime T: type, key: []const u8) ?T {
         const v = self.get(key) orelse return null;
         return switch (T) {
-            i64 => v.asScalar(i64),
-            bool => v.asScalar(bool),
-            []const u8 => v.asScalar([]const u8),
             []const Value => v.asArray(),
-            types.ScalableValue => v.asScalar(types.ScalableValue),
-            else => @compileError("Section.getAs: unsupported type " ++ @typeName(T)),
+            else => v.asScalar(T),
         };
     }
 
@@ -354,6 +358,9 @@ pub fn colorFromValue(val: Value) ?u32 {
 /// expression. Config is locally authored, so this is a defensive backstop
 /// against a pathological chain, not a response to observed input.
 const max_mix_operands = 8;
+/// The percentage budget a color-mix's explicit weights share; the head
+/// (annotation-free) operand absorbs the remainder.
+const mix_percent_total: u32 = 100;
 
 /// One resolved operand of a color-mix expression: a literal color plus the
 /// optional percentage weight annotated on the `+` before it (null = weight
@@ -390,9 +397,7 @@ fn parseWeightPrefix(s: []const u8) ?struct { weight: u32, end: usize } {
 /// weight token as a string before the generic percentage branch mistakes its
 /// non-numeric prefix for an invalid ratio and errors the whole line.
 pub fn isWeightToken(raw: []const u8) bool {
-    const s = if (raw.len > 0 and raw[0] == '+') raw[1..] else raw;
-    const p = parseWeightPrefix(s) orelse return false;
-    return p.end == s.len;
+    return weightFromToken(raw) != null;
 }
 
 /// The weight (0-100) carried by a whole weight-marker token; null when `raw`
@@ -425,7 +430,7 @@ fn resolveMixOperand(operand: []const u8, palette: *const std.StringHashMap(u32)
 /// literal, or a string palette reference); null when it isn't a color.
 fn resolveMixOperandValue(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
     if (colorFromValue(val)) |c| return c;
-    if (val.asScalar([]const u8)) |s| return resolveMixOperand(s, palette);
+    if (val.asScalar([]const u8)) |s| return palette.get(s);
     return null;
 }
 
@@ -469,12 +474,18 @@ fn extractMixOperands(
             return count;
         },
         .array => |arr| {
-            if (arr.items.len < 2) return null;
+            // Only a LITERAL array (one declaration) is a mix expression. An
+            // accumulated duplicate array is "later declaration wins": the
+            // caller falls through to the last-scalar descent instead of
+            // averaging the duplicates.
+            if (arr.accumulated) return null;
+            const items = arr.list.items;
+            if (items.len < 2) return null;
             // Bare operand list: no `+` and no weight tokens, every element a
             // color operand. These mix equally (all weights null -> equal
             // share in mixColors), e.g. `[red, green]` = 50/50.
             var has_marker = false;
-            for (arr.items) |elem| {
+            for (items) |elem| {
                 if (elem == .string) {
                     const s = elem.string;
                     if (std.mem.eql(u8, s, "+") or isWeightToken(s)) {
@@ -484,18 +495,18 @@ fn extractMixOperands(
                 }
             }
             if (!has_marker) {
-                for (arr.items) |elem| {
+                for (items) |elem| {
                     const color = resolveMixOperandValue(elem, palette) orelse return null;
                     if (!pushMixOperand(out, &count, color, null)) return null;
                 }
                 return count;
             }
             // Spaced spelling: an array alternating operand and "+"([weight]) tokens.
-            if (arr.items.len < 3) return null;
+            if (items.len < 3) return null;
             var last_was_operand = false;
             var pending_weight: ?u32 = null;
             var expecting_operand_after_plus = false;
-            for (arr.items) |elem| {
+            for (items) |elem| {
                 if (elem == .string) {
                     const s = elem.string;
                     if (std.mem.eql(u8, s, "+")) {
@@ -553,14 +564,15 @@ fn scanWeights(parts: []const MixOperand) struct { any_explicit: bool, sum: u64 
 /// equally. Weights must be validated (each 0-100, explicit sum <= 100) by
 /// resolveColorExpr before this is reached.
 fn mixColors(parts: []const MixOperand) u32 {
+    // Callers guarantee at least one operand (extractMixOperands returns null
+    // on an empty chain); a single element is that element's color.
     const n = parts.len;
-    if (n == 0) return 0;
     if (n == 1) return parts[0].color;
 
     const stats = scanWeights(parts[1..]);
     var weights: [max_mix_operands]u64 = undefined;
     if (stats.any_explicit) {
-        weights[0] = 100 - stats.sum;
+        weights[0] = mix_percent_total - stats.sum;
         for (parts[1..], 0..) |p, i| weights[i + 1] = p.weight orelse 0;
     } else {
         for (parts, 0..) |_, i| weights[i] = 1;
@@ -600,17 +612,19 @@ pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32
     if (parts.len == 0) return null;
     if (parts[0].weight != null) return null;
     const stats = scanWeights(parts);
-    if (stats.any_explicit and stats.sum > 100) return null;
-    for (parts) |p| if (p.weight) |w| if (w > 100) return null;
+    // A single weight > mix_percent_total forces the sum over and is caught
+    // here, so no per-weight bound is needed.
+    if (stats.any_explicit and stats.sum > mix_percent_total) return null;
     return mixColors(parts);
 }
 
 /// Resolves a palette-variable declaration to a color. Literals decode
 /// directly; a `+`-bearing value is a color mix; a single name is an alias of
-/// another collected palette variable. An accumulated `.array` first tries
-/// the whole-value mix (the spaced spelling accumulates element-wise), then
-/// falls through to the last-declaration scalar (later declaration wins) for
-/// plain duplicates. Used by collectPalette's fixpoint.
+/// another collected palette variable. A LITERAL array is owned by
+/// resolveColorExpr (bare lists and spaced spellings mix); an accumulated
+/// `.array` (duplicate declarations) is NOT a mix -- it falls through to the
+/// last-declaration scalar so "later declaration wins" like every other knob.
+/// Used by collectPalette's fixpoint.
 fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
     if (colorFromValue(val)) |c| return c;
     if (val == .array) {
@@ -682,20 +696,27 @@ pub fn collectPalette(self: *Document) void {
 
 // Document merging
 
-// Wraps `old_val` in a fresh array if it isn't one already, so callers can
-// append into it.
+// Wraps `old_val` in a fresh accumulated array if it isn't one already, so
+// callers can append into it. This array represents duplicate-key
+// accumulation (later declaration wins), unlike parse-time literal arrays.
 fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
-    if (old_val.* == .array) return;
+    if (old_val.* == .array) {
+        old_val.array.accumulated = true;
+        return;
+    }
     var arr = try std.ArrayList(Value).initCapacity(allocator, 1);
     arr.appendAssumeCapacity(old_val.*);
-    old_val.* = .{ .array = arr };
+    old_val.* = .{ .array = .{ .list = arr, .accumulated = true } };
 }
 
 // Accumulates `incoming` into `old_val`. An array-valued `incoming` is
 // flattened. Values are SHARED, never copied: all documents in a load share
 // one arena, so pointers stay valid until the load's arena reset. Scalar
 // getters resolve to the LAST element (later files win); asArray sees the
-// full accumulation so keybinds, `include`, `layouts`, etc. chain.
+// full accumulation so keybinds, `include`, `layouts`, etc. chain. The result
+// is always an ACCUMULATED array (genuinely duplicated keys), marking it so
+// literal arrays (bracket lists / bare multi-token spellings) stay distinct:
+// scalar later-wins applies to accumulated arrays only.
 fn accumulate(
     allocator: std.mem.Allocator,
     old_val: *Value,
@@ -703,10 +724,9 @@ fn accumulate(
 ) !void {
     try ensureArray(allocator, old_val);
     if (incoming == .array) {
-        const inc = incoming;
-        try old_val.array.appendSlice(allocator, inc.array.items);
+        try old_val.array.list.appendSlice(allocator, incoming.array.list.items);
     } else {
-        try old_val.array.append(allocator, incoming);
+        try old_val.array.list.append(allocator, incoming);
     }
 }
 
@@ -1116,14 +1136,17 @@ const Parser = struct {
         if (items.items.len == 1) {
             return items.swapRemove(0);
         }
-        return .{ .array = items };
+        // Literal array (one declaration): `accumulated` stays false so a
+        // scalar read never descends into it and color reads treat it as a
+        // mix unit.
+        return .{ .array = .{ .list = items } };
     }
 
     fn parseValue(self: *Parser, in_array: bool) ParseError!Value {
         self.skipWhitespace();
         const c = self.peek() orelse return ParseError.InvalidValue;
 
-        if (c == '[') return .{ .array = try self.parseArray() };
+        if (c == '[') return .{ .array = .{ .list = try self.parseArray() } };
         if (c == '"' or c == '\'') return .{ .string = try self.parseString() };
 
         return self.parseBareValues(in_array);
@@ -1157,47 +1180,47 @@ const Parser = struct {
     // Parses `key = value` pairs (and bare `key` flags) until a blank line,
     // comment, `;` terminator, or end of content. Duplicate keys accumulate
     // into arrays so a repeated keybind or include runs all declarations.
+    // Parses one `key = value` pair (or bare `key` flag), inserts it, and
+    // consumes the trailing syntax. The document loop in `parse` re-invokes
+    // this for each further pair on the following line; a malformed pair is
+    // warned-and-skipped to the next line so recovery returns to that loop.
     fn parsePairs(self: *Parser, section: *Section) ParseError!void {
-        while (true) {
-            const kv = self.parseKeyValuePair() catch |err| {
-                self.had_errors.* = true;
-                if (self.last_key.len > 0)
-                    self.warnLine("invalid key-value (key '{s}'): {}", .{ self.last_key, err })
-                else
-                    self.warnLine("invalid key-value: {}", .{err});
-                self.skipToNewline();
-                continue;
-            };
+        const kv = self.parseKeyValuePair() catch |err| {
+            self.had_errors.* = true;
+            if (self.last_key.len > 0)
+                self.warnLine("invalid key-value (key '{s}'): {}", .{ self.last_key, err })
+            else
+                self.warnLine("invalid key-value: {}", .{err});
+            self.skipToNewline();
+            return;
+        };
 
-            // Duplicate key: accumulate both values into an array rather
-            // than overwriting, so a keybind can bind multiple actions:
-            //
-            //   Mod+Shift+1 = "move_to_workspace_1"
-            //   Mod+Shift+1 = "toggle_tag_1"
-            //
-            // parseKeybindings treats array values as sequences; scalar
-            // reads of a repeated key resolve to the last declaration.
-            try insertOrAccumulate(self.allocator, section, kv[0], kv[1], self.line);
+        // Duplicate key: accumulate both values into an array rather
+        // than overwriting, so a keybind can bind multiple actions:
+        //
+        //   Mod+Shift+1 = "move_to_workspace_1"
+        //   Mod+Shift+1 = "toggle_tag_1"
+        //
+        // parseKeybindings treats array values as sequences; scalar
+        // reads of a repeated key resolve to the last declaration.
+        try insertOrAccumulate(self.allocator, section, kv[0], kv[1], self.line);
 
-            self.skipWhitespace();
-            if (!self.advanceAfterPair()) break;
-        }
+        self.skipWhitespace();
+        self.advanceAfterPair();
     }
 
     // Advances past the end of one pair: an optional ';' terminator, trailing
-    // whitespace, and any line-end comment or newline. Returns false (stop
-    // the pair loop) on a terminator or an unexpected trailing character.
-    fn advanceAfterPair(self: *Parser) bool {
+    // whitespace, and any line-end comment or newline.
+    fn advanceAfterPair(self: *Parser) void {
         const next = self.peek();
         if (next == ';') _ = self.consume();
         self.skipWhitespace();
         const trail = self.peek();
-        if (trail == '\n' or trail == '#' or trail == null) {
-            self.skipLineEnd(trail);
-            return false;
+        if (trail != '\n' and trail != '#' and trail != null) {
+            self.skipBadLine("unexpected character after pair (key '{s}')", .{self.last_key});
+            return;
         }
-        self.skipBadLine("unexpected character after pair (key '{s}')", .{self.last_key});
-        return false;
+        self.skipLineEnd(trail);
     }
 };
 

@@ -53,6 +53,11 @@ const visibility = @import("visibility");
 const window_mods = @import("window_modules").modules;
 const contract = @import("contract");
 
+/// The hide-family provider bound to the generated window registry, resolved
+/// once at file scope: the hidden-set synthesis and its collect dispatch
+/// share one lookup (no module is ever named by the bar).
+const collect_hidden_set = window.providerOf(.collectHiddenSet);
+
 // Registry-resolved segment identity (comptime): the bar locates modules by
 // name through the generated registry instead of importing them directly.
 // Role/named lookups return null on an absent (even empty) registry, so the
@@ -75,21 +80,17 @@ inline fn segId(name: []const u8) ?usize {
 }
 
 /// Registry entry at a resolved `id`. Callers reach this only after `segId`
-/// (or a registry capability/role lookup) matched a name, which is impossible
-/// when the registry is empty, so the zero-length branch is statically
-/// Comptime-selected empty-registry guard: indexing a zero-length array is a
-/// compile error, so the runtime index expression is elided entirely when no
-/// segments are registered. `hasRegisteredSegments` is false only in that
-/// build; every guard below becomes `unreachable` at comptime and the removed
-/// bodies never reach codegen.
-inline fn hasRegisteredSegments() bool {
-    return comptime bar_mods.len != 0;
-}
-
-/// Resolved-segment getter (comptime guarded by hasRegisteredSegments).
+/// (or a registry capability/role lookup) matched a name; a match is
+/// impossible when the registry is empty.
 inline fn segAt(id: usize) *const contract.Segment {
     if (comptime !hasRegisteredSegments()) unreachable;
     return &bar_mods[id];
+}
+
+/// True in builds with at least one registered bar segment, false in
+/// segment-less builds.
+inline fn hasRegisteredSegments() bool {
+    return comptime bar_mods.len != 0;
 }
 
 /// Dirty-bit read for a resolved `id` (comptime guarded as segAt).
@@ -137,6 +138,41 @@ fn centerShare(remaining: u16, count: u16, idx: u16) u16 {
     return if (idx < extra) base + 1 else base;
 }
 
+/// Center-row budget derivation: reserves a center layout's own non-center
+/// segments (their widths plus trailing gaps) out of `avail`, returning what
+/// remains for the center-slot segments and how many slots share it. For a
+/// non-center layout the budget is empty (`.left`/`.right` rows carry no
+/// center slots).
+fn centerRowBudget(
+    self: *State,
+    frame: *const segmod.Frame,
+    lay: types.BarLayout,
+    avail: u16,
+    scaled_spacing: u16,
+) struct { remaining: u16, center_count: u16 } {
+    var remaining: u16 = 0;
+    var center_count: u16 = 0;
+    if (lay.position != .center) return .{ .remaining = remaining, .center_count = center_count };
+    // Reserve the layout's own non-center segments (their widths plus
+    // trailing gaps) before the center-slot budget, so a center row that also
+    // carries a clock or workspaces slot can't spill into the right cluster.
+    const clamped = @min(
+        @max(segmod.title_min_width, avail -| scaled_spacing),
+        avail,
+    );
+    var claim: u16 = 0;
+    for (lay.segments.items) |s| {
+        if (isRole(s, center_slot_ids)) {
+            center_count += 1;
+            continue;
+        }
+        claim +|= self.measureSegmentWidth(frame, s);
+        claim +|= scaled_spacing;
+    }
+    remaining = clamped -| claim;
+    return .{ .remaining = remaining, .center_count = center_count };
+}
+
 fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
     contract.callAll(contract.Segment, bar_mods[0..], hook, .{});
 }
@@ -155,25 +191,15 @@ fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytyp
 // bar-owned metrics module (metrics.zig) for drawing to read; no config is
 // mutated.
 
-const min_bar_height: u32 = scale.bar_min_height_px;
-/// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured bar
-/// derives its height from font metrics, and this bounds that derivation so
-/// a huge fallback font can't take over the whole screen.
-const max_bar_height: u32 = 200;
-/// Fallback bar height when even font metrics are unavailable: a small
-/// strip-sized default that stays in proportion on any screen.
-const default_bar_height: u32 = 24;
-
-fn probeMetrics(size_override: ?u16) ?struct { asc: i32, desc: i32 } {
+fn probeMetrics(size_override: ?u16) ?drawing.FontMetrics {
     const cs = core.getState();
     const sized = drawing.buildSizedFontList(cs.alloc, size_override) catch return null;
     defer drawing.freeSizedFontList(cs.alloc, sized);
-    const m = drawing.probeFontMetrics(
+    return drawing.probeFontMetrics(
         cs.alloc,
         core.dpi_info,
         sized,
-    ) orelse return null;
-    return .{ .asc = m.ascent, .desc = m.descent };
+    );
 }
 
 fn resolvePercentageFontSize(bar_height: u16) ?u16 {
@@ -183,7 +209,7 @@ fn resolvePercentageFontSize(bar_height: u16) ?u16 {
     const trial_pt: u16 = 100;
     const cs = core.getState();
     const m = probeMetrics(trial_pt) orelse return null;
-    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.asc + m.desc))) /
+    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.ascent + m.descent))) /
         @as(f32, @floatFromInt(trial_pt));
     const max_size_pt = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
     const cfg_pct = cs.config.bar.font_size.value / 100.0;
@@ -208,12 +234,8 @@ fn calcBarHeightAndFontSize() u16 {
         }
         return height;
     }
-    const m = probeMetrics(null) orelse return default_bar_height;
-    return @intCast(std.math.clamp(
-        @max(1, m.asc + m.desc),
-        @as(i32, @intCast(min_bar_height)),
-        @as(i32, @intCast(max_bar_height)),
-    ));
+    const m = probeMetrics(null) orelse return scale.default_bar_height_px;
+    return scale.clampBarHeight(@max(1, m.ascent + m.descent));
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +252,7 @@ pub fn onPollWakeup() void {
     // waking only on the poll timer with no X traffic to trigger that path.
     // performDraw consumes the redraw request itself; no consume here.
     if (gBar.state) |s| {
-        if (barModsConsumeRedrawRequest()) s.markDirty();
+        _ = foldModuleRedraw(s);
     }
     performDraw();
 }
@@ -273,8 +295,20 @@ pub fn chromeHandleKeypress(
 /// and the bar must not name it.
 pub fn chromeToggleOverlay() void {
     const s = gBar.state orelse return;
-    if (title_id) |tid|
-        dispatchClick(s, tid, 0, false, true);
+    if (titleIdBound(s)) |tb|
+        if (segId(tb.name)) |tid| {
+            const is_right_click = true;
+            dispatchClick(s, tid, 0, false, is_right_click);
+        };
+}
+
+/// The title segment's recorded on-screen bound, or null when the title
+/// addon isn't registered (`title_id`) or the last layout pass never placed
+/// it. Shared by the prompt-open click path and chromeToggleOverlay, so the
+/// title id/name/bound resolution lives in one place.
+fn titleIdBound(s: *State) ?SegBound {
+    const center_id = title_id orelse return null;
+    return s.recordedBound(segAt(center_id).name);
 }
 
 /// Routes one click at `offset` pixels into segment `id` to its onClick hook
@@ -352,7 +386,7 @@ const max_batched_redraws: u8 = 4;
 /// right-position segment once up front, deriving both the reserved width
 /// (which left/center placement shrinks around) and the per-segment widths
 /// the draw consumes. Falls back to measure-at-draw when the segment count
-/// overflows `max_right_segments` (`take` then reports null).
+/// overflows `max_right_segments`.
 const RightCluster = struct {
     /// Measured widths by position in the right cluster (concatenated right
     /// layouts, in order). Only the first `max_right_segments` are recorded.
@@ -364,34 +398,6 @@ const RightCluster = struct {
     total: u16 = 0,
     /// Running draw index, advanced by `take` per right layout.
     ridx: usize = 0,
-
-    /// Measures all right segments across the bar's layouts.
-    fn measure(self: *RightCluster, s: *State, frame: *const segmod.Frame, scaled_spacing: u16) void {
-        // Accumulate the reservation in u32 (segment widths + gaps could push
-        // past u16 on a very wide desktop) and clamp into the u16 field.
-        var total: u32 = 0;
-        for (s.render.config.layout.items) |lay| {
-            if (lay.position != .right) continue;
-            for (lay.segments.items) |seg| {
-                const w = s.measureSegmentWidth(frame, seg);
-                if (self.count < max_right_segments) self.widths[self.count] = w;
-                self.count += 1;
-                total += @as(u32, w) + scaled_spacing;
-            }
-            if (lay.segments.items.len > 0) total -= scaled_spacing;
-        }
-        self.total = @intCast(@min(total, std.math.maxInt(u16)));
-    }
-
-    /// Slices out the measured widths for one right layout's segments,
-    /// advancing the internal index. Returns null when the measurement buffer
-    /// overflowed, signalling the draw to re-measure per segment.
-    fn take(self: *RightCluster, segments: []const []const u8) ?[]const u16 {
-        const start = self.ridx;
-        self.ridx += segments.len;
-        if (self.count > max_right_segments) return null;
-        return self.widths[start..][0..segments.len];
-    }
 };
 
 /// On-screen hit-test bound of one segment, recorded by recordClickBound
@@ -408,13 +414,6 @@ const SegBound = struct {
     }
 };
 
-/// All live bar state. The title-window scratch below is rebuilt every frame
-/// from in-process caches (no X11, nothing to refetch); every other field is
-/// recomputed per frame.
-///
-/// State is plain data owned by this file alone: the poll-driven loop reads
-/// and mutates it directly, and segments receive only per-segment sub-views
-/// (via the DrawCtx), never State itself.
 const Visibility = struct {
     /// Asked-to-be-shown; cleared by the per-segment empty checks.
     shown: bool = true,
@@ -529,6 +528,13 @@ const Facts = struct {
     fullscreen_rev: u32 = std.math.maxInt(u32),
 };
 
+/// All live bar state. The title-window scratch below is rebuilt every frame
+/// from in-process caches (no X11, nothing to refetch); every other field is
+/// recomputed per frame.
+///
+/// State is plain data owned by this file alone: the poll-driven loop reads
+/// and mutates it directly, and segments receive only per-segment sub-views
+/// (via the DrawCtx), never State itself.
 const State = struct {
     win: WindowCtx,
     render: RenderCtx,
@@ -716,13 +722,13 @@ const State = struct {
     /// set and !dirty.flag, the only pending work is a marquee/overlay
     /// needsRepaint hook and the cached last_ctx snapshot is still accurate.
     fn hasLayoutSegmentDirty(self: *const State) bool {
-        const pred = struct {
-            fn dirty(state: *const State, name: []const u8) bool {
-                const id = segId(name) orelse return false;
-                return segDirty(state, id);
+        for (self.render.config.layout.items) |lay| {
+            for (lay.segments.items) |name| {
+                const id = segId(name) orelse continue;
+                if (segDirty(self, id)) return true;
             }
-        }.dirty;
-        return self.anyLayoutSegment(pred);
+        }
+        return false;
     }
 
     /// Records the on-screen bounds of a clickable segment as the layout pass
@@ -776,7 +782,7 @@ const State = struct {
         // addon that owns it. No provider compiled in => empty api =>
         // scanLiveFrame no-ops, matching prior boot ordering.
         var minimized_api: segmod.MinimizedApi = .{};
-        if (contract.providerOf(contract.WindowModule, window_mods[0..], .collectHiddenSet) != null)
+        if (collect_hidden_set != null)
             minimized_api.collect = minimizedCollect;
         ctx.minimized_api = minimized_api;
         // Titles/geoms below come from the WM-owned title cache and the sync
@@ -841,7 +847,7 @@ const State = struct {
                 }
             }
             for (0..self.frame.frame.workspace_count) |i| {
-                self.frame.ws_has_windows[i] = model.maskedOn(combined_mask, model.WSId.fromIndex(@intCast(i)));
+                self.frame.ws_has_windows[i] = model.maskedOn(combined_mask, model.WSId.fromIndex(i));
             }
         }
     }
@@ -926,8 +932,9 @@ const State = struct {
         const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
         // Runs across the whole right cluster, NOT per layout: multiple right
         // layouts butt against each other (no inter-layout spacing, matching
-        // RightCluster.measure) instead of each restarting from the bar's
-        // right edge and overlapping the previous layout's pixels.
+        // the reservation computed up front in drawAllInner) instead of each
+        // restarting from the bar's right edge and overlapping the previous
+        // layout's pixels.
         var cur_x = right_x.*;
         var pending_gap = false;
         var i = names.len;
@@ -985,8 +992,25 @@ const State = struct {
             self.clearRegion(0, r.width);
         }
 
-        var right = RightCluster{};
-        right.measure(self, frame, scaled_spacing);
+        var right_widths: [max_right_segments]u16 = undefined;
+        var right_count: usize = 0;
+        var right_ridx: usize = 0;
+        var right_total_raw: u32 = 0;
+        // Measure every right-position segment once up front: reserved width
+        // for left/center placement plus the per-segment widths the draw uses.
+        // Accumulate the reservation in u32 (segment widths + gaps could push
+        // past u16 on a very wide desktop) and clamp into the u16 handled below.
+        for (r.config.layout.items) |lay| {
+            if (lay.position != .right) continue;
+            for (lay.segments.items) |seg| {
+                const w = self.measureSegmentWidth(frame, seg);
+                if (right_count < max_right_segments) right_widths[right_count] = w;
+                right_count += 1;
+                right_total_raw += @as(u32, w) + scaled_spacing;
+            }
+            if (lay.segments.items.len > 0) right_total_raw -= scaled_spacing;
+        }
+        const right_total: u16 = @intCast(@min(right_total_raw, std.math.maxInt(u16)));
 
         self.clicks.len = 0;
         var x: u16 = 0;
@@ -998,31 +1022,10 @@ const State = struct {
             switch (lay.position) {
                 .left, .center => {
                     // Available horizontal space before the right cluster.
-                    const avail = r.width -| x -| right.total;
-                    var remaining: u16 = 0;
-                    // Center-slot segment count for this row, used to split
-                    // the budget evenly below.
-                    var center_count: u16 = 0;
-                    if (lay.position == .center) {
-                        // Reserve the layout's own non-center segments (their
-                        // widths plus trailing gaps) before the center-slot
-                        // budget, so a center row that also carries a clock or
-                        // workspaces slot can't spill into the right cluster.
-                        const clamped = @min(
-                            @max(segmod.title_min_width, avail -| scaled_spacing),
-                            avail,
-                        );
-                        var claim: u16 = 0;
-                        for (lay.segments.items) |s| {
-                            if (isRole(s, center_slot_ids)) {
-                                center_count += 1;
-                                continue;
-                            }
-                            claim +|= self.measureSegmentWidth(frame, s);
-                            claim +|= scaled_spacing;
-                        }
-                        remaining = clamped -| claim;
-                    }
+                    const avail = r.width -| x -| right_total;
+                    const budget = centerRowBudget(self, frame, lay, avail, scaled_spacing);
+                    const remaining = budget.remaining;
+                    const center_count = budget.center_count;
                     var center_idx: u16 = 0;
                     for (lay.segments.items) |seg| {
                         const is_center = (lay.position == .center) and isRole(seg, center_slot_ids);
@@ -1064,7 +1067,15 @@ const State = struct {
                     }
                 },
                 .right => {
-                    self.drawRightSegments(ctx, lay.segments.items, right.take(lay.segments.items), is_full_redraw, &right_x);
+                    const start = right_ridx;
+                    right_ridx += lay.segments.items.len;
+                    // Null when the measurement buffer overflowed: the draw
+                    // falls back to measure-at-draw per segment.
+                    const widths: ?[]const u16 = if (right_count > max_right_segments)
+                        null
+                    else
+                        right_widths[start..][0..lay.segments.items.len];
+                    self.drawRightSegments(ctx, lay.segments.items, widths, is_full_redraw, &right_x);
                 },
             }
         }
@@ -1109,7 +1120,7 @@ fn performDraw() void {
     // a direct submitDraw can never drop it; the onPollWakeup / updateIfDirty
     // callers have typically already consumed, in which case this is a false
     // no-op.
-    if (!s.dirty.flag and barModsConsumeRedrawRequest()) s.markDirty();
+    if (!s.dirty.flag) _ = foldModuleRedraw(s);
     // A timer-only wake with zero repaint work (nothing whole-bar dirty, no
     // segment dirty or needsRepaint) must not run the full
     // scan + measure pass. The clock's own repaint on the same wake is handled
@@ -1180,7 +1191,6 @@ fn requestFullRedraw() void {
 /// Everything a fully-initialised bar owns; returned by createBar.
 const BarSetup = struct {
     setup: barwin.BarWindowSetup,
-    dc: *drawing.DrawContext,
     state: *State,
 };
 
@@ -1207,7 +1217,7 @@ fn createBar(height: u16, y_pos: i16) !BarSetup {
         dc,
         cs.config.bar,
     );
-    return .{ .setup = setup, .dc = dc, .state = state };
+    return .{ .setup = setup, .state = state };
 }
 
 // Lifecycle
@@ -1334,7 +1344,7 @@ fn minimizedCollect(
     allocator: std.mem.Allocator,
 ) void {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (contract.providerOf(contract.WindowModule, window_mods[0..], .collectHiddenSet)) |wm|
+    if (collect_hidden_set) |wm|
         wm.collectHiddenSet.?(mm, set, allocator);
 }
 
@@ -1682,9 +1692,7 @@ pub fn updateIfDirty() !void {
     // can't busy-spin this batch.
     var redraw_iter: u8 = 0;
     while (redraw_iter < max_batched_redraws) : (redraw_iter += 1) {
-        if (barModsConsumeRedrawRequest()) {
-            requestFullRedraw();
-        }
+        _ = foldModuleRedraw(s);
         if (!s.dirty.flag) break;
         performDraw();
     }
@@ -1696,6 +1704,16 @@ pub fn updateIfDirty() !void {
 /// (e.g. the prompt's blink-tick reactivity).
 fn barModsConsumeRedrawRequest() bool {
     return anyBoolHook(.consumeRedrawRequest, .{});
+}
+
+/// Folds a queued module redraw request into the dirty state as a full
+/// redraw (flag + every slot). Returns true when it consumed one. Single
+/// shared fold for the poll wakeup, direct-submit, and X-batch paths so no
+/// path can drop a request.
+fn foldModuleRedraw(s: *State) bool {
+    if (!barModsConsumeRedrawRequest()) return false;
+    s.markDirty();
+    return true;
 }
 
 /// Redraws just the clock segment when its on-screen content is stale
@@ -1837,8 +1855,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
 ///   - otherwise -> focuses it
 fn handleTitleClick(s: *State, offset: u16) void {
     if (s.frame.wins_len == 0) return;
-    const center_id = title_id orelse return;
-    const tb = s.recordedBound(segAt(center_id).name) orelse return;
+    const tb = titleIdBound(s) orelse return;
 
     const target = segmod.hitTest(
         s.frame.last_ctx.titleRenderContext(tb.x, tb.w),

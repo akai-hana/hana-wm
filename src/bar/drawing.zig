@@ -209,7 +209,8 @@ pub const FontState = struct {
     allocator: std.mem.Allocator,
     pango_layout: *PangoLayout,
     current_font_desc: ?*PangoFontDescription = null,
-    cached_metrics: ?struct { ascent: i16, descent: i16 } = null,
+    /// Cached (ascent, descent) in pixels; invalidated by loadFont.
+    cached_metrics: ?struct { i16, i16 } = null,
 
     fn deinit(self: *FontState) void {
         if (self.current_font_desc) |desc| pango_font_description_free(desc);
@@ -237,7 +238,7 @@ pub const FontState = struct {
 
     /// Returns (ascent, descent) in pixels; cached per font description, invalidated by loadFont.
     pub fn getMetrics(self: *FontState) struct { i16, i16 } {
-        if (self.cached_metrics) |m| return .{ m.ascent, m.descent };
+        if (self.cached_metrics) |m| return m;
         const metrics = pango_context_get_metrics(
             pango_layout_get_context(self.pango_layout),
             self.current_font_desc,
@@ -246,7 +247,7 @@ pub const FontState = struct {
         defer pango_font_metrics_unref(metrics);
         const ascent = pangoPxToI16(pango_font_metrics_get_ascent(metrics));
         const descent = pangoPxToI16(pango_font_metrics_get_descent(metrics));
-        self.cached_metrics = .{ .ascent = ascent, .descent = descent };
+        self.cached_metrics = .{ ascent, descent };
         return .{ ascent, descent };
     }
 };
@@ -791,48 +792,52 @@ pub fn drawPaddedSegmentValue(
     props: types.SegmentProps,
 ) !u16 {
     const padding = config.scaledSegmentPadding(height);
+    // `value` must live inside `text` (both callers pass a slice of it);
+    // absent or not-a-subslice draws the whole text in the segment color,
+    // which is exactly paintedSegment.
+    const valid = if (value) |v| blk: {
+        const v_a: usize = @intFromPtr(v.ptr);
+        const t_a: usize = @intFromPtr(text.ptr);
+        break :blk v.len <= text.len and v_a >= t_a and v_a + v.len <= t_a + text.len;
+    } else false;
+    const fg = config.segmentFg(segment_name);
+    const value_fg = config.segmentValueFg(segment_name);
+    if (value == null or !valid)
+        return dc.paintedSegment(x, height, text, padding, config.bg, fg, null, props);
+
     const list = dc.applyStyleProps(props);
     defer dc.restoreStyleProps(list);
     const width: u16 = dc.measureTextWidth(text) + padding * 2;
     dc.fillRect(x, 0, width, height, config.bg);
     const baseline = dc.baselineY(height);
-    if (value) |v| {
-        // `value` must live inside `text` (both callers pass a slice of it);
-        // anything else draws the whole text in the segment color.
-        const v_a: usize = @intFromPtr(v.ptr);
-        const t_a: usize = @intFromPtr(text.ptr);
-        const in_bounds = v.len <= text.len and v_a >= t_a and v_a + v.len <= t_a + text.len;
-        if (in_bounds) {
-            const start: usize = @intFromPtr(v.ptr) - @intFromPtr(text.ptr);
-            const fg = config.segmentFg(segment_name);
-            const value_fg = config.segmentValueFg(segment_name);
-            const parts = [_]struct { text: []const u8, color: u32 }{
-                .{ .text = text[0..start], .color = fg },
-                .{ .text = v, .color = value_fg },
-                .{ .text = text[start + v.len ..], .color = fg },
-            };
-            var cursor: u16 = x + padding;
-            for (parts) |part| {
-                if (part.text.len == 0) continue;
-                try dc.drawText(cursor, baseline, part.text, part.color);
-                cursor +|= dc.measureTextWidth(part.text);
-            }
-            return x + width;
-        }
+    const v = value.?;
+    const start: usize = @intFromPtr(v.ptr) - @intFromPtr(text.ptr);
+    const parts = [_]struct { text: []const u8, color: u32 }{
+        .{ .text = text[0..start], .color = fg },
+        .{ .text = v, .color = value_fg },
+        .{ .text = text[start + v.len ..], .color = fg },
+    };
+    var cursor: u16 = x + padding;
+    for (parts) |part| {
+        if (part.text.len == 0) continue;
+        try dc.drawText(cursor, baseline, part.text, part.color);
+        cursor +|= dc.measureTextWidth(part.text);
     }
-    try dc.drawText(x + padding, baseline, text, config.segmentFg(segment_name));
     return x + width;
 }
 
 // ---------------------------------------------------------------------------
 // One-shot font metrics probing (used by the bar height / font-size calc).
 
+/// Font metrics pair (ascent, descent) in pixels.
+pub const FontMetrics = struct { ascent: i16, descent: i16 };
+
 /// Loads `font_names` into a throwaway layout and returns its (ascent, descent) in pixels.
 pub fn probeFontMetrics(
     allocator: std.mem.Allocator,
     dpi: f32,
     font_names: []const []const u8,
-) ?struct { ascent: i16, descent: i16 } {
+) ?FontMetrics {
     const surface = cairo_image_surface_create(.ARGB32, 1, 1) orelse return null;
     defer cairo_surface_destroy(surface);
     // The cairo context exists only to obtain the Pango layout.
@@ -914,30 +919,44 @@ fn resolveVisualType(
     return firstVisualOfDepth(screen, depth) orelse error.NoVisuals;
 }
 
-/// Converts Xft `"FontName:size=N:weight=bold"` to Pango `"FontName Bold N"` format.
+/// Converts Xft `"FontName:size=N:weight=bold"` (or a comma-joined fallback
+/// chain of those) to Pango `"FontName,OtherFont Bold N"` format. Comma-joined
+/// families are kept as a Pango family list so multi-font configs get real
+/// per-glyph fallback rather than first-family-only.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![:0]const u8 {
-    if (std.mem.indexOfScalar(u8, xft_name, ':') == null)
+    if (std.mem.indexOfScalar(u8, xft_name, ':') == null and
+        std.mem.indexOfScalar(u8, xft_name, ',') == null)
         return allocator.dupeZ(u8, xft_name);
 
     var result: std.ArrayListUnmanaged(u8) = .empty;
     errdefer result.deinit(allocator);
 
-    var parts = std.mem.splitScalar(u8, xft_name, ':');
-    try result.appendSlice(allocator, parts.first());
-
     var size: ?[]const u8 = null;
     var weight: ?[]const u8 = null;
     var slant: ?[]const u8 = null;
 
-    while (parts.next()) |part| {
-        if (std.mem.startsWith(u8, part, "size="))
-            size = part["size=".len..]
-        else if (std.mem.startsWith(u8, part, "pixelsize="))
-            size = part["pixelsize=".len..]
-        else if (std.mem.startsWith(u8, part, "weight="))
-            weight = part["weight=".len..]
-        else if (std.mem.startsWith(u8, part, "slant="))
-            slant = part["slant=".len..];
+    var fonts = std.mem.splitScalar(u8, xft_name, ',');
+    var first_family = true;
+    while (fonts.next()) |font| {
+        // Bound each family to its own Xft spec (`Family:size=..:weight=..`).
+        // The font description is family-first, so emit families up front and
+        // let the option tokens below trail the whole list.
+        if (!first_family) try result.append(allocator, ',');
+        first_family = false;
+
+        var parts = std.mem.splitScalar(u8, font, ':');
+        try result.appendSlice(allocator, parts.first());
+
+        while (parts.next()) |part| {
+            if (std.mem.startsWith(u8, part, "size="))
+                size = part["size=".len..]
+            else if (std.mem.startsWith(u8, part, "pixelsize="))
+                size = part["pixelsize=".len..]
+            else if (std.mem.startsWith(u8, part, "weight="))
+                weight = part["weight=".len..]
+            else if (std.mem.startsWith(u8, part, "slant="))
+                slant = part["slant=".len..];
+        }
     }
 
     const slant_token: []const u8 = if (slant) |s|

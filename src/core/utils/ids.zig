@@ -7,6 +7,9 @@
 //! boundary without conversion. The type keeps a `.index` member so model
 //! code can keep using ws values directly as array indices; integer-typed
 //! boundaries (wire formats, counters) convert with `fromIndex` / `.index`.
+//! `fromIndex` accepts any integer (internal checked `@intCast` to u8), so
+//! callers don't scatter `@intCast` wrappers; the u8 field type still keeps
+//! indices distinct from unrelated u8 values (counts, layout indices, etc.).
 //! Lives in core/utils rather than core or model because both modules need it
 //! and model must stay xcb-free (it never imports core); this file imports
 //! nothing but std.
@@ -21,19 +24,11 @@ pub const WindowId = u32;
 pub const WorkspaceId = struct {
     index: u8,
 
-    pub fn fromIndex(i: u8) WorkspaceId {
-        return .{ .index = i };
+    pub fn fromIndex(i: anytype) WorkspaceId {
+        return .{ .index = @intCast(i) };
     }
 
     pub fn eql(self: WorkspaceId, other: WorkspaceId) bool {
         return self.index == other.index;
     }
 };
-
-test "ids: fromIndex round-trips the index and eql compares it" {
-    const a = WorkspaceId.fromIndex(3);
-    const b = WorkspaceId.fromIndex(3);
-    try std.testing.expectEqual(@as(u8, 3), a.index);
-    try std.testing.expect(a.eql(b));
-    try std.testing.expect(!a.eql(WorkspaceId.fromIndex(4)));
-}

@@ -14,11 +14,9 @@ const battery_probe_slots: usize = 8;
 
 /// Charge % of the first present battery under /sys/class/power_supply.
 fn read() ?u8 {
-    var buf: [128]u8 = undefined;
     for (0..battery_probe_slots) |i| {
-        const name = std.fmt.bufPrint(&buf, "BAT{d}", .{i}) catch return null;
-        var cap_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&cap_buf, "/sys/class/power_supply/{s}/capacity", .{name}) catch return null;
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/sys/class/power_supply/BAT{d}/capacity", .{i}) catch return null;
         var cb: [16]u8 = undefined;
         const contents = systatus.readSmallFile(path, &cb) orelse continue;
         return std.fmt.parseUnsigned(u8, std.mem.trim(u8, contents, " \n"), 10) catch continue;

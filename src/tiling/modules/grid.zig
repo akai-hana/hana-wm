@@ -7,6 +7,13 @@ const tiling = @import("tiling");
 // Variant index of the "relaxed" variant; must match variantParse order below.
 const variant_relaxed = 1;
 
+/// Even share of `total` across `count` cells, with a full `gap` between every
+/// pair plus one at each outer edge. The cell math behind grid's rigid and
+/// widened-last-row shapes.
+inline fn paneCell(total: u16, count: u16, gap: u16) u16 {
+    return (total -| (count + 1) *| gap) / count;
+}
+
 /// Compute grid layout. Full gap between cells and at screen edges; u16
 /// integer-divided cells, last partial row wider in relaxed mode.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
@@ -20,8 +27,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
 
-    const cell_w = tiling.paneCell(screen_w, grid.cols, m.gap);
-    const cell_h = tiling.paneCell(screen_h, grid.rows, m.gap);
+    const cell_w = paneCell(screen_w, grid.cols, m.gap);
+    const cell_h = paneCell(screen_h, grid.rows, m.gap);
     const win_h = tiling.shrinkClamped(cell_h, bm, v.env.min_dim);
     const win_w = tiling.shrinkClamped(cell_w, bm, v.env.min_dim);
     const wa_y = tiling.waY(v);
@@ -29,7 +36,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // In relaxed mode a partial last row shares the full screen width.
     const last_row_count = n % grid.cols;
     const partial_cell_w: u16 = if (v.env.variant_idx == variant_relaxed and last_row_count != 0)
-        tiling.paneCell(screen_w, @intCast(last_row_count), m.gap)
+        paneCell(screen_w, @intCast(last_row_count), m.gap)
     else
         cell_w;
     const partial_win_w: u16 = tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim);
@@ -46,8 +53,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             v,
             out,
             win,
-            @intCast(m.gap +| col *| (spacing_w +| m.gap)),
-            @intCast(wa_y +| m.gap +| row *| (cell_h +| m.gap)),
+            @intCast(m.gap +| tiling.cellStride(spacing_w, m.gap, col)),
+            @intCast(wa_y +| m.gap +| tiling.cellStride(cell_h, m.gap, row)),
             if (is_partial_row) partial_win_w else win_w,
             win_h,
         );

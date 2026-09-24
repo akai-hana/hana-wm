@@ -185,8 +185,7 @@ fn tryParseTomlFile(
 }
 
 /// Parses and merges one config file (path = `dir_path` + `name`) into `dst`,
-/// then resolves its own `include`s via mergeIncludes. Shared by the directory
-/// loader and include resolution: the parse/merge/log tail is the same in both.
+/// then resolves its own `include`s via mergeIncludes.
 fn mergeOneFile(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -194,10 +193,21 @@ fn mergeOneFile(
     name: []const u8,
 ) !void {
     const path = try std.fs.path.join(allocator, &.{ dir_path, name });
-    var doc = tryParseTomlFile(allocator, path, dst) orelse return;
-    try parser.mergeDocumentsInto(allocator, dst, &doc);
-    debug.info("Merged: {s}", .{path});
+    var doc = (try parseAndMerge(allocator, dst, path, "Merged: {s}")) orelse return;
     try mergeIncludes(allocator, dst, &doc, dir_path);
+}
+
+/// Parse-merge-log tail shared by mergeOneFile and mergeIncludes.
+fn parseAndMerge(
+    allocator: std.mem.Allocator,
+    dst: *parser.Document,
+    path: []const u8,
+    comptime msg: []const u8,
+) !?parser.Document {
+    var doc = tryParseTomlFile(allocator, path, dst) orelse return null;
+    try parser.mergeDocumentsInto(allocator, dst, &doc);
+    debug.info(msg, .{path});
+    return doc;
 }
 
 /// Merges files listed in `include = [...]` from `src_doc` into `dst`;
@@ -223,12 +233,10 @@ fn mergeIncludes(
             continue;
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
-        var inc_doc = tryParseTomlFile(allocator, abs, dst) orelse continue;
+        var inc_doc = (try parseAndMerge(allocator, dst, abs, "Merged (include): {s}")) orelse continue;
         if (inc_doc.root.get("include")) |_| {
             debug.warn("{s}: nested 'include' inside an included file is not " ++ "supported; its include list is skipped", .{abs});
         }
-        try parser.mergeDocumentsInto(allocator, dst, &inc_doc);
-        debug.info("Merged (include): {s}", .{abs});
     }
 }
 
@@ -388,10 +396,10 @@ const GoodSource = struct {
 var last_good_source: ?GoodSource = null;
 
 fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir: bool) void {
-    if (allocator.dupe(u8, path)) |duped| {
-        if (last_good_source) |g| allocator.free(g.path);
-        last_good_source = .{ .path = duped, .is_dir = is_dir };
-    } else |_| {}
+    // OOM is silent: the snapshot just keeps the previous good source.
+    const duped = allocator.dupe(u8, path) catch return;
+    if (last_good_source) |g| allocator.free(g.path);
+    last_good_source = .{ .path = duped, .is_dir = is_dir };
 }
 
 /// Snapshot dir a re-exec boots from. XDG_RUNTIME_DIR is already per-user, so
@@ -958,13 +966,14 @@ fn actionFromValue(
 ) !?types.Action {
     return switch (value) {
         .array => |arr| {
-            if (arr.items.len == 0) return null;
+            const items = arr.list.items;
+            if (items.len == 0) return null;
             var acts: std.ArrayList(types.Action) = .empty;
             errdefer {
                 for (acts.items) |*a| a.deinit(allocator);
                 acts.deinit(allocator);
             }
-            for (arr.items) |elem|
+            for (items) |elem|
                 if (elem.asScalar([]const u8)) |cmd|
                     try acts.append(allocator, try resolveElement(allocator, cmd, ws_idx, kill));
             // A non-empty array whose elements were all non-strings
@@ -1337,7 +1346,7 @@ fn parseTilingLayoutSubtables(
                             debug.warn("master-stack.counts: count {} for workspace {} out of range [0,{d}], skipping", .{ count_val, ws_1based, max_master_count })
                         else
                             try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
-                                .workspace_idx = ids.WorkspaceId.fromIndex(@intCast(ws_1based - 1)),
+                                .workspace_idx = ids.WorkspaceId.fromIndex(ws_1based - 1),
                                 .count = @intCast(count_val),
                             });
                     }
@@ -1398,29 +1407,6 @@ fn isLayoutName(name: []const u8) bool {
     return layout_name_grammar.has(lowered);
 }
 
-/// Handles a layouts-array "variants word" for the given layout. The
-/// value-string is stored into `cfg.tiling.variants` under the canonical
-/// layout name (registry-driven: no typed per-layout enums, no enum fold), and
-/// returned for per-workspace overrides (see parseWorkspaceListInto). Validity
-/// of the string is checked against the active module's `variant_parse` at
-/// seed time, not here.
-fn parseLayoutVariant(
-    allocator: std.mem.Allocator,
-    cfg: *types.Config,
-    layout_name: []const u8,
-    variants_str: []const u8,
-) !?[]const u8 {
-    var buf: [max_layout_name]u8 = undefined;
-    const lowered = normalizeLayoutName(&buf, layout_name) orelse {
-        debug.warn("layouts array: layout name '{s}' too long to match against a " ++
-            "variant type, ignoring variants '{s}'", .{ layout_name, variants_str });
-        return null;
-    };
-    const canon = canonicalLayoutName(lowered);
-    try setTilingVariant(allocator, cfg, canon, variants_str);
-    return variants_str;
-}
-
 /// Parses a comma-separated workspace list string (e.g. "1,3,5") and appends
 /// one WorkspaceLayoutOverride per valid workspace to `overrides`. Each
 /// override owns a heap-dupe of the (possibly null) variant value-string, so
@@ -1438,7 +1424,7 @@ fn parseWorkspaceListInto(
         const trimmed = std.mem.trim(u8, ws_tok, " \t");
         const ws_1based = tryParseWsToken(trimmed, constants.max_workspaces, "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
         const variant_copy: ?[]const u8 = if (variant) |v| try allocator.dupe(u8, v) else null;
-        try overrides.append(allocator, .{ .workspace_idx = ids.WorkspaceId.fromIndex(@intCast(ws_1based - 1)), .layout_idx = layout_idx, .variant = variant_copy });
+        try overrides.append(allocator, .{ .workspace_idx = ids.WorkspaceId.fromIndex(ws_1based - 1), .layout_idx = layout_idx, .variant = variant_copy });
     }
 }
 
@@ -1458,11 +1444,11 @@ const max_layouts = model.max_layouts;
 /// name is skipped with a warning (resolution, not spelling, is authoritative).
 /// The optional trailing group after an appended layout name: a workspace
 /// list and/or a variants word, consumed in either order. A variants word
-/// feeds both the per-layout map (`parseLayoutVariant`) and, when a
-/// workspace list follows, the per-workspace overrides. `i` advanced past
-/// every consumed token; null when the trailing token is another layout
-/// name or nothing (a malformed variants word also yields null, leaving the
-/// word for the caller's warn-and-skip).
+/// is stored into `cfg.tiling.variants` under the canonical layout name and
+/// also, when a workspace list follows, feeds the per-workspace overrides.
+/// `i` advanced past every consumed token; null when the trailing token is
+/// another layout name or nothing (a malformed variants word also yields
+/// null, leaving the word for the caller's warn-and-skip).
 fn parseLayoutTrailing(
     allocator: std.mem.Allocator,
     cfg: *types.Config,
@@ -1477,17 +1463,20 @@ fn parseLayoutTrailing(
         return .{ .variants = null, .ws_list = peek };
     }
     if (isLayoutName(peek)) return null;
-    const variants = (try parseLayoutVariant(allocator, cfg, name_lower, peek)) orelse return null;
+    // A variants word: stored canonical (aliases fold onto their registry
+    // module) under the already-lowered layout name. Anything else leaves the
+    // word for the caller's warn-and-skip.
+    try setTilingVariant(allocator, cfg, canonicalLayoutName(name_lower), peek);
     i.* += 1;
     if (i.* + 1 < arr.len) {
         if (arr[i.* + 1].asScalar([]const u8)) |peek2| {
             if (isWorkspaceList(peek2)) {
                 i.* += 1;
-                return .{ .variants = variants, .ws_list = peek2 };
+                return .{ .variants = peek, .ws_list = peek2 };
             }
         }
     }
-    return .{ .variants = variants, .ws_list = null };
+    return .{ .variants = peek, .ws_list = null };
 }
 
 fn parseLayoutsArray(
@@ -1698,7 +1687,7 @@ fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name:
     if (ws_num < 1)
         debug.warn("Rule workspace {d} for '{s}' below minimum 1, skipping", .{ ws_num, class_name })
     else if (checkWorkspaceBound(@intCast(ws_num), class_name, cfg.workspaces.count))
-        try addRule(allocator, cfg, class_name, @as(usize, @intCast(ws_num)));
+        try addRule(allocator, cfg, class_name, @intCast(ws_num));
 }
 
 /// Length of the leading run of ASCII digits in `s` (0 when it starts with

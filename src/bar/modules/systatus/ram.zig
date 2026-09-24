@@ -5,7 +5,7 @@
 const std = @import("std");
 const systatus = @import("systatus");
 
-fn parseMemField(s: []const u8, key: []const u8) ?u64 {
+fn parseRamField(s: []const u8, key: []const u8) ?u64 {
     var lines = std.mem.splitScalar(u8, s, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, key)) continue;
@@ -22,8 +22,8 @@ fn parseMemField(s: []const u8, key: []const u8) ?u64 {
 fn read() ?u8 {
     var buf: [4096]u8 = undefined;
     const s = systatus.readSmallFile("/proc/meminfo", &buf) orelse return null;
-    const total = parseMemField(s, "MemTotal:") orelse return null;
-    const avail = parseMemField(s, "MemAvailable:") orelse return null;
+    const total = parseRamField(s, "MemTotal:") orelse return null;
+    const avail = parseRamField(s, "MemAvailable:") orelse return null;
     if (total == 0) return null;
     const used = total -| avail;
     return @intCast(@min((used * 100) / total, 100));
@@ -31,16 +31,16 @@ fn read() ?u8 {
 
 /// This readout's binding to the systatus surface (`systatus.Sub`).
 pub const sub: systatus.Sub = .{
-    .name = "mem",
-    .label = "Mem",
+    .name = "ram",
+    .label = "RAM",
     .read = read,
 };
 
 const testing = std.testing;
 
-test "parseMemField extracts the value" {
+test "parseRamField extracts the value" {
     const s = "MemTotal:       16299896 kB\nMemAvailable:    12345678 kB\nMemFree:          111 kB\n";
-    try testing.expectEqual(@as(?u64, 16299896), parseMemField(s, "MemTotal:"));
-    try testing.expectEqual(@as(?u64, 12345678), parseMemField(s, "MemAvailable:"));
-    try testing.expectEqual(@as(?u64, null), parseMemField(s, "SwapTotal:"));
+    try testing.expectEqual(@as(?u64, 16299896), parseRamField(s, "MemTotal:"));
+    try testing.expectEqual(@as(?u64, 12345678), parseRamField(s, "MemAvailable:"));
+    try testing.expectEqual(@as(?u64, null), parseRamField(s, "SwapTotal:"));
 }

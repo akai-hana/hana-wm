@@ -30,9 +30,9 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
         const fh: f32 = @floatFromInt(height);
         // Clamp to u16 range before narrowing so a huge aspect ratio caps.
         if (fw > fh * h.max_aspect) {
-            width = @min(clampAspectDim(fh, h.max_aspect, h.inc_width, h.max_width), width);
+            width = @min(clampAspectDim(fh, h.max_aspect, h.inc_width), width);
         } else if (fh > fw * h.min_aspect) {
-            height = @min(clampAspectDim(fw, h.min_aspect, h.inc_height, h.max_height), height);
+            height = @min(clampAspectDim(fw, h.min_aspect, h.inc_height), height);
         }
     }
 
@@ -52,12 +52,11 @@ pub fn applyHints(rect: utils.Rect, h: model.SizeHints) utils.Rect {
 }
 
 /// Clamp `other * ratio` (a cross-multiplied aspect product) into u16 range,
-/// snap down to the increment, then cap at `max_dim`.
-inline fn clampAspectDim(other: f32, ratio: f32, inc: u16, max_dim: u16) u16 {
+/// then snap down to the increment. No max cap here: callers already clamp
+/// against the max dimension via `@min` (and pre-clamped width in `applyHints`).
+inline fn clampAspectDim(other: f32, ratio: f32, inc: u16) u16 {
     const aspect = utils.scaling.roundToU16(other * ratio, 0.0);
-    var dim = snapDimToIncrement(aspect, inc);
-    if (max_dim > 0) dim = @min(dim, max_dim);
-    return dim;
+    return snapDimToIncrement(aspect, inc);
 }
 
 /// Snap `dim` down to the nearest multiple of `inc`.
@@ -122,19 +121,11 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
 }
 
-/// Saturating i16 coordinate clamp: narrows an i32 tiling coordinate into the
-/// i16 `Rect` range, clamping instead of wrapping so a single pathological
-/// layout can't cross the whole screen in ReleaseFast. Internal to the engine;
-/// modules reach it through `emitRect`/`insetRect`.
-inline fn satI16(v: i32) i16 {
-    return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
-}
-
 /// Full-rect inset by `margin` (shrinkClamped width/height at fixed origin).
 pub inline fn insetRect(x: i32, y: i32, w: u16, h: u16, margin: u16, min_dim: u16) utils.Rect {
     return .{
-        .x = satI16(x),
-        .y = satI16(y),
+        .x = utils.satI16(x),
+        .y = utils.satI16(y),
         .width = shrinkClamped(w, margin, min_dim),
         .height = shrinkClamped(h, margin, min_dim),
     };
@@ -176,16 +167,15 @@ pub inline fn bisectRegion(dim: u16, gap: u16) struct { first: u16, second: u16 
     return .{ .first = first, .second = second };
 }
 
-/// Even share of `total` across `count` cells, with a full `gap` between every
-/// pair plus one at each outer edge. The cell math behind grid's rigid and
-/// widened-last-row shapes.
-pub inline fn paneCell(total: u16, count: u16, gap: u16) u16 {
-    return (total -| (count + 1) *| gap) / count;
-}
-
 /// Work-area origin y clamped to >= 0, as u16.
 pub inline fn waY(v: *const View) u16 {
     return clampYToU16(v.workarea.y);
+}
+
+/// Position of cell `i` along an axis of `cell`-sized cells separated by
+/// `gap`. Shared by grid and master (the `i *| (cell +| gap)` stride).
+pub inline fn cellStride(cell: u16, gap: u16, i: u16) u16 {
+    return i *| (cell +| gap);
 }
 
 /// Append one placement. If the list is already at capacity this is a silent
@@ -201,12 +191,12 @@ pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: ut
 }
 
 /// Emit a visible placement built from integer tiling coordinates, narrowing
-/// x/y through satI16. The shared row-emission shape every module used to
-/// hand-build as `utils.Rect{ .x = satI16(...), ... }` + emitView.
+/// x/y through utils.satI16. The shared row-emission shape every module used
+/// to hand-build as `utils.Rect{ .x = satI16(...), ... }` + emitView.
 pub inline fn emitRect(v: *const View, out: *List, win: model.WindowId, x: i32, y: i32, w: u16, h: u16) void {
     emitView(v, out, win, .{
-        .x = satI16(x),
-        .y = satI16(y),
+        .x = utils.satI16(x),
+        .y = utils.satI16(y),
         .width = w,
         .height = h,
     });
@@ -237,7 +227,9 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
 
 /// Dispatch registry (build-generated, alphabetical stems). The active layout
 /// is a `u8` index into this table; the engine never owns a closed enum.
-const tiling_mods = @import("tiling_modules").modules;
+/// Imported via contract's guarded re-export (the single `has_tiling`
+/// conditional-import definition).
+const tiling_mods = contract.tiling_mods;
 
 /// Resolve a config layout name to its registry index (case-insensitive match
 /// on module names), or null when unregistered.
@@ -249,8 +241,8 @@ pub fn layoutByName(name: []const u8) ?usize {
 /// Resolve a config layout name to a registry index, collapsing to `fallback`
 /// when the name does not resolve. Loud, never silent: an unresolvable/removed
 /// layout name is a config bug, and every seeding/reload site resolves config
-/// names through this one function (kept distinct from `layoutKindOf` only by
-/// the fallback choice: the neutral default vs a caller-chosen seed).
+/// names through this one function. The fallback is the caller's choice: the
+/// neutral default (index 0) or a caller-chosen seed kind.
 pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
     if (layoutByName(name)) |k| return @intCast(k);
     debug.warn(
@@ -259,16 +251,6 @@ pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
         .{ name, moduleName(fallback) },
     );
     return fallback;
-}
-
-/// Resolve a config layout name to a registry index, collapsing to the
-/// neutral last-resort default (index 0, the first registered module) when
-/// the name does not resolve. The effective default is config-driven
-/// (cfg.tiling.layout resolves at every seeding site); 0 only stands in when
-/// that name fails to resolve (a removed/unknown module), keeping dispatch ids
-/// always resolvable.
-pub fn layoutKindOf(name: []const u8) u8 {
-    return layoutKindFallingBack(name, 0);
 }
 
 /// The registry module name for `kind` ("" when out of range).
@@ -290,7 +272,9 @@ pub fn variantCount(kind: u8) u8 {
 /// from config names) it lands on the first/last edge by direction.
 pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     // Names list is the config layout-name list (fits model.max_layouts);
-    // a larger registry-resolved set would spill here.
+    // a larger registry-resolved set would spill here. The `n < indices.len`
+    // clamp below is unreachable under that config cap — kept as a hard bound
+    // so a larger future source can't overflow the stack array.
     var indices: [model.max_layouts]u8 = undefined;
     var n: usize = 0;
     for (names) |nm| if (layoutByName(nm)) |idx| {
@@ -316,7 +300,9 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
 /// in reconcile); a layout module may rely on seeing the whole set at once
 /// and must not assume a sliced subset — module counters/boosts that mirror
 /// per-window state (e.g. pending-count) depend on this. The empty-check in
-/// the engine below is defensive only (reconcile guards first).
+/// the engine below is a div-by-zero guard first (grid's paneCell divides by
+/// `count`), reconciles the contract for direct/test callers, and is not a
+/// slicing seam.
 pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
     if (kind >= tiling_mods.len) return;
@@ -338,6 +324,9 @@ pub fn variantParse(comptime names: []const []const u8) fn ([]const u8) ?u8 {
     }.parse;
 }
 
+/// Assemble a layout module's registry entry: `name`/`icon` are the display
+/// stems, `f` the compute hook, and `extra` the baseline `contract.Layout`
+/// fields (variants, indicators, property hints). Build-generated registry.
 pub fn layoutModule(comptime name: []const u8, comptime icon: []const u8, comptime f: anytype, comptime extra: contract.Layout) contract.Layout {
     var m = extra;
     m.name = name;

@@ -201,7 +201,7 @@ Extract `naturalVisibility(ws, is_globally_visible)`. **−2..−3**
 
 ## A.5 `src/bar/` modules (v8 — 14 numbered findings, ≈ −48 LoC)
 
-### [SY-01] H — systatus cpu/mem/batt: open+read stanza repeated 3×
+### [SY-01] H — systatus cpu/ram/batt: open+read stanza repeated 3×
 Add `systatus.readSmallFile(path, buf) ?usize`. **−7**
 
 ### [S-02] M — brightness.zig:114-124 + native_alsa.zig:137-151: pct↔range maps implemented twice
@@ -473,7 +473,7 @@ WCD-01/12/13, CORE-03 (owner gate), TIL-N6/10.
   pct + write application, used by apply/reset/flushOwed/finish), CL-01 (`stale()` inlined
   into `secondElapsed`), SY-02 (cpu.zig baseline/delta branches merged into one state-write
   tail + single clamp via `use_delta`), SY-01 (`systatus.readSmallFile` single-sources the
-  open-read-close stanza, adopted by mem/cpu/batt readouts, −18), TG-02 (`[2]f32` +
+  open-read-close stanza, adopted by ram/cpu/batt readouts, −18), TG-02 (`[2]f32` +
   `corner_x_axis`/`corner_y_axis` index consts → 2-field `.x/.y` struct in tags.zig:97-110,
   − resistant to index-swap), T-01 (title.zig:250-252/268 ellipsis arm → single trailing
   `drawTextEllipsis`; carousel-off + active-off paths fold). **TG-01 folded into TG-02
@@ -490,7 +490,7 @@ WCD-01/12/13, CORE-03 (owner gate), TIL-N6/10.
   **Records**: BAR14 deferred (Q2), BAR10 folded into Phase 1 (dead guard).
 
 - **Wave 1 systatus/tags/title Phase-2 DONE, gates green**: SY-01 (`systatus.readSmallFile`
-  shared by mem 4096B / cpu 512B / batt 64B carries, −18), TG-01 (`getCachedWorkspaceWidth`
+  shared by ram 4096B / cpu 512B / batt 64B carries, −18), TG-01 (`getCachedWorkspaceWidth`
   trivial getter deleted; `ws_width` at both call sites −3), TG-02 (`[2]f32`+axis index consts
   → 2-field struct in tags.zig −3), T-01 (title.zig duplicated ellipsis arm single-sourced −2).
   T-01 folds the carousel-head comment so static mode stays the one spell.
@@ -500,7 +500,7 @@ WCD-01/12/13, CORE-03 (owner gate), TIL-N6/10.
   - **WCD-06** (`window.providerOf` re-export): the re-export IS the dependency seam — leaf
     window modules must not know `window_mods`, only window.zig (the registry owner) may. Folding
     moves the seam, does not remove it. Keep.
-  - **WCD-08** (per-module atom mini-caches): systatus/mem paths already single-source through
+  - **WCD-08** (per-module atom mini-caches): systatus/ram paths already single-source through
     the shared `utils.getAtomCached` AtomCache; systatus's capability probe uses raw read only
     (no atom). No standalone mini-cache remains to fold. Keep.
   - **WCD-09** (property-reply validation 3 ways): icccm's format-8 (string) vs wire's

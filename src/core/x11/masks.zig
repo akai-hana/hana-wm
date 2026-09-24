@@ -27,6 +27,13 @@ pub const mod_mask_binding: u16 = mod_shift | mod_control | mod_alt | mod_super;
 pub const modifier_keysym_lo: u32 = 0xFFE0;
 pub const modifier_keysym_hi: u32 = 0xFFEF;
 
+/// True when `keysym` falls in the modifier keysym band (see above). A bare
+/// modifier press can never match a binding; callers use this to stay silent
+/// instead of logging keystroke noise.
+pub inline fn isModifierKeysym(keysym: u32) bool {
+    return keysym >= modifier_keysym_lo and keysym <= modifier_keysym_hi;
+}
+
 /// Lock key combinations grabbed alongside every keybinding so binds work
 /// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
 /// the three lock modifiers in the historical grab order (size 0, the three

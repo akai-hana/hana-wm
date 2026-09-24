@@ -75,7 +75,7 @@ Non-`src` files in the tree (`.git`, `.zig-cache`, `zig-out`, `.opencode`, etc.)
   ```
 - `tiling_seam` — `pub const tiling = if (build_options.has_tiling) @import("tiling") else struct {};` Core/input import this seam, never `src/tiling/` by name.
 - `bar_modules` — array of all `contract.Segment` bindings from `src/bar/modules/`.
-- `<pkg>_subs` — `systatus_subs` (batt/cpu/mem readouts), `slider_subs` (brightness/volume), `prompt_subs` (vim addon), `title_subs` (carousel scroller).
+- `<pkg>_subs` — `systatus_subs` (batt/cpu/ram readouts), `slider_subs` (brightness/volume), `prompt_subs` (vim addon), `title_subs` (carousel scroller).
 - `fallback_toml` — `pub const content = @embedFile("fallback.toml");` from `config/fallback.toml` (or `""` when absent). Injected into every compiled module; `fallback_toml` is a reserved module name so a source file can never collide with it.
 
 ### 3.3 Registry shape enforcement
@@ -299,7 +299,7 @@ The bar is an orchestrator with zero segment logic: every segment is a drop-in a
 - **`systatus/systatus.zig` (216)** — iterates the generated `systatus_subs` registry of simple readouts, coalesced to `read_interval_ms 2000`, throttled, `max_readout_len 36`, `needsRepaint` false while contents unchanged.
 - **`systatus/batt.zig` (37)** — first `/sys/class/power_supply/BAT*` charge %; renders nothing (collapses) on battery-less machines.
 - **`systatus/cpu.zig` (62)** — aggregate core utilization from the `/proc/stat` first-line delta; first read is the boot-cumulative average while the baseline is established.
-- **`systatus/mem.zig` (49)** — used % from `MemTotal` vs `MemAvailable`; saturating math; unit test in-file.
+- **`systatus/ram.zig` (49)** — used % from `MemTotal` vs `MemAvailable`; saturating math; unit test in-file.
 - **`title/title.zig` (522)** — the center-slot title chrome overlay: tracks focused-title identity, renders text, and hosts the inline prompt overlay (found by scanning `bar_mods` for the `BarOverlay` hook — name-free). Click-to-focus, right-click toggles the chrome overlay, `TitleWidthMemo` (buffer-content compare avoids stale width on X id reuse). First center-slot binder = the title.
 - **`title/carousel.zig` (145)** — marquee scroller for the title, advancing one display period per frame locked to `refresh.detectedHz` (sub-pixel f32 offset handed to cairo); `inter_title_gap_px 48`; `resetForShow` prevents advancing across the hidden gap.
 - **`prompt/prompt.zig` (1388)** — the inline command prompt overlay (chrome-overlay client; the largest single file): full line editor, insert/normal modality (vim module separate), command completion (files + history), spawn action. Addons via `prompt_subs` registry (`Addon { register, init, deinit }`). Ghost-append drawing inline in `performDraw` — deliberately not `blitRegion` (mid-batch copy would snapshot stale siblings).

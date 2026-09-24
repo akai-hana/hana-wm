@@ -1,34 +1,17 @@
-//! Complete workspaces feature: tag membership transitions + the workspace
-//! count for the tracking facade.
+//! Complete workspaces feature: tag membership transitions.
 //! A self-contained plugin over the model: switching, tagging, and moving are
-//! model transitions (tag mask + tiled_order moves), and the workspace count
-//! (config-driven) is forwarded to tracking at init. The per-workspace
-//! config-override store once held here was dead weight (never read in
-//! production) and is gone; config overrides seed the model params directly
-//! through actions.seedParamsFromConfig.
+//! model transitions (tag mask + tiled_order moves). The workspace count is
+//! no longer forwarded here: the tracking facade latches it directly from
+//! config at init. The per-workspace config-override store once held here was
+//! dead weight (never read in production) and is gone; config overrides seed
+//! the model params directly through actions.seedParamsFromConfig.
 
-const core = @import("core");
-
-const tracking = @import("tracking");
 const model = @import("model");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
 const providerOf = window.providerOf;
-
-/// Initializes global workspace state. Workspaces-disabled collapses to a
-/// single implicit workspace; every switch/tag/move action already no-ops on
-/// an out-of-range target, so nothing else needs to branch on this.
-pub fn init() !void {
-    const cs = core.getState();
-    const count = if (cs.config.workspaces.enabled) cs.config.workspaces.count else 1;
-    tracking.setWorkspaceCount(count);
-}
-
-pub fn deinit() void {
-    tracking.setWorkspaceCount(0);
-}
 
 /// Test-only; the production switch path is `actions.switchTo`.
 pub fn switchTo(m: *model.Model, ws: model.WSId) void {
@@ -41,13 +24,12 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     if (model.isPinned(e.*)) return; // pinned stays everywhere-visible
 
     // Refuse-before-mutate: full destination list cancels the move.
-    const h: ?model.WSId = e.home_ws;
-    const to_new_ws = h == null or !h.?.eql(ws);
-    if (h != null and to_new_ws and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
+    const to_new_ws = if (e.home_ws) |hw| !hw.eql(ws) else true;
+    if (e.home_ws != null and to_new_ws and m.ws[ws.index].tiled_order.len >= model.max_tiled_per_ws) return;
 
     transferFullscreenOnMove(m, win, ws);
     e.mask = model.bit(ws);
-    if (h) |old_h| {
+    if (e.home_ws) |old_h| {
         if (to_new_ws) {
             model.removeValue(&m.ws[old_h.index].tiled_order, win);
             _ = m.ws[ws.index].tiled_order.append(win);
@@ -65,7 +47,9 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
         if (providerOf(.toggleCovering)) |wm| {
             _ = wm.toggleCovering.?(m, win);
         }
-    } else if (providerOf(.moveCoveringTo)) |wm| {
+        return; // a resident owner swallows the transfer
+    }
+    if (providerOf(.moveCoveringTo)) |wm| {
         wm.moveCoveringTo.?(m, win, dest);
     }
 }
@@ -112,11 +96,10 @@ pub fn allViewToggle(m: *model.Model) bool {
     return m.all_view_active;
 }
 
-/// This module's window sub-system contribution: lifecycle only, since
-/// workspace state lives in the model.
+/// This module's window sub-system contribution: pure model transitions;
+/// lifecycle is handled by the tracking facade's init (count latch) and
+/// model state lives in the model.
 pub const module: @import("contract").WindowModule = .{
-    .init = init,
-    .deinit = deinit,
     .sendToWs = moveWindowToWs,
     .addToWs = tagAdd,
     .removeFromWs = tagRemove,

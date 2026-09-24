@@ -209,7 +209,8 @@ Standing verification commands: `zig fmt --check .`, `zig build check`, `zig bui
 ### [nit] RateForModeId linear scan; cursor-blink poll wakeups flush+tick every iteration — **GATED**
 - The blink path is fixed (scoped repaint, insert-mode gating, no redundant flush on the wakeups); `RateForModeId`'s scan remains (small N).
 
-### [nit] persist always serializes all 64 workspaces — **FIXED** (sparse zig-zag map of live workspaces)
+### [nit] persist always serializes all 64 workspaces — **OPEN** (dense array is deliberate)
+- All `MAX_WS` workspaces are serialized unconditionally (array position is the index), so parse-time indexing needs no bounds work and a hand-edited file cannot name a workspace that was never saved (see `src/core/persist.zig` header).
 
 ### [nit] Restart re-execs unconditionally; spawn drain every batch; etc. — **OPEN** (nits)
 

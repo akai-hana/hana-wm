@@ -283,7 +283,7 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try spaced.append(testing.allocator, .{ .string = "+" });
     try spaced.append(testing.allocator, .{ .string = "(weight:25%)" });
     try spaced.append(testing.allocator, .{ .string = "pb" });
-    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = spaced }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = .{ .list = spaced } }, &palette).?);
 
     // Combined "+(weight:N%)" token (no space after the plus) is equivalent.
     var compact = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 3);
@@ -291,7 +291,7 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try compact.append(testing.allocator, .{ .string = "pa" });
     try compact.append(testing.allocator, .{ .string = "+(weight:25%)" });
     try compact.append(testing.allocator, .{ .string = "pb" });
-    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = compact }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = .{ .list = compact } }, &palette).?);
     // Reversed weight: b = 75%.
     try testing.expectEqual(@as(u32, 0x881800), parser.resolveColorExpr(.{ .string = "pa+(weight:75%)pb" }, &palette).?);
 
@@ -322,7 +322,7 @@ test "color-mix: malformed expressions resolve to null, not garbage" {
         var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, cs.len);
         defer arr.deinit(testing.allocator);
         try arr.appendSlice(testing.allocator, cs);
-        try testing.expect(parser.resolveColorExpr(.{ .array = arr }, &palette) == null);
+        try testing.expect(parser.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) == null);
     }
     // The head operand may never carry a weight.
     try testing.expect(parser.resolveColorExpr(.{ .string = "(weight:50%)pa+pb" }, &palette) == null);
@@ -338,13 +338,13 @@ test "color-mix: a bare operand list mixes equally" {
     var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 2);
     defer arr.deinit(testing.allocator);
     try arr.appendSlice(testing.allocator, &.{ .{ .string = "pa" }, .{ .string = "pb" } });
-    const mixed = parser.resolveColorExpr(.{ .array = arr }, &palette) orelse return error.TestUnexpectedResult;
+    const mixed = parser.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u32, 0x901000), mixed);
     // A single-element list is not a mix; the alias fallback handles it.
     var one = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 1);
     defer one.deinit(testing.allocator);
     try one.append(testing.allocator, .{ .string = "pa" });
-    try testing.expect(parser.resolveColorExpr(.{ .array = one }, &palette) == null);
+    try testing.expect(parser.resolveColorExpr(.{ .array = .{ .list = one } }, &palette) == null);
 }
 
 test "collectPalette: aliases and + mixes resolve through a fixpoint" {
@@ -377,4 +377,34 @@ test "collectPalette: a cyclic mix is skipped, not infinite-looped" {
     try testing.expect(doc.palette.contains("text_color"));
     try testing.expect(!doc.palette.contains("primary_color"));
     try testing.expect(!doc.palette.contains("secondary_color"));
+}
+
+test "color-mix: literal arrays parse with accumulated=false, mixing stays intact" {
+    // C-16: parsing is orthogonal to the mix half. A genuine single-declaration
+    // literal array from any working spelling (bracket or bare, `0x` colors)
+    // must keep `accumulated` false so `colorFromValue`/`resolveColorExpr`
+    // treat it as a mix unit and never descend as a scalar.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const doc0 = try parse(arena.allocator(),
+        \\[tiling.aesthetics]
+        \\x = [1, 2]
+    );
+    const x = doc0.sections.getPtr("tiling.aesthetics").?.get("x").?;
+    try testing.expect(x == .array);
+    try testing.expect(!x.array.accumulated);
+    try testing.expectEqual(@as(usize, 2), x.array.list.items.len);
+    var doc5 = try parse(arena.allocator(),
+        \\icons = 0xac3232, 0x52263e
+    );
+    const icons = doc5.root.get("icons").?;
+    try testing.expect(icons == .array);
+    try testing.expect(!icons.array.accumulated);
+    try testing.expectEqual(@as(usize, 2), icons.array.list.items.len);
+    var doc6 = try parse(arena.allocator(),
+        \\x = [0xac3232, 0x52263e]
+    );
+    const x6 = doc6.root.get("x").?;
+    try testing.expect(x6 == .array);
+    try testing.expect(!x6.array.accumulated);
 }

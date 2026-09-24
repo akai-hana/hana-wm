@@ -1,6 +1,12 @@
-//! Window tracking facade over the model, the single source of truth.
-//! Queries read pipeline.model() (counts via the store, scans via the
-//! per-call snapshot in allWindows), so window predicates match actions/sync.
+//! Window tracking queries over the model (the single source of truth for
+//! windows/workspaces): counts, per-window predicates, sweep snapshots and
+//! the workspace labels. A few boot/config-driven lifecycle bits (workspace
+//! count, the init flag) are kept locally here.
+//!
+//! PENDING (no simplification action): border sweeps call
+//! model.coveringOccupantOnWs per window (an O(N) store scan each); measured
+//! (~480 ns/call) and deliberately uncached (IMPROVEMENTS §II) -- an
+//! optimization question, not a simplification.
 
 const std = @import("std");
 
@@ -8,7 +14,6 @@ const core = @import("core");
 const constants = @import("constants");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
-const debug = @import("debug");
 
 // Transition-layer gate for THIS facade's own model writes only. The single
 // entry-drop transition (removeWindow) and the focus-MRU clear in
@@ -91,31 +96,27 @@ fn clearFocusMru() void {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle / workspace count (kept local; config-driven)
+// Lifecycle / workspace count (latched from config at init)
 // ---------------------------------------------------------------------------
 
-var state = struct {
-    initialized: bool = false,
-    workspace_count: usize = 1,
-}{};
+var workspace_count: usize = 1;
 
+/// Latch the workspace count directly from the live config, collapsing to a
+/// single implicit workspace when the workspaces feature is disabled. The
+/// u64 workspace bitmask caps the count; clamp (never crash) so a corrupt
+/// config count can't overflow the mask in ReleaseFast. Callers before
+/// core.init (headless test harnesses) keep the default.
 pub fn init() void {
-    state.initialized = true;
+    if (core.isReady()) {
+        const cs = core.getState().config.workspaces;
+        workspace_count = if (cs.enabled) @min(@as(usize, cs.count), constants.max_workspaces) else 1;
+    }
     clearFocusMru();
 }
 
 pub fn deinit() void {
-    state = .{};
+    workspace_count = 1;
     clearFocusMru();
-}
-
-/// Called by workspaces.init: tells tracking how many workspaces exist.
-/// The workspace bitmask is a u64, so more than 64 workspaces cannot be
-/// represented; clamp (never crash) so a corrupt boot count can't overflow the
-/// mask in ReleaseFast.
-pub fn setWorkspaceCount(count: usize) void {
-    if (count > constants.max_workspaces) debug.warn("setWorkspaceCount: {d} workspaces requested; clamping to {d}", .{ count, constants.max_workspaces });
-    state.workspace_count = @min(count, constants.max_workspaces);
 }
 
 /// Read-through facade over `model.current`, the single source of truth:
@@ -123,12 +124,12 @@ pub fn setWorkspaceCount(count: usize) void {
 /// tracking query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    if (pipeline.initialized) return @intCast(pipeline.model().current.index);
+    if (pipeline.initialized) return pipeline.model().current.index;
     return null;
 }
 
 pub inline fn getWorkspaceCount() usize {
-    return state.workspace_count;
+    return workspace_count;
 }
 
 // ---------------------------------------------------------------------------

@@ -39,8 +39,8 @@ test "moveWindowToWs: out-of-range workspace is a no-op (never indexes m.ws[ws])
     // C12-era regression: the guard `ws >= m.ws.len` keeps these from
     // indexing m.ws[ws] out of bounds; without it ReleaseFast would take the
     // adjacent memory silently.
-    workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(@intCast(max_ws))); // == m.ws.len
-    workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(@intCast(constants.max_workspace_number_1based)));
+    workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(max_ws)); // == m.ws.len
+    workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(constants.max_workspace_number_1based));
     workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(std.math.maxInt(u8)));
 
     try testing.expectEqual(before_mask, m.store.get(202).?.mask);

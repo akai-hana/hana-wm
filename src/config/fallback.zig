@@ -25,8 +25,11 @@ const terminals = [_][]const u8{
     "terminator",
 };
 
+/// Last-resort terminal when nothing on the preference list is available.
+const fallback_terminal = "xterm";
+
 /// Returns the first available terminal from the preference list, falling back
-/// to "xterm" when nothing else is found.
+/// to `fallback_terminal` when nothing else is found.
 pub fn detectTerminal() []const u8 {
     for (terminals) |cmd| {
         if (isCommandAvailable(cmd)) {
@@ -34,8 +37,8 @@ pub fn detectTerminal() []const u8 {
             return cmd;
         }
     }
-    debug.warn("No preferred terminal found, using 'xterm'", .{});
-    return "xterm";
+    debug.warn("No preferred terminal found, using '{s}'", .{fallback_terminal});
+    return fallback_terminal;
 }
 
 fn isCommandAvailable(command: []const u8) bool {
@@ -43,24 +46,9 @@ fn isCommandAvailable(command: []const u8) bool {
     const path_env = std.mem.span(std.c.getenv("PATH") orelse return false);
     var dir_it = paths.dirIterator(path_env);
     while (dir_it.next()) |dir| {
-        if (checkPath(&buf, dir, command)) return true;
+        if (paths.exeInDir(&buf, dir, command)) return true;
     }
     return false;
-}
-
-// std.posix.access was removed in this Zig version, so faccessat is called
-// as a raw syscall. It checks existence and executability in one syscall;
-// openFileAbsolute checks readability only, so a non-executable file named
-// like a terminal is not reported "available" and fails later with EACCES.
-fn checkPath(buf: []u8, dir: []const u8, command: []const u8) bool {
-    const full_path = std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, command }) catch return false;
-    const rc: isize = @bitCast(std.os.linux.faccessat(
-        std.os.linux.AT.FDCWD,
-        full_path,
-        std.posix.X_OK,
-        0,
-    ));
-    return rc == 0;
 }
 
 /// Returns the fallback TOML embedded in the binary, or null when
