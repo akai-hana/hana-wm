@@ -1,4 +1,4 @@
-//! Sends are planned in sync.zig and dispatched by sync/sink.zig's shims
+//! Sends are planned in sync.zig and dispatched by sink.zig's shims
 //! (the sanctioned seam); sync.Sink's inline methods are thin dispatchers
 //! over that seam; the raw XCB primitives those shims call are defined
 //! in core/x11/wire.zig (allowlisted primitive home); a small documented
@@ -47,7 +47,7 @@ const std = @import("std");
 const utils = @import("utils");
 const build_options = @import("build_options");
 const model = @import("model");
-const debug = @import("debug");
+const log = @import("log");
 
 /// The tiling engine is reached through the build-generated `tiling_seam`:
 /// when no tiling subsystem is present the seam is an empty struct, and every
@@ -384,7 +384,15 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         const is_winner = winner == win;
 
         if (parked) {
-            if (!ledger.parked) ctx.sink.park(win);
+            if (!ledger.parked) {
+                // Map before park: a fresh window's own map request was
+                // redirected by SubstructureRedirect (never performed by the
+                // server), so the offscreen park would otherwise leave it
+                // unmapped, and a focus issued for it (spawn under a covering
+                // winner, cross-workspace spawn) fails with BadMatch.
+                if (!ledger.has_rect) ctx.sink.map(win);
+                ctx.sink.park(win);
+            }
         } else {
             // Raise triggers per the ledger contract (header read 2): winner
             // .above on geometry motion, unpark, or restack pressure only.
@@ -416,7 +424,7 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
             if (parked) g.parked = true else markSentVisible(g, rect, bw, pixel);
         } else ledger_overflow = true;
     }
-    if (ledger_overflow) debug.err("sync.reconcile: ledger full; some sends applied, records lost", .{});
+    if (ledger_overflow) log.err("sync.reconcile: ledger full; some sends applied, records lost", .{});
 
     // force_restack additionally raises bar/top.
     if (opts.force_restack) {

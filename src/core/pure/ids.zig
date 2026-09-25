@@ -10,9 +10,9 @@
 //! `fromIndex` accepts any integer (internal checked `@intCast` to u8), so
 //! callers don't scatter `@intCast` wrappers; the u8 field type still keeps
 //! indices distinct from unrelated u8 values (counts, layout indices, etc.).
-//! Lives in core/utils rather than core or model because both modules need it
-//! and model must stay xcb-free (it never imports core); this file imports
-//! nothing but std.
+//! Lives in core/pure (the xcb-free vocabulary) because both the hub and the
+//! model need it and model must stay xcb-free (it never imports core); this
+//! file imports nothing but std.
 const std = @import("std");
 
 /// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId`

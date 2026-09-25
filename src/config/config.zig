@@ -4,7 +4,7 @@
 const std = @import("std");
 const constants = @import("constants");
 const fallback = @import("fallback");
-const debug = @import("debug");
+const log = @import("log");
 const ids = @import("ids");
 const keysyms = @import("keysyms");
 const masks = @import("masks");
@@ -25,11 +25,11 @@ const max_modifier_key_bytes = 16;
 /// exceeding `max` (the workspace count / constants.max_workspaces ceiling).
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     if (ws_1based < 1 or ws_1based > constants.max_workspace_number_1based) {
-        debug.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
+        log.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
         return false;
     }
     if (ws_1based > max) {
-        debug.warn(
+        log.warn(
             "{s}: workspace {} exceeds the {}-workspace limit, skipping",
             .{ context, ws_1based, max },
         );
@@ -44,14 +44,14 @@ fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
 /// to skip it.
 fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: anytype) ?usize {
     const ws_1based = std.fmt.parseInt(usize, tok, 10) catch {
-        debug.warn(fmt, args);
+        log.warn(fmt, args);
         return null;
     };
     if (ws_1based < 1 or
         ws_1based > constants.max_workspace_number_1based or
         ws_1based > max)
     {
-        debug.warn(fmt, args);
+        log.warn(fmt, args);
         return null;
     }
     return ws_1based;
@@ -117,7 +117,7 @@ const max_key_name_bytes = 64;
 pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
-        if (err == error.FileNotFound) debug.info("Not found: {s}", .{path});
+        if (err == error.FileNotFound) log.info("Not found: {s}", .{path});
         return err;
     };
     defer file.close(io);
@@ -177,10 +177,10 @@ fn tryParseTomlFile(
 ) ?parser.Document {
     const doc = parseTomlFile(allocator, path) catch |err| {
         dst.had_errors = true;
-        debug.warn("Skipping '{s}': {}", .{ path, err });
+        log.warn("Skipping '{s}': {}", .{ path, err });
         return null;
     };
-    if (doc == null) debug.info("Skipping empty file: {s}", .{path});
+    if (doc == null) log.info("Skipping empty file: {s}", .{path});
     return doc;
 }
 
@@ -206,7 +206,7 @@ fn parseAndMerge(
 ) !?parser.Document {
     var doc = tryParseTomlFile(allocator, path, dst) orelse return null;
     try parser.mergeDocumentsInto(allocator, dst, &doc);
-    debug.info(msg, .{path});
+    log.info(msg, .{path});
     return doc;
 }
 
@@ -229,13 +229,13 @@ fn mergeIncludes(
     for (includes) |item| {
         const rel = item.asScalar([]const u8) orelse continue;
         if (!std.mem.endsWith(u8, rel, ".toml")) {
-            debug.warn("include '{s}': path must end in .toml; skipping", .{rel});
+            log.warn("include '{s}': path must end in .toml; skipping", .{rel});
             continue;
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
         var inc_doc = (try parseAndMerge(allocator, dst, abs, "Merged (include): {s}")) orelse continue;
         if (inc_doc.root.get("include")) |_| {
-            debug.warn("{s}: nested 'include' inside an included file is not " ++ "supported; its include list is skipped", .{abs});
+            log.warn("{s}: nested 'include' inside an included file is not " ++ "supported; its include list is skipped", .{abs});
         }
     }
 }
@@ -259,7 +259,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
         const io = std.Options.debug_io;
         var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound or err == error.NotDir)
-                debug.info("Config dir not found: {s}", .{dir_path});
+                log.info("Config dir not found: {s}", .{dir_path});
             return err;
         };
         defer dir.close(io);
@@ -273,13 +273,13 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
     }
 
     if (names.items.len == 0) {
-        debug.info("No .toml files in config dir: {s}", .{dir_path});
+        log.info("No .toml files in config dir: {s}", .{dir_path});
         return error.FileNotFound;
     }
 
     std.mem.sort([]u8, names.items, {}, sliceLessThan);
     const cfg = try parseAndBuild(allocator, parseDirDoc, DirInput{ .dir_path = dir_path, .names = names.items });
-    debug.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
+    log.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
     return cfg;
 }
 
@@ -310,7 +310,7 @@ fn tryLoadOrWarn(
         // user's typo'd config.
         if (err == error.ConfigParseFailed) return err;
         for (silent) |e| if (err == e) return null;
-        debug.warn(err_msg, .{ path, err });
+        log.warn(err_msg, .{ path, err });
         return null;
     };
 }
@@ -505,7 +505,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
                 return cfg;
             } else |err| switch (err) {
                 error.FileNotFound, error.NotDir, error.ConfigParseFailed => {
-                    debug.warn("Re-exec config snapshot {s} unusable ({s}); falling back to the user's config", .{ env, @errorName(err) });
+                    log.warn("Re-exec config snapshot {s} unusable ({s}); falling back to the user's config", .{ env, @errorName(err) });
                 },
                 else => return err,
             }
@@ -529,14 +529,14 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
             return cfg;
         };
 
-    debug.info("No config found, using fallback with auto-detection", .{});
+    log.info("No config found, using fallback with auto-detection", .{});
     source.* = .fallback;
     return try loadFallbackConfig(allocator);
 }
 
 /// Validates domain invariants on a freshly loaded config.
 fn invalid(comptime fmt: []const u8, args: anytype) error{InvalidConfig} {
-    debug.err("Invalid config: " ++ fmt ++ ", keeping old", args);
+    log.err("Invalid config: " ++ fmt ++ ", keeping old", args);
     return error.InvalidConfig;
 }
 
@@ -563,12 +563,12 @@ pub fn validate(cfg: *const types.Config) !void {
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config {
     const cfg = parseAndBuild(allocator, parseFileDoc, FileInput{ .path = path, .base_dir = std.fs.path.dirname(path) orelse "." }) catch |err| switch (err) {
         error.ConfigEmpty => {
-            debug.info("Empty config file: {s}, using fallback", .{path});
+            log.info("Empty config file: {s}, using fallback", .{path});
             return try loadFallbackConfig(allocator);
         },
         else => return err,
     };
-    debug.info("Loaded: {s}", .{path});
+    log.info("Loaded: {s}", .{path});
     return cfg;
 }
 
@@ -628,7 +628,7 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
         }
     }
 
-    debug.info("Loaded fallback configuration with auto-detection", .{});
+    log.info("Loaded fallback configuration with auto-detection", .{});
     return cfg;
 }
 
@@ -711,14 +711,14 @@ fn warnMisCasedSections(doc: *parser.Document) void {
         var buf: [max_section_name_bytes]u8 = undefined;
         const lowered = types.lowerSlice(buf.len, &buf, name) orelse continue;
         if (!std.mem.eql(u8, lowered, name) and known_sections.has(lowered)) {
-            debug.warn("Section [{s}] is mis-cased; hana recognizes [{s}], ignoring the section", .{ name, lowered });
+            log.warn("Section [{s}] is mis-cased; hana recognizes [{s}], ignoring the section", .{ name, lowered });
             continue;
         }
         for (known_section_prefixes) |pfx| {
             if (name.len > pfx.len and std.ascii.startsWithIgnoreCase(name, pfx) and
                 !std.mem.startsWith(u8, name, pfx))
             {
-                debug.warn("Section [{s}] is mis-cased; hana recognizes the [{s}...] family (all lowercase), ignoring", .{ name, pfx });
+                log.warn("Section [{s}] is mis-cased; hana recognizes the [{s}...] family (all lowercase), ignoring", .{ name, pfx });
                 break;
             }
         }
@@ -732,13 +732,13 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
         var iter = doc.sections.iterator();
         while (iter.next()) |entry| {
             if (std.mem.startsWith(u8, entry.key_ptr.*, types.section_prefix_tiling)) {
-                debug.warn("[tiling.*] sections present but bare [tiling] is missing; their knobs are inert", .{});
+                log.warn("[tiling.*] sections present but bare [tiling] is missing; their knobs are inert", .{});
                 break;
             }
         }
     }
     if (doc.getSection(types.section_bar) == null and doc.getSection(types.section_bar_properties) != null)
-        debug.warn("[bar.properties] present but [bar] is missing; its knobs are inert", .{});
+        log.warn("[bar.properties] present but [bar] is missing; its knobs are inert", .{});
 }
 
 const mod_map = std.StaticStringMap(u16).initComptime(.{
@@ -865,7 +865,7 @@ fn expandRangeToken(
     var ch = t[0];
     const end = t[2];
     if (ch > end) {
-        debug.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end });
+        log.warn("Keybind glob '{s}': descending range '{c}-{c}', skipping", .{ key_pattern, ch, end });
         return;
     }
     while (ch <= end) : (ch += 1) try appendExpandedEntry(allocator, entries, prefix, suffix, &.{ch});
@@ -879,7 +879,7 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
     const lbrace = std.mem.indexOfScalar(u8, key_pattern, '{') orelse
         return singleGlobEntry(allocator, key_pattern);
     const rbrace = std.mem.indexOfScalarPos(u8, key_pattern, lbrace + 1, '}') orelse {
-        debug.warn("Keybind glob missing closing '}}' in '{s}', treating as literal", .{key_pattern});
+        log.warn("Keybind glob missing closing '}}' in '{s}', treating as literal", .{key_pattern});
         return singleGlobEntry(allocator, key_pattern);
     };
     const prefix = key_pattern[0..lbrace];
@@ -1096,7 +1096,7 @@ fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *t
             defer if (keybind_str.ptr != ge.key.ptr) allocator.free(keybind_str);
             var action = try actionFromValue(allocator, entry.value, ge.ws_idx, kill_placeholder) orelse continue;
             const bind = parseBindString(keybind_str) catch |err| {
-                debug.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
+                log.warn("Failed to parse keybind '{s}': {}", .{ keybind_str, err });
                 // The action just built owns heap strings; it isn't stored
                 // anywhere on this path, so free it before skipping the bind.
                 action.deinit(allocator);
@@ -1208,11 +1208,11 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     // resembling a built-in action is almost always a typo, and running it as
     // an exec (which fails or does nothing) hides the mistake, so warn.
     if (looksLikeActionWord(cmd))
-        debug.warn("Unrecognized action '{s}': running it as an exec command: " ++
+        log.warn("Unrecognized action '{s}': running it as an exec command: " ++
             "check the spelling (action names are matched exactly)", .{cmd});
     // Never let an unresolved `{...}` placeholder reach the shell verbatim.
     if (hasPlaceholderFragment(cmd))
-        debug.warn("Action '{s}' still contains a '{{...}}' placeholder; executing it verbatim", .{cmd});
+        log.warn("Action '{s}' still contains a '{{...}}' placeholder; executing it verbatim", .{cmd});
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
@@ -1231,7 +1231,7 @@ pub fn load(allocator: std.mem.Allocator) !types.Config {
         // config (the WM must still start). On reload the parse error
         // propagates instead, so the live config is kept.
         error.ConfigParseFailed => blk: {
-            debug.warn("Config parse error at startup; using the embedded fallback", .{});
+            log.warn("Config parse error at startup; using the embedded fallback", .{});
             break :blk try loadFallbackConfig(allocator);
         },
         else => return err,
@@ -1349,11 +1349,11 @@ fn parseTilingLayoutSubtables(
                     counts_sec.markConsumed(p.key);
                     if (tryParseWsToken(p.key, constants.max_workspaces, "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
                         const count_val = p.value.asScalar(i64) orelse {
-                            debug.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
+                            log.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
                             continue;
                         };
                         if (count_val < 0 or count_val > max_master_count)
-                            debug.warn("master-stack.counts: count {} for workspace {} out of range [0,{d}], skipping", .{ count_val, ws_1based, max_master_count })
+                            log.warn("master-stack.counts: count {} for workspace {} out of range [0,{d}], skipping", .{ count_val, ws_1based, max_master_count })
                         else
                             try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
                                 .workspace_idx = ids.WorkspaceId.fromIndex(ws_1based - 1),
@@ -1497,19 +1497,19 @@ fn parseLayoutsArray(
     var i: usize = 0;
     while (i < arr.len) : (i += 1) {
         const raw_name = arr[i].asScalar([]const u8) orelse {
-            debug.warn("layouts array: expected a string at index {}, skipping", .{i});
+            log.warn("layouts array: expected a string at index {}, skipping", .{i});
             continue;
         };
         var name_lower_buf: [max_layout_name]u8 = undefined;
         const name_lower = normalizeLayoutName(&name_lower_buf, raw_name) orelse {
-            debug.warn("layouts array: layout name '{s}' at index {} is longer than the {d}-byte limit, skipping", .{ raw_name, i, max_layout_name });
+            log.warn("layouts array: layout name '{s}' at index {} is longer than the {d}-byte limit, skipping", .{ raw_name, i, max_layout_name });
             continue;
         };
         const is_dup = for (cfg.tiling.layouts.items) |existing| {
             if (std.mem.eql(u8, existing, name_lower)) break true;
         } else false;
         if (is_dup) {
-            debug.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_lower, i });
+            log.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_lower, i });
             continue;
         }
         // Stored canonical (config.canonicalLayoutName) so every downstream
@@ -1519,7 +1519,7 @@ fn parseLayoutsArray(
         // u8), checked BEFORE the cast so an overlong config can't trap in
         // ReleaseFast.
         if (cfg.tiling.layouts.items.len >= max_layouts) {
-            debug.warn("layouts array: maximum of {d} unique layouts reached, skipping '{s}'", .{ max_layouts, raw_name });
+            log.warn("layouts array: maximum of {d} unique layouts reached, skipping '{s}'", .{ max_layouts, raw_name });
             continue;
         }
         const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
@@ -1554,7 +1554,7 @@ fn appendDupedStrings(
         if (item.asScalar([]const u8)) |s| {
             try dst.append(allocator, try allocator.dupe(u8, s));
         } else if (warn) {
-            debug.warn("Non-string entry in bar segment list, skipping", .{});
+            log.warn("Non-string entry in bar segment list, skipping", .{});
         }
     }
 }
@@ -1569,7 +1569,7 @@ fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Con
     if (section.getAs([]const parser.Value, "fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, types.keep_capacity);
         try appendDupedStrings(ignore_bad_font_entries, allocator, arr, &cfg.bar.fonts);
-        debug.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
+        log.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
     }
     // indicator_focused/unfocused: if only one is set, the other mirrors it.
     // A pair interaction, so it stays bespoke rather than joining the table.
@@ -1666,7 +1666,7 @@ fn parseNumberedRuleSections(
         const name = entry.key_ptr.*;
         const suffix_len = if (std.mem.startsWith(u8, name, types.section_prefix_workspace_rules)) types.section_prefix_workspace_rules.len else if (std.mem.startsWith(u8, name, types.section_prefix_rules)) types.section_prefix_rules.len else continue;
         const ws_num = std.fmt.parseInt(usize, name[suffix_len..], 10) catch {
-            debug.warn("Section [{s}]: workspace suffix is not a number, skipping", .{name});
+            log.warn("Section [{s}]: workspace suffix is not a number, skipping", .{name});
             continue;
         };
         if (!checkWorkspaceBound(ws_num, name, cfg.workspaces.count)) continue;
@@ -1687,15 +1687,15 @@ fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *types.Config, class_name:
             try addRule(allocator, cfg, class_name, null);
             return;
         }
-        debug.warn("Rule for '{s}' has string value '{s}', only integer or \"float\" supported, skipping", .{ class_name, s });
+        log.warn("Rule for '{s}' has string value '{s}', only integer or \"float\" supported, skipping", .{ class_name, s });
         return;
     }
     const ws_num = value.asScalar(i64) orelse {
-        debug.warn("Rule for '{s}' has non-integer value, skipping", .{class_name});
+        log.warn("Rule for '{s}' has non-integer value, skipping", .{class_name});
         return;
     };
     if (ws_num < 1)
-        debug.warn("Rule workspace {d} for '{s}' below minimum 1, skipping", .{ ws_num, class_name })
+        log.warn("Rule workspace {d} for '{s}' below minimum 1, skipping", .{ ws_num, class_name })
     else if (checkWorkspaceBound(@intCast(ws_num), class_name, cfg.workspaces.count))
         try addRule(allocator, cfg, class_name, @intCast(ws_num));
 }
@@ -1728,7 +1728,7 @@ fn parseWorkspaceRuleSection(
             continue;
         }
         if (digit_run != entry.key.len) {
-            debug.warn("[workspace.rules]: key '{s}' starts with a digit but isn't a workspace number, treating it as a class name", .{entry.key});
+            log.warn("[workspace.rules]: key '{s}' starts with a digit but isn't a workspace number, treating it as a class name", .{entry.key});
             try tryAddClassRule(allocator, cfg, entry.key, entry.value);
             continue;
         }
@@ -1736,7 +1736,7 @@ fn parseWorkspaceRuleSection(
         // plausible workspace number), so warn-and-skip rather than coerce
         // into a class rule.
         const ws_num = std.fmt.parseInt(usize, entry.key, 10) catch {
-            debug.warn("[workspace.rules]: workspace number '{s}' is too large, skipping", .{entry.key});
+            log.warn("[workspace.rules]: workspace number '{s}' is too large, skipping", .{entry.key});
             continue;
         };
         if (!checkWorkspaceBound(ws_num, entry.key, cfg.workspaces.count)) continue;

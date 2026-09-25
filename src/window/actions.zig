@@ -13,7 +13,7 @@ const focus = @import("focus");
 const window = @import("window");
 const screen = @import("screen");
 const build_options = @import("build_options");
-const debug = @import("debug");
+const log = @import("log");
 const utils = @import("utils");
 const tracking = @import("tracking");
 
@@ -321,7 +321,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     // ungrabAndFlush, i.e. the visual-completion point.
     if (build_options.profile_key) {
         const dt = utils.monotonicNs() - fs_t0;
-        debug.info("[FSPROF] win={d} kind={s} done {d}ns", .{
+        log.info("[FSPROF] win={d} kind={s} done {d}ns", .{
             win, @tagName(kind), dt,
         });
     }
@@ -344,7 +344,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
 
     var ft: focus.FocusTransition = .none;
     if (ws_idx != m.current.index) {
-        if (was_focused) ft = focusFallback(m, .tiling_operation);
+        if (was_focused) { ft = focusFallback(m, .tiling_operation); }
         // Moving the current workspace's covering window away changes the
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
@@ -374,7 +374,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
         if (rem_prov) |rp| {
             if (!rp.removeFromWs.?(m, win, model_mod.WSId.fromIndex(ws_idx))) return; // last tag protected
         }
-        if (removing_current and m.focused == win) ft = focusFallback(m, .tiling_operation);
+        if (removing_current and m.focused == win) { ft = focusFallback(m, .tiling_operation); }
     } else {
         if (add_prov) |ap| ap.addToWs.?(m, win, model_mod.WSId.fromIndex(ws_idx), protect_current);
     }
@@ -815,13 +815,13 @@ fn resolveVariant(
             if (md.variant_parse) |vp| {
                 v_idx = vp(vs) orelse blk: {
                     if (override_variant != null)
-                        debug.warn("Config: workspace layout variant '{s}' ignored — not a variant of the active layout", .{vs})
+                        log.warn("Config: workspace layout variant '{s}' ignored — not a variant of the active layout", .{vs})
                     else
-                        debug.warn("Unknown {s} variants '{s}', using default", .{ md.name, vs });
+                        log.warn("Unknown {s} variants '{s}', using default", .{ md.name, vs });
                     break :blk 0;
                 };
             } else if (override_variant != null) {
-                debug.warn("Config: workspace layout variant ignored — not a variant of the active layout", .{});
+                log.warn("Config: workspace layout variant ignored — not a variant of the active layout", .{});
             }
         }
     }
@@ -926,7 +926,7 @@ pub fn switchTo(ws_idx: u8) void {
 
     if (build_options.profile_key) {
         const t3 = utils.monotonicNs();
-        debug.info("[TIMING] switchTo ws={}: model={d}us rt_prep={d}us grab_body={d}us total={d}us", .{
+        log.info("[TIMING] switchTo ws={}: model={d}us rt_prep={d}us grab_body={d}us total={d}us", .{
             ws_idx,
             @as(u64, @intCast(t1 - t0)) / 1000,
             @as(u64, @intCast(t2 - t1)) / 1000,
@@ -957,7 +957,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // A defined refusal (store or home-list full) leaves the window
     // unmanaged.
     model_mod.register(m, win, if (on_current) null else model_mod.WSId.fromIndex(target_ws)) catch {
-        debug.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
+        log.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
         return;
     };
     // Bridge the cached WM_NORMAL_HINTS into the model entry at registration.

@@ -4,7 +4,7 @@
 const std = @import("std");
 const utils = @import("utils");
 const model = @import("model");
-const debug = @import("debug");
+const log = @import("log");
 
 const contract = @import("contract");
 
@@ -246,7 +246,7 @@ pub fn layoutByName(name: []const u8) ?usize {
 /// neutral default (index 0) or a caller-chosen seed kind.
 pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
     if (layoutByName(name)) |k| return @intCast(k);
-    debug.warn(
+    log.warn(
         "Config: layout name '{s}' did not resolve to a registered layout; " ++
             "using layout '{s}'",
         .{ name, moduleName(fallback) },

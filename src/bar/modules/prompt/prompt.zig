@@ -5,7 +5,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const debug = @import("debug");
+const log = @import("log");
 
 const types = @import("types");
 
@@ -416,7 +416,7 @@ fn init(
     g.vim_state = try EditorState.init(allocator, default_max_input);
     g.key_syms = xcb_key_symbols_alloc(conn);
     if (g.key_syms == null)
-        debug.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
+        log.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
     // The addon lifecycle lives here: each registered engine binds its
     // handlers into this module's state on init and tears down on deinit.
     inline for (addons) |a| {
@@ -618,12 +618,12 @@ fn activate() void {
     );
     const grab_reply = xcb.xcb_grab_keyboard_reply(cs.conn, cookie, null);
     if (grab_reply == null) {
-        debug.warn("prompt: xcb_grab_keyboard_reply returned null: aborting activation", .{});
+        log.warn("prompt: xcb_grab_keyboard_reply returned null: aborting activation", .{});
         return;
     }
     defer std.c.free(grab_reply);
     if (grab_reply.*.status != xcb.XCB_GRAB_STATUS_SUCCESS) {
-        debug.warn(
+        log.warn(
             "prompt: keyboard grab failed (status {}): aborting activation",
             .{grab_reply.*.status},
         );

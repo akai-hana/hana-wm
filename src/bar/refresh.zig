@@ -9,7 +9,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const debug = @import("debug");
+const log = @import("log");
 
 const utils = @import("utils");
 
@@ -151,7 +151,7 @@ fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
         // cache, and RandR has no targeted per-mode rate request to fetch one
         // on demand. Overflowed modes therefore always fall back to a full
         // re-detect when they become active; surface it rather than stall it.
-        debug.warn(
+        log.warn(
             "refresh: {} modes exceed the {}-mode cache; extra modes fall back to full re-detection",
             .{ modes.len, max_cached_modes },
         );
@@ -309,9 +309,9 @@ fn pipelinedRefreshRateFromOutputs(
 fn publishDetectedRate(rate: f64) void {
     if (std.math.isFinite(rate) and rate >= min_sane_hz and rate <= max_sane_hz) {
         detected_rate_hz.store(rate, .monotonic);
-        debug.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
+        log.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
     } else {
-        debug.warn("Detected invalid refresh rate {d:.2} Hz, keeping fallback", .{rate});
+        log.warn("Detected invalid refresh rate {d:.2} Hz, keeping fallback", .{rate});
     }
 }
 

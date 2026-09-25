@@ -1584,24 +1584,28 @@ const Module = struct {
     /// cross-wiring — one graph, so it cannot drift from a second hand-kept
     /// dependency list. The hub layers (core, window, input, bar) may import
     /// each other at will (hub-and-spoke); the pure layers may only depend on
-    /// the shared utility shelf and their own neighborhood. Because any
+    /// the pure vocabulary (src/core/pure/) and their own neighborhood. Because any
     /// import cycle with a pure member needs the pure module to reach INTO
     /// the hub, this makes pure-layer cycles structurally impossible and
     /// catches regressions like the old config -> xkbcommon -> core -> config
     /// cycle (config now parses keysym names through the pure `keysyms`).
     ///
     /// This check is the IMPORT-EDGE guard only. The complementary body/
-    /// reference sweep (any bare `xcb` token in model/ and tiling/, comments
-    /// stripped) lives in check-layers.sh Rule 3 — an import of an xcb-using
-    /// module passes here yet still lets `xcb` reach a pure file by
-    /// re-export, so Rule 3 -- not this function -- is the sole guard on
-    /// pure-layer xcb BODIES.
+    /// reference sweep (any bare `xcb` token in the pure vocabulary, tiling,
+    /// and config, comments stripped) lives in check-layers.sh Rule 3 — an
+    /// import of an xcb-using module passes here yet still lets `xcb` reach a
+    /// pure file by re-export, so Rule 3 -- not this function -- is the sole
+    /// guard on pure-layer xcb BODIES.
     fn assertPureLayerImports(
         name: []const u8,
         rel_path: []const u8,
         edges: []const []const u8,
     ) !void {
-        const layer = if (std.mem.startsWith(u8, rel_path, "src/model/"))
+        // The pure data model is the one pure-root file living in the core
+        // hub's vocabulary dir (src/core/pure/). The shelf siblings there are
+        // xcb-free by construction (and covered by Rule 3's body sweep for
+        // model only; contract's xcb event TYPES keep it out of the sweep).
+        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/pure/model.zig"))
             "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
             "tiling"
@@ -1621,16 +1625,16 @@ const Module = struct {
         }
     }
 
-    /// The allowed-import policy behind `assertPureLayerImports`. The shared
-    /// utility shelf is xcb-free by construction and safe for every layer;
-    /// `model` is the shared data model; the per-layer extras are the pure
-    /// neighborhoods each layer legitimately reaches (tiling's own seam plus
-    /// the `contract` decls; config's own parsing siblings plus the
-    /// pure `keysyms`). Anything else is hub wiring and belongs behind an
+    /// The allowed-import policy behind `assertPureLayerImports`. The pure
+    /// vocabulary (src/core/pure/) is xcb-free by construction and safe for
+    /// every layer; `model` is the shared data model; the per-layer extras
+    /// are the pure neighborhoods each layer legitimately reaches (tiling's
+    /// own seam plus the `contract` decls; config's own parsing siblings plus
+    /// the pure `keysyms`). Anything else is hub wiring and belongs behind an
     /// interface, not an import.
     fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
         const shelf = [_][]const u8{
-            "constants", "debug", "ids", "masks", "utils", "paths", "proc", "bounded", "idmap",
+            "constants", "log", "ids", "masks", "utils", "paths", "proc", "bounded", "idmap",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
         if (std.mem.eql(u8, dep, "model")) return true;

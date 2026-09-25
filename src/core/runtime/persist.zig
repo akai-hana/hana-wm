@@ -28,7 +28,7 @@ const std = @import("std");
 const config_mod = @import("config");
 const constants = @import("constants");
 const core = @import("core");
-const debug = @import("debug");
+const log = @import("log");
 const model = @import("model");
 const paths = @import("paths");
 /// Layout registry (build-generated); the active layout is a `u8` index into
@@ -291,26 +291,26 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) bool {
         allocator,
         std.Io.Limit.limited(max_restore_bytes),
     ) catch |err| {
-        debug.warn("persist: no usable restore file ({s}); booting fresh", .{@errorName(err)});
+        log.warn("persist: no usable restore file ({s}); booting fresh", .{@errorName(err)});
         return false;
     };
     defer allocator.free(raw);
 
     var parsed = std.json.parseFromSlice(StateFile, allocator, raw, .{}) catch {
-        debug.warn("persist: restore file unparseable; booting fresh", .{});
+        log.warn("persist: restore file unparseable; booting fresh", .{});
         return false;
     };
     if (parsed.value.version != persist_version) {
         const ver = parsed.value.version;
         parsed.deinit();
-        debug.warn("persist: unsupported restore version {}; booting fresh", .{ver});
+        log.warn("persist: unsupported restore version {}; booting fresh", .{ver});
         return false;
     }
 
     if (loaded_parsed) |old| old.deinit();
     const p = parsed.value;
     loaded_parsed = parsed;
-    debug.info("persist: loaded session state ({} windows, {d} workspaces)", .{
+    log.info("persist: loaded session state ({} windows, {d} workspaces)", .{
         p.windows.len,
         p.workspaces.len,
     });
@@ -383,7 +383,7 @@ pub fn applyModelLevel(m: *model.Model) void {
         // silent.
         if (@import("contract").moduleOf(s.params.kind) == null and tiling_mods.len > 0) {
             const fallback = resumableDefaultKind();
-            debug.warn(
+            log.warn(
                 "persist: restoring persisted layout kind {} which no " ++
                     "longer resolves ({} registered); using default kind {}",
                 .{ s.params.kind, tiling_mods.len, fallback },

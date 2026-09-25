@@ -8,18 +8,18 @@ This document walks the codebase file-by-file: what each file is for, what it de
 
 ## 1. Design philosophy
 
-The central idea is **hub-and-spoke composition**: a small, always-compiled core at the center (one pure model, one event pipeline, one sync boundary) with optional subsystems hanging off it through **build-generated registries** bound against the **open contracts** defined in `src/core/contract.zig`.
+The central idea is **hub-and-spoke composition**: a small, always-compiled core at the center (one pure model, one event pipeline, one sync boundary) with optional subsystems hanging off it through **build-generated registries** bound against the **open contracts** defined in `src/core/pure/contract.zig`.
 
 Four properties fall out of this design:
 
 - **Build-time auto-discovery.** `build.zig` walks the source tree; every `.zig` file under `src/` becomes a named module, and every `modules/` directory becomes a deterministic registry. `has_*` build flags are *derived from the walk*, never hand-maintained, so a flag can never disagree with what is actually on disk.
 - **The core never names an optional subsystem.** Core, input, and sync reach tiling/bar/window-addons only through generated seams (`tiling_seam`, `surfaces`) and generated registries (`tiling_modules`, `window_modules`, `bar_modules`, `systatus_subs`, `slider_subs`, `prompt_subs`, `title_subs`). Dispatch loops iterate the registry; deleting a file just shrinks the array and turns hook calls into no-ops.
-- **A pure, allocator-free model.** `src/model/model.zig` is the single source of truth for management state — no X11, no allocation, no feature-specific imports. Layer purity is *enforced at build time* (`assertPureLayerImports`), not just documented.
+- **A pure, allocator-free model.** `src/core/pure/model.zig` is the single source of truth for management state — no X11, no allocation, no feature-specific imports. Layer purity is *enforced at build time* (`assertPureLayerImports`), not just documented.
 - **One sync boundary.** "Planning in `sync.zig`, dispatch in `sink.zig`, raw XCB in `wire.zig`": the reconciler computes everything unconditionally and sends only the delta, under a server grab, in exactly one flush.
 
 Terminology used throughout:
 
-- **contract** — the interfaces declared in `src/core/contract.zig` (`Surfaces`, `WindowModule`, `Layout`, `Segment`, the `tiling_mods` conditional import). Open to any module that binds `pub const module`, closed to extension by the core.
+- **contract** — the interfaces declared in `src/core/pure/contract.zig` (`Surfaces`, `WindowModule`, `Layout`, `Segment`, the `tiling_mods` conditional import). Open to any module that binds `pub const module`, closed to extension by the core.
 - **contractor (module)** — any file inside a `modules/` directory that binds one of those contracts via a comptime-structured `pub const module` declaration and is pulled into a generated registry. Dispatch is registry-first; nothing names a sibling module.
 - **core** — the always-compiled layer: `core.zig`, `contract.zig`, `pipeline.zig`, `events.zig`, `persist.zig`, `restart.zig`, `scale.zig`, `screen.zig`, the `sync/`/`x11/` seam, and the shared utility shelf.
 - **model / config** — the two pure layers (no `xcb`), kept free of X by construction and enforced by the build.
@@ -38,7 +38,10 @@ dev/scripts/         check-layers.sh (import/body-sweep layer enforcement)
 src/                 All Zig sources (every .zig becomes a named module)
   main.zig           Entry point
   core/              Always-compiled core + contract + seams + shelf
-  model/             Pure data model
+    core.zig         Process-wide XCB state + shared types (directory facade)
+    pure/            X-free vocabulary: model, contract, ids, constants, bounded, ... (the pure import frontier)
+    runtime/         Always-running orchestration: event loop, pipeline, persist/restart, spawn/signals, scale/screen
+    x11/             The whole X contact surface: xcb/randr translation, masks, wire primitives, sync planner + sink
   window/            Client lifecycle facade + window-owner modules
   tiling/            Tiling engine + layout modules
   input/             Keyboard/pointer input + keybinding dispatch
@@ -85,8 +88,8 @@ Non-`src` files in the tree (`.git`, `.zig-cache`, `zig-out`, `.opencode`, etc.)
 
 ### 3.4 Layer purity enforcement
 
-- `assertPureLayerImports` runs (via `wireAll`) on the real `@import` edges of every discovered module. For sources under `src/model/`, `src/tiling/`, and `src/config/`, each dependency is checked against `pureLayerAllows`:
-  - the shared utility shelf — `constants, debug, ids, masks, utils, paths, proc, bounded, idmap`;
+- `assertPureLayerImports` runs (via `wireAll`) on the real `@import` edges of every discovered module. For the pure model file (`src/core/pure/model.zig`), `src/tiling/`, and `src/config/`, each dependency is checked against `pureLayerAllows`:
+  - the pure vocabulary — `constants, log, ids, masks, utils, paths, proc, bounded, idmap`;
   - always `model`;
   - tiling may additionally import `tiling` and `contract`;
   - config may additionally import its siblings `parser, schema, types, fallback` and the pure `keysyms`.
@@ -101,7 +104,7 @@ Non-`src` files in the tree (`.git`, `.zig-cache`, `zig-out`, `.opencode`, etc.)
 
 ---
 
-## 4. The contract layer (`src/core/contract.zig`)
+## 4. The pure vocabulary + contracts (`src/core/pure/`)
 
 The pluggable-composition hub. Key contents:
 
@@ -125,66 +128,68 @@ Boots the whole tree, in order: `core.init`, events/signals setup, `config.load`
 
 The connection singleton plus shared vocabulary: `XK` keysym enum, `Connection`/`Screen` aliases, `WindowId = ids.WindowId` (u32), `WorkspaceId = ids.WorkspaceId` (a `struct{index: u8}` wrapper), `FocusSuppressReason`. Re-exports the `xcb` cImport (as `core.xcb`) for the modules that need it. `core.init()` must complete before `getState()`; failure is fatal.
 
-### 5.3 `src/core/pipeline.zig` — model owner + reconcile choke point
+### 5.3 `src/core/runtime/pipeline.zig` — model owner + reconcile choke point
 
 Owns the global `Model` instance (`pub var initialized`); builds the per-reconcile `sync.Ctx`; entry points `init()`, `dragTick()`, `reconcileNow()`, fullscreen hooks, `reconcileUnderGrabNow*` / `reconcileGrabFocus`. Model access is `*const` via `pipeline.model()` (compiler-enforced read-only); mutation requires the private `Gate` capability `pipeline.mut` — a zero-cost, accident-resistant pattern, and the reason tracking/window/actions/focus each declare their own private `gate` rather than a shared writable token. Runs `preReconcileDuties` (applies the scroll layout's `preReconcile` at the single choke point) and `tilingEnv` (resolves the config-driven `contract.Env` from config+scale). Imports `contract.tiling_mods` and `tiling_seam.tiling`.
 
-### 5.4 `src/core/events.zig` — event loop + dispatch
+### 5.4 `src/core/runtime/events.zig` — event loop + dispatch
 
 X event dispatch and the main loop. Uses event-polling over `fd_xcb = 0` and the signal wake `fd_signal = 1`, batching `max_events_per_batch = 128`. Handles: mapping-notify (XKB rebuild → re-grab), config reload (`handleConfigReload`: load → reject parse failures or non-`.user` source → `validate` → XKB check → `input.buildKeybinds` pre-swap → atomic pointer swap → `refreshSnapshot` → `detectChanges` → per-subsystem gated work → re-grab), re-exec (`handleReexec`: pins `HANA_CONFIG_DIR`, persists state, `restart.execNext`), grabs (`grabKeybindings`, ungrab-all then re-grab every binding across all lock-modifier combos), and `setenv`/libc for the `HANA_CONFIG_DIR` hand-off. Mutual runtime-only circular dependency with input (no comptime cycle).
 
-### 5.5 `src/core/persist.zig` — pure serialization
+### 5.5 `src/core/runtime/persist.zig` — pure serialization
 
 Serializes the model to a temp file via `std.json` — no X traffic. Carries a `WindowRecord` per window with a presence flag and an opaque extension blob stamped `[version][registry ordinal][payload]`, so window-owner modules claim their own blobs on restore. Mirrors `tiling` layout names via `config.canonicalLayoutName`. Serializes all `max_workspaces` workspaces; floats round-trip exactly. Restore is driven from `window.adoptRootWindows` + `applyModelLevel`.
 
-### 5.6 `src/core/restart.zig` — re-exec coordinator
+### 5.6 `src/core/runtime/restart.zig` — re-exec coordinator
 
 In-place `execv` of the same binary. Explicitly xcb-free and model-free; it only arranges the environment hand-off (`HANA_CONFIG_DIR` pinned to the frozen last-good config snapshot, `HANA_RESTORE`). Ownership split with `proc.zig`: `proc` owns the reload (SIGHUP / atomic flag + wake byte, no process swap); `restart` owns the re-exec (SIGUSR1 / `requestReexec`).
 
-### 5.7 `src/core/scale.zig` — DPI detection/scaling
+### 5.7 `src/core/runtime/scale.zig` — DPI detection/scaling
 
 DPI probing via RandR + `RESOURCE_MANAGER` (`Xft.dpi`, 1024-word probe then 4096 retry), `mm_per_inch 25.4`, `baseline_dpi`, reasonable-DPI band 50–300, `font_baseline_height 1080`. Exposes `scaleFontSize`, `scaleBarHeight`, and `bar_min_height_px = 20`. Feeds font and bar sizing; its `XftProbe` distinguishes truncation from genuine property absence.
 
-### 5.8 `src/core/screen.zig` — work-area ledger
+### 5.8 `src/core/runtime/screen.zig` — work-area ledger
 
 Tracks which window claims screen edges (used by the bar). `Edge { top, bottom, left, right }`, `Claim { edge = .top, px = 0, active = false }`, `max_claims = if has_bar 1 else 0`, `bar_id = 0` — a comptime-fixed claims array. Chrome surfaces **push** claims and only **read** `workArea()`; `setSurfaceWindow` lets core recognize the bar window as chrome so it is excluded from margins.
 
-### 5.9 The sync seam — `sync.zig` → `sink.zig` → `wire.zig` (+ `xcb.zig`, `masks.zig`)
+### 5.9 The sync seam — `sync.zig` → `sink.zig` → `wire.zig` (+ `xcb.zig`, `masks.zig`) in `src/core/x11/`
 
 The send architecture is a strict three-layer seam:
 
-- **`src/core/sync/sync.zig` (planner, 588 lines).** The reconcile engine: computes the desired X state unconditionally and emits *only the delta* against a write-only sent ledger. `Ctx` bundles the `Sink`, screen rect, `workarea`, `cfg_bw`, env (`contract.Env`), and `color_of`. The `Stack` enum is `{ above }`. VTable: `map`, `geom`, `geom_bordered`, `border_width`, `border_pixel`, `park`, `stack_only`, `set_ewmh_fullscreen`, `flush`, `grab_server`, `ungrab_and_flush`. Calls `tiling.compute` (via the seam) to get placements; maps/parks are modeled as window-presence transitions. The four ledger reads are documented as a behavioral contract so future edits don't turn reads into skips. Id recycling (`forget`) keeps canvas-visible ids alive.
-- **`src/core/sync/sink.zig` (dispatcher, 194 lines).** `XcbSink`, the vtable implementation over `wire.zig` primitives — the only home of mutations (with `wire.zig`; check-layers Rule 1).
+- **`src/core/x11/sync.zig` (planner).** The reconcile engine: computes the desired X state unconditionally and emits *only the delta* against a write-only sent ledger. `Ctx` bundles the `Sink`, screen rect, `workarea`, `cfg_bw`, env (`contract.Env`), and `color_of`. The `Stack` enum is `{ above }`. VTable: `map`, `geom`, `geom_bordered`, `border_width`, `border_pixel`, `park`, `stack_only`, `set_ewmh_fullscreen`, `flush`, `grab_server`, `ungrab_and_flush`. Calls `tiling.compute` (via the seam) to get placements; maps/parks are modeled as window-presence transitions. The four ledger reads are documented as a behavioral contract so future edits don't turn reads into skips. Id recycling (`forget`) keeps canvas-visible ids alive.
+- **`src/core/x11/sink.zig` (dispatcher).** `XcbSink`, the vtable implementation over `wire.zig` primitives — the only home of mutations (with `wire.zig`; check-layers Rule 1).
 - **`src/core/x11/wire.zig` (raw primitives, 328 lines).** Raw XCB request wrappers with batching/flush discipline. Poll-first reply collection, cookie handling. Imports `xcb` directly (not via core) so the graph stays acyclic — this breaks the historical `core → utils → wire → core` cycle. Comptime-driven atom cache: `supported_atoms ⊆ AtomCache` fields is enforced (`@compileError` on an advertised atom without a cache field).
 - **`src/core/x11/xcb.zig` (16 lines).** The single `@cImport` translation site (`xcb.h`, `xcbext.h` for `xcb_poll_for_reply`, `randr.h`, `xkb.h` for detectable auto-repeat.
 - **`src/core/x11/masks.zig` (102 lines).** X event-mask constants, used by grabs and window setup.
 
 The grab protocol: `reconcileUnderGrabNow*` grabs the server, renders off-screen, queues blits **without** flushing, and `ungrabAndFlush()` sends configure-window + copy_area + ungrab in one flush — exactly one compositor frame per grabbed interaction.
 
-### 5.10 The shared utility shelf (`src/core/utils/`)
+### 5.10 The pure vocabulary (`src/core/pure/`)
 
-X-free, fixed-capacity, single-threaded helpers reused across layers (and importable from pure layers):
+X-free, fixed-capacity, single-threaded helpers reused across layers (importable from pure layers), plus the shared data model and the contract seams:
 
-- **`bounded.zig` (322)** — allocator-free collections: `BoundedList`, the sorted-key `bounded.Store` (used as the model's store). Capacity overflow refuses cleanly — no OOM error surface.
-- **`constants.zig` (111)** — capacity/intent constants: `store_capacity = 128`, `mru_capacity = 16`, `max_tiled_per_ws = 64`, `max_workspaces`, `min_window_dim`, `offscreen_x_position`, `min_master_width`/`max_master_width`, `baseline_dpi`.
-- **`utils.zig` (202)** — scaling helpers, `Rect`, `Margins`, `toXcbCoord`, the atom cache, EWMH helpers, monotonic timing, the `running` flag, `eventCast`.
-- **`ids.zig` (39)** — `WindowId` (u32, xcb window), `WorkspaceId` (`struct{index: u8}`), `empty = 0` sentinel.
-- **`idmap.zig` (137)** — keycode/window-ID ↔ index map; `idmap.empty = 0` non-zero sentinel.
-- **`proc.zig` (87)** — the reload flag + wake pipe (config reload), plus path/waits.
-- **`paths.zig` (54)** — XDG path resolution.
-- **`debug.zig` (51)** — logging/diagnostics.
+- **`bounded.zig`** — allocator-free collections: `BoundedList`, the sorted-key `bounded.Store` (used as the model's store). Capacity overflow refuses cleanly — no OOM error surface.
+- **`constants.zig`** — capacity/intent constants: `store_capacity = 128`, `mru_capacity = 16`, `max_tiled_per_ws = 64`, `max_workspaces`, `min_window_dim`, `offscreen_x_position`, `min_master_width`/`max_master_width`, `baseline_dpi`.
+- **`utils.zig`** — scaling helpers, `Rect`, `Margins`, `toXcbCoord`, the atom cache, EWMH helpers, monotonic timing, the `running` flag, `eventCast`.
+- **`ids.zig`** — `WindowId` (u32, xcb window), `WorkspaceId` (`struct{index: u8}`), `empty = 0` sentinel.
+- **`idmap.zig`** — keycode/window-ID ↔ index map; `idmap.empty = 0` non-zero sentinel.
+- **`proc.zig`** — the reload flag + wake pipe (config reload), plus path/waits.
+- **`paths.zig`** — XDG path resolution.
+- **`log.zig`** — logging/diagnostics.
+- **`model.zig`** — the shared data model (section 6).
+- **`contract.zig`** — the pluggable-composition seams (section 4).
 
-### 5.11 `src/core/signals.zig` — signal handling
+### 5.11 `src/core/runtime/signals.zig` — signal handling
 
 Signalfd-based async signal handling (the `fd_signal` side of the event loop); bridges to `proc.reload()` (SIGHUP) and `restart.requestReexec()` (SIGUSR1). Fixed-capacity, no allocation.
 
-### 5.12 `src/core/spawn.zig` — process spawn
+### 5.12 `src/core/runtime/spawn.zig` — process spawn
 
 Fork/exec/pipes for user actions (`exec`, keybind commands); drains child pipes, waits with timeout; `execSynchronous` for `,`-sequences. The user process lives outside the X model entirely.
 
 ---
 
-## 6. The model (`src/model/model.zig`)
+## 6. The model (`src/core/pure/model.zig`)
 
 The single source of truth for management state. Pure, allocator-free, single-threaded, and **X-free by construction** — `assertPureLayerImports` forbids any imported hub/xcb dependency.
 

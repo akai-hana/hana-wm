@@ -1,5 +1,5 @@
 //! X-gated integration tests for the reconcile pipeline
-//! (src/core/sync + src/core/pipeline). Runs the real engine -> Ctx -> sink
+//! (src/core/x11 + src/core/runtime). Runs the real engine -> Ctx -> sink
 //! chain against a live X server and asserts the server state matches the
 //! logged placements, plus the covering (fullscreen) winner/park branches.
 //! Self-skips without a server so `zig build test` stays green headless.

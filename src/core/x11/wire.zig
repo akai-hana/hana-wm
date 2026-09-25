@@ -4,8 +4,8 @@
 //! and non-mutation flushes (dev/scripts/check-layers.sh Rules 1-2).
 //! Atom cache, EWMH root advertisement, property fetchers, and the
 //! configure/raise/grab request shims live here; window parking lives in
-//! sync/sink.zig. Pure geometry (Rect/Margins/scaling) stays in utils.zig so
-//! model/tiling never imports this file.
+//! sink.zig. Pure geometry (Rect/Margins/scaling) stays in core/pure/utils.zig
+//! so the pure layers never import this file.
 
 const std = @import("std");
 

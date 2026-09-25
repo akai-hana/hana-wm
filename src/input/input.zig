@@ -10,7 +10,7 @@ const utils = @import("utils");
 const restart = @import("restart");
 const constants = @import("constants");
 const masks = @import("masks");
-const debug = @import("debug");
+const log = @import("log");
 const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
@@ -132,7 +132,7 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
 const key_profile = utils.WindowedProfiler(
     build_options.profile_key,
     "[KPROF] receive->action last {} keys: avg={d:.0}ns min={d}ns max={d}ns",
-    debug.info,
+    log.info,
 );
 
 // Event handlers
@@ -145,7 +145,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     focus.setLastEventTime(event.time);
 
     const state = getXkbState() orelse {
-        debug.warn("[KEY] keypress before XKB init; ignoring", .{});
+        log.warn("[KEY] keypress before XKB init; ignoring", .{});
         return;
     };
 
@@ -164,7 +164,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         // Per-key dispatch logs are `.debug` so release WMs (default log
         // level `.info`) compile them out of the hot path; folding them into
         // a summary keeps tracing available without per-key formatting+write.
-        debug.debug("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{
+        log.debug("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{
             mods, keysym, @tagName(action.*),
         });
         if (key_profile.enabled) key_profile.note(utils.monotonicNs() - key_t0);
@@ -172,7 +172,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     } else if (mods != 0 or !masks.isModifierKeysym(keysym)) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R) can never
         // match a binding; staying silent keeps logs free of keystroke noise.
-        debug.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
+        log.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
     }
 }
 
@@ -339,7 +339,7 @@ fn executeAction(action: *const types.Action) void {
         .reload_hana => restart.requestReexec(),
         .dump_state => dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
-            debug.err("exec failed: {}", .{err}),
+            log.err("exec failed: {}", .{err}),
         // A `+` batch is fire-and-forget: members are launched together, no
         // member waits on another, and execs spawn as detached children that
         // keep running after the batch moves on.
@@ -408,10 +408,10 @@ inline fn tilingOp(comptime op: anytype, arg: anytype) void {
 fn dumpState() void {
     const all = tracking.allWindows();
 
-    debug.info("========== STATE DUMP ==========", .{});
-    debug.info("Focused:        {?x}", .{focus.getFocused()});
-    debug.info("Total windows:  {}", .{all.len});
-    debug.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
+    log.info("========== STATE DUMP ==========", .{});
+    log.info("Focused:        {?x}", .{focus.getFocused()});
+    log.info("Total windows:  {}", .{all.len});
+    log.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
 
     if (build_options.has_workspaces) {
         const ws_count = tracking.getWorkspaceCount();
@@ -420,7 +420,7 @@ fn dumpState() void {
             for (all) |e| {
                 if (model.maskedOn(e.mask, core.WorkspaceId.fromIndex(i))) n += 1;
             }
-            debug.info(
+            log.info(
                 "  WS{}: {} windows",
                 .{ i + 1, n },
             );
@@ -429,12 +429,12 @@ fn dumpState() void {
 
     if (build_options.has_tiling and core.tilingEnabled()) {
         const m = pipeline.model();
-        debug.info("Tiling enabled: true", .{});
-        debug.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
-        debug.info("Tiled windows:  {}", .{model.tiledCountOnWs(m, m.current)});
+        log.info("Tiling enabled: true", .{});
+        log.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
+        log.info("Tiled windows:  {}", .{model.tiledCountOnWs(m, m.current)});
     }
 
-    debug.info("================================", .{});
+    log.info("================================", .{});
 }
 
 // Helpers
@@ -515,7 +515,7 @@ const XcbCursor = struct {
             &[_]u32{cursor},
         );
         if (xcb.xcb_request_check(conn, cookie)) |err| {
-            debug.err("Failed to set root cursor: error_code={}", .{err.*.error_code});
+            log.err("Failed to set root cursor: error_code={}", .{err.*.error_code});
             std.c.free(err);
         }
 

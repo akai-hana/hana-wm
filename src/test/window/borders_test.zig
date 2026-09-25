@@ -3,8 +3,8 @@
 //! `borders.resolveBorderColor()` and `core.borderWidth()` are the pure public
 //! reads: color resolves the covering-mode policy + config colors against live
 //! MODEL focus, width resolves the tiling border width against the screen
-//! height. Both run over the shared window fixture (real core/pipeline/model
-//! state), self-skipping when no X display is reachable. The X-issuing half
+//! height. Both run over the shared window fixture (real model state),
+//! self-skipping when no X display is reachable. The X-issuing half
 //! (`apply/applyWidth`, border cache) requires a live connection and is
 //! covered by the integration layer instead.
 

@@ -9,7 +9,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const utils = @import("utils");
-const debug = @import("debug");
+const log = @import("log");
 const constants = @import("constants");
 
 // WM_HINTS constants (ICCCM 4.1.2.4)
@@ -139,7 +139,7 @@ fn extractWMHintsInput(
 fn putCachedProps(win: u32, props: CachedProps) void {
     if (!cache_ready) return;
     if (!cache_slots.put(win, props)) {
-        debug.warn("Focus cache full, falling back to live queries", .{});
+        log.warn("Focus cache full, falling back to live queries", .{});
     }
 }
 

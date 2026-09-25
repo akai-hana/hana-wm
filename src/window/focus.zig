@@ -9,7 +9,7 @@ const utils = @import("utils");
 const types = @import("types");
 const window = @import("window");
 const tracking = @import("tracking");
-const debug = @import("debug");
+const log = @import("log");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
 
@@ -230,7 +230,7 @@ pub const Reason = enum {
 // CommitFlags: controls which side effects applyPendingFocus applies.
 // All fields are non-defaulted so every call site must be explicit; an
 // accidental zero-flags call fails to compile, preventing silent
-// no-protocol transitions that are hard to debug.
+// no-protocol transitions that are hard to log.
 const CommitFlags = struct {
     /// Send xcb_set_input_focus. False for no_input (never receives focus
     /// protocol) and globally_active (manages its own focus, ICCCM 4.1.7).
@@ -365,12 +365,13 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     const raise = shouldRaise(reason, win);
     const same_applied = state.?.last_applied == win;
     if (same_applied and !raise) return .none;
-    const old: ?u32 = if (same_applied) null else state.?.last_applied;
-    return setIntent(win, old, resolved, .{
+const old: ?u32 = if (same_applied) null else state.?.last_applied;
+    const out = setIntent(win, old, resolved, .{
         .raise = raise,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
         .force_set_input_focus = force,
     });
+    return out;
 }
 
 /// Phase 1: prepare a focus-clear transition (outside grab).
@@ -392,7 +393,7 @@ pub fn prepareClearFocus() FocusTransition {
     if (applied == null) return .none; // model-only focus (none) -- nothing applied to clear
     if (focused) |f| {
         if (f != applied) {
-            debug.warn(
+            log.warn(
                 "focus: clear divergence last_applied=0x{x} model.focused=0x{x}; clearing applied",
                 .{ applied.?, f },
             );

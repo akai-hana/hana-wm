@@ -1,4 +1,4 @@
-//! Headless tests for the canonical workspace identifier (`core/utils/ids`).
+//! Headless tests for the canonical workspace identifier (`core/pure/ids`).
 //!
 //! `WorkspaceId` unifies the former `core.WorkspaceId`+`model.WSId` pair, and
 //! `fromIndex` now takes `anytype` with a checked internal cast so callers
