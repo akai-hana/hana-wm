@@ -31,7 +31,6 @@ const read_interval_ms: i64 = 2000;
 /// (worst-case label plus a 3-digit readout). Larger than any rendered slot.
 const render_buf_len: usize = 128;
 
-// ---------------------------------------------------------------------------
 // The systatus surface is a closed-core / open-module system: the CLOSED CORE
 // is this file (`Sub` + the per-segment poll/render machinery); the OPEN
 // MODULES are the sibling `.zig` files, each binding `pub const sub: Sub`, and
@@ -40,7 +39,6 @@ const render_buf_len: usize = 128;
 //
 // To add a readout: drop `foo.zig` beside this file exporting
 // `pub const sub: Sub`. Every file here besides systatus.zig must export it.
-// ---------------------------------------------------------------------------
 
 pub const Sub = struct {
     /// Config identity ("ram", "cpu", ...): the name its bar segment is

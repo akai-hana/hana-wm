@@ -147,7 +147,7 @@ fn adoptRestoredSession(restore_path: []const u8) void {
             // entry (the adopted window is already mapped).
             if (pipeline.model().focused) |focused| {
                 const ft = focus.prepareFocus(focused, .window_spawn);
-                pipeline.reconcileGrabFocus(.{}, ft, .after);
+                pipeline.reconcileGrabFocus(.{}, ft, .after, null);
             } else {
                 pipeline.reconcileUnderGrabNow(.{});
             }

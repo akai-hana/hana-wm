@@ -88,7 +88,7 @@ pub const DrawCtx = struct {
 
     frame: Frame,
 
-    // -- Title snapshot (filled by bar each frame) --
+    // Title snapshot (filled by bar each frame)
     focused_window: ?u32 = null,
     focused_title: []const u8 = "",
     minimized_title: []const u8 = "",
@@ -124,10 +124,8 @@ pub const DrawCtx = struct {
     }
 };
 
-// ============================================================================
 // Title render/snapshot machinery (moved here from the title module so the bar
 // can reach it without naming the title segment).
-// ============================================================================
 
 /// Minimum reserved row width for the title segment.
 pub const title_min_width: u16 = 100;

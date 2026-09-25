@@ -60,7 +60,6 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Scroll viewport addon hooks. ONLY the scroll layout registers these; the
 // engine/actions treat "the active layout provides slotWidth/maxOffset/
 // preReconcile" as the definition of a scroll layout (no name matching). If
@@ -68,9 +67,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 // them out otherwise. `preReconcile` takes the workspace's LayoutParams BY
 // VALUE and returns the updated params (pure; a layout module never receives
 // a mutable pointer into the model).
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
 // This layout's registry contribution: metadata + the dispatch hook. The
 // name is the config identity and the cycle-order key; icon/indicators are
 // rendered by the bar's layout/variants segments (no core switch over
@@ -80,7 +77,6 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 // variant indices. `tiling.layoutModule` fills name/icon/compute (typed
 // `*const fn(*const View, *List)`, no opaque cast) — mirror grid.zig /
 // master.zig.
-// ---------------------------------------------------------------------------
 pub const module = tiling.layoutModule("template", "[T]", compute, .{
     .variant_count = 1, // TODO: number of cycle_variant steps this layout has
     // .fifo_variant = 1,             // variant index that toggles fifo spawn

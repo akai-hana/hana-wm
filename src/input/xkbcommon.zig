@@ -185,36 +185,53 @@ fn retryDelay(attempt: u8) void {
     }
 }
 
+/// Shared early-startup retry skeleton behind the three XKB probes: runs
+/// `attempt(args)` up to max_xkb_retries times with `retryDelay` between
+/// tries, accepting the first non-null result and falling back to `failure`
+/// when every try fails. Each probe reports its own "not ready yet" as null.
+fn withRetries(
+    comptime T: type,
+    args: anytype,
+    comptime attempt: fn (@TypeOf(args)) ?T,
+    comptime failure: anytype,
+) !T {
+    for (0..max_xkb_retries) |i| {
+        if (attempt(args)) |result| return result;
+        retryDelay(@intCast(i));
+    }
+    return failure;
+}
+
+fn setupOnce(conn: core.Connection) ?void {
+    const ok = xkb.xkb_x11_setup_xkb_extension(
+        @ptrCast(conn),
+        xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
+        xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
+        xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
+        null,
+        null,
+        null,
+        null,
+    );
+    return if (ok == 0) null else {};
+}
+
 /// Retries xkb_x11_setup_xkb_extension up to max_xkb_retries times; the
 /// extension may not be ready immediately at WM startup.
 fn retrySetup(xcb_conn: core.Connection) !void {
-    for (0..max_xkb_retries) |i| {
-        const ok = xkb.xkb_x11_setup_xkb_extension(
-            @ptrCast(xcb_conn),
-            xkb.XKB_X11_MIN_MAJOR_XKB_VERSION,
-            xkb.XKB_X11_MIN_MINOR_XKB_VERSION,
-            xkb.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
-            null,
-            null,
-            null,
-            null,
-        );
-        if (ok != 0) return;
-        retryDelay(@intCast(i));
-    }
-    return error.XkbSetupFailed;
+    _ = try withRetries(void, xcb_conn, setupOnce, error.XkbSetupFailed);
+}
+
+fn deviceOnce(conn: core.Connection) ?i32 {
+    const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(conn));
+    return if (device_id == -1) null else device_id;
 }
 
 /// Retries xkb_x11_get_core_keyboard_device_id up to max_xkb_retries times;
 /// the core keyboard device may not be enumerable yet in the same
 /// early-startup window retrySetup guards against.
 fn retryDeviceId(xcb_conn: core.Connection) !i32 {
-    for (0..max_xkb_retries) |i| {
-        const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
-        if (device_id != -1) return device_id;
-        retryDelay(@intCast(i));
-    }
-    return error.XkbNoKeyboard;
+    return withRetries(i32, xcb_conn, deviceOnce, error.XkbNoKeyboard);
 }
 
 /// Minimum reachable keysyms in the health-check window for a keymap to count
@@ -246,22 +263,31 @@ fn tableForDevice(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) 
     return buildKeysymTable(km);
 }
 
+const keymapOnceArgs = struct {
+    ctx: *xkb_context,
+    conn: core.Connection,
+    device_id: i32,
+};
+
+fn keymapOnce(args: keymapOnceArgs) ?*xkb_keymap {
+    const km = xkb.xkb_x11_keymap_new_from_device(
+        args.ctx,
+        @ptrCast(args.conn),
+        args.device_id,
+        xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
+    ) orelse return null;
+    if (keymapHasEnoughSymbols(km)) return km;
+    xkb.xkb_keymap_unref(km);
+    return null;
+}
+
 /// Retries keymap creation up to max_xkb_retries times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
-fn retryKeymap(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) !*xkb_keymap {
-    for (0..max_xkb_retries) |i| {
-        const km = xkb.xkb_x11_keymap_new_from_device(
-            ctx,
-            @ptrCast(xcb_conn),
-            device_id,
-            xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
-        ) orelse {
-            retryDelay(@intCast(i));
-            continue;
-        };
-        if (keymapHasEnoughSymbols(km)) return km;
-        xkb.xkb_keymap_unref(km);
-        retryDelay(@intCast(i));
-    }
-    return error.XkbKeymapFailed;
+fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) !*xkb_keymap {
+    return withRetries(
+        *xkb_keymap,
+        keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id },
+        keymapOnce,
+        error.XkbKeymapFailed,
+    );
 }

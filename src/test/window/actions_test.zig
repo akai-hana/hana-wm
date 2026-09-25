@@ -129,6 +129,41 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     try std.testing.expect(!m.all_view_active);
 }
 
+test "actions: switching to the CURRENT workspace while in all-view exits it" {
+    var fx = fixture.setUp("actions_test") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+    const ws0: u8 = @intCast(m.current.index);
+
+    const w1 = fx.createWindow();
+    actions.mapRequest(w1, 0, true, null);
+    fx.flush();
+
+    // w2 lives on a neighbor workspace, hidden from the current one.
+    const w2 = fx.createWindow();
+    actions.mapRequest(w2, 0, true, null);
+    actions.moveWindowTo(w2, 2);
+    fx.flush();
+    try std.testing.expect(model.visibleOn(m, w2, m.current) == false);
+
+    // Enter all-view: every workspace's windows become visible.
+    actions.allViewToggle();
+    fx.flush();
+    try std.testing.expect(m.all_view_active);
+    try std.testing.expect(model.visibleOn(m, w2, m.current));
+
+    // Switching to the current workspace (a no-op when the view is already
+    // this workspace) must still exit the all-view flag and park the foreign
+    // window, returning focus to workspace-1's own window.
+    actions.switchTo(ws0);
+    fx.flush();
+    try std.testing.expect(!m.all_view_active);
+    try std.testing.expectEqual(ws0, m.current.index);
+    try std.testing.expect(!model.visibleOn(m, w2, m.current));
+    try std.testing.expectEqual(w1, m.focused.?);
+    try fx.expectParked(w2);
+}
+
 test "actions: minimize parks, restore unmaps-and-redraws" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
@@ -182,6 +217,54 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     try std.testing.expect(e2.home_ws != null);
     try std.testing.expectEqual(@as(usize, 1), model.tiledCountOnWs(m, m.current));
     try fx.expectTiledGeometry(win); // back on the tiling grid
+}
+
+test "actions: dragging a tiled window out detaches AND reflows the pile (no gap)" {
+    var fx = fixture.setUp("actions_drag") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    const w1 = fx.createWindow();
+    const w2 = fx.createWindow();
+    const w3 = fx.createWindow();
+    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w2, 0, true, null);
+    actions.mapRequest(w3, 0, true, null);
+    fx.flush();
+
+    // Baseline: three tiled windows (the fixture's default layout kind).
+    try fx.expectTiledGeometry(w1);
+    try fx.expectTiledGeometry(w2);
+    try fx.expectTiledGeometry(w3);
+    const g2 = fx.geometry(w2) orelse return error.ClosedWindow;
+    const g3 = fx.geometry(w3) orelse return error.ClosedWindow;
+
+    // Real drag: press (Super+left) on w2, first motion detaches it to
+    // floating (pending-float), ticks move it, release ends the drag.
+    const px: i16 = @intCast(@as(i32, g2.x) + @as(i32, g2.width) - 4);
+    const py: i16 = @intCast(@as(i32, g2.y) + 4);
+    actions.startDrag(w2, 1, px, py);
+    actions.updateDrag(px + 8, py + 8); // first motion: detach + retile
+    actions.updateDrag(px + 60, py + 60); // subsequent tick
+    actions.stopDrag();
+    fx.flush();
+
+    // w2 is floating and out of the pile.
+    const e2 = m.store.get(w2) orelse return error.UnknownWindow;
+    try std.testing.expect(e2.anchor == .floating);
+    try std.testing.expectEqual(@as(?model.WSId, null), e2.home_ws);
+    try std.testing.expectEqual(@as(usize, 2), model.tiledCountOnWs(m, m.current));
+
+    // NO GAP: w3 reflowed off the pile into the freed slot (server truth =
+    // current engine placement) and grew to cover it.
+    try fx.expectTiledGeometry(w3);
+    const g3_after = fx.geometry(w3) orelse return error.ClosedWindow;
+    try std.testing.expect(g3_after.height > g3.height);
+    // w1 stays put.
+    try fx.expectTiledGeometry(w1);
+    // w2 moved with the drag (floating, off the tile)
+    const g2_after = fx.geometry(w2) orelse return error.ClosedWindow;
+    try std.testing.expect(g2_after.x != g2.x or g2_after.y != g2.y);
 }
 
 test "actions: unmanage drops the window and re-focuses" {

@@ -12,6 +12,7 @@ const pipeline = @import("pipeline");
 const sync = @import("sync");
 const actions = @import("actions");
 const fixture = @import("fixture");
+const xcb = core.xcb;
 
 /// Two mapped windows, the arrangement most pipeline tests seed.
 fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
@@ -82,12 +83,20 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     actions.fullscreenToggleWindow(w1);
     fx.flush();
     try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    // The covering winner owns the screen, so it owns keyboard focus too
+    // (the toggle ran against an unfocused w1, e.g. an EWMH request).
+    try std.testing.expectEqual(w1, m.focused.?);
+    try std.testing.expectEqual(w1, fx.inputFocus());
 
     // Direct covering hand-off: claiming a second window while occupied.
     actions.fullscreenToggleWindow(w2);
     fx.flush();
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
     try fx.expectParked(w1);
+    // Focus follows the claim: the new occupant must get the screen's
+    // keystrokes, not the displaced one.
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
 
     // Exit: both windows return to their tiled placements.
     actions.fullscreenToggleWindow(w2);
@@ -95,4 +104,46 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
     try fx.expectTiledGeometry(w1);
     try fx.expectTiledGeometry(w2);
+    // Exit leaves focus with the window that left fullscreen.
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
+}
+
+test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2" {
+    var fx = fixture.setUp("pipeline_test") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    const w1 = fx.createWindow();
+    const w2 = fx.createWindow();
+    // Like a real client: map before MapRequest and before X input focus can
+    // legally target the window (set_input_focus on an unmapped window is a
+    // BadMatch, silently ignored).
+    _ = xcb.xcb_map_window(fx.conn, w1);
+    _ = xcb.xcb_map_window(fx.conn, w2);
+    fx.flush();
+    actions.mapRequest(w1, 0, true, null);
+    fx.flush();
+    try std.testing.expectEqual(w1, m.focused.?);
+    try std.testing.expectEqual(w1, fx.inputFocus());
+
+    // 1. Fullscreen w1 (keybind on the focused window).
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
+    try std.testing.expectEqual(w1, m.focused.?);
+    try std.testing.expectEqual(w1, fx.inputFocus());
+    try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+
+    // 2. Open w2 while w1 is still fullscreened.
+    actions.mapRequest(w2, 0, true, null);
+    fx.flush();
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
+
+    // 3. Fullscreen w2 on top of the old fullscreened window.
+    actions.fullscreenToggleWindow(w2);
+    fx.flush();
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
+    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 }

@@ -6,7 +6,7 @@
 //
 // Every focus change commits a server-grab reconcile (focus.applyPendingFocus +
 // sync.reconcile). reconcile replays the FULL desired wire state for EVERY
-// window each pass (map + borderPixel + borderWidth + geom), which this
+// window each reconcile (map + borderPixel + borderWidth + geom), which this
 // instrumentation quantifies as a function of window count.
 //
 // The Mod+k caller shape (`focus.cycleTarget` then
@@ -22,7 +22,7 @@ const helpers = @import("helpers");
 const build_options = @import("build_options");
 
 // Latency instrumentation only runs its full loops + timing output under
-// `-Dbench`; the default suite keeps a silent single-pass smoke so `zig build
+// `-Dbench`; the default suite keeps a silent smoke so `zig build
 // test` never writes to stderr (the runner flags test stderr as `failed
 // command:` even on success).
 const bench = build_options.bench;
@@ -50,10 +50,10 @@ test "latency: reconcile cost + request count at focus change" {
         defer sync.init();
 
         // Warm once (a live counter seeds the ledger), then measure the CPU
-        // cost of one reconcile pass.
+        // cost of one reconcile.
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
-        // Count requests in one representative pass (fresh sink).
+        // Count requests in one representative reconcile (fresh sink).
         var probe = CountingSink{};
         var probe_ctx = makeCtx(probe.sink(), colorOfFocused, helpers.std_wa);
         sync.reconcile(&m, &probe_ctx, .{});
@@ -71,10 +71,10 @@ test "latency: reconcile cost + request count at focus change" {
 // applyPendingFocus and sync.reconcile). Previously the cycle did a focus
 // transition (first reconcile) then snapViewportToFocused (a second
 // grab+reconcile whenever the viewport had to shift), plus a redundant second
-// pass even when the focused window was already on-screen.
+// reconcile even when the focused window was already on-screen.
 //
 // This test quantifies the single-reconcile cost the folded path now pays, so
-// the per-Mod+k compute is explicit and any regression to two passes shows up.
+// the per-Mod+k compute is explicit and any regression to two reconciles shows up.
 test "latency: Mod+k folded focus + viewport-snap reconcile" {
     const n = 16;
     var m = makeModel();
@@ -100,7 +100,7 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     }
     const focus_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iters));
 
-    // Phase 2: a second reconcile pass, kept as the cost reference the folded
+    // Phase 2: a second reconcile, kept as the cost reference the folded
     // path would pay IF it regressed to two grabs per Mod+k. The folded path
     // never runs this: it reconciles once, with the snap already applied.
     var s2 = CountingSink{};

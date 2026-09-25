@@ -13,8 +13,6 @@ const segdraw = @import("segdraw");
 // tiling subsystem is absent.
 const tiling_mods = contract.tiling_mods;
 
-const W = segdraw.widthState("variants");
-
 /// Empty-indicator sentinel: a layout with no variant indicator reserves no
 /// row width (the segment draws nothing and contributes a 0-width slot).
 const no_variant_icon = "";
@@ -35,15 +33,10 @@ fn getIndicator() []const u8 {
 }
 
 /// Returns the updated x position after drawing the segment, or the original
-/// start_x when tiling is disabled or no indicator is available.
+/// start_x when tiling is disabled or no indicator is available (a 0-width
+/// reservation, per drawAndStore's empty-text path).
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    const indicator = getIndicator();
-    var end_x = start_x;
-    if (indicator.len != 0) {
-        end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, "variants", indicator, null, config.segmentProps("variants"));
-    }
-    W.store(end_x - start_x);
-    return end_x;
+    return segdraw.drawAndStore("variants", dc, config, height, start_x, getIndicator());
 }
 
 pub const module = segdraw.module("variants", draw, actions.stepVariantDir, .{ .with_collapse = true });

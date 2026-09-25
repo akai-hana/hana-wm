@@ -77,7 +77,7 @@ test "readFileAlloc growth path handles stat-less files (/proc)" {
     try testing.expect(std.mem.startsWith(u8, got, "Name:"));
 }
 
-// -- Config-load pipeline tests (loadToml -> buildConfigFromDoc) --
+// Config-load pipeline tests (loadToml -> buildConfigFromDoc)
 
 const types = @import("types");
 
@@ -231,7 +231,7 @@ test "a document with skipped (broken) lines fails the load" {
     ));
 }
 
-// -- lowerSlice out-buffer safety --
+// lowerSlice out-buffer safety
 
 test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
     var buf8: [8]u8 = undefined;
@@ -255,7 +255,7 @@ test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
     try testing.expectEqual(@as(usize, 0), empty.len);
 }
 
-// -- Config reload change detection deltas --
+// Config reload change detection deltas
 
 test "detectChanges: identical configs report no subsystem changes" {
     var a = types.Config{};

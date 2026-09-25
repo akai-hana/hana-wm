@@ -14,8 +14,6 @@ const segdraw = @import("segdraw");
 // absent.
 const tiling_mods = contract.tiling_mods;
 
-const W = segdraw.widthState("layout");
-
 /// Fallback glyph when no tiling layout is resolvable (tiling disabled or the
 /// tiling subsystem absent: all windows float by definition).
 const fallback_icon = "><>";
@@ -32,9 +30,7 @@ fn getIcon() []const u8 {
 }
 
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    const end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, "layout", getIcon(), null, config.segmentProps("layout"));
-    W.store(end_x - start_x);
-    return end_x;
+    return segdraw.drawAndStore("layout", dc, config, height, start_x, getIcon());
 }
 
 pub const module = segdraw.module("layout", draw, actions.cycleLayoutKind, .{ .with_collapse = false });

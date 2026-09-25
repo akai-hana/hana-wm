@@ -347,17 +347,17 @@ fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: u
 /// Restores model-level fields into the model: current/focused/all_view,
 /// per-ws params, tiled_order and focus_mru (pruned to windows that are
 /// actually registered (closed or never adopted ones are dropped). Call AFTER
-/// the adoption pass registered the surviving windows.
+/// the adoption phase registered the surviving windows.
 ///
 /// No feature counters live here anymore: extensions own all of their state
-/// (minimize maintains its sequence internally), so this pass only re-lists
+/// (minimize maintains its sequence internally), so this phase only re-lists
 /// tiled membership and copies scalars.
 pub fn applyModelLevel(m: *model.Model) void {
     const f = loaded() orelse return;
 
     // Restore the model-authoritative covering intent (presence + covering_ws)
     // from the window records. Fullscreen needs no module blob (its state IS
-    // the model intent), so this pass is the fullscreen restore path. A
+    // the model intent), so this phase is the fullscreen restore path. A
     // `.parked` record that still carries covering_ws (minimized-from-fullscreen)
     // keeps presence intact while restoring the capture target.
     for (f.windows) |r| {
@@ -381,7 +381,7 @@ pub fn applyModelLevel(m: *model.Model) void {
         // config default kind (index 0 as the neutral last resort) instead of
         // leaving an unresolvable dispatch id. Loud, so the degradation is never
         // silent.
-        if (s.params.kind >= tiling_mods.len and tiling_mods.len > 0) {
+        if (@import("contract").moduleOf(s.params.kind) == null and tiling_mods.len > 0) {
             const fallback = resumableDefaultKind();
             debug.warn(
                 "persist: restoring persisted layout kind {} which no " ++
@@ -395,7 +395,7 @@ pub fn applyModelLevel(m: *model.Model) void {
         restoreMembers(&s.focus_mru, r.mru, m, model.mru_capacity);
     }
 
-    // Membership repair: the adoption pass registered every surviving window
+    // Membership repair: the adoption phase registered every surviving window
     // as a base-tiled member of its home workspace (which also appended it to
     // tiled_order), but the loop above clears and rebuilds tiled_order from a
     // file that may not record everything (a record-less first restore, or a

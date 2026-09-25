@@ -12,7 +12,7 @@ Mod   = "Super"   # Super/Mod4, Alt/Mod1
 kill  = "pkill -9" # Replaced where {kill} appears in action values
 
 # -- Window management --
-Mod+F       = "toggle_fullscreen"
+Mod+P       = "toggle_fullscreen"
 Mod+Shift+F = "close_window"
 
 Mod+T           = "minimize_window"
@@ -67,7 +67,7 @@ Mod+Shift+B = "toggle_bar_position"    # Top / bottom
 # boots from the last-good config snapshot -- i.e. it reloads ONLY the binary,
 # never touching the config files. Chained on one key, the two give a full
 # reload: the config is applied + validated in-process, then the binary swaps.
-Mod+Shift+Escape = ["reload_config", "reload_hana"]
+Mod+Shift+Escape = ["reload_hana", "reload_config"]
 # Mod+Shift+R = "reload_config" # Hot-reload config only (no binary swap)
 
 # -- Personal program binds --

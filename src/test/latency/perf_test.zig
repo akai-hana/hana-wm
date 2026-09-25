@@ -1,7 +1,7 @@
 //! Micro-benchmarks for model/sync hot paths.
 //!
 //! Run: zig build test -Dbench --summary all (timing goes to stdout/stderr
-//! only under -Dbench; the default suite runs these as silent single-pass
+//! only under -Dbench; the default suite runs these as silent
 //! smokes so `zig build test` stays quiet).
 
 const std = @import("std");
@@ -13,8 +13,7 @@ const utils = @import("utils");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
 
-// Bench marks only run (full iterations + timing output) under `-Dbench`; the
-// default suite runs them as single-pass smokes and stays silent on stderr.
+// Bench marks only run (full iterations + timing output) under `-Dbench`.
 const bench = build_options.bench;
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
@@ -291,9 +290,9 @@ test "bench: store.get linear scan (max_tiled_windows, worst case)" {
 
 test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     // The sync sent-ledger access pattern, isolated: reconcile touches the
-    // ledger with exactly one get-or-put per window per pass (see sync.reconcile).
-    // COLD = fresh ledger first-touch (post-boot pass); WARM = already-seeded
-    // ledger, hit-only sweep (steady-state pass; model.Store iterates sorted-key
+    // ledger with exactly one get-or-put per window per reconcile (see sync.reconcile).
+    // COLD = fresh ledger first-touch (post-boot reconcile); WARM = already-seeded
+    // ledger, hit-only sweep (steady-state reconcile; model.Store iterates sorted-key
     // order, so the sweep walks ascending window ids).
     sync.init();
     defer sync.init();

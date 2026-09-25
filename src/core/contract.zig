@@ -48,6 +48,17 @@ const model = @import("model");
 pub const tiling_mods =
     if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
+/// Bounds-checked registry lookup for `kind` (the single owner of the
+/// `kind >= tiling_mods.len` guard). Returns the registry entry, or null when
+/// kind is out of range (including the absent-tiling empty registry). Every
+/// consumer that wants a layout module BY INDEX dispatches through this:
+/// moduleName/variantCount/compute, the pre-reconcile duty, viewport and
+/// fifo metadata, and the persist restore fallback.
+pub fn moduleOf(kind: u8) ?*const Layout {
+    if (kind >= tiling_mods.len) return null;
+    return &tiling_mods[kind];
+}
+
 /// The active tiling layout registry index, when the model-derived `kind` is
 /// live for the built layout registry under the tiling-enabled config fact;
 /// null otherwise (disabled, or the tiling subsystem absent: all windows float
@@ -57,7 +68,7 @@ pub const tiling_mods =
 /// applies the registry/tiling gates they would otherwise each repeat.
 pub fn activeLayoutKind(kind: u8) ?u8 {
     if (!core.tilingEnabled()) return null;
-    if (kind >= tiling_mods.len) return null;
+    if (moduleOf(kind) == null) return null;
     return kind;
 }
 
@@ -145,7 +156,7 @@ pub const WindowModule = struct {
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
     armPendingBarHide: ?*const fn (u32) void = null,
     armPendingBarShow: ?*const fn (u32) void = null,
-    // ---------- Hide/restore family (minimize module; model vocabulary) ----------
+    // Hide/restore family (minimize module; model vocabulary)
     /// Hide a window (minimize): parks the model entry and stashes the
     /// tiled slot. At most one module binds this.
     hideWindow: ?*const fn (*model.Model, model.WindowId) anyerror!void = null,
@@ -177,7 +188,7 @@ pub const WindowModule = struct {
         std.mem.Allocator,
     ) void = null,
 
-    // ---------- Screen-covering family (fullscreen module; model vocabulary) ----------
+    // Screen-covering family (fullscreen module; model vocabulary)
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
     toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
@@ -200,7 +211,7 @@ pub const WindowModule = struct {
     /// its record guard. At most one module binds this.
     moveCoveringTo: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
 
-    // ---------- Workspaces family (workspaces module) ----------
+    // Workspaces family (workspaces module)
     /// Move `win` to a single tag `ws` (mask replaces; home-list
     /// follows). At most one module binds this.
     sendToWs: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
@@ -215,7 +226,7 @@ pub const WindowModule = struct {
     /// Toggle all-view mode; returns true when entering.
     toggleAllView: ?*const fn (*model.Model) bool = null,
 
-    // ---------- Floating family (floating module; "floating" is model vocabulary) ----------
+    // Floating family (floating module; "floating" is model vocabulary)
     /// Update a floating window's rect on the model (no-op for
     /// tiled/unknown).
     setFloatingRect: ?*const fn (*model.Model, model.WindowId, utils.Rect) void = null,
@@ -547,7 +558,7 @@ pub const List = utils.BoundedList(Placement, model.store_capacity);
 
 /// Frozen size-hint snapshot aligned index-for-index with View.order. The
 /// caller materializes one hint per ordered window; lookup is a scan over the
-/// (small) order slice only — rebuilt each layout pass, no allocator, and
+/// (small) order slice only — rebuilt each reconcile, no allocator, and
 /// bounded by `model.max_tiled_per_ws` (64), so a map would add nothing.
 pub const HintsView = struct {
     order: []const model.WindowId,

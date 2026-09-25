@@ -75,13 +75,13 @@ carousel_enabled = true
 # Main color palette
 ## Core palette: the editable colors. Every accent below inherits from
 ## these four; change one here and the whole bar follows.
-primary_color     = "#ac3232" # focused title / selected workspace / active border
+primary_color     = "#000000" # focused title / selected workspace / active border
 secondary_color   = "#52263e" # unfocused title / inactive border
 alternative_color = "#007373" # minimized title
 text_color        = "#ebd9bc" # bar text (matches fg)
 
 # Bar
-bg = "#0d0d14" 
+bg = "#0d0d14"
 fg = text_color
 
 ## Workspace tag indicators

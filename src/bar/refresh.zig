@@ -129,7 +129,6 @@ fn setupRandr(conn: core.Connection, root: xcb.xcb_window_t) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Cached mode table
 //
 // The screen-resources reply carries the full mode table (id -> refresh rate).
@@ -198,7 +197,6 @@ fn rateFromNotifyEvent(event: *anyopaque) ?f64 {
     return rateForModeId(mode_id);
 }
 
-// ---------------------------------------------------------------------------
 // Pipelined refresh detection
 //
 // The old path fired one request and immediately drained it with _reply,

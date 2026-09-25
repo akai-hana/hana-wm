@@ -55,9 +55,9 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         // border either side. Gate is geometry-only (gap+borders), unlike
         // leaf.zig's 2*min_dim+gap floor for a flat two-child pane.
         if (last or cur.w < min_region or cur.h < min_region) {
-            // focusedElse: fallback is the current split-remainder head.
-            const top = tiling.focusedElse(v, windows[i..], win);
-            tiling.emitOverflowShare(ctx, windows[i..], top, cur);
+            // focusedElse falls back to the current split-remainder head
+            // (win == windows[i..][0]).
+            tiling.emitOverflowShare(ctx, windows[i..], cur);
             return;
         }
 
