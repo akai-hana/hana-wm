@@ -9,12 +9,12 @@
 //! run in pipeline.preReconcileDuties -- the single choke point -- before any
 //! reconcile; this module never mutates model params (m is const).
 //!
-//! RECONCILE ALGORITHM - UNCONDITIONAL COMPUTE, DELTA SEND. Every pass
+//! RECONCILE ALGORITHM - UNCONDITIONAL COMPUTE, DELTA SEND. Each reconcile
 //! computes the desired state for every stored window that needs it (an
 //! OFF-WORKSPACE fast path elides windows provably already parked -- not the
 //! covering winner, not on the current ws, or presence parked -- and already
 //! parked in the ledger: no recompute, no resend), so a client that mutated
-//! its own geometry/border behind our back is repaired on the very next pass
+//! its own geometry/border behind our back is repaired on the very next reconcile
 //! -- drift-proof by construction, no diff cache, no sweep counter, no
 //! staging buffer). The SEND is then diffed against the sent ledger: a
 //! request whose desired value matches the last one sent is elided, because
@@ -143,7 +143,7 @@ pub const ReconcileOpts = struct { force_restack: bool = false };
 ///     not a sentinel rect: a legitimately placed zero-size window at the
 ///     origin would collide with a "never sent" marker value);
 ///   - rect: the last VISIBLE geometry sent (survives parks);
-///   - parked: whether the latest pass parked it;
+///   - parked: whether the latest reconcile parked it;
 ///   - bw: the last border width sent for a visible window (0 while parked/never);
 ///   - pixel: the last border pixel sent for a visible window (0 while parked/never).
 const SentEntry = struct {
@@ -170,7 +170,7 @@ pub fn init() void {
 }
 
 /// Ledger read of a window's last-sent record. pub because it is also the
-/// test verification seam (sync_test/tracking_test assert what a pass sent);
+/// test verification seam (sync_test/tracking_test assert what a reconcile sent);
 /// production reads at lastRectFor/truthRect.
 pub fn sentGet(win: model.WindowId) ?SentEntry {
     return st.sent.get(win);
@@ -211,7 +211,7 @@ fn markSentVisible(e: *SentEntry, rect: utils.Rect, bw: u16, pixel: u32) void {
 /// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
 /// clock held by each server-grab retile -- the exact latency a user feels
 /// across a tiling op -- plus how many store entries were walked (the full
-/// path walks every entry each pass, modulo the off-workspace fast path).
+/// path walks every entry each reconcile, modulo the off-workspace fast path).
 /// Gated by `build_options.profile_key` (the same flag as the key-dispatch
 /// path) so release WMs compile it out.
 const retile_prof = utils.WindowedProfiler(
@@ -279,9 +279,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     var placements: contract.List = .{};
     // Per-window placement lookup: `pl_of_slot[i]` is the index into
     // `placements` of the placement for store slot `i`, or null when that
-    // window has no placement this pass. Built alongside the layout compute
-    // below (one write per ordered window), then the fused store pass below
-    // -- which already knows each window's slot via m.store.at(i) -- resolves
+    // window has no placement this reconcile. Built alongside the layout compute
+    // below (one write per ordered window), then the fused store loop below
+    // which already knows each window's slot via m.store.at(i) resolves
     // its placement in O(1) instead of an O(N) scan per window. Stack scratch,
     // no allocation, matching the file's fixed-capacity style.
     var pl_of_slot: [model.store_capacity]?usize = [_]?usize{null} ** model.store_capacity;
@@ -312,20 +312,20 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
 
     // Winner seed: fullscreen winner outright; else the focused window when
     // its desire will be non-parked (checked here so no earlier store entry
-    // can shadow it); else the pass elects the first non-parked desire.
+    // can shadow it); else the reconcile elects the first non-parked desire.
     var winner: ?model.WindowId = fs_win;
     // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
-    // with has_kept_rect = false: the ledger is unknowable pre-pass, so a
+    // with has_kept_rect = false: the ledger is unknowable pre-reconcile, so a
     // placement-less visible orphan is left to the first-desire fallback).
     // The fast-path visibility is derived here exactly once (shared with
-    // the fused pass below; the seed spans only this focused-window test).
+    // the fused loop below; the seed spans only this focused-window test).
     if (winner == null) if (m.focused) |f| blk: {
         const slot = m.store.indexOf(f) orelse break :blk;
         const fe = m.store.at(slot).val.*;
         if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, model.visibleEntry(m, &fe, m.current))) winner = f;
     };
 
-    // One fused pass over the store: compute a window's desire, then SEND it
+    // One fused loop over the store: compute a window's desire, then SEND it
     // immediately. Ordering is via the Sink adapter below (a widening PR
     // proved the contract survives reordering), honoring two invariants here:
     // map precedes geometry so a first-show/unparking client exposes at its
@@ -339,9 +339,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
     // here feeds lastRectFor/truthRect (read 3). Sends never consult the
     // ledger to SKIP anything.
     const count = m.store.count();
-    // One warn per pass when any window's record couldn't be written, not one
+    // One warn per reconcile when any window's record couldn't be written, not one
     // per window: the condition is structural (ledger at store_capacity), so
-    // a full pass would otherwise log per window.
+    // a full reconcile would otherwise log per window.
     var ledger_overflow = false;
     for (0..count) |i| {
         const it = m.store.at(i);
@@ -352,9 +352,9 @@ pub fn reconcile(m: *const model.Model, ctx: *Ctx, opts: ReconcileOpts) void {
         // contract reads AND the post-send write, so a visible window costs a
         // single scan. The record is read before any send and only written
         // after, so raises still derive from what we last sent, never from
-        // this pass's sends. When the ledger is full and `win` has no record
+        // this reconcile's sends. When the ledger is full and `win` has no record
         // yet, `gop` is null: reads see a fresh blank entry and the write is
-        // lost (one per-pass warning at the loop's end; sends never depend on
+        // lost (one per-reconcile warning at the loop's end; sends never depend on
         // the ledger).
         const gop = sentGetOrPut(win);
         const ledger = (if (gop) |g| g.* else SentEntry{});
@@ -482,7 +482,7 @@ fn markParked(bw: *u16, pixel: *u32, parked: *bool) void {
 /// last-sent rect (`has_kept_rect`). Shared by the winner seed and
 /// computeDesire so the focused window's priority cannot drift from its
 /// desire: the seed passes `has_kept_rect = false` (the ledger is unknowable
-/// there, so placement-less orphans stay on the pass's first-desire
+/// there, so placement-less orphans stay on the reconcile's first-desire
 /// fallback).
 fn desireIsNonParked(
     e: model.Entry,
@@ -530,7 +530,7 @@ fn computeDesire(
                 pixel = 0;
             } else parked = true;
         },
-        // A covering window owns the screen this pass: every other present
+        // A covering window owns the screen this reconcile: every other present
         // window is a covered sibling and parks (geometry preserved for the
         // exit replay), regardless of anchor.
         .present => {
@@ -559,7 +559,7 @@ fn computeDesire(
 }
 
 /// O(1) placement lookup: placement for store slot `slot`, or null when the window
-/// has no placement this pass (multi-tag orphan, off-workspace, no-tiling
+/// has no placement this reconcile (multi-tag orphan, off-workspace, no-tiling
 /// build). `slot` must be < m.store.count(); the table was built alongside
 /// placements in reconcile. Indexes into a copy-cached slice so a module that
 /// emits fewer placements than ordered windows degrades to null (same as the

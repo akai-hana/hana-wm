@@ -181,7 +181,6 @@ fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytyp
     return contract.callFirstTrue(contract.Segment, bar_mods[0..], hook, args);
 }
 
-// ---------------------------------------------------------------------------
 // Bar height / font-size resolution.
 //
 // Owns everything needed to decide the bar's pixel height and effective font
@@ -237,8 +236,6 @@ fn calcBarHeightAndFontSize() u16 {
     const m = probeMetrics(null) orelse return scale.default_bar_height_px;
     return scale.clampBarHeight(@max(1, m.ascent + m.descent));
 }
-
-// ---------------------------------------------------------------------------
 
 /// Uniform poll wakeup: runs every module's onPollWakeup hook (prompt caret
 /// blink, marquee repaint-marking, ...) then submits a draw. The bar never
@@ -444,7 +441,7 @@ const Dirty = struct {
 const SelfTickerScope = struct {
     /// Left edge of the segment's reserved slot from the last layout pass.
     x: u16 = 0,
-    /// Reserved width from the same pass (its natural width at that frame's
+    /// Reserved width from the same layout (its natural width at that frame's
     /// clock budget).
     width: u16 = 0,
     /// True once a layout pass placed the segment (a self-ticker that never
@@ -808,7 +805,7 @@ const State = struct {
         ctx.geoms = self.title_data.geoms_buf[0..self.frame.wins_len];
     }
 
-    // -- Live-state collection ------------------------------------------------
+    // Live-state collection
 
     /// Reads workspace/window state into the frame fields. Pure model reads:
     /// no X11. The per-window titles/geoms are filled later (fillDrawCtx)
@@ -862,7 +859,7 @@ const State = struct {
         return sync.truthRect(pipeline.model(), win) orelse segmod.offscreen_rect;
     }
 
-    // -- Drawing ---------------------------------------------------------------
+    // Drawing
 
     /// Warns on a draw failure and reports the position unchanged, so a broken
     /// segment can't corrupt the layout.

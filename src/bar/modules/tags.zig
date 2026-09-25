@@ -19,6 +19,13 @@ const fallback_width: u16 = 270;
 var label_widths: [tracking.workspace_labels.len]u16 = [_]u16{0} ** tracking.workspace_labels.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
+// All-view (all_workspaces / Mod+5) collapse: while the flag is active every
+// workspace tag is replaced by ONE cell labeled "花", so the whole segment
+// narrows to a single tag. The cell is at least the standard tag width,
+// growing to fit the (wider) CJK glyph when necessary.
+const all_view_label = "花";
+var all_view_label_width: u16 = 0;
+var all_view_cell_width: u16 = 0;
 // Cached horizontal offset of the indicator glyph within a workspace cell.
 // Added to the cell's start_x at draw time; constant for all cells.
 var cached_ind_x_off: u16 = 0;
@@ -55,6 +62,11 @@ fn ensureCache(
         w.* = dc.measureTextWidthStyled(getLabel(i, config), config.workspaceIconProps(is_current));
     }
     ws_width = config.scaledWorkspaceWidth(height);
+    // Measure the all-view collapse label with the SELECTED styling: the single
+    // all-view cell renders as the current tag, and its CJK glyph is wider than
+    // the default numeric tags.
+    all_view_label_width = dc.measureTextWidthStyled(all_view_label, config.workspaceIconProps(true));
+    all_view_cell_width = @max(ws_width, all_view_label_width);
     cache_valid = true;
 
     // All geometry inputs are constant between reloads, so the indicator
@@ -108,11 +120,53 @@ fn indicatorPos(
     return .{ .x = ix, .y = iy };
 }
 
+// Draws one workspace tag cell: background, centered label, and the window
+// indicator glyph when `has_windows`. Shared by the regular per-workspace tags
+// and the single all-view collapse cell.
+fn drawCell(
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    x: u16,
+    cell_w: u16,
+    label: []const u8,
+    label_w: u16,
+    has_windows: bool,
+    is_current: bool,
+) !void {
+    const bg = if (is_current) config.selected_bg else config.bg;
+    const fg = config.workspaceTextFg(is_current);
+
+    dc.fillRect(x, 0, cell_w, height, bg);
+
+    // baselineY returns the same value for every cell; hoist it once outside.
+    const text_x = x + (cell_w -| label_w) / 2;
+    try dc.drawTextStyled(text_x, dc.baselineY(height), label, fg, config.workspaceIconProps(is_current));
+
+    if (has_windows) {
+        const glyph = if (is_current)
+            config.indicator_focused orelse types.default_indicator_focused
+        else
+            config.indicator_unfocused orelse types.default_indicator_unfocused;
+        const color = config.workspaceIndicatorColor(is_current);
+        // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
+        try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, config.scaledIndicatorSize(height), color);
+    }
+}
+
+// Whether any workspace carries at least one window (drives the indicator
+// glyph on the all-view collapse cell).
+fn anyWorkspaceHasWindows(ws_has_windows: []const bool) bool {
+    for (ws_has_windows) |hw| if (hw) return true;
+    return false;
+}
+
 // Draw workspace tags.
 //
 // `ws_current`: index of the currently active workspace. `ws_has_windows`:
 // one bool per workspace; true when it has at least one window (drives the
-// indicator glyph).
+// indicator glyph). While `ws_all_active` (the all_workspaces / Mod+5 view)
+// the 8+ tags collapse into a single "花" tag rendered as current.
 fn drawFrame(
     dc: *drawing.DrawContext,
     config: types.BarConfig,
@@ -124,34 +178,26 @@ fn drawFrame(
 ) !u16 {
     if (ws_has_windows.len == 0) return start_x;
     ensureCache(dc, config, height, ws_current, ws_all_active);
-    const ind_size = config.scaledIndicatorSize(height);
     var x = start_x;
 
-    // baselineY returns the same value for every cell; hoist it once outside the loop.
-    const baseline_y = dc.baselineY(height);
+    if (ws_all_active) {
+        try drawCell(
+            dc,
+            config,
+            height,
+            x,
+            all_view_cell_width,
+            all_view_label,
+            all_view_label_width,
+            anyWorkspaceHasWindows(ws_has_windows),
+            true,
+        );
+        x += all_view_cell_width;
+        return x;
+    }
 
     for (ws_has_windows, 0..) |has_windows, i| {
-        const is_current = ws_all_active or (i == ws_current);
-        const bg = if (is_current) config.selected_bg else config.bg;
-        const fg = config.workspaceTextFg(is_current);
-
-        dc.fillRect(x, 0, ws_width, height, bg);
-
-        const label = getLabel(i, config);
-        const label_w = label_widths[i];
-        const text_x = x + (ws_width -| label_w) / 2;
-        try dc.drawTextStyled(text_x, baseline_y, label, fg, config.workspaceIconProps(is_current));
-
-        if (has_windows) {
-            const glyph = if (is_current)
-                config.indicator_focused orelse types.default_indicator_focused
-            else
-                config.indicator_unfocused orelse types.default_indicator_unfocused;
-            const color = config.workspaceIndicatorColor(is_current);
-            // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
-            try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, ind_size, color);
-        }
-
+        try drawCell(dc, config, height, x, ws_width, getLabel(i, config), label_widths[i], has_windows, i == ws_current);
         x += ws_width;
     }
     return x;
@@ -176,12 +222,18 @@ fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
 /// This module's bar-segment contribution (registry binding).
 fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
     const f: *const segmod.Frame = @ptrCast(@alignCast(frame));
-    if (f.workspace_count > 0)
+    if (f.workspace_count > 0) {
+        // All-view collapses 8 tags -> 1: the row reservation narrows with it.
+        if (f.is_all_view_active) return all_view_cell_width;
         return @intCast(f.workspace_count * ws_width);
+    }
     return fallback_width;
 }
 
 fn resolveWorkspaceClick(offset: u16) ?usize {
+    // In all-view the single "花" cell represents every workspace at once; a
+    // click cannot map onto one workspace, so it is a no-op.
+    if (tracking.isAllViewActive()) return null;
     const cell_w = ws_width;
     if (cell_w == 0) return null;
     if (!build_options.has_workspaces) return null;

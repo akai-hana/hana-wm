@@ -252,8 +252,6 @@ pub const FontState = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-
 inline fn setCairoColor(ctx: *cairo_t, color: u32) void {
     const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
     const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
@@ -481,7 +479,8 @@ pub const DrawContext = struct {
 
     /// Uses XCB rather than Cairo to write straight-alpha pixels (picom expects straight-alpha;
     /// Cairo's XRender backend writes premultiplied). `last_gc_color` skips xcb_change_gc
-    /// when the color is unchanged, which is the common case for adjacent same-background segments.
+    /// when the color is unchanged, which is the common case for adjacent
+    /// same-background segments.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         const packed_color: u32 = if (self.is_argb)
             (@as(u32, self.alpha_u8) << 24) | (color & 0x00FFFFFF)
@@ -826,7 +825,6 @@ pub fn drawPaddedSegmentValue(
     return x + width;
 }
 
-// ---------------------------------------------------------------------------
 // One-shot font metrics probing (used by the bar height / font-size calc).
 
 /// Font metrics pair (ascent, descent) in pixels.

@@ -147,9 +147,7 @@ pub fn sendBorderColorIfChanged(win: u32, color: u32) void {
     utils.setBorderPixel(conn, win, color);
 }
 
-// ---------------------------------------------------------------------------
 // Window-title cache
-// ---------------------------------------------------------------------------
 
 /// How many bytes of a title to fetch. Generous for real titles; longer
 /// titles are truncated (parity with the old bar title fetches).

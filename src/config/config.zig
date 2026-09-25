@@ -480,8 +480,14 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
 /// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
 /// `source` receives where the config actually came from (user vs fallback),
 /// so callers with different boot/reload semantics (see events.handleConfigReload)
-/// need no separate existence probe.
-pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource) !types.Config {
+/// need no separate existence probe. `allow_pinned_snapshot` admits the one
+/// boot-only win over that order: a re-exec successor (reload_hana,
+/// restart.execNext) pinning HANA_CONFIG_DIR to the frozen last-good snapshot.
+/// The in-place reload path MUST pass false -- HANA_CONFIG_DIR stays set for
+/// the process lifetime after the first re-exec, so honoring it there would
+/// re-read the frozen snapshot instead of the user's live config files, and
+/// bind/theme edits would never hot-reload.
+pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, allow_pinned_snapshot: bool) !types.Config {
     const paths = try searchPaths(allocator);
     defer paths.deinit(allocator);
 
@@ -490,17 +496,19 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource) !
     // config WITHOUT re-reading the live config tree. Any failure falls
     // through to the normal search (a broken snapshot must not silently swap
     // in the embedded fallback over an otherwise-fine user config).
-    if (std.c.getenv("HANA_CONFIG_DIR")) |env_z| {
-        const env = std.mem.span(env_z);
-        if (loadConfigFromDir(allocator, env)) |cfg| {
-            rememberGoodSource(allocator, env, true);
-            source.* = .user;
-            return cfg;
-        } else |err| switch (err) {
-            error.FileNotFound, error.NotDir, error.ConfigParseFailed => {
-                debug.warn("Re-exec config snapshot {s} unusable ({s}); falling back to the user's config", .{ env, @errorName(err) });
-            },
-            else => return err,
+    if (allow_pinned_snapshot) {
+        if (std.c.getenv("HANA_CONFIG_DIR")) |env_z| {
+            const env = std.mem.span(env_z);
+            if (loadConfigFromDir(allocator, env)) |cfg| {
+                rememberGoodSource(allocator, env, true);
+                source.* = .user;
+                return cfg;
+            } else |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.ConfigParseFailed => {
+                    debug.warn("Re-exec config snapshot {s} unusable ({s}); falling back to the user's config", .{ env, @errorName(err) });
+                },
+                else => return err,
+            }
         }
     }
 
@@ -1208,7 +1216,9 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     return .{ .exec = try allocator.dupe(u8, cmd) };
 }
 
-/// Canonical startup/reload entry point: load, validate.
+/// Canonical startup entry point: load, validate. Re-exec successors find
+/// their pinned config snapshot via `loadConfigDefault(true)`; the in-place
+/// reload path (events.handleConfigReload) loads live configs itself instead.
 ///
 /// Note: keybinding resolution (keysym -> keycode + dispatch map) is an input
 /// concern and happens separately via `input.buildKeybinds` once the config is
@@ -1216,7 +1226,7 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
 /// bar itself (see bar/metrics.zig) rather than stored on the config.
 pub fn load(allocator: std.mem.Allocator) !types.Config {
     var source: DefaultSource = .fallback;
-    var cfg = loadConfigDefault(allocator, &source) catch |err| switch (err) {
+    var cfg = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
         // A malformed user config at BOOT falls back to the embedded
         // config (the WM must still start). On reload the parse error
         // propagates instead, so the live config is kept.
@@ -1303,7 +1313,7 @@ fn setTilingVariant(
     try cfg.tiling.variants.put(allocator, key, val);
 }
 
-/// The `[tiling.layouts.*]` sub-table family, scanned in one pass: a bare
+/// The `[tiling.layouts.*]` sub-table family, scanned once: a bare
 /// `[tiling.layouts.<name>]` table carries a per-layout `variants` string; a
 /// `[tiling.layouts.<name>.counts]` one carries per-workspace master-count
 /// overrides (workspace_number (1-based) = count; only meaningful with
@@ -1736,7 +1746,7 @@ fn parseWorkspaceRuleSection(
     }
 }
 
-// ── Per-subsystem change detection ──────────────────────────────────
+// Per-subsystem change detection
 // Content-based comparisons for handleConfigReload so it can skip
 // teardown/rebuild work when a subsystem didn't actually change (e.g. a bar
 // color tweak should not regrab keybindings). std containers are compared

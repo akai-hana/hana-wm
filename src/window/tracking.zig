@@ -40,9 +40,7 @@ pub const Entry = struct {
     presence: model_mod.Presence = .present,
 };
 
-// ---------------------------------------------------------------------------
 // Registry queries (facade)
-// ---------------------------------------------------------------------------
 
 pub fn isManaged(win: u32) bool {
     const mm = m() orelse return false;
@@ -81,13 +79,11 @@ pub fn allWindows() []const Entry {
     return snapshot_buf[0..n];
 }
 
-// ---------------------------------------------------------------------------
 // Per-workspace focus MRU (facade over model.ws[ws].focus_mru)
 //
 // Order convention: index 0 = most recent (matches model.setFocus's
 // front-insert). Fallback selection reads the MRU through
 // model.fallbackFocusCandidate.
-// ---------------------------------------------------------------------------
 
 fn clearFocusMru() void {
     if (!modelReady()) return;
@@ -95,9 +91,7 @@ fn clearFocusMru() void {
     for (&mm.ws) |*s| s.focus_mru.clear();
 }
 
-// ---------------------------------------------------------------------------
 // Lifecycle / workspace count (latched from config at init)
-// ---------------------------------------------------------------------------
 
 var workspace_count: usize = 1;
 
@@ -132,9 +126,15 @@ pub inline fn getWorkspaceCount() usize {
     return workspace_count;
 }
 
-// ---------------------------------------------------------------------------
+/// True while the all_workspaces (Mod+5) all-view flag is active: every
+/// workspace's windows are shown at once, and the bar collapses the tags into
+/// a single cell. Reads the model, the single source of truth.
+pub inline fn isAllViewActive() bool {
+    const mm = m() orelse return false;
+    return mm.all_view_active;
+}
+
 // Workspace bitmask helpers
-// ---------------------------------------------------------------------------
 
 // Comptime workspace label table
 

@@ -60,7 +60,6 @@ fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 const surfaces = @import("surfaces").Surfaces;
 const wincache = @import("wincache");
 const contract = @import("contract");
-const tiling_mods = contract.tiling_mods;
 const tiling = @import("tiling_seam").tiling;
 
 /// Withdrawal facts for actions.unmanage. The sole caller (window.
@@ -99,7 +98,7 @@ fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
     if (opts.bump_fullscreen) core.fullscreen.bump();
     if (opts.with_focus) {
         // Focus lands before geometry (focus-before).
-        pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, .before);
+        pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, .before, null);
     } else pipeline.reconcileUnderGrabNow(if (opts.restack) .{ .force_restack = true } else .{});
 }
 
@@ -113,7 +112,7 @@ fn retileWithFallback(m: *model_mod.Model, fs_current: bool, was_focused: bool) 
     retile(.{ .bump_fullscreen = fs_current, .restack = true, .with_focus = true }, ft);
 }
 
-// ----------------------------------------------------------- hide (window park)
+// hide (window park)
 
 /// Atomicity: hide + fallback-focus + retile land under one grab.
 ///
@@ -182,7 +181,7 @@ fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: focu
     return prep;
 }
 
-// --------------------------------------------------------- restore (unpark)
+// restore (unpark)
 
 fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
     return callHookBool(.isWindowHidden, .{ m, win });
@@ -192,7 +191,7 @@ fn restoreAndFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
     // A no_input restore never takes model focus, but the reconcile still
     // runs so the restored window is mapped and placed.
     const prep = prepareAndSetFocus(m, win, .window_spawn);
-    pipeline.reconcileGrabFocus(.{ .force_restack = true }, prep, .before);
+    pipeline.reconcileGrabFocus(.{ .force_restack = true }, prep, .before, null);
 }
 
 fn armFullscreenBarHideIfNeeded(
@@ -247,14 +246,14 @@ pub fn restoreAll() void {
         armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
 }
 
-// ------------------------------------------------------- covering (screen claim)
+// covering (screen claim)
 
 /// Covering enter/exit/switch for an arbitrary window in ONE model
 /// transition + ONE reconcile.
 ///
 /// The covering winner renders on the full screen edge-to-edge (screen rect,
 /// bw=0, pixel=0, ABOVE merged); everyone else parks off-screen in the same
-/// pass. Floating exit geometry replays from the base rect via the LastSent
+/// transition. Floating exit geometry replays from the base rect via the LastSent
 /// diff; tiled exit re-derives placements from the tiling engine, so the pre-exit
 /// "restore then re-park" request round collapses away.
 ///
@@ -283,13 +282,27 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     const prev_fs_win = currentCoveringOccupant(m);
     const kind: pipeline.FullscreenKind =
         if (isCoveringOnWs(m, win)) .exit else if (prev_fs_win != null) .switch_ else .enter;
+    const was_focused = m.focused == win;
 
     if (!wm.toggleCovering.?(m, win)) return;
+
+    // Focus the covering winner unless it already owns focus or the toggle
+    // turned fullscreen OFF. A covering window owns the whole screen, so it
+    // must own keyboard focus too: requests can arrive for an unfocused
+    // window (EWMH) and a covering switch can raise a window the pointer is
+    // not over, leaving keystrokes stranded on the displaced occupant. The
+    // model write happens before the reconcile (borders and the winner seed
+    // derive from it); the X focus lands inside the same grab, after the
+    // reconcile maps/raises the entrant. Returns .none for a no_input
+    // entrant (which can never hold X focus) without touching the model.
+    var ft: focus.FocusTransition = .none;
+    if (kind != .exit and !was_focused) ft = prepareAndSetFocus(m, win, .user_command);
 
     // EWMH writes + bar arming land inside the same grab as geometry -- all
     // fire-and-forget or pure state.
     pipeline.reconcileUnderGrabNowFullscreen(
         .{ .force_restack = true },
+        ft,
         win,
         prev_fs_win,
         kind,
@@ -314,7 +327,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     }
 }
 
-// ------------------------------------------------- tag-move / pin / all-view
+// tag-move / pin / all-view
 
 /// move_to_workspace. Model moves mask + home list + covering record in one
 /// call; the reconcile's diff parks/repairs geometry globally.
@@ -368,7 +381,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
 
     if (removing_current or (!had_bit and ws_idx == m.current.index)) {
         // Visible-set changed on the shown workspace: atomic evict/map+retile.
-        pipeline.reconcileGrabFocus(.{}, ft, .before);
+        pipeline.reconcileGrabFocus(.{}, ft, .before, null);
     }
     if (!removing_current) {
         // Off-workspace change: the tag set changed; bump the fact so the
@@ -399,7 +412,7 @@ pub fn allViewToggle() void {
     retile(.{ .restack = true, .with_focus = true }, ft);
 }
 
-// ------------------------------------------------------------ tiling ops / drag
+// tiling ops / drag
 
 /// Shared tiled->floating detach (toggleFloating/detachToFloating): seeds the
 /// floating anchor from LastSent geometry and drops the home-list membership.
@@ -466,7 +479,7 @@ pub fn detachToFloating(win: model_mod.WindowId) void {
     pipeline.reconcileUnderGrabNow(.{});
 }
 
-// ------------------------------------ floating drag commands (registry loops)
+// floating drag commands (registry loops)
 //
 // Uniform dispatch loops over the compiled-in sub-system set: a module that
 // provides the hook runs it, and a tree without the module simply has no
@@ -568,7 +581,7 @@ pub fn adjustSecondaryBalance(delta: f32) void {
 /// focused window's (focus MRU), not the list head -- a slot in the middle of
 /// a 3+ window workspace still swaps the pair the user expects. focus_swap
 /// variant moves focus to the previously focused window BEFORE the reconcile
-/// so the swapped-in window is focused on the first pass.
+/// so the swapped-in window is focused on the first reconcile.
 pub fn swapPrimaryAction(focus_swap: bool) void {
     const m = pipeline.mut(&gate);
     const focused = m.focused orelse return;
@@ -581,7 +594,7 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
         // A no_input displaced window must not take model focus.
         ft = prepareAndSetFocus(m, displaced, .tiling_operation);
     }
-    pipeline.reconcileGrabFocus(.{}, ft, .before);
+    pipeline.reconcileGrabFocus(.{}, ft, .before, null);
 }
 
 pub fn moveFocused(delta: i32) void {
@@ -676,9 +689,7 @@ const viewport_inactive: ViewportContext =
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
     if (!build_options.has_tiling) return viewport_inactive;
     const p = &m.ws[m.current.index].params;
-    const mod: ?contract.Layout =
-        if (p.kind < tiling_mods.len) tiling_mods[p.kind] else null;
-    const md = mod orelse return viewport_inactive;
+    const md = contract.moduleOf(p.kind) orelse return viewport_inactive;
     if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
     const n = model_mod.tiledCountOnWs(m, m.current);
     const wa = screen.workArea(core.getState().screen);
@@ -701,7 +712,7 @@ fn activeViewport() ?struct {
     return .{ .m = m, .p = p, .sc = sc };
 }
 
-// ---------------------------------------------------------- config reload
+// config reload
 
 /// Boot/restore seam: replay a persisted session's model level onto the
 /// live model. Sole authorized user is main.zig's re-exec restore path
@@ -755,7 +766,7 @@ pub fn seedParamsFromConfig() void {
     const m = pipeline.mut(&gate);
     // Global default template, stamped across every workspace by
     // applyConfigReload (preserves viewport runtime state). Per-workspace
-    // overrides are re-stamped in the pass below.
+    // overrides are re-stamped in the loop below.
     model_mod.applyConfigReload(m, .{
         .kind = default_kind,
         .variant_idx = resolveVariant(cfg, default_kind, null),
@@ -796,8 +807,7 @@ fn resolveVariant(
     override_variant: ?[]const u8,
 ) u8 {
     var value_string: ?[]const u8 = override_variant;
-    const active_mod: ?contract.Layout =
-        if (kind < tiling_mods.len) tiling_mods[kind] else null;
+    const active_mod = contract.moduleOf(kind);
     var v_idx: u8 = 0;
     if (active_mod) |md| {
         if (value_string == null) value_string = cfg.variants.get(md.name);
@@ -823,7 +833,7 @@ pub fn applyConfigReload() void {
     pipeline.reconcileUnderGrabNow(.{});
 }
 
-// ---------------------------------------------------------- workspace switch
+// workspace switch
 
 /// Workspace switch. One model transition + one reconcile; the LastSent
 /// diff parks leavers once and maps+places arrivers (see sync_test's switch
@@ -840,7 +850,11 @@ pub fn applyConfigReload() void {
 pub fn switchTo(ws_idx: u8) void {
     const m = pipeline.mut(&gate);
     if (ws_idx >= constants.max_workspaces) return;
-    if (m.current.index == ws_idx) return;
+    // No-op only when the view is already exactly this workspace (no all-view
+    // to exit). In all-view the current index may already equal the target:
+    // hitting the tag must still exit the all-view flag, returning the view to
+    // that one workspace.
+    if (m.current.index == ws_idx and !m.all_view_active) return;
 
     const t0: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
@@ -908,7 +922,7 @@ pub fn switchTo(ws_idx: u8) void {
     // an unmapped window is a BadMatch that leaves X focus on the old
     // workspace's window.  The .after order maps the arriving window before
     // applyPendingFocus targets it, in the same flush.
-    pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft, .after);
+    pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft, .after, null);
 
     if (build_options.profile_key) {
         const t3 = utils.monotonicNs();
@@ -922,7 +936,7 @@ pub fn switchTo(ws_idx: u8) void {
     }
 }
 
-// ------------------------------------------------------- spawn/map lifecycle
+// spawn/map lifecycle
 
 /// MapRequest tail. The caller's front-end (event masks, property
 /// queries, size-hints cache) has already run; this registers the window in
@@ -935,7 +949,7 @@ pub fn switchTo(ws_idx: u8) void {
 /// tiled (core membership is tiled-only) and then immediately detached to the
 /// given rect with no home-list membership, mirroring detachTiledToFloating's
 /// anchor/home_ws state. The reconcile tail then sizes it floating in one
-/// pass, so a float-rule spawn never flashes a tiled slot.
+/// reconcile, so a float-rule spawn never flashes a tiled slot.
 pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?utils.Rect) void {
     const m = pipeline.mut(&gate);
     if (m.store.has(win)) return; // double-manage guard
@@ -953,7 +967,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // Float-rule admission: detach the entry from its tiled slot before the
     // fifo placement runs (which assumes a home slot, nonsensical for a
     // floating window). The anchor/home_ws state mirrors toggleFloating's
-    // detach, and the reconcile tail applies the rect in the same pass.
+    // detach, and the reconcile tail applies the rect in the same reconcile.
     if (float_rect) |rect| {
         if (e) |ep| {
             if (ep.home_ws) |home| model_mod.removeValue(&m.ws[home.index].tiled_order, win);
@@ -977,9 +991,8 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
             // Same policy restated at the spawn site: driven by the active
             // module's fifo_variant metadata (the head slot binds variant
             // index 1).
-            if (p.kind < tiling_mods.len) {
-                const fv = tiling_mods[p.kind].fifo_variant;
-                if (fv) |v| {
+            if (contract.moduleOf(p.kind)) |mv| {
+                if (mv.fifo_variant) |v| {
                     if (p.variant_idx == v and m.ws[home.index].tiled_order.len > 1)
                         model_mod.reorderTiled(m, win, 0);
                 }
@@ -998,7 +1011,7 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // AFTER the reconcile, inside the same grab: the window must be mapped
     // before xcb_set_input_focus, so both map+focus land under one grab.
     const ft = prepareAndSetFocus(m, win, .window_spawn);
-    pipeline.reconcileGrabFocus(.{}, ft, .after);
+    pipeline.reconcileGrabFocus(.{}, ft, .after, null);
 }
 
 /// Unmanage tail: close/destroy/unmap of a managed window. Local

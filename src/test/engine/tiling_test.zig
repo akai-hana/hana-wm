@@ -1,7 +1,8 @@
 //! Layout engine tests.
 //!
 //! Golden-value tests: expected rects are hand-computed from the layout
-//! modules' formulas (modules/*.zig), so any drift fails loudly. Fixture: windows registered on workspace 0 via model.register.
+//! modules' formulas (modules/*.zig), so any drift fails loudly. Fixture:
+//! windows registered on workspace 0 via model.register.
 
 const std = @import("std");
 const testing = std.testing;
@@ -91,7 +92,7 @@ fn tuned(fx: *Fixture) tiling.View {
     return v;
 }
 
-/// One compute pass into a fresh list (a BoundedList, so returning by value
+/// One compute into a fresh list (a BoundedList, so returning by value
 /// is allocation-free).
 fn computeOf(kind: u8, v: tiling.View) List {
     var list: List = .{};

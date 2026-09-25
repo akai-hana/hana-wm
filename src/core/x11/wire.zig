@@ -18,7 +18,6 @@ const Connection = *xcb.xcb_connection_t;
 const Screen = *xcb.xcb_screen_t;
 const utils = @import("utils");
 
-// ---------------------------------------------------------------------------
 // Geometry <-> wire conversions
 
 /// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
@@ -34,7 +33,6 @@ pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect 
     };
 }
 
-// ---------------------------------------------------------------------------
 // Configure/raise/park primitives
 
 /// Moves and resizes `win`, optionally merging a stack mode and/or a border
@@ -100,7 +98,6 @@ pub inline fn ungrabAndFlush(conn: Connection) void {
     _ = xcb.xcb_flush(conn);
 }
 
-// ---------------------------------------------------------------------------
 // Atom cache
 //
 // Field names match X11 atom strings exactly, so getAtomCached resolves
@@ -199,7 +196,6 @@ inline fn changeProperty(
     );
 }
 
-// ---------------------------------------------------------------------------
 // EWMH root window advertisement
 
 /// EWMH atoms hana declares via `_NET_SUPPORTED`. Every entry must correspond
@@ -301,7 +297,6 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     changeProperty(conn, root, net_supported, xcb.xcb_atom_t, xcb.XCB_ATOM_ATOM, &supported);
 }
 
-// ---------------------------------------------------------------------------
 // Reply collection (poll-first)
 
 /// Collects the reply for an already-fired get_property request, trying a

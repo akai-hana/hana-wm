@@ -1,15 +1,15 @@
-### hana WM configuration ###
+# hana WM configuration
 
-# ---------------------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+#
+# This file holds hana's functional behavior. See `binds.toml` for the bind
+# list and `themes/akai.toml` for visual behavior.
+#
+# Files can be structured however you want; this layout keeps quick theme
+# swapping viable and functional behavior swappable without touching your
+# personal binds list.
 
-# In here lies all of hana's functional behavior.
-# See `binds.toml` for the bind list, and `themes/akai.toml` for visual behavior.
-
-# Files can be structured however the user wants; I decided on this structure in order
-# to make quick theme swapping viable, and functional behavior swappable without affecting
-# the user's personal program binds list.
-
-# ---------------------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 # TOML config files to load.
 # - Files placed in the main config directory are auto-loaded (alphabetically).
@@ -19,21 +19,23 @@
 # See config/README.md for value format details (ScalableValue, glob expansion, etc.)
 include = ["themes/akai.toml"]
 
-# TILING #
+# ---------------------------------------------------------------------------
+# Tiling
+# ---------------------------------------------------------------------------
 
 [tiling]
 enabled = true
 
 # When false (default), each workspace remembers its own layout independently.
-# When true,  changing the layout on one workspace changes it everywhere.
+# When true, changing the layout on one workspace changes it everywhere.
 global_layout = false
 
 # Minimum tiled window dimension in pixels [1..]
-min_window_dim   = 50
+min_window_dim = 50
 
 # Available layouts, in cycle order.
 # - Layouts not listed here are unavailable at runtime.
-# - Omitting the array entirely enables every layout in src/tiling/layouts/.
+# - Omitting the array entirely enables every layout in src/tiling/modules/.
 #
 # Inline syntax: "name" [, variant] [, workspace_list]
 #
@@ -42,9 +44,9 @@ min_window_dim   = 50
 #   workspace_list Comma-separated 1-based indices restricting the layout to specific workspaces (optional)
 #
 # Variant reference:
-#   master-stack  "lifo" (default) | "fifo"       — new window lands in master or stack
-#   monocle       "gapless" (default) | "gaps"     — honour window gaps like other layouts
-#   grid          "rigid" (default) | "relaxed"    — incomplete last row: leave gaps or expand
+#   master-stack  "lifo" (default) | "fifo"  — new window lands in master or stack
+#   monocle       "gapless" (default) | "gaps"   — honour window gaps like other layouts
+#   grid          "rigid" (default) | "relaxed"  — incomplete last row: leave gaps or expand
 #   fibonacci     (no variants)
 #
 layouts = [
@@ -59,16 +61,16 @@ layouts = [
 # -- Layout-specific settings --
 
 [tiling.layouts.master-stack]
-count = 1        # Number of windows in the master area [1..]
-side  = "left"   # "left" / "right" — master area on this side of the screen
-width = 50%      # Master area width [5%-95%] or exact pixels (0-N]px
-variants = "lifo" # "lifo" = new window spawns in master; "fifo" = spawns in stack
+count    = 1        # Number of windows in the master area [1..]
+side     = "left"   # "left" / "right" — master area on this side of the screen
+width    = 50%      # Master area width [5%-95%] or exact pixels (0, N] px
+variants = "lifo"   # "lifo" = new window spawns in master; "fifo" = spawns in stack
 
 [tiling.layouts.monocle]
-variants = "gaps" # "gapless" (true fullscreen) | "gaps" (honour gap settings)
+variants = "gaps"   # "gapless" (true fullscreen) | "gaps" (honour gap settings)
 
 [tiling.layouts.grid]
-variants = "relaxed" # "rigid" (strict grid) | "relaxed" (last window expands)
+variants = "relaxed"   # "rigid" (strict grid) | "relaxed" (last window expands)
 
 [tiling.layouts.fibonacci]
 # Fibonacci has no behavioral variants.

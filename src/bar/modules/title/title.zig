@@ -281,7 +281,7 @@ fn drawSegmentedTitles(
     }
 }
 
-// -- Segment hooks -----------------------------------------------------------
+// Segment hooks
 
 /// True while the last draw handed the slot to the prompt overlay. Latched
 /// here so the overlay close can be noticed: the scroller saw no frames for

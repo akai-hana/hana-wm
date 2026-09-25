@@ -6,6 +6,8 @@
 
 const segmod = @import("segment");
 const contract = @import("contract");
+const drawing = @import("drawing");
+const types = @import("types");
 
 /// Per-module width cache: the ACTUAL drawn width from the last render, read
 /// by the default naturalWidth for the row reservation (0 until the first
@@ -35,6 +37,64 @@ pub fn widthState(comptime tag: []const u8) type {
             return cached;
         }
     };
+}
+
+/// Keyed width cache (the clock's mode reservation): the last measured width
+/// plus the `Key` it belongs to, so a caller can tell when the stored width
+/// is stale (a mode/renderer change re-measures). Read before the first
+/// store falls back to the caller's probe width instead of a 0 reservation
+/// (a fresh bar sizes the clock by its probe). No redraw_request: consumers
+/// that re-measure on key change (the clock) drive repaints through their
+/// own staleness path.
+pub fn keyedWidthState(comptime tag: []const u8, comptime Key: type) type {
+    return struct {
+        var cached: u16 = 0;
+        var cached_key: ?Key = null;
+        const _ = tag;
+
+        /// True when `key` is the key the stored width was measured for;
+        /// false before any store (stale).
+        pub fn matches(key: Key) bool {
+            return if (cached_key) |ck| ck == key else false;
+        }
+        /// Stores the measured width under `key`.
+        pub fn store(key: Key, width: u16) void {
+            cached = width;
+            cached_key = key;
+        }
+        /// The stored width when a store happened, else `fallback` (caller's
+        /// probe width).
+        pub fn naturalWidth(_: *const anyopaque, fallback: u16) u16 {
+            return if (cached > 0) cached else fallback;
+        }
+        /// Drops the stored width+key so the next draw re-measures.
+        pub fn invalidate() void {
+            cached = 0;
+            cached_key = null;
+        }
+    };
+}
+
+/// Draws one padded segment for `name` and records its drawn width into
+/// `name`'s width state (the shared draw body of the icon-ish modules that
+/// are exactly "padded segment + width store"). Empty `text` draws nothing
+/// and stores a 0-width reservation instead, so segments that may have
+/// nothing to show (variants without an indicator) keep the row layout
+/// honest without a per-module guard.
+pub fn drawAndStore(
+    comptime name: []const u8,
+    dc: *drawing.DrawContext,
+    config: types.BarConfig,
+    height: u16,
+    start_x: u16,
+    text: []const u8,
+) !u16 {
+    var end_x = start_x;
+    if (text.len != 0) {
+        end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, name, text, null, config.segmentProps(name));
+    }
+    widthState(name).store(end_x - start_x);
+    return end_x;
 }
 
 const NaturalWidth = *const fn (*const anyopaque, u16) u16;

@@ -411,7 +411,7 @@ test "per-segment text colors: bar.properties keys override segment fg" {
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("batt"));
     // clock has a style-only entry (no color): its color stays the bar fg.
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("clock"));
-    // The scalar title knob still lands, untouched by the map pass.
+    // The scalar title knob still lands, untouched by the map.
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.title_accent_color);
     try testing.expectEqual(@as(usize, 4), cfg.bar.segment_fg.count());
     // `<name>_value` keys are per-segment NUMBER colors; a segment without one

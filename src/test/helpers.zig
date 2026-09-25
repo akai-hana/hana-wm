@@ -76,8 +76,8 @@ pub fn makeCtx(
     };
 }
 
-/// Warms the sync ledger with one steady-state pass, then times `iterations`
-/// reconcile passes and returns nanoseconds per pass. Shared by the latency
+/// Warms the sync ledger with one steady-state reconcile, then times `iterations`
+/// reconciles and returns nanoseconds per reconcile. Shared by the latency
 /// benchmarks (the identical warm+bench pattern in the latency tests).
 pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
     var warm = TestSink(.count){};
