@@ -353,7 +353,10 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
 
     // History-less variant: registered here with mask bit for ws 1 but NEVER
     // reconciled on its home ws (nothing ever sent): first sighting as an
-    // orphan must PARK, not materialize a bogus geometry.
+    // orphan must PARK, not materialize a bogus geometry. A window that was
+    // never mapped still has to reach the server viewable, so the first park
+    // is preceded by a single map (the WM maps on behalf of a redirecting
+    // substructure client); the parked configure stays ONE merged request.
     fx.m.current = model.WSId.fromIndex(0);
     helpers.regCur(&fx.m, 702); // home ws 0
     fx.m.store.getPtr(702).?.mask |= model.bit(model.WSId.fromIndex(1));
@@ -361,8 +364,9 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.m.current = model.WSId.fromIndex(1);
     fx.rec.clear();
     fx.reconcile(.{});
-    try fx.rec.expectLen(1);
-    try fx.rec.expectPark(0, 702);
+    try fx.rec.expectLen(2);
+    try fx.rec.expectMap(0, 702);
+    try fx.rec.expectPark(1, 702);
     try testing.expectEqual(@as(?utils.Rect, null), sync.lastRectFor(702));
 }
 
@@ -416,22 +420,26 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     model.setFocus(&fx.m, 901);
     fx.reconcile(.{});
 
-    // Baseline: exactly ONE park op for the parked window - never a separate
-    // offscreen configure plus a stack configure.
-    try fx.rec.expectLen(4);
+    // Baseline: 902 lives off-ws with NO sent history - its first sight is
+    // parked, but substructure-redirect means IT is only viewable once the WM
+    // maps it, so the first park carries a single preceding map. The parked
+    // configure itself is exactly ONE merged request (never a separate
+    // offscreen configure plus a stack configure).
+    try fx.rec.expectLen(5);
     try fx.rec.expectMap(0, 901);
     try fx.rec.expectPixel(1, 901, focused_pixel);
     try fx.rec.expectGeomBw(2, 901, golden.single, cfg_bw, .above);
-    try fx.rec.expectPark(3, 902);
+    try fx.rec.expectMap(3, 902);
+    try fx.rec.expectPark(4, 902);
 
     // Steady state: nothing changed since the baseline reconcile, so delta-send
-    // elides every op (901's map/pixel/geom+bw and 902's park were all sent).
+    // elides every op (901's map/pixel/geom+bw and 902's map+park were all sent).
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(0);
 
     // Minimized windows ride the same single-op park shape. Only 901's park
-    // is new: 902's park was already sent on the baseline reconcile.
+    // is new: 902's map+park were already sent on the baseline reconcile.
     try minimize.minimize(&fx.m, 901);
     fx.rec.clear();
     fx.reconcile(.{});

@@ -9,7 +9,7 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
 const masks = @import("masks");
-const debug = @import("debug");
+const log = @import("log");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const icccm = @import("icccm");
@@ -271,7 +271,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
-        debug.warn(
+        log.warn(
             "window: spawn queue pre-allocation failed ({s}); will grow on demand",
             .{@errorName(err)},
         );
@@ -406,13 +406,13 @@ fn findSpawnQueueWorkspace(
     // consuming items[0] would mis-route it to the oldest pending spawn's
     // workspace, so return null and let handleMapRequest fall back to current_ws.
     if (state.?.spawn_queue.items.len != 1) {
-        debug.debug(
+        log.debug(
             "spawn: no exact PID match for pid={d}, {d} pending; ambiguous, routing to current ws",
             .{ win_pid, state.?.spawn_queue.items.len },
         );
         return null;
     }
-    debug.debug(
+    log.debug(
         "spawn: no exact PID match for pid={d}, sole entry ws={d}, using heuristic",
         .{ win_pid, state.?.spawn_queue.items[0].workspace },
     );
@@ -460,14 +460,14 @@ fn resolveAdmissionDecision(
 pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     const alloc = state.?.alloc orelse return;
     if (state.?.spawn_queue.items.len >= spawn_queue_capacity) {
-        debug.warn(
+        log.warn(
             "registerSpawn: spawn queue full ({d} entries); entry dropped",
             .{spawn_queue_capacity},
         );
         return;
     }
     state.?.spawn_queue.append(alloc, .{ .workspace = workspace.index, .pid = pid }) catch |err| {
-        debug.warn("registerSpawn: failed to queue spawn entry: {}", .{err});
+        log.warn("registerSpawn: failed to queue spawn entry: {}", .{err});
     };
 }
 
@@ -635,7 +635,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     if (build_options.profile_key) {
         const t_map = utils.monotonicNs();
-        debug.info("[TIMING] spawn 0x{x}: local={d}us drain={d}us after_drain={d}us total={d}us", .{
+        log.info("[TIMING] spawn 0x{x}: local={d}us drain={d}us after_drain={d}us total={d}us", .{
             win,
             @as(u64, @intCast(t_fire - t0)) / 1000,
             @as(u64, @intCast(t_drain - t_fire)) / 1000,
@@ -897,7 +897,7 @@ pub fn adoptRootWindows() !usize {
         adopted += 1;
     }
 
-    debug.info("Adopted {d} pre-existing windows", .{adopted});
+    log.info("Adopted {d} pre-existing windows", .{adopted});
     return adopted;
 }
 
@@ -1145,18 +1145,23 @@ fn sendRequestedConfigure(
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     if (focus.getSuppressReason() != .window_spawn) return false;
-    // Consume the suppression flag unconditionally: it is a one-shot guard that
-    // only applies to the first crossing event after a spawn. Clearing it
-    // only when the cursor had moved would instead suppress all future
-    // hover-focus events if the cursor stayed at the exact spawn pixel.
-    focus.setSuppressReason(.none);
     // The spawn snapshot (state.spawn_cursor) is taken by handleMapRequest
-    // when the spawn's MapRequest arrives; a synthetic crossing caused by the
-    // new window mapping under the parked cursor carries exactly those root
-    // coordinates. A crossing at any other position means the cursor actually
-    // moved or entered a different window, so it is a genuine hover and must
-    // be allowed to refocus.
-    return root_x == state.?.spawn_cursor.x and root_y == state.?.spawn_cursor.y;
+    // when the spawn's MapRequest arrives. Mapping a new window under the
+    // stationary cursor produces a PAIR of synthetic crossings, both carrying
+    // the spawn's root coordinates: the enter into the spawned window, and the
+    // return crossing into the window it displaced (which, when the spawned
+    // window immediately parks offscreen, is the previous focus). A one-shot
+    // guard only drops the first, letting the return crossing re-steal focus
+    // from the just-spawned window via mouse_enter.
+    //
+    // Keep the guard armed while crossings stay at the spawn pixel: only a
+    // genuine pointer move (different coordinates) is a real hover and may
+    // clear it. A cursor parked where it was when the app launched can't hover
+    // a different window at that same pixel until it moves, which is the
+    // acceptable price for not stealing focus during the spawn's layout.
+    if (root_x == state.?.spawn_cursor.x and root_y == state.?.spawn_cursor.y) return true;
+    focus.setSuppressReason(.none);
+    return false;
 }
 
 /// Shared guard tail for the EnterNotify/LeaveNotify handlers, run after each
@@ -1398,7 +1403,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (net_active != 0 and event.type == net_active) {
         if (!warned_active_ignore) {
             warned_active_ignore = true;
-            debug.warn("Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
+            log.warn("Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
         }
         return;
     }
@@ -1416,7 +1421,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (!isValidManagedWindow(win)) {
         if (!warned_unmanaged_state) {
             warned_unmanaged_state = true;
-            debug.warn("Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
+            log.warn("Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
         }
         return;
     }

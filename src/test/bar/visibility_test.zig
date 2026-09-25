@@ -46,7 +46,7 @@ test "F03: fullscreen occupancy forces the bar hidden" {
         return;
     }
 
-    // Live branch: boot the real core/pipeline/model wiring on the shared
+    // Live branch: boot the real pipeline/model wiring on the shared
     // display (SKIP headless like the other fixture tests).
     const fixture = @import("fixture");
     const pipeline = @import("pipeline");

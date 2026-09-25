@@ -1,4 +1,4 @@
-//! Headless tests for the shared bounded collections (`core/utils/bounded`).
+//! Headless tests for the shared bounded collections (`core/pure/bounded`).
 //!
 //! `BoundedList` backs the window caches, minimize records, and the spawn
 //! pending table, so its cap/evict/scan semantics are load-bearing but were

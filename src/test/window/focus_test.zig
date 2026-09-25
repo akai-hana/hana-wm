@@ -192,7 +192,7 @@ test "focus: switch lands xcb_set_input_focus on globally_active window" {
     try std.testing.expect(focus.protocolParityHolds());
 }
 
-test "focus: parked cursor cannot steal a fresh spawn's focus (one-shot suppression)" {
+test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel suppression)" {
     var fx = fixture.setUp("focus_test") orelse return;
     defer fx.deinit();
     const m = pipeline.model();
@@ -214,17 +214,24 @@ test "focus: parked cursor cannot steal a fresh spawn's focus (one-shot suppress
     admitViaMapRequest(w2);
     try std.testing.expectEqual(w2, m.focused.?);
 
-    // The crossing the spawn's map generates lands exactly on the snapshot
-    // position: it is synthetic, so it must NOT re-hover-focus w1. w2 keeps
-    // both model and X focus.
+    // The crossings the spawn's map generates land exactly on the snapshot
+    // position: they are synthetic (an enter into the spawned window and the
+    // return crossing into the window it displaced), so NEITHER may
+    // re-hover-focus w1. w2 keeps both model and X focus.
+    enterNotify(fx, w1, 200, 200);
+    fx.flush();
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
     enterNotify(fx, w1, 200, 200);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
     try std.testing.expectEqual(w2, fx.inputFocus());
 
-    // The guard is one-shot: a second crossing at the same pixel is a real
-    // hover and hands focus back to the window under the cursor.
-    enterNotify(fx, w1, 200, 200);
+    // The guard releases only on a genuine pointer move: a hover at a
+    // different pixel is real and hands focus back to the window under it.
+    _ = xcb.xcb_warp_pointer(fx.conn, xcb.XCB_NONE, fx.root, 0, 0, 0, 0, 400, 400);
+    fx.flush();
+    enterNotify(fx, w1, 400, 400);
     fx.flush();
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expect(focus.protocolParityHolds());

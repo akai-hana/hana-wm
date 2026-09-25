@@ -18,7 +18,7 @@ const c = @cImport({
 
 const core = @import("core");
 const utils = @import("utils");
-const debug = @import("debug");
+const log = @import("log");
 const tracking = @import("tracking");
 const window = @import("window");
 
@@ -62,7 +62,7 @@ fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
 fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     const grandchild_pid = c.fork();
     if (grandchild_pid < 0) {
-        debug.err("Second fork failed", .{});
+        log.err("Second fork failed", .{});
         std.process.exit(1);
     }
     if (grandchild_pid == 0) {
@@ -149,12 +149,12 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     // to a synchronous waitpid on the event loop and silently dropped
     // workspace routing for the spawn.
     if (g_pending.len >= max_pending_spawns) {
-        debug.err("spawn: pending spawn table full, rejecting '{s}'", .{cmd});
+        log.err("spawn: pending spawn table full, rejecting '{s}'", .{cmd});
         return error.SpawnQueueFull;
     }
 
     const pipe_fds = utils.makePipe() catch {
-        debug.err("pipe2() failed (spawn pipe): {s}", .{cmd});
+        log.err("pipe2() failed (spawn pipe): {s}", .{cmd});
         return error.PipeFailed;
     };
 
@@ -162,7 +162,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     if (pid < 0) {
         _ = c.close(pipe_fds[0]);
         _ = c.close(pipe_fds[1]);
-        debug.err("First fork failed: {s}", .{cmd});
+        log.err("First fork failed: {s}", .{cmd});
         return error.ForkFailed;
     }
 
@@ -304,7 +304,7 @@ pub fn execSynchronous(cmd: []const u8) void {
 
     const pid = c.fork();
     if (pid < 0) {
-        debug.err("Fork failed (synchronous exec): {s}", .{cmd});
+        log.err("Fork failed (synchronous exec): {s}", .{cmd});
         return;
     }
     if (pid == 0) {
@@ -321,7 +321,7 @@ pub fn execSynchronous(cmd: []const u8) void {
             .SUCCESS => break,
             .INTR => continue, // SIGCHLD from an unrelated child interrupts; retry.
             else => {
-                debug.err("waitpid failed (synchronous exec): {s}", .{cmd});
+                log.err("waitpid failed (synchronous exec): {s}", .{cmd});
                 return;
             },
         }

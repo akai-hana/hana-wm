@@ -11,7 +11,7 @@
 //! nothing and have no deinit.
 
 const std = @import("std");
-const debug = @import("debug");
+const log = @import("log");
 const types = @import("types");
 
 pub const Value = union(enum) {
@@ -113,7 +113,7 @@ pub const Section = struct {
     /// (best-effort: losing the reserve just means an extra rehash).
     fn reserve(allocator: std.mem.Allocator, comptime V: type, comptime label: []const u8) std.StringHashMap(V) {
         var map = std.StringHashMap(V).init(allocator);
-        map.ensureTotalCapacity(section_keys_reserve) catch |err| debug.warnOnErr(err, label);
+        map.ensureTotalCapacity(section_keys_reserve) catch |err| log.warnOnErr(err, label);
         return map;
     }
 
@@ -162,7 +162,7 @@ pub const Section = struct {
     // `[workspace.rules]`, `[tiling.layouts.master-stack.counts]`) rather
     // than the typed getters.
     pub fn markConsumed(self: *Section, key: []const u8) void {
-        self.consumed.put(key, {}) catch |err| debug.warnOnErr(err, "marking key consumed");
+        self.consumed.put(key, {}) catch |err| log.warnOnErr(err, "marking key consumed");
     }
 
     // Warns about every key in the section that was never examined via
@@ -174,7 +174,7 @@ pub const Section = struct {
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
         for (self.keys_in_order.items, 0..) |key, i| {
             if (!self.consumed.contains(key)) {
-                debug.warn(
+                log.warn(
                     "Unrecognized key '{s}' in section [{s}] (line {d}); ignoring",
                     .{ key, section_name, if (i < self.lines_in_order.items.len) self.lines_in_order.items[i] else 0 },
                 );
@@ -209,7 +209,7 @@ pub const Section = struct {
         // Root pairs (no section header) warn under a "[root]" label so one
         // format serves both cases.
         const decls: usize = val.array.list.items.len;
-        debug.warn(
+        log.warn(
             "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations); scalar reads use the last value",
             .{ key, if (self.name.len == 0) "root" else self.name, decls },
         );
@@ -235,7 +235,7 @@ pub const Section = struct {
         const out = self.getAs(T, key);
         if (out == null) {
             if (self.pairs.get(key)) |v| {
-                debug.warn(
+                log.warn(
                     "Key '{s}' in section [{s}] expects {s}, got {s}; ignoring (keeping default)",
                     .{ key, self.name, typeLabel(T), valueTypeLabel(v) },
                 );
@@ -299,9 +299,9 @@ pub const Document = struct {
 
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
-        sections.ensureTotalCapacity(document_sections_reserve) catch |err| debug.warnOnErr(err, "document section map reserve");
+        sections.ensureTotalCapacity(document_sections_reserve) catch |err| log.warnOnErr(err, "document section map reserve");
         var palette = std.StringHashMap(u32).init(allocator);
-        palette.ensureTotalCapacity(palette_var_names.len) catch |err| debug.warnOnErr(err, "document palette reserve");
+        palette.ensureTotalCapacity(palette_var_names.len) catch |err| log.warnOnErr(err, "document palette reserve");
         return .{ .sections = sections, .root = Section.init(allocator), .palette = palette };
     }
 
@@ -686,7 +686,7 @@ pub fn collectPalette(self: *Document) void {
 
     for (last, 0..) |may, i| {
         if (may != null) {
-            debug.warn(
+            log.warn(
                 "Palette variable '{s}' is a cyclic or unresolvable color expression; ignoring (referencing colors fall back to defaults)",
                 .{palette_var_names[i]},
             );
@@ -862,7 +862,7 @@ const Parser = struct {
 
     // Per-line diagnostic prefixed with file:line:column.
     fn warnLine(self: *const Parser, comptime fmt: []const u8, args: anytype) void {
-        debug.warn("{s}:{d}:{d}: " ++ fmt, .{ self.sourceLabel(), self.line, self.column() } ++ args);
+        log.warn("{s}:{d}:{d}: " ++ fmt, .{ self.sourceLabel(), self.line, self.column() } ++ args);
     }
 
     // Advances one byte. A newline also bumps the line counter and resets

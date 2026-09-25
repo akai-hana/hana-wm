@@ -20,7 +20,7 @@ const xcb = core.xcb;
 const utils = @import("utils");
 const constants = @import("constants");
 const sync = @import("sync");
-const debug = @import("debug");
+const log = @import("log");
 
 pub const XcbSink = struct {
     conn: core.Connection,
@@ -127,7 +127,7 @@ pub const XcbSink = struct {
                 // More atoms on the wire than we can preserve: rewriting would
                 // drop them. Leave the property alone.
                 if (reply.*.bytes_after != 0) {
-                    debug.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping fullscreen update", .{ win, max_ewmh_states });
+                    log.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping fullscreen update", .{ win, max_ewmh_states });
                     return;
                 }
                 const raw = xcb.xcb_get_property_value(reply) orelse return;

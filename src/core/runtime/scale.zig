@@ -6,7 +6,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
-const debug = @import("debug");
+const log = @import("log");
 
 const types = @import("types");
 const utils = @import("utils");
@@ -134,13 +134,13 @@ fn calcDpiFromGeometry(screen: core.Screen) f32 {
     const width_mm: f32 = @floatFromInt(screen.width_in_millimeters);
     const height_mm: f32 = @floatFromInt(screen.height_in_millimeters);
     if (width_mm == 0 or height_mm == 0) {
-        debug.warn("Display reports 0mm dimensions, using baseline DPI", .{});
+        log.warn("Display reports 0mm dimensions, using baseline DPI", .{});
         return baseline_dpi;
     }
     const dpi_x = (width_px / width_mm) * mm_per_inch;
     const dpi_y = (height_px / height_mm) * mm_per_inch;
     const avg_dpi = (dpi_x + dpi_y) / 2.0;
-    debug.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
+    log.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
     return avg_dpi;
 }
 
@@ -153,18 +153,18 @@ fn isReasonableDpi(dpi: f32) bool {
 pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         if (isReasonableDpi(xft_dpi)) {
-            debug.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
+            log.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
             return xft_dpi;
         }
-        debug.warn("Ignoring unreasonable Xft.dpi value {d:.1}", .{xft_dpi});
+        log.warn("Ignoring unreasonable Xft.dpi value {d:.1}", .{xft_dpi});
     }
 
     const geometry_dpi = calcDpiFromGeometry(screen);
     if (!isReasonableDpi(geometry_dpi)) {
-        debug.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
+        log.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
         return baseline_dpi;
     }
-    debug.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
+    log.info("Using geometry-calculated DPI: {d:.1}", .{geometry_dpi});
     return geometry_dpi;
 }
 

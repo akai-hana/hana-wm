@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const constants = @import("constants");
-const debug = @import("debug");
+const log = @import("log");
 const parser = @import("parser");
 const types = @import("types");
 const utils = @import("utils");
@@ -310,7 +310,7 @@ fn reject(
     bound: T,
     default: anytype,
 ) @TypeOf(default) {
-    debug.warn(
+    log.warn(
         "Value for '{s}' ({any}) " ++ verb ++ " ({any}), using default",
         .{ key, value_, bound },
     );
@@ -378,17 +378,17 @@ fn getColorFromValue(
     if (parser.colorFromValue(val)) |c| return c;
     if (parser.resolveColorExpr(val, palette)) |c| return c;
     if (isMixAttempt(val)) {
-        debug.warn("Invalid color mix for '{s}': coalesced + weights may not exceed 100 and the head operand cannot carry a weight (using default)", .{key});
+        log.warn("Invalid color mix for '{s}': coalesced + weights may not exceed 100 and the head operand cannot carry a weight (using default)", .{key});
         return default;
     }
     if (val.asScalar([]const u8)) |s| {
         if (palette.get(s)) |c| return c;
-        debug.warn("Invalid color for {s}: '{s}' (not a hex code, palette reference, or + mix)", .{ key, s });
+        log.warn("Invalid color for {s}: '{s}' (not a hex code, palette reference, or + mix)", .{ key, s });
         return default;
     }
     // Unresolvable value (boolean, size, bare float, out-of-range int, ...)
     // would otherwise silently use the default without a trace.
-    debug.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', a bare 6/8-digit hex number, a palette reference, or a + mix), using default", .{key});
+    log.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', a bare 6/8-digit hex number, a palette reference, or a + mix), using default", .{key});
     return default;
 }
 
@@ -407,7 +407,7 @@ fn getScalableInRange(
 ) ?types.ScalableValue {
     const val = section.getAsOrWarn(types.ScalableValue, key) orelse return default;
     if (val.value < min) {
-        debug.warn(
+        log.warn(
             "Value for '{s}' ({d}) below minimum ({d}), using {s}",
             .{ key, val.value, min, fallback_label },
         );
@@ -430,17 +430,17 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
             // `= 1` is ambiguous (1% or 1.0); per the "bare integers are
             // percentages" rule it resolves to 1%, but we warn so a user who
             // meant the full value writes `1.0` or `100%`.
-            debug.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
+            log.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
                 "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
             return 0.01;
         }
-        debug.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
+        log.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
         return default;
     }
     if (val.asScalar(types.ScalableValue)) |s| {
         const f = utils.scaling.asRatio(s);
         if (f < 0.0 or f > 1.0) {
-            debug.warn(
+            log.warn(
                 "Invalid {s} value {d} (must be 0.0-1.0 or 0-100%), using default",
                 .{ key, f },
             );
@@ -449,12 +449,12 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
         return f;
     }
     if (val.asScalar([]const u8)) |str|
-        debug.warn(
+        log.warn(
             "{s} value '{s}' is quoted; write it unquoted (e.g. {s} = 0.5), using default",
             .{ key, str, key },
         )
     else if (val != .array) // a non-string, non-number scalar (boolean, ...)
-        debug.warn(
+        log.warn(
             "{s} expects a number or ratio, got an unreadable value; using default",
             .{key},
         );
@@ -547,7 +547,7 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
                     if (parsed) |v| {
                         p.* = v;
                     } else if (er.warn) {
-                        debug.warn(
+                        log.warn(
                             "Unknown {s} '{s}', using default '{s}'",
                             .{ h.key, s, er.default_label },
                         );
@@ -730,7 +730,7 @@ fn applySegmentEntry(
                 continue;
             };
             const token = items[i].asScalar([]const u8) orelse {
-                debug.warn("Invalid token for '{s}': expected a color or underline/bold/italic flag, skipping", .{key});
+                log.warn("Invalid token for '{s}': expected a color or underline/bold/italic flag, skipping", .{key});
                 i += 1;
                 continue;
             };
@@ -754,7 +754,7 @@ fn applySegmentEntry(
             if (setStyleFlag(&props, flag, set)) {
                 if (consumed_next) i += 1;
             } else {
-                debug.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
+                log.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
             }
             i += 1;
         }

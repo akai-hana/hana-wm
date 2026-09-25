@@ -25,7 +25,7 @@ const screen = @import("screen");
 const refresh = @import("refresh");
 const scale = @import("scale");
 const constants = @import("constants");
-const debug = @import("debug");
+const log = @import("log");
 
 const types = @import("types");
 
@@ -864,7 +864,7 @@ const State = struct {
     /// Warns on a draw failure and reports the position unchanged, so a broken
     /// segment can't corrupt the layout.
     inline fn reportDrewNothing(x: u16) u16 {
-        debug.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
+        log.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
         return x;
     }
 
@@ -879,7 +879,7 @@ const State = struct {
         // advance correctly.
         ctx.width = width orelse self.measureSegmentWidth(&ctx.frame, name);
         return segAt(id).draw.?(ctx, x) catch |e| {
-            debug.warnOnErr(e, "bar drawSegment");
+            log.warnOnErr(e, "bar drawSegment");
             return x;
         };
     }
@@ -1200,7 +1200,7 @@ fn createBar(height: u16, y_pos: i16) !BarSetup {
     barwin.setWindowProperties(setup.win_id, height);
     const dc = try barwin.createDrawContext(setup, height);
     errdefer dc.deinit();
-    debug.info(
+    log.info(
         "Bar transparency: {s}",
         .{if (setup.has_argb) "enabled (ARGB)" else "disabled (opaque)"},
     );
@@ -1269,7 +1269,7 @@ pub fn deinit() void {
 pub fn reload() void {
     const old = gBar.state orelse {
         if (core.getState().config.bar.enabled) {
-            init() catch |err| debug.err("Bar init failed: {}", .{err});
+            init() catch |err| log.err("Bar init failed: {}", .{err});
         }
         return;
     };
@@ -1279,7 +1279,7 @@ pub fn reload() void {
     }
     const height = calcBarHeightAndFontSize();
     applyReload(old, height) catch |err| {
-        debug.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
+        log.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
 
@@ -1387,7 +1387,7 @@ pub fn toggleBarSegmentAnchor() void {
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     ungrabAndFlush();
-    debug.info("Bar position toggled to: {s}", .{@tagName(cs.config.bar.bar_position)});
+    log.info("Bar position toggled to: {s}", .{@tagName(cs.config.bar.bar_position)});
 }
 
 pub fn isBarWindow(win: u32) bool {
@@ -1640,7 +1640,7 @@ fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
     const decision = visibility.desiredVisibility(ws, s.vis.shown, s.vis.preferred);
     if (!decision.needs_change) return;
     applyVisibility(s, decision.should_be_visible, do_reconcile);
-    debug.info(
+    log.info(
         "Bar {s} for workspace {d}",
         .{ if (decision.should_be_visible) "shown" else "hidden", ws },
     );
@@ -1694,7 +1694,7 @@ pub fn updateIfDirty() !void {
         performDraw();
     }
     if (redraw_iter == max_batched_redraws)
-        debug.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
+        log.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
 }
 
 /// Asks each module whether it queued a redraw request the bar should honour

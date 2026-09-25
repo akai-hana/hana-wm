@@ -8,7 +8,7 @@ const std = @import("std");
 const testing = std.testing;
 
 // The tests deliberately feed the parser invalid input, which emits
-// warn-level diagnostics; src/core/utils/debug.zig silences all std.log
+// warn-level diagnostics; src/core/pure/log.zig silences all std.log
 // diagnostics in test binaries, so this stays quiet on success.
 const parser = @import("parser");
 const types = @import("types");

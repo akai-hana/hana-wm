@@ -25,7 +25,7 @@
 const std = @import("std");
 
 const utils = @import("utils");
-const debug = @import("debug");
+const log = @import("log");
 
 // libc bindings for execv/setenv (no Zig stdlib wrappers exist for them, and
 // the executable links libc, so mirroring spawn.zig's pattern is the honest
@@ -42,7 +42,7 @@ const c = @cImport({
 /// there is nothing left to do but end the session.
 fn mustDupeZ(src: []const u8, what: []const u8) [:0]const u8 {
     return std.heap.c_allocator.dupeZ(u8, src) catch {
-        debug.err("restart: out of memory copying {s}", .{what});
+        log.err("restart: out of memory copying {s}", .{what});
         std.process.exit(1);
     };
 }
@@ -65,7 +65,7 @@ pub fn init() void {
     // the truncated bytes as the exec path. Treat a full buffer as
     // unresolvable so a re-exec can never hand execv a cut-off path.
     if (std.posix.errno(n) != .SUCCESS or n == buf.len) {
-        debug.warn(
+        log.warn(
             "restart: readlink /proc/self/exe failed or truncated; in-place re-exec disabled",
             .{},
         );
@@ -120,12 +120,12 @@ pub fn execNext(self_path: []const u8, restore_path: []const u8) noreturn {
     const restore_z = mustDupeZ(restore_path, "restore path");
 
     if (c.setenv("HANA_RESTORE", restore_z, 1) != 0) {
-        debug.err("restart: setenv failed", .{});
+        log.err("restart: setenv failed", .{});
         std.process.exit(1);
     }
     _ = c.execv(self_z, @ptrCast(&[_:null]?[*:0]const u8{ self_z, null }));
     // Only reachable when exec failed; the X connection is already closed,
     // so there is nothing left to do but end the session.
-    debug.err("restart: execv failed", .{});
+    log.err("restart: execv failed", .{});
     std.process.exit(1);
 }

@@ -4,7 +4,7 @@
 const std = @import("std");
 
 const constants = @import("constants");
-const debug = @import("debug");
+const log = @import("log");
 const core = @import("core");
 
 const xkb = @cImport({
@@ -40,11 +40,11 @@ fn enableDetectableAutoRepeat(conn: core.Connection) void {
 
     const xconn: ?*c.struct_xcb_connection_t = conn;
     const ext = c.xcb_get_extension_data(xconn, &c.xcb_xkb_id) orelse {
-        debug.warn("XKB: extension data unavailable; detectable auto-repeat not enabled", .{});
+        log.warn("XKB: extension data unavailable; detectable auto-repeat not enabled", .{});
         return;
     };
     if (ext.*.present == 0) {
-        debug.warn("XKB: extension not present; detectable auto-repeat not enabled", .{});
+        log.warn("XKB: extension not present; detectable auto-repeat not enabled", .{});
         return;
     }
 
@@ -62,12 +62,12 @@ fn enableDetectableAutoRepeat(conn: core.Connection) void {
     if (c.xcb_xkb_per_client_flags_reply(xconn, cookie, null)) |reply| {
         defer std.c.free(reply);
         if (reply.*.supported & xkb_detectable_auto_repeat_mask != 0) {
-            debug.info("XKB: detectable auto-repeat enabled", .{});
+            log.info("XKB: detectable auto-repeat enabled", .{});
         } else {
-            debug.warn("XKB: server does not support detectable auto-repeat", .{});
+            log.warn("XKB: server does not support detectable auto-repeat", .{});
         }
     } else {
-        debug.warn("XKB: failed to enable detectable auto-repeat", .{});
+        log.warn("XKB: failed to enable detectable auto-repeat", .{});
     }
 }
 
@@ -141,7 +141,7 @@ pub const XkbState = struct {
         // Table swapped only after the new keymap built successfully, so a
         // failed rebuild leaves dispatch fully functional on the old mapping.
         self.keysym_by_keycode = tableForDevice(self.context, xcb_conn, device_id) catch {
-            debug.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
+            log.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
             return;
         };
     }

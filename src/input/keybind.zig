@@ -8,7 +8,7 @@
 //! layer X-free.
 
 const std = @import("std");
-const debug = @import("debug");
+const log = @import("log");
 const types = @import("types");
 const keysyms = @import("keysyms");
 const xkbcommon = @import("xkbcommon");
@@ -36,11 +36,11 @@ pub const KeybindResolver = struct {
         for (keybindings, 0..) |*kb, i| {
             const key = dispatchKey(kb.modifiers, kb.keysym);
             const gop = self.map.getOrPut(allocator, key) catch |e| {
-                debug.warnOnErr(e, "keybind map build");
+                log.warnOnErr(e, "keybind map build");
                 continue;
             };
             if (gop.found_existing)
-                debug.warn(
+                log.warn(
                     "Keybinding conflict: binding #{} (mods=0x{x:0>4} " ++
                         "keysym=0x{x}) is shadowed; a later binding with the " ++
                         "same key wins",
@@ -74,7 +74,7 @@ pub fn resolveKeycodes(keybindings: []types.Keybind, state: *xkbcommon.XkbState)
             // 64 bytes covers any XKB keysym name (longest is ~20 chars).
             var name_buf: [64]u8 = undefined;
             const name = keysyms.keysymGetName(kb.keysym, &name_buf);
-            debug.warn(
+            log.warn(
                 "Keybinding mods=0x{x:0>4} keysym={s} (0x{x}) resolves to no base " ++
                     "keycode and will NOT be grabbed, shifted symbols such as \"@\" " ++
                     "must be bound via their unshifted key name (e.g. \"2\")",

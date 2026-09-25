@@ -12,7 +12,7 @@ const config = @import("config");
 const types = @import("types");
 const masks = @import("masks");
 const scale = @import("scale");
-const debug = @import("debug");
+const log = @import("log");
 const build_options = @import("build_options");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
 // through the core-owned `surfaces` composition root, never by importing the
@@ -112,11 +112,11 @@ pub fn main() !void {
 
     // Direct subsystem init: only the bar ever registered hooks (no plugin
     // registry anymore).
-    if (build_options.has_bar) surfaces.init() catch |err| debug.err("bar init failed: {}", .{err});
+    if (build_options.has_bar) surfaces.init() catch |err| log.err("bar init failed: {}", .{err});
     defer if (build_options.has_bar) surfaces.deinit();
 
     _ = xcb.xcb_flush(x.conn);
-    debug.info("hana booted up successfully!", .{});
+    log.info("hana booted up successfully!", .{});
 
     // Re-exec session hand-off (restart.execNext sets HANA_RESTORE).
     if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
@@ -124,7 +124,7 @@ pub fn main() !void {
     }
 
     try events.run();
-    debug.info("Shutting down gracefully...", .{});
+    log.info("Shutting down gracefully...", .{});
 }
 
 /// Re-exec session hand-off (restart.execNext sets HANA_RESTORE before execv;
@@ -137,7 +137,7 @@ fn adoptRestoredSession(restore_path: []const u8) void {
     const alloc = std.heap.c_allocator;
     if (persist.loadToGlobal(alloc, restore_path)) {
         const n = window.adoptRootWindows() catch |err| blk: {
-            debug.err("Window adoption failed: {}", .{err});
+            log.err("Window adoption failed: {}", .{err});
             break :blk 0;
         };
         if (n > 0) {
@@ -165,7 +165,7 @@ fn connectToX() !XSession {
     const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
 
     if (xcb.xcb_connection_has_error(conn) != 0) {
-        debug.err("X11 connection failed", .{});
+        log.err("X11 connection failed", .{});
         return error.X11ConnectionFailed;
     }
 
@@ -182,7 +182,7 @@ fn connectToX() !XSession {
         &[_]u32{masks.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
-        debug.err(
+        log.err(
             "Another window manager is already running (error_code={d}, type={d})",
             .{ err.*.error_code, err.*.response_type },
         );

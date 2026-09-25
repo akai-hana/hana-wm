@@ -2,7 +2,7 @@
 //! Provides terminal auto-detection and the embedded default TOML.
 
 const std = @import("std");
-const debug = @import("debug");
+const log = @import("log");
 const paths = @import("paths");
 const fallback_toml = @import("fallback_toml");
 
@@ -33,11 +33,11 @@ const fallback_terminal = "xterm";
 pub fn detectTerminal() []const u8 {
     for (terminals) |cmd| {
         if (isCommandAvailable(cmd)) {
-            debug.info("Detected terminal: {s}", .{cmd});
+            log.info("Detected terminal: {s}", .{cmd});
             return cmd;
         }
     }
-    debug.warn("No preferred terminal found, using '{s}'", .{fallback_terminal});
+    log.warn("No preferred terminal found, using '{s}'", .{fallback_terminal});
     return fallback_terminal;
 }
 

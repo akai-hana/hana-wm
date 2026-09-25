@@ -12,7 +12,7 @@ Mod   = "Super"   # Super/Mod4, Alt/Mod1
 kill  = "pkill -9" # Replaced where {kill} appears in action values
 
 # -- Window management --
-Mod+P       = "toggle_fullscreen"
+Mod+F       = "toggle_fullscreen"
 Mod+Shift+F = "close_window"
 
 Mod+T           = "minimize_window"

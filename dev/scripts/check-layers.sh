@@ -3,7 +3,8 @@
 # import each other (both are core systems) around a hub-and-spoke model of
 # a single core model + sync sink. These rules enforce the one policy the
 # split actually cares about -- wire mutations belong behind the sync
-# boundary, and model/tiling must stay xcb-pure -- plus formatting. Each rule
+# boundary, and the pure layers (model/tiling/config) must stay xcb-pure --
+# plus formatting. Each rule
 
 # exits non-zero when its policy is violated outside a documented allowlist.
 set -u
@@ -67,20 +68,20 @@ wire_allowed() {
         # sync force_restack in a later cleanup.
         src/main.zig|src/input/input.zig) ;;
 
-        # Wire PRIMITIVES: sync/sink.zig dispatches through
+        # Wire PRIMITIVES: sink.zig (in core/x11/) dispatches through
         # core/x11/wire.zig's configureWindow / raiseWindow / setBorderPixel
         # (park rides an offscreen+below configure in sink.zig). Primitive
         # home is not a policy violation -- grep cannot distinguish
         # definition from rogue send. These definitions were moved out of
-        # utils.zig into core/x11/wire.zig so the model/tiling layer only
-        # ever sees xcb-free utils decls.
+        # utils.zig into core/x11/wire.zig so the pure vocabulary only
+        # ever sees xcb-free decls.
         src/core/x11/wire.zig) ;;
 
-        # Re-export DECLARATIONS only: utils.zig's `pub const raiseWindow =
+        # Re-export DECLARATIONS only: pure/utils.zig's `pub const raiseWindow =
         # x11wire.raiseWindow;` is an xcb-free forwarding decl, not a send (the
         # actual primitive lives in wire.zig, allowlisted above). Grep matches
         # the wrapper NAME here, so this is the same definition-vs-call caveat.
-        src/core/utils/utils.zig) ;;
+        src/core/pure/utils.zig) ;;
 
         # Tiled border-width application: borders.zig's xcb_configure_window
         # sets XCB_CONFIG_WINDOW_BORDER_WIDTH on tiled windows (the per-frame
@@ -119,7 +120,7 @@ wire_allowed() {
         # event-loop flush; refresh.zig is the RandR (bar-side) detection
         # flush; prompt.zig is the bar's keyboard grab-drop flush. These are
         # documented non-mutations, not Rule-1 sends.
-        src/core/events.zig|src/bar/refresh.zig|src/bar/modules/prompt/prompt.zig) ;;
+        src/core/runtime/events.zig|src/bar/refresh.zig|src/bar/modules/prompt/prompt.zig) ;;
 
         *) return 1 ;;
     esac
@@ -159,8 +160,8 @@ pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xc
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue
-    viol "rule 1 ($f outside src/sync/ and allowlist)"; printf '%s\n' "$line" >&2
-done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
+    viol "rule 1 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
+done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
 # Rule 2: server grabs belong behind the sync boundary (+ allowlist). Comment
 # mentions of xcb_grab_server are stripped so documentation doesn't trip the
@@ -172,21 +173,24 @@ pat2='xcb\.xcb_grab_server|utils\.grabServer'
 while IFS= read -r line; do
     f=${line%%:*}
     grab_allowed "$f" && continue
-    viol "rule 2 ($f outside src/sync/ and allowlist)"; printf '%s\n' "$line" >&2
-done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/sync/' | code_lines)
+    viol "rule 2 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
+done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
-# Rule 3: no xcb imports/references in model/, tiling/, or config/.
-# Comments are stripped first so `/* ... */` (incl. multi-line) and `//`
-# commentary that merely names an xcb symbol does not trip the guard. The awk
-# strips comments while preserving each physical line (and its number), so
+# Rule 3: no xcb imports/references in the pure model file, tiling/, or
+# config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+# `//` commentary that merely names an xcb symbol does not trip the guard. The
+# awk strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
-# it sweeps for any `xcb` token in model/, tiling/, and config/ after comment
-# removal -- imports AND re-exported bare references alike. (The complementary
-# IMPORT-EDGE scan lives in build.zig's assertPureLayerImports: a pure module
-# can import an xcb-using sibling and pass there, so Rule 3, not that scan,
-# is the last line of defense on bodies.)
+# it sweeps for any `xcb` token in the model file, tiling/, and config/ after
+# comment removal -- imports AND re-exported bare references alike. (The
+# complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
+# a pure module can import an xcb-using sibling and pass there, so Rule 3, not
+# that scan, is the last line of defense on bodies. Only the model file is
+# swept: its pure/ siblings carry no xcb tokens by construction, and contract
+# declares xcb event TYPES in its body, so it cannot sit on this side of the
+# sweep.)
 hits=$(
     while IFS= read -r f; do
         awk '
@@ -202,7 +206,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/model src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/pure/model.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

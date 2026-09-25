@@ -4,7 +4,7 @@
 const std = @import("std");
 
 const core = @import("core");
-const debug = @import("debug");
+const log = @import("log");
 
 const xcb = core.xcb;
 const xcb_connection_t = xcb.xcb_connection_t;
@@ -229,7 +229,7 @@ pub const FontState = struct {
         defer self.allocator.free(pango_name_z);
         self.current_font_desc = pango_font_description_from_string(pango_name_z.ptr);
         if (self.current_font_desc == null) {
-            debug.warn("Failed to load font '{s}', using default", .{font_name});
+            log.warn("Failed to load font '{s}', using default", .{font_name});
             self.current_font_desc = pango_font_description_from_string(fallbackFont);
         }
         pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
@@ -883,7 +883,7 @@ pub fn loadBarFonts(dc: *DrawContext, size_override: ?u16) !void {
     defer freeSizedFontList(cs.alloc, sized);
     if (sized.len == 0) return; // keep Pango default, matching probeFontMetrics
     try dc.font.loadFonts(sized);
-    if (sized.len > 1) debug.info("Loaded {} fonts with fallback support", .{sized.len});
+    if (sized.len > 1) log.info("Loaded {} fonts with fallback support", .{sized.len});
 }
 
 fn createPangoLayout(ctx: *cairo_t, dpi: f32) !*PangoLayout {

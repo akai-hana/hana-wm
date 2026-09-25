@@ -16,7 +16,7 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-const debug = @import("debug");
+const log = @import("log");
 const config = @import("config");
 const input = @import("input");
 const window = @import("window");
@@ -166,7 +166,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
     if (event_type == 0) {
         const e = utils.eventCast(*xcb.xcb_generic_error_t, event);
-        debug.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
+        log.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
         return;
     }
 
@@ -218,7 +218,7 @@ fn fillGrabCookies(cookies: []CookieEntry) usize {
         // Check once per keybinding that the full lock-modifier set fits.
         // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
         if (n + masks.lock_modifiers.len > cookies.len) {
-            debug.warn(
+            log.warn(
                 "Too many keybindings. Increase max_keybind_cookies (currently {})",
                 .{max_keybind_cookies},
             );
@@ -250,7 +250,7 @@ fn checkGrabCookies(cookies: []const CookieEntry) usize {
     for (cookies) |entry| {
         if (xcb.xcb_request_check(conn, entry.cookie)) |err| {
             std.c.free(err);
-            debug.warn("Failed to grab keycode: {}", .{entry.keycode});
+            log.warn("Failed to grab keycode: {}", .{entry.keycode});
             failed += 1;
         }
     }
@@ -268,7 +268,7 @@ pub fn grabKeybindings() void {
     const n = fillGrabCookies(&cookies);
 
     const failed = checkGrabCookies(cookies[0..n]);
-    if (failed > 0) debug.warn("{} keybinding(s) failed to grab", .{failed});
+    if (failed > 0) log.warn("{} keybinding(s) failed to grab", .{failed});
 
     _ = xcb.xcb_flush(cs.conn);
 }
@@ -287,7 +287,7 @@ pub fn grabKeybindings() void {
 //   4. errdefer frees the heap-allocated new config if anything fails pre-swap.
 //      Post-swap all calls are infallible, so no errdefer is needed.
 fn handleConfigReload() !void {
-    debug.info("Reload requested", .{});
+    log.info("Reload requested", .{});
     const cs = core.getState();
 
     var source: config.DefaultSource = .fallback;
@@ -327,7 +327,7 @@ fn handleConfigReload() !void {
     // needed. This plain return is NOT an error, but the defer still fires
     // (not committed) and frees the short-lived fallback allocation.
     if (source != .user) {
-        debug.err(
+        log.err(
             "Config reload rejected: no user config file found. " ++
                 "Keeping current config (the embedded fallback is boot-only)",
             .{},
@@ -384,7 +384,7 @@ fn handleConfigReload() !void {
 
     if (changes.keys) grabKeybindings();
 
-    debug.info("Reload complete (bar={} tiling={} keys={})", .{ changes.bar, changes.tiling, changes.keys });
+    log.info("Reload complete (bar={} tiling={} keys={})", .{ changes.bar, changes.tiling, changes.keys });
 }
 
 // Re-exec hand-off, driven by restart.consumeReexec() in run(). The sequence
@@ -396,10 +396,10 @@ fn handleConfigReload() !void {
 fn handleReexec() !void {
     const cs = core.getState();
     const self_path = restart.selfPath() orelse {
-        debug.err("Re-exec aborted: executable path unknown", .{});
+        log.err("Re-exec aborted: executable path unknown", .{});
         return error.ExecutablePathUnknown;
     };
-    debug.info("Re-executing new binary", .{});
+    log.info("Re-executing new binary", .{});
 
     const path = try persist.defaultStatePath(cs.alloc);
     // The path is allocator-owned; execNext never returns so this only
@@ -576,7 +576,7 @@ fn handleXcbEvents() void {
     spawn.drainPendingSpawns();
 
     if (build_options.has_bar)
-        surfaces.updateIfDirty() catch |err| debug.err("Bar post-batch update failed: {}", .{err});
+        surfaces.updateIfDirty() catch |err| log.err("Bar post-batch update failed: {}", .{err});
     // Must run after the event-draining loop above: any EnterNotify a tiling
     // reflow generated has to have already been dispatched (and filtered,
     // since suppression is still active) before this lifts suppression.
@@ -622,7 +622,7 @@ pub fn run() !void {
             .SUCCESS => @intCast(poll_rc),
             .INTR => continue,
             else => |err| {
-                debug.err("poll error: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+                log.err("poll error: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
                 continue;
             },
         };
@@ -650,16 +650,16 @@ pub fn run() !void {
         // that fails keeps the last-good snapshot, so the re-exec still lands
         // on the previously live config.
         if (utils.consumeReload())
-            handleConfigReload() catch |err| debug.err("Reload failed: {}", .{err});
+            handleConfigReload() catch |err| log.err("Reload failed: {}", .{err});
 
         if (restart.consumeReexec())
-            handleReexec() catch |err| debug.err("Re-exec failed: {}", .{err});
+            handleReexec() catch |err| log.err("Re-exec failed: {}", .{err});
 
         if (ready == 0 and poll_timeout_ms >= 0) {
             if (build_options.has_bar) surfaces.onPollWakeup();
             _ = xcb.xcb_flush(cs.conn);
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            debug.err("X11 connection error, shutting down", .{});
+            log.err("X11 connection error, shutting down", .{});
             break;
         } else if ((fds[fd_xcb].revents & std.posix.POLL.IN) != 0) {
             handleXcbEvents();
