@@ -74,7 +74,7 @@ pub fn deinit() void {
     state = null;
 }
 
-// ---- Query API (pure reads) ----
+// Query API (pure reads)
 
 /// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
@@ -126,7 +126,7 @@ pub inline fn getLastEventTime() u32 {
     return state.?.last_event_time;
 }
 
-// ---- Mutation API (side effects) ----
+// Mutation API (side effects)
 
 /// Update the X11 event timestamp.  Called by the EnterNotify and
 /// LeaveNotify handlers before they call into focus logic.
@@ -520,7 +520,7 @@ pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) voi
         pipeline.focusOnlyCommit(ft);
         return;
     }
-    pipeline.reconcileUnderGrabNowWithFocusDuty(.{}, ft, duty);
+    pipeline.reconcileGrabFocus(.{}, ft, .before, duty);
 }
 
 /// Fire an async "has the server caught up" round trip that defers lifting

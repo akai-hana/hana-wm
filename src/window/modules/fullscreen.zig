@@ -25,15 +25,18 @@ const window = @import("window");
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
 
-/// Window configured fullscreen but awaiting ConfigureNotify confirmation.
-/// Zero when none pending. Set by armPendingBarHide; cleared in
-/// notifyConfigureIfPending/resetState/onWindowGone.
-var g_pending_bar_hide_win: u32 = 0;
+/// Window awaiting ConfigureNotify confirmation of a deferred bar
+/// transition: fullscreen enter (hide the bar) or exit (show it). The two
+/// intents are mutually exclusive (arming one clears the other), so a single
+/// optional entry carries both. Null when none pending; set by the arm
+/// pair; cleared by notifyConfigureIfPending, resolvePendingBarShow,
+/// resetState, onWindowGone.
+var g_pending_bar: ?PendingBar = null;
 
-/// Window that has exited fullscreen and been retiled but awaits ConfigureNotify
-/// confirming its new dimensions. Zero when none pending. Set by
-/// armPendingBarShow; cleared in notifyConfigureIfPending, resetState, onWindowGone.
-var g_pending_bar_show_win: u32 = 0;
+const PendingBar = struct {
+    win: u32,
+    hide: bool,
+};
 
 // EWMH atoms for _NET_WM_STATE_FULLSCREEN, resolved from the shared atom
 // cache (utils.initAtomCache) in init(). Zero (XCB_ATOM_NONE) when the cache
@@ -43,8 +46,7 @@ var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
 // Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
-    g_pending_bar_hide_win = 0;
-    g_pending_bar_show_win = 0;
+    g_pending_bar = null;
     g_net_wm_state = 0;
     g_net_wm_state_fullscreen = 0;
 }
@@ -178,9 +180,7 @@ pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) vo
 /// verbatim by `persist.WindowRecord`, so there is no serialize/deserialize
 /// seam here (minimize alone claims the `ext` slot for parked windows).
 
-// ---------------------------------------------------------------------------
 // Protocol hooks (EWMH advertisement + deferred bar hide/show).
-// ---------------------------------------------------------------------------
 
 // Sets or clears the EWMH _NET_WM_STATE_FULLSCREEN property on `win`. The
 // actual change_property write is routed through sync's sink (the ONLY writer
@@ -206,50 +206,55 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
 /// non-fullscreen ones (exit). Safe for every ConfigureNotify; no-ops when
 /// nothing is pending or dimensions don't match.
 pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
+    const pending = g_pending_bar orelse return;
+    if (pending.win != win) return;
+
     const cs = core.getState();
     const screen_w = @as(u16, @intCast(cs.screen.width_in_pixels));
     const screen_h = @as(u16, @intCast(cs.screen.height_in_pixels));
 
     // Deferred bar hide (enter-fullscreen path): window must report exactly
     // screen dimensions before we hide the bar. Deferred bar show (exit
-    // path) must report non-fullscreen dimensions first. The else-if makes
-    // the mutual exclusion explicit: both can never match for the same win.
+    // path) must report non-fullscreen dimensions first. The branch carries
+    // the mutual exclusion explicitly: both can never match for the same win.
     // In both cases we only bump core's fullscreen-occupancy fact; the bar
     // (a consumer) derives its own hide/show from that fact.
-    if (g_pending_bar_hide_win == win) {
+    if (pending.hide) {
         if (width == screen_w and height == screen_h) {
-            g_pending_bar_hide_win = 0;
+            g_pending_bar = null;
             core.fullscreen.bump();
         }
-    } else if (g_pending_bar_show_win == win) {
-        if (width != screen_w or height != screen_h) resolvePendingBarShow();
+    } else if (width != screen_w or height != screen_h) {
+        resolvePendingBarShow();
     }
 }
 
 fn resolvePendingBarShow() void {
-    g_pending_bar_show_win = 0;
+    g_pending_bar = null;
     core.fullscreen.bump();
 }
 
 /// Arm the deferred bar-hide from the fullscreenToggle path.
 pub fn armPendingBarHide(win: u32) void {
-    g_pending_bar_show_win = 0;
-    g_pending_bar_hide_win = win;
+    g_pending_bar = .{ .win = win, .hide = true };
 }
 
 /// Arm the deferred bar-show after an exit reconcile (armed AFTER geometry
 /// settles).
 pub fn armPendingBarShow(win: u32) void {
-    g_pending_bar_hide_win = 0;
-    g_pending_bar_show_win = win;
+    g_pending_bar = .{ .win = win, .hide = false };
 }
 
 /// Record cleanup on window teardown; the wire layer fires this (events /
 /// unmanage) after removing the store entry. Also clears any pending deferred
 /// bar op so the bar doesn't stay stuck (both show and hide cases).
 pub fn onWindowGone(win: u32) void {
-    if (g_pending_bar_show_win == win) resolvePendingBarShow();
-    if (g_pending_bar_hide_win == win) g_pending_bar_hide_win = 0;
+    const pending = g_pending_bar orelse return;
+    if (pending.win != win) return;
+    if (pending.hide)
+        g_pending_bar = null
+    else
+        resolvePendingBarShow();
 }
 
 /// This module's window sub-system contribution: lifecycle + coverage seam +

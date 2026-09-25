@@ -51,7 +51,7 @@ const Fixture = struct {
     }
 };
 
-// -- Spawn -----------------------------------------------------------------
+// Spawn
 
 test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-sends nothing" {
     var fx: Fixture = undefined;
@@ -72,7 +72,7 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-send
     try fx.rec.expectGeomBw(2, 101, golden.single, cfg_bw, .above);
 
     // Steady state: delta-send elides unchanged map/pixel/bw/geom; the server
-    // already holds this exact desired state (still re-computed each pass).
+    // already holds this exact desired state (still re-computed each reconcile).
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(0);
@@ -85,7 +85,7 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-send
     try fx.rec.expectGeomRect(0, 101, golden.single, .above);
 }
 
-// -- Focus color flip --------------------------------------------------------
+// Focus color flip
 
 test "focus change: delta-sends ONLY the two border pixels, no raise" {
     var fx: Fixture = undefined;
@@ -108,7 +108,7 @@ test "focus change: delta-sends ONLY the two border pixels, no raise" {
     try fx.rec.expectPixel(1, 202, focused_pixel);
 }
 
-// -- Fullscreen enter/exit ---------------------------------------------------
+// Fullscreen enter/exit
 
 test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; exit restores" {
     var fx: Fixture = undefined;
@@ -182,7 +182,7 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
     try fx.rec.expectGeomRect(3, 502, golden.stack, null);
 }
 
-// -- Park / unpark ------------------------------------------------------------
+// Park / unpark
 
 test "minimize parks every pass; restore replays original slot geometry" {
     var fx: Fixture = undefined;
@@ -203,7 +203,7 @@ test "minimize parks every pass; restore replays original slot geometry" {
     try fx.rec.expectGeomRect(0, 401, golden.single, .above);
     try fx.rec.expectPark(1, 402);
 
-    // Idempotent pass while minimized: delta-sends nothing (401 unchanged,
+    // Idempotent reconcile while minimized: delta-sends nothing (401 unchanged,
     // 402 already parked), though every desire is still re-computed.
     fx.rec.clear();
     fx.reconcile(.{});
@@ -220,7 +220,7 @@ test "minimize parks every pass; restore replays original slot geometry" {
     try fx.rec.expectGeomRect(2, 402, golden.stack, null);
 }
 
-// -- Fullscreen -> minimize -> restore -> un-fullscreen ------------------------
+// Fullscreen -> minimize -> restore -> un-fullscreen
 // The fullscreen-prev window's saved slot must survive restore, ending fully tiled.
 test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     var fx: Fixture = undefined;
@@ -281,7 +281,7 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
     try fx.rec.expectGeomRect(3, 602, golden.stack, null);
 }
 
-// -- Workspace switch (wire shape) -------------------------------------------
+// Workspace switch (wire shape)
 
 test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark raises" {
     var fx: Fixture = undefined;
@@ -310,7 +310,7 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
     // winner counts as UNPARKED => ABOVE merged into the replay even though
     // the rect itself did not move. 502 parks again.
     // Delta-send elides pixel/bw: 501's focused color equals the value last
-    // sent on the baseline pass, and nothing since changed it.
+    // sent on the baseline reconcile, and nothing since changed it.
     fx.m.current = model.WSId.fromIndex(0);
     fx.rec.clear();
     fx.reconcile(.{});
@@ -320,7 +320,7 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
     try fx.rec.expectPark(2, 502);
 }
 
-// -- Multi-tag orphan resurface (ledger read #1) ------------------------------
+// Multi-tag orphan resurface (ledger read #1)
 
 test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     var fx: Fixture = undefined;
@@ -341,7 +341,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.rec.clear();
     fx.reconcile(.{});
 
-    // Orphan pass: ws 1's home list is empty so no placement owns 701, but
+    // Orphan reconcile: ws 1's home list is empty so no placement owns 701, but
     // the mask shows it here - kept at its previous REAL geometry
     // (never parks a window with sent history). Even though it is the
     // fallback winner, the raise stays suppressed: same rect, no transition,
@@ -366,7 +366,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     try testing.expectEqual(@as(?utils.Rect, null), sync.lastRectFor(702));
 }
 
-// -- forget() / ledger lifecycle (X ids recycle) ------------------------------
+// forget() / ledger lifecycle (X ids recycle)
 
 test "forget clears the sent ledger; next pass treats the window as first sight" {
     var fx: Fixture = undefined;
@@ -400,7 +400,7 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     try fx.rec.expectGeomBw(2, 801, golden.single, cfg_bw, .above);
 }
 
-// -- Park wire shape ----------------------------------------------------------
+// Park wire shape
 
 test "park: offscreen-X constant, ONE merged request per parked window per pass" {
     var fx: Fixture = undefined;
@@ -424,14 +424,14 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectGeomBw(2, 901, golden.single, cfg_bw, .above);
     try fx.rec.expectPark(3, 902);
 
-    // Steady state: nothing changed since the baseline pass, so delta-send
+    // Steady state: nothing changed since the baseline reconcile, so delta-send
     // elides every op (901's map/pixel/geom+bw and 902's park were all sent).
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(0);
 
     // Minimized windows ride the same single-op park shape. Only 901's park
-    // is new: 902's park was already sent on the baseline pass.
+    // is new: 902's park was already sent on the baseline reconcile.
     try minimize.minimize(&fx.m, 901);
     fx.rec.clear();
     fx.reconcile(.{});

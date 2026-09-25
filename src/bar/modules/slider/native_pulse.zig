@@ -161,7 +161,7 @@ pub fn pulseReachable() bool {
     return c.access(&p, c.F_OK) == 0;
 }
 
-// --- Pure byte-buffer helpers (unit-tested without libpulse or a daemon) ---
+// Pure byte-buffer helpers (unit-tested without libpulse or a daemon)
 
 fn readLE(comptime T: type, b: []const u8, off: usize) T {
     return std.mem.readInt(T, b[off..][0..@sizeOf(T)], .little);
@@ -233,7 +233,7 @@ fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
     return true;
 }
 
-// --- Operation plumbing ---
+// Operation plumbing
 
 /// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`.
 fn waitDone(done: *bool, timeout_ms: i64) bool {
@@ -333,7 +333,7 @@ fn successCb(_: ?*anyopaque, success: c_int, _: ?*anyopaque) callconv(.c) void {
     signalDone(&g_sink.done);
 }
 
-// --- Attach ---
+// Attach
 
 fn openLib() ?Lib {
     var lib = std.DynLib.open("libpulse.so.0") catch return null;
@@ -484,7 +484,7 @@ pub const Backend = struct {
     }
 };
 
-// --- Tests (pure byte-buffer + mapping logic; no libpulse, no daemon) ---
+// Tests (pure byte-buffer + mapping logic; no libpulse, no daemon)
 
 const testing = std.testing;
 

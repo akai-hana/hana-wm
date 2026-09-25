@@ -60,13 +60,10 @@ const date_format: []const u8 = "%Y-%m-%d";
 var mode: DisplayMode = .date_time;
 
 /// Reserved slot width for the current display mode (probe width + padding),
-/// stable within a mode. Zero until the clock has drawn once; the bar's
-/// `updateClock` then folds it into the row reservation and re-lays when a
-/// mode cycle changes it.
-var reserved_width: u16 = 0;
-/// The mode `reserved_width` was measured for; cycling to a different mode
-/// re-measures on the next draw.
-var reserved_mode: ?DisplayMode = null;
+/// stable within a mode; zero until the clock has drawn once. The mode key
+/// makes a stored width stale (re-measures) when a mode cycle or reload
+/// changes the probe -- see keyedWidthState.
+const W = segdraw.keyedWidthState("clock", DisplayMode);
 
 /// The format `m` maps `base` (the configured format) to: the config format
 /// unchanged in date_time mode, a fixed built-in otherwise. Pure, so tests can
@@ -140,10 +137,12 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     const str = try formatTime(&buf, sec, fmt);
     // Refresh the mode's reserved width once per mode; the probe is stable, so
     // per-second text-width drift never re-lays the row.
-    if (reserved_mode != mode) {
-        reserved_mode = mode;
-        reserved_width = dc.measureTextWidthStyled(measureStringFor(mode), config.segmentProps("clock")) +
-            2 * config.scaledSegmentPadding(height);
+    if (!W.matches(mode)) {
+        W.store(
+            mode,
+            dc.measureTextWidthStyled(measureStringFor(mode), config.segmentProps("clock")) +
+                2 * config.scaledSegmentPadding(height),
+        );
     }
     // Record the attempt before rendering: a persistent render failure
     // (e.g. fonts unavailable) must degrade to one retry per boundary --
@@ -160,7 +159,7 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
 /// initial layout. Also drives the bar's reflow check in updateClock, which
 /// compares this against the laid-out reservation after a clock-only repaint.
 fn naturalWidthHook(_: *const anyopaque, fallback: u16) u16 {
-    return if (reserved_width > 0) reserved_width else fallback;
+    return W.naturalWidth(@as(*const anyopaque, undefined), fallback);
 }
 
 /// Resets the mode width reservation so the next draw re-measures the active
@@ -168,8 +167,7 @@ fn naturalWidthHook(_: *const anyopaque, fallback: u16) u16 {
 /// padding). Until then the bar's freshly computed probe width (the natural
 /// width fallback) applies, so the reservation never collapses to zero.
 fn invalidateWidth() void {
-    reserved_width = 0;
-    reserved_mode = null;
+    W.invalidate();
 }
 
 fn currentEpochSeconds() i64 {

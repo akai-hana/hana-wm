@@ -641,7 +641,7 @@ fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
 
 /// Scans every section (and the root) for palette-variable declarations,
 /// resolving each to its color value and storing the last declaration into
-/// `doc.palette` ("later declaration wins" like every other knob). One pass
+/// `doc.palette` ("later declaration wins" like every other knob). The initial scan
 /// resolves literal declarations; a bounded fixpoint then resolves aliases
 /// and `+` mixes that reference other palette variables, so
 /// `primary_color = secondary_color + text_color` works. Also marks the keys
@@ -666,7 +666,7 @@ pub fn collectPalette(self: *Document) void {
         last[i] = best;
     }
 
-    // Fixpoint: each round resolves whatever became resolvable this pass; a
+    // Fixpoint: each round resolves whatever became resolvable this round; a
     // progress-free round means everything left is cyclic or unresolvable.
     var progress = true;
     var rounds: usize = 0;

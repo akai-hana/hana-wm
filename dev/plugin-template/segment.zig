@@ -32,17 +32,13 @@ const std = @import("std");
 const core = @import("core");
 const segment = @import("segment");
 
-// ---------------------------------------------------------------------------
 // Segment-owned state. Same discipline as every addon: file-scope statics,
 // allocation-free, reset by init/deinit (tests init/deinit per fixture).
-// ---------------------------------------------------------------------------
 
 var g_active: bool = false;
 var g_polls: u32 = 0;
 
-// ---------------------------------------------------------------------------
 // REQUIRED lifecycle hooks (bind both).
-// ---------------------------------------------------------------------------
 
 /// Lifecycle: reset ALL module state. Called once at boot and at every
 /// re-init (restart) through the uniform registry loop.
@@ -69,11 +65,9 @@ pub fn deinit(allocator: std.mem.Allocator) void {
     g_polls = 0;
 }
 
-// ---------------------------------------------------------------------------
 // Bar-frame services (uniform polls). The bar runs these on EVERY registry
 // entry every frame, whether or not the segment is configured. Leave `null`
 // for a purely passive segment.
-// ---------------------------------------------------------------------------
 
 /// Poll wakeup interval in ms: <= 0 disables wakeups (clock uses this).
 pub fn pollTimeoutMs() i32 {
@@ -99,12 +93,10 @@ pub fn invalidate() void {
     g_active = true;
 }
 
-// ---------------------------------------------------------------------------
 // Configured-segment hooks. The bar invokes these ONLY on segments present
 // in the config's `[bar] segments` list (this template's name is a
 // placeholder, so none of these fire until you set a real name and add it to
 // a config).
-// ---------------------------------------------------------------------------
 
 /// Reserved row width probe (clock's measure string; the bar reserves the
 /// measured string's width in the row).
@@ -150,17 +142,14 @@ pub fn onClick(
     return false; // TODO: your click handling; false = not ours.
 }
 
-// ---------------------------------------------------------------------------
 // Prompt chrome-surface extras. ONLY the prompt overlay binds these; if you
 // bind them, the bar will treat your segment as the chrome-surface input
 // provider when the prompt isn't present. Leave them commented out for any
 // normal segment.
-// ---------------------------------------------------------------------------
 //   pub fn handleKeypress(event: *const xcb.xcb_key_press_event_t, bound: ?*const types.Action) bool { ... }
 //   pub fn consumeRedrawRequest() bool { ... }
 //   pub fn invalidateReloadCaches() void { ... }
 
-// ---------------------------------------------------------------------------
 // This segment's bar contribution: the build-generated registry reads this
 // exact export. Only the fields you set are dispatched. A segment is part of
 // the config surface exactly when its `.name` appears in `[bar] segments` (or
@@ -176,7 +165,6 @@ pub fn onClick(
 //   .dirty_sources = .{ .focus = true, .frame = true }, // repaint on fact-revs
 //   .clickable = false,            // skip click-hit bounds (clock)
 //   .needsRepaint = needsRepaint,  // "repaint me every draw while active"
-// ---------------------------------------------------------------------------
 pub const module: @import("contract").Segment = .{
     .name = "template", // TODO: unique config identity, e.g. "clock"
     .init = init,

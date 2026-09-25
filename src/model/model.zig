@@ -238,12 +238,10 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     return null;
 }
 
-// ---------------------------------------------------------------------------
 // Shared vocabulary types (folded in from the former feature module files).
 // Pure vocabulary consumed by both the wire-side feature plugins and wire
 // callers; they live in core so nothing needs to import a feature file just
 // to reference them.
-// ---------------------------------------------------------------------------
 
 /// Restore-order target selection over minimized windows on a workspace:
 /// `.fifo` = oldest minimize seq, `.lifo` = newest.
@@ -262,11 +260,9 @@ pub const ConfigureReq = struct {
 /// Outcome of honoring a configure request against a floating window record.
 pub const HonorDecision = enum { geometry_applied, border_only, ignored };
 
-// ---------------------------------------------------------------------------
 // Core intrinsics: focus (setFocus/clearFocus, MRU upkeep, fallback candidate)
 // and tiling-order transitions (reorder/step/swap, primary width). Pure model
 // operations; feature transitions live in the window layer's optional modules.
-// ---------------------------------------------------------------------------
 
 pub fn setFocus(m: *Model, win: WindowId) void {
     if (!m.store.has(win)) return;

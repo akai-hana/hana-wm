@@ -1229,7 +1229,7 @@ test "minimize serialize/deserialize round-trip" {
     try testing.expect(minimize.serializeWindow(@ptrCast(&m), 70, testing.allocator) == null);
 }
 
-// -- Core intents: covering_ws is a model-authoritative core intent -----
+// Core intents: covering_ws is a model-authoritative core intent
 
 // toggleFullscreen drives the model's covering_ws core intent in lockstep
 // with the covering presence: ON sets covering_ws, OFF clears it.
@@ -1303,7 +1303,7 @@ test "move/tag retarget tracks covering_ws to the new ws" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
 }
 
-// -- Behavioral contracts ------------------------------------------------------
+// Behavioral contracts
 
 // Spawn path: on-current spawn tiles+focuses; off-current spawn tiles
 // on its target ws but does NOT take focus (mirrors actions.mapRequest).

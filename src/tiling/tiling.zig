@@ -216,11 +216,12 @@ pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: 
     }
 }
 
-/// Region too small to subdivide (overflow share): place `top` on-screen
-/// inset by the doubled border, park every other window in `windows`. Shared
-/// by fibonacci and leaf, whose "region can't fit two children" fallbacks
-/// both reduce to this shape.
-pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId, top: model.WindowId, r: Region) void {
+/// Region too small to subdivide (overflow share): place the focused window —
+/// falling back to the list head — on-screen inset by the doubled border, park
+/// every other window in `windows`. Shared by fibonacci and leaf, whose
+/// "region can't fit two children" fallbacks both reduce to this shape.
+pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId, r: Region) void {
+    const top = focusedElse(ctx.v, windows, windows[0]);
     emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, utils.doubledBorder(ctx.m), ctx.min_dim));
     showOneHideRest(ctx.out, windows, top);
 }
@@ -255,14 +256,14 @@ pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
 
 /// The registry module name for `kind` ("" when out of range).
 pub fn moduleName(kind: u8) []const u8 {
-    if (kind >= tiling_mods.len) return "";
-    return tiling_mods[kind].name;
+    if (contract.moduleOf(kind)) |m| return m.name;
+    return "";
 }
 
 /// Variant count for `kind` (cycle_variant actions/mod bar). Registry-driven.
 pub fn variantCount(kind: u8) u8 {
-    if (kind >= tiling_mods.len) return 1;
-    return tiling_mods[kind].variant_count;
+    if (contract.moduleOf(kind)) |m| return m.variant_count;
+    return 1;
 }
 
 /// Step a layout within the config layout-name list (config order is the
@@ -305,9 +306,9 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
 /// slicing seam.
 pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
-    if (kind >= tiling_mods.len) return;
+    const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
-    if (tiling_mods[kind].compute) |f| f(v, out);
+    if (m.compute) |f| f(v, out);
 }
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of

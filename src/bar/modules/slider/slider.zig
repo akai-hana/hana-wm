@@ -240,7 +240,6 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
     return .{ .text = buf[0..n], .value = value };
 }
 
-// ---------------------------------------------------------------------------
 // The slider surface is a closed-core / open-module system, like every
 // surface in this tree:
 //
@@ -257,7 +256,6 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
 //     a control is drop a file; deleting one is delete the file.
 //
 // To add a control: drop `foo.zig` here exporting `pub const sub: Sub`.
-// ---------------------------------------------------------------------------
 
 pub const Sub = struct {
     /// Config identity ("volume", "brightness", ...): the name its bar
@@ -489,7 +487,7 @@ fn onScrollFor(idx: usize, dir: i8, redraw: *const fn () void) bool {
     const pct: u8 = @intCast(new_u);
     // Boundary: the clamped target equals the current level, so this wheel
     // step changes nothing. Claim it and return without writing or repainting
-    // -- scrolling at 0/100 % is a true no-op, never backend traffic.
+    // scrolling at 0/100 % is a true no-op, never backend traffic.
     if (pct == sub.pct()) return true;
     // Optimistic display + throttled commit: the label follows immediately
     // while the backend write is coalesced (commitPreview) and the value is

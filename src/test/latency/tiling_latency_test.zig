@@ -6,7 +6,7 @@
 //!
 //! Every tiling op routes through actions -> pipeline.reconcileUnderGrabNow
 //! -> sync.reconcileUnderGrab -> sync.reconcile. reconcile replays the FULL
-//! desired wire state for EVERY stored window (all workspaces) each pass,
+//! desired wire state for EVERY stored window (all workspaces) each reconcile,
 //! then delta-sends only what changed (no-op elision). The SEND is O(changed)
 //! but the COMPUTE is O(total windows), so a retile's CPU cost grows with
 //! total window count even though few windows actually move.
@@ -20,7 +20,7 @@ const helpers = @import("helpers");
 const build_options = @import("build_options");
 
 // Latency instrumentation only runs its full loops + timing output under
-// `-Dbench`; the default suite keeps a silent single-pass smoke so `zig build
+// `-Dbench`; the default suite keeps a silent smoke so `zig build
 // test` never writes to stderr (the runner flags test stderr as `failed
 // command:` even on success).
 const bench = build_options.bench;
@@ -48,10 +48,10 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         defer sync.init();
 
         // Warm: seed steady-state ledger, then measure one steady-state reconcile
-        // pass (all desire compute + ledger scans; sends mostly elided).
+        // (all desire compute + ledger scans; sends mostly elided).
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
-        // What a single CHANGED pass costs: flip the layout kind so every
+        // What a single CHANGED reconcile costs: flip the layout kind so every
         // rect changes -> geometry requests sent for every visible window.
         var move = CountingSink{};
         var move_ctx = makeCtx(move.sink(), colorOfFocused, helpers.std_wa);
@@ -87,7 +87,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         sync.init();
         defer sync.init();
 
-        // Warm, then measure one steady-state reconcile pass.
+        // Warm, then measure one steady-state reconcile.
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
         if (bench)
@@ -98,7 +98,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
     }
 }
 
-// Decompose a retile pass into: (a) layout compute over visible windows,
+// Decompose a retile into: (a) layout compute over visible windows,
 // (b) the full reconcile walk over ALL windows.
 test "tiling: decompose layout.compute vs full reconcile walk" {
     const n = 50;
@@ -136,7 +136,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     }
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 
-    // Warm, then measure the full reconcile-walk pass.
+    // Warm, then measure the full reconcile-walk.
     const reconcile_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
     if (bench)
@@ -146,8 +146,8 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
         );
 }
 
-// A *change* pass (e.g. every tiling op) sends geometry for every visible
-// window. Counts the XCB requests in the changed pass at various window
+// A *change* reconcile (e.g. every tiling op) sends geometry for every visible
+// window. Counts the XCB requests in the changed reconcile at various window
 // counts, mirroring reconcileUnderGrab's grab-server -> ungrabAndFlush.
 test "tiling: XCB request count on a changing retile (layout switch)" {
     inline for (.{ 1, 20, 35, 50 }) |n| {

@@ -1,5 +1,6 @@
 //! Window lifecycle
-//! Manages window creation, destruction, configuration, and event handling for all managed windows.
+//! Manages window creation, destruction, configuration, and event handling
+//! for all managed windows.
 
 const std = @import("std");
 
@@ -612,13 +613,13 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 
     claimManagedEventMask(conn, win);
 
-    // ----- Fire ALL property cookies before draining any reply -----
+    // Fire ALL property cookies before draining any reply
     // The server processes all five requests in parallel while we do pure
     // local bookkeeping below.
     const cookies = fireAdmissionCookies(conn, win);
     const t_fire: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
 
-    // ----- Drain replies sequentially -----
+    // Drain replies sequentially
     const decision = resolveAdmissionDecision(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
     const target_ws = decision.workspace;
     const on_current = target_ws.eql(current_ws);
@@ -728,7 +729,7 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
     // its private record. Dispatch happens for ANY non-null ext (not only
     // parked records): a covering (fullscreen) window advertises presence
     // .covering + a fullscreen blob, and must route through the module in the
-    // same pass. When no module claims the blob (the feature was stripped, or
+    // same dispatch. When no module claims the blob (the feature was stripped, or
     // the record carried no ext), the entry stays present and reconciles
     // on-screen -- the graceful degrade.
     //
@@ -779,8 +780,8 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
 /// Returns the number of windows admitted (restored-parked ones included).
 ///
 /// PIPELINING: MapRequest pipelines one window's five property queries. Boot
-/// restore pipelines the attribute + property query of every root child: pass 1
-/// fires all cookies across all children into a single list, pass 2 drains each
+/// restore pipelines the attribute + property query of every root child: fires
+/// all cookies across all children into a single list, then drains each
 /// batch in request order. The X server answers the whole batch back-to-back,
 /// so the once per-window serial attribute-then-properties pattern collapses to
 /// ~2 blocking reads total (the query_tree reply plus one drain that pulls the
@@ -812,14 +813,13 @@ pub fn adoptRootWindows() !usize {
 
     const loaded = persist.loaded();
 
-    // ----- Pass 1: fire EVERY cookie across EVERY child before draining -----
     // The per-window admission query used to be fired and drained inside this
     // loop (and the attribute query even earlier), costing one serial blocking
     // round trip for the attribute and one for the admission batch per child:
     // 1 + 2N total. Firing them all up-front lets the X server process every
     // child's attribute + property query in parallel; the replies then arrive
     // back-to-back and are drained in order below, so the batch costs a single
-    // blocking read. Candidates that fail the attribute gate in pass 2 still
+    // blocking read. Candidates that fail the attribute gate during the drain still
     // have their up-front property replies discarded, never leaked.
     const alloc = state.?.alloc orelse return 0;
     var entries: std.ArrayListUnmanaged(AdoptionEntry) = .empty;
@@ -835,7 +835,7 @@ pub fn adoptRootWindows() !usize {
         if (screen_mod.surfaceWindow()) |bar_win| if (bar_win == win) continue;
 
         // The restore-record lookup is a local scan; carry the result into the
-        // drain pass so pass 2 does no X work before consuming each batch.
+        // drain loop so it does no X work before consuming each batch.
         const record = if (loaded) |f| findWindowRecord(f.windows, win) else null;
 
         entries.appendAssumeCapacity(.{
@@ -846,7 +846,6 @@ pub fn adoptRootWindows() !usize {
         });
     }
 
-    // ----- Pass 2: drain each batch in request order -----
     var adopted: usize = 0;
     for (entries.items) |*entry| {
         const win = entry.win;
@@ -859,7 +858,7 @@ pub fn adoptRootWindows() !usize {
         // the restore file records them as parked (a surviving hidden
         // window must stay hidden). Other unmapped windows are likely
         // withdrawn toplevels and are skipped. A null reply means the
-        // window vanished between pass 1 and this drain; release its
+        // window vanished between the cookie fire and this drain; release its
         // up-front admission replies without parsing them.
         const adopt = if (attr_reply) |r|
             r.*.override_redirect == 0 and
@@ -912,7 +911,7 @@ fn unmanageWindow(win: u32) void {
     // hover.
     evictChildCache(win);
 
-    // -- Local bookkeeping, before the grab ---------------------------------
+    // Local bookkeeping, before the grab
     // wincache.removeWindow unconditionally evicts the combined cache entry
     // (geometry + border + size hints). All three removes are pure local
     // bookkeeping (no X requests), so they run pre-grab, letting the
@@ -949,7 +948,7 @@ fn unmanageWindow(win: u32) void {
     // Drop the MODEL entry, resolve the post-close focus target (fallback
     // tiers) and reconcile under one grab. Idempotent: a window withdrawn
     // via unmap+destroy runs this once per event; unregister/fallback no-op
-    // on the second pass.
+    // on the second invocation.
     actions.unmanage(&actx, win);
 }
 
@@ -1045,7 +1044,7 @@ fn handleManagedConfigureRequest(
         .geometry_applied => {
             // ICCCM 4.1.5: a border-width-only request applied by the module
             // needs the synthetic ConfigureNotify (the width isn't otherwise
-            // observable) AND the reconcile ledger updated so the next pass
+            // observable) AND the reconcile ledger updated so the next reconcile
             // doesn't re-assert the WM width (reverting the honored value).
             if (mask == xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH) {
                 noteHonoredBorderWidth(win, event.border_width);
@@ -1079,7 +1078,7 @@ fn handleManagedConfigureRequest(
     sendSyntheticConfigureNotify(win);
 }
 
-/// Record an honored border width in the reconcile ledger so the next pass
+/// Record an honored border width in the reconcile ledger so the next reconcile
 /// doesn't re-assert the WM default (reverting the honored value). No-op on
 /// non-tiling builds.
 fn noteHonoredBorderWidth(win: u32, bw: u16) void {

@@ -20,7 +20,7 @@ const proc = @import("proc");
 const bounded = @import("bounded");
 const x11wire = @import("wire");
 
-// --- process lifecycle (re-exports) --------------------------------------
+// process lifecycle (re-exports)
 pub const running = &proc.running;
 pub const setSignalWriteFd = proc.setSignalWriteFd;
 pub const quit = proc.quit;
@@ -29,7 +29,7 @@ pub const wake = proc.wake;
 pub const consumeReload = proc.consumeReload;
 pub const makePipe = proc.makePipe;
 
-// --- time ---------------------------------------------------------------
+// time
 // clock_gettime with a best-effort fallback to the other clock id (a
 // monotonic-realtime node or similar), then nanos.
 fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
@@ -97,12 +97,12 @@ pub fn WindowedProfiler(
     };
 }
 
-// --- bounded collections (re-exports) ---------------------------------------
+// bounded collections (re-exports)
 pub const BoundedList = bounded.BoundedList;
 pub const IdMap = idmap.IdMap;
 pub const Store = bounded.Store;
 
-// --- X11 wire primitives (re-exports; xcb-dependent live in the x11 wire module) ---
+// X11 wire primitives (re-exports; xcb-dependent live in the x11 wire module)
 pub const initAtomCache = x11wire.initAtomCache;
 pub const getAtomCached = x11wire.getAtomCached;
 pub const getAtomOrZero = x11wire.getAtomOrZero;
@@ -115,7 +115,6 @@ pub const grabServer = x11wire.grabServer;
 pub const ungrabAndFlush = x11wire.ungrabAndFlush;
 pub const rectFromXcb = x11wire.rectFromXcb;
 
-// ---------------------------------------------------------------------------
 // Pure geometry & scaling (xcb-free; safe for model/tiling)
 
 /// Position and dimensions of a managed window, relative to the root window

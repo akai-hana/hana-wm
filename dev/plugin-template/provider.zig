@@ -32,13 +32,11 @@ const utils = @import("utils");
 const model = @import("model");
 const contract = @import("contract");
 
-// ---------------------------------------------------------------------------
 // Module-owned state. Every sub-system is allocation-free: a fixed,
 // compile-time-bounded static store. There is NO per-model instance — the
 // process runs exactly one WM, and the module store lives for the process
 // lifetime. This is also why init()/deinit() must reset everything (test
 // fixtures rely on it; see "test discipline" below).
-// ---------------------------------------------------------------------------
 
 /// Ceiling on concurrently flagged windows. Pick a constant from
 /// `constants` when possible (e.g. constants.max_minimized); a local const
@@ -65,14 +63,11 @@ fn findRec(win: model.WindowId) ?usize {
     return null;
 }
 
-// ---------------------------------------------------------------------------
 // REQUIRED hooks. A module that stores per-window state binds all five;
 // bind only the ones your feature uses, the rest stay null.
-//
 // init/deinit ordering: the wire layer calls every module's init during
 // boot (after atom cache setup, so utils.getAtomOrZero works), in registry
 // order, and every deinit during shutdown/restart in the same order.
-// ---------------------------------------------------------------------------
 
 /// Lifecycle: reset ALL module state. Called once at boot and at every
 /// re-init (restart). Deinit must perform the same reset so a run ends
@@ -166,10 +161,8 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // OPTIONAL hooks — bind only what your feature owns; everything else stays
 // null and every dispatch loop skips this module for that hook.
-// ---------------------------------------------------------------------------
 
 /// Screen-cover seam (contract.WindowModule.coveringOccupantOnWs): "which
 /// window owns the screen on `ws`, if any". sync resolves coverage directly
@@ -199,7 +192,6 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
     return null;
 }
 
-// ---------------------------------------------------------------------------
 // Feature-to-feature interaction (when your feature must ask another one).
 // Two hard rules:
 //   1. `@import("otherfeature")` may appear ONLY inside a function body,
@@ -207,18 +199,15 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
 //      a top-level declaration, or a struct type.
 //   2. Shared vocabulary types (a struct two modules both need) live in
 //      model.zig — never inside either module.
-//
 // Pattern (mirrored from workspaces/floating):
 //   if (build_options.has_fullscreen) {
 //       if (@import("fullscreen").isFullscreenMode(m, win)) return .ignored;
 //   }
 
-// ---------------------------------------------------------------------------
 // This module's window sub-system contribution: the build-generated registry
 // reads this exact export. Only the fields you set are dispatched; changing
 // signatures here breaks EVERY module, so keep them verbatim. The remaining
 // hook families (all optional, bind + delete the ones you don't need):
-//
 //   // Hide/restore family (minimize.zig): the model `.parked` presence.
 //   .hideWindow / .restoreWindow / .restoreCandidateOn / .restoreOnWs /
 //   .latestHiddenOnWs / .isWindowHidden / .collectHiddenSet
@@ -231,7 +220,6 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
 //   // Protocol-side EWMH/deferred-bar hooks (fullscreen.zig).
 //   .setEwmhFullscreenState / .armPendingBarHide / .armPendingBarShow /
 //   .notifyConfigureIfPending
-// ---------------------------------------------------------------------------
 pub const module: @import("contract").WindowModule = .{
     .init = init,
     .deinit = deinit,

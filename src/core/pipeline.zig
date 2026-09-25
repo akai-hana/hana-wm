@@ -23,7 +23,6 @@ const window_mods = @import("window_modules").modules;
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile.
 const contract = @import("contract");
-const tiling_mods = contract.tiling_mods;
 const tiling = @import("tiling_seam").tiling;
 
 /// True after init(); tracking's facade gates every model access on this so
@@ -163,8 +162,7 @@ fn preReconcileDuties() void {
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
     // module receives a mutable pointer into the model anymore).
     const p = &instance.ws[instance.current.index].params;
-    if (p.kind >= tiling_mods.len) return;
-    const md = tiling_mods[p.kind];
+    const md = contract.moduleOf(p.kind) orelse return;
     if (md.preReconcile == null) return;
     const n = model_mod.tiledCountOnWs(&instance, instance.current);
     const wa = screen.workArea(core.getState().screen);
@@ -194,6 +192,11 @@ pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
 /// Order of `reconcileGrabFocus`' two phases inside the grab: focus lands
 /// before geometry (most actions), or after (mapRequest, where the window
 /// must be mapped before xcb_set_input_focus targets it).
+///
+/// `duty` (usually null) runs inside the grab after the focus protocol and
+/// before the reconcile when focus lands first. Lets a caller fold a
+/// model-derived adjustment that depends on the new focus (the viewport snap)
+/// into the same reconcile instead of opening a second grab.
 pub const FocusOrder = enum {
     before,
     after,
@@ -203,41 +206,23 @@ pub inline fn reconcileGrabFocus(
     o: sync.ReconcileOpts,
     t: focus.FocusTransition,
     order: FocusOrder,
-) void {
-    preReconcileDuties();
-    withServerGrab(struct {
-        o: sync.ReconcileOpts,
-        t: focus.FocusTransition,
-        order: FocusOrder,
-        fn call(self: @This(), c: *sync.Ctx) void {
-            if (self.order == .before) focus.applyPendingFocus(self.t);
-            sync.reconcile(&instance, c, self.o);
-            if (self.order == .after) focus.applyPendingFocus(self.t);
-        }
-    }{ .o = o, .t = t, .order = order });
-}
-
-/// Focus lands before geometry so border colors and stacking are correct on
-/// the first frame, but runs `duty` inside the grab after the focus protocol
-/// and before the reconcile. Lets a caller fold a model-derived adjustment
-/// that depends on the new focus (the viewport snap) into the same reconcile
-/// instead of opening a second grab.
-pub inline fn reconcileUnderGrabNowWithFocusDuty(
-    o: sync.ReconcileOpts,
-    t: focus.FocusTransition,
     duty: ?*const fn () void,
 ) void {
     preReconcileDuties();
     withServerGrab(struct {
         o: sync.ReconcileOpts,
         t: focus.FocusTransition,
+        order: FocusOrder,
         duty: ?*const fn () void,
         fn call(self: @This(), c: *sync.Ctx) void {
-            focus.applyPendingFocus(self.t);
-            if (self.duty) |d| d();
+            if (self.order == .before) {
+                focus.applyPendingFocus(self.t);
+                if (self.duty) |d| d();
+            }
             sync.reconcile(&instance, c, self.o);
+            if (self.order == .after) focus.applyPendingFocus(self.t);
         }
-    }{ .o = o, .t = t, .duty = duty });
+    }{ .o = o, .t = t, .order = order, .duty = duty });
 }
 
 /// Commit a focus transition inside one server grab with no reconcile: for
@@ -258,12 +243,21 @@ pub inline fn focusOnlyCommit(t: focus.FocusTransition) void {
 /// hide/show arming inside the grab.
 pub const FullscreenKind = enum { enter, exit, switch_ };
 
-/// Grab server, reconcile, do EWMH + bar hide, then ungrabAndFlush, atomically.
-/// Specialised for the fullscreen toggle path so EWMH writes and the bar
-/// unmap/hide land inside the same grab as geometry (grouped atomicity); the
-/// enter path unmaps the bar immediately rather than deferring to ConfigureNotify.
+/// Grab server, reconcile, do focus + EWMH + bar hide, then ungrabAndFlush,
+/// atomically. Specialised for the fullscreen toggle path so the focus
+/// handoff, EWMH writes and the bar unmap/hide land inside the same grab as
+/// geometry (grouped atomicity); the enter path unmaps the bar immediately
+/// rather than deferring to ConfigureNotify.
+///
+/// `t` is the optional focus transition to the covering entrant (`.none` for
+/// an exit or an already-focused entrant): a covering switch/enter hands
+/// input focus to the window that owns the screen. Applied AFTER the
+/// reconcile so the entrant is mapped+raised before xcb_set_input_focus
+/// targets it (the mapRequest ordering rule); a parked/unparked entrant is
+/// re-mapped inside this grab.
 pub inline fn reconcileUnderGrabNowFullscreen(
     o: sync.ReconcileOpts,
+    t: focus.FocusTransition,
     win: model_mod.WindowId,
     prev_fs_win: ?model_mod.WindowId,
     kind: FullscreenKind,
@@ -271,11 +265,13 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     preReconcileDuties();
     withServerGrab(struct {
         o: sync.ReconcileOpts,
+        t: focus.FocusTransition,
         win: model_mod.WindowId,
         prev_fs_win: ?model_mod.WindowId,
         kind: FullscreenKind,
         fn call(self: @This(), c: *sync.Ctx) void {
             sync.reconcile(&instance, c, self.o);
+            focus.applyPendingFocus(self.t);
             // EWMH advertisement inside the grab: clear for whoever left
             // fullscreen, set for entrant. All fire-and-forget
             // (xcb_change_property). Uniform loop over the sub-system set:
@@ -312,7 +308,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
                 }
             }
         }
-    }{ .o = o, .win = win, .prev_fs_win = prev_fs_win, .kind = kind });
+    }{ .o = o, .t = t, .win = win, .prev_fs_win = prev_fs_win, .kind = kind });
 }
 
 /// Flushless reconcile against the current ctx (drag tick path).
