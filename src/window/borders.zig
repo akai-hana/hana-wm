@@ -7,10 +7,10 @@ const model = @import("model");
 const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
-const sync = @import("sync");
 const wincache = @import("wincache");
 const window = @import("window");
 
+const ledger = @import("ledger");
 /// Pure focused/unfocused pixel pick: 0 for screen-covering windows,
 /// focused or unfocused color otherwise. Headless-testable.
 pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
@@ -62,11 +62,11 @@ pub fn resolveBorderColor(win: u32) u32 {
 pub fn applyWidth(conn: core.Connection, win: u32) void {
     const w = core.borderWidth();
     if (w == 0) return;
-    if (sync.sentGet(win)) |e| {
+    if (ledger.sentGet(win)) |e| {
         if (e.bw == w) return;
     }
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{w});
-    if (build_options.has_tiling) sync.markSentBorderWidth(win, w);
+    if (build_options.has_tiling) ledger.markSentBorderWidth(win, w);
 }
 
 /// Applies both border width and color to `win`. Color goes through the

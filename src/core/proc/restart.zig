@@ -4,7 +4,7 @@
 //! event-loop trigger flag. xcb-free and model-free: it never touches the X
 //! connection or the model. The event loop performs the actual re-exec
 //! sequence (save state, close the X connection, then execNext) so this
-//! module stays a pure flag surface, mirroring how proc.zig owns the reload
+//! module stays a pure flag surface, mirroring how lifecycle.zig owns the reload
 //! flag but events.zig consumes it.
 //!
 //! The reload is UNCONDITIONAL: every request re-execs whatever image is at
@@ -19,14 +19,14 @@
 //! exclusively through the `reload_config` action / SIGHUP.
 //!
 //! This is the *re-exec* coordinator only. Config-only reloads (the
-//! `reload_config` keybind, SIGHUP) stay in proc.zig's flag surface and never
+//! `reload_config` keybind, SIGHUP) stay in lifecycle.zig's flag surface and never
 //! re-exec the process.
 
 const std = @import("std");
 
-const utils = @import("utils");
 const log = @import("log");
 
+const lifecycle = @import("lifecycle");
 // libc bindings for execv/setenv (no Zig stdlib wrappers exist for them, and
 // the executable links libc, so mirroring spawn.zig's pattern is the honest
 // route). execv (not execvp) is deliberate: we hand it the absolute self
@@ -79,7 +79,7 @@ pub fn init() void {
 /// current in-place binary, skipping any change check.
 pub fn requestReexec() void {
     should_reexec.store(true, .release);
-    utils.wake();
+    lifecycle.wake();
 }
 
 /// Atomic, mirrors proc.consumeReload: true exactly once per request.

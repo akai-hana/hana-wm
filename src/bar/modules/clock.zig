@@ -13,10 +13,10 @@
 
 const std = @import("std");
 const types = @import("types");
-const utils = @import("utils");
 const drawing = @import("drawing");
 const segdraw = @import("segdraw");
 
+const time = @import("time");
 const c = @cImport(@cInclude("time.h"));
 
 const ns_per_s = std.time.ns_per_s;
@@ -120,7 +120,7 @@ pub fn deadlineFromMs(now_ms: i64) i32 {
 
 /// ms until the next whole-second boundary, contributed via bar.pollTimeoutMs().
 fn tickDeadlineMs() i32 {
-    return deadlineFromMs(utils.realtimeMs());
+    return deadlineFromMs(time.realtimeMs());
 }
 
 // Drawing
@@ -171,7 +171,7 @@ fn invalidateWidth() void {
 }
 
 fn currentEpochSeconds() i64 {
-    return @intCast(utils.realtimeNs() / ns_per_s);
+    return @intCast(time.realtimeNs() / ns_per_s);
 }
 
 /// Formats `sec` (seconds since the Unix epoch) into `buf` using `fmt` as a

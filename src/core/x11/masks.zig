@@ -108,3 +108,13 @@ pub const EventMasks = struct {
         xcb.XCB_EVENT_MASK_PROPERTY_CHANGE | // DWM: PropertyChangeMask
         xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY; // DWM: StructureNotifyMask
 };
+
+/// Strips lock-key and pointer-button bits from a raw event modifier state,
+/// leaving only the modifier bits the WM uses for keybinding matching.
+///
+/// A mask operation, so it lives with the masks it filters: the input layer
+/// is the only caller and needed it from a general-purpose utility module
+/// before the module was dissolved.
+pub inline fn normalizeModifiers(state: u16) u16 {
+    return state & mod_mask_binding;
+}

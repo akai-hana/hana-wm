@@ -5,10 +5,11 @@ const std = @import("std");
 
 const types = @import("types");
 const constants = @import("constants");
-const utils = @import("utils");
+const scaling = @import("scaling");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
-pub const xcb = @import("xcb").xcb;
+const xcbmod = @import("xcb");
+pub const xcb = xcbmod.xcb;
 
 /// X11 keysym constants, matching <X11/keysymdef.h>. Cast to xcb_keysym_t with @intFromEnum.
 pub const XK = enum(u32) {
@@ -24,8 +25,16 @@ pub const XK = enum(u32) {
 };
 
 /// Thin wrappers over raw XCB types, decoupling public APIs from the C binding.
-pub const Connection = *xcb.xcb_connection_t;
-pub const Screen = *xcb.xcb_screen_t;
+/// Re-exported from the x11 leaf (`x11/xcb.zig`) so there is one definition of
+/// each alias and the x11 layer never has to reach back into this hub.
+pub const Connection = xcbmod.Connection;
+pub const Screen = xcbmod.Screen;
+
+/// Narrows a queued `*anyopaque` event to its concrete xcb event type. Lives in
+/// the x11 leaf beside the cImport; re-exported here because the event loop
+/// and the bar's refresh path are its only callers and both already speak
+/// through `core`.
+pub const eventCast = xcbmod.eventCast;
 
 /// Alias of the canonical @import("ids").WindowId (xcb_window_t); see the
 /// ids.zig header for the single-definition rationale.
@@ -106,7 +115,7 @@ pub inline fn tilingEnabled() bool {
 /// Scaled tiling border width in pixels (config fact).
 pub inline fn borderWidth() u16 {
     const cs = getState();
-    return utils.scaling.scaleBorderWidth(
+    return scaling.scaleBorderWidth(
         cs.config.tiling.border_width,
         cs.screen.height_in_pixels,
     );

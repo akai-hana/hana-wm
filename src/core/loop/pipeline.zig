@@ -1,5 +1,5 @@
 //! Model-pipeline entry glue. This module owns the global Model instance,
-//! builds the per-reconcile sync.Ctx from live state, and exposes the
+//! builds the per-reconcile reconcile.Ctx from live state, and exposes the
 //! reconcile slots entry points call.
 //!
 //! Entry points: init() (startup), dragTick() (floating drag motion),
@@ -7,12 +7,10 @@
 //! fullscreenToggleWindow/workspace hooks routed from the window layer.
 
 const model_mod = @import("model");
-const sync = @import("sync");
 const core = @import("core");
-const utils = @import("utils");
 const focus = @import("focus");
 const xcb_sink = @import("sink");
-const screen = @import("screen");
+const usable_area = @import("usable_area");
 const build_options = @import("build_options");
 const surfaces = @import("surfaces").Surfaces;
 // Fullscreen EWMH/bar-arming hooks via the build-generated `window_modules`
@@ -24,7 +22,11 @@ const window_mods = @import("window_modules").modules;
 /// absent. Gated on has_tiling so tree variants without tiling compile.
 const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
+const scaling = @import("scaling");
 
+const ledger = @import("ledger");
+const reconcile = @import("reconcile");
+const sink = @import("sink");
 /// True after init(); tracking's facade gates every model access on this so
 /// boot order never touches the undefined global instance.
 pub var initialized: bool = false;
@@ -34,7 +36,7 @@ pub fn init() void {
     instance = .{}; // bounded lists: no allocator inside the model
     g_sink = .{ .conn = core.getState().conn };
     initialized = true;
-    sync.init();
+    ledger.init();
 }
 /// READ-ONLY access to the WM model (single source of truth). The return type
 /// is `*const`, so any attempt to write through this handle is a compile
@@ -84,11 +86,11 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
 var g_sink: xcb_sink.XcbSink = undefined;
 
 /// The shared XCB sink: inited once in init(), then free across every use.
-inline fn syncSink() sync.Sink {
+inline fn syncSink() sink.Sink {
     return (&g_sink).sink();
 }
 
-var g_ctx: sync.Ctx = undefined;
+var g_ctx: reconcile.Ctx = undefined;
 
 /// The tiling engine environment for a workspace's layout params, resolved
 /// from live config (scaled margins, min_dim, master side, variant index).
@@ -99,7 +101,7 @@ pub fn tilingEnv(p: *const model_mod.LayoutParams) contract.Env {
     const screen_h = cs.screen.height_in_pixels;
     return .{
         .margins = .{
-            .gap = utils.scaling.scaleBorderWidth(cs.config.tiling.gap_width, screen_h),
+            .gap = scaling.scaleBorderWidth(cs.config.tiling.gap_width, screen_h),
             .border = core.borderWidth(),
         },
         .min_dim = cs.config.tiling.min_window_dim,
@@ -117,7 +119,7 @@ pub fn tilingEnv(p: *const model_mod.LayoutParams) contract.Env {
 /// margins/min_dim and variant booleans from config, border width from the
 /// same scaled config fact (see tilingEnv), colors from config.tiling.
 /// Only valid after init().
-fn ctx() *sync.Ctx {
+fn ctx() *reconcile.Ctx {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     const p = &model().ws[model().current.index].params;
@@ -130,10 +132,10 @@ fn ctx() *sync.Ctx {
             .width = cs.screen.width_in_pixels,
             .height = screen_h,
         },
-        .workarea = screen.workArea(cs.screen),
+        .workarea = usable_area.workArea(cs.screen),
         .env = env,
         .color_of = colorOf,
-        .bar_win = screen.mappedSurfaceWindow(),
+        .bar_win = usable_area.mappedSurfaceWindow(),
     };
     return &g_ctx;
 }
@@ -148,7 +150,7 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
 }
 
 pub inline fn dragTick(win: model_mod.WindowId) void {
-    sync.reconcileDragTick(&instance, syncSink(), win);
+    reconcile.reconcileDragTick(&instance, syncSink(), win);
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke
@@ -165,7 +167,7 @@ fn preReconcileDuties() void {
     const md = contract.moduleOf(p.kind) orelse return;
     if (md.preReconcile == null) return;
     const n = model_mod.tiledCountOnWs(&instance, instance.current);
-    const wa = screen.workArea(core.getState().screen);
+    const wa = usable_area.workArea(core.getState().screen);
     p.* = md.preReconcile.?(p.*, n, wa.width);
 }
 
@@ -182,9 +184,9 @@ fn withServerGrab(body: anytype) void {
 }
 
 /// Grab server, reconcile, then ungrabAndFlush, atomically.
-pub inline fn reconcileUnderGrabNow(o: sync.ReconcileOpts) void {
+pub inline fn reconcileUnderGrabNow(o: reconcile.Opts) void {
     preReconcileDuties();
-    sync.reconcileUnderGrab(&instance, ctx(), o);
+    reconcile.reconcileUnderGrab(&instance, ctx(), o);
 }
 
 /// Grab server, run the focus transition, reconcile, then ungrabAndFlush
@@ -203,23 +205,23 @@ pub const FocusOrder = enum {
 };
 
 pub inline fn reconcileGrabFocus(
-    o: sync.ReconcileOpts,
+    o: reconcile.Opts,
     t: focus.FocusTransition,
     order: FocusOrder,
     duty: ?*const fn () void,
 ) void {
     preReconcileDuties();
     withServerGrab(struct {
-        o: sync.ReconcileOpts,
+        o: reconcile.Opts,
         t: focus.FocusTransition,
         order: FocusOrder,
         duty: ?*const fn () void,
-        fn call(self: @This(), c: *sync.Ctx) void {
+        fn call(self: @This(), c: *reconcile.Ctx) void {
             if (self.order == .before) {
                 focus.applyPendingFocus(self.t);
                 if (self.duty) |d| d();
             }
-            sync.reconcile(&instance, c, self.o);
+            reconcile.run(&instance, c, self.o);
             if (self.order == .after) focus.applyPendingFocus(self.t);
         }
     }{ .o = o, .t = t, .order = order, .duty = duty });
@@ -231,7 +233,7 @@ pub inline fn reconcileGrabFocus(
 pub inline fn focusOnlyCommit(t: focus.FocusTransition) void {
     withServerGrab(struct {
         t: focus.FocusTransition,
-        fn call(self: @This(), _: *sync.Ctx) void {
+        fn call(self: @This(), _: *reconcile.Ctx) void {
             focus.applyPendingFocus(self.t);
         }
     }{ .t = t });
@@ -251,12 +253,12 @@ pub const FullscreenKind = enum { enter, exit, switch_ };
 ///
 /// `t` is the optional focus transition to the covering entrant (`.none` for
 /// an exit or an already-focused entrant): a covering switch/enter hands
-/// input focus to the window that owns the screen. Applied AFTER the
+/// input focus to the window that owns the usable area. Applied AFTER the
 /// reconcile so the entrant is mapped+raised before xcb_set_input_focus
 /// targets it (the mapRequest ordering rule); a parked/unparked entrant is
 /// re-mapped inside this grab.
 pub inline fn reconcileUnderGrabNowFullscreen(
-    o: sync.ReconcileOpts,
+    o: reconcile.Opts,
     t: focus.FocusTransition,
     win: model_mod.WindowId,
     prev_fs_win: ?model_mod.WindowId,
@@ -264,13 +266,13 @@ pub inline fn reconcileUnderGrabNowFullscreen(
 ) void {
     preReconcileDuties();
     withServerGrab(struct {
-        o: sync.ReconcileOpts,
+        o: reconcile.Opts,
         t: focus.FocusTransition,
         win: model_mod.WindowId,
         prev_fs_win: ?model_mod.WindowId,
         kind: FullscreenKind,
-        fn call(self: @This(), c: *sync.Ctx) void {
-            sync.reconcile(&instance, c, self.o);
+        fn call(self: @This(), c: *reconcile.Ctx) void {
+            reconcile.run(&instance, c, self.o);
             focus.applyPendingFocus(self.t);
             // EWMH advertisement inside the grab: clear for whoever left
             // fullscreen, set for entrant. All fire-and-forget
@@ -292,14 +294,14 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             //
             // ENTER: immediately unmap the bar via the surfaces seam. The
             // fullscreen client is already mapped+raised+screen-sized by
-            // sync.reconcile, so it covers the bar before the unmap reaches
+            // reconcile.run, so it covers the bar before the unmap reaches
             // the server. Cancel any stale pending bar show from a previous
             // exit (a new enter supersedes it).
             //
             // EXIT: arm the deferred show. The bar reappears after the
             // client's ConfigureNotify confirms non-fullscreen dimensions.
             if (self.kind != .exit) {
-                // Immediate bar unmap when fullscreen claims the screen.
+                // Immediate bar unmap when fullscreen claims the usable area.
                 if (build_options.has_bar) surfaces.hideBarForFullscreen();
             } else {
                 // Exit: deferred bar show (unchanged path).
@@ -314,7 +316,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
 /// Flushless reconcile against the current ctx (drag tick path).
 pub inline fn reconcileNow() void {
     preReconcileDuties();
-    sync.reconcile(&instance, ctx(), .{});
+    reconcile.run(&instance, ctx(), .{});
 }
 
 /// Run pre-reconcile duties and return the pipeline context for the caller
@@ -322,7 +324,7 @@ pub inline fn reconcileNow() void {
 /// ctx.sink.ungrabAndFlush() when done (typically via defer). A manual-grab
 /// seam for callers needing a bespoke grab body: switchTo and the fullscreen
 /// EWMH write.
-pub fn grabCtx() *sync.Ctx {
+pub fn grabCtx() *reconcile.Ctx {
     preReconcileDuties();
     return ctx();
 }

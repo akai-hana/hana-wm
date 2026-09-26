@@ -6,7 +6,6 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
-const utils = @import("utils");
 const restart = @import("restart");
 const constants = @import("constants");
 const masks = @import("masks");
@@ -28,6 +27,9 @@ const surfaces = @import("surfaces").Surfaces;
 // `grabKeybindings` lives in events.zig (mutual runtime-only dependency).
 const events = @import("events");
 
+const atoms = @import("atoms");
+const lifecycle = @import("lifecycle");
+const time = @import("time");
 // Constants
 
 var xkb_state: ?xkbcommon.XkbState = null;
@@ -129,7 +131,7 @@ fn setupGrabs(conn: core.Connection, root: u32) void {
 // event receipt (entry to handleKeyPress) to the bound action's dispatch,
 // accumulated over a window so a periodic summary can be logged. Gated by
 // `build_options.profile_key` so release WMs compile it out entirely.
-const key_profile = utils.WindowedProfiler(
+const key_profile = log.WindowedProfiler(
     build_options.profile_key,
     "[KPROF] receive->action last {} keys: avg={d:.0}ns min={d}ns max={d}ns",
     log.info,
@@ -140,7 +142,7 @@ const key_profile = utils.WindowedProfiler(
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // Timing: wall-clock from event receipt to the bound action's dispatch.
     // Compiled out when `build_options.profile_key` is false.
-    const key_t0: i128 = if (key_profile.enabled) utils.monotonicNs() else 0;
+    const key_t0: i128 = if (key_profile.enabled) time.monotonicNs() else 0;
 
     focus.setLastEventTime(event.time);
 
@@ -149,7 +151,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         return;
     };
 
-    const mods = utils.normalizeModifiers(event.state);
+    const mods = masks.normalizeModifiers(event.state);
     const keysym = state.keycodeToKeysym(event.detail);
 
     // O(1) dispatch via the (modifiers << 32 | keysym) map built by
@@ -167,7 +169,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         log.debug("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{
             mods, keysym, @tagName(action.*),
         });
-        if (key_profile.enabled) key_profile.note(utils.monotonicNs() - key_t0);
+        if (key_profile.enabled) key_profile.note(time.monotonicNs() - key_t0);
         executeAction(action);
     } else if (mods != 0 or !masks.isModifierKeysym(keysym)) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R) can never
@@ -218,7 +220,7 @@ fn handleBarButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: 
 /// lookup, drag, and the unbound-Super replay fallback.
 fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) void {
     const cs = core.getState();
-    const mods = utils.normalizeModifiers(event.state);
+    const mods = masks.normalizeModifiers(event.state);
 
     // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
     // a specific window, so they're checked before the managed-window guard
@@ -294,8 +296,8 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 fn closeWindow(win: u32) void {
     const conn = core.getState().conn;
     if (window.supportsWMDeleteCached(conn, win)) blk: {
-        const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") orelse break :blk;
-        const delete_atom = utils.getAtomCached("WM_DELETE_WINDOW") orelse break :blk;
+        const protocols_atom = atoms.getAtomCached("WM_PROTOCOLS") orelse break :blk;
+        const delete_atom = atoms.getAtomCached("WM_DELETE_WINDOW") orelse break :blk;
 
         var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
         event.response_type = xcb.XCB_CLIENT_MESSAGE;
@@ -335,7 +337,7 @@ fn executeAction(action: *const types.Action) void {
             if (a.* == .exec) spawn.execSynchronous(a.exec) else executeAction(a),
         // Core
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
-        .reload_config => utils.reload(),
+        .reload_config => lifecycle.reload(),
         .reload_hana => restart.requestReexec(),
         .dump_state => dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
@@ -441,7 +443,7 @@ fn dumpState() void {
 
 /// Searches config mouse bindings for a modifier+button match and executes it.
 /// Returns true and releases the grab if a binding is found, false otherwise.
-fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
+fn tryConfigMouseBind(mods: u16, button: u8, win: u32, ts: u32) bool {
     // Linear scan is intentional: mouse bindings are few (~5-10), hash overhead not worth it.
     for (core.getState().config.mouse_bindings.items) |*mb|
         if (mb.modifiers == mods and mb.button == button) {
@@ -452,7 +454,7 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
                 .toggle_floating_window => tilingOp(actions.toggleFloating, win),
                 else => executeAction(&mb.action),
             }
-            releaseGrab(time);
+            releaseGrab(ts);
             return true;
         };
     return false;
@@ -461,10 +463,10 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, time: u32) bool {
 /// Shared tail for releasing grab sequences. The two callers differ only in
 /// the pointer mode: REPLAY_POINTER (release the grab, let the click through)
 /// vs ASYNC_POINTER (keep the grab for drag tracking).
-inline fn finishGrab(time: u32, pointer_mode: c_uint) void {
+inline fn finishGrab(ts: u32, pointer_mode: c_uint) void {
     const conn = core.getState().conn;
-    _ = xcb.xcb_allow_events(conn, pointer_mode, time);
-    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, time);
+    _ = xcb.xcb_allow_events(conn, pointer_mode, ts);
+    _ = xcb.xcb_allow_events(conn, xcb.XCB_ALLOW_ASYNC_KEYBOARD, ts);
     _ = xcb.xcb_flush(conn);
 }
 
@@ -472,16 +474,16 @@ inline fn finishGrab(time: u32, pointer_mode: c_uint) void {
 /// the click reaches the app underneath. Only safe for click paths that don't
 /// need to keep tracking the pointer afterward; NOT for drag start; use
 /// keepDragGrab. Always pass event.time, never XCB_CURRENT_TIME.
-inline fn releaseGrab(time: u32) void {
-    finishGrab(time, xcb.XCB_ALLOW_REPLAY_POINTER);
+inline fn releaseGrab(ts: u32) void {
+    finishGrab(ts, xcb.XCB_ALLOW_REPLAY_POINTER);
 }
 
 /// Un-freezes the pointer for a drag while keeping the Super+Button grab
 /// engaged: AsyncPointer resumes delivery without replaying or ending the
 /// grab, so MotionNotify/ButtonRelease keep reaching us. The grab ends on
 /// release; the keyboard grab drops immediately. Always pass event.time.
-inline fn keepDragGrab(time: u32) void {
-    finishGrab(time, xcb.XCB_ALLOW_ASYNC_POINTER);
+inline fn keepDragGrab(ts: u32) void {
+    finishGrab(ts, xcb.XCB_ALLOW_ASYNC_POINTER);
 }
 
 // XcbCursor, declared manually because xcb_cursor_load_cursor is a static

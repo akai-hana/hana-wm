@@ -13,10 +13,10 @@
 
 const std = @import("std");
 const constants = @import("constants");
-const utils = @import("utils");
 const model = @import("model");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
+const bounded = @import("bounded");
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
 
@@ -56,7 +56,7 @@ const PackedMinimize = extern struct {
 
 /// Self-contained minimized store: static, allocation-free, <= 32 entries,
 /// linear scans by design. No model bookkeeping backs it.
-var g_recs: utils.BoundedList(Rec, MAX_MINIMIZED) = .{};
+var g_recs: bounded.BoundedList(Rec, MAX_MINIMIZED) = .{};
 
 /// Monotonic minimize counter; stamps `Rec.seq` across restores too (never
 /// reused) so actions can pick LIFO/FIFO restore targets without a side

@@ -5,7 +5,7 @@
 // of it redundant?
 //
 // Every focus change commits a server-grab reconcile (focus.applyPendingFocus +
-// sync.reconcile). reconcile replays the FULL desired wire state for EVERY
+// reconcile.run). reconcile replays the FULL desired wire state for EVERY
 // window each reconcile (map + borderPixel + borderWidth + geom), which this
 // instrumentation quantifies as a function of window count.
 //
@@ -16,18 +16,19 @@
 
 const std = @import("std");
 const model = @import("model");
-const sync = @import("sync");
-const utils = @import("utils");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 
+const time = @import("time");
 // Latency instrumentation only runs its full loops + timing output under
+const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 // `-Dbench`; the default suite keeps a silent smoke so `zig build
 // test` never writes to stderr (the runner flags test stderr as `failed
 // command:` even on success).
 const bench = build_options.bench;
 
-const nowNs = utils.monotonicNs;
+const nowNs = time.monotonicNs;
 
 const makeModel = helpers.makeModel;
 
@@ -46,8 +47,8 @@ test "latency: reconcile cost + request count at focus change" {
         var m = makeModel();
         for (0..n) |i| regCur(&m, @intCast(i + 1));
 
-        sync.init();
-        defer sync.init();
+        ledger.init();
+        defer ledger.init();
 
         // Warm once (a live counter seeds the ledger), then measure the CPU
         // cost of one reconcile.
@@ -56,7 +57,7 @@ test "latency: reconcile cost + request count at focus change" {
         // Count requests in one representative reconcile (fresh sink).
         var probe = CountingSink{};
         var probe_ctx = makeCtx(probe.sink(), colorOfFocused, helpers.std_wa);
-        sync.reconcile(&m, &probe_ctx, .{});
+        reconcile.run(&m, &probe_ctx, .{});
 
         if (bench)
             std.debug.print(
@@ -68,7 +69,7 @@ test "latency: reconcile cost + request count at focus change" {
 
 // Mod+k caller: `focus.grabFocusWithDuty` commits the focus protocol and the
 // viewport snap in ONE grab+reconcile (the snap runs as a duty between
-// applyPendingFocus and sync.reconcile). Previously the cycle did a focus
+// applyPendingFocus and reconcile.run). Previously the cycle did a focus
 // transition (first reconcile) then snapViewportToFocused (a second
 // grab+reconcile whenever the viewport had to shift), plus a redundant second
 // reconcile even when the focused window was already on-screen.
@@ -80,12 +81,12 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     var m = makeModel();
     for (0..n) |i| regCur(&m, @intCast(i + 1));
 
-    sync.init();
-    defer sync.init();
+    ledger.init();
+    defer ledger.init();
 
     var warm = CountingSink{};
     var warm_ctx = makeCtx(warm.sink(), colorOfFocused, helpers.std_wa);
-    sync.reconcile(&m, &warm_ctx, .{});
+    reconcile.run(&m, &warm_ctx, .{});
 
     const iters: usize = if (bench) 5_000 else 1;
 
@@ -96,7 +97,7 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     const t0 = nowNs();
     for (0..iters) |_| {
         model.setFocus(&m, 2);
-        sync.reconcile(&m, &c1, .{});
+        reconcile.run(&m, &c1, .{});
     }
     const focus_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iters));
 
@@ -106,7 +107,7 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     var s2 = CountingSink{};
     var c2 = makeCtx(s2.sink(), colorOfFocused, helpers.std_wa);
     const t1 = nowNs();
-    for (0..iters) |_| sync.reconcile(&m, &c2, .{});
+    for (0..iters) |_| reconcile.run(&m, &c2, .{});
     const snap_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters));
 
     if (bench)

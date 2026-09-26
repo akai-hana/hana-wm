@@ -17,11 +17,11 @@
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
+const atoms = @import("atoms");
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
 
@@ -39,7 +39,7 @@ const PendingBar = struct {
 };
 
 // EWMH atoms for _NET_WM_STATE_FULLSCREEN, resolved from the shared atom
-// cache (utils.initAtomCache) in init(). Zero (XCB_ATOM_NONE) when the cache
+// cache (atoms.initAtomCache) in init(). Zero (XCB_ATOM_NONE) when the cache
 // was unavailable; setEwmhFullscreenState's guard already skips the write then.
 var g_net_wm_state: xcb.xcb_atom_t = 0;
 var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
@@ -56,8 +56,8 @@ pub fn init() anyerror!void {
 
     // Re-resolve the EWMH fullscreen atoms from the shared atom cache rather
     // than interning them again here.
-    g_net_wm_state = utils.getAtomOrZero("_NET_WM_STATE");
-    g_net_wm_state_fullscreen = utils.getAtomOrZero("_NET_WM_STATE_FULLSCREEN");
+    g_net_wm_state = atoms.getAtomOrZero("_NET_WM_STATE");
+    g_net_wm_state_fullscreen = atoms.getAtomOrZero("_NET_WM_STATE_FULLSCREEN");
 }
 
 pub fn deinit() void {
@@ -198,7 +198,7 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     );
 }
 
-// The protocol-side geometry commit helpers are gone: sync.reconcile derives
+// The protocol-side geometry commit helpers are gone: reconcile.run derives
 // their wire traffic from the model.
 
 /// Called from the ConfigureNotify handler in events.zig. Drives both deferred

@@ -12,7 +12,7 @@ const model = @import("model");
 const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
-const utils = @import("utils");
+const scaling = @import("scaling");
 
 /// Longest section name a mis-case warning must lower (bounded helper buffer;
 /// real-world section names are far shorter, this just caps a pathological
@@ -547,7 +547,7 @@ pub fn validate(cfg: *const types.Config) !void {
     // a pixel-vs-ratio check would wrongly refuse `master_width = 600`.
     const mw = cfg.tiling.master_width;
     if (mw.is_percentage) {
-        const mw_ratio: f32 = utils.scaling.asRatio(mw);
+        const mw_ratio: f32 = scaling.asRatio(mw);
         if (mw_ratio < constants.min_master_width or mw_ratio > constants.max_master_width)
             return invalid("master_width {d:.0}% out of [{d:.0}%, {d:.0}%]", .{
                 mw_ratio * 100.0,

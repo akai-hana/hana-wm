@@ -54,7 +54,7 @@ const types = @import("types");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
-const utils = @import("utils");
+const time = @import("time");
 
 const c = @cImport({
     @cInclude("stdio.h");
@@ -76,7 +76,7 @@ const throttle_ms: i64 = 80;
 
 /// The WM's single time base: monotonic-ish wall time in ms.
 pub fn nowMs() i64 {
-    return utils.realtimeMs();
+    return time.realtimeMs();
 }
 
 /// Commit scheduler for scroll/drag events, shared by every slider control. A

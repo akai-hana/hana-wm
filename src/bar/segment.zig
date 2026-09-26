@@ -16,12 +16,12 @@
 const std = @import("std");
 const core = @import("core");
 const constants = @import("constants");
-const utils = @import("utils");
 
 const drawing = @import("drawing");
 const types = @import("types");
 const contract = @import("contract");
 
+const geom = @import("geom");
 /// Service handles the bar passes into mechanism segments (the prompt) at
 /// init. Passed once so segments never import the bar orchestrator;
 /// one-way bar -> segment only.
@@ -95,7 +95,7 @@ pub const DrawCtx = struct {
     current_ws_wins: []const u32 = &.{},
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void) = &.{},
     titles: []const []const u8 = &.{},
-    geoms: []const ?utils.Rect = &.{},
+    geoms: []const ?geom.Rect = &.{},
 
     /// The title renderer's stable per-frame context (dc/config/height/
     /// start_x/width/conn). The start_x/width are the segment's on-screen box.
@@ -135,7 +135,7 @@ pub const title_min_width: u16 = 100;
 pub const max_visible_windows = constants.max_tiled_windows;
 
 /// Off-screen sentinel: sorts last in position, drawing is skipped.
-pub const offscreen_rect: utils.Rect = .{
+pub const offscreen_rect: geom.Rect = .{
     .x = std.math.maxInt(i16),
     .y = std.math.maxInt(i16),
     .width = 0,
@@ -169,7 +169,7 @@ pub const TitleSnapshot = struct {
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
 
     titles: []const []const u8 = &.{},
-    geoms: []const ?utils.Rect = &.{},
+    geoms: []const ?geom.Rect = &.{},
 };
 
 /// Builds the sorted WindowInfo list for the split view from the snapshot's
@@ -185,11 +185,11 @@ fn gatherAndSortWindowInfos(
     var info_count: usize = 0;
     const win_count = @min(windows.len, max_visible_windows);
     for (windows[0..win_count], 0..) |win, i| {
-        const geom = snapshot.geoms[i] orelse continue;
+        const wgeom = snapshot.geoms[i] orelse continue;
         out_window_info_buf[info_count] = .{
             .window = win,
-            .x = geom.x,
-            .y = geom.y,
+            .x = wgeom.x,
+            .y = wgeom.y,
             .title = snapshot.titles[i],
             .minimized = snapshot.minimized_set.contains(win),
         };

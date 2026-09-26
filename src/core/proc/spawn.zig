@@ -17,11 +17,12 @@ const c = @cImport({
 });
 
 const core = @import("core");
-const utils = @import("utils");
 const log = @import("log");
 const tracking = @import("tracking");
 const window = @import("window");
 
+const bounded = @import("bounded");
+const lifecycle = @import("lifecycle");
 /// Tags for the two possible messages written onto the spawn pipe. Sent as
 /// a leading byte so the reader can tell them apart no matter which order
 /// they arrive in (see finishSpawn()).
@@ -126,10 +127,10 @@ const PendingSpawn = struct {
     spawn_ws: ?u8, // Target workspace for window.registerSpawn.
 };
 
-// std.BoundedArray was removed in the Zig 0.16 toolchain; utils.BoundedList
+// std.BoundedArray was removed in the Zig 0.16 toolchain; bounded.BoundedList
 // is the shared fixed-buffer-plus-length stand-in used everywhere this shape
 // is needed.
-var g_pending: utils.BoundedList(PendingSpawn, max_pending_spawns) = .{};
+var g_pending: bounded.BoundedList(PendingSpawn, max_pending_spawns) = .{};
 
 /// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately;
 /// lifecycle is tracked in g_pending and resolved by drainPendingSpawns() /
@@ -153,7 +154,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
         return error.SpawnQueueFull;
     }
 
-    const pipe_fds = utils.makePipe() catch {
+    const pipe_fds = lifecycle.makePipe() catch {
         log.err("pipe2() failed (spawn pipe): {s}", .{cmd});
         return error.PipeFailed;
     };

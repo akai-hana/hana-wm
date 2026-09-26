@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Wire-policy guards. The tree is NOT a strict import stack: core and window
 # import each other (both are core systems) around a hub-and-spoke model of
-# a single core model + sync sink. These rules enforce the one policy the
-# split actually cares about -- wire mutations belong behind the sync
-# boundary, and the pure layers (model/tiling/config) must stay xcb-pure --
+# a single core model + sink. These rules enforce the one policy the
+# split actually cares about -- wire mutations belong behind the reconcile
+# boundary, and the pure layers (model/geom/tiling/config) must stay xcb-pure --
 # plus formatting. Each rule
 
 # exits non-zero when its policy is violated outside a documented allowlist.
@@ -26,9 +26,9 @@ code_lines() { # strip comment-only lines from grep output on stdin
 }
 
 # Rule 1 allowlist: files permitted to send
-# configure/map/change_attributes outside of the sync boundary's wire policy.
-# Each case documents the surviving wire traffic and why it has not (yet)
-# moved behind sync.
+# configure/map/change_attributes outside of the reconcile boundary's wire
+# policy. Each case documents the surviving wire traffic and why it has not
+# (yet) moved behind the reconciler.
 wire_allowed() {
     case "$1" in
         # Bar's OWN window lifecycle: map on show, Y-reposition on height
@@ -68,20 +68,16 @@ wire_allowed() {
         # sync force_restack in a later cleanup.
         src/main.zig|src/input/input.zig) ;;
 
-        # Wire PRIMITIVES: sink.zig (in core/x11/) dispatches through
-        # core/x11/wire.zig's configureWindow / raiseWindow / setBorderPixel
+        # Wire PRIMITIVES: core/x11/requests.zig hosts configureWindow /
+        # raiseWindow / setBorderPixel / grabServer, and core/x11/atoms.zig
+        # hosts the intern/lookup half. sink.zig dispatches through those
         # (park rides an offscreen+below configure in sink.zig). Primitive
         # home is not a policy violation -- grep cannot distinguish
         # definition from rogue send. These definitions were moved out of
-        # utils.zig into core/x11/wire.zig so the pure vocabulary only
-        # ever sees xcb-free decls.
-        src/core/x11/wire.zig) ;;
-
-        # Re-export DECLARATIONS only: pure/utils.zig's `pub const raiseWindow =
-        # x11wire.raiseWindow;` is an xcb-free forwarding decl, not a send (the
-        # actual primitive lives in wire.zig, allowlisted above). Grep matches
-        # the wrapper NAME here, so this is the same definition-vs-call caveat.
-        src/core/pure/utils.zig) ;;
+        # the old pure/utils.zig facade so the pure vocabulary only ever sees
+        # xcb-free decls. (Rule 1's grep already exempts src/core/x11/; the
+        # entries stay for documentation.)
+        src/core/x11/requests.zig|src/core/x11/atoms.zig) ;;
 
         # Tiled border-width application: borders.zig's xcb_configure_window
         # sets XCB_CONFIG_WINDOW_BORDER_WIDTH on tiled windows (the per-frame
@@ -114,13 +110,20 @@ wire_allowed() {
         # Same test-double carve-out as fixture.zig; never routes through sync.
         src/test/window/focus_test.zig) ;;
 
+        # src/test/engine/pipeline_test.zig is a TEST DOUBLE: it maps two
+        # synthetic override-redirect windows through the X-gated harness's
+        # real connection so it can assert the pipeline's window-enter /
+        # map-request path. Test setup is not WM wire traffic and never routes
+        # through the reconciler. Same carve-out as fixture.zig.
+        src/test/engine/pipeline_test.zig) ;;
+
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
         # buffer after others' queued requests). events.zig is the core
         # event-loop flush; refresh.zig is the RandR (bar-side) detection
         # flush; prompt.zig is the bar's keyboard grab-drop flush. These are
         # documented non-mutations, not Rule-1 sends.
-        src/core/runtime/events.zig|src/bar/refresh.zig|src/bar/modules/prompt/prompt.zig) ;;
+        src/core/loop/events.zig|src/bar/refresh.zig|src/bar/modules/prompt/prompt.zig) ;;
 
         *) return 1 ;;
     esac
@@ -130,14 +133,14 @@ wire_allowed() {
 # Rule 2 allowlist (same wire policy): files permitted to grab the server
 # outside the sync boundary. This list starts non-empty and shrinks.
 # Note: grab_allowed covers BOTH the raw xcb.xcb_grab_server call and the
-# utils.grabServer wrapper (Rule 2 matches both; see pat2 below).
+# requests.grabServer wrapper (Rule 2 matches both; see pat2 below).
 grab_allowed() {
     case "$1" in
         # core/x11/wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES;
         # sync.zig's reconcileUnderGrab calls
         # these; the primitive home is not itself a policy violation, but
         # grep cannot tell call from definition.
-        src/core/x11/wire.zig) ;;
+        src/core/x11/requests.zig) ;;
 
         # Bar's OWN window lifecycle, the counterpart of its Rule 1 entry:
         # position toggle (Y-reposition) and show/hide (map/unmap) bracket
@@ -151,7 +154,7 @@ grab_allowed() {
     return 0
 }
 
-# Rule 1: wire-mutating XCB requests belong behind the sync boundary
+# Rule 1: wire-mutating XCB requests belong behind the reconcile boundary
 # (+ allowlist). The original pattern missed unmap/destroy/circulate and
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
@@ -163,34 +166,37 @@ while IFS= read -r line; do
     viol "rule 1 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
-# Rule 2: server grabs belong behind the sync boundary (+ allowlist). Comment
+# Rule 2: server grabs belong behind the reconcile boundary (+ allowlist). Comment
 # mentions of xcb_grab_server are stripped so documentation doesn't trip the
-# guard. Match BOTH the raw XCB primitive and the utils.grabServer wrapper.
-# Siblings like sync.zig route grabs through the Sink vtable (sink.grabServer,
-# never literally `utils.grabServer`), so a wrapper match isolates files that
-# grab the server directly, which is exactly the policy being enforced.
-pat2='xcb\.xcb_grab_server|utils\.grabServer'
+# guard. Match BOTH the raw XCB primitive and the requests.grabServer wrapper.
+# Siblings like reconcile.zig route grabs through the Sink vtable
+# (sink.grabServer, never literally `requests.grabServer`), so a wrapper match
+# isolates files that grab the server directly, which is exactly the policy
+# being enforced.
+pat2='xcb\.xcb_grab_server|requests\.grabServer'
 while IFS= read -r line; do
     f=${line%%:*}
     grab_allowed "$f" && continue
     viol "rule 2 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
-# Rule 3: no xcb imports/references in the pure model file, tiling/, or
-# config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+# Rule 3: no xcb imports/references in the pure architecture vocabulary
+# (model.zig, geom.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
 # awk strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
-# it sweeps for any `xcb` token in the model file, tiling/, and config/ after
+# it sweeps for any `xcb` token in the pure model/geom files, tiling/, and
+# config/ after
 # comment removal -- imports AND re-exported bare references alike. (The
 # complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
 # a pure module can import an xcb-using sibling and pass there, so Rule 3, not
-# that scan, is the last line of defense on bodies. Only the model file is
-# swept: its pure/ siblings carry no xcb tokens by construction, and contract
-# declares xcb event TYPES in its body, so it cannot sit on this side of the
-# sweep.)
+# that scan, is the last line of defense on bodies. Only the xcb-free
+# vocabulary files are swept (model.zig, geom.zig): their pure/ siblings carry
+# no xcb tokens by construction, and architecture/contract.zig -- now a
+# sibling of model/geom rather than a pure/ file -- declares xcb event TYPES
+# in its body, so it cannot sit on this side of the sweep.)
 hits=$(
     while IFS= read -r f; do
         awk '
@@ -206,7 +212,8 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/pure/model.zig src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/model.zig src/core/architecture/geom.zig \
+                  src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

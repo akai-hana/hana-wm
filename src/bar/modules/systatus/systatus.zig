@@ -20,11 +20,11 @@
 //! shape is kept explicit in each file instead; see slider.zig.
 
 const std = @import("std");
-const utils = @import("utils");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
 
+const time = @import("time");
 const read_interval_ms: i64 = 2000;
 
 /// Length of the per-segment rendered-text buffers: room for "<label> <pct>%"
@@ -126,15 +126,15 @@ fn refresh(idx: usize) bool {
 /// otherwise (0 = due now).
 fn pollDeadlineMsFor(idx: usize) i32 {
     if (!g_armed[idx]) return -1;
-    const left = g_next_read_ms[idx] - utils.realtimeMs();
+    const left = g_next_read_ms[idx] - time.realtimeMs();
     if (left <= 0) return 0;
     return @intCast(@min(left, read_interval_ms));
 }
 
 fn onPollWakeupFor(idx: usize) void {
     if (!g_armed[idx]) return;
-    if (utils.realtimeMs() < g_next_read_ms[idx]) return;
-    g_next_read_ms[idx] = utils.realtimeMs() + read_interval_ms;
+    if (time.realtimeMs() < g_next_read_ms[idx]) return;
+    g_next_read_ms[idx] = time.realtimeMs() + read_interval_ms;
     if (refresh(idx)) g_pending_redraw[idx] = true;
 }
 
@@ -148,7 +148,7 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     const c = segmod.castDraw(ctx);
     if (!g_armed[idx]) {
         g_armed[idx] = true;
-        g_next_read_ms[idx] = utils.realtimeMs() + read_interval_ms;
+        g_next_read_ms[idx] = time.realtimeMs() + read_interval_ms;
         _ = refresh(idx); // prime the text so the first draw isn't empty
     }
 

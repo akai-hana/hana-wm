@@ -38,10 +38,11 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
-const utils = @import("utils");
 const build_options = @import("build_options");
 const model = @import("model");
 
+const bounded = @import("bounded");
+const geom = @import("geom");
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
 /// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
@@ -229,7 +230,7 @@ pub const WindowModule = struct {
     // Floating family (floating module; "floating" is model vocabulary)
     /// Update a floating window's rect on the model (no-op for
     /// tiled/unknown).
-    setFloatingRect: ?*const fn (*model.Model, model.WindowId, utils.Rect) void = null,
+    setFloatingRect: ?*const fn (*model.Model, model.WindowId, geom.Rect) void = null,
     /// Honor a configure request against a floating window record on the
     /// model. Returns the decision (geometry_applied / border_only /
     /// ignored).
@@ -245,7 +246,7 @@ pub const WindowModule = struct {
     updateDrag: ?*const fn (i16, i16) void = null,
     isDragging: ?*const fn () bool = null,
     isResizingWindow: ?*const fn (u32) bool = null,
-    getDragLastRect: ?*const fn () utils.Rect = null,
+    getDragLastRect: ?*const fn () geom.Rect = null,
     cancelDragForWindow: ?*const fn (u32) void = null,
 };
 
@@ -535,7 +536,7 @@ pub const Layout = struct {
 pub const View = struct {
     order: []const model.WindowId,
     params: *const model.LayoutParams,
-    workarea: utils.Rect,
+    workarea: geom.Rect,
     hints: *const HintsView,
     focused: ?model.WindowId,
     // Environment resolved by the CALLER from config.
@@ -544,17 +545,17 @@ pub const View = struct {
 
 /// Sentinel rect for parked placements: the zero rect. The sync layer derives
 /// parked geometry from its own policy, never from this.
-pub const parked_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+pub const parked_rect: geom.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 
 /// A placement computed for one window (see View.order).
 pub const Placement = struct {
     win: model.WindowId,
-    rect: utils.Rect,
+    rect: geom.Rect,
     visible: bool,
 };
 
 /// Zero-allocation placement buffer (one entry per stored window).
-pub const List = utils.BoundedList(Placement, model.store_capacity);
+pub const List = bounded.BoundedList(Placement, model.store_capacity);
 
 /// Frozen size-hint snapshot aligned index-for-index with View.order. The
 /// caller materializes one hint per ordered window; lookup is a scan over the
@@ -578,7 +579,7 @@ pub const HintsView = struct {
 /// per-layout booleans that each new layout would grow. Resolved from config
 /// by the reconciler's caller; the core carries no layout-feature booleans.
 pub const Env = struct {
-    margins: utils.Margins = .{},
+    margins: geom.Margins = .{},
     min_dim: u16 = 0,
     primary_on_right: bool = false,
     variant_idx: u8 = 0,

@@ -9,9 +9,9 @@
 //! intentionally held for the whole process in production).
 //!
 //! `save` is called with the leak-checking `testing` allocator: the
-//! core/runtime/persist.zig save path used to transfer the JSON buffer out of its
+//! core/proc/persist.zig save path used to transfer the JSON buffer out of its
 //! Allocating writer and never free it (an S-F finding, surfaced as leaked
-//! bytes here), and the one-line fix that lands in core/runtime/persist.zig frees it
+//! bytes here), and the one-line fix that lands in core/proc/persist.zig frees it
 //! (`defer al.deinit()`), so the tracking allocator now doubles as a
 //! regression guard for that class of leak.
 

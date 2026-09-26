@@ -5,7 +5,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const masks = @import("masks");
 
 // libc setenv for the re-exec hand-off's config-snapshot pin (HANA_CONFIG_DIR).
@@ -30,6 +29,7 @@ const persist = @import("persist");
 const spawn = @import("spawn");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
+const lifecycle = @import("lifecycle");
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
 
@@ -79,18 +79,18 @@ inline fn asHandler(comptime f: anytype) EventHandler {
 }
 
 fn handleExpose(event: *anyopaque) void {
-    const e = utils.eventCast(*xcb.xcb_expose_event_t, event);
+    const e = core.eventCast(*xcb.xcb_expose_event_t, event);
     if (build_options.has_bar) surfaces.handleExpose(e);
 }
 
 fn handlePropertyNotify(event: *anyopaque) void {
-    const e = utils.eventCast(*xcb.xcb_property_notify_event_t, event);
+    const e = core.eventCast(*xcb.xcb_property_notify_event_t, event);
     window.handlePropertyNotify(e);
 }
 
 // Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
-    const e = utils.eventCast(*xcb.xcb_configure_notify_event_t, event);
+    const e = core.eventCast(*xcb.xcb_configure_notify_event_t, event);
     window.dispatchAll(.notifyConfigureIfPending, .{ e.window, e.width, e.height });
 }
 
@@ -98,7 +98,7 @@ fn handleConfigureNotify(event: *anyopaque) void {
 // This clears any pending deferred bar-show for a window that exits fullscreen
 // and is then destroyed before it can send a ConfigureNotify.
 fn handleDestroyNotify(event: *anyopaque) void {
-    const e = utils.eventCast(*xcb.xcb_destroy_notify_event_t, event);
+    const e = core.eventCast(*xcb.xcb_destroy_notify_event_t, event);
     window.dispatchAll(.onWindowGone, .{e.window});
     window.handleDestroyNotify(e);
 }
@@ -165,7 +165,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // this branch such errors would be silently dropped, making real-world
     // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
     if (event_type == 0) {
-        const e = utils.eventCast(*xcb.xcb_generic_error_t, event);
+        const e = core.eventCast(*xcb.xcb_generic_error_t, event);
         log.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
         return;
     }
@@ -604,7 +604,7 @@ pub fn run() !void {
         .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 },
     };
 
-    while (utils.running.load(.acquire)) {
+    while (lifecycle.running.load(.acquire)) {
         // No built-in deadline: with no timer sources the loop blocks until
         // an X event or signal arrives. Timer sources are exclusively a bar
         // concern (clock segment, prompt cursor blink, carousel marquee) and
@@ -649,7 +649,7 @@ pub fn run() !void {
         // snapshot) before the successor boots from that snapshot. A reload
         // that fails keeps the last-good snapshot, so the re-exec still lands
         // on the previously live config.
-        if (utils.consumeReload())
+        if (lifecycle.consumeReload())
             handleConfigReload() catch |err| log.err("Reload failed: {}", .{err});
 
         if (restart.consumeReexec())

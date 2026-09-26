@@ -5,7 +5,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const events = @import("events");
 const signals = @import("signals");
 const config = @import("config");
@@ -26,6 +25,8 @@ const restart = @import("restart");
 const persist = @import("persist");
 const focus = @import("focus");
 
+const atoms = @import("atoms");
+const requests = @import("requests");
 // Always keep Zig's crash handler armed, even though this project defaults to
 // the release profile (ReleaseFast strips DWARF and disables runtime safety,
 // so an uncaught SIGSEGV/SIGBUS would otherwise abort with zero trace, the
@@ -48,7 +49,7 @@ pub fn main() !void {
     // Intern the atom cache before any module reads atoms: scale.detectDpi()
     // resolves RESOURCE_MANAGER through the cache, so it must be populated
     // first or Xft.dpi would never be read.
-    try utils.initAtomCache(x.conn);
+    try atoms.initAtomCache(x.conn);
 
     core.dpi_info = scale.detectDpi(x.conn, x.screen);
 
@@ -93,7 +94,7 @@ pub fn main() !void {
     // is released before the keybindings its entries borrow are freed.
     defer input.deinitKeybinds();
 
-    utils.advertiseEwmhSupport(x.conn, x.screen, x.root);
+    requests.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
     try signals.setup();
     defer signals.deinit();

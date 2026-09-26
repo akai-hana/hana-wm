@@ -45,7 +45,7 @@ pub const x11_max_keycode = 256;
 // Windows on inactive workspaces are parked here so they are hidden without
 // being unmapped (unmapping causes some apps to pause).
 //
-// X11's ConfigureWindow encodes x/y as INT16 on the wire (hence utils.Rect.x/y
+// X11's ConfigureWindow encodes x/y as INT16 on the wire (hence geom.Rect.x/y
 // being i16), so -32768 is the hard floor. The old -4000 only cleared a single
 // 3840px-wide display: on multi-monitor layouts with a display left of primary,
 // ultrawides, or 5K/6K panels, -4000 can land back inside real screen estate.

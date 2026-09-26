@@ -14,10 +14,11 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const constants = @import("constants");
 const model_mod = @import("model");
 
+const atoms = @import("atoms");
+const requests = @import("requests");
 /// Single logical type: the model's SizeHints. The former layouts.SizeHints
 /// copy (with its comptime shape guard) is gone -- caching stores model
 /// entries directly, so the actions.mapRequest bridge needs no conversion.
@@ -139,12 +140,12 @@ pub fn sendBorderColorIfChanged(win: u32, color: u32) void {
     const conn = core.getState().conn;
     const wd = getOrPutDefault(win) catch {
         // Cache full (bounded by max_entries): refuse to grow, send anyway.
-        utils.setBorderPixel(conn, win, color);
+        requests.setBorderPixel(conn, win, color);
         return;
     };
     if (wd.border_color == color) return;
     wd.border_color = color;
-    utils.setBorderPixel(conn, win, color);
+    requests.setBorderPixel(conn, win, color);
 }
 
 // Window-title cache
@@ -169,8 +170,8 @@ pub const TitleCookies = struct {
 fn ensureAtoms() void {
     if (atoms_resolved) return;
     atoms_resolved = true;
-    net_wm_name = utils.getAtomCached("_NET_WM_NAME") orelse null;
-    utf8_string = utils.getAtomCached("UTF8_STRING") orelse null;
+    net_wm_name = atoms.getAtomCached("_NET_WM_NAME") orelse null;
+    utf8_string = atoms.getAtomCached("UTF8_STRING") orelse null;
 }
 
 /// Fires both title queries without waiting (no flush: the caller's batch
@@ -260,7 +261,7 @@ fn takePropertyReply(
     atom_type: u32,
     buf: []u8,
 ) ?[]const u8 {
-    const reply = utils.collectPropertyReply(conn, cookie) orelse return null;
+    const reply = requests.collectPropertyReply(conn, cookie) orelse return null;
     defer std.c.free(reply);
     const r = reply.*;
     if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;

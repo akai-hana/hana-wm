@@ -12,7 +12,6 @@ const testing = std.testing;
 
 const types = @import("types");
 const keybind = @import("keybind");
-const utils = @import("utils");
 const masks = @import("masks");
 
 fn actionTag(a: *const types.Action) std.meta.Tag(types.Action) {
@@ -22,14 +21,14 @@ fn actionTag(a: *const types.Action) std.meta.Tag(types.Action) {
 test "normalizeModifiers keeps real modifiers, strips lock and button bits" {
     // Every bit outside the binding mask (lock keys, pointer buttons, odd
     // high bits X may set) must be masked away so matching is stable.
-    try testing.expectEqual(masks.mod_shift, utils.normalizeModifiers(masks.mod_shift | masks.mod_capslock));
+    try testing.expectEqual(masks.mod_shift, masks.normalizeModifiers(masks.mod_shift | masks.mod_capslock));
     try testing.expectEqual(
         masks.mod_control | masks.mod_super,
-        utils.normalizeModifiers(masks.mod_control | masks.mod_super | masks.mod_numlock | masks.mod_scrolllock | 0x0100),
+        masks.normalizeModifiers(masks.mod_control | masks.mod_super | masks.mod_numlock | masks.mod_scrolllock | 0x0100),
     );
     // All-ones folds to exactly the binding mask, never wider.
-    try testing.expectEqual(masks.mod_mask_binding, utils.normalizeModifiers(0xffff));
-    try testing.expectEqual(@as(u16, 0), utils.normalizeModifiers(masks.mod_capslock | masks.mod_numlock));
+    try testing.expectEqual(masks.mod_mask_binding, masks.normalizeModifiers(0xffff));
+    try testing.expectEqual(@as(u16, 0), masks.normalizeModifiers(masks.mod_capslock | masks.mod_numlock));
 }
 
 test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {

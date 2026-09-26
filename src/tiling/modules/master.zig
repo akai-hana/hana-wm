@@ -1,11 +1,12 @@
 //! Master-stack tiling layout.
 //! Master + stack panes, spilling overflow into a column-major grid.
 
-const utils = @import("utils");
 const constants = @import("constants");
 const model = @import("model");
 const tiling = @import("tiling");
 
+const geom = @import("geom");
+const scaling = @import("scaling");
 /// Stack-column weight boosts derived from `secondary_balance`:
 /// positive boosts the top slot, negative boosts the bottom slot.
 const StackBoost = struct {
@@ -39,7 +40,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     // When no stack exists the master pane takes the full width.
     const master_w_frac: u16 = if (stack_n > 0)
-        utils.scaling.roundToU16(@as(f32, @floatFromInt(screen_w)) * v.params.primary_width, 0.0)
+        scaling.roundToU16(@as(f32, @floatFromInt(screen_w)) * v.params.primary_width, 0.0)
     else
         screen_w;
 
@@ -195,11 +196,11 @@ inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
     return w;
 }
 
-inline fn stackSeamMargin(m: utils.Margins) u16 {
+inline fn stackSeamMargin(m: geom.Margins) u16 {
     return tiling.seamGap(m) +| rowPitch(m);
 }
 
-inline fn rowPitch(m: utils.Margins) u16 {
+inline fn rowPitch(m: geom.Margins) u16 {
     return m.gap +| 2 *| m.border;
 }
 
@@ -263,7 +264,7 @@ fn tileStackExtra(
     const stack_n: u16 = @intCast(windows.len);
     const row_avail = calcAvailableHeight(h, max_fit, ctx.m, ctx.min_dim);
 
-    const min_col_w: u16 = ctx.min_dim +| utils.doubledBorder(ctx.m);
+    const min_col_w: u16 = ctx.min_dim +| geom.doubledBorder(ctx.m);
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
@@ -277,7 +278,7 @@ fn tileStackExtra(
         const gaps_in_row = tiling.seamGap(ctx.m) +| ctx.m.gap *| cols_in_row;
         const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row *| min_col_w;
         const col_w = row_total_w / cols_in_row;
-        const col_inner_w = tiling.shrinkClamped(col_w, utils.doubledBorder(ctx.m), ctx.min_dim);
+        const col_inner_w = tiling.shrinkClamped(col_w, geom.doubledBorder(ctx.m), ctx.min_dim);
 
         const y_pos = y_offset +| ctx.m.gap +|
             @as(u16, @intCast(@as(u32, row) * @as(u32, row_avail) / @as(u32, max_fit))) +|
@@ -308,7 +309,7 @@ inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, 
 
 /// Total pixel height available for window content after gaps and borders.
 /// Falls back to count * min_dim when margins exceed total_h.
-inline fn calcAvailableHeight(total_h: u16, count: u16, m: utils.Margins, min_dim: u16) u16 {
+inline fn calcAvailableHeight(total_h: u16, count: u16, m: geom.Margins, min_dim: u16) u16 {
     // gap + count * rowPitch: the row seam gaps (one leading, count+1 with the
     // trailing gap folded in) plus each row's doubled border.
     const overhead = m.gap +| count *| rowPitch(m);

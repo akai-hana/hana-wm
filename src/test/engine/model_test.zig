@@ -7,10 +7,10 @@ const testing = std.testing;
 // std.log diagnostics in test binaries, so this stays quiet on success.
 const model = @import("model");
 const constants = @import("constants");
-const utils = @import("utils");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
+const geom = @import("geom");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -55,7 +55,7 @@ fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
 const regCur = helpers.regCur;
 
 /// Floating-anchor window, the shape most store.put fixtures use.
-fn addFloating(m: *Model, win: WindowId, r: utils.Rect) !void {
+fn addFloating(m: *Model, win: WindowId, r: geom.Rect) !void {
     _ = try m.store.put(win, .{
         .mask = model.bit(model.WSId.fromIndex(0)),
         .anchor = .{ .floating = r },
@@ -223,7 +223,7 @@ test "minimize/restore floating preserves rect" {
 
     try minimize.init();
     defer minimize.deinit();
-    const r: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    const r: geom.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 7, r);
     try minimize.minimize(&m, 7);
     try testing.expect(minimize.isMinimized(&m, 7));
@@ -263,7 +263,7 @@ test "fullscreen toggling and minimize-from-fullscreen" {
     try testing.expect(!fullscreen.isFullscreenMode(&m, 1));
 
     // Floating base survives minimize-from-fullscreen.
-    const r: utils.Rect = .{ .x = 5, .y = 6, .width = 640, .height = 480 };
+    const r: geom.Rect = .{ .x = 5, .y = 6, .width = 640, .height = 480 };
     try addFloating(&m, 2, r);
     _ = fullscreen.toggleFullscreen(&m, 2);
     try minimize.minimize(&m, 2);
@@ -352,7 +352,7 @@ test "pinToggle across all modes" {
     var m = makeModel();
 
     regCur(&m, 1); // tiled
-    const r: utils.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
+    const r: geom.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
     try addFloating(&m, 2, r); // floating
     regCur(&m, 3);
     _ = fullscreen.toggleFullscreen(&m, 3); // fullscreen
@@ -556,7 +556,7 @@ test "ConfigureRequest honoring per mode" {
     var m = makeModel();
 
     regCur(&m, 1); // tiled
-    const r0: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    const r0: geom.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 2, r0);
     regCur(&m, 3);
     _ = fullscreen.toggleFullscreen(&m, 3);
@@ -875,7 +875,7 @@ test "floating-base fullscreen minimize/restore never joins a list" {
     var m = makeModel();
 
     regCur(&m, 5);
-    const r: utils.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
+    const r: geom.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
     try addFloating(&m, 6, r);
     _ = fullscreen.toggleFullscreen(&m, 6);
     try minimize.minimize(&m, 6);
@@ -1155,9 +1155,9 @@ test "setFloatingRect updates floating window geometry" {
 
     try fullscreen.init();
     defer fullscreen.deinit();
-    const r: utils.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    const r: geom.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 5, r);
-    const new_r: utils.Rect = .{ .x = 50, .y = 60, .width = 400, .height = 300 };
+    const new_r: geom.Rect = .{ .x = 50, .y = 60, .width = 400, .height = 300 };
     floating.setFloatingRect(&m, 5, new_r);
     try testing.expect(new_r.eql(m.store.get(5).?.anchor.floating));
     // A tiled window is untouched by geometry updates.

@@ -8,7 +8,7 @@ const constants = @import("constants");
 const log = @import("log");
 const parser = @import("parser");
 const types = @import("types");
-const utils = @import("utils");
+const scaling = @import("scaling");
 
 /// One accepted location for a knob: a section name and the key spelling
 /// used inside it.
@@ -438,7 +438,7 @@ fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
         return default;
     }
     if (val.asScalar(types.ScalableValue)) |s| {
-        const f = utils.scaling.asRatio(s);
+        const f = scaling.asRatio(s);
         if (f < 0.0 or f > 1.0) {
             log.warn(
                 "Invalid {s} value {d} (must be 0.0-1.0 or 0-100%), using default",

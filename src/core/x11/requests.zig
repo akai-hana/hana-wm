@@ -1,35 +1,40 @@
-//! Raw XCB primitives here live behind the sync seam's sink
-//! (the sanctioned boundary: send planning in sync.zig, dispatch in
-//! sink.zig), plus a documented allowlist for bar lifecycle, client-protocol,
-//! and non-mutation flushes (dev/scripts/check-layers.sh Rules 1-2).
-//! Atom cache, EWMH root advertisement, property fetchers, and the
-//! configure/raise/grab request shims live here; window parking lives in
-//! sink.zig. Pure geometry (Rect/Margins/scaling) stays in core/pure/utils.zig
-//! so the pure layers never import this file.
+//! X request primitives: the allowlisted home for raw `xcb_*` calls, plus the
+//! documented EWMH/geometry/policy requests that sit above them.
+//!
+//! Split out of the former `wire` module. XCB is a request/reply protocol, so
+//! this is the request layer: `configureWindow`, `raiseWindow`,
+//! `setBorderPixel`, the server grab pair, the poll-first reply collector, the
+//! EWMH root advertisement, and the one xcb-typed geometry adapter. Atom ids
+//! come from `atoms.zig`; dispatch of these requests happens in `sink.zig`,
+//! which is the sanctioned seam (see dev/scripts/check-layers.sh Rules 1-2).
+//! Geometry itself stays in `architecture/geom.zig` so the pure layers never
+//! import this file.
 
 const std = @import("std");
 
-// Imported from the leaf xcb hub (pure @cImport) rather than from `core`,
-// so this layer stays a DAG root: core imports utils which imports wire, and
-// wire must not reach back into core (that was the core -> utils -> wire ->
-// core cycle). The type aliases mirror Connection / Screen.
-const xcb = @import("xcb").xcb;
-const Connection = *xcb.xcb_connection_t;
-const Screen = *xcb.xcb_screen_t;
-const utils = @import("utils");
+// Imported from the leaf xcb hub (pure @cImport) rather than from `core`, so
+// this layer stays a DAG root: `core` re-exports these decls upward, and
+// reaching back into it here would close the loop.
+const xcbmod = @import("xcb");
+const xcb = xcbmod.xcb;
+const Connection = xcbmod.Connection;
+const Screen = xcbmod.Screen;
+
+const geom = @import("geom");
+const atoms = @import("atoms");
 
 // Geometry <-> wire conversions
 
-/// Builds a Rect from a get_geometry reply (moved out of Rect so the pure
-/// geometry type in utils.zig stays xcb-free). The wire border_width feeds
-/// the Rect's border_width.
-pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect {
+/// Builds a Rect from a get_geometry reply. Deliberately on the xcb side of
+/// the boundary so `geom.Rect` itself stays xcb-free and the pure layers can
+/// hold one; the wire border_width feeds the Rect's border_width.
+pub inline fn rectFromXcb(reply: *const xcb.xcb_get_geometry_reply_t) geom.Rect {
     return .{
-        .x = geom.x,
-        .y = geom.y,
-        .width = geom.width,
-        .height = geom.height,
-        .border_width = geom.border_width,
+        .x = reply.x,
+        .y = reply.y,
+        .width = reply.width,
+        .height = reply.height,
+        .border_width = reply.border_width,
     };
 }
 
@@ -43,15 +48,15 @@ pub inline fn rectFromXcb(geom: *const xcb.xcb_get_geometry_reply_t) utils.Rect 
 pub fn configureWindow(
     conn: Connection,
     win: u32,
-    rect: utils.Rect,
+    rect: geom.Rect,
     stack_mode: ?u32,
     border_width: ?u16,
 ) void {
     var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
         xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
     var values = [_]u32{
-        utils.toXcbCoord(rect.x),
-        utils.toXcbCoord(rect.y),
+        geom.toXcbCoord(rect.x),
+        geom.toXcbCoord(rect.y),
         rect.width,
         rect.height,
         0, // border_width slot
@@ -96,80 +101,6 @@ inline fn ungrabServer(conn: Connection) void {
 pub inline fn ungrabAndFlush(conn: Connection) void {
     ungrabServer(conn);
     _ = xcb.xcb_flush(conn);
-}
-
-// Atom cache
-//
-// Field names match X11 atom strings exactly, so getAtomCached resolves
-// them with a single @field call: no switch, no enum, no second place to
-// add entries when a new atom is needed.
-const AtomCache = struct {
-    WM_PROTOCOLS: u32,
-    WM_DELETE_WINDOW: u32,
-    WM_TAKE_FOCUS: u32,
-    _NET_WM_NAME: u32,
-    UTF8_STRING: u32,
-    WM_CLASS: u32,
-    // Root window EWMH-conformance atoms, see advertiseEwmhSupport() below.
-    _NET_SUPPORTED: u32,
-    _NET_SUPPORTING_WM_CHECK: u32,
-    // Bar window property atoms, batched here so setWindowProperties pays
-    // zero X round-trips instead of 10 serial ones.
-    _NET_WM_STRUT_PARTIAL: u32,
-    _NET_WM_WINDOW_TYPE: u32,
-    _NET_WM_WINDOW_TYPE_DOCK: u32,
-    _NET_WM_STATE: u32,
-    _NET_WM_STATE_FULLSCREEN: u32,
-    _NET_WM_STATE_ABOVE: u32,
-    _NET_WM_STATE_STICKY: u32,
-    _NET_WM_ALLOWED_ACTIONS: u32,
-    _NET_WM_ACTION_CLOSE: u32,
-    _NET_WM_ACTION_ABOVE: u32,
-    _NET_WM_ACTION_STICK: u32,
-    _NET_WM_PID: u32,
-    // Root-window focus advertisement: read by focus.zig's setFocus path.
-    _NET_ACTIVE_WINDOW: u32,
-    // X resource-database atom: read by scale.zig for Xft.dpi.
-    RESOURCE_MANAGER: u32,
-};
-
-var atom_cache: ?AtomCache = null;
-
-/// Interns all atoms in a single round-trip batch. Atom names come from
-/// `AtomCache`'s field names at comptime, so adding a field is the only
-/// change required, no parallel array, no index-order mismatch risk.
-pub fn initAtomCache(conn: Connection) !void {
-    const fields = std.meta.fields(AtomCache);
-    var cookies: [fields.len]xcb.xcb_intern_atom_cookie_t = undefined;
-
-    inline for (fields, 0..) |f, i|
-        cookies[i] = xcb.xcb_intern_atom(conn, 0, @intCast(f.name.len), f.name.ptr);
-
-    var cache: AtomCache = undefined;
-    inline for (fields, 0..) |f, i| {
-        const reply = xcb.xcb_intern_atom_reply(conn, cookies[i], null) orelse {
-            for (i + 1..fields.len) |j| xcb.xcb_discard_reply(conn, cookies[j].sequence);
-            return error.AtomFailed;
-        };
-        defer std.c.free(reply);
-        @field(cache, f.name) = reply.*.atom;
-    }
-    atom_cache = cache;
-}
-
-/// Looks up a cached atom by name, or null when the atom cache isn't ready.
-/// Unknown names produce a compile error rather than a silent runtime failure.
-pub inline fn getAtomCached(comptime name: []const u8) ?u32 {
-    comptime if (!@hasField(AtomCache, name)) @compileError("atom not in cache: " ++ name);
-    const cache = atom_cache orelse return null;
-    return @field(cache, name);
-}
-
-/// Like getAtomCached but returns 0 (the X11 "no atom" sentinel) instead of
-/// null when the cache isn't ready. Callers guard `if (atom != 0)` before
-/// issuing an X request.
-pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
-    return getAtomCached(name) orelse 0;
 }
 
 /// Fires a replace-mode xcb_change_property for `value` typed `[]const T`.
@@ -233,11 +164,11 @@ const supported_atoms = [_][]const u8{
 // never advertised, and vice versa is a compile error).
 comptime {
     @setEvalBranchQuota(100000);
-    const fields = std.meta.fieldNames(AtomCache);
+    const fields = std.meta.fields(atoms.AtomCache);
     for (supported_atoms) |name| {
         var found = false;
         for (fields) |f| {
-            if (std.mem.eql(u8, f, name)) found = true;
+            if (std.mem.eql(u8, f.name, name)) found = true;
         }
         if (!found) @compileError("supported_atoms has no AtomCache field: " ++ name);
     }
@@ -251,8 +182,8 @@ comptime {
 /// take more conservative, in GLFW's case broken, code paths (see
 /// `supported_atoms`).
 ///
-/// Must run once at startup, after initAtomCache() and before any client can
-/// map a window.
+/// Must run once at startup, after atoms.initAtomCache() and before any client
+/// can map a window.
 ///
 /// Known gaps between `_NET_SUPPORTED` and full behaviour: document, don't
 /// narrow; external tools key on the listed hints, and the list above is
@@ -271,10 +202,10 @@ comptime {
 /// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
 ///   `_NET_STRUT_PARTIAL` feedback instead.
 pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
-    const supporting_wm_check = getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return;
-    const net_wm_name = getAtomCached("_NET_WM_NAME") orelse return;
-    const utf8_string = getAtomCached("UTF8_STRING") orelse return;
-    const net_supported = getAtomCached("_NET_SUPPORTED") orelse return;
+    const supporting_wm_check = atoms.getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return;
+    const net_wm_name = atoms.getAtomCached("_NET_WM_NAME") orelse return;
+    const utf8_string = atoms.getAtomCached("UTF8_STRING") orelse return;
+    const net_supported = atoms.getAtomCached("_NET_SUPPORTED") orelse return;
 
     // A small, invisible identity window. Override-redirect so hana's own
     // SubstructureRedirect handling never tries to manage it as a client.
@@ -293,7 +224,7 @@ pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
 
     var supported: [supported_atoms.len]xcb.xcb_atom_t = undefined;
     inline for (supported_atoms, 0..) |name, i|
-        supported[i] = getAtomCached(name) orelse xcb.XCB_ATOM_NONE;
+        supported[i] = atoms.getAtomCached(name) orelse xcb.XCB_ATOM_NONE;
     changeProperty(conn, root, net_supported, xcb.xcb_atom_t, xcb.XCB_ATOM_ATOM, &supported);
 }
 

@@ -1,4 +1,4 @@
-//! Headless tests for utils.IdMap, the fixed-capacity window-ID hash map that
+//! Headless tests for idmap.IdMap, the fixed-capacity window-ID hash map that
 //! backs the ICCCM focus-property cache.
 //!
 //! The map's probing/tombstone/compaction paths are easy to get subtly wrong
