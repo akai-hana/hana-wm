@@ -4,9 +4,11 @@
 //! exports only shared vocabulary types, queries, and core focus/tiling
 //! intrinsics.
 const std = @import("std");
-const utils = @import("utils");
 const constants = @import("constants");
 
+const bounded = @import("bounded");
+const cycle = @import("cycle");
+const geom = @import("geom");
 /// Alias of the canonical WindowId (`@import("ids").WindowId`; see ids.zig).
 pub const WindowId = @import("ids").WindowId;
 /// Alias of the canonical WorkspaceId (`@import("ids").WorkspaceId`). Model
@@ -82,7 +84,7 @@ pub const BaseMode = union(enum) {
     /// holds a tiled window; findHome). Visibility on other tagged workspaces
     /// is a sync-time mask filter (engine stays mask-agnostic).
     tiled,
-    floating: utils.Rect,
+    floating: geom.Rect,
 };
 
 /// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden
@@ -113,7 +115,7 @@ const WsState = struct {
 
 /// Bounded sorted-key collection re-exported via the utils facade; the model's
 /// window store and the sync ledger share it without either naming core.
-pub const Store = utils.Store;
+pub const Store = bounded.Store;
 
 /// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated);
 /// 16 keeps the per-workspace focus MRU small. Per-workspace tiled membership
@@ -121,8 +123,8 @@ pub const Store = utils.Store;
 pub const store_capacity = 128;
 pub const mru_capacity = 16;
 pub const max_tiled_per_ws = constants.max_tiled_windows;
-const OrderList = utils.BoundedList(WindowId, max_tiled_per_ws);
-const MruList = utils.BoundedList(WindowId, mru_capacity);
+const OrderList = bounded.BoundedList(WindowId, max_tiled_per_ws);
+const MruList = bounded.BoundedList(WindowId, mru_capacity);
 const StoreT = Store(WindowId, Entry, store_capacity);
 
 /// Index (workspace id) of the lowest set bit in `m`, or null for the zero
@@ -350,7 +352,7 @@ pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
     const len = list.len;
     if (len < 2) return;
     const from = list.indexOfScalar(win) orelse return;
-    moveTiled(list, win, from, utils.wrapIndex(from, dir, len));
+    moveTiled(list, win, from, cycle.wrapIndex(from, dir, len));
 }
 
 /// Slot swap: exchanges the first two tiled slots of the current workspace

@@ -9,7 +9,8 @@ const constants = @import("constants");
 const log = @import("log");
 
 const types = @import("types");
-const utils = @import("utils");
+const atoms = @import("atoms");
+const scaling = @import("scaling");
 
 const baseline_dpi = constants.baseline_dpi;
 
@@ -110,7 +111,7 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
 fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     // Resolve the atom from the shared cache; a property request with atom 0
     // just comes back empty, so a cache miss reads as "no Xft.dpi".
-    const atom = utils.getAtomOrZero("RESOURCE_MANAGER");
+    const atom = atoms.getAtomOrZero("RESOURCE_MANAGER");
     const root = screen.root;
 
     // Xft.dpi is almost always near the start; a smaller first fetch is
@@ -172,7 +173,7 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 /// Percentage values are relative to font_baseline_height (1080px) rather than the
 /// screen baseline, so font sizes degrade more gracefully on smaller screens.
 /// Note the asymmetry with scaleBarHeight below: that sibling delegates to
-/// utils.scaling.scaleToPixels because bar height is an absolute figure against
+/// scaling.scaleToPixels because bar height is an absolute figure against
 /// the screen baseline, while font size keeps this inline relative-to-1080 form.
 pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
     const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
@@ -180,12 +181,12 @@ pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
         value.value * (screen_height / font_baseline_height)
     else
         value.value;
-    return utils.scaling.roundToU16(raw, 1.0);
+    return scaling.roundToU16(raw, 1.0);
 }
 
 /// Converts a scalable bar height value to pixels, clamped to bar_min_height_px.
 pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
-    const scaled_px: f32 = utils.scaling.scaleToPixels(value, screen_height_f);
-    return @max(bar_min_height_px, utils.scaling.roundToU16(scaled_px, 0.0));
+    const scaled_px: f32 = scaling.scaleToPixels(value, screen_height_f);
+    return @max(bar_min_height_px, scaling.roundToU16(scaled_px, 0.0));
 }

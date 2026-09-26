@@ -5,7 +5,7 @@
 //! server-grab reconcile add, and how does it scale with window count?
 //!
 //! Every tiling op routes through actions -> pipeline.reconcileUnderGrabNow
-//! -> sync.reconcileUnderGrab -> sync.reconcile. reconcile replays the FULL
+//! -> reconcile.reconcileUnderGrab -> reconcile.run. reconcile replays the FULL
 //! desired wire state for EVERY stored window (all workspaces) each reconcile,
 //! then delta-sends only what changed (no-op elision). The SEND is O(changed)
 //! but the COMPUTE is O(total windows), so a retile's CPU cost grows with
@@ -13,13 +13,16 @@
 
 const std = @import("std");
 const model = @import("model");
-const utils = @import("utils");
-const sync = @import("sync");
 const tiling = @import("tiling");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 
+const geom = @import("geom");
+const time = @import("time");
 // Latency instrumentation only runs its full loops + timing output under
+const ledger = @import("ledger");
+const reconcile = @import("reconcile");
+const sink = @import("sink");
 // `-Dbench`; the default suite keeps a silent smoke so `zig build
 // test` never writes to stderr (the runner flags test stderr as `failed
 // command:` even on success).
@@ -29,7 +32,7 @@ const WindowId = model.WindowId;
 
 const makeModel = helpers.makeModel;
 const regCur = helpers.regCur;
-const nowNs = utils.monotonicNs;
+const nowNs = time.monotonicNs;
 
 const CountingSink = helpers.TestSink(.category);
 
@@ -44,8 +47,8 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         for (0..n) |i| regCur(&m, @intCast(i + 1));
         model.setFocus(&m, 1);
 
-        sync.init();
-        defer sync.init();
+        ledger.init();
+        defer ledger.init();
 
         // Warm: seed steady-state ledger, then measure one steady-state reconcile
         // (all desire compute + ledger scans; sends mostly elided).
@@ -57,7 +60,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         var move_ctx = makeCtx(move.sink(), colorOfFocused, helpers.std_wa);
         m.ws[m.current.index].params.kind = 1;
         const t1 = nowNs();
-        sync.reconcile(&m, &move_ctx, .{});
+        reconcile.run(&m, &move_ctx, .{});
         const move_ns: f64 = @floatFromInt(nowNs() - t1);
 
         if (bench)
@@ -84,8 +87,8 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         }
         model.setFocus(&m, 1);
 
-        sync.init();
-        defer sync.init();
+        ledger.init();
+        defer ledger.init();
 
         // Warm, then measure one steady-state reconcile.
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
@@ -106,10 +109,10 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     for (0..n) |i| regCur(&m, @intCast(i + 1));
     model.setFocus(&m, 1);
 
-    sync.init();
-    defer sync.init();
+    ledger.init();
+    defer ledger.init();
 
-    const screen: utils.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
+    const screen: geom.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
     var order_buf: [128]WindowId = undefined;
     var hints_buf: [128]model.SizeHints = undefined;
     var placements: tiling.List = .{};
@@ -155,18 +158,18 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         for (0..n) |i| regCur(&m, @intCast(i + 1));
         model.setFocus(&m, 1);
 
-        sync.init();
-        defer sync.init();
+        ledger.init();
+        defer ledger.init();
 
         var warm = CountingSink{};
         var warm_ctx = makeCtx(warm.sink(), colorOfFocused, helpers.std_wa);
-        sync.reconcile(&m, &warm_ctx, .{});
+        reconcile.run(&m, &warm_ctx, .{});
 
-        var sink = CountingSink{};
-        var ctx = makeCtx(sink.sink(), colorOfFocused, helpers.std_wa);
+        var counting = CountingSink{};
+        var ctx = makeCtx(counting.sink(), colorOfFocused, helpers.std_wa);
         m.ws[m.current.index].params.kind = 1;
         ctx.sink.grabServer();
-        sync.reconcile(&m, &ctx, .{});
+        reconcile.run(&m, &ctx, .{});
         ctx.sink.ungrabAndFlush();
 
         if (bench)

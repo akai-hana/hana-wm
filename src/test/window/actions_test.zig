@@ -10,12 +10,12 @@ const std = @import("std");
 const core = @import("core");
 const model = @import("model");
 const pipeline = @import("pipeline");
-const sync = @import("sync");
 const actions = @import("actions");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
-const utils = @import("utils");
+const geom = @import("geom");
 
+const ledger = @import("ledger");
 test "actions: mapRequest admits, maps, and focuses a window" {
     var fx = fixture.setUp("actions_test") orelse return;
     defer fx.deinit();
@@ -42,7 +42,7 @@ test "actions: mapRequest admits a float-rule window floating at its rect" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    const rect = utils.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
+    const rect = geom.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
     actions.mapRequest(win, 0, true, rect);
     fx.flush();
 
@@ -285,7 +285,7 @@ test "actions: unmanage drops the window and re-focuses" {
     actions.unmanage(&quiet, w1);
     fx.flush();
     try std.testing.expect(!m.store.has(w1));
-    try std.testing.expect(sync.lastRectFor(w1) == null); // ledger forgot it
+    try std.testing.expect(ledger.lastRectFor(w1) == null); // ledger forgot it
     try std.testing.expect(m.store.has(w2));
     try std.testing.expectEqual(w2, m.focused.?);
     try fx.expectTiledGeometry(w2);

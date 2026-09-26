@@ -8,12 +8,13 @@ const std = @import("std");
 const testing = std.testing;
 const model = @import("model");
 const constants = @import("constants");
-const sync = @import("sync");
-const utils = @import("utils");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
 
+const time = @import("time");
 // Bench marks only run (full iterations + timing output) under `-Dbench`.
+const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 const bench = build_options.bench;
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
@@ -25,7 +26,7 @@ const WSId = model.WSId;
 
 const makeModel = helpers.makeModel;
 
-const nowNs = utils.monotonicNs;
+const nowNs = time.monotonicNs;
 
 const regCur = helpers.regCur;
 
@@ -168,14 +169,14 @@ test "bench: reconcile pass (50 windows)" {
 
     var recorder = helpers.TestSink(.none){};
 
-    sync.init();
-    defer sync.init();
+    ledger.init();
+    defer ledger.init();
 
     var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
 
     const iterations: usize = if (bench) 1_000 else 1;
     const t0 = nowNs();
-    for (0..iterations) |_| sync.reconcile(&m, &ctx, .{});
+    for (0..iterations) |_| reconcile.run(&m, &ctx, .{});
     const elapsed_ns = nowNs() - t0;
     const per_pass_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
     if (bench) std.debug.print("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
@@ -194,14 +195,14 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     const e = m.store.getPtr(dragged).?;
     e.anchor = .{ .floating = .{ .x = 100, .y = 100, .width = 300, .height = 200 } };
 
-    sync.init();
-    defer sync.init();
+    ledger.init();
+    defer ledger.init();
 
     var recorder = helpers.TestSink(.none){};
     var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
 
     // Warm once so the sent ledger is seeded (steady-state drag).
-    sync.reconcile(&m, &ctx, .{});
+    reconcile.run(&m, &ctx, .{});
 
     const iterations: usize = if (bench) 100_000 else 1;
 
@@ -216,7 +217,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
             },
             .tiled => unreachable,
         }
-        sync.reconcileDragTick(&m, recorder.sink(), dragged);
+        reconcile.reconcileDragTick(&m, recorder.sink(), dragged);
     }
     const elapsed2 = nowNs() - t2;
     const per_tick_ns = @as(f64, @floatFromInt(elapsed2)) / @as(f64, @floatFromInt(iterations));
@@ -232,7 +233,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
             },
             .tiled => unreachable,
         }
-        sync.reconcile(&m, &ctx, .{});
+        reconcile.run(&m, &ctx, .{});
     }
     const elapsed1 = nowNs() - t1;
     const per_full_ns = @as(f64, @floatFromInt(elapsed1)) / @as(f64, @floatFromInt(iterations));
@@ -290,30 +291,30 @@ test "bench: store.get linear scan (max_tiled_windows, worst case)" {
 
 test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     // The sync sent-ledger access pattern, isolated: reconcile touches the
-    // ledger with exactly one get-or-put per window per reconcile (see sync.reconcile).
+    // ledger with exactly one get-or-put per window per reconcile (see reconcile.run).
     // COLD = fresh ledger first-touch (post-boot reconcile); WARM = already-seeded
     // ledger, hit-only sweep (steady-state reconcile; model.Store iterates sorted-key
     // order, so the sweep walks ascending window ids).
-    sync.init();
-    defer sync.init();
+    ledger.init();
+    defer ledger.init();
 
     const n: usize = 64;
 
     const it_cold: usize = if (bench) 20_000 else 1;
     const t0 = nowNs();
     for (0..it_cold) |_| {
-        sync.init();
-        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1));
+        ledger.init();
+        for (0..n) |i| _ = ledger.sentGetOrPut(@intCast(i + 1));
     }
     const cold_ns = nowNs() - t0;
     const per_cold_ns = @as(f64, @floatFromInt(cold_ns)) / @as(f64, @floatFromInt(it_cold * n));
 
-    sync.init();
-    for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001));
+    ledger.init();
+    for (0..n) |i| _ = ledger.sentGetOrPut(@intCast(i + 1001));
     const it_warm: usize = if (bench) 20_000 else 1;
     const t1 = nowNs();
     for (0..it_warm) |_| {
-        for (0..n) |i| _ = sync.sentGetOrPut(@intCast(i + 1001));
+        for (0..n) |i| _ = ledger.sentGetOrPut(@intCast(i + 1001));
     }
     const warm_ns = nowNs() - t1;
     const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));

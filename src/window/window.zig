@@ -6,7 +6,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const constants = @import("constants");
 const masks = @import("masks");
 const log = @import("log");
@@ -15,7 +14,7 @@ const focus = @import("focus");
 const icccm = @import("icccm");
 const build_options = @import("build_options");
 const window_mods = @import("window_modules").modules;
-const screen_mod = @import("screen");
+const usable_area_mod = @import("usable_area");
 const wincache = @import("wincache");
 const borders = @import("borders");
 const pipeline = @import("pipeline");
@@ -23,9 +22,16 @@ const actions = @import("actions");
 const persist = @import("persist");
 const contract = @import("contract");
 const model_mod = @import("model");
-const sync = @import("sync");
 
+const atoms = @import("atoms");
+const bounded = @import("bounded");
+const geom = @import("geom");
+const requests = @import("requests");
+const scaling = @import("scaling");
+const time = @import("time");
 // Private transition-layer gate for mutable model access (per-owner token,
+const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 // see tracking.gate).
 const gate: pipeline.Gate = .{};
 
@@ -132,7 +138,7 @@ const State = struct {
     float_rules: std.StringHashMapUnmanaged(void) = .{},
 
     // Child XID -> managed toplevel XID (see "Child window resolution").
-    child_cache: utils.BoundedList(ChildEntry, child_cache_capacity) = .{},
+    child_cache: bounded.BoundedList(ChildEntry, child_cache_capacity) = .{},
 
     // True when a grab-flush path already swept floating borders this batch,
     // so the event loop can skip the redundant second sweep. Reset at the
@@ -158,11 +164,11 @@ pub fn markBordersFlushed() void {
 }
 
 /// Returns null if the window does not exist or is not yet mapped.
-pub fn getGeometry(conn: core.Connection, win: u32) ?utils.Rect {
+pub fn getGeometry(conn: core.Connection, win: u32) ?geom.Rect {
     const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse
         return null;
     defer std.c.free(reply);
-    return utils.rectFromXcb(reply);
+    return requests.rectFromXcb(reply);
 }
 
 // Child window resolution
@@ -310,7 +316,7 @@ inline fn tilingActive() bool {
 
 /// True for the null window, the root, or the bar, never valid focus/manage targets.
 pub inline fn isInvalidWindow(win: u32) bool {
-    return win == 0 or win == core.getState().root or screen_mod.isSurfaceWindow(win);
+    return win == 0 or win == core.getState().root or usable_area_mod.isSurfaceWindow(win);
 }
 
 inline fn isValidManagedWindow(win: u32) bool {
@@ -494,7 +500,7 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     const cs = core.getState();
 
     // Workspace resolution cookies (conditional).
-    const wm_class_atom = utils.getAtomOrZero("WM_CLASS");
+    const wm_class_atom = atoms.getAtomOrZero("WM_CLASS");
     const c_wm_class: ?xcb.xcb_get_property_cookie_t =
         if (cs.config.workspaces.rules.items.len > 0 and wm_class_atom != 0)
             icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, constants.property_max_length)
@@ -503,7 +509,7 @@ fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
 
     const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t =
         if (state.?.spawn_queue.items.len > 0)
-            icccm.firePropQuery(conn, win, utils.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 1)
+            icccm.firePropQuery(conn, win, atoms.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 1)
         else
             null;
 
@@ -596,7 +602,7 @@ fn snapshotSpawnCursor(conn: core.Connection) void {
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
-    const t0: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const t0: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Double-manage guard: a window can send multiple MapRequest events (e.g.
     // an unmap+remap race while the first is still processing); without it,
@@ -617,7 +623,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // The server processes all five requests in parallel while we do pure
     // local bookkeeping below.
     const cookies = fireAdmissionCookies(conn, win);
-    const t_fire: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const t_fire: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Drain replies sequentially
     const decision = resolveAdmissionDecision(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
@@ -625,7 +631,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const on_current = target_ws.eql(current_ws);
 
     drainAdmissionCookies(conn, win, cookies, false);
-    const t_drain: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const t_drain: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
@@ -634,7 +640,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     admitWindow(win, target_ws.index, on_current, decision.float);
 
     if (build_options.profile_key) {
-        const t_map = utils.monotonicNs();
+        const t_map = time.monotonicNs();
         log.info("[TIMING] spawn 0x{x}: local={d}us drain={d}us after_drain={d}us total={d}us", .{
             win,
             @as(u64, @intCast(t_fire - t0)) / 1000,
@@ -660,11 +666,11 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 /// `target_ws` is the already-resolved target workspace and `float` mirrors the
 /// MapRequest admission decision. The float seed's geometry is fetched here: at
 /// admission there is no LastSent entry yet (no reconcile has run), so
-/// detachTiledToFloating's `sync.lastRectFor` would find nothing; the one
+/// detachTiledToFloating's `ledger.lastRectFor` would find nothing; the one
 /// extra xcb_get_geometry round-trip supplies the window's natural rect.
 fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool) void {
     const cs = core.getState();
-    const float_rect: ?utils.Rect = if (float) getGeometry(cs.conn, win) else null;
+    const float_rect: ?geom.Rect = if (float) getGeometry(cs.conn, win) else null;
     actions.mapRequest(win, target_ws, on_current, float_rect);
     cacheChildWindow(win, cs.root);
 }
@@ -832,7 +838,7 @@ pub fn adoptRootWindows() !usize {
         if (tracking.isManaged(win)) continue;
 
         // The WM's own bar window is a root child we created; leave it alone.
-        if (screen_mod.surfaceWindow()) |bar_win| if (bar_win == win) continue;
+        if (usable_area_mod.surfaceWindow()) |bar_win| if (bar_win == win) continue;
 
         // The restore-record lookup is a local scan; carry the result into the
         // drain loop so it does no X work before consuming each batch.
@@ -966,16 +972,16 @@ const geometry_mask: u16 =
     xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
 
-fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
+fn sendConfigureNotify(win: u32, rect: geom.Rect) void {
     var ev = std.mem.zeroes(xcb.xcb_configure_notify_event_t);
     ev.response_type = xcb.XCB_CONFIGURE_NOTIFY;
     ev.event = win;
     ev.window = win;
-    ev.x = geom.x;
-    ev.y = geom.y;
-    ev.width = geom.width;
-    ev.height = geom.height;
-    ev.border_width = geom.border_width;
+    ev.x = rect.x;
+    ev.y = rect.y;
+    ev.width = rect.width;
+    ev.height = rect.height;
+    ev.border_width = rect.border_width;
     _ = xcb.xcb_send_event(
         core.getState().conn,
         0,
@@ -995,9 +1001,9 @@ fn sendConfigureNotify(win: u32, geom: utils.Rect) void {
 ///      never retiled; a fallback, not a hot path.
 ///
 /// Returns null when even the fallback fails (window gone).
-fn resolveConfigureGeometry(win: u32) ?utils.Rect {
+fn resolveConfigureGeometry(win: u32) ?geom.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
-    if (sync.truthRect(pipeline.model(), win)) |rect| {
+    if (reconcile.truthRect(pipeline.model(), win)) |rect| {
         // Report the border width we actually last sent for this window
         // (the ledger), not the global config default. The two differ before
         // the first reconcile and for per-window overrides; a wrong value here
@@ -1005,7 +1011,7 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
         const border: u16 = if (!build_options.has_tiling)
             0
         else
-            sync.lastBorderWidthFor(win) orelse core.borderWidth();
+            ledger.lastBorderWidthFor(win) orelse core.borderWidth();
         return .{
             .x = rect.x,
             .y = rect.y,
@@ -1020,8 +1026,8 @@ fn resolveConfigureGeometry(win: u32) ?utils.Rect {
 }
 
 fn sendSyntheticConfigureNotify(win: u32) void {
-    const geom = resolveConfigureGeometry(win) orelse return;
-    sendConfigureNotify(win, geom);
+    const rect = resolveConfigureGeometry(win) orelse return;
+    sendConfigureNotify(win, rect);
 }
 
 fn handleManagedConfigureRequest(
@@ -1051,7 +1057,7 @@ fn handleManagedConfigureRequest(
                 sendSyntheticConfigureNotify(win);
                 return;
             }
-            // Don't teleport an off-screen window onto the visible screen.
+            // Don't teleport an off-screen window onto the visible usable area.
             // A parked (off-workspace) or non-current-workspace floating
             // window's ConfigureRequest must update its model rect (done in the
             // module above) but not move the X window, which would flash it
@@ -1082,7 +1088,7 @@ fn handleManagedConfigureRequest(
 /// doesn't re-assert the WM default (reverting the honored value). No-op on
 /// non-tiling builds.
 fn noteHonoredBorderWidth(win: u32, bw: u16) void {
-    if (build_options.has_tiling) sync.markSentBorderWidth(win, bw);
+    if (build_options.has_tiling) ledger.markSentBorderWidth(win, bw);
 }
 
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
@@ -1126,8 +1132,8 @@ fn sendRequestedConfigure(
     mask: u16,
 ) void {
     const fields = .{
-        .{ xcb.XCB_CONFIG_WINDOW_X, utils.toXcbCoord(event.x) },
-        .{ xcb.XCB_CONFIG_WINDOW_Y, utils.toXcbCoord(event.y) },
+        .{ xcb.XCB_CONFIG_WINDOW_X, geom.toXcbCoord(event.x) },
+        .{ xcb.XCB_CONFIG_WINDOW_Y, geom.toXcbCoord(event.y) },
         .{ xcb.XCB_CONFIG_WINDOW_WIDTH, event.width },
         .{ xcb.XCB_CONFIG_WINDOW_HEIGHT, event.height },
         .{ xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, event.border_width },
@@ -1220,7 +1226,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // and bump the window fact so surfaces reading titles from the cache (the
     // bar) repaint. The WM is now the sole owner of title freshness; the bar
     // does no title property fetching at all.
-    const net_wm_name = utils.getAtomOrZero("_NET_WM_NAME");
+    const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
         if (wincache.refreshTitle(conn, event.window)) core.window.bump();
         return;
@@ -1235,7 +1241,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         return;
     }
 
-    if (event.atom == utils.getAtomOrZero("WM_PROTOCOLS") or
+    if (event.atom == atoms.getAtomOrZero("WM_PROTOCOLS") or
         event.atom == xcb.XCB_ATOM_WM_HINTS)
     {
         icccm.refreshCachedPropHalf(conn, event.window, event.atom);
@@ -1254,8 +1260,8 @@ fn extractFieldPair(
     comptime off: usize,
 ) SizePair {
     if (want and field_count >= off + 2) return .{
-        .width = utils.scaling.clampToU16(fields[off]),
-        .height = utils.scaling.clampToU16(fields[off + 1]),
+        .width = scaling.clampToU16(fields[off]),
+        .height = scaling.clampToU16(fields[off + 1]),
     };
     return .{ .width = 0, .height = 0 };
 }
@@ -1399,7 +1405,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     // Unhonorable pager requests are dropped silently otherwise; both warns
     // fire once per process so a looping pager cannot flood the log.
-    const net_active = utils.getAtomOrZero("_NET_ACTIVE_WINDOW");
+    const net_active = atoms.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
         if (!warned_active_ignore) {
             warned_active_ignore = true;
@@ -1408,10 +1414,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         return;
     }
 
-    const net_wm_state = utils.getAtomOrZero("_NET_WM_STATE");
+    const net_wm_state = atoms.getAtomOrZero("_NET_WM_STATE");
     if (net_wm_state == 0 or event.type != net_wm_state) return;
 
-    const fs_atom = utils.getAtomOrZero("_NET_WM_STATE_FULLSCREEN");
+    const fs_atom = atoms.getAtomOrZero("_NET_WM_STATE_FULLSCREEN");
     if (fs_atom == 0) return;
     const prop1 = event.data.data32[1];
     const prop2 = event.data.data32[2];

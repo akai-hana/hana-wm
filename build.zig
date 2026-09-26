@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces, .x_gated = false },
         .{ .name = "schema_test", .gate = true, .x_gated = false },
         .{ .name = "tiling_test", .gate = has_tiling, .x_gated = false },
-        .{ .name = "sync_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
+        .{ .name = "reconcile_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
         .{ .name = "tracking_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
         .{ .name = "workspaces_test", .gate = has_workspaces, .x_gated = false },
         .{ .name = "config_test", .gate = true, .x_gated = false },
@@ -1579,7 +1579,7 @@ const Module = struct {
         }
     }
 
-    /// Layer-purity assertion for the pure layers (model, tiling, config),
+    /// Layer-purity assertion for the pure layers (architecture, tiling, config),
     /// enforced on the SAME import edges wireAll already derives for
     /// cross-wiring — one graph, so it cannot drift from a second hand-kept
     /// dependency list. The hub layers (core, window, input, bar) may import
@@ -1591,8 +1591,9 @@ const Module = struct {
     /// cycle (config now parses keysym names through the pure `keysyms`).
     ///
     /// This check is the IMPORT-EDGE guard only. The complementary body/
-    /// reference sweep (any bare `xcb` token in the pure vocabulary, tiling,
-    /// and config, comments stripped) lives in check-layers.sh Rule 3 — an
+    /// reference sweep (any bare `xcb` token in the xcb-free vocabulary files
+    /// — architecture/model.zig and architecture/geom.zig — plus tiling and
+    /// config, comments stripped) lives in check-layers.sh Rule 3 — an
     /// import of an xcb-using module passes here yet still lets `xcb` reach a
     /// pure file by re-export, so Rule 3 -- not this function -- is the sole
     /// guard on pure-layer xcb BODIES.
@@ -1601,12 +1602,14 @@ const Module = struct {
         rel_path: []const u8,
         edges: []const []const u8,
     ) !void {
-        // The pure data model is the one pure-root file living in the core
-        // hub's vocabulary dir (src/core/pure/). The shelf siblings there are
-        // xcb-free by construction (and covered by Rule 3's body sweep for
-        // model only; contract's xcb event TYPES keep it out of the sweep).
-        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/pure/model.zig"))
-            "model"
+        // The xcb-free architecture vocabulary (model + geom) is the pure root
+        // living in the core hub's architecture dir. The shelf siblings in
+        // src/core/pure/ are xcb-free by construction; contract's xcb event
+        // TYPES keep architecture/contract.zig out of both this guard and
+        // Rule 3's body sweep.
+        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig") or
+            std.mem.endsWith(u8, rel_path, "src/core/architecture/geom.zig"))
+            "architecture"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
             "tiling"
         else if (std.mem.startsWith(u8, rel_path, "src/config/"))
@@ -1617,7 +1620,7 @@ const Module = struct {
         for (edges) |dep| {
             if (!pureLayerAllows(layer, dep)) {
                 std.debug.print(
-                    "Error: layer guard: pure-{s} module '{s}' imports hub module '{s}'. The pure layers may only import the shared utility shelf, `model`, and their own layer; see assertPureLayerImports in build.zig.\n",
+                    "Error: layer guard: pure-{s} module '{s}' imports hub module '{s}'. The pure layers may only import the shared utility shelf, the xcb-free architecture vocabulary, and their own layer; see assertPureLayerImports in build.zig.\n",
                     .{ layer, name, dep },
                 );
                 return error.LayerGuardViolation;
@@ -1626,19 +1629,22 @@ const Module = struct {
     }
 
     /// The allowed-import policy behind `assertPureLayerImports`. The pure
-    /// vocabulary (src/core/pure/) is xcb-free by construction and safe for
-    /// every layer; `model` is the shared data model; the per-layer extras
-    /// are the pure neighborhoods each layer legitimately reaches (tiling's
-    /// own seam plus the `contract` decls; config's own parsing siblings plus
-    /// the pure `keysyms`). Anything else is hub wiring and belongs behind an
-    /// interface, not an import.
+    /// shelf (src/core/pure/) is xcb-free by construction and safe for every
+    /// layer; `model` is the shared data model; the per-layer extras are the
+    /// pure neighborhoods each layer legitimately reaches (architecture's own
+    /// model/geom siblings; tiling's own seam plus the `contract` decls;
+    /// config's own parsing siblings plus the pure `keysyms`). Anything else
+    /// is hub wiring and belongs behind an interface, not an import.
     fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
         const shelf = [_][]const u8{
-            "constants", "log", "ids", "masks", "utils", "paths", "proc", "bounded", "idmap",
+            "constants", "log",     "ids",  "masks", "paths",     "bounded",
+            "idmap",     "scaling", "time", "cycle", "lifecycle",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
         if (std.mem.eql(u8, dep, "model")) return true;
-        if (std.mem.eql(u8, layer, "model")) return false;
+        if (std.mem.eql(u8, layer, "architecture")) {
+            return std.mem.eql(u8, dep, "geom");
+        }
         if (std.mem.eql(u8, layer, "tiling")) {
             return std.mem.eql(u8, dep, "tiling") or std.mem.eql(u8, dep, "contract");
         }
@@ -1674,7 +1680,7 @@ const Module = struct {
         ctx: SharedBuildContext,
     ) !void {
         // Wiring follows declared `@import` edges. Layer purity for the pure
-        // layers (model/tiling/config) is enforced HERE, at build time, on
+        // layers (architecture/tiling/config) is enforced HERE, at build time, on
         // those same edges (`assertPureLayerImports`, below): a pure module
         // importing hub wiring fails the build instead of merely being caught
         // later by dev/scripts/check-layers.sh at `zig build check`. That

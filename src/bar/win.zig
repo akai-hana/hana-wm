@@ -14,10 +14,10 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 
 const drawing = @import("drawing");
 
+const atom = @import("atoms");
 /// All atoms needed to declare the bar window as a dock to the compositor.
 const BarAtoms = struct {
     strut_partial: xcb.xcb_atom_t = 0,
@@ -49,7 +49,7 @@ pub fn initAtoms() void {
         .{ "action_stick", "_NET_WM_ACTION_STICK" },
     };
     inline for (entries) |e|
-        @field(atoms, e[0]) = utils.getAtomCached(e[1]) orelse 0;
+        @field(atoms, e[0]) = atom.getAtomCached(e[1]) orelse 0;
 }
 
 pub fn calcBarYPos(height: u16) i16 {
@@ -100,9 +100,9 @@ pub fn setWindowProperties(win_id: u32, height: u16) void {
         },
     };
     inline for (entries) |e| {
-        const atom = @field(atoms, e[0]);
-        if (atom != 0)
-            setAtomProperty(cs.conn, win_id, atom, e[1], e[2]);
+        const id = @field(atoms, e[0]);
+        if (id != 0)
+            setAtomProperty(cs.conn, win_id, id, e[1], e[2]);
     }
 }
 

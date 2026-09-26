@@ -1,9 +1,9 @@
 //! Grid tiling layout.
 //! Splits the work area into equal cells, rigid or relaxed per the variant.
 
-const utils = @import("utils");
 const tiling = @import("tiling");
 
+const geom = @import("geom");
 // Variant index of the "relaxed" variant; must match variantParse order below.
 const variant_relaxed = 1;
 
@@ -22,7 +22,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     const grid = calcGridShape(n);
     // Both sides of each window's border, used to shrink usable cell dimensions.
-    const bm = utils.doubledBorder(m);
+    const bm = geom.doubledBorder(m);
 
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;

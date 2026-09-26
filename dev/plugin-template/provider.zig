@@ -28,10 +28,11 @@
 
 const std = @import("std");
 const constants = @import("constants");
-const utils = @import("utils");
 const model = @import("model");
 const contract = @import("contract");
 
+const atoms = @import("atoms");
+const bounded = @import("bounded");
 // Module-owned state. Every sub-system is allocation-free: a fixed,
 // compile-time-bounded static store. There is NO per-model instance — the
 // process runs exactly one WM, and the module store lives for the process
@@ -53,7 +54,7 @@ const Rec = struct {
 
 /// Self-contained flagged store: static, allocation-free, linear scans. No
 /// model bookkeeping backs it (the bounded-list idiom matches minimize.zig).
-var g_recs: utils.BoundedList(Rec, MAX_FLAGGED) = .{};
+var g_recs: bounded.BoundedList(Rec, MAX_FLAGGED) = .{};
 var g_seq: u32 = 0;
 
 fn findRec(win: model.WindowId) ?usize {
@@ -66,7 +67,7 @@ fn findRec(win: model.WindowId) ?usize {
 // REQUIRED hooks. A module that stores per-window state binds all five;
 // bind only the ones your feature uses, the rest stay null.
 // init/deinit ordering: the wire layer calls every module's init during
-// boot (after atom cache setup, so utils.getAtomOrZero works), in registry
+// boot (after atom cache setup, so atoms.getAtomOrZero works), in registry
 // order, and every deinit during shutdown/restart in the same order.
 
 /// Lifecycle: reset ALL module state. Called once at boot and at every

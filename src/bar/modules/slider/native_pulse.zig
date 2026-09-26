@@ -30,7 +30,7 @@
 //! (single-threaded event loop), so per-op state lives in module globals.
 
 const std = @import("std");
-const utils = @import("utils");
+const time = @import("time");
 
 const c = @cImport({
     @cInclude("fcntl.h");
@@ -239,11 +239,11 @@ fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
 fn waitDone(done: *bool, timeout_ms: i64) bool {
     const lib = g_oplib.?;
     const m = g_mainloop.?;
-    const deadline = utils.realtimeMs() + timeout_ms;
+    const deadline = time.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
     while (!done.*) {
-        if (utils.realtimeMs() >= deadline) return false;
+        if (time.realtimeMs() >= deadline) return false;
         _ = lib.mainloop_wait(m);
     }
     return true;
@@ -372,14 +372,14 @@ fn waitReady(timeout_ms: i64) bool {
     const lib = g_oplib.?;
     const m = g_mainloop.?;
     const ctx = g_ctx.?;
-    const deadline = utils.realtimeMs() + timeout_ms;
+    const deadline = time.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
     while (true) {
         const st = lib.context_get_state(ctx);
         if (st == PA_STATE_READY) return true;
         if (st == PA_STATE_FAILED or st == PA_STATE_TERMINATED) return false;
-        if (utils.realtimeMs() >= deadline) return false;
+        if (time.realtimeMs() >= deadline) return false;
         _ = lib.mainloop_wait(m);
     }
 }

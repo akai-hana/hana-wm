@@ -8,10 +8,11 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const log = @import("log");
 const constants = @import("constants");
 
+const atoms = @import("atoms");
+const idmap = @import("idmap");
 // WM_HINTS constants (ICCCM 4.1.2.4)
 const wm_hints_input_flag: u32 = 1 << 0;
 const wm_hints_flags_field: usize = 0;
@@ -24,7 +25,7 @@ pub const wm_hints_long_length: u32 = 9; // flags + 8 fields
 // take_focus (WM_TAKE_FOCUS in WM_PROTOCOLS). Safe because the mask-first
 // map ordering guarantees PropertyNotify before any post-seed change can stale.
 
-var cache_slots: utils.IdMap(CachedProps, max_window_cache) = .{};
+var cache_slots: idmap.IdMap(CachedProps, max_window_cache) = .{};
 var cache_ready: bool = false;
 
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
@@ -113,7 +114,7 @@ pub fn fireWMProtocolsQuery(
     conn: core.Connection,
     win: u32,
 ) ?xcb.xcb_get_property_cookie_t {
-    const protocols_atom = utils.getAtomCached("WM_PROTOCOLS") orelse return null;
+    const protocols_atom = atoms.getAtomCached("WM_PROTOCOLS") orelse return null;
     return firePropQuery(conn, win, protocols_atom, xcb.XCB_ATOM_ATOM, constants.property_max_length);
 }
 
@@ -229,8 +230,8 @@ fn sendTakeFocusEvent(
 /// share, or null when the atom cache is not ready. The atom set is atomic
 /// (one cache), so a partial failure is impossible.
 fn focusAtoms() ?FocusAtoms {
-    const protocols = utils.getAtomCached("WM_PROTOCOLS") orelse return null;
-    const take_focus = utils.getAtomCached("WM_TAKE_FOCUS") orelse return null;
+    const protocols = atoms.getAtomCached("WM_PROTOCOLS") orelse return null;
+    const take_focus = atoms.getAtomCached("WM_TAKE_FOCUS") orelse return null;
     return .{ .protocols = protocols, .take_focus = take_focus };
 }
 
@@ -304,7 +305,7 @@ fn drainWMProtocolsReply(conn: core.Connection, cookie: xcb.xcb_get_property_coo
     // not yet available. take_focus atom 0 can never match a real client
     // atom, keeping the miss path's take_focus verdict as correct as the
     // old early-return-empty.
-    const wm_delete = utils.getAtomOrZero("WM_DELETE_WINDOW");
+    const wm_delete = atoms.getAtomOrZero("WM_DELETE_WINDOW");
     const at = focusAtoms() orelse
         return protocolPropsFromReply(reply, 0, wm_delete);
     return protocolPropsFromReply(reply, at.take_focus, wm_delete);
@@ -330,7 +331,7 @@ fn queryWMHintsAcceptsInput(conn: core.Connection, win: u32) bool {
 /// A WM_PROTOCOLS notify invalidates both wm_delete and take_focus (same
 /// property); a WM_HINTS notify invalidates only accepts_input.
 pub fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
-    const is_protocols = atom == utils.getAtomOrZero("WM_PROTOCOLS");
+    const is_protocols = atom == atoms.getAtomOrZero("WM_PROTOCOLS");
     const existing: ?CachedProps = peekCachedProps(win);
 
     // Refresh only the half the notify invalidated; the other half reuses the

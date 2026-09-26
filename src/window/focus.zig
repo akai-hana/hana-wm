@@ -5,7 +5,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const types = @import("types");
 const window = @import("window");
 const tracking = @import("tracking");
@@ -13,6 +12,9 @@ const log = @import("log");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
 
+const atoms = @import("atoms");
+const cycle = @import("cycle");
+const requests = @import("requests");
 // Private transition-layer gate for mutable model access (per-owner token,
 // see tracking.gate).
 const gate: @import("pipeline").Gate = .{};
@@ -64,7 +66,7 @@ var state: ?State = null;
 pub fn init() void {
     // Reset every field so a deinit()+init() cycle starts from a clean slate.
     state = .{};
-    state.?.net_active_window = utils.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0;
+    state.?.net_active_window = atoms.getAtomCached("_NET_ACTIVE_WINDOW") orelse 0;
 }
 
 pub fn deinit() void {
@@ -365,7 +367,7 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     const raise = shouldRaise(reason, win);
     const same_applied = state.?.last_applied == win;
     if (same_applied and !raise) return .none;
-const old: ?u32 = if (same_applied) null else state.?.last_applied;
+    const old: ?u32 = if (same_applied) null else state.?.last_applied;
     const out = setIntent(win, old, resolved, .{
         .raise = raise,
         .new_suppress = suppressionFor(reason, state.?.suppress_reason),
@@ -428,7 +430,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             const conn = core.getState().conn;
 
             if (intent.flags.set_input_focus) focusNow(conn, intent.win);
-            if (intent.flags.raise) utils.raiseWindow(conn, intent.win);
+            if (intent.flags.raise) requests.raiseWindow(conn, intent.win);
 
             if (intent.flags.send_wm_take_focus and intent.flags.take_focus_known)
                 window.sendWMTakeFocusKnown(conn, intent.win, 0, true);
@@ -604,7 +606,7 @@ fn collectVisibleWindows() usize {
 /// Returns the next (forward=true) or previous (forward=false) index in a
 /// circular list of `len` elements, starting from `idx`.
 inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
-    return utils.wrapIndex(idx, if (forward) 1 else -1, len);
+    return cycle.wrapIndex(idx, if (forward) 1 else -1, len);
 }
 
 /// Resolve the visible window a focus-cycle step would land on, or null when

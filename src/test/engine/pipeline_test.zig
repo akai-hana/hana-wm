@@ -9,10 +9,10 @@ const std = @import("std");
 const core = @import("core");
 const model = @import("model");
 const pipeline = @import("pipeline");
-const sync = @import("sync");
 const actions = @import("actions");
 const fixture = @import("fixture");
 const xcb = core.xcb;
+const ledger = @import("ledger");
 
 /// Two mapped windows, the arrangement most pipeline tests seed.
 fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
@@ -41,7 +41,7 @@ test "pipeline: reconcile tiles to engine placements and records LastSent" {
     try fx.expectTiledGeometry(w2);
 
     // The sent ledger matches the actual server geometry.
-    const lr = sync.lastRectFor(w1) orelse return error.NoLedgerEntry;
+    const lr = ledger.lastRectFor(w1) orelse return error.NoLedgerEntry;
     const g1 = fx.geometry(w1) orelse return error.ClosedWindow;
     try std.testing.expectEqual(lr.width, g1.width);
     try std.testing.expectEqual(lr.height, g1.height);

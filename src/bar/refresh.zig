@@ -10,8 +10,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const log = @import("log");
-
-const utils = @import("utils");
+const time = @import("time");
 
 /// Fallback used when RandR is unavailable or returns an invalid value.
 const default_hz: f64 = 60.0;
@@ -102,7 +101,7 @@ pub fn handleRandrNotifyEvent(event: *anyopaque) void {
         return;
     }
 
-    const now = utils.monotonicNs();
+    const now = time.monotonicNs();
     if (now -| last_redetect_ns < min_redetect_interval_ns) return;
     last_redetect_ns = now;
     redetect_pending = true;
@@ -187,7 +186,7 @@ fn rateFromNotifyEvent(event: *anyopaque) ?f64 {
     // union. The screen-change event (base) has a rotation byte in the same
     // offset as subCode, so trust it only when response_type matches base + 1.
     if (randr_first_event == 0) return null;
-    const notify = utils.eventCast(*xcb.xcb_randr_notify_event_t, event);
+    const notify = core.eventCast(*xcb.xcb_randr_notify_event_t, event);
     // Widen before adding 1: an extension base of 255 would wrap the u8 add
     // to 0 and silently disable re-detection for that server.
     if (notify.*.response_type != @as(u16, randr_first_event) + 1) return null;

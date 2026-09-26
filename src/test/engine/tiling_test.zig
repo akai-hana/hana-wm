@@ -7,13 +7,13 @@
 const std = @import("std");
 const testing = std.testing;
 
-const utils = @import("utils");
 const model = @import("model");
 const helpers = @import("helpers");
 
 const build_options = @import("build_options");
 const tiling = @import("tiling");
 // Scroll-only tests runtime-skip below, but the stub must still expose the
+const geom = @import("geom");
 // two members their bodies reference so a scroll-less tree compiles.
 const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {
     fn slotWidth(_: i32) i32 {
@@ -50,14 +50,14 @@ const Fixture = struct {
     m: model.Model,
     hv: tiling.HintsView,
     hint_buf: [model.store_capacity]model.SizeHints = undefined,
-    wa: utils.Rect,
+    wa: geom.Rect,
 
     fn init(self: *Fixture, wins: []const model.WindowId) !void {
         try self.initAt(wins, helpers.std_wa);
     }
 
     /// init with an explicit work area, for the non-standard-geometry cases.
-    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: utils.Rect) !void {
+    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: geom.Rect) !void {
         self.* = .{
             .m = .{},
             .hv = undefined,
@@ -329,7 +329,7 @@ test "hints applied at emit" {
     try fx.init(&.{11});
 
     // Mutate the model entry, then re-materialize the View's hint snapshot
-    // exactly as sync.reconcile does per retile (hints are frozen INTO
+    // exactly as reconcile.run does per retile (hints are frozen INTO
     // the View; a post-snapshot store change needs a fresh View).
     fx.m.store.getPtr(11).?.size_hints = .{ .inc_width = 100, .inc_height = 100 };
     fx.hint_buf[0] = fx.m.store.getPtr(11).?.size_hints;
@@ -347,7 +347,7 @@ test "hints applied at emit" {
 // (floating.sizeHintLimits); this guards against min enforcement leaking into
 // the shared hint path.
 test "applyHints ignores declared minimums" {
-    const rect: utils.Rect = .{ .x = 8, .y = 8, .width = 780, .height = 580 };
+    const rect: geom.Rect = .{ .x = 8, .y = 8, .width = 780, .height = 580 };
     try testing.expectEqual(rect, tiling.applyHints(rect, .{ .min_width = 1000, .min_height = 1000 }));
 }
 

@@ -9,7 +9,7 @@
 //! test` stays green on headless machines and never draws onto a running
 //! session.
 //! Everything here goes through the real public boot entry points
-//! (wire.initAtomCache / core.init / window.init / pipeline.init) -- this
+//! (atoms.initAtomCache / core.init / window.init / pipeline.init) -- this
 //! fixture adds no test-only behavior to src/*.
 //!
 //! Windows are created as real (unmanaged) top-levels with
@@ -25,16 +25,16 @@ const build_options = @import("build_options");
 const types = @import("types");
 const model = @import("model");
 const pipeline = @import("pipeline");
-const sync = @import("sync");
 const window = @import("window");
-const wire = @import("wire");
-const screen = @import("screen");
-const utils = @import("utils");
+const atoms = @import("atoms");
+const usable_area = @import("usable_area");
 const constants = @import("constants");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
 const helpers = @import("helpers");
 
+const geom = @import("geom");
 /// Bounded placement buffer width, mirroring the engine's own cap.
+const ledger = @import("ledger");
 pub const max_order = constants.max_tiled_windows;
 
 /// Why the fixture refused to connect, so setUp can pick the right banner.
@@ -114,7 +114,7 @@ pub const Geometry = struct {
 /// Reads the `_NET_SUPPORTING_WM_CHECK` property of `win` as a window id, or
 /// null when the property is absent/empty.
 fn wmCheckWindow(conn: core.Connection, win: u32) ?u32 {
-    const atom = wire.getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return null;
+    const atom = atoms.getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return null;
     const reply = xcb.xcb_get_property_reply(
         conn,
         xcb.xcb_get_property(conn, 0, win, atom, 0, 0, 1),
@@ -183,7 +183,7 @@ pub const Fx = struct {
             return null;
         };
 
-        wire.initAtomCache(conn) catch {
+        atoms.initAtomCache(conn) catch {
             return null;
         };
 
@@ -234,7 +234,7 @@ pub const Fx = struct {
             const win = m.store.at(m.store.count() - 1).key;
             _ = xcb.xcb_destroy_window(self.conn, win);
             model.unregister(m, win);
-            sync.forget(win);
+            ledger.forget(win);
         }
         self.flush();
         pipeline.init();
@@ -250,8 +250,8 @@ pub const Fx = struct {
     }
 
     /// Current workspace work area (screen minus bar claims; none in tests).
-    pub fn workArea(self: *const Fx) utils.Rect {
-        return screen.workArea(self.scr);
+    pub fn workArea(self: *const Fx) geom.Rect {
+        return usable_area.workArea(self.scr);
     }
 
     /// Creates a real, unmapped, unselected child top-level of the root.
@@ -325,7 +325,7 @@ pub const Fx = struct {
     /// XCB_ATOM_WINDOW), so the read must filter by XCB_ATOM_ANY, not by the
     /// property's own name atom.
     pub fn rootActiveWindow(self: *const Fx) ?u32 {
-        const atom = wire.getAtomCached("_NET_ACTIVE_WINDOW") orelse return null;
+        const atom = atoms.getAtomCached("_NET_ACTIVE_WINDOW") orelse return null;
         const reply = xcb.xcb_get_property_reply(
             self.conn,
             xcb.xcb_get_property(self.conn, 0, self.root, atom, 0, 0, 1),
@@ -340,9 +340,9 @@ pub const Fx = struct {
     /// WM_PROTOCOLS = [WM_TAKE_FOCUS, WM_DELETE_WINDOW] (input=True +
     /// WM_TAKE_FOCUS -> ICCCM locally_active).
     pub fn setWmTakeFocus(self: *const Fx, win: u32) void {
-        const wm_protocols = wire.getAtomCached("WM_PROTOCOLS") orelse return;
-        const take = wire.getAtomCached("WM_TAKE_FOCUS") orelse return;
-        const del = wire.getAtomCached("WM_DELETE_WINDOW") orelse return;
+        const wm_protocols = atoms.getAtomCached("WM_PROTOCOLS") orelse return;
+        const take = atoms.getAtomCached("WM_TAKE_FOCUS") orelse return;
+        const del = atoms.getAtomCached("WM_DELETE_WINDOW") orelse return;
         const list = [2]u32{ take, del };
         _ = xcb.xcb_change_property(
             self.conn,
@@ -377,7 +377,7 @@ pub const Fx = struct {
     /// workspace, mirroring pipeline's Ctx/env resolution (non-tiling builds
     /// have no engine; returns null). The engine emits the full footprint, so
     /// the server's geometry (which includes border width) must equal it.
-    pub fn expectedPlacementOf(self: *const Fx, win: u32) ?utils.Rect {
+    pub fn expectedPlacementOf(self: *const Fx, win: u32) ?geom.Rect {
         if (!build_options.has_tiling) return null;
         const m = pipeline.model();
         const ws = m.current;

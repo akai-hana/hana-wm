@@ -1,5 +1,5 @@
 //! Facade-vs-ledger parity tests (src/window/tracking.zig vs
-//! src/core/x11/sync.zig). The tracking facade is a read-through of the
+//! src/core/x11/reconcile.zig). The tracking facade is a read-through of the
 //! model; the sent ledger is the "what's on the wire" authority. After a
 //! reconcile the two must agree window-for-window on the managed set, on
 //! current-workspace visibility, and on parked state.
@@ -16,10 +16,11 @@ const testing = std.testing;
 const model = @import("model");
 const pipeline = @import("pipeline");
 const tracking = @import("tracking");
-const sync = @import("sync");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
+const ledger = @import("ledger");
+const recon = @import("reconcile");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 
 const cfg_bw = helpers.cfg_bw;
@@ -40,14 +41,14 @@ fn pipelineModel() *model.Model {
     const m = pipeline.mut(&gate);
     m.* = helpers.makeModel();
     helpers.testReset();
-    sync.init();
+    ledger.init();
     tracking.init();
     return m;
 }
 
-fn reconcile(m: *model.Model, rec: *Recorder, opts: sync.ReconcileOpts) void {
+fn reconcile(m: *model.Model, rec: *Recorder, opts: recon.Opts) void {
     var ctx = helpers.makeCtx(rec.sink(), testColor, helpers.std_wa);
-    sync.reconcile(m, &ctx, opts);
+    recon.run(m, &ctx, opts);
 }
 
 fn reg(m: *model.Model, win: model.WindowId, ws_idx: u8) !void {
@@ -66,7 +67,7 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
     model.setFocus(m, 101);
 
     // Ledger-first preconditions: nothing sent yet, nothing visible.
-    try testing.expect(sync.lastRectFor(101) == null);
+    try testing.expect(ledger.lastRectFor(101) == null);
 
     reconcile(m, &rec, .{});
 
@@ -76,7 +77,7 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
     const wins = [_]model.WindowId{ 101, 102, 201 };
     for (wins) |w| {
         try testing.expect(tracking.isManaged(w));
-        try testing.expect(sync.sentGet(w) != null);
+        try testing.expect(ledger.sentGet(w) != null);
     }
 
     // Mask parity: the facade's current-workspace test matches the model's
@@ -92,11 +93,11 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
     // and were placed (ledger visible); the ws1 window is parked on the wire
     // (ledger has no visible rect) and the facade agrees.
     try testing.expect(tracking.isOnCurrentWorkspace(101));
-    try testing.expect(sync.lastRectFor(101) != null);
+    try testing.expect(ledger.lastRectFor(101) != null);
     try testing.expect(tracking.isOnCurrentWorkspace(102));
-    try testing.expect(sync.lastRectFor(102) != null);
+    try testing.expect(ledger.lastRectFor(102) != null);
     try testing.expect(!tracking.isOnCurrentWorkspace(201));
-    try testing.expect(sync.lastRectFor(201) == null);
+    try testing.expect(ledger.lastRectFor(201) == null);
 }
 
 test "facade tracks the workspace switch exactly like the ledger" {
@@ -110,8 +111,8 @@ test "facade tracks the workspace switch exactly like the ledger" {
     reconcile(m, &rec, .{});
 
     // Baseline on ws0: 101 placed, 201 parked.
-    try testing.expect(sync.lastRectFor(101) != null);
-    try testing.expect(sync.lastRectFor(201) == null);
+    try testing.expect(ledger.lastRectFor(101) != null);
+    try testing.expect(ledger.lastRectFor(201) == null);
 
     // Switch to ws1: leavers park on the wire, arrivers place; the facade
     // must flip in lockstep.
@@ -120,9 +121,9 @@ test "facade tracks the workspace switch exactly like the ledger" {
 
     try testing.expectEqual(@as(u8, 1), tracking.getCurrentWorkspace().?);
     try testing.expect(!tracking.isOnCurrentWorkspace(101));
-    try testing.expect(sync.lastRectFor(101) == null);
+    try testing.expect(ledger.lastRectFor(101) == null);
     try testing.expect(tracking.isOnCurrentWorkspace(201));
-    try testing.expect(sync.lastRectFor(201) != null);
+    try testing.expect(ledger.lastRectFor(201) != null);
 }
 
 test "minimized windows are invisible to both facade and ledger" {
@@ -144,11 +145,11 @@ test "minimized windows are invisible to both facade and ledger" {
     try testing.expect(tracking.isOnCurrentWorkspace(102));
     // ...but not visible: facade sees the parked presence, ledger has no
     // visible rect (the park was actually sent).
-    try testing.expect(sync.lastRectFor(102) == null);
+    try testing.expect(ledger.lastRectFor(102) == null);
 
     // The sibling keeps full visibility on both sides of the seam.
     try testing.expect(tracking.isOnCurrentWorkspace(101));
-    try testing.expect(sync.lastRectFor(101) != null);
+    try testing.expect(ledger.lastRectFor(101) != null);
 }
 
 test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
@@ -173,8 +174,8 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
     // window into focus recovery.
     try testing.expect(tracking.isManaged(101));
     try testing.expect(tracking.isOnCurrentWorkspace(101));
-    try testing.expect(sync.lastRectFor(101) != null);
+    try testing.expect(ledger.lastRectFor(101) != null);
     try testing.expect(tracking.isManaged(102));
     try testing.expect(tracking.isOnCurrentWorkspace(102));
-    try testing.expect(sync.lastRectFor(102) == null);
+    try testing.expect(ledger.lastRectFor(102) == null);
 }

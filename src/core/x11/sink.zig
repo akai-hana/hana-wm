@@ -1,31 +1,101 @@
-//! Sends are planned in sync.zig and dispatched by the shims in this file
-//! (the sanctioned seam where raw XCB calls are allowed -- the seam may call
-//! `xcb.*` and core utils directly, so a few shims stay inline rather than
-//! forcing every primitive through wire.zig; the check-layers allowlist
-//! covers this file). Each shim wraps the exact request pattern it
-//! consolidates here:
-//!   geom          ~ utils.configureWindow (plus the atomic raise variant
+//! The send seam: the interface every optional subsystem emits requests
+//! through, and its one production implementation.
+//!
+//! `Sink` (the vtable) lives HERE, beside the shims that implement it, rather
+//! than in the reconciler that consumes it. It used to be declared in
+//! `sync.zig`, which made this low-level implementation import the high-level
+//! planner just to name the type it implements -- an inversion. Requests are
+//! planned in `reconcile.zig` and dispatched by the shims in this file (the
+//! sanctioned seam where raw XCB calls are allowed: a few shims stay inline
+//! rather than forcing every primitive through `requests.zig`, and the
+//! check-layers allowlist covers this file). Each shim wraps the exact request
+//! pattern it consolidates here:
+//!   geom          ~ requests.configureWindow (plus the atomic raise variant
 //!                   that merges a stack mode into the same request)
 //!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent);
 //!                   inline xcb_configure_window in this seam
-//!   borderPixel   ~ utils.setBorderPixel
+//!   borderPixel   ~ requests.setBorderPixel
 //!   park          ~ X-offscreen + BELOW merged into one request
-//!   stackOnly     ~ utils.raiseWindow (ABOVE; the only stack mode)
+//!   stackOnly     ~ requests.raiseWindow (ABOVE; the only stack mode)
 //!   setEwmhFullscreen ~ xcb_change_property (_NET_WM_STATE_FULLSCREEN)
-//!   flush/grab    ~ conn.flush / utils.grabServer / ungrabAndFlush
+//!   flush/grab    ~ conn.flush / requests.grabServer / ungrabAndFlush
 
 const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
 const constants = @import("constants");
-const sync = @import("sync");
 const log = @import("log");
+
+const model = @import("model");
+const geometry = @import("geom");
+const requests = @import("requests");
+/// Stacking mode vocabulary for a request. `above` is currently the only mode
+/// the WM emits.
+pub const Stack = enum { above };
+
+/// Request sink: the output port every placement decision writes through.
+/// Production wires `XcbSink`; tests wire a recorder, which is the whole point
+/// of the vtable. One batch = everything queued between caller flushes (xcb
+/// buffers requests; the CALLER decides when to flush).
+pub const Sink = struct {
+    ptr: *anyopaque,
+    vt: *const VTable,
+
+    pub const VTable = struct {
+        map: *const fn (*anyopaque, model.WindowId) void,
+        geom: *const fn (*anyopaque, model.WindowId, geometry.Rect, ?Stack) void,
+        geom_bordered: *const fn (*anyopaque, model.WindowId, geometry.Rect, u16, ?Stack) void,
+        border_width: *const fn (*anyopaque, model.WindowId, u16) void,
+        border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,
+        park: *const fn (*anyopaque, model.WindowId) void,
+        stack_only: *const fn (*anyopaque, model.WindowId, Stack) void,
+        set_ewmh_fullscreen: *const fn (*anyopaque, model.WindowId, u32, u32, bool) void,
+        flush: *const fn (*anyopaque) void,
+        grab_server: *const fn (*anyopaque) void,
+        ungrab_and_flush: *const fn (*anyopaque) void,
+    };
+
+    pub inline fn map(self: Sink, win: model.WindowId) void {
+        self.vt.map(self.ptr, win);
+    }
+    pub inline fn geom(self: Sink, win: model.WindowId, rect: geometry.Rect, stack: ?Stack) void {
+        self.vt.geom(self.ptr, win, rect, stack);
+    }
+    /// Geometry + border width merged into one configure request; the shape a
+    /// workspace switch emits for every arriving window.
+    pub inline fn geomBordered(self: Sink, win: model.WindowId, rect: geometry.Rect, bw: u16, stack: ?Stack) void {
+        self.vt.geom_bordered(self.ptr, win, rect, bw, stack);
+    }
+    pub inline fn borderWidth(self: Sink, win: model.WindowId, bw: u16) void {
+        self.vt.border_width(self.ptr, win, bw);
+    }
+    pub inline fn borderPixel(self: Sink, win: model.WindowId, pixel: u32) void {
+        self.vt.border_pixel(self.ptr, win, pixel);
+    }
+    pub inline fn park(self: Sink, win: model.WindowId) void {
+        self.vt.park(self.ptr, win);
+    }
+    pub inline fn stackOnly(self: Sink, win: model.WindowId, s: Stack) void {
+        self.vt.stack_only(self.ptr, win, s);
+    }
+    pub inline fn setEwmhFullscreen(self: Sink, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
+        self.vt.set_ewmh_fullscreen(self.ptr, win, state_atom, fs_atom, is_fullscreen);
+    }
+    pub inline fn flush(self: Sink) void {
+        self.vt.flush(self.ptr);
+    }
+    pub inline fn grabServer(self: Sink) void {
+        self.vt.grab_server(self.ptr);
+    }
+    pub inline fn ungrabAndFlush(self: Sink) void {
+        self.vt.ungrab_and_flush(self.ptr);
+    }
+};
 
 pub const XcbSink = struct {
     conn: core.Connection,
 
-    pub fn sink(self: *XcbSink) sync.Sink {
+    pub fn sink(self: *XcbSink) Sink {
         return .{
             .ptr = self,
             .vt = &xcb_vtable,
@@ -42,8 +112,8 @@ pub const XcbSink = struct {
 
     /// Configure X|Y|W|H, merging a stack mode into the SAME request when
     /// one is requested (never a separate round of requests for geometry+raise).
-    fn geomShim(ptr: *anyopaque, win: u32, rect: utils.Rect, stack: ?sync.Stack) void {
-        utils.configureWindow(
+    fn geomShim(ptr: *anyopaque, win: u32, rect: geometry.Rect, stack: ?Stack) void {
+        requests.configureWindow(
             XcbSink.fromPtr(ptr).conn,
             win,
             rect,
@@ -55,8 +125,8 @@ pub const XcbSink = struct {
     /// Geometry + border-width in ONE configure: the common workspace-switch
     /// shape (an arriving window re-sends both), so the two go out as a single
     /// request instead of two round trips of the config queue.
-    fn geomBorderedShim(ptr: *anyopaque, win: u32, rect: utils.Rect, bw: u16, stack: ?sync.Stack) void {
-        utils.configureWindow(
+    fn geomBorderedShim(ptr: *anyopaque, win: u32, rect: geometry.Rect, bw: u16, stack: ?Stack) void {
+        requests.configureWindow(
             XcbSink.fromPtr(ptr).conn,
             win,
             rect,
@@ -75,7 +145,7 @@ pub const XcbSink = struct {
     }
 
     fn borderPixelShim(ptr: *anyopaque, win: u32, pixel: u32) void {
-        utils.setBorderPixel(XcbSink.fromPtr(ptr).conn, win, pixel);
+        requests.setBorderPixel(XcbSink.fromPtr(ptr).conn, win, pixel);
     }
 
     /// Park = offscreen X + stack BELOW in ONE configure_window.
@@ -91,9 +161,9 @@ pub const XcbSink = struct {
         );
     }
 
-    fn stackOnlyShim(ptr: *anyopaque, win: u32, s: sync.Stack) void {
+    fn stackOnlyShim(ptr: *anyopaque, win: u32, s: Stack) void {
         switch (s) {
-            .above => utils.raiseWindow(XcbSink.fromPtr(ptr).conn, win),
+            .above => requests.raiseWindow(XcbSink.fromPtr(ptr).conn, win),
         }
     }
 
@@ -118,9 +188,9 @@ pub const XcbSink = struct {
     ) void {
         const conn = XcbSink.fromPtr(ptr).conn;
 
-        var atoms: [max_ewmh_states]u32 = undefined;
+        var state_atoms: [max_ewmh_states]u32 = undefined;
         var count: usize = 0;
-        const get_cookie = xcb.xcb_get_property(conn, 0, win, state_atom, xcb.XCB_ATOM_ATOM, 0, atoms.len);
+        const get_cookie = xcb.xcb_get_property(conn, 0, win, state_atom, xcb.XCB_ATOM_ATOM, 0, state_atoms.len);
         if (xcb.xcb_get_property_reply(conn, get_cookie, null)) |reply| {
             defer std.c.free(reply);
             if (reply.*.format == 32 and reply.*.type == xcb.XCB_ATOM_ATOM) {
@@ -132,16 +202,16 @@ pub const XcbSink = struct {
                 }
                 const raw = xcb.xcb_get_property_value(reply) orelse return;
                 const n: usize = @intCast(reply.*.value_len);
-                const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, atoms.len)];
+                const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, state_atoms.len)];
                 for (existing) |a| {
                     if (a == fs_atom or a == 0) continue;
-                    atoms[count] = a;
+                    state_atoms[count] = a;
                     count += 1;
                 }
             }
         }
-        if (is_fullscreen and count < atoms.len) {
-            atoms[count] = fs_atom;
+        if (is_fullscreen and count < state_atoms.len) {
+            state_atoms[count] = fs_atom;
             count += 1;
         }
 
@@ -153,7 +223,7 @@ pub const XcbSink = struct {
             xcb.XCB_ATOM_ATOM,
             32,
             @intCast(count),
-            if (count > 0) &atoms else null,
+            if (count > 0) &state_atoms else null,
         );
     }
 
@@ -162,17 +232,17 @@ pub const XcbSink = struct {
     }
 
     fn grabShim(ptr: *anyopaque) void {
-        utils.grabServer(XcbSink.fromPtr(ptr).conn);
+        requests.grabServer(XcbSink.fromPtr(ptr).conn);
     }
 
     fn ungrabAndFlushShim(ptr: *anyopaque) void {
-        utils.ungrabAndFlush(XcbSink.fromPtr(ptr).conn);
+        requests.ungrabAndFlush(XcbSink.fromPtr(ptr).conn);
     }
 };
 
 /// Shared vtable for the production sink: one const instead of re-inlining the
 /// shim table in every XcbSink::sink() call.
-const xcb_vtable: sync.Sink.VTable = .{
+const xcb_vtable: Sink.VTable = .{
     .map = XcbSink.mapShim,
     .geom = XcbSink.geomShim,
     .geom_bordered = XcbSink.geomBorderedShim,
@@ -186,7 +256,7 @@ const xcb_vtable: sync.Sink.VTable = .{
     .ungrab_and_flush = XcbSink.ungrabAndFlushShim,
 };
 
-inline fn stackMode(s: sync.Stack) u32 {
+inline fn stackMode(s: Stack) u32 {
     return switch (s) {
         .above => xcb.XCB_STACK_MODE_ABOVE,
     };

@@ -17,9 +17,9 @@ const borders = @import("borders");
 const fixture = @import("fixture");
 const model = @import("model");
 const parser = @import("parser");
-const utils = @import("utils");
 const types = @import("types");
 
+const scaling = @import("scaling");
 test "core.borderWidth resolves absolute and percentage border widths" {
     const fx = fixture.setUp("borders.width") orelse return;
     defer fx.deinit();
@@ -31,7 +31,7 @@ test "core.borderWidth resolves absolute and percentage border widths" {
     // sides). Derive the expectation from the LIVE screen height so any
     // display geometry passes.
     fx.config.tiling.border_width = types.ScalableValue.percentage(2.0);
-    const expected = utils.scaling.scaleBorderWidth(
+    const expected = scaling.scaleBorderWidth(
         types.ScalableValue.percentage(2.0),
         fx.scr.*.height_in_pixels,
     );

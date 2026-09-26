@@ -13,9 +13,9 @@
 //! usable area is the full screen (the natural state when the bar is absent).
 
 const core = @import("core");
-const utils = @import("utils");
 const build_options = @import("build_options");
 
+const geom = @import("geom");
 /// Which screen edge a claim occupies.
 pub const Edge = enum { top, bottom, left, right };
 
@@ -86,7 +86,7 @@ pub fn releaseClaim(comptime id: u8) void {
 
 /// The usable rectangular area: physical screen minus the pixels that active
 /// claims take from their edges. With no active claims this is the full screen.
-pub fn workArea(screen: core.Screen) utils.Rect {
+pub fn workArea(screen: core.Screen) geom.Rect {
     var top: u32 = 0;
     var bottom: u32 = 0;
     var left: u32 = 0;

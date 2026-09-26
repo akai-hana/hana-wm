@@ -8,7 +8,6 @@
 
 const core = @import("core");
 
-const utils = @import("utils");
 const refresh = @import("refresh");
 
 const types = @import("types");
@@ -17,6 +16,7 @@ const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
 // The scrolling title addon (the carousel) binds its motion, cycle and
+const time = @import("time");
 // frame-pacing hooks to this contract; membership in the generated
 // `title_subs` registry is driven by file presence alone, so this module
 // never names it. Dropping carousel.zig just shortens `addons` and the title
@@ -106,14 +106,14 @@ fn drawSingleWindow(
     ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, accent);
 
     const baseline_y = ctx.dc.baselineY(ctx.height);
-    const geom = titleTextGeom(ctx, ctx.start_x, ctx.width);
+    const text_geom = titleTextGeom(ctx, ctx.start_x, ctx.width);
 
     if (is_minimized) {
         if (snapshot.minimized_title.len > 0)
             try drawFittedTitle(
                 ctx,
                 baseline_y,
-                geom,
+                text_geom,
                 single_win,
                 snapshot.minimized_title,
                 ctx.dc.measureTextWidth(snapshot.minimized_title),
@@ -129,7 +129,7 @@ fn drawSingleWindow(
     try drawFittedTitle(
         ctx,
         baseline_y,
-        geom,
+        text_geom,
         single_win,
         snapshot.focused_title,
         ctx.dc.measureTextWidth(snapshot.focused_title),
@@ -142,7 +142,7 @@ fn drawSingleWindow(
 fn drawMarqueeCell(
     ctx: segmod.TitleRenderContext,
     baseline_y: u16,
-    geom: SegmentGeometry,
+    sg: SegmentGeometry,
     win: u32,
     txt: []const u8,
     text_w: u16,
@@ -154,7 +154,7 @@ fn drawMarqueeCell(
             win,
             txt,
             text_w,
-            geom.avail_w,
+            sg.avail_w,
             ctx.config.carousel_enabled,
             ctx.config.carousel_speed_px_s,
             now,
@@ -163,10 +163,10 @@ fn drawMarqueeCell(
             const cycle = s.cyclePx(text_w);
             // Anchor the scroll at the padded text start (same spot static mode uses),
             // so enabling the carousel continues seamlessly from where the head sat.
-            const x0: f64 = @as(f64, @floatFromInt(geom.text_x)) - off;
+            const x0: f64 = @as(f64, @floatFromInt(sg.text_x)) - off;
             try ctx.dc.drawTextScrolled(
-                geom.seg_x,
-                geom.seg_w,
+                sg.seg_x,
+                sg.seg_w,
                 baseline_y,
                 .{ x0, x0 + cycle },
                 txt,
@@ -175,7 +175,7 @@ fn drawMarqueeCell(
             return;
         }
     }
-    try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, txt, geom.avail_w, fg);
+    try ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, txt, sg.avail_w, fg);
 }
 
 /// Accent colour for a title segment: focused wins, then minimized, then the
@@ -207,28 +207,28 @@ fn titleTextGeom(ctx: segmod.TitleRenderContext, seg_x: u16, seg_w: u16) Segment
 fn drawFittedTitle(
     ctx: segmod.TitleRenderContext,
     baseline_y: u16,
-    geom: SegmentGeometry,
+    sg: SegmentGeometry,
     window: u32,
     title: []const u8,
     text_w: u16,
     text_fg: u32,
     scroll_enabled: bool,
 ) !void {
-    const now = utils.monotonicMs();
-    if (text_w <= geom.avail_w) {
+    const now = time.monotonicMs();
+    if (text_w <= sg.avail_w) {
         // Focused cell that no longer overflows: retire any active scroll so
         // the carousel state machine (and with it the poll deadline and the
         // needsRepaint query) stops requesting frames for a static cell.
         // Unfocused cells never touch the carousel: it tracks exactly one
         // cell per frame, the focused one.
         if (scroll_enabled) {
-            if (scroller) |s| _ = s.offsetFor(window, title, text_w, geom.avail_w, false, 0, now);
+            if (scroller) |s| _ = s.offsetFor(window, title, text_w, sg.avail_w, false, 0, now);
         }
-        try ctx.dc.drawText(geom.text_x, baseline_y, title, text_fg);
+        try ctx.dc.drawText(sg.text_x, baseline_y, title, text_fg);
     } else if (scroll_enabled)
-        try drawMarqueeCell(ctx, baseline_y, geom, window, title, text_w, text_fg, now)
+        try drawMarqueeCell(ctx, baseline_y, sg, window, title, text_w, text_fg, now)
     else
-        try ctx.dc.drawTextEllipsis(geom.text_x, baseline_y, title, geom.avail_w, text_fg);
+        try ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, title, sg.avail_w, text_fg);
 }
 
 /// Renders one title segment per window in a horizontal split-view layout.
@@ -337,7 +337,7 @@ fn pollTimeoutMsHook() i32 {
     if (overlayActive()) return -1;
     if (scroller) |s|
         return s.pollDeadlineMs(
-            utils.monotonicMs(),
+            time.monotonicMs(),
             core.getState().config.bar.carousel_enabled,
             refresh.detectedHz(),
         );

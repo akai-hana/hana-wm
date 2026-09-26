@@ -4,15 +4,16 @@
 const std = @import("std");
 const testing = std.testing;
 
-const utils = @import("utils");
 const model = @import("model");
 const constants = @import("constants");
 
-const sync = @import("sync");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
+const geom = @import("geom");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
+const ledger = @import("ledger");
+const recon = @import("reconcile");
 
 const cfg_bw = helpers.cfg_bw;
 const focused_pixel = helpers.focused_pixel;
@@ -25,7 +26,7 @@ const Recorder = helpers.TestSink(.record);
 const Fixture = struct {
     m: model.Model,
     rec: Recorder,
-    ctx: sync.Ctx,
+    ctx: recon.Ctx,
 
     fn init(self: *Fixture) void {
         // setUpModel resets the minimize/fullscreen module stores, so
@@ -36,18 +37,18 @@ const Fixture = struct {
             .rec = .{},
             .ctx = undefined,
         };
-        sync.init();
+        ledger.init();
         self.ctx = helpers.makeCtx(self.rec.sink(), testColor, helpers.std_wa);
     }
 
     fn deinit(self: *Fixture) void {
         self.rec.deinit();
         minimize.deinit();
-        sync.init();
+        ledger.init();
     }
 
-    fn reconcile(self: *Fixture, opts: sync.ReconcileOpts) void {
-        sync.reconcile(&self.m, &self.ctx, opts);
+    fn reconcile(self: *Fixture, opts: recon.Opts) void {
+        recon.run(&self.m, &self.ctx, opts);
     }
 };
 
@@ -333,7 +334,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.reconcile(.{}); // baseline: placed at master slot on ws 0
 
     // The live rect IS what we last sent (ledger read #3 feeds assertions).
-    const real_rect = sync.lastRectFor(701).?;
+    const real_rect = ledger.lastRectFor(701).?;
     try testing.expectEqual(@as(i32, golden.single.x), @as(i32, real_rect.x));
     try testing.expectEqual(@as(u16, golden.single.width), real_rect.width);
 
@@ -349,7 +350,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     // the window is already mapped at that rect with that color, so there is
     // nothing to emit.
     try fx.rec.expectLen(0);
-    try testing.expectEqual(real_rect, sync.lastRectFor(701).?);
+    try testing.expectEqual(real_rect, ledger.lastRectFor(701).?);
 
     // History-less variant: registered here with mask bit for ws 1 but NEVER
     // reconciled on its home ws (nothing ever sent): first sighting as an
@@ -367,7 +368,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     try fx.rec.expectLen(2);
     try fx.rec.expectMap(0, 702);
     try fx.rec.expectPark(1, 702);
-    try testing.expectEqual(@as(?utils.Rect, null), sync.lastRectFor(702));
+    try testing.expectEqual(@as(?geom.Rect, null), ledger.lastRectFor(702));
 }
 
 // forget() / ledger lifecycle (X ids recycle)
@@ -380,17 +381,17 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     helpers.regCur(&fx.m, 801);
     model.setFocus(&fx.m, 801);
     fx.reconcile(.{});
-    try testing.expect(sync.lastRectFor(801) != null);
+    try testing.expect(ledger.lastRectFor(801) != null);
 
     // truthRect prefers the floating anchor once the model says floating
     // (ledger read #3 contract: actions' detach base).
-    const float_rect: utils.Rect = .{ .x = 42, .y = 43, .width = 300, .height = 200 };
+    const float_rect: geom.Rect = .{ .x = 42, .y = 43, .width = 300, .height = 200 };
     fx.m.store.getPtr(801).?.anchor = .{ .floating = float_rect };
-    try testing.expectEqual(@as(?utils.Rect, float_rect), sync.truthRect(&fx.m, 801));
+    try testing.expectEqual(@as(?geom.Rect, float_rect), recon.truthRect(&fx.m, 801));
     fx.m.store.getPtr(801).?.anchor = .tiled;
 
-    sync.forget(801);
-    try testing.expectEqual(@as(?utils.Rect, null), sync.lastRectFor(801));
+    ledger.forget(801);
+    try testing.expectEqual(@as(?geom.Rect, null), ledger.lastRectFor(801));
 
     // Ledger gone => first_send => moved => winner raise replays exactly
     // like first sight. This is why stale records MUST die with unmanage:
@@ -412,7 +413,7 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     defer fx.deinit();
 
     // Production Sink.park folds X-offscreen + BELOW into ONE configure:
-    // the X value is this constant, the stack half is BELOW (wire.zig).
+    // the X value is this constant, the stack half is BELOW (requests.zig).
     try testing.expectEqual(@as(i32, -30000), constants.offscreen_x_position);
 
     try model.register(&fx.m, 901, model.WSId.fromIndex(0));

@@ -6,7 +6,6 @@
 const std = @import("std");
 
 const core = @import("core");
-const utils = @import("utils");
 
 const window = @import("window");
 const borders = @import("borders");
@@ -15,12 +14,14 @@ const tracking = @import("tracking");
 
 const pipeline = @import("pipeline");
 const actions = @import("actions");
-const screen = @import("screen");
+const usable_area = @import("usable_area");
 
 const model = @import("model");
-const sync = @import("sync");
 // Peers reach each other's hooks through the generated window registry,
+const geom = @import("geom");
+const scaling = @import("scaling");
 // never by naming a sibling module: deleting a sibling only shortens the
+const reconcile = @import("reconcile");
 // registry, and capabilities stay provider-agnostic.
 
 const DragMode = enum { move, resize };
@@ -46,7 +47,7 @@ const DragState = struct {
     /// Geometry from the last updateDrag call. Zero means no motion event
     /// arrived; consumed by the resize ConfigureRequest deny while the
     /// drag is active.
-    last_rect: utils.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    last_rect: geom.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     /// Resolved once at drag start: snap distance in pixels (0 = disabled) and
     /// the work-area edges used for snapping. Both are constant for the whole
     /// drag, so re-resolving them on every motion event would be wasted work.
@@ -61,7 +62,7 @@ fn snapDistance() i32 {
     const sv = cs.config.snap_distance;
     if (sv.value == 0) return 0;
     const sw: f32 = @floatFromInt(cs.screen.width_in_pixels);
-    return @intFromFloat(@round(utils.scaling.scaleToPixels(sv, sw)));
+    return @intFromFloat(@round(scaling.scaleToPixels(sv, sw)));
 }
 
 /// Work-area edges, accounting for the bar and border width. X positions a
@@ -71,7 +72,7 @@ fn workarea() WaEdges {
     const cs = core.getState();
     const sw: i32 = cs.screen.width_in_pixels;
     const bw2: i32 = @as(i32, core.borderWidth()) * 2;
-    const work = screen.workArea(cs.screen);
+    const work = usable_area.workArea(cs.screen);
     return .{
         .left = 0,
         .right = sw - bw2,
@@ -93,7 +94,7 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
 /// near; a lone edge resolves to the corner at its handled end; anything
 /// well inside the window falls back to bottom_right (dwm's conventional
 /// button-3 corner).
-fn nearestResizeCorner(x: i16, y: i16, rect: utils.Rect, border_width: u32) ResizeCorner {
+fn nearestResizeCorner(x: i16, y: i16, rect: geom.Rect, border_width: u32) ResizeCorner {
     const left: i32 = rect.x;
     const top: i32 = rect.y;
     const right: i32 = rect.x + @as(i32, rect.width);
@@ -127,20 +128,20 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
-    if (screen.isSurfaceWindow(win)) return;
+    if (usable_area.isSurfaceWindow(win)) return;
     if (window.isCoveringMode(pipeline.model(), win)) return;
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
-    const geom = blk: {
-        if (sync.truthRect(pipeline.model(), win)) |g| break :blk g;
+    const cur = blk: {
+        if (reconcile.truthRect(pipeline.model(), win)) |g| break :blk g;
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
     const resize_corner: ResizeCorner = if (button == 1)
         .bottom_right
     else
-        nearestResizeCorner(x, y, geom, core.borderWidth());
+        nearestResizeCorner(x, y, cur, core.borderWidth());
 
     // Snap distance and work area are resolved here so updateDrag's per-event
     // path only does arithmetic. They are constant for the duration of a drag.
@@ -153,10 +154,10 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
             .resize_corner = resize_corner,
             .start_x = x,
             .start_y = y,
-            .start_win_x = geom.x,
-            .start_win_y = geom.y,
-            .start_win_width = geom.width,
-            .start_win_height = geom.height,
+            .start_win_x = cur.x,
+            .start_win_y = cur.y,
+            .start_win_width = cur.width,
+            .start_win_height = cur.height,
             .snap_px = snap_px,
             .workarea = if (snap_px > 0)
                 workarea()
@@ -184,7 +185,7 @@ fn computeMoveRect(
     dy: i32,
     wa: WaEdges,
     was_pending_float: bool,
-) utils.Rect {
+) geom.Rect {
     const snap = drag.snap_px;
     const raw_x: i32 = @as(i32, drag.start_win_x) + dx;
     const raw_y: i32 = @as(i32, drag.start_win_y) + @as(i32, dy);
@@ -193,11 +194,11 @@ fn computeMoveRect(
     // Raw drag coords are unbounded i32; pin down to the i16 wire range
     // before the narrowing cast so a window dragged beyond +/-32767 (or into
     // negative X11 coords) can't UB in ReleaseFast.
-    const mx: i16 = utils.satI16(if (was_pending_float)
+    const mx: i16 = geom.satI16(if (was_pending_float)
         raw_x
     else
         snapAxis(raw_x, win_w, wa.left, wa.right, snap));
-    const my: i16 = utils.satI16(if (was_pending_float)
+    const my: i16 = geom.satI16(if (was_pending_float)
         raw_y
     else
         snapAxis(raw_y, win_h, wa.top, wa.bottom, snap));
@@ -234,7 +235,7 @@ fn sizeHintLimits(win: u32) HintLimits {
     };
 }
 
-fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect {
+fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) geom.Rect {
     const snap = drag.snap_px;
     // Max outer size from the window's PMaxSize hints. X11 configure
     // width/height excludes the frame, so the outer ceiling is the hint
@@ -285,8 +286,8 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) utils.Rect 
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
     return .{
-        .x = utils.satI16(pinned_x),
-        .y = utils.satI16(pinned_y),
+        .x = geom.satI16(pinned_x),
+        .y = geom.satI16(pinned_y),
         .width = @intCast(clamped_w),
         .height = @intCast(clamped_h),
     };
@@ -305,7 +306,7 @@ pub fn updateDrag(x: i16, y: i16) void {
 
     // Widen BEFORE subtracting: start_x/start_y and x/y are i16, and a drag
     // spanning >32767px on a large (or multi-monitor) virtual desktop would
-    // wrap the i16 difference, teleporting the window across the screen.
+    // wrap the i16 difference, teleporting the window across the usable area.
     // Promote to i32 (used throughout computeMoveRect/computeResizeRect) so
     // the delta is computed in the wider type.
     const dx: i32 = @as(i32, x) - @as(i32, drag.start_x);
@@ -347,12 +348,12 @@ pub fn isResizingWindow(win: u32) bool {
 
 /// Rect last applied during the active drag. Only meaningful while
 /// isDragging() and after at least one motion event.
-pub fn getDragLastRect() utils.Rect {
+pub fn getDragLastRect() geom.Rect {
     return g_state.drag.last_rect;
 }
 
 /// Updates a floating window's rect on the model, no-op for tiled/unknown.
-pub fn setFloatingRect(m: *model.Model, win: model.WindowId, r: utils.Rect) void {
+pub fn setFloatingRect(m: *model.Model, win: model.WindowId, r: geom.Rect) void {
     const e = m.store.getPtr(win) orelse return;
     if (e.presence == .covering) return; // fullscreen owns geometry
     if (e.anchor == .floating) e.anchor.floating = r;

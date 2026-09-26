@@ -20,8 +20,7 @@ const build_options = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
-const utils = @import("utils");
-const screen = @import("screen");
+const usable_area = @import("usable_area");
 const refresh = @import("refresh");
 const scale = @import("scale");
 const constants = @import("constants");
@@ -34,7 +33,7 @@ const focus = @import("focus");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const model = @import("model");
-const sync = @import("sync");
+const reconcile = @import("reconcile");
 const wincache = @import("wincache");
 
 const window = @import("window");
@@ -53,6 +52,8 @@ const visibility = @import("visibility");
 const window_mods = @import("window_modules").modules;
 const contract = @import("contract");
 
+const geom = @import("geom");
+const requests = @import("requests");
 /// The hide-family provider bound to the generated window registry, resolved
 /// once at file scope: the hidden-set synthesis and its collect dispatch
 /// share one lookup (no module is ever named by the bar).
@@ -504,7 +505,7 @@ const TitleScratch = struct {
     /// in [0, frame.wins_len) for the frame; the DrawCtx's title snapshot
     /// points into them and click hit-testing reuses them after the draw.
     titles_buf: [max_frame_windows][]const u8 = undefined,
-    geoms_buf: [max_frame_windows]?utils.Rect = undefined,
+    geoms_buf: [max_frame_windows]?geom.Rect = undefined,
 };
 
 /// Last-seen core fact revisions (see core.Facts). Each is diffed against the
@@ -854,9 +855,9 @@ const State = struct {
     /// with the off-screen sentinel for windows that have never been placed
     /// (parked/unsent). Mirrors the old batch behavior (truth-rect first,
     /// sentinel fallback) without the xcb_get_geometry round-trip.
-    fn titleGeom(win: u32, minimized: bool) ?utils.Rect {
+    fn titleGeom(win: u32, minimized: bool) ?geom.Rect {
         if (minimized) return segmod.offscreen_rect;
-        return sync.truthRect(pipeline.model(), win) orelse segmod.offscreen_rect;
+        return reconcile.truthRect(pipeline.model(), win) orelse segmod.offscreen_rect;
     }
 
     // Drawing
@@ -1175,7 +1176,7 @@ fn submitDrawBlockingFull() void {
 }
 
 inline fn ungrabAndFlush() void {
-    utils.ungrabAndFlush(core.getState().conn);
+    requests.ungrabAndFlush(core.getState().conn);
 }
 
 /// Requests the next draw to repaint every segment and mark the whole bar
@@ -1227,7 +1228,7 @@ pub fn init() !void {
     const height = calcBarHeightAndFontSize();
     const bar = try createBar(height, barwin.calcBarYPos(height));
     gBar.state = bar.state;
-    screen.setSurfaceWindow(bar.setup.win_id);
+    usable_area.setSurfaceWindow(bar.setup.win_id);
     // Map before the first draw (same rationale as applyVisibility: a blit to
     // an unmapped window is discarded, and compositors start remapped windows
     // blank until first damage).
@@ -1262,8 +1263,8 @@ pub fn deinit() void {
         s.deinit();
         gBar.state = null;
     }
-    screen.releaseClaim(screen.bar_id);
-    screen.clearSurfaceWindow();
+    usable_area.releaseClaim(usable_area.bar_id);
+    usable_area.clearSurfaceWindow();
 }
 
 pub fn reload() void {
@@ -1321,7 +1322,7 @@ fn applyReload(old: *State, height: u16) !void {
     new_state.vis.shown = old.vis.shown;
     new_state.vis.preferred = old.vis.preferred;
     gBar.state = new_state;
-    screen.setSurfaceWindow(new_bar.setup.win_id);
+    usable_area.setSurfaceWindow(new_bar.setup.win_id);
     syncScreenClaim();
     submitDrawBlockingFull();
     if (new_state.vis.shown) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
@@ -1359,12 +1360,12 @@ pub fn toggleBarSegmentAnchor() void {
     // self-ticker bound so a stale tick cannot region-scope a repaint before
     // the layout pass re-records them.
     for (&s.clock.segs) |*sc| sc.valid = false;
-    utils.grabServer(cs.conn);
+    requests.grabServer(cs.conn);
     _ = xcb.xcb_configure_window(
         cs.conn,
         s.win.win_id,
         xcb.XCB_CONFIG_WINDOW_Y,
-        &[_]u32{utils.toXcbCoord(new_y)},
+        &[_]u32{geom.toXcbCoord(new_y)},
     );
     // Publish the new edge BEFORE any early return. The bar window has
     // already moved and bar_position changed, so bailing out below without
@@ -1402,9 +1403,9 @@ pub fn isBarWindow(win: u32) bool {
 fn syncScreenClaim() void {
     const s = gBar.state orelse return;
     const cs = core.getState();
-    const edge: screen.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
+    const edge: usable_area.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
     const px: u16 = if (s.vis.shown) s.render.height else 0;
-    screen.setClaim(screen.bar_id, edge, px);
+    usable_area.setClaim(usable_area.bar_id, edge, px);
 }
 
 /// Synchronous bar update safe to call inside xcb_grab_server.
@@ -1562,7 +1563,7 @@ pub fn setBarState(action: types.Action) void {
 fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
     s.vis.shown = should_be_visible;
     const conn = core.getState().conn;
-    if (do_reconcile) utils.grabServer(conn);
+    if (do_reconcile) requests.grabServer(conn);
     _ = if (should_be_visible) xcb.xcb_map_window(conn, s.win.win_id) else xcb.xcb_unmap_window(conn, s.win.win_id);
     // Draw AFTER the map request so the blit lands in an already-mapped
     // window. A copy queued to an unmapped window is discarded by the server

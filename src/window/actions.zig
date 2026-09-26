@@ -8,13 +8,11 @@ const types = @import("types");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const persist = @import("persist");
-const sync = @import("sync");
 const focus = @import("focus");
 const window = @import("window");
-const screen = @import("screen");
+const usable_area = @import("usable_area");
 const build_options = @import("build_options");
 const log = @import("log");
-const utils = @import("utils");
 const tracking = @import("tracking");
 
 // Private transition-layer gate for mutable model access: this module owns
@@ -61,7 +59,11 @@ const surfaces = @import("surfaces").Surfaces;
 const wincache = @import("wincache");
 const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
+const cycle = @import("cycle");
+const geom = @import("geom");
+const time = @import("time");
 
+const ledger = @import("ledger");
 /// Withdrawal facts for actions.unmanage. The sole caller (window.
 /// unmanageWindow) removes the model entry BEFORE the action runs, so both
 /// fields are captured up front and ride the context in; every other entry
@@ -268,7 +270,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     // which the bar is gone and the window is sized, all visible on the next
     // compositor frame. Gated on `-Dprofile-key` like the other profiler
     // seams, so non-profiled builds skip the clock samples.
-    const fs_t0: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const fs_t0: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
     const wm = providerOf(.toggleCovering) orelse return;
     if (!core.getState().config.fullscreen_enabled) return;
     const m = pipeline.mut(&gate);
@@ -320,7 +322,7 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     // already covers the reconcile + immediate bar hide (enter) and the
     // ungrabAndFlush, i.e. the visual-completion point.
     if (build_options.profile_key) {
-        const dt = utils.monotonicNs() - fs_t0;
+        const dt = time.monotonicNs() - fs_t0;
         log.info("[FSPROF] win={d} kind={s} done {d}ns", .{
             win, @tagName(kind), dt,
         });
@@ -344,7 +346,9 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
 
     var ft: focus.FocusTransition = .none;
     if (ws_idx != m.current.index) {
-        if (was_focused) { ft = focusFallback(m, .tiling_operation); }
+        if (was_focused) {
+            ft = focusFallback(m, .tiling_operation);
+        }
         // Moving the current workspace's covering window away changes the
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
@@ -374,7 +378,9 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
         if (rem_prov) |rp| {
             if (!rp.removeFromWs.?(m, win, model_mod.WSId.fromIndex(ws_idx))) return; // last tag protected
         }
-        if (removing_current and m.focused == win) { ft = focusFallback(m, .tiling_operation); }
+        if (removing_current and m.focused == win) {
+            ft = focusFallback(m, .tiling_operation);
+        }
     } else {
         if (add_prov) |ap| ap.addToWs.?(m, win, model_mod.WSId.fromIndex(ws_idx), protect_current);
     }
@@ -417,7 +423,7 @@ pub fn allViewToggle() void {
 /// Shared tiled->floating detach (toggleFloating/detachToFloating): seeds the
 /// floating anchor from LastSent geometry and drops the home-list membership.
 fn detachTiledToFloating(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.WindowId) bool {
-    const r = sync.lastRectFor(win) orelse return false;
+    const r = ledger.lastRectFor(win) orelse return false;
     if (e.home_ws) |home| model_mod.removeValue(&m.ws[home.index].tiled_order, win);
     e.anchor = .{ .floating = r };
     e.home_ws = null; // no longer in tiled_order
@@ -461,7 +467,7 @@ fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.W
 /// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
 /// window's geometry (1 XCB call) instead of replaying all windows. Called
 /// from the drag provider's updateDrag on every motion event.
-pub fn dragRect(win: model_mod.WindowId, r: utils.Rect) void {
+pub fn dragRect(win: model_mod.WindowId, r: geom.Rect) void {
     const wm = providerOf(.setFloatingRect) orelse return;
     const m = pipeline.mut(&gate);
     wm.setFloatingRect.?(m, win, r);
@@ -515,8 +521,8 @@ pub fn isResizingWindow(win: model_mod.WindowId) bool {
 /// Last committed drag rect, for resize-path geometry replay. Zero rect
 /// fallback when no module provides the hook, matching the old no-floating
 /// default.
-pub fn getDragLastRect() utils.Rect {
-    const zero = utils.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
+pub fn getDragLastRect() geom.Rect {
+    const zero = geom.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
     const wm = providerOf(.getDragLastRect) orelse return zero;
     return wm.getDragLastRect.?();
 }
@@ -549,7 +555,7 @@ pub fn stepVariantDir(dir: i32) void {
     const m = pipeline.mut(&gate);
     const p = &m.ws[m.current.index].params;
     const n = tiling.variantCount(p.kind);
-    p.variant_idx = @intCast(utils.wrapIndex(p.variant_idx, dir, n));
+    p.variant_idx = @intCast(cycle.wrapIndex(p.variant_idx, dir, n));
     retile(.{ .full_redraw = true }, null);
 }
 
@@ -624,7 +630,7 @@ pub fn viewportStep(dir: i32) void {
 }
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
-/// window's slot is fully on-screen. Pure model/param mutation (no grab, no
+/// window's slot is fully on-usable area. Pure model/param mutation (no grab, no
 /// reconcile); returns whether the offset or tiled count actually changed.
 /// When the focused window is already fully on-screen (the common case during
 /// focus cycling) both are unchanged and the caller can skip all geometry
@@ -648,7 +654,7 @@ fn snapViewportParamsToFocused() bool {
     }
     const i = idx orelse return false;
 
-    const wa = screen.workArea(core.getState().screen);
+    const wa = usable_area.workArea(core.getState().screen);
     const i64_slot_w: i64 = sc.slot_w;
     const slot_left = @as(i64, @intCast(i)) * i64_slot_w - p.viewport_offset;
     const slot_right = slot_left + i64_slot_w;
@@ -692,7 +698,7 @@ fn viewportContext(m: *const model_mod.Model) ViewportContext {
     const md = contract.moduleOf(p.kind) orelse return viewport_inactive;
     if (md.slotWidth == null or md.maxOffset == null) return viewport_inactive;
     const n = model_mod.tiledCountOnWs(m, m.current);
-    const wa = screen.workArea(core.getState().screen);
+    const wa = usable_area.workArea(core.getState().screen);
     const slot_w = md.slotWidth.?(wa.width);
     const max_off = md.maxOffset.?(n, slot_w, wa.width);
     return .{ .active = true, .tiled_count = n, .slot_w = slot_w, .max_off = max_off };
@@ -856,7 +862,7 @@ pub fn switchTo(ws_idx: u8) void {
     // that one workspace.
     if (m.current.index == ws_idx and !m.all_view_active) return;
 
-    const t0: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const t0: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Suppression reset, then the switch transition.
     focus.setSuppressReason(.none);
@@ -890,7 +896,7 @@ pub fn switchTo(ws_idx: u8) void {
     // merely visible on ws, owns the screen here.
     if (model_mod.coveringOccupantOnWs(m, m.current) != null) core.fullscreen.bump();
 
-    const t1: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const t1: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // The server grab body below is pure fire-and-forget XCB (focus
     // transition + reconcile), so no blocking wait ever freezes input while
@@ -909,7 +915,7 @@ pub fn switchTo(ws_idx: u8) void {
     // purely from the model with zero X round trips.
     const ft: focus.FocusTransition = focusFallback(m, .workspace_switch);
 
-    const t2: u64 = if (build_options.profile_key) utils.monotonicNs() else 0;
+    const t2: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Reconcile + focus under one server grab, atomically, via the pipeline
     // seam (grabCtx/reconcile/applyPendingFocus/ungrabAndFlush consolidated).
@@ -925,7 +931,7 @@ pub fn switchTo(ws_idx: u8) void {
     pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft, .after, null);
 
     if (build_options.profile_key) {
-        const t3 = utils.monotonicNs();
+        const t3 = time.monotonicNs();
         log.info("[TIMING] switchTo ws={}: model={d}us rt_prep={d}us grab_body={d}us total={d}us", .{
             ws_idx,
             @as(u64, @intCast(t1 - t0)) / 1000,
@@ -950,7 +956,7 @@ pub fn switchTo(ws_idx: u8) void {
 /// given rect with no home-list membership, mirroring detachTiledToFloating's
 /// anchor/home_ws state. The reconcile tail then sizes it floating in one
 /// reconcile, so a float-rule spawn never flashes a tiled slot.
-pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?utils.Rect) void {
+pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?geom.Rect) void {
     const m = pipeline.mut(&gate);
     if (m.store.has(win)) return; // double-manage guard
 
@@ -1030,7 +1036,7 @@ pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
     const was_focused = ctx.withdrawn_was_focused;
 
     model_mod.unregister(m, win);
-    sync.forget(win); // X ids recycle; stale LastSent must not survive
+    ledger.forget(win); // X ids recycle; stale LastSent must not survive
 
     // Closing the current workspace's covering occupant releases the area;
     // retileWithFallback bumps the core fact so the bar reacts.

@@ -5,7 +5,7 @@ const std = @import("std");
 const constants = @import("constants");
 const ids = @import("ids");
 const model = @import("model");
-const utils = @import("utils");
+const scaling = @import("scaling");
 
 /// A value that can be expressed as either an absolute pixel count or a
 /// percentage of some reference dimension. Defined here (not in the parser)
@@ -663,13 +663,13 @@ pub const BarConfig = struct {
 
     /// Resolves a ScalableValue to pixels: the percentage path multiplies the
     /// reference dimension by `factor`, the absolute path is used verbatim
-    /// (canonical formula lives in `utils.scaling`).
+    /// (canonical formula lives in `core/pure/scaling`).
     inline fn scaleValue(sv: ScalableValue, bar_height: u16, factor: f32) f32 {
-        return utils.scaling.scaleToPixels(sv, @as(f32, @floatFromInt(bar_height)) * factor);
+        return scaling.scaleToPixels(sv, @as(f32, @floatFromInt(bar_height)) * factor);
     }
 
     inline fn scaleToU16(val: f32) u16 {
-        return utils.scaling.roundToU16(val, 0.0);
+        return scaling.roundToU16(val, 0.0);
     }
     /// Scale factor applied to the spacing percentage path (`spacing` widens
     /// with the bar); the absolute-px path is used verbatim.

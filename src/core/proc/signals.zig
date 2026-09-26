@@ -4,10 +4,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const utils = @import("utils");
 const spawn = @import("spawn");
 const restart = @import("restart");
 
+const lifecycle = @import("lifecycle");
 // End indices of the self-pipe: signal handlers write to pipe_write; the
 // event loop polls pipe_read.
 const pipe_read = 0;
@@ -181,8 +181,8 @@ fn setupBacktraceHandler() void {
 
 /// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
 pub fn setup() !void {
-    signal_pipe = try utils.makePipe();
-    utils.setSignalWriteFd(signal_pipe[pipe_write]);
+    signal_pipe = try lifecycle.makePipe();
+    lifecycle.setSignalWriteFd(signal_pipe[pipe_write]);
 
     const sa: std.posix.Sigaction = .{
         .handler = .{ .handler = signalHandler },
@@ -227,7 +227,7 @@ pub fn setup() !void {
 
 // Closes both ends of the signal pipe.
 pub fn deinit() void {
-    utils.setSignalWriteFd(-1);
+    lifecycle.setSignalWriteFd(-1);
     for (&signal_pipe) |*fd| {
         if (fd.* == -1) continue;
         _ = std.os.linux.close(fd.*);
@@ -244,12 +244,12 @@ pub fn readFd() std.posix.fd_t {
 // set bit in the pending-signals bitmap).
 fn dispatchSignal(pending_sig: u8) void {
     switch (@as(std.posix.SIG, @enumFromInt(pending_sig))) {
-        .HUP => utils.reload(),
+        .HUP => lifecycle.reload(),
         // Unconditional in-place re-exec of the current binary (no change
         // check). Dispatch runs on the event loop, NOT in the signal
         // handler, so flag work is safe.
         .USR1 => restart.requestReexec(),
-        .TERM, .INT => utils.quit(),
+        .TERM, .INT => lifecycle.quit(),
         // SIGCHLD: an intermediate double-fork child has exited.
         // Reap it with WNOHANG, then immediately drain the spawn pipes so
         // registerSpawn fires without waiting for the next XCB event batch.

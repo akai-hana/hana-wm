@@ -1,10 +1,10 @@
 //! Fibonacci (spiral) tiling layout.
 //! Arranges windows in a clockwise spiral, each taking half the remaining screen area.
 
-const utils = @import("utils");
 const model = @import("model");
 const tiling = @import("tiling");
 const Region = tiling.Region;
+const geom = @import("geom");
 
 // Clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
@@ -40,7 +40,7 @@ const SpiralDirection = enum(u2) {
 /// helpers take the pointer to avoid copies in the recursion.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
-    const border2 = utils.doubledBorder(m);
+    const border2 = geom.doubledBorder(m);
     const min_region = m.gap *| 2 +| border2;
 
     const outer = tiling.outerArea(v.workarea, m.gap);
@@ -73,7 +73,7 @@ inline fn splitAndAdvance(
     cur: *Region,
 ) void {
     const m = ctx.m;
-    const border2 = utils.doubledBorder(m);
+    const border2 = geom.doubledBorder(m);
     const gap = m.gap;
     const step = dir.step();
     const split_x = step.split_x;
