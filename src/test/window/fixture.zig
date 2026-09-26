@@ -32,7 +32,6 @@ const constants = @import("constants");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
 const helpers = @import("helpers");
 
-const geom = @import("geom");
 /// Bounded placement buffer width, mirroring the engine's own cap.
 const ledger = @import("ledger");
 pub const max_order = constants.max_tiled_windows;
@@ -250,7 +249,7 @@ pub const Fx = struct {
     }
 
     /// Current workspace work area (screen minus bar claims; none in tests).
-    pub fn workArea(self: *const Fx) geom.Rect {
+    pub fn workArea(self: *const Fx) model.Rect {
         return usable_area.workArea(self.scr);
     }
 
@@ -377,7 +376,7 @@ pub const Fx = struct {
     /// workspace, mirroring pipeline's Ctx/env resolution (non-tiling builds
     /// have no engine; returns null). The engine emits the full footprint, so
     /// the server's geometry (which includes border width) must equal it.
-    pub fn expectedPlacementOf(self: *const Fx, win: u32) ?geom.Rect {
+    pub fn expectedPlacementOf(self: *const Fx, win: u32) ?model.Rect {
         if (!build_options.has_tiling) return null;
         const m = pipeline.model();
         const ws = m.current;

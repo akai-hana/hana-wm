@@ -39,6 +39,7 @@ var xkb_state: ?xkbcommon.XkbState = null;
 // Rebuilt on startup and every config reload (buildKeybinds); the entries
 // borrow `*const Action` pointers from the live config's keybindings.
 var keybind_resolver: keybind.KeybindResolver = .{};
+var resolved_binds: []keybind.ResolvedBind = &.{};
 
 /// Initialises the XKB context, keymap, and key state
 /// from the server's current keyboard configuration.
@@ -65,8 +66,25 @@ pub fn getXkbState() ?*xkbcommon.XkbState {
 /// every config reload with the new config's keybindings. No-op without XKB.
 pub fn buildKeybinds(keybindings: []types.Keybind) void {
     const state = getXkbState() orelse return;
-    keybind.resolveKeycodes(keybindings, state);
-    keybind_resolver.rebuildDispatchMap(keybindings, core.getState().alloc);
+    const alloc = core.getState().alloc;
+    // The compiled list lives here, not in config: it is derived from the live
+    // keyboard, and `grabKeybindings` needs it on every regrab (including
+    // reloads that did not change the bindings). Rebuilt here so a keyboard
+    // change and a binding change take the same path.
+    resolved_binds = alloc.realloc(resolved_binds, keybindings.len) catch {
+        resolved_binds = &.{};
+        return;
+    };
+    resolved_binds = keybind.resolveKeycodes(keybindings, state, resolved_binds);
+    keybind.reportUnresolved(resolved_binds);
+    keybind_resolver.rebuildDispatchMap(keybindings, alloc);
+}
+
+/// The keybindings with keycodes resolved against the live XKB state, for
+/// `events.grabKeybindings`. Empty when XKB is unavailable (no keyboard to
+/// resolve against), which is also when nothing can be grabbed.
+pub fn resolvedKeybinds() []const keybind.ResolvedBind {
+    return resolved_binds;
 }
 
 /// Releases the dispatch map. Call before the config whose keybindings the
@@ -87,9 +105,11 @@ pub fn handleMappingNotify() void {
     const state = getXkbState() orelse return;
     state.rebuild(cs.conn);
 
-    // Re-resolve per-binding keycodes from the new table, then atomically
-    // re-grab (ungrab all, grab the updated set).
-    keybind.resolveKeycodes(cs.config.keybindings.items, state);
+    // Re-resolve the compiled list from the new table, then atomically re-grab
+    // (ungrab all, grab the updated set). `buildKeybinds` is the single place
+    // that produces the list, so a mapping change cannot leave the grab path
+    // reading a list resolved against the old keyboard.
+    buildKeybinds(cs.config.keybindings.items);
     events.grabKeybindings();
 }
 
@@ -316,14 +336,11 @@ fn closeWindow(win: u32) void {
 // Action dispatch
 
 /// Directional actions carry a `Dir`; map it to the signed step used by the
-/// tiling ops (`.forward` = +1, `.reverse` = -1).
-inline fn dirSign(dir: types.Dir) i32 {
+/// tiling ops (`.forward` = +1, `.reverse` = -1). One generic serves both the
+/// integer step and the scaled f32 rate, so the two can never disagree about
+/// which direction is positive.
+inline fn dirSign(comptime T: type, dir: types.Dir) T {
     return if (dir == .forward) 1 else -1;
-}
-
-/// Float form of dirSign, for scaled-step actions that multiply a f32 rate.
-inline fn dirSignFloat(dir: types.Dir) f32 {
-    return if (dir == .forward) 1.0 else -1.0;
 }
 
 /// Top-level action dispatcher. Routes each action tag to its handler inline
@@ -354,15 +371,15 @@ fn executeAction(action: *const types.Action) void {
         },
 
         .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
-        .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(dir)),
-        .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(dir)),
-        .set_master_width => |dir| actions.adjustPrimaryWidthAction(dirSignFloat(dir) * constants.master_width_step),
-        .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(dir)),
-        .grow_stack => |dir| actions.adjustSecondaryBalance(dirSignFloat(dir) * constants.stack_balance_step),
+        .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(i32, dir)),
+        .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(i32, dir)),
+        .set_master_width => |dir| actions.adjustPrimaryWidthAction(dirSign(f32, dir) * constants.master_width_step),
+        .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(i32, dir)),
+        .grow_stack => |dir| actions.adjustSecondaryBalance(dirSign(f32, dir) * constants.stack_balance_step),
         .swap_master => |mode| actions.swapPrimaryAction(mode == .focus_swap),
         .move_window_next => actions.moveFocused(1),
         .move_window_prev => actions.moveFocused(-1),
-        .scroll_view => |dir| actions.viewportStep(dirSign(dir)),
+        .scroll_view => |dir| actions.viewportStep(dirSign(i32, dir)),
 
         // Cycle focus forward/backward. The viewport snap runs as a duty
         // inside the focus transition's single grab (see

@@ -61,7 +61,6 @@ const log = @import("log");
 /// reference — no mirrored duplicate to keep in lockstep, and no local stub.
 const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
-const geom = @import("geom");
 const ledger = @import("ledger");
 const sink = @import("sink");
 const time = @import("time");
@@ -69,10 +68,10 @@ const time = @import("time");
 pub const Ctx = struct {
     sink: sink.Sink,
     /// Full screen rect (fullscreen branch geometry).
-    screen: geom.Rect,
+    screen: model.Rect,
     /// Screen minus bar; computed by the caller with the existing
     /// bar-offset helper (workArea(ctx)). Used for tiled geometry.
-    workarea: geom.Rect,
+    workarea: model.Rect,
     env: contract.Env = .{},
     /// Focus/mode border color; ported from borders.resolveBorderColor minus
     /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
@@ -121,7 +120,7 @@ pub fn reconcileUnderGrab(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
 pub fn reconcileDragTick(m: *const model.Model, snk: sink.Sink, win: model.WindowId) void {
     const e = m.store.get(win) orelse return;
     if (e.presence != .present) return;
-    const rect: geom.Rect = switch (e.anchor) {
+    const rect: model.Rect = switch (e.anchor) {
         .floating => |r| r,
         .tiled => return,
     };
@@ -243,7 +242,10 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
         const is_fs = win == fs_win;
         const on_current = model.visibleEntry(m, e, m.current);
         const definitely_parked_desire = e.presence == .parked or !on_current;
-        if (!is_fs and definitely_parked_desire and last.parked) continue;
+        // `parked_dirty` means the client moved this parked window behind our
+        // back, so the elision below would strand it on screen; recompute and
+        // re-park it. See ledger.SentEntry.parked_dirty.
+        if (!is_fs and definitely_parked_desire and last.parked and !last.parked_dirty) continue;
 
         // Resolve this tiled window's placement in O(1): the lookup table is
         // indexed by store slot, which this store iteration already provides.
@@ -259,7 +261,11 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
         const is_winner = winner == win;
 
         if (parked) {
-            if (!last.parked) {
+            // Re-send on the transition OR when the client moved itself while
+            // parked: `last.parked` stays true across the drift, so without
+            // the dirty term the recompute above would compute a fresh park
+            // and then throw it away.
+            if (!last.parked or last.parked_dirty) {
                 // Map before park: a fresh window's own map request was
                 // redirected by SubstructureRedirect (never performed by the
                 // server), so the offscreen park would otherwise leave it
@@ -272,7 +278,10 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             // Raise triggers per the ledger contract (header read 2): winner
             // .above on geometry motion, unpark, or restack pressure only.
             const first_send = !last.has_rect;
-            const moved = first_send or !last.rect.eql(rect);
+            // Geometry only: `border_width` is owned by the separate `need_bw`
+            // check below (last.bw), so letting it into `moved` would make a
+            // border-only change look like motion and raise for nothing.
+            const moved = first_send or !last.rect.eqlGeom(rect);
             const unpark_transition = last.parked;
             const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
 
@@ -296,7 +305,10 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
         if (gop) |g| {
+            // A park (fresh or drift repair) records that the window is where
+            // we want it, which is also what clears the dirty flag.
             if (parked) g.parked = true else ledger.markSentVisible(g, rect, bw, pixel);
+            g.parked_dirty = false;
         } else ledger_overflow = true;
     }
     if (ledger_overflow) log.err("reconcile.run: ledger full; some sends applied, records lost", .{});
@@ -312,14 +324,14 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
 /// Best known live geometry for `win` without a server round trip:
 ///   1. floating base rect from the model (authoritative while floating),
 ///   2. else the last visible geometry we sent (null while parked/unsent).
-pub fn truthRect(m: *const model.Model, win: model.WindowId) ?geom.Rect {
+pub fn truthRect(m: *const model.Model, win: model.WindowId) ?model.Rect {
     const e = m.store.get(win) orelse return null;
     if (e.presence == .present and e.anchor == .floating) return e.anchor.floating;
     return ledger.lastRectFor(win);
 }
 
 const Desire = struct {
-    rect: geom.Rect,
+    rect: model.Rect,
     bw: u16,
     pixel: u32,
     parked: bool,
@@ -371,7 +383,7 @@ fn computeDesire(
     last: ledger.SentEntry,
     on_current: bool,
 ) Desire {
-    var rect: geom.Rect = contract.parked_rect;
+    var rect: model.Rect = contract.parked_rect;
     var bw: u16 = ctx.env.margins.border;
     var pixel: u32 = ctx.color_of(win, m);
     var parked = false;
@@ -387,7 +399,14 @@ fn computeDesire(
                 rect = ctx.screen;
                 bw = 0;
                 pixel = 0;
-            } else parked = true;
+            } else {
+                // Deliberately NOT markParked: this branch keeps bw/pixel, and
+                // so does the doc above. markParked zeroes both, which is
+                // right for the "park from a clean slate" arms above and wrong
+                // here -- the exit replay needs the borders the window was
+                // last given, or it comes back undecorated.
+                parked = true;
+            }
         },
         // A covering window owns the screen this reconcile: every other present
         // window is a covered sibling and parks (geometry preserved for the

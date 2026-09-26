@@ -21,7 +21,7 @@ Terminology used throughout:
 
 - **contract** — the interfaces declared in `src/core/architecture/contract.zig` (`Surfaces`, `WindowModule`, `Layout`, `Segment`, the `tiling_mods` conditional import). Open to any module that binds `pub const module`, closed to extension by the core.
 - **contractor (module)** — any file inside a `modules/` directory that binds one of those contracts via a comptime-structured `pub const module` declaration and is pulled into a generated registry. Dispatch is registry-first; nothing names a sibling module.
-- **core** — the always-compiled layer, grouped by role: `architecture/` (the xcb-free `model`/`geom` vocabulary plus `contract`), `x11/` (the whole X contact surface), `loop/` (`pipeline`, `events`), `proc/` (`lifecycle`, `signals`, `spawn`, `restart`, `persist`), `display/` (`scale`, `usable_area`), and the xcb-free `pure/` shelf.
+- **core** — the always-compiled layer, grouped by role: `architecture/` (the xcb-free `model` — state *and* the `Rect`/`Margins` value objects — plus `contract`), `x11/` (the whole X contact surface), `loop/` (`pipeline`, `events`), `proc/` (`lifecycle`, `signals`, `spawn`, `restart`, `persist`), `display/` (`scale`, `usable_area`), and the xcb-free `pure/` shelf.
 - **model / config** — the two pure layers (no `xcb`), kept free of X by construction and enforced by the build. `architecture/contract.zig` sits with the model but *is* xcb-touching (it declares xcb event types), so it is outside the pure frontier.
 - **other** — file/service modules that are neither contract nor core: `main.zig`, layout helpers such as `tiling/tiling.zig`, bar helpers such as `bar/segment.zig`.
 
@@ -39,7 +39,7 @@ src/                 All Zig sources (every .zig becomes a named module)
   main.zig           Entry point
   core/              Always-compiled core + contract + seams + shelf
     core.zig         Process-wide XCB state + shared types (directory facade)
-    architecture/    The shape of the WM: model + geom (xcb-free) and contract (xcb event types)
+    architecture/    The shape of the WM: model.zig (xcb-free; state + geometry value objects) and contract.zig (xcb event types)
     pure/            X-free shelf: ids, constants, bounded, idmap, log, paths, scaling, time, cycle
     loop/            Always-running orchestration: pipeline (model owner + reconcile choke point), events
     proc/            Process/hand-off cluster: lifecycle (reload flag + wake pipe), signals, spawn, restart, persist
@@ -86,19 +86,18 @@ Non-`src` files in the tree (`.git`, `.zig-cache`, `zig-out`, `.opencode`, etc.)
 
 ### 3.3 Registry shape enforcement
 
-- `classifyFile` enforces exact `pub const module` spellings via comptime needles: typed (`pub const module: @import("contract").` ), segdraw (`pub const module = segdraw.module(`), and layout (`pub const module = tiling.layoutModule(`). Any other spelling is a loud build error, because a mis-typed member would silently break the registry.
+- `classifyFile` enforces exact `pub const module` spellings via comptime needles: typed (`pub const module: @import("contract").` ), scaffold (`pub const module = scaffold.module(`), and layout (`pub const module = tiling.layoutModule(`). Any other spelling is a loud build error, because a mis-typed member would silently break the registry.
 - `deriveOwnerContracts` derives each owner's contract name from its declarations (empty → default contract, mixed → `error.MixedOwnerContract`). No hand-written table.
 
 ### 3.4 Layer purity enforcement
 
-- `assertPureLayerImports` runs (via `wireAll`) on the real `@import` edges of every discovered module. For the xcb-free architecture vocabulary (`src/core/architecture/model.zig` and `geom.zig`), `src/tiling/`, and `src/config/`, each dependency is checked against `pureLayerAllows`:
+- `assertPureLayerImports` runs (via `wireAll`) on the real `@import` edges of every discovered module. For the pure model file (`src/core/architecture/model.zig`), `src/tiling/`, and `src/config/`, each dependency is checked against `pureLayerAllows`:
   - the pure shelf — `constants, log, ids, masks, paths, bounded, idmap, scaling, time, cycle, lifecycle`;
-  - always `model`;
-  - architecture may additionally import its `geom` sibling;
+  - always `model` (and the model itself may import nothing else but the shelf);
   - tiling may additionally import `tiling` and `contract`;
   - config may additionally import its siblings `parser, schema, types, fallback` and the pure `keysyms`.
   - Any other import (hub wiring, `xcb`) fails the build with `error.LayerGuardViolation`.
-- This is complemented by `dev/scripts/check-layers.sh`, which sweeps import *bodies* for bare `xcb` tokens in pure-layer files (an import guard alone can't catch `xcb` re-exported through a shelf module). Its Rule 1 puts X mutations behind the reconcile seam (with a documented allowlist: `src/bar/bar.zig|src/bar/drawing.zig|src/bar/win.zig` for the bar's own wire lifecycle); Rule 2 does the same for server grabs; Rule 3 sweeps the xcb-free vocabulary bodies (`architecture/model.zig`, `architecture/geom.zig`, `tiling/`, `config/`).
+- This is complemented by `dev/scripts/check-layers.sh`, which sweeps import *bodies* for bare `xcb` tokens in pure-layer files (an import guard alone can't catch `xcb` re-exported through a shelf module). Its Rule 1 puts X mutations behind the reconcile seam (with a documented allowlist: `src/bar/bar.zig|src/bar/drawing.zig|src/bar/win.zig` for the bar's own wire lifecycle); Rule 2 does the same for server grabs; Rule 3 sweeps the pure bodies (`architecture/model.zig`, `tiling/`, `config/`).
 
 ### 3.5 Tests
 
@@ -148,7 +147,7 @@ Serializes the model to a temp file via `std.json` — no X traffic. Carries a `
 
 In-place `execv` of the same binary. Explicitly xcb-free and model-free; it only arranges the environment hand-off (`HANA_CONFIG_DIR` pinned to the frozen last-good config snapshot, `HANA_RESTORE`). Ownership split with `lifecycle.zig`: `lifecycle` owns the reload (SIGHUP / atomic flag + wake byte, no process swap); `restart` owns the re-exec (SIGUSR1 / `requestReexec`).
 
-### 5.7 `src/core/display/scale.zig` — DPI detection/scaling
+### 5.7 `src/core/display/dpi.zig` — DPI detection/scaling
 
 DPI probing via RandR + `RESOURCE_MANAGER` (`Xft.dpi`, 1024-word probe then 4096 retry), `mm_per_inch 25.4`, `baseline_dpi`, reasonable-DPI band 50–300, `font_baseline_height 1080`. Exposes `scaleFontSize`, `scaleBarHeight`, and `bar_min_height_px = 20`. Feeds font and bar sizing; its `XftProbe` distinguishes truncation from genuine property absence.
 
@@ -163,7 +162,7 @@ The send architecture is a strict four-layer seam. The DAG runs strictly downwar
 - **`src/core/x11/reconcile.zig` (planner).** The reconcile engine: computes the desired X state unconditionally and emits *only the delta* against a write-only sent ledger. `Ctx` bundles the `Sink`, screen rect, `workarea`, `cfg_bw`, env (`contract.Env`), and `color_of`. The entry point is `run()` (`Opts` is its options struct), with `reconcileUnderGrab` and `reconcileDragTick` as the grab-bracketed and single-window fast paths. Calls `tiling.compute` (via the seam) to get placements; maps/parks are modeled as window-presence transitions. The four ledger reads are documented as a behavioral contract so future edits don't turn reads into skips. Id recycling (`ledger.forget`) keeps canvas-visible ids alive.
 - **`src/core/x11/ledger.zig` (write-only sent state).** The `SentEntry` records, the `init`/`forget` lifecycle, and the `sentGet`/`sentGetOrPut`/`markSent*`/`lastRectFor`/`lastBorderWidthFor` readers — split out of the planner so the diff state has a home that is neither the planner nor the dispatcher. `truthRect` (model-then-ledger resolution) stays with the planner, since it reads the model rather than the ledger.
 - **`src/core/x11/sink.zig` (interface + dispatcher).** Owns the `Stack` enum (`{ above }`), the `Sink` struct and its vtable (`map`, `geom`, `geom_bordered`, `border_width`, `border_pixel`, `park`, `stack_only`, `set_ewmh_fullscreen`, `flush`, `grab_server`, `ungrab_and_flush`), and `XcbSink`, the vtable implementation over `requests.zig`/`atoms.zig` — the only home of mutations (check-layers Rule 1). Tests bind a recorder against this same vtable.
-- **`src/core/x11/requests.zig` (raw primitives).** Raw XCB request wrappers with batching/flush discipline: `configureWindow`, `raiseWindow`, `setBorderPixel`, `grabServer`/`ungrabAndFlush`, EWMH advertisement, and `collectPropertyReply` (poll-first, then blocking). Also owns `rectFromXcb`, the xcb↔`geom.Rect` adapter — it lives here, not in `geom.zig`, so the geometry vocabulary stays xcb-free. Imports `xcb` directly (not via core) so the graph stays acyclic.
+- **`src/core/x11/requests.zig` (raw primitives).** Raw XCB request wrappers with batching/flush discipline: `configureWindow`, `raiseWindow`, `setBorderPixel`, `grabServer`/`ungrabAndFlush`, EWMH advertisement, and `collectPropertyReply` (poll-first, then blocking). Also owns `rectFromXcb`, the xcb↔`model.Rect` adapter — it lives here, not in `model.zig`, so the pure model stays xcb-free. Imports `xcb` directly (not via core) so the graph stays acyclic.
 - **`src/core/x11/atoms.zig` (the atom cache).** The comptime `AtomCache` struct plus its batched intern pass and `getAtomCached`/`getAtomOrZero` lookups. `supported_atoms ⊆ AtomCache` fields is enforced (`@compileError` on an advertised atom without a cache field). Split from `requests.zig` so interning is not mistaken for a wire primitive.
 - **`src/core/x11/xcb.zig`.** The single `@cImport` translation site (`xcb.h`, `xcbext.h` for `xcb_poll_for_reply`, `randr.h`, `xkb.h` for detectable auto-repeat) plus the `Connection`/`Screen` aliases and `eventCast`.
 - **`src/core/x11/masks.zig`.** X event-mask constants (used by grabs and window setup) and `normalizeModifiers`.
@@ -182,13 +181,20 @@ X-free, fixed-capacity, single-threaded helpers reused across layers (importable
 - **`log.zig`** — logging/diagnostics, plus the `WindowedProfiler` (fixed-capacity rolling window used by the latency tests).
 - **`scaling.zig`** — the pure pixel-conversion helpers (`scaleFontSize`, `scaleBarHeight`, …), the scaling half of what used to be `utils`.
 - **`time.zig`** — monotonic timing (`monotonicNs` and friends).
-- **`cycle.zig`** — index wrap-around for the layout-kind/variant cycles.
 
 The architecture vocabulary lives beside them in `src/core/architecture/`:
 
-- **`model.zig`** — the shared data model (section 6).
-- **`geom.zig`** — the xcb-free geometry vocabulary: `Rect`, `Margins`, `satI16`, `toXcbCoord`, `doubledBorder`. The xcb→rect adapter (`rectFromXcb`) deliberately lives in `x11/requests.zig` instead, so this file has no X dependency at all and can sit on the pure frontier.
+- **`model.zig`** — the shared data model (section 6), which also owns the geometry vocabulary it stores: the `Rect` and `Margins` value objects plus `doubledBorder`, `satI16`, and `toXcbCoord`. These are not general utilities — `Rect` has no identity and is compared with `eql`, and the two helpers exist only to serve it (`satI16` clamps into `Rect`'s own i16 range; `toXcbCoord` adapts a `Rect` field to the wire). `satI16` is also used by the pure `tiling/` layer, which is why they cannot live on the x11 side; the one genuinely xcb-typed adapter, `rectFromXcb`, stays in `x11/requests.zig`. `wrapIndex` (the round-robin modulo used by the layout-kind, variant, and focus cycles) is here for the same reason: it is the one modulo-wrap in the tree, and folding the three pure consumers' shared vocabulary into the file they all already import beat a 12-line module of its own.
 - **`contract.zig`** — the pluggable-composition seams (section 4). It declares xcb *event types*, which is why it is a sibling of the pure model rather than a member of the pure shelf.
+
+The `pure/` tier's contract is worth stating precisely, because the allowlists
+read as decisions otherwise: it is **xcb-free**, not **side-effect-free**. The
+process, path, and scaling helpers reach the filesystem, read `/proc`, and write
+a wake pipe — they just never touch the X connection. That is the property the
+layer allowlists actually enforce, and it is what makes a pure-layer test
+possible without a display: not "does nothing", but "cannot observe the server".
+Files that are genuinely free of side effects (ids, time, bounded, idmap) are
+still the ones to reach for when writing one.
 
 Process wiring moved out of the shelf into `src/core/proc/`:
 
@@ -197,6 +203,8 @@ Process wiring moved out of the shelf into `src/core/proc/`:
 ### 5.11 `src/core/proc/signals.zig` — signal handling
 
 Signalfd-based async signal handling (the `fd_signal` side of the event loop); bridges to `lifecycle.reload()` (SIGHUP) and `restart.requestReexec()` (SIGUSR1). Fixed-capacity, no allocation.
+
+**The self-pipe is a wake-up edge, not a payload channel.** A signal handler cannot do much, so each handled signal sets a bit in a shared bitmap and writes one byte to a non-blocking pipe; the loop's poll then wakes and reads the bitmap. The byte is a fixed token, never decoded — the bitmap is the state. Two consequences worth knowing before editing: the write must stay async-signal-safe (nothing but `write(2)`, no allocation, no logging), and the bitmap write must happen *before* the pipe write, or the loop can wake and observe a cleared bitmap. `signo >= 64` is clamped before the `1 << n` shift, since the bitmap is 64 bits wide.
 
 ### 5.12 `src/core/proc/spawn.zig` — process spawn
 
@@ -212,7 +220,7 @@ Key contents:
 
 - Aliases/vocabulary: `WindowId`, `WSId`, `Mask = u64`, `bit(ws)`, `maskedOn`, `ALL_MASK` (the "all workspaces" pin sentinel), `SizeHints`, `RestoreOrder { lifo, fifo }`, `ConfigureReq`, `HonorDecision`.
 - `LayoutParams` — kind (u8 registry index), `variant_idx`, `primary_width`, `primary_count`, `secondary_balance`, plus model-owned viewport state (`viewport_offset`, `viewport_prev_count`) so the layout engine stays pure.
-- `BaseMode = union(enum) { tiled, floating: geom.Rect }`; `Presence = enum { present, parked, covering }`; `Entry` (mask, anchor, size_hints, `home_ws` single-membership cache, presence, `covering_ws`). The fullscreen "covering" record lives on the model entry itself.
+- `BaseMode = union(enum) { tiled, floating: Rect }`; `Presence = enum { present, parked, covering }`; `Entry` (mask, anchor, size_hints, `home_ws` single-membership cache, presence, `covering_ws`). The fullscreen "covering" record lives on the model entry itself.
 - Collections are `bounded.BoundedList` or `bounded.Store` (store 128, MRU 16, `max_tiled_per_ws` 64). Register/unregister roll back atomically on capacity refusal — no OOM paths.
 - Predicates: `visibleOn`, `visibleEntry`, `taggedOn`, `isPinned`, `findHome` (cache-first home-workspace scan), `tiledCountOnWs`, `coveringOccupantOnWs`.
 - Focus machinery: `setFocus`/`clearFocus` (MRU newest-first, oldest dropped), `fallbackFocusCandidate` (minimize-fallback policy across MRU → reversed tiled_order → any floating not in tiled_order, with `excluded` skip).
@@ -303,10 +311,10 @@ The bar is an orchestrator with zero segment logic: every segment is a drop-in a
 
 - **`bar.zig` (1910)** — the orchestrator. Window lifecycle (create/map/strut/colormap), the layout pass (left → center → right), click dispatch, per-segment **dirty tracking** (`Dirty { flag, segments: [bar_mods.len]bool }`, whole-bar full-redraw flag, `span_x`/`span_w` consumed by the region copy), the grab-scoped redraw path, screen-claim sync, prompt-visible forcing. Constants: `min_bar_height 20` (from scale), `max_bar_height 200`, `default_bar_height 24`, `max_frame_windows = segmod.max_visible_windows`, `max_click_bounds = bar_mods.len`, `max_right_segments 16`, `max_batched_redraws 4`. Maps the window *before* the first draw (blits to unmapped windows are discarded; compositors start remapped blank). `g_bar_handlers` is a module global on purpose — the prompt retains the pointer past init (use-after-return hazard documented). `pollTimeoutMs` returns −1 when hidden (a hidden bar can't make progress, suppressing carousel spin/caret blink re-arming).
 - **`segment.zig` (324)** — the shared frame/window vocabulary: `DrawCtx`, `Frame`, `Row`, `Canvas`, `Visibility`, `Dirty`, `BarHandlers`, workspace-frame mirror fields, `MinimizedApi` (synthetic hide-set route that stays build-gated on `has_minimize`), `findAllByCapability` (comptime capability scan), `castDraw`, populating clip windows, `recordClickBound`.
-- **`segdraw.zig` (127)** — comptime module builder for simple draw+onClick addons: `module(name, draw, on_click, opts) → contract.Segment`, `Opts { with_collapse, self_ticking, clickable, pollTimeoutMs, secondsElapsed, invalidate, invalidateReloadCaches, measureString, natural_width, on_click }`. `with_collapse` preserves the previous segment's span when width → 0 (no flicker).
+- **`scaffold.zig` (127)** — comptime module builder for simple draw+onClick addons: `module(name, draw, on_click, opts) → contract.Segment`, `Opts { with_collapse, self_ticking, clickable, pollTimeoutMs, secondsElapsed, invalidate, invalidateReloadCaches, measureString, natural_width, on_click }`. `with_collapse` preserves the previous segment's span when width → 0 (no flicker).
 - **`drawing.zig` (971)** — all Cairo/Pango rendering: draw-context creation, font-list building, `drawText(Ellipsis)`, `drawPaddedSegment`, `toCairoColor`, `clockFormat` (shared accessor for clock/title/systatus), and the two blit paths — `queueBlit` (batch-end, grab-safe, no flush; trusts its window is fully drawn) vs `blitRegion` (flushes immediately; timer paths only, never mid-batch — it would snapshot stale siblings).
 - **`metrics.zig` (44)** — the effective DPI-scaled font size (`getScaledFontSize`/`setScaledFontSize`, `recompute` tying into `scale.scaleFontSize`), kept near its only reader (`drawing.buildSizedFontList`) and writer (`bar.calcBarHeightAndFontSize`).
-- **`refresh.zig` (329)** — adaptive RandR refresh-rate detection (`detectedHz()`, atomics, `ensureRefreshRateDetected` idempotent, `handleRandrNotifyEvent` hook, `runPendingRedetect` consumed outside event dispatch so detection never blocks the loop). Drives the carousel's frame cadence.
+- **`hz.zig` (329)** — adaptive RandR refresh-rate detection (`detectedHz()`, atomics, `ensureRefreshRateDetected` idempotent, `handleRandrNotifyEvent` hook, `runPendingRedetect` consumed outside event dispatch so detection never blocks the loop). Drives the carousel's frame cadence.
 - **`visibility.zig` (64)** — *pure* visibility policy, no X11/wire code: `desiredVisibility(ws, is_visible, is_globally_visible)`, fullscreen forcing (comptime-folds false without `has_fullscreen`), and the `keepPromptOverride` recomputed at prompt-exit so granted visibility can't be gamed by toggles while visible.
 - **`win.zig` (186)** — the bar's own window wire lifecycle: `createWindow` (depth-32 ARGB visual + colormap), `setWindowProperties` (`_NET_WM_WINDOW_TYPE_DOCK`, `_NET_WM_STATE_ABOVE`|`STICKY`, `_NET_WM_STRUT_PARTIAL`, `_NET_WM_ALLOWED_ACTIONS`), top/bottom positioning, free/atom helpers. One of the three allowlisted files authorized by check-layers Rule 1 to configure/map/change-attributes outside sync.
 

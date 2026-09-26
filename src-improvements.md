@@ -12,6 +12,15 @@
 >
 > Legend (hard/soft core, module, module extensor) as in the companion `src-analysis.md`.
 > Reference doc: `src-analysis.md` (sections listed per entry below).
+>
+> (2026-09-26) The `src/core/` overhaul (commits `b33f81b`/`8f78f7a`, "automated sync") moved the flat
+> core into `architecture/` + `display/` + `loop/` + `proc/` + a pure **shelf** + `x11/`; `utils.zig`,
+> `runtime/`, `sync.zig`, `wire.zig`, `screen.zig`, `geometry/`, and `src/model/` no longer exist. Sections
+> 2-8 below carry re-verified post-overhaul status blocks and map names at their headers. Older sections
+> keep the pre-reorg names as written: read `sync.zig` → `reconcile.zig`, `wire.zig` → `requests.zig` +
+> `atoms.zig`, `screen.zig` → `usable_area.zig`, `utils.*` → `pure/*` (or `model.Rect`),
+> `core/runtime/*` → `loop/` + `proc/` + `pure/`, and `src/model/*` → `src/core/architecture/`. `file:line`
+> references in unrevised sections target the pre-reorg files and are mapping-only.
 ---
 
 ## 1. `src/main.zig` — composition root (HARD core)
@@ -42,13 +51,29 @@
 3. **Give `connectToX` an owning return type** (`XSession` with `deinit` encoding the has-error check), dropping the deferred disconnect at main.zig:44; closes the three leak paths. Risk: low. **Quick win.**
 4. **Single-source the env hand-off** — typed `restart.restorePathFromEnv()` + config-dir accessor, consumed at main.zig:122; removes four hardcoded copies of two contract strings. Risk: low. **Quick win.**
 5. **Move `adoptRestoredSession` out of the root** into `src/window/restore.zig`, and share the "focus after geometry" tail with actions.zig:1013-1014. Drops `persist`/`focus` imports from main; makes the re-exec-only path reviewable. Risk: low-medium (mind import edges). **Structural, small.**
-6. **Put main's two raw XCB calls behind `core/x11/wire.zig`** (`wire.flush`, `wire.claimWmGrab`), then remove main from check-layers.sh:69. Shrinks the rule-1 hole at the entry point. Risk: low. **Structural, small, high architectural payoff.**
+6. **Put main's remaining raw XCB calls behind `core/x11/requests.zig`/`xcb.zig`** (flush, grab claim — `requests.advertiseEwmhSupport` at requests.zig:204 is the pattern), then remove main from check-layers.sh:69. Shrinks the rule-1 hole at the entry point. Risk: low. **Structural, small, high architectural payoff.**
 7. **Comptime-resolve the surface lifecycle** — emit a no-op `Surfaces` (full field list) in build.zig:461-466 instead of `null`, drop main.zig:16/115/116. Boot stops branching on a build flag. Risk: medium (contract.zig:76-79 documents the null design; four other sites share it). **Structural.**
 8. **Fix the phantom error surface** — make `events.run` return `void` (events.zig:597), drop `try` at main.zig:126. Risk: none. **Quick win, pair with #1.**
 9. **Extract a shared phase-split boot plan** for fixture reuse — but split at the signals line (signals.zig:183 installs process-wide handlers a test must not call); fixture already drifted. Risk: medium-high. **Structural; do last.**
 10. **Centralize the allocator** — pass main.zig:46's `alloc` into `adoptRestoredSession` (main.zig:137) or read it from core. Risk: none. **Quick win.**
 
 ## 2. `src/core/` hub — `core.zig` + `events.zig` + `pipeline.zig` (HARD core)
+*(re-verified 2026-09-26 after the reorg; paths now `src/core/core.zig`, `src/core/loop/events.zig`, `src/core/loop/pipeline.zig`)*
+
+**Post-overhaul status.** The reorg moved/renamed these files but landed **no behavioral item**. Re-verified verdicts (new `file:line`):
+1. spawn-pipe poll — NOT-DONE (`loop/events.zig:602-605` still polls exactly 2 fds; spawn exposes no fd accessor).
+2. refuse `-1` from `xcb_get_file_descriptor` — NOT-DONE (`loop/events.zig:599`; with a broken fd + `-1` timeout it blocks forever instead of taking the ERR/HUP break).
+3. stop aliasing codes `≥ 0x80` through the 0x7F mask — NOT-DONE (dispatch `loop/events.zig:185`, `isMotion` `:469`; mask def `x11/masks.zig:53-59`, documented hazard at `loop/events.zig:146-153` unchanged).
+4. build the reconcile ctx once; funnel the pre-reconcile duty into one `prepare()` — NOT-DONE (`g_ctx` is still a global-overwrite builder `loop/pipeline.zig:122-141`, rebuilt at `:180/:189/:319/:329`; `preReconcileDuties()` still at 5 sites `:188/:213/:267/:318/:328`).
+5. post-batch stage table — NOT-DONE (ordering still hardcoded inline `loop/events.zig:576-594`).
+6. core deadline reducer — NOT-DONE (still bar-only deadline via `surfaces.pollTimeoutMs()`, `-1` default `loop/events.zig:614-618`).
+7. unify grab+flush ownership; export a `ScopedGrab`; internalize flushless `reconcileNow` — NOT-DONE (`loop/pipeline.zig:179-184` is a private bracket; `reconcileNow()` still exported `:317`; the bar still self-grabs `bar.zig:1362`/`:1565`, owns `xcb_flush` `:1236/:1516/:1539`, and calls flushless `reconcileNow` `:1386/:1596`).
+8. one `core.Phase`; collapse the two init latches — NOT-DONE (two latches remain: `core.zig:128` `isReady()` and `loop/pipeline.zig:32` `initialized`; `core.State` still has no `deinit`; `dpi_info` still a bare global `core.zig:155` — a third lifetime).
+9. grab reentrancy depth guard — NOT-DONE (`loop/pipeline.zig:179-184` is a 5-liner with no depth counter).
+10. hygiene cluster — PARTIAL (one sub-item landed: the no-user-config condition has exactly one reporter, `loop/events.zig:329-335`, with `:652-653` as the sole returned-error reporter; still open: `run() !void` `:597`, no `reload_in_progress`, no `reconcileGrab` alias — 8 raw `reconcileUnderGrabNow(.{})` sites remain, 7 in `src/window/actions.zig` + `src/main.zig:153`).
+
+**New while re-verifying:** grab/flush owners remain ≥8 (the bar's 3 families + `input.zig:127`/`:470` + the manual `grabCtx` seam `loop/pipeline.zig:327-330`); `core.isReady()` (set at `main.zig:71`) and `pipeline.initialized` (set later) can genuinely disagree — `state != null` no longer implies the model instance is defined.
+
 **Conceptual model (step 1).** `core.State` is the process-wide heap of immutable-for-the-process facts (connection, screen, root, allocator, atomically-swapped config) plus monotone fact revisions; `events.run()` is the single driver (one blocking `poll` over the XCB socket and the signal self-pipe, with a bar-owned deadline); `pipeline.zig` is the reconcile choke point funneling every model→wire mutation through one server-grab bracket with exactly one flush.
 
 **Design brainstorm (step 2).**
@@ -82,7 +107,25 @@
 9. **Add a reentrancy depth guard to the pipeline** — `var depth` incremented in `withServerGrab`, `assert` on re-entry (X `GrabServer` is not reentrant-counted). **Quick win.**
 10. **Hygiene cluster** — `events.run` `!void`→`void` (:597); pick one reporter for "no user config" (:306 vs :329-335/:653); `reload_in_progress` bool (events.zig:289); a zero-arg `reconcileGrab()` alias for the 17 `reconcileUnderGrabNow(.{})` sites in actions.zig. **Quick wins.**
 
-## 3. `src/core/pure/contract.zig` — the open contracts (HARD core)
+## 3. `src/core/architecture/contract.zig` — the open contracts (HARD core)
+*(re-verified 2026-09-26; moved out of `pure/` into `architecture/` by the reorg — the location changed, the claims did not)*
+
+**Post-overhaul status.** Verdicts:
+1. layout-output post-condition assert — NOT-DONE (`src/tiling/tiling.zig:308-313` `compute` still has zero asserts).
+2. exhaustive hook classification (`@compileError`, not `continue`) — NOT-DONE (`build.zig:1072` still `if (!@hasField(T, hook)) continue;`; no `multi_binder_hooks`).
+3. per-contract binder lists — NOT-DONE (`contract.zig:260-271` one hardcoded single-binder list; Segment's `measureString`/`naturalWidth`/`overlay` `:435/:438/:481` still in no list, so their "at most one" claims stay unenforced).
+4. `providerOf` → `?*const T` — NOT-DONE (`contract.zig:285-292` still returns `?T` by value — a 36-field copy on every capability probe, not just the 5 hot sites).
+5. typed capability lookup — NOT-DONE (`src/bar/segment.zig:325-328` still string-keyed `@field(m, name)`; callers `bar.zig:68-69` pass literal names).
+6. drop `Env.variant_idx` — NOT-DONE (`contract.zig:584` still carries it; sole producer still `loop/pipeline.zig:112`).
+7. fold the `has_bar` gate into the `Surfaces` type — NOT-DONE (`build.zig:466` still untyped `if (has_bar) @import("bar").surfaces else null`; ~20 `if (build_options.has_bar)` sites remain, e.g. `loop/events.zig:83/:157/:181/:578`).
+8. `callAllTry` — NOT-DONE (hand-written try loops persist at `bar.zig:1249`/`:1257` and `window.zig:275`/`:292`; no shared helper).
+9. named `ClickCtx` — NOT-DONE (still the 6-arg positional `onClick` tuple `contract.zig:443-450`, call site `bar.zig:316-318`).
+10. contract purity story — PARTIAL: the *relocation* half landed (contract now sits in `architecture/`; `ARCHITECTURE.md:25` and `check-layers.sh:197-199` now state it is xcb-touching), the *split* half did not (`contract.zig:38-39` still `import core` + `core.xcb`; no `contract_x11.zig`; still exempted at `build.zig:1605-1611`).
+11. stable module identity — NOT-DONE (`WindowModule` has no `id`/`name`; `proc/persist.zig:188` still stamps `@intCast(idx)`; adoption still ordinal-relative `window.zig:752-754`).
+12. doc fix (generated-registry import edge) — NOT-DONE (`contract.zig:283-284` still claims the contract "stays free of an import edge into the generated-registry layer" while `:48-49` still re-exports `@import("tiling_modules")`).
+
+**New while re-verifying:** the `@field(m, name)` string-typo hazard (`segment.zig:328`) is the same defect class as item 2 — a typo'd `"self_ticking"` at `bar.zig:68` silently yields an empty ticker set; `measureString`/`naturalWidth`/`overlay` doc-assert "at most one" while no build-time check exists; ARCHITECTURE.md:22 still lists `tiling_mods` as an open contract while `:283-284` denies the import edge.
+
 **Conceptual model (step 1).** contract.zig is the type-level boundary where optional subsystems bind: `Surfaces` (all-required fn-pointer set the bar satisfies), `WindowModule`/`Segment`/`Layout` (all-optional hook structs via `pub const module`), and the tiling interchange vocabulary (`View`/`List`/`Placement`/`HintsView`/`Env`). Absence is encoded via `null` hooks and build-generated registries that shrink to empty, so core dispatches through uniform loops without ever naming an optional module; capability flags (`self_ticking`, `center_slot`, `dirty_sources`) are the negotiation channel; registry order (sorted-stem scan) is priority.
 
 **Design brainstorm (step 2).**
@@ -118,7 +161,24 @@
 11. **Stable module identity** — add `id`/`name` to `WindowModule`, stamp instead of `@intCast(idx)` (persist.zig:188). **Structural.**
 12. **Doc fix** — contract.zig:282-284 (and src-analysis.md:70) claim no generated-registry import edge; :48-49 has one and it is intentional. **Quick win.**
 
-## 4. `src/core/runtime/` session & lifecycle — `persist.zig` + `restart.zig` + `signals.zig` + `spawn.zig` (HARD core)
+## 4. `src/core/proc/` session & lifecycle — `persist.zig` + `restart.zig` + `signals.zig` + `spawn.zig` (HARD core)
+*(re-verified 2026-09-26; the `runtime/` dir is gone — these four live in `proc/`, and the loop now consumes reload/reexec via `proc/lifecycle.zig`)*
+
+**Post-overhaul status.** Pure move+rename; **none of items 1-13 landed**. Re-verified verdicts (new `file:line`):
+1. pid-qualified temp name — NOT-DONE (`proc/persist.zig:242-244` still the fixed sibling `"{path}.tmp"`; the cross-instance delete race that can abort re-exec is intact).
+2. reap-aware `entry.pid` clear — NOT-DONE (`proc/spawn.zig:226-229` still clears `pid` unconditionally after a `waitpid(pid, null, WNOHANG)` that can return 0; zombie race intact).
+3. remove `log.err` from the forked child — NOT-DONE (still `proc/spawn.zig:66`, a non-async-signal-safe lock-taker inside the fork path).
+4. report failed spawns — NOT-DONE (no command string stored `proc/spawn.zig:122-128`; `finishSpawn` still computes `failed` and discards it).
+5. single constant wake token — NOT-DONE (per-signo byte write still `proc/signals.zig:42-43`; the in-handler read-drain loop `:54-64` survives though the byte is never read).
+6. unlink the restore file on graceful exit — NOT-DONE (nothing unlinks next to the shutdown log; `proc/lifecycle.zig:14/:69` carries only `should_reload`/`consumeReload`).
+7. `fsync` before rename — NOT-DONE (`proc/persist.zig:242-267` atomicWrite still has no `file.sync`).
+8. monotonic spawn deadline — NOT-DONE (no deadline; 16 wedged pipes can still permanently disable `exec`).
+9. validate `variant_idx` on restore — NOT-DONE (`proc/persist.zig:384-393` still validates `kind` only).
+10. assert snapshot completeness — NOT-DONE (`Snapshot.workspaces` still `undefined` at `proc/persist.zig:161`, copied whole later).
+11. single `Handoff` owner — NOT-DONE.
+12. double-fork → `PR_SET_CHILD_SUBREAPER` — NOT-DONE (still double-fork + pipe tag protocol).
+13. doc+micro fixes — NOT-DONE (e.g. ARCHITECTURE.md:184 "Signalfd-based" vs the actual self-pipe at `proc/signals.zig`).
+
 **Conceptual model (step 1).** hana's "session" is not a struct — it is a *file plus an execve*: `persist.zig` projects the model into a flat, versioned, atomically-renamed JSON shadow record set; `restart.zig` turns a flag (keybind or SIGUSR1) into an in-place `execv` of `/proc/self/exe`; `signals.zig` is the async→sync bridge (atomic bitmap + self-pipe wake token dispatched on the event loop); `spawn.zig` runs user commands as detached double-forks whose outcome returns over one pipe so the WM can route the resulting window by pid. Hand-off channels: the on-disk file (state) and the environment (`HANA_RESTORE` restart.zig:122, `HANA_CONFIG_DIR` events.zig:415-416, read at main.zig:122).
 
 **Design brainstorm (step 2).**
@@ -159,6 +219,21 @@
 ---
 
 ## 5. `src/core/x11/` — synchronization boundary & raw X11 wire (HARD core)
+*(re-verified 2026-09-26 — the seam is now a four-layer DAG: `reconcile.zig` (planner) → `ledger.zig` (write-only sent records) → `sink.zig` (interface + dispatcher) → `requests.zig`/`atoms.zig` (raw primitives). `sync.zig` → `reconcile.zig`, `wire.zig` → `requests.zig` + new `atoms.zig`, `sync_test.zig` → `reconcile_test.zig`.)*
+
+**Post-overhaul status.** Structural relocation, behavioral no-op; **all 9 items still open**:
+1. `SentEntry` park doc — NOT-DONE (`x11/ledger.zig:27-33`; the park write at `reconcile.zig:390` still flips only `parked` and preserves `bw`/`pixel` — the "0 while parked" trap survives the split).
+2. compare only the fields sent (`eqlGeom`) — NOT-DONE (border-width double-channel intact).
+3. collapse the ConfigureWindow slots — NOT-DONE (`x11/sink.zig:46-52` still 3 configure-shaped slots + park; recorder still 3 configure-shaped shims `src/test/helpers.zig:243`).
+4. unify the grab bracket — NOT-DONE (the `reconcile.zig:98-108` bracket survives alongside `loop/pipeline.zig:179`).
+5. generalize the EWMH slot (`set_state_atom`) — NOT-DONE (`sink.zig:52` still `set_ewmh_fullscreen`; the `_NET_WM_STATE` list-merge stayed in the shim `sink.zig:191-227`, not beside `changeProperty` in `requests.zig`).
+6. repair parked-window drift — NOT-DONE (no `markParkedDirty` anywhere in `x11/`; ConfigureNotify route `loop/events.zig:92-95` still fullscreen-only; header claim `reconcile.zig:20-21` still says "repaired on the very next reconcile" while its fast path elides on `last.parked` at `reconcile.zig:246`).
+7. anchor the ledger to the model entry — NOT-DONE (`ledger.zig:42-48` is still a process-global `var st: State` second store; `:60-63` binary-search `sentGetOrPut` intact; `model.Entry` `architecture/model.zig:113-126` has no sent fields; unregister lockstep intact at `window/tracking.zig:56` + `window/actions.zig:1038`).
+8. tidy small divergences — NOT-DONE 0/3 (`reconcile.zig:390` still `else parked = true;`; `ledger.zig:28` still defaults `rect` to `contract.parked_rect` while `has_rect` is the tested flag; `masks.zig:59` still `synthetic_event_mask`, 3 callers `loop/events.zig:185/:469`, `bar/modules/prompt/prompt.zig:502`).
+9. specify error observation at the sink — NOT-DONE (every shim discards its cookie `_ =` at `sink.zig:110/:139/:153/:218/:231/:235/:239`; no ledger-coupled error read).
+
+**New while re-verifying:** the one genuine structural win — the `Sink` vtable moved **down** into `sink.zig:40-56` beside its shims, killing the old low-level-imports-high-level-planner inversion; the ledger is second-writer by visibility (`ledger.sentGet`/`lastRectFor` are read by `src/test/engine/tracking_test.zig:80-114` and `src/test/window/actions_test.zig:288`), contradicting the module-private claim in its own header `ledger.zig:9-10`; **ConfigureNotify has zero core-side duty** — `loop/events.zig:137` routes it straight to `window.dispatchAll(.notifyConfigureIfPending)` — so parked-drift repair needs a ledger-invalidation duty added at the loop layer, not inside the fullscreen path; the `_NET_WM_STATE` list-merge is a **blocking `xcb_get_property` round-trip inside the server grab** (`sink.zig:193-194`), the one place the "zero round trips in the grab" invariant (`reconcile.zig:99-100`) is broken; the "exactly four behavioral ledger reads" contract is now stated twice (`reconcile.zig:33-47` and `ledger.zig:12,18-26`) with no cross-check.
+
 **Conceptual model (step 1).** The boundary is a write-only *sent ledger* (what we last told X) diffed against an unconditionally recomputed *desire* (what the model+layout say now); the delta is emitted through an 11-slot `Sink` vtable into shims that are the only sanctioned place to touch libxcb, batched under one server grab and delivered by a single flush. `wire.zig` owns raw primitives/atoms/EWMH advertisement, `xcb.zig` is the single `@cImport` hub, `masks.zig` keeps cheaply-reproducible X constants out of the pure layers.
 
 **Design brainstorm (step 2).**
@@ -193,7 +268,23 @@
 8. **Tidy small divergences** — `else parked = true;` → `markParked` (sync.zig:539); drop the dead `parked_rect` default (sync.zig:150-151); rename `masks.zig:59` to `core_event_code_mask`. **Quick wins.**
 9. **Speculative** — observe protocol errors at the sink and invalidate the ledger record. Nothing observes them today. Measure before building.
 
-## 6. `src/core/runtime/` scaling & screen — `scale.zig` + `screen.zig` (HARD core)
+## 6. `src/core/display/scale.zig` + `src/core/display/usable_area.zig` — scaling & screen (HARD core)
+*(re-verified 2026-09-26; `screen.zig` → `usable_area.zig`, both moved into `display/`; the `scaleToPixels`/`scaleBorderWidth` formulas now live in the shelf as `src/core/pure/scaling.zig`)*
+
+**Post-overhaul status.** Pure move; **all 10 items still open** (verdicts on new `file:line`):
+1. `screen_rev` fact — NOT-DONE (`core.zig:74-87` `Facts` still has exactly 4 revs, accessors at `:100-103`; `usable_area.zig:78-80` `setClaim` bumps nothing).
+2. RandR re-read + DPI refresh in the loop — NOT-DONE (RandR branch `loop/events.zig:177-182` only feeds `surfaces.handleRandrEvent`; deferred work `:672` is bar-only; `detectDpi` has exactly one caller, `src/main.zig:54`).
+3. pure split of the DPI half — NOT-DONE (`pure/scaling.zig` (41 lines) holds only value→pixel formulas; `parseXftDpi`/`calcDpiFromGeometry`/`isReasonableDpi` stayed in `display/scale.zig:75/:132/:148`, band constants `:48-49`).
+4. pure `workAreaFrom` + `screen_test.zig` — NOT-DONE (`usable_area.zig:89-110` still takes live `core.Screen` and walks the global `claims`; no `workAreaFrom`; no screen test under `src/test/core/`).
+5. unify the screen-context parameter — NOT-DONE (still `scaleFontSize(value, screen: core.Screen)` `scale.zig:178` vs `scaleBarHeight(value, screen_height: u16)` `:188`).
+6. comptime bounds + `has_bar` gate — NOT-DONE (`usable_area.zig:78-79` indexes `claims[id]` unchecked; `:36 pub const bar_id: u8 = 0` ungated while `max_claims` is `0` on a no-bar build — the latent OOB is still live).
+7. `monitor: u8` screen identity — NOT-DONE (`Claim = {edge, px, active}` `usable_area.zig:22-26`; `mappedSurfaceWindow` `:70-72` still scans claims).
+8. `BarHeightPolicy` + `scaleBarHeight` cap — NOT-DONE (three consts `scale.zig:23/:28/:32`; `:191` still floors at 20, never caps at 200).
+9. fold `dpi_info` into `State`; config override — NOT-DONE (`core.zig:152-155` bare global; `main.zig:54` `detectDpi` still runs before `:60` `config.load`; no `dpi` config key).
+10. fullscreen-owns-workarea decision — NOT-DONE (still bar-driven: `syncScreenClaim` `bar.zig:1402-1407` encodes hidden as `px = 0`; the "LAYERING NOTE" allowlist `bar.zig:1382-1386`/`check-layers.sh:144-150` intact).
+
+**New while re-verifying:** `usable_area.zig:89` now returns `model.Rect` — `geometry/geom.zig` was folded into `architecture/model.zig`, so item 4's pure split only needs `Claim` moved to the shelf to be xcb-free; `setClaim` is comptime-indexed (`:78`) but callers pass the still-comptime `bar_id`, so the `max_claims == 0` landmine fires at call sites, not at the declaration.
+
 **Conceptual model (step 1).** Two one-shot/little-changed globals define the WM's whole spatial vocabulary: a boot-time DPI number (`scale.zig`, cached in `core.dpi_info`) and a screen-space claim ledger (`screen.zig`) from which core derives the single `workArea()` rect that every placement path consumes. Neither multiplies DPI into layout — scaling is expressed as *percentage-against-a-reference-dimension*, and DPI only reaches cairo/Pango — so the layer's real job is choosing reference dimensions and owning the work-area subtraction, not rescaling.
 
 **Design brainstorm (step 2).**
@@ -227,7 +318,20 @@
 9. **Structural: fold `dpi_info` into `State` + config override** — move `detectDpi` after `config.load` (main.zig:53,59,69), add optional `dpi` config key. Removes the "global outside State" wart. Higher risk; do after 1-8. 
 10. **Structural: decide who owns "fullscreen ⇒ no work area"** — bar.zig:1402-1407 + screen.zig:78-85: either core reads the existing `fullscreen_rev` fact inside workArea, or the zero-pixel encoding is documented as the contract. Highest risk (behavioral). 
 
-## 7. `src/core/pure/` — utility collection (HARD core)
+## 7. `src/core/pure/` — the pure shelf (HARD core)
+*(re-verified 2026-09-26 — the `utils.zig` facade is deleted; the tier is now a named shelf `pure/{bounded,constants,cycle,idmap,ids,log,paths,scaling,time}.zig` alongside `x11/{atoms,requests,masks,xcb}.zig` and `proc/lifecycle.zig`)*
+
+**Post-overhaul status.** This is the one section where the reorg actually landed structural items:
+- **item 8 (kill the xcb vector through the facade)** — IMPLEMENTED by deletion: no `utils.zig` exists; the xcb re-exports now live at their real homes (`x11/atoms.zig`, `x11/requests.zig`, `x11/masks.zig`, `x11/xcb.zig`); the old `check-layers.sh:79-85` carve-out is gone.
+- **item 12 (document the tier's real contract)** — IMPLEMENTED: `ARCHITECTURE.md:174` documents the shelf, that it "holds no model, no contract, and no process wiring — those moved to `architecture/` and `proc/`", and that "no `utils.zig` facade" exists.
+- **item 1 (`note`/`flush` pub)** — NOT-DONE, and now a **live build break**: `pure/log.zig:73` `note` and `:81` `flush` are still private (`pub const enabled` at `:66`), yet they are called from `src/core/x11/reconcile.zig:105` and `src/input/input.zig:172` inside `if (key_profile.enabled)`; `zig build -Dprofile-key=true` fails with "not marked 'pub'". Plain `zig build`, `zig build test`, and `zig build check` all pass on Zig 0.16.0.
+- **item 2 (typed constants)** — NOT-DONE (`pure/constants.zig:42` and `:111` still untyped `comptime_int`).
+- **item 3 (harden `Store.at`)** — NOT-DONE (`pure/bounded.zig:307-310` still clamps to `len -| 1`, blessing row 0 of an `undefined` array).
+- **item 4 (unify overflow signaling on `error{CapacityFull}`)** — NOT-DONE (four vocabularies persist: `pure/bounded.zig:89-99/:179-180/:252/:260`, `pure/idmap.zig:72-80`).
+- items 5-11 are file-renamed only (no behavioral change); refs re-pointed: `pure/bounded.zig` (eviction, `Store.at`), `pure/idmap.zig` (0-sentinel/iterator), `pure/ids.zig` (`WorkspaceId` bounds), `pure/time.zig` (untyped clocks), `proc/lifecycle.zig` (old `proc.zig` atomics), `pure/log.zig` (test mute).
+
+**Shelf composition post-reorg.** `pure/log.zig` = old `debug.zig` + the `WindowedProfiler`; `pure/time.zig`/`pure/scaling.zig`/`pure/cycle.zig` are verbatim extractions of old `utils.zig` internals; `pure/paths.zig` unchanged; the process atomics (`should_reload`/`consumeReload`) split into `proc/lifecycle.zig`.
+
 **Conceptual model (step 1).** This tier is the WM's shared vocabulary: identity types, fixed-capacity collections, geometry/scaling math, monotonic time, process-lifecycle signals, and a `std.log` facade — everything reachable from the model, tiling, and config without dragging in X11. Its two load-bearing properties are **no-X** and **no-alloc**, both upheld as a *convention* rather than a type-level guarantee: `assertPureLayerImports` only inspects *direct* import edges, and the fallback guarantee is Zig's lazy analysis (a pure consumer naming only `utils.Rect` never resolves the xcb-typed decls behind the same module).
 
 **Design brainstorm (step 2).**
@@ -268,8 +372,20 @@
 
 ---
 
-## 8. `src/core/pure/model.zig` — the model sub-system (HARD core)
-*(Path note: the analysis doc's `src/model/model.zig` has moved; the live file is `src/core/pure/model.zig`.)*
+## 8. `src/core/architecture/model.zig` — the model sub-system (HARD core)
+*(Path note: `src/model/model.zig` → `src/core/pure/model.zig` → now `src/core/architecture/model.zig` (2026-09-26); the separate `geometry/geom.zig` has since been merged in — `Rect`/`Margins` are `model.Rect`/`model.Margins`, and `architecture/` holds exactly `contract.zig` + `model.zig`.)*
+
+**Post-overhaul status.** Pure move (≈R091); **all 8 items still open** (re-verified on the new `file:line`):
+1. total `unregister` — NOT-DONE (`model.zig:194-200`: the cached-home scrub is at `:197`, but the 64-ws loop at `:198` scrubs `focus_mru` only, never `tiled_order`).
+2. model-level `moveTiled`/`detachTiled`/`attachTiled` — NOT-DONE (no attach/detach anywhere; `model.zig:352` private `moveTiled` is the pre-existing list-rotate helper; `repairStrandedHome` remains at `src/window/actions.zig:459-465`; hand-rolled sites persist in actions/minimize/workspaces/window).
+3. `assert` in `bit()` + bounds-check `hint_ws` — NOT-DONE (`model.zig:40-42` bare shift with the `< 64` precondition only in docs; `register` `:181-192` indexes `m.ws[target.index]` and `bit(target)` with no bound check — a 65th workspace is still silent-wrong-mask/latent UB).
+4. determinism-harness holes — NOT-DONE (`src/test/engine/model_test.zig:99-109` still omits `viewport_offset`/`viewport_prev_count`; `:120` still exempts parked; no `home_ws == actual_home` assert at `:116-133`).
+5. `register` entry seed + drop duplicate guard — NOT-DONE (signature still `(m, win, hint_ws)` with its own `has` check `model.zig:181-182`; `src/window/actions.zig:962` keeps the double-manage `has` guard; register-then-immediately-undo at `actions.zig:965`→`:979-981`).
+6. split `isPinned` from "tagged everywhere" — NOT-DONE (`model.zig:220-222` still `e.mask == ALL_MASK`; consumer `workspaces.zig:24` unchanged).
+7. per-workspace `covering_occupant` slot — NOT-DONE (still the full-store OR-scan `model.zig:251-259`, hit per-reconcile at `x11/reconcile.zig:148`; `WsState` `model.zig:128-132` has no occupant slot).
+8. close the un-gated mutation channel — NOT-DONE (`loop/pipeline.zig:166-171` still writes `p.* = md.preReconcile.?(...)` straight through the private instance; no `applyParamsDelta`; the new comment at `pipeline.zig:162-165` *documents* the direct write rather than closing it).
+
+**New while re-verifying:** the 65th-workspace trap got *more* reachable — `architecture/model.zig` is now a public architecture-layer import, and the only guards remain caller-side (`src/window/modules/workspaces.zig:23`, `window.clampToValidWorkspace` `src/window/window.zig:329`); the `geom.zig` fold means `model` now re-exports the geometry vocabulary consumed by `contract.zig` and `display/usable_area.zig:89`.
 
 **Conceptual model (step 1).** The model is the xcb-free single source of truth for all management state: a sorted, allocation-free `Store` of per-window `Entry` records, a fixed `[max_workspaces]WsState` array of per-workspace tiled order / focus MRU / layout params, and three globals (`current`, `focused`, `all_view_active`). Tiled membership is *derived* — exactly one `ws.tiled_order` holds a tiled window — with a `home_ws` cache on the entry so the scan is not needed on the hot path; visibility derives from `presence` plus the `mask` tag bits, and every mutation produces a delta that `focus_rev`/`frame_rev` facts turn into repaint/reconcile.
 
@@ -960,37 +1076,37 @@ Retracted: I expected the mouse path to need a hash map — the linear scan at `
 
 # Index of design-review sections
 
-> Index compiled from line 961: header lines 1-15, sections 17-957, end of file.
+> Index compiled from line 1077: header lines 1-24, sections 26-1075, end of file.
 
 | # | Section | Lines |
 |---|---------|-------|
-| 1 | `src/main.zig` — composition root | 17-50 |
-| 2 | `src/core/` hub — `core.zig` + `events.zig` + `pipeline.zig` | 51-84 |
-| 3 | `src/core/pure/contract.zig` — the open contracts | 85-120 |
-| 4 | `src/core/runtime/` session & lifecycle — `persist`/`restart`/`signals`/`spawn` | 121-160 |
-| 5 | `src/core/x11/` — synchronization boundary & raw X11 wire | 161-195 |
-| 6 | `src/core/runtime/` scaling & screen — `scale.zig` + `screen.zig` | 196-229 |
-| 7 | `src/core/pure/` — utility collection | 230-270 |
-| 8 | `src/core/pure/model.zig` — the model sub-system | 271-305 |
-| 9 | `src/window/` sub-system core — `window.zig` + `icccm.zig` + `borders.zig` | 306-341 |
-| 10 | `src/window/` actions & focus — `actions.zig` + `focus.zig` | 342-380 |
-| 11 | `src/window/` tracking & caching — `wincache.zig` + `tracking.zig` | 381-410 |
-| 12 | `src/window/modules/` — window modules | 411-445 |
-| 13 | `src/tiling/tiling.zig` — the tiling engine | 446-479 |
-| 14 | `src/tiling/modules/` — the six layout modules | 480-511 |
-| 15 | `src/config/config.zig` + `fallback.zig` — the config facade | 512-548 |
-| 16 | `src/config/parser.zig` — the custom TOML reader | 549-572 |
-| 17 | `src/config/types.zig` + `schema.zig` — the config schema & types | 573-603 |
-| 18 | `src/input/input.zig` — the input sub-system | 604-637 |
-| 19 | `src/input/` keybind/XKB support — `keybind`/`keysyms`/`xkbcommon` | 638-670 |
-| 20 | `src/bar/bar.zig` + `refresh.zig` + `win.zig` — the bar orchestrator | 671-703 |
-| 21 | `src/bar/` segment core — `segment`/`segdraw`/`metrics`/`visibility` | 704-736 |
-| 22 | `src/bar/drawing.zig` — the cairo/pango renderer | 737-767 |
-| 23 | `src/bar/modules/` — MODULES: `clock.zig` + `tags.zig` + `layout/` + `variants.zig` | 768-800 |
-| 24 | `src/bar/modules/title/` — title MODULE + carousel MODULE EXTENSOR | 801-833 |
-| 25 | `src/bar/modules/systatus/` — systatus MODULE + batt/cpu/ram MODULE EXTENSORS | 834-865 |
-| 26 | `src/bar/modules/slider/` — slider MODULE + brightness/volume MODULE EXTENSORS + native backends | 866-897 |
-| 27 | `src/bar/modules/prompt/` — prompt MODULE + vim MODULE EXTENSOR | 898-928 |
-| 28 | `src/test/` — test organization, helpers, fixtures | 929-957 |
+| 1 | `src/main.zig` — composition root | 26-59 |
+| 2 | `src/core/` hub — `core.zig` + `events.zig` + `pipeline.zig` | 60-109 |
+| 3 | `src/core/architecture/contract.zig` — the open contracts | 110-163 |
+| 4 | `src/core/proc/` session & lifecycle — `persist`/`restart`/`signals`/`spawn` | 164-220 |
+| 5 | `src/core/x11/` — synchronization boundary & raw X11 wire | 221-270 |
+| 6 | `src/core/display/scale.zig` + `src/core/display/usable_area.zig` — scaling & screen | 271-320 |
+| 7 | `src/core/pure/` — the pure shelf | 321-374 |
+| 8 | `src/core/architecture/model.zig` — the model sub-system | 375-421 |
+| 9 | `src/window/` sub-system core — `window.zig` + `icccm.zig` + `borders.zig` | 422-457 |
+| 10 | `src/window/` actions & focus — `actions.zig` + `focus.zig` | 458-496 |
+| 11 | `src/window/` tracking & caching — `wincache.zig` + `tracking.zig` | 497-526 |
+| 12 | `src/window/modules/` — window modules | 527-561 |
+| 13 | `src/tiling/tiling.zig` — the tiling engine | 562-595 |
+| 14 | `src/tiling/modules/` — the six layout modules | 596-627 |
+| 15 | `src/config/config.zig` + `fallback.zig` — the config facade | 628-664 |
+| 16 | `src/config/parser.zig` — the custom TOML reader | 665-688 |
+| 17 | `src/config/types.zig` + `schema.zig` — the config schema & types | 689-719 |
+| 18 | `src/input/input.zig` — the input sub-system | 720-753 |
+| 19 | `src/input/` keybind/XKB support — `keybind`/`keysyms`/`xkbcommon` | 754-786 |
+| 20 | `src/bar/bar.zig` + `refresh.zig` + `win.zig` — the bar orchestrator | 787-819 |
+| 21 | `src/bar/` segment core — `segment`/`segdraw`/`metrics`/`visibility` | 820-852 |
+| 22 | `src/bar/drawing.zig` — the cairo/pango renderer | 853-883 |
+| 23 | `src/bar/modules/` — MODULES: `clock.zig` + `tags.zig` + `layout/` + `variants.zig` | 884-916 |
+| 24 | `src/bar/modules/title/` — title MODULE + carousel MODULE EXTENSOR | 917-949 |
+| 25 | `src/bar/modules/systatus/` — systatus MODULE + batt/cpu/ram MODULE EXTENSORS | 950-981 |
+| 26 | `src/bar/modules/slider/` — slider MODULE + brightness/volume MODULE EXTENSORS + native backends | 982-1013 |
+| 27 | `src/bar/modules/prompt/` — prompt MODULE + vim MODULE EXTENSOR | 1014-1044 |
+| 28 | `src/test/` — test organization, helpers, fixtures | 1045-1075 |
 
 Sections follow a uniform structure: **Conceptual model (step 1)** · **Design brainstorm (step 2)** · **Grounding in code (step 3, second thoughts)** · **Final actionable improvements (step 4)** — each suggestion labeled "Quick win" / "Structural (small)" / "Structural refactor" with `file:line` references.

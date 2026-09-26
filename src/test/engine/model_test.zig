@@ -10,7 +10,6 @@ const constants = @import("constants");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
-const geom = @import("geom");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -55,7 +54,7 @@ fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
 const regCur = helpers.regCur;
 
 /// Floating-anchor window, the shape most store.put fixtures use.
-fn addFloating(m: *Model, win: WindowId, r: geom.Rect) !void {
+fn addFloating(m: *Model, win: WindowId, r: model.Rect) !void {
     _ = try m.store.put(win, .{
         .mask = model.bit(model.WSId.fromIndex(0)),
         .anchor = .{ .floating = r },
@@ -223,7 +222,7 @@ test "minimize/restore floating preserves rect" {
 
     try minimize.init();
     defer minimize.deinit();
-    const r: geom.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    const r: model.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 7, r);
     try minimize.minimize(&m, 7);
     try testing.expect(minimize.isMinimized(&m, 7));
@@ -263,7 +262,7 @@ test "fullscreen toggling and minimize-from-fullscreen" {
     try testing.expect(!fullscreen.isFullscreenMode(&m, 1));
 
     // Floating base survives minimize-from-fullscreen.
-    const r: geom.Rect = .{ .x = 5, .y = 6, .width = 640, .height = 480 };
+    const r: model.Rect = .{ .x = 5, .y = 6, .width = 640, .height = 480 };
     try addFloating(&m, 2, r);
     _ = fullscreen.toggleFullscreen(&m, 2);
     try minimize.minimize(&m, 2);
@@ -352,7 +351,7 @@ test "pinToggle across all modes" {
     var m = makeModel();
 
     regCur(&m, 1); // tiled
-    const r: geom.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
+    const r: model.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
     try addFloating(&m, 2, r); // floating
     regCur(&m, 3);
     _ = fullscreen.toggleFullscreen(&m, 3); // fullscreen
@@ -509,6 +508,87 @@ test "stepTiled wraps at both ends" {
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3, 4 });
 }
 
+// The focus-cycle pool (Mod+j/k) is derived from the current workspace's
+// tiled_order, so the cycle follows the arrangement on screen instead of the
+// window-id order the windows happened to be created in. The tiled_order and
+// the pool are two different lists, so the test drives the mutations that
+// rewrite the first and asserts the second moved with it.
+test "cycle pool follows tiled order through swaps and moves" {
+    var m = makeModel();
+    var buf: [model.store_capacity]WindowId = undefined;
+    const ws = WSId.fromIndex(0);
+
+    // Ids deliberately ascend opposite to the tiled order, so a pool that
+    // still walked the store would be caught by the very first assertion.
+    for ([_]WindowId{ 30, 10, 20 }) |w| regCur(&m, w);
+    try expectOrder(&m, ws, &.{ 30, 10, 20 });
+    try testing.expectEqual(@as(usize, 3), model.collectCyclePool(&m, ws, &buf));
+    try testing.expectEqualSlices(WindowId, &.{ 30, 10, 20 }, buf[0..3]);
+
+    // Mod+Tab (swap_master_focus_swap) exchanges two slots: the cycle must
+    // show the exchanged positions, not the pre-swap one.
+    model.setFocus(&m, 10);
+    model.setFocus(&m, 20);
+    model.swapFocusedWithPrevious(&m);
+    try expectOrder(&m, ws, &.{ 30, 20, 10 });
+    _ = model.collectCyclePool(&m, ws, &buf);
+    try testing.expectEqualSlices(WindowId, &.{ 30, 20, 10 }, buf[0..3]);
+
+    // Mod+Shift+j/k (stepTiled) moves a window one slot: same requirement.
+    model.stepTiled(&m, 30, 1);
+    try expectOrder(&m, ws, &.{ 20, 30, 10 });
+    _ = model.collectCyclePool(&m, ws, &buf);
+    try testing.expectEqualSlices(WindowId, &.{ 20, 30, 10 }, buf[0..3]);
+}
+
+// The pool admits untiled windows (floating, and multi-tagged windows homed
+// on another workspace) after the tiled run, and hides the ones the
+// focus-visible model hides.
+test "cycle pool appends untiled windows and honors visibility" {
+    var m = makeModel();
+    var buf: [model.store_capacity]WindowId = undefined;
+    const ws = WSId.fromIndex(0);
+
+    regCur(&m, 1);
+    regCur(&m, 2);
+    // Floating on ws 0: no tiled slot, so it trails the tiled run.
+    try addFloating(&m, 5, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
+    // Tiled on ws 1 but ALSO tagged on ws 0: visible here, no slot here.
+    try model.register(&m, 3, WSId.fromIndex(1));
+    if (m.store.getPtr(3)) |e| e.mask = model.bit(ws) | model.bit(WSId.fromIndex(1));
+
+    try testing.expectEqual(@as(usize, 4), model.collectCyclePool(&m, ws, &buf));
+    try testing.expectEqualSlices(WindowId, &.{ 1, 2, 3, 5 }, buf[0..4]);
+
+    // A parked window leaves the pool (mirrors visibleEntry).
+    m.store.getPtr(1).?.presence = .parked;
+    _ = model.collectCyclePool(&m, ws, &buf);
+    try testing.expectEqualSlices(WindowId, &.{ 2, 3, 5 }, buf[0..3]);
+
+    // Untagging hides it too, unless all-view relaxes the tag test.
+    if (m.store.getPtr(3)) |e| e.mask = model.bit(WSId.fromIndex(1));
+    _ = model.collectCyclePool(&m, ws, &buf);
+    try testing.expectEqualSlices(WindowId, &.{ 2, 5 }, buf[0..2]);
+    m.all_view_active = true;
+    _ = model.collectCyclePool(&m, ws, &buf);
+    try testing.expectEqualSlices(WindowId, &.{ 2, 3, 5 }, buf[0..3]);
+    m.all_view_active = false;
+
+    // A covering occupant owns the screen: the pool collapses to it, so a
+    // cycle step can never fade focus into what is behind it.
+    m.store.getPtr(2).?.presence = .covering;
+    m.store.getPtr(2).?.covering_ws = ws;
+    try testing.expectEqual(@as(usize, 1), model.collectCyclePool(&m, ws, &buf));
+    try testing.expectEqual(@as(WindowId, 2), buf[0]);
+
+    // Off-current workspaces pool their own windows, in their own order.
+    var other = makeModel();
+    regCur(&other, 4);
+    try model.register(&other, 6, WSId.fromIndex(1));
+    try testing.expectEqual(@as(usize, 1), model.collectCyclePool(&other, WSId.fromIndex(1), &buf));
+    try testing.expectEqual(@as(WindowId, 6), buf[0]);
+}
+
 // unregister cleans tiled_order/MRU/minimized/fs refs everywhere.
 test "unregister cleans all references" {
     var m = makeModel();
@@ -556,7 +636,7 @@ test "ConfigureRequest honoring per mode" {
     var m = makeModel();
 
     regCur(&m, 1); // tiled
-    const r0: geom.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    const r0: model.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 2, r0);
     regCur(&m, 3);
     _ = fullscreen.toggleFullscreen(&m, 3);
@@ -875,7 +955,7 @@ test "floating-base fullscreen minimize/restore never joins a list" {
     var m = makeModel();
 
     regCur(&m, 5);
-    const r: geom.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
+    const r: model.Rect = .{ .x = 3, .y = 4, .width = 100, .height = 80 };
     try addFloating(&m, 6, r);
     _ = fullscreen.toggleFullscreen(&m, 6);
     try minimize.minimize(&m, 6);
@@ -1155,9 +1235,9 @@ test "setFloatingRect updates floating window geometry" {
 
     try fullscreen.init();
     defer fullscreen.deinit();
-    const r: geom.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
+    const r: model.Rect = .{ .x = 10, .y = 20, .width = 300, .height = 200 };
     try addFloating(&m, 5, r);
-    const new_r: geom.Rect = .{ .x = 50, .y = 60, .width = 400, .height = 300 };
+    const new_r: model.Rect = .{ .x = 50, .y = 60, .width = 400, .height = 300 };
     floating.setFloatingRect(&m, 5, new_r);
     try testing.expect(new_r.eql(m.store.get(5).?.anchor.floating));
     // A tiled window is untouched by geometry updates.

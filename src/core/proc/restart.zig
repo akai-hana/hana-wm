@@ -49,7 +49,7 @@ fn mustDupeZ(src: []const u8, what: []const u8) [:0]const u8 {
 
 /// Null-terminated absolute path to exec on re-exec (readLink of
 /// `/proc/self/exe`). c_allocator-owned, process-lifetime: never freed.
-var exec_path_z: ?[*:0]const u8 = null;
+var exec_path_z: ?[:0]const u8 = null;
 
 /// Re-exec request flag. Set by `requestReexec` (the `reload_hana` action and
 /// SIGUSR1), consumed by `consumeReexec` in the main event loop.
@@ -93,7 +93,14 @@ pub fn consumeReexec() bool {
 /// exec path.
 pub fn selfPath() ?[]const u8 {
     const z = exec_path_z orelse return null;
-    return z[0..std.mem.len(z)];
+    return z[0..z.len];
+}
+
+/// The same path, still sentinel-terminated, for callers that hand it to
+/// `execv`. `execNext` takes this form so the hand-off does not re-duplicate a
+/// string the process is already holding.
+pub fn selfPathZ() ?[:0]const u8 {
+    return exec_path_z;
 }
 
 /// Execs `self_path` IN PLACE, inheriting environ/DISPLAY. Never returns.
@@ -115,14 +122,51 @@ pub fn selfPath() ?[]const u8 {
 /// The restore path crosses the hand-off in HANA_RESTORE: execv inherits
 /// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
 /// environment is the one channel a fresh boot can see.
-pub fn execNext(self_path: []const u8, restore_path: []const u8) noreturn {
-    const self_z = mustDupeZ(self_path, "self path");
-    const restore_z = mustDupeZ(restore_path, "restore path");
+/// The complete re-exec hand-off, assembled once and owned by `restart`.
+///
+/// These three values used to travel separately: the event loop held the exec
+/// path, built the restore path, and called into config for the snapshot path
+/// before handing each to `execNext` as loose arguments. Three sources of truth
+/// for one transition means the sequence has to be re-derived at every call
+/// site, and nothing can assert the set is complete. Naming the record makes
+/// "what crosses the hand-off" a single declaration.
+pub const Handoff = struct {
+    /// Sentinel-terminated (`selfPathZ()`); this process's own image.
+    self_path: [:0]const u8,
+    /// The session state file. Not sentinel-terminated: the only copy is made
+    /// here, inside the call that needs it.
+    restore_path: []const u8,
+    /// Frozen last-good config directory, or null when no user config was ever
+    /// loaded (a fallback-only session has nothing to pin).
+    config_snapshot: ?[:0]const u8 = null,
+};
+
+/// The hand-off for this process, or null when re-exec was never armed
+/// (`init` saw no `/proc`, so there is no exec path to hand over).
+///
+/// `config_snapshot` is passed in rather than resolved here: the snapshot
+/// lives in the config layer, and importing config from `core/proc` to fetch
+/// one path would invert the dependency for no gain. The caller already has
+/// both values; this only fixes their order and names them.
+pub fn currentHandoff(restore_path: []const u8, config_snapshot: ?[:0]const u8) ?Handoff {
+    const self_path = selfPathZ() orelse return null;
+    return .{
+        .self_path = self_path,
+        .restore_path = restore_path,
+        .config_snapshot = config_snapshot,
+    };
+}
+
+pub fn execNext(handoff: Handoff) noreturn {
+    const self_z = handoff.self_path;
+    const restore_z = mustDupeZ(handoff.restore_path, "restore path");
 
     if (c.setenv("HANA_RESTORE", restore_z, 1) != 0) {
         log.err("restart: setenv failed", .{});
         std.process.exit(1);
     }
+    if (handoff.config_snapshot) |snap_z|
+        _ = c.setenv("HANA_CONFIG_DIR", snap_z, 1);
     _ = c.execv(self_z, @ptrCast(&[_:null]?[*:0]const u8{ self_z, null }));
     // Only reachable when exec failed; the X connection is already closed,
     // so there is nothing left to do but end the session.

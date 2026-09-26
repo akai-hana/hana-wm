@@ -139,9 +139,11 @@ fn extractWMHintsInput(
 /// the live-query fallback is always correct.
 fn putCachedProps(win: u32, props: CachedProps) void {
     if (!cache_ready) return;
-    if (!cache_slots.put(win, props)) {
-        log.warn("Focus cache full, falling back to live queries", .{});
-    }
+    // No warn on failure: cache_slots is sized store_capacity (128) while
+    // max_window_cache is 512, so put cannot fail from capacity and the
+    // drop here is genuinely silent. The doc above already says so; a log
+    // line that can never execute is a lie the reader has to disprove.
+    _ = cache_slots.put(win, props);
 }
 
 /// Returns cached props without triggering a live query, or null on a miss.

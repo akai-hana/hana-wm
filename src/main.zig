@@ -9,8 +9,7 @@ const events = @import("events");
 const signals = @import("signals");
 const config = @import("config");
 const types = @import("types");
-const masks = @import("masks");
-const scale = @import("scale");
+const scale = @import("dpi");
 const log = @import("log");
 const build_options = @import("build_options");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
@@ -18,11 +17,17 @@ const build_options = @import("build_options");
 // bar module here.
 const surfaces = @import("surfaces").Surfaces;
 const input = @import("input");
+
+/// The process allocator. One binding: a second `std.heap.c_allocator` spelling
+/// is a second place to change, and the two former sites disagreed about what
+/// they were even naming.
+const alloc = std.heap.c_allocator;
 const window = @import("window");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
 const restart = @import("restart");
 const persist = @import("persist");
+const restore = @import("restore");
 const focus = @import("focus");
 
 const atoms = @import("atoms");
@@ -44,8 +49,6 @@ pub fn main() !void {
     // connection can crash inside libxcb's teardown.
     defer if (xcb.xcb_connection_has_error(x.conn) == 0) xcb.xcb_disconnect(x.conn);
 
-    const alloc = std.heap.c_allocator;
-
     // Intern the atom cache before any module reads atoms: scale.detectDpi()
     // resolves RESOURCE_MANAGER through the cache, so it must be populated
     // first or Xft.dpi would never be read.
@@ -62,7 +65,6 @@ pub fn main() !void {
     // Heap-allocate config so core.State holds a pointer; this allows
     // atomic pointer-swap on reload instead of by-value copy aliasing.
     const config_ptr = try alloc.create(types.Config);
-    errdefer alloc.destroy(config_ptr);
     config_ptr.* = loaded_config;
 
     // core.init() takes ownership of config_ptr; must run before any
@@ -78,18 +80,13 @@ pub fn main() !void {
     // request can arrive (restart.init).
     restart.init();
 
-    // Drop the Config internals and the heap box core.init() owns; the keybind
-    // resolver (input-owned) is deinited separately above. The identity guard
-    // matters: a config reload swaps cs.config and the reload path
-    // (events.handleConfigReload) deinits AND destroys the displaced boot
-    // config itself, so this safely no-ops after a swap -- without it the
-    // defer would free the box a second time at shutdown, the GP fault seen in
-    // reload-then-quit runs.
-    const initial_config = core.getState().config;
-    defer if (core.getState().config == initial_config) {
-        initial_config.deinit(alloc);
-        alloc.destroy(initial_config);
-    };
+    // Drop the Config internals and the heap box core owns. No identity guard:
+    // a reload goes through core.replaceOwnedConfig, which releases the
+    // displaced box there and leaves the new one to this defer, so exactly one
+    // call frees each box. (The guard this replaces existed because the reload
+    // path used to free the box itself while main also held a reference to it
+    // -- the GP fault seen in reload-then-quit runs.)
+    defer core.deinitOwnedConfig();
     // Registered AFTER the config-deinit defer, so (LIFO) the resolver's map
     // is released before the keybindings its entries borrow are freed.
     defer input.deinitKeybinds();
@@ -113,47 +110,32 @@ pub fn main() !void {
 
     // Direct subsystem init: only the bar ever registered hooks (no plugin
     // registry anymore).
-    if (build_options.has_bar) surfaces.init() catch |err| log.err("bar init failed: {}", .{err});
-    defer if (build_options.has_bar) surfaces.deinit();
+    surfaces.init() catch |err| log.err("surface init failed: {}", .{err});
+    defer surfaces.deinit();
 
-    _ = xcb.xcb_flush(x.conn);
+    requests.flush(x.conn);
     log.info("hana booted up successfully!", .{});
 
     // Re-exec session hand-off (restart.execNext sets HANA_RESTORE).
     if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
-        adoptRestoredSession(std.mem.span(restore_path_z));
+        restore.adoptSession(std.mem.span(restore_path_z));
     }
 
-    try events.run();
-    log.info("Shutting down gracefully...", .{});
-}
+    events.run();
 
-/// Re-exec session hand-off (restart.execNext sets HANA_RESTORE before execv;
-/// a plain boot has no such var). The session's windows survive a re-exec
-/// because hana never reparents: clients are direct root children, so the
-/// successor adopts them, re-applies the persisted model level, then runs ONE
-/// reconcile that places everything exactly as it was. Called after bar init
-/// so the bar-aware workarea is live.
-fn adoptRestoredSession(restore_path: []const u8) void {
-    const alloc = std.heap.c_allocator;
-    if (persist.loadToGlobal(alloc, restore_path)) {
-        const n = window.adoptRootWindows() catch |err| blk: {
-            log.err("Window adoption failed: {}", .{err});
-            break :blk 0;
+    // This session's restore file is a hand-off record, and a graceful exit
+    // is the one case where the NEXT boot must not adopt it: the XIDs it
+    // names have already been given back, so the server may have recycled
+    // them and the successor would adopt unrelated windows. (After a crash
+    // or a re-exec the file is exactly what recovery needs, which is why
+    // this runs only here.)
+    if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
+        std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, std.mem.span(restore_path_z)) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => log.warn("Could not remove restore file: {}", .{err}),
         };
-        if (n > 0) {
-            actions.applyRestoredLevel();
-            // Restore X input focus on the session's focused window;
-            // the mapRequest path uses the same focus-after-geometry
-            // entry (the adopted window is already mapped).
-            if (pipeline.model().focused) |focused| {
-                const ft = focus.prepareFocus(focused, .window_spawn);
-                pipeline.reconcileGrabFocus(.{}, ft, .after, null);
-            } else {
-                pipeline.reconcileUnderGrabNow(.{});
-            }
-        }
     }
+    log.info("Shutting down gracefully...", .{});
 }
 
 const XSession = struct {
@@ -174,22 +156,8 @@ fn connectToX() !XSession {
         xcb.xcb_get_setup(conn),
     ).data orelse return error.X11ScreenFailed;
 
-    // Claim SubstructureRedirectMask on the root window to become the WM;
-    // the X server rejects this if another WM already holds it.
-    const cookie = xcb.xcb_change_window_attributes_checked(
-        conn,
-        screen.*.root,
-        xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{masks.EventMasks.root_window},
-    );
-    if (xcb.xcb_request_check(conn, cookie)) |err| {
-        log.err(
-            "Another window manager is already running (error_code={d}, type={d})",
-            .{ err.*.error_code, err.*.response_type },
-        );
-        std.c.free(err);
-        return error.AnotherWMRunning;
-    }
+    // Claim SubstructureRedirectMask on the root window to become the WM.
+    try requests.claimWindowManagerRole(conn, screen.*.root);
 
     return .{ .conn = conn, .screen = screen, .root = screen.*.root };
 }

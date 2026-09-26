@@ -152,6 +152,15 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// Removes every item whose `field_name` equals `id`, compacting in
         /// place (unordered). Used when several entries share one key (e.g.
         /// every child-window cache row pointing at the same toplevel).
+        /// First-class scalar removal: the find-then-remove pair is the shape
+        /// half the tree wants, so give it one name instead of every caller
+        /// spelling it out. Returns whether anything was removed.
+        pub fn removeValue(self: *Self, v: T) bool {
+            const i = self.indexOfScalar(v) orelse return false;
+            self.orderedRemove(i);
+            return true;
+        }
+
         pub fn removeAllById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) usize {
             return self.removeAllWhere(id, fieldEq(field_name).match);
         }
@@ -305,6 +314,11 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         /// Empty map → row 0 of the fixed-capacity storage (always
         /// addressable, capacity >= 1).
         pub fn at(self: *const Self, seq: usize) Item {
+            // An empty map has no row to return; the old clamp handed back
+            // whatever sat in the fixed-capacity storage. Every caller already
+            // checks len > 0, so make the precondition loud instead of
+            // fabricating an entry.
+            std.debug.assert(self.len > 0);
             const idx = @min(seq, self.len -| 1);
             return .{ .key = self.keys[idx], .val = &self.vals[idx] };
         }

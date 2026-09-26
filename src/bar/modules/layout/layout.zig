@@ -6,7 +6,7 @@ const drawing = @import("drawing");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
 const contract = @import("contract");
-const segdraw = @import("segdraw");
+const scaffold = @import("scaffold");
 
 // Layout registry (build-generated); the active layout is a `u8` index into
 // it, and each module carries its own bar icon metadata. Empty (and
@@ -30,7 +30,7 @@ fn getIcon() []const u8 {
 }
 
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    return segdraw.drawAndStore("layout", dc, config, height, start_x, getIcon());
+    return scaffold.drawAndStore("layout", dc, config, height, start_x, getIcon());
 }
 
-pub const module = segdraw.module("layout", draw, actions.cycleLayoutKind, .{ .with_collapse = false });
+pub const module = scaffold.module("layout", draw, actions.cycleLayoutKind, .{ .with_collapse = false });

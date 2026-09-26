@@ -21,8 +21,8 @@ const build_options = @import("build_options");
 const core = @import("core");
 const xcb = core.xcb;
 const usable_area = @import("usable_area");
-const refresh = @import("refresh");
-const scale = @import("scale");
+const hz = @import("hz");
+const scale = @import("dpi");
 const constants = @import("constants");
 const log = @import("log");
 
@@ -52,7 +52,6 @@ const visibility = @import("visibility");
 const window_mods = @import("window_modules").modules;
 const contract = @import("contract");
 
-const geom = @import("geom");
 const requests = @import("requests");
 /// The hide-family provider bound to the generated window registry, resolved
 /// once at file scope: the hidden-set synthesis and its collect dispatch
@@ -293,11 +292,10 @@ pub fn chromeHandleKeypress(
 /// and the bar must not name it.
 pub fn chromeToggleOverlay() void {
     const s = gBar.state orelse return;
-    if (titleIdBound(s)) |tb|
-        if (segId(tb.name)) |tid| {
-            const is_right_click = true;
-            dispatchClick(s, tid, 0, false, is_right_click);
-        };
+    if (titleIdBound(s)) |tb| {
+        const is_right_click = true;
+        dispatchClick(s, tb.id, 0, false, is_right_click);
+    }
 }
 
 /// The title segment's recorded on-screen bound, or null when the title
@@ -306,7 +304,7 @@ pub fn chromeToggleOverlay() void {
 /// title id/name/bound resolution lives in one place.
 fn titleIdBound(s: *State) ?SegBound {
     const center_id = title_id orelse return null;
-    return s.recordedBound(segAt(center_id).name);
+    return s.recordedBound(center_id);
 }
 
 /// Routes one click at `offset` pixels into segment `id` to its onClick hook
@@ -352,9 +350,17 @@ const WindowCtx = struct {
     }
 };
 
+/// The live bar configuration. The render state used to hold its own
+/// `types.BarConfig` copy and needed a `refreshConfig()` re-point on every
+/// reload path -- a second source of truth that silently borrowed slices from
+/// a config the caller frees a few lines later. One accessor, reading core,
+/// means there is nothing to re-point and nothing to forget.
+inline fn renderBar() types.BarConfig {
+    return core.getState().config.bar;
+}
+
 const RenderCtx = struct {
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
     width: u16,
     height: u16,
     allocator: std.mem.Allocator,
@@ -403,7 +409,11 @@ const RightCluster = struct {
 /// these in recorded order (first match wins). The name is borrowed from the
 /// config's layout list (stable for the bar's lifetime).
 const SegBound = struct {
-    name: []const u8,
+    /// Segment identity, not its name. The layout already knows the id it is
+    /// positioning, so keying the record by id makes lookup a compare instead
+    /// of a string scan, and two segments sharing a name (or one appearing
+    /// twice) can no longer alias each other's bounds.
+    id: usize,
     x: u16,
     w: u16,
 
@@ -467,6 +477,27 @@ const Clicks = struct {
     len: usize = 0,
 };
 
+/// The bar-wide merged display width of the self-ticking segments: the max
+/// across them of each one's width probe plus its segment padding (a segment
+/// with no probe contributes 0). The single definition of the "clock budget"
+/// handed to every naturalWidth hook as its fallback, so a fresh bar
+/// (State.init) and a post-mode-cycle re-derivation (adoptFreshClockWidth)
+/// can never disagree.
+///
+/// Measured off each segment's CURRENT `measureString`, which is what makes
+/// the reflow check work: the clock's probe is the ACTIVE display mode's, so a
+/// click-driven mode cycle is visible here immediately, whereas the clock's
+/// naturalWidth hook cannot report the incoming mode's span until the clock
+/// has drawn once (and drawing is what the reflow is supposed to drive).
+fn mergedClockWidth(dc: *drawing.DrawContext, config: types.BarConfig, height: u16) u16 {
+    var width: u16 = 0;
+    for (self_ticking_ids) |cid| {
+        if (segAt(cid).measureString) |ms|
+            width = @max(width, dc.measureTextWidth(ms()) + 2 * config.scaledSegmentPadding(height));
+    }
+    return width;
+}
+
 /// Live frame state (recollected on every draw; see scanLiveFrame). Holds
 /// the shared `segmod.Frame` directly (workspace_count/current_workspace/
 /// is_all_view_active) plus the bar-local backing array it slices, so the
@@ -505,7 +536,7 @@ const TitleScratch = struct {
     /// in [0, frame.wins_len) for the frame; the DrawCtx's title snapshot
     /// points into them and click hit-testing reuses them after the draw.
     titles_buf: [max_frame_windows][]const u8 = undefined,
-    geoms_buf: [max_frame_windows]?geom.Rect = undefined,
+    geoms_buf: [max_frame_windows]?model.Rect = undefined,
 };
 
 /// Last-seen core fact revisions (see core.Facts). Each is diffed against the
@@ -571,11 +602,7 @@ const State = struct {
         // The merged clock display width comes from the self-ticking segments'
         // measureString hooks (max across them; a segment with no hook
         // contributes 0).
-        var clock_width: u16 = 0;
-        for (self_ticking_ids) |cid| {
-            if (segAt(cid).measureString) |ms|
-                clock_width = @max(clock_width, dc.measureTextWidth(ms()) + 2 * config.scaledSegmentPadding(height));
-        }
+        const clock_width = mergedClockWidth(dc, config, height);
         s.* = .{
             .win = .{
                 .conn = conn,
@@ -584,7 +611,6 @@ const State = struct {
             },
             .render = .{
                 .dc = dc,
-                .config = config,
                 .width = width,
                 .height = height,
                 .allocator = allocator,
@@ -649,7 +675,7 @@ const State = struct {
     /// span to cover it: the shared repaint idiom for every segment region
     /// (including the full-redraw path, where `x = 0, w = width`).
     fn clearRegion(self: *State, x: u16, w: u16) void {
-        self.render.dc.fillRect(x, 0, w, self.render.height, self.render.config.bg);
+        self.render.dc.fillRect(x, 0, w, self.render.height, renderBar().bg);
         self.extendDirtySpan(x, w);
     }
 
@@ -699,7 +725,7 @@ const State = struct {
     /// slot is excluded (its dirty flag is never cleared, so a registry-wide
     /// scan would always match and defeat the fast-path early-exit).
     inline fn anyLayoutSegment(self: *const State, comptime pred: anytype) bool {
-        for (self.render.config.layout.items) |lay| {
+        for (renderBar().layout.items) |lay| {
             for (lay.segments.items) |seg| {
                 if (pred(self, seg)) return true;
             }
@@ -720,7 +746,7 @@ const State = struct {
     /// set and !dirty.flag, the only pending work is a marquee/overlay
     /// needsRepaint hook and the cached last_ctx snapshot is still accurate.
     fn hasLayoutSegmentDirty(self: *const State) bool {
-        for (self.render.config.layout.items) |lay| {
+        for (renderBar().layout.items) |lay| {
             for (lay.segments.items) |name| {
                 const id = segId(name) orelse continue;
                 if (segDirty(self, id)) return true;
@@ -737,13 +763,13 @@ const State = struct {
         const id = segId(name) orelse return;
         if (!segAt(id).clickable) return;
         if (self.clicks.len >= max_click_bounds) return;
-        self.clicks.bounds[self.clicks.len] = .{ .name = name, .x = x, .w = w };
+        self.clicks.bounds[self.clicks.len] = .{ .id = id, .x = x, .w = w };
         self.clicks.len += 1;
     }
 
-    fn recordedBound(self: *const State, name: []const u8) ?SegBound {
+    fn recordedBound(self: *const State, id: usize) ?SegBound {
         for (self.clicks.bounds[0..self.clicks.len]) |b| {
-            if (std.mem.eql(u8, b.name, name)) return b;
+            if (b.id == id) return b;
         }
         return null;
     }
@@ -752,6 +778,9 @@ const State = struct {
     /// naturalWidth hook, or 0 for an unknown/removed segment name.
     fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, name: []const u8) u16 {
         const id = segId(name) orelse return 0;
+        // The hook's first parameter is `*const anyopaque` (the contract keeps
+        // no import edge into the bar layer), so the cast to the shared
+        // segment Frame happens HERE, once, instead of at each call site.
         if (segAt(id).naturalWidth) |nw| return nw(frame, self.clock.width);
         return 0;
     }
@@ -855,7 +884,7 @@ const State = struct {
     /// with the off-screen sentinel for windows that have never been placed
     /// (parked/unsent). Mirrors the old batch behavior (truth-rect first,
     /// sentinel fallback) without the xcb_get_geometry round-trip.
-    fn titleGeom(win: u32, minimized: bool) ?geom.Rect {
+    fn titleGeom(win: u32, minimized: bool) ?model.Rect {
         if (minimized) return segmod.offscreen_rect;
         return reconcile.truthRect(pipeline.model(), win) orelse segmod.offscreen_rect;
     }
@@ -927,7 +956,7 @@ const State = struct {
         right_x: *u16,
     ) void {
         const frame = &ctx.frame;
-        const scaled_spacing = self.render.config.scaledSpacing(self.render.height);
+        const scaled_spacing = renderBar().scaledSpacing(self.render.height);
         // Runs across the whole right cluster, NOT per layout: multiple right
         // layouts butt against each other (no inter-layout spacing, matching
         // the reservation computed up front in drawAllInner) instead of each
@@ -981,7 +1010,7 @@ const State = struct {
     fn drawAllInner(self: *State, ctx: *segmod.DrawCtx) void {
         const r = &self.render;
         const frame = &ctx.frame;
-        const scaled_spacing = r.config.scaledSpacing(r.height);
+        const scaled_spacing = renderBar().scaledSpacing(r.height);
         const is_full_redraw = self.isFullDirty();
         self.dirty.span_x = 0;
         self.dirty.span_w = 0;
@@ -998,7 +1027,7 @@ const State = struct {
         // for left/center placement plus the per-segment widths the draw uses.
         // Accumulate the reservation in u32 (segment widths + gaps could push
         // past u16 on a very wide desktop) and clamp into the u16 handled below.
-        for (r.config.layout.items) |lay| {
+        for (renderBar().layout.items) |lay| {
             if (lay.position != .right) continue;
             for (lay.segments.items) |seg| {
                 const w = self.measureSegmentWidth(frame, seg);
@@ -1016,7 +1045,7 @@ const State = struct {
         // layouts so they lay out back-to-back (measure reserves one span for
         // the whole cluster); see drawRightSegments.
         var right_x = r.width;
-        for (r.config.layout.items) |lay| {
+        for (renderBar().layout.items) |lay| {
             switch (lay.position) {
                 .left, .center => {
                     // Available horizontal space before the right cluster.
@@ -1088,6 +1117,18 @@ const State = struct {
             redrawSlotScoped(self, cid, sc.x, sc.width, null, true);
         }
     }
+
+    /// Re-derives the merged clock display width from the live width probes and
+    /// adopts it, reporting whether it moved. Driven by a display-mode cycle:
+    /// the next row layout must reserve the incoming mode's span, and the
+    /// region-scoped tick blit cannot deliver that (it paints inside the
+    /// previously laid-out slot).
+    fn adoptFreshClockWidth(self: *State) bool {
+        const fresh = mergedClockWidth(self.render.dc, renderBar(), self.render.height);
+        if (fresh == self.clock.width) return false;
+        self.clock.width = fresh;
+        return true;
+    }
 };
 
 // Draw submission
@@ -1098,7 +1139,7 @@ const State = struct {
 fn frameCtx(s: *State) segmod.DrawCtx {
     return .{
         .dc = s.render.dc,
-        .config = s.render.config,
+        .config = renderBar(),
         .height = s.render.height,
         .conn = s.win.conn,
         .allocator = s.render.allocator,
@@ -1224,7 +1265,7 @@ pub fn init() !void {
     const cs = core.getState();
     std.debug.assert(cs.config.bar.enabled);
     barwin.initAtoms();
-    refresh.ensureRefreshRateDetected(cs.conn);
+    hz.ensureRefreshRateDetected(cs.conn);
     const height = calcBarHeightAndFontSize();
     const bar = try createBar(height, barwin.calcBarYPos(height));
     gBar.state = bar.state;
@@ -1284,18 +1325,6 @@ pub fn reload() void {
     };
 }
 
-/// Re-points the bar's config copy at the LIVE config's bar section.
-/// handleConfigReload only rebuilds the bar when changes.bar is set; a reload
-/// that lands elsewhere in the config leaves render.config borrowing slices of
-/// the OLD config, which the caller frees right after these hooks return -- the
-/// next draw would read freed memory. Same re-point as the applyReload failure
-/// path, just for the no-rebuild path.
-pub fn refreshConfig() void {
-    const s = gBar.state orelse return;
-    s.render.config = core.getState().config.bar;
-    requestFullRedraw();
-}
-
 fn applyReload(old: *State, height: u16) !void {
     const cs = core.getState();
     // Module caches (font widths, caret geometry) are built against the old
@@ -1311,10 +1340,9 @@ fn applyReload(old: *State, height: u16) !void {
     const new_bar = createBar(height, barwin.calcBarYPos(height)) catch |err| {
         // The caller has already swapped cs.config to the new config and frees
         // the OLD config when this returns. The old bar survives this failed
-        // reload, but its render.config borrows slices from that config; so
-        // re-point it at the live new config before old_config.deinit() runs,
-        // or the next draw reads freed memory.
-        old.render.config = cs.config.bar;
+        // reload; it used to need its cached config copy re-pointed here or the
+        // next draw would read freed memory. It reads the live config now
+        // (renderBar), so there is nothing to repair.
         metrics.setScaledFontSize(old_scaled_font_size);
         return err;
     };
@@ -1365,7 +1393,7 @@ pub fn toggleBarSegmentAnchor() void {
         cs.conn,
         s.win.win_id,
         xcb.XCB_CONFIG_WINDOW_Y,
-        &[_]u32{geom.toXcbCoord(new_y)},
+        &[_]u32{model.toXcbCoord(new_y)},
     );
     // Publish the new edge BEFORE any early return. The bar window has
     // already moved and bar_position changed, so bailing out below without
@@ -1437,7 +1465,7 @@ fn redrawInsideGrab() void {
 fn redrawSegmentScoped(s: *State, id: usize) void {
     if (!s.vis.shown) return;
     if (s.pendingFullRedraw()) return;
-    const tb = s.recordedBound(segAt(id).name) orelse return;
+    const tb = s.recordedBound(id) orelse return;
     redrawSlotScoped(s, id, tb.x, tb.w, tb.w, false);
 }
 
@@ -1647,7 +1675,7 @@ fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
     );
 }
 
-pub fn updateIfDirty() !void {
+pub fn updateIfDirty() void {
     const s = gBar.state orelse return;
 
     // Fullscreen-occupancy reaction runs even when the bar is currently hidden
@@ -1715,35 +1743,37 @@ fn foldModuleRedraw(s: *State) bool {
 }
 
 /// Redraws just the clock segment when its on-screen content is stale
-/// (second rolled over, or config reload changed the format). Cheap to call
-/// on every event batch: it no-ops unless staleness is detected.
+/// (second rolled over, the display mode changed, or a config reload changed
+/// the format). Cheap to call on every event batch: it no-ops unless staleness
+/// is detected.
+///
+/// A display-mode cycle also changes a self-ticking segment's slot width, and
+/// that case reflows the row rather than ticking in place. The check runs
+/// BEFORE any paint, off the live width probes, because the region-scoped tick
+/// blit can only paint inside the slot the last layout pass reserved: shipping
+/// that first would show the new mode's text stranded in the outgoing mode's
+/// (wider) slot while its neighbours stayed put.
 pub fn updateClock() void {
     const s = gBar.state orelse return;
     if (!s.vis.shown) return;
     if (self_ticking_ids.len == 0) return;
     const fmt = drawing.clockFormat(core.getState().config.bar);
     if (!anyBoolHook(.secondsElapsed, .{fmt})) return;
-    s.drawClockOnly();
-    // A display-mode cycle also changes a self-ticking segment's slot width:
-    // re-derive the merged clock display width (max across the tickers'
-    // natural widths) and re-lay the row so neighboring segments shift to the
-    // narrowed/widened slot. Within a mode the reported width is stable (the
-    // mode's probe), so the normal once-per-second clock repaint never trips
-    // this re-layout.
-    var merged = s.clock.width;
-    for (self_ticking_ids, 0..) |cid, i| {
-        const sc = &s.clock.segs[i];
-        if (!sc.valid) continue;
-        if (segAt(cid).naturalWidth) |nw| {
-            const fresh = nw(&s.frame, s.clock.width);
-            sc.width = fresh;
-            merged = @max(merged, fresh);
-        }
-    }
-    if (merged != s.clock.width) {
-        s.clock.width = merged;
+
+    if (s.adoptFreshClockWidth()) {
+        // Re-lay and repaint the row in this same call, then ship it. updateClock
+        // is the last statement of the event loop body, i.e. it runs AFTER the
+        // end-of-batch flush and after the batch's own updateIfDirty, so merely
+        // flagging the redraw left the reflow to the next loop iteration --
+        // up to a whole second on an idle bar, which is exactly the stale-length
+        // window this path exists to close. performDraw queues its blit, so the
+        // flush is ours to make.
         requestFullRedraw();
+        performDraw();
+        _ = xcb.xcb_flush(core.getState().conn);
+        return;
     }
+    s.drawClockOnly();
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
@@ -1784,7 +1814,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const h = for (s.clicks.bounds[0..s.clicks.len]) |b| {
         if (b.contains(x)) break b;
     } else return;
-    const id = segId(h.name) orelse return;
+    const id = h.id;
 
     const detail = event.detail;
     if (detail == constants.mouse_button_left) {
@@ -1823,7 +1853,7 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
     const id = s.drag_segment orelse return;
     if (!s.vis.shown) return;
     if (segAt(id).onDragMotion) |drag| {
-        const tb = s.recordedBound(segAt(id).name) orelse return;
+        const tb = s.recordedBound(id) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
         const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
         // Scoped repaint, not redrawInsideGrab: a scrub only mutates the
@@ -1891,11 +1921,10 @@ pub const surfaces = @import("contract").Surfaces{
     .pollTimeoutMs = pollTimeoutMs,
     .onPollWakeup = onPollWakeup,
     .updateClock = updateClock,
-    .randrFirstEvent = refresh.randrFirstEvent,
-    .handleRandrEvent = refresh.handleRandrNotifyEvent,
-    .runPendingRedetect = refresh.runPendingRedetect,
+    .randrFirstEvent = hz.randrFirstEvent,
+    .handleRandrEvent = hz.handleRandrNotifyEvent,
+    .runPendingRedetect = hz.runPendingRedetect,
     .onReload = reload,
-    .refreshConfig = refreshConfig,
     .chromeHandleKeypress = chromeHandleKeypress,
     .isBarWindow = isBarWindow,
     .handleButtonPress = handleButtonPress,

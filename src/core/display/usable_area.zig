@@ -12,10 +12,11 @@
 //! lives here, not in any particular surface. With no active claims, the
 //! usable area is the full screen (the natural state when the bar is absent).
 
+const std = @import("std");
 const core = @import("core");
 const build_options = @import("build_options");
+const model = @import("model");
 
-const geom = @import("geom");
 /// Which screen edge a claim occupies.
 pub const Edge = enum { top, bottom, left, right };
 
@@ -32,8 +33,11 @@ const Claim = struct {
 // runtime registration).
 const max_claims = if (build_options.has_bar) 1 else 0;
 
-// The bar is surface id 0 (present only when has_bar).
-pub const bar_id: u8 = 0;
+// The bar is surface id 0 (present only when has_bar). With no bar compiled
+// in there are no claim ids at all, so the constant must not exist: a caller
+// that reads it is already broken and should fail at compile time rather than
+// index a zero-length array.
+pub const bar_id: u8 = if (build_options.has_bar) 0 else unreachable;
 
 var claims: [max_claims]Claim = [_]Claim{.{}} ** max_claims;
 
@@ -76,6 +80,9 @@ pub fn mappedSurfaceWindow() ?core.WindowId {
 /// or pixel count replaces the previous claim; the caller is responsible for
 /// triggering any reconcile that new geometry requires.
 pub fn setClaim(comptime id: u8, edge: Edge, px: u16) void {
+    // comptime id + comptime-length array => the bounds check happens while
+    // compiling, not on first paint.
+    comptime std.debug.assert(id < claims.len);
     claims[id] = .{ .edge = edge, .px = px, .active = px != 0 };
 }
 
@@ -86,26 +93,40 @@ pub fn releaseClaim(comptime id: u8) void {
 
 /// The usable rectangular area: physical screen minus the pixels that active
 /// claims take from their edges. With no active claims this is the full screen.
-pub fn workArea(screen: core.Screen) geom.Rect {
-    var top: u32 = 0;
-    var bottom: u32 = 0;
-    var left: u32 = 0;
-    var right: u32 = 0;
+/// Sum of every ACTIVE claim per edge. Pure over the claim table, so the
+/// arithmetic the usable-area depends on is testable without an X connection.
+fn claimInsets() [4]u32 {
+    var insets = [4]u32{ 0, 0, 0, 0 }; // top, bottom, left, right
     for (claims) |c| {
         if (!c.active) continue;
         switch (c.edge) {
-            .top => top += c.px,
-            .bottom => bottom += c.px,
-            .left => left += c.px,
-            .right => right += c.px,
+            .top => insets[0] += c.px,
+            .bottom => insets[1] += c.px,
+            .left => insets[2] += c.px,
+            .right => insets[3] += c.px,
         }
     }
-    const w = screen.width_in_pixels;
-    const h = screen.height_in_pixels;
+    return insets;
+}
+
+/// The usable-area arithmetic, with no global state and no X handle.
+///
+/// Every subtraction SATURATES (`-|`) on purpose: an over-claiming surface
+/// (two bars on one edge, or a claim wider than a small screen) must yield a
+/// zero-sized area rather than wrapping to a huge one and handing the layouts
+/// a rect off the end of the display. That behavior is load-bearing and was
+/// previously only reachable through a live screen, which is why it now has
+/// this seam.
+pub fn workAreaFrom(screen_w: u32, screen_h: u32) model.Rect {
+    const insets = claimInsets();
     return .{
-        .x = @intCast(left),
-        .y = @intCast(top),
-        .width = @intCast(w -| left -| right),
-        .height = @intCast(h -| top -| bottom),
+        .x = @intCast(insets[2]),
+        .y = @intCast(insets[0]),
+        .width = @intCast(screen_w -| insets[2] -| insets[3]),
+        .height = @intCast(screen_h -| insets[0] -| insets[1]),
     };
+}
+
+pub fn workArea(screen: core.Screen) model.Rect {
+    return workAreaFrom(screen.width_in_pixels, screen.height_in_pixels);
 }

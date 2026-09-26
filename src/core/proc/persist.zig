@@ -214,6 +214,10 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
         };
         snap.ws_filled = i + 1;
     }
+    // The loader reads the whole fixed-size workspace array, so a snapshot that
+    // stopped early would be read back as a truncated session. The loop above
+    // can only fail, never break early, so a short fill is a bug -- say so.
+    std.debug.assert(snap.ws_filled == MAX_WS);
     return snap;
 }
 
@@ -241,7 +245,10 @@ fn stringifySnapshot(allocator: std.mem.Allocator, m: *const model.Model, snap: 
 /// loader tolerates a missing file but warns on a corrupt one).
 fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
     const io = std.Options.debug_io;
-    const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    // Pid-qualified: two hana instances restoring the same session would
+    // otherwise race on one temp path, and the loser's unlink could delete
+    // the winner's in-flight file.
+    const tmp = try std.fmt.allocPrint(allocator, "{s}.{d}.tmp", .{ path, std.os.linux.getpid() });
     defer allocator.free(tmp);
     // Exclusive, no-follow create: a pre-existing symlink or hardlink at the
     // temp path would otherwise be followed and redirect the write to an
@@ -261,6 +268,13 @@ fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8
     };
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
+    // Flush BEFORE the rename. Rename is atomic with respect to the NAME, not
+    // the DATA: without the sync, a crash right after the rename can leave the
+    // new name pointing at blocks that never reached disk, so the boot-time
+    // loader can read a truncated file -- the exact outcome the temp-file dance
+    // above exists to prevent. Skipping this only "worked" because the page
+    // cache usually survives; that is not a durability property.
+    try file.sync(io);
     // POSIX rename replaces the name while the fd stays open; the defer's
     // close lands after the rename moved the temp into place.
     try std.Io.Dir.renameAbsolute(tmp, path, io);
@@ -381,6 +395,22 @@ pub fn applyModelLevel(m: *model.Model) void {
         // config default kind (index 0 as the neutral last resort) instead of
         // leaving an unresolvable dispatch id. Loud, so the degradation is never
         // silent.
+        // variant_idx is validated here for the same reason `kind` is: it is
+        // persisted as a bare ordinal, so a variant that no longer exists
+        // (a module trimmed its variant list between runs) would otherwise
+        // index past the end of the module's own table. Clamp to the reported
+        // count and say so, rather than reading out of bounds.
+        if (@import("contract").moduleOf(s.params.kind)) |l| {
+            const vc = l.variant_count;
+            if (s.params.variant_idx >= vc) {
+                log.warn(
+                    "persist: clamping restored variant_idx {} to {} (layout " ++
+                        "'{}' exposes {} variant(s))",
+                    .{ s.params.variant_idx, vc -| 1, s.params.kind, vc },
+                );
+                s.params.variant_idx = vc -| 1;
+            }
+        }
         if (@import("contract").moduleOf(s.params.kind) == null and tiling_mods.len > 0) {
             const fallback = resumableDefaultKind();
             log.warn(

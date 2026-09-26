@@ -21,8 +21,15 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const top_rect = tiling.insetRect(inset, tiling.waY(v) +| inset, v.workarea.width, v.workarea.height, total_margin, v.env.min_dim);
 
-    tiling.emitView(v, out, top_win, top_rect);
-    tiling.showOneHideRest(out, v.order, top_win);
+    // One pass, in View.order order, one placement per window: the previous
+    // shape emitted `top_win` first regardless of its position in v.order,
+    // which broke the positional contract the sink relies on and left the top
+    // window's stacking position dependent on where focus sat in the list.
+    // (Emitting every window at the shared rect and hiding afterwards does not
+    // work: appendPlacement only ever appends, so that shape double-counts.)
+    for (v.order) |win| {
+        if (win == top_win) tiling.emitView(v, out, win, top_rect) else tiling.emitHidden(out, win);
+    }
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.

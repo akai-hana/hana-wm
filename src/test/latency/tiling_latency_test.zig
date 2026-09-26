@@ -17,7 +17,6 @@ const tiling = @import("tiling");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 
-const geom = @import("geom");
 const time = @import("time");
 // Latency instrumentation only runs its full loops + timing output under
 const ledger = @import("ledger");
@@ -112,7 +111,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     ledger.init();
     defer ledger.init();
 
-    const screen: geom.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
+    const screen: model.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
     var order_buf: [128]WindowId = undefined;
     var hints_buf: [128]model.SizeHints = undefined;
     var placements: tiling.List = .{};

@@ -6,7 +6,7 @@ const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const contract = @import("contract");
-const segdraw = @import("segdraw");
+const scaffold = @import("scaffold");
 
 // Layout registry (build-generated); the active layout is a `u8` index into
 // it, and each module carries its own variant indicator list. Empty when the
@@ -36,7 +36,7 @@ fn getIndicator() []const u8 {
 /// start_x when tiling is disabled or no indicator is available (a 0-width
 /// reservation, per drawAndStore's empty-text path).
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
-    return segdraw.drawAndStore("variants", dc, config, height, start_x, getIndicator());
+    return scaffold.drawAndStore("variants", dc, config, height, start_x, getIndicator());
 }
 
-pub const module = segdraw.module("variants", draw, actions.stepVariantDir, .{ .with_collapse = true });
+pub const module = scaffold.module("variants", draw, actions.stepVariantDir, .{ .with_collapse = true });

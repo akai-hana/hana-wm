@@ -7,14 +7,16 @@
 //! its on-screen content has gone stale (second rolled over, a config reload
 //! changed the format, or the display mode changed). The three display modes
 //! -- date-time (default, configured format), time-only, date-only -- cycle
-//! by clicking the segment: left-click advances, right-click reverses.
+//! by clicking the segment: left-click advances, right-click reverses. A cycle
+//! also moves the reserved slot width, so the bar re-lays the row for the new
+//! mode rather than ticking in place (see bar.updateClock).
 //! Single-threaded by construction -- all state lives on the main thread, so
 //! there are no locks, flags, or drain races (docs/clock-plan.md).
 
 const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
-const segdraw = @import("segdraw");
+const scaffold = @import("scaffold");
 
 const time = @import("time");
 const c = @cImport(@cInclude("time.h"));
@@ -63,7 +65,7 @@ var mode: DisplayMode = .date_time;
 /// stable within a mode; zero until the clock has drawn once. The mode key
 /// makes a stored width stale (re-measures) when a mode cycle or reload
 /// changes the probe -- see keyedWidthState.
-const W = segdraw.keyedWidthState("clock", DisplayMode);
+const W = scaffold.keyedWidthState("clock", DisplayMode);
 
 /// The format `m` maps `base` (the configured format) to: the config format
 /// unchanged in date_time mode, a fixed built-in otherwise. Pure, so tests can
@@ -158,8 +160,11 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
 /// the clock has drawn, else the bar's freshly computed probe width for the
 /// initial layout. Also drives the bar's reflow check in updateClock, which
 /// compares this against the laid-out reservation after a clock-only repaint.
+/// A mode cycle that has NOT drawn yet reports the bar's fresh probe instead
+/// of the outgoing mode's cached slot, so a reflow pass reserves the incoming
+/// mode's span instead of the one being left behind.
 fn naturalWidthHook(_: *const anyopaque, fallback: u16) u16 {
-    return W.naturalWidth(@as(*const anyopaque, undefined), fallback);
+    return W.naturalWidth(mode, @as(*const anyopaque, undefined), fallback);
 }
 
 /// Resets the mode width reservation so the next draw re-measures the active
@@ -198,8 +203,10 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
 /// Cycles the clock's display mode: left-click advances date-time -> time ->
 /// date -> date-time, right-click cycles the opposite way. The repaint rides
 /// the existing staleness path: the mode change alters the effective format
-/// pointer, so the bar's end-of-batch updateClock runs the region-scoped
-/// clock redraw this same batch.
+/// pointer, so the bar's end-of-batch updateClock runs this same batch. That
+/// path re-lays the row for the new mode's slot width (a narrower mode's text
+/// cannot be blitted into the outgoing mode's wider reservation), which is why
+/// this hook neither redraws nor measures anything itself.
 fn onClickHook(
     _: u16,
     left: bool,
@@ -215,7 +222,7 @@ fn onClickHook(
 /// This module's bar-segment contribution (registry binding). Natural width is
 /// the current mode's measured slot (auto-sized to the active view via the
 /// naturalWidth hook; the passthrough measureString default sizes a fresh bar).
-pub const module = segdraw.module(
+pub const module = scaffold.module(
     "clock",
     draw,
     null,

@@ -9,6 +9,31 @@
 //! a load is called with the same arena-backed allocator; the arena reset at
 //! the end of the load reclaims everything, so Document/Section/Value own
 //! nothing and have no deinit.
+//!
+//! ACCEPTED SUBSET (everything outside this list is a parse error, by design --
+//! this is a hand-written reader for one config dialect, not a TOML
+//! implementation, and silently accepting a construct whose semantics we would
+//! then have to approximate is worse than rejecting it):
+//!
+//!   `[table]` headers, one level, flat keys only;
+//!   `key = value` pairs, plus the bare-key shorthand (`key` == `key = true`,
+//!   which workspace rules rely on);
+//!   values: decimal integers, `true`/`false`, single- or double-quoted
+//!   strings, bracketed `[a, b, c]` arrays, bare multi-token lists, colors
+//!   (`#RRGGBB`, `0xRRGGBB`), and scalable values with a unit suffix;
+//!   `#` comments to end of line; duplicate keys accumulate into an array.
+//!
+//! REJECTED, with the error each produces:
+//!
+//!   inline tables (`{ a = 1 }`), dotted keys (`a.b = 1`), array-of-tables
+//!   (`[[x]]`), date/time literals, floats, multi-line/basic strings,
+//!   escapes beyond the supported set  -> InvalidValue
+//!   a key or table name the reader cannot lex               -> InvalidSyntax
+//!   a `[header]` that does not open a section the reader accepts -> InvalidSection
+//!   a color token that is not a valid 24-bit hex              -> InvalidColor
+//!   allocator exhaustion (distinct so callers can retry)     -> OutOfMemory
+//!
+//! The error set is `ParseError`, declared at the bottom of this file.
 
 const std = @import("std");
 const log = @import("log");

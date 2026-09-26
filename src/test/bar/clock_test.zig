@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const clock = @import("clock");
+const scaffold = @import("scaffold");
 
 test "deadlineFromMs returns ms to next whole-second boundary" {
     // Exactly on a boundary: a full second to the next one.
@@ -66,4 +67,29 @@ test "each mode reserves its own stable width probe" {
         clock.measureStringFor(.date_time),
         clock.measureStringFor(.time),
     ));
+}
+
+test "a width stored for one mode is not reserved for the next" {
+    // The clock's row reservation comes from the width it measured for the
+    // ACTIVE mode. A stored width belonging to the mode being left behind is
+    // already too wide for the incoming one, so the hook must fall back to the
+    // bar's fresh probe for that mode. Reporting the stale slot is what left
+    // the row laid out at the previous mode's length after a click.
+    const W = scaffold.keyedWidthState("clock_test", clock.DisplayMode);
+    const ctx: *const anyopaque = undefined;
+    const wide: u16 = 190; // date_time
+    const narrow: u16 = 80; // time
+
+    // Before any store the fresh probe width applies (a fresh bar).
+    W.invalidate();
+    try std.testing.expectEqual(wide, W.naturalWidth(.date_time, ctx, wide));
+
+    W.store(.date_time, wide);
+    try std.testing.expectEqual(wide, W.naturalWidth(.date_time, ctx, wide));
+    // The cycle itself: stale under the new key, so the narrow probe wins.
+    try std.testing.expectEqual(narrow, W.naturalWidth(.time, ctx, narrow));
+    // And it does not come back to the old slot for a mode it was never
+    // measured for either.
+    try std.testing.expectEqual(narrow, W.naturalWidth(.date, ctx, narrow));
+    W.invalidate();
 }

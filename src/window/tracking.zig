@@ -42,17 +42,14 @@ pub const Entry = struct {
 
 // Registry queries (facade)
 
+/// The double-manage guard, in one place. A window can send multiple MapRequest
+/// events (e.g. an unmap+remap race while the first is still processing);
+/// without this check the model registration and property queries would fire
+/// twice. Every admission path asks THIS, never a raw store lookup, so the
+/// guard cannot drift out of parity between the direct and drain paths.
 pub fn isManaged(win: u32) bool {
     const mm = m() orelse return false;
     return mm.store.has(win);
-}
-
-/// Idempotent with actions.unmanage (unregister early-returns when absent).
-/// The one entry-drop transition in this facade: unregisters the model entry
-/// (requires the transition-layer gate; all other tracking queries are reads).
-pub fn removeWindow(win: u32) void {
-    if (!modelReady()) return;
-    model_mod.unregister(pipeline.mut(&gate), win);
 }
 
 pub inline fn windowCount() usize {

@@ -2,13 +2,12 @@ const std = @import("std");
 const model = @import("model");
 const build_options = @import("build_options");
 
-const geom = @import("geom");
 const time = @import("time");
 /// Standard 800x600 test geometry (screen == workarea), shared by the sync
 const reconcile = @import("reconcile");
 const sinkmod = @import("sink");
 /// and tiling fixtures so no caller threads it through every init.
-pub const std_wa: geom.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
+pub const std_wa: model.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 
 pub fn makeModel() model.Model {
     return .{};
@@ -67,7 +66,7 @@ pub fn testColor(win: model.WindowId, m: *const model.Model) u32 {
 pub fn makeCtx(
     sink: sinkmod.Sink,
     color_of: *const fn (model.WindowId, *const model.Model) u32,
-    screen: geom.Rect,
+    screen: model.Rect,
 ) reconcile.Ctx {
     return .{
         .sink = sink,
@@ -94,8 +93,8 @@ pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
 
 pub const TestOp = union(enum) {
     map: model.WindowId,
-    geom: struct { win: model.WindowId, rect: geom.Rect, stack: ?sinkmod.Stack },
-    geom_bw: struct { win: model.WindowId, rect: geom.Rect, bw: u16, stack: ?sinkmod.Stack },
+    geom: struct { win: model.WindowId, rect: model.Rect, stack: ?sinkmod.Stack },
+    geom_bw: struct { win: model.WindowId, rect: model.Rect, bw: u16, stack: ?sinkmod.Stack },
     bw: struct { win: model.WindowId, w: u16 },
     pixel: struct { win: model.WindowId, p: u32 },
     park: model.WindowId,
@@ -136,14 +135,14 @@ pub const std_golden = struct {
     const split_w: u16 = std_wa.width / 2; // round(800 * 0.5) = 400
 
     /// Single window filling the master pane.
-    pub const single = geom.Rect{
+    pub const single = model.Rect{
         .x = @intCast(gap),
         .y = @intCast(gap),
         .width = std_wa.width -| total_inset,
         .height = inner_h,
     };
     /// Master pane of a two-window 50/50 split.
-    pub const master = geom.Rect{
+    pub const master = model.Rect{
         .x = @intCast(gap),
         .y = @intCast(gap),
         .width = split_w -| seam,
@@ -151,7 +150,7 @@ pub const std_golden = struct {
     };
     /// Stack pane of a two-window 50/50 split: origin = master_w, then a
     /// half-gap step; the stack column shrinks by the same seam.
-    pub const stack = geom.Rect{
+    pub const stack = model.Rect{
         .x = @intCast(split_w +| gap / 2),
         .y = @intCast(gap),
         .width = split_w -| seam,
@@ -192,12 +191,12 @@ pub fn TestSink(comptime mode: SinkMode) type {
             self.bump(.map, .{ .map = win });
         }
 
-        fn geomShim(self_ptr: *anyopaque, win: model.WindowId, rect: geom.Rect, stack: ?sinkmod.Stack) void {
+        fn geomShim(self_ptr: *anyopaque, win: model.WindowId, rect: model.Rect, stack: ?sinkmod.Stack) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
             self.bump(.geom, .{ .geom = .{ .win = win, .rect = rect, .stack = stack } });
         }
 
-        fn geomBorderedShim(self_ptr: *anyopaque, win: model.WindowId, rect: geom.Rect, bw: u16, stack: ?sinkmod.Stack) void {
+        fn geomBorderedShim(self_ptr: *anyopaque, win: model.WindowId, rect: model.Rect, bw: u16, stack: ?sinkmod.Stack) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
             self.bump(.geom_bw, .{ .geom_bw = .{ .win = win, .rect = rect, .bw = bw, .stack = stack } });
         }
@@ -291,7 +290,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
             self: *const Self,
             i: usize,
             win: model.WindowId,
-            rect: geom.Rect,
+            rect: model.Rect,
             stack: ?sinkmod.Stack,
         ) !void {
             comptime if (mode != .record) @compileError("expectGeomRect requires record mode");
@@ -303,7 +302,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
             self: *const Self,
             i: usize,
             win: model.WindowId,
-            rect: geom.Rect,
+            rect: model.Rect,
             bw: u16,
             stack: ?sinkmod.Stack,
         ) !void {

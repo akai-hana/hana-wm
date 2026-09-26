@@ -8,7 +8,7 @@
 
 const core = @import("core");
 
-const refresh = @import("refresh");
+const hz = @import("hz");
 
 const types = @import("types");
 
@@ -67,7 +67,7 @@ fn drawInner(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
 ) !u16 {
-    refresh.ensureRefreshRateDetected(ctx.conn);
+    hz.ensureRefreshRateDetected(ctx.conn);
     const window_count = snapshot.current_ws_wins.len;
     // Empty workspace: fill the background and return the segment's end x.
     if (window_count == 0) {
@@ -339,7 +339,7 @@ fn pollTimeoutMsHook() i32 {
         return s.pollDeadlineMs(
             time.monotonicMs(),
             core.getState().config.bar.carousel_enabled,
-            refresh.detectedHz(),
+            hz.detectedHz(),
         );
     return -1;
 }

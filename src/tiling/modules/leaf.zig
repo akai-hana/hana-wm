@@ -4,7 +4,6 @@
 const model = @import("model");
 const tiling = @import("tiling");
 const Region = tiling.Region;
-const geom = @import("geom");
 
 /// Compute BSP layout: recursive bisection of the longer axis 50/50 with one
 /// gap at each seam; border subtracted at leaf nodes only.
@@ -28,7 +27,7 @@ fn tileRegion(
 
     if (n == 1) {
         // All leaf placements are visible; hints applied by tiling.emitView.
-        const border2: u16 = geom.doubledBorder(ctx.m);
+        const border2: u16 = model.doubledBorder(ctx.m);
         tiling.emitView(ctx.v, ctx.out, windows[0], tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim));
         return;
     }

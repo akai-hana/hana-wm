@@ -30,9 +30,44 @@ const max_fallback_toml_bytes = 1024 * 1024; // Memory limit just in case.
 
 // Entry point
 
+/// hana's default build is ReleaseFast, not Debug.
+///
+/// `standardOptimizeOption` only applies `preferred_optimize_mode` when the
+/// build is *already* in a release mode, so a bare `zig build` silently
+/// produced a Debug binary (and rejected `-Doptimize` outright, because that
+/// path registers no such option). Debug is not a harmless default here: it
+/// keeps every `std.log.debug` call in the binary and measures far slower
+/// startup work, so the release/fallback distinction belongs in this script
+/// rather than in a flag nobody passes.
+///
+/// Precedence, highest first:
+///   -Doptimize=<Debug|ReleaseSafe|ReleaseFast|ReleaseSmall>
+///   --release=<fast|safe|small>          (or the legacy `-Drelease`)
+///   ReleaseFast                          (the default)
+fn resolveOptimize(b: *std.Build) std.builtin.OptimizeMode {
+    if (b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Prioritize performance, safety, or binary size (default: ReleaseFast)",
+    )) |mode| return mode;
+
+    // Registered so the historical `-Drelease` keeps working; it means the
+    // same thing as `--release=fast`, which is what it always meant here.
+    const legacy_release = b.option(bool, "release", "Optimize for end users (same as --release=fast)") orelse false;
+    if (legacy_release) return .ReleaseFast;
+
+    return switch (b.release_mode) {
+        // `.off` is the bare `zig build` case, and `.any` is a bare
+        // `--release`; both mean "whatever release mode hana prefers".
+        .off, .any, .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+        .small => .ReleaseSmall,
+    };
+}
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .native } });
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    const optimize = resolveOptimize(b);
 
     if (target.result.os.tag != .linux) {
         std.debug.print(
@@ -134,7 +169,7 @@ pub fn build(b: *std.Build) !void {
     var registry = try OwnerRegistry.run(&discovery);
     try validateRegistryNames(b, &registry, &discovery.modules);
     // Contract names are read from the modules' own `pub const module`
-    // declarations (typed or via segdraw), never from a hand-written table.
+    // declarations (typed or via scaffold), never from a hand-written table.
     // The classification is single-read memoized during discovery, so this
     // pass adds no source re-reads.
     try deriveOwnerContracts(b, &discovery, &registry);
@@ -460,10 +495,69 @@ fn buildFallbackTomlModule(
 /// stays byte-identical.
 const surfaces_generated_source =
     \\const build_options = @import("build_options");
+    \\const xcb = @import("xcb");
+    \\const core = @import("core");
+    \\const types = @import("types");
     \\
-    \\/// The active chrome-surface hook set, or the comptime `null` type when no
-    \\/// surface module is compiled in.
-    \\pub const Surfaces = if (build_options.has_bar) @import("bar").surfaces else null;
+    \\// No-op hooks for a build with no surface module compiled in. The point
+    \\// of a real struct rather than `null` is that `Surfaces` is then ONE
+    \\// type in every build: core never tests a build flag before calling a
+    \\// hook, so a hook ADDED to the contract cannot be forgotten at one of
+    \\// the call sites (the `null` design let `surfaces.handleRandrEvent`
+    \\// compile in some permutations and not others, and the call was only
+    \\// safe because the guard in front of it happened to be comptime).
+    \\// These bodies are trivial, so the unused surface really does no work.
+    \\fn noopVoid() void {}
+    \\fn noopBool() bool {
+    \\    return false;
+    \\}
+    \\fn noopKeypress(_: *const xcb.xcb_key_press_event_t, _: ?*const types.Action) bool {
+    \\    return false;
+    \\}
+    \\fn noopExpose(_: *const xcb.xcb_expose_event_t) void {}
+    \\fn noopButtonPress(_: *const xcb.xcb_button_press_event_t) void {}
+    \\fn noopButtonMotion(_: *const xcb.xcb_motion_notify_event_t) void {}
+    \\fn noopButtonRelease(_: *const xcb.xcb_button_release_event_t) void {}
+    \\fn noopAction(_: types.Action) void {}
+    \\fn noopU8(_: u8) void {}
+    \\fn noopTimeout() i32 {
+    \\    return -1;
+    \\}
+    \\fn noopFirstEvent() u8 {
+    \\    return 0;
+    \\}
+    \\fn noopOpaque(_: *anyopaque) void {}
+    \\fn noopConn(_: core.Connection) void {}
+    \\fn noopWin(_: u32) bool {
+    \\    return false;
+    \\}
+    \\fn noopInit() anyerror!void {}
+    \\
+    \\/// The active chrome-surface hook set. With no surface module compiled
+    \\/// in, every hook is the no-op above; with one, the module's own set.
+    \\pub const Surfaces = if (build_options.has_bar) @import("bar").surfaces else .{
+    \\    .init = noopInit,
+    \\    .deinit = noopVoid,
+    \\    .handleExpose = noopExpose,
+    \\    .updateIfDirty = noopVoid,
+    \\    .pollTimeoutMs = noopTimeout,
+    \\    .onPollWakeup = noopVoid,
+    \\    .updateClock = noopVoid,
+    \\    .randrFirstEvent = noopFirstEvent,
+    \\    .handleRandrEvent = noopOpaque,
+    \\    .runPendingRedetect = noopConn,
+    \\    .onReload = noopVoid,
+    \\    .chromeHandleKeypress = noopKeypress,
+    \\    .isBarWindow = noopWin,
+    \\    .handleButtonPress = noopButtonPress,
+    \\    .handleButtonMotion = noopButtonMotion,
+    \\    .handleButtonRelease = noopButtonRelease,
+    \\    .setBarState = noopAction,
+    \\    .updateBarVisibilityForWorkspace = noopU8,
+    \\    .hideBarForFullscreen = noopVoid,
+    \\    .toggleBarSegmentAnchor = noopVoid,
+    \\    .chromeToggleOverlay = noopVoid,
+    \\};
 ;
 
 /// A named import to wire into a generated module.
@@ -666,8 +760,8 @@ fn validateRegistryNames(
 ///      form used by the window/tiling sub-systems (floating, fullscreen,
 ///      minimize, workspaces, the tiling layouts) and by the explicitly
 ///      typed bar segments (prompt, systatus, tags, title, slider).
-///   2. `pub const module = segdraw.module(...)` — the bar-core convenience
-///      shim (clock, layout, variants); `segdraw.module` returns
+///   2. `pub const module = scaffold.module(...)` — the bar-core convenience
+///      shim (clock, layout, variants); `scaffold.module` returns
 ///      `contract.Segment` by construction, so the contract is the same name.
 ///   3. `pub const module = tiling.layoutModule(...)` — the tiling layouts;
 ///      `layoutModule` returns `contract.Layout` by construction.
@@ -685,7 +779,7 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
     defer b.allocator.free(src);
 
     const typed_needle = "pub const module: @import(\"contract\").";
-    const segdraw_needle = "pub const module = segdraw.module(";
+    const scaffold_needle = "pub const module = scaffold.module(";
     const layout_needle = "pub const module = tiling.layoutModule(";
     // Any `pub const module` declaration in an unrecognized spelling.
     const module_needle = "pub const module";
@@ -709,7 +803,7 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
             }
             return .{ .pub_module = true, .contract = try b.allocator.dupe(u8, rest[0..n]) };
         }
-        if (std.mem.indexOf(u8, trimmed, segdraw_needle) != null)
+        if (std.mem.indexOf(u8, trimmed, scaffold_needle) != null)
             return .{ .pub_module = true, .contract = "Segment" };
         if (std.mem.indexOf(u8, trimmed, layout_needle) != null)
             return .{ .pub_module = true, .contract = "Layout" };
@@ -718,7 +812,7 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
     }
     if (saw_unrecognized) {
         std.debug.print(
-            "Error: module '{s}' declares `pub const module` in an unrecognized shape; bind one of the typed forms (`pub const module: @import(\"contract\").<Contract> = ...`, `pub const module = segdraw.module(...)`, or `pub const module = tiling.layoutModule(...)`).\n",
+            "Error: module '{s}' declares `pub const module` in an unrecognized shape; bind one of the typed forms (`pub const module: @import(\"contract\").<Contract> = ...`, `pub const module = scaffold.module(...)`, or `pub const module = tiling.layoutModule(...)`).\n",
             .{rel_path},
         );
         return error.UnrecognizedModuleSpelling;
@@ -1579,7 +1673,7 @@ const Module = struct {
         }
     }
 
-    /// Layer-purity assertion for the pure layers (architecture, tiling, config),
+    /// Layer-purity assertion for the pure layers (model, tiling, config),
     /// enforced on the SAME import edges wireAll already derives for
     /// cross-wiring — one graph, so it cannot drift from a second hand-kept
     /// dependency list. The hub layers (core, window, input, bar) may import
@@ -1591,9 +1685,8 @@ const Module = struct {
     /// cycle (config now parses keysym names through the pure `keysyms`).
     ///
     /// This check is the IMPORT-EDGE guard only. The complementary body/
-    /// reference sweep (any bare `xcb` token in the xcb-free vocabulary files
-    /// — architecture/model.zig and architecture/geom.zig — plus tiling and
-    /// config, comments stripped) lives in check-layers.sh Rule 3 — an
+    /// reference sweep (any bare `xcb` token in the model vocabulary, tiling,
+    /// and config, comments stripped) lives in check-layers.sh Rule 3 — an
     /// import of an xcb-using module passes here yet still lets `xcb` reach a
     /// pure file by re-export, so Rule 3 -- not this function -- is the sole
     /// guard on pure-layer xcb BODIES.
@@ -1602,14 +1695,14 @@ const Module = struct {
         rel_path: []const u8,
         edges: []const []const u8,
     ) !void {
-        // The xcb-free architecture vocabulary (model + geom) is the pure root
-        // living in the core hub's architecture dir. The shelf siblings in
-        // src/core/pure/ are xcb-free by construction; contract's xcb event
-        // TYPES keep architecture/contract.zig out of both this guard and
-        // Rule 3's body sweep.
-        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig") or
-            std.mem.endsWith(u8, rel_path, "src/core/architecture/geom.zig"))
-            "architecture"
+        // The model is the one pure root: it holds the WM's state AND the
+        // Rect/Margins value objects that state holds. `satI16` is also needed
+        // by the pure tiling layer, which is why the coordinate helpers cannot
+        // live on the x11 side. The shelf siblings in src/core/pure/ are
+        // xcb-free by construction; contract's xcb event TYPES keep
+        // architecture/contract.zig out of both this guard and Rule 3's sweep.
+        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig"))
+            "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
             "tiling"
         else if (std.mem.startsWith(u8, rel_path, "src/config/"))
@@ -1620,7 +1713,7 @@ const Module = struct {
         for (edges) |dep| {
             if (!pureLayerAllows(layer, dep)) {
                 std.debug.print(
-                    "Error: layer guard: pure-{s} module '{s}' imports hub module '{s}'. The pure layers may only import the shared utility shelf, the xcb-free architecture vocabulary, and their own layer; see assertPureLayerImports in build.zig.\n",
+                    "Error: layer guard: pure-{s} module '{s}' imports hub module '{s}'. The pure layers may only import the shared utility shelf, `model`, and their own layer; see assertPureLayerImports in build.zig.\n",
                     .{ layer, name, dep },
                 );
                 return error.LayerGuardViolation;
@@ -1630,21 +1723,20 @@ const Module = struct {
 
     /// The allowed-import policy behind `assertPureLayerImports`. The pure
     /// shelf (src/core/pure/) is xcb-free by construction and safe for every
-    /// layer; `model` is the shared data model; the per-layer extras are the
-    /// pure neighborhoods each layer legitimately reaches (architecture's own
-    /// model/geom siblings; tiling's own seam plus the `contract` decls;
-    /// config's own parsing siblings plus the pure `keysyms`). Anything else
-    /// is hub wiring and belongs behind an interface, not an import.
+    /// layer; `model` is the shared data model AND the geometry vocabulary
+    /// (Rect/Margins) that the state holds; the per-layer extras are the pure
+    /// neighborhoods each layer legitimately reaches (tiling's own seam plus
+    /// the `contract` decls; config's own parsing siblings plus the pure
+    /// `keysyms`). Anything else is hub wiring and belongs behind an
+    /// interface, not an import.
     fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
         const shelf = [_][]const u8{
-            "constants", "log",     "ids",  "masks", "paths",     "bounded",
-            "idmap",     "scaling", "time", "cycle", "lifecycle",
+            "constants", "log",     "ids",  "masks",     "paths", "bounded",
+            "idmap",     "scaling", "time", "lifecycle",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
         if (std.mem.eql(u8, dep, "model")) return true;
-        if (std.mem.eql(u8, layer, "architecture")) {
-            return std.mem.eql(u8, dep, "geom");
-        }
+        if (std.mem.eql(u8, layer, "model")) return false;
         if (std.mem.eql(u8, layer, "tiling")) {
             return std.mem.eql(u8, dep, "tiling") or std.mem.eql(u8, dep, "contract");
         }
@@ -1680,7 +1772,7 @@ const Module = struct {
         ctx: SharedBuildContext,
     ) !void {
         // Wiring follows declared `@import` edges. Layer purity for the pure
-        // layers (architecture/tiling/config) is enforced HERE, at build time, on
+        // layers (model/tiling/config) is enforced HERE, at build time, on
         // those same edges (`assertPureLayerImports`, below): a pure module
         // importing hub wiring fails the build instead of merely being caught
         // later by dev/scripts/check-layers.sh at `zig build check`. That

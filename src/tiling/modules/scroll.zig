@@ -5,7 +5,6 @@ const std = @import("std");
 const model = @import("model");
 const tiling = @import("tiling");
 
-const geom = @import("geom");
 // GROW DUTY (optional): on window grow, callers may pre-clamp viewport_offset
 // to maxOffset(n, slotWidth(wa.w), wa.w) and update viewport_prev_count
 // (see pipeline.preReconcileDuties); compute clamps internally either way.
@@ -53,7 +52,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // adjacent windows together share exactly one full gap.
     const gap_i32: i32 = @intCast(m.gap);
     const gap_half: i32 = @intCast(tiling.seamGap(m));
-    const border2: i32 = @as(i32, geom.doubledBorder(m));
+    const border2: i32 = @as(i32, model.doubledBorder(m));
 
     for (windows, 0..) |win, i| {
         const col: i32 = @intCast(i);

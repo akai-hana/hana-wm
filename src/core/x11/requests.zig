@@ -7,7 +7,7 @@
 //! EWMH root advertisement, and the one xcb-typed geometry adapter. Atom ids
 //! come from `atoms.zig`; dispatch of these requests happens in `sink.zig`,
 //! which is the sanctioned seam (see dev/scripts/check-layers.sh Rules 1-2).
-//! Geometry itself stays in `architecture/geom.zig` so the pure layers never
+//! Geometry itself stays in `architecture/model.zig` so the pure layers never
 //! import this file.
 
 const std = @import("std");
@@ -20,15 +20,17 @@ const xcb = xcbmod.xcb;
 const Connection = xcbmod.Connection;
 const Screen = xcbmod.Screen;
 
-const geom = @import("geom");
 const atoms = @import("atoms");
+const model = @import("model");
+const masks = @import("masks");
+const log = @import("log");
 
 // Geometry <-> wire conversions
 
-/// Builds a Rect from a get_geometry reply. Deliberately on the xcb side of
-/// the boundary so `geom.Rect` itself stays xcb-free and the pure layers can
-/// hold one; the wire border_width feeds the Rect's border_width.
-pub inline fn rectFromXcb(reply: *const xcb.xcb_get_geometry_reply_t) geom.Rect {
+/// Builds a model.Rect from a get_geometry reply. Deliberately on the xcb side of
+/// the boundary so `model.Rect` itself stays xcb-free and the pure layers can
+/// hold one; the wire border_width feeds the model.Rect's border_width.
+pub inline fn rectFromXcb(reply: *const xcb.xcb_get_geometry_reply_t) model.Rect {
     return .{
         .x = reply.x,
         .y = reply.y,
@@ -48,15 +50,15 @@ pub inline fn rectFromXcb(reply: *const xcb.xcb_get_geometry_reply_t) geom.Rect 
 pub fn configureWindow(
     conn: Connection,
     win: u32,
-    rect: geom.Rect,
+    rect: model.Rect,
     stack_mode: ?u32,
     border_width: ?u16,
 ) void {
     var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
         xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
     var values = [_]u32{
-        geom.toXcbCoord(rect.x),
-        geom.toXcbCoord(rect.y),
+        model.toXcbCoord(rect.x),
+        model.toXcbCoord(rect.y),
         rect.width,
         rect.height,
         0, // border_width slot
@@ -201,6 +203,35 @@ comptime {
 ///   advertised nor answered; minimize is internal-only (no state property).
 /// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
 ///   `_NET_STRUT_PARTIAL` feedback instead.
+/// Claim SubstructureRedirectMask on the root window, which is what makes this
+/// process the window manager. The X server rejects the claim if another WM
+/// already holds it, so a failure here is the "another WM is running" case --
+/// distinct from a broken connection and worth telling apart from it.
+/// Lives here with the other wire primitives so the composition root does not
+/// need its own xcb include.
+pub fn claimWindowManagerRole(conn: Connection, root: u32) !void {
+    const cookie = xcb.xcb_change_window_attributes_checked(
+        conn,
+        root,
+        xcb.XCB_CW_EVENT_MASK,
+        &[_]u32{masks.EventMasks.root_window},
+    );
+    if (xcb.xcb_request_check(conn, cookie)) |err| {
+        log.err(
+            "Another window manager is already running (error_code={d}, type={d})",
+            .{ err.*.error_code, err.*.response_type },
+        );
+        std.c.free(err);
+        return error.AnotherWMRunning;
+    }
+}
+
+/// Flush the request queue. The one raw call left in the composition root,
+/// wrapped here so main needs no xcb include of its own.
+pub fn flush(conn: Connection) void {
+    _ = xcb.xcb_flush(conn);
+}
+
 pub fn advertiseEwmhSupport(conn: Connection, screen: Screen, root: u32) void {
     const supporting_wm_check = atoms.getAtomCached("_NET_SUPPORTING_WM_CHECK") orelse return;
     const net_wm_name = atoms.getAtomCached("_NET_WM_NAME") orelse return;

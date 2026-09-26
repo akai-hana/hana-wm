@@ -10,7 +10,6 @@ const constants = @import("constants");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
-const geom = @import("geom");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const ledger = @import("ledger");
 const recon = @import("reconcile");
@@ -368,7 +367,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     try fx.rec.expectLen(2);
     try fx.rec.expectMap(0, 702);
     try fx.rec.expectPark(1, 702);
-    try testing.expectEqual(@as(?geom.Rect, null), ledger.lastRectFor(702));
+    try testing.expectEqual(@as(?model.Rect, null), ledger.lastRectFor(702));
 }
 
 // forget() / ledger lifecycle (X ids recycle)
@@ -385,13 +384,13 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
 
     // truthRect prefers the floating anchor once the model says floating
     // (ledger read #3 contract: actions' detach base).
-    const float_rect: geom.Rect = .{ .x = 42, .y = 43, .width = 300, .height = 200 };
+    const float_rect: model.Rect = .{ .x = 42, .y = 43, .width = 300, .height = 200 };
     fx.m.store.getPtr(801).?.anchor = .{ .floating = float_rect };
-    try testing.expectEqual(@as(?geom.Rect, float_rect), recon.truthRect(&fx.m, 801));
+    try testing.expectEqual(@as(?model.Rect, float_rect), recon.truthRect(&fx.m, 801));
     fx.m.store.getPtr(801).?.anchor = .tiled;
 
     ledger.forget(801);
-    try testing.expectEqual(@as(?geom.Rect, null), ledger.lastRectFor(801));
+    try testing.expectEqual(@as(?model.Rect, null), ledger.lastRectFor(801));
 
     // Ledger gone => first_send => moved => winner raise replays exactly
     // like first sight. This is why stale records MUST die with unmanage:

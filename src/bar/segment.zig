@@ -20,8 +20,8 @@ const constants = @import("constants");
 const drawing = @import("drawing");
 const types = @import("types");
 const contract = @import("contract");
+const model = @import("model");
 
-const geom = @import("geom");
 /// Service handles the bar passes into mechanism segments (the prompt) at
 /// init. Passed once so segments never import the bar orchestrator;
 /// one-way bar -> segment only.
@@ -95,7 +95,7 @@ pub const DrawCtx = struct {
     current_ws_wins: []const u32 = &.{},
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void) = &.{},
     titles: []const []const u8 = &.{},
-    geoms: []const ?geom.Rect = &.{},
+    geoms: []const ?model.Rect = &.{},
 
     /// The title renderer's stable per-frame context (dc/config/height/
     /// start_x/width/conn). The start_x/width are the segment's on-screen box.
@@ -135,7 +135,7 @@ pub const title_min_width: u16 = 100;
 pub const max_visible_windows = constants.max_tiled_windows;
 
 /// Off-screen sentinel: sorts last in position, drawing is skipped.
-pub const offscreen_rect: geom.Rect = .{
+pub const offscreen_rect: model.Rect = .{
     .x = std.math.maxInt(i16),
     .y = std.math.maxInt(i16),
     .width = 0,
@@ -169,7 +169,7 @@ pub const TitleSnapshot = struct {
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
 
     titles: []const []const u8 = &.{},
-    geoms: []const ?geom.Rect = &.{},
+    geoms: []const ?model.Rect = &.{},
 };
 
 /// Builds the sorted WindowInfo list for the split view from the snapshot's

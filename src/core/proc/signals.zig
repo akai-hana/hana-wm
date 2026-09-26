@@ -37,7 +37,11 @@ var pending_signals: std.atomic.Value(u64) = .init(0);
 
 // Async-signal-safe handler: records the signal and wakes the loop.
 fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
-    const bit: u6 = @intCast(@intFromEnum(signo));
+    // The u64 bitmap only has 64 bits, so clamp rather than panic when the
+    // runtime hands us a signal number past 63: a panic inside an
+    // async-signal handler cannot unwind, it would abort the process. A
+    // clamped signal still lands in the bitmap and still gets dispatched.
+    const bit: u6 = @intCast(@min(@intFromEnum(signo), 63));
     _ = pending_signals.fetchOr(@as(u64, 1) << bit, .release);
     const byte: u8 = @intCast(@intFromEnum(signo));
     writeSignalByte(byte);

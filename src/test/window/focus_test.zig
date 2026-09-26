@@ -192,6 +192,57 @@ test "focus: switch lands xcb_set_input_focus on globally_active window" {
     try std.testing.expect(focus.protocolParityHolds());
 }
 
+// The Mod+j/k cycle must follow the arrangement on screen, not the order the
+// windows were created in: after a move or a master swap the windows sit
+// somewhere else, so the next cycle step has to land on the new neighbour.
+// Four windows, so both mutations below are transpositions. A three-window
+// swap_master can only ever produce a ROTATION of the spawn order, and a
+// rotation cycles identically -- the old id-ordered pool would agree with the
+// layout and hide the bug.
+test "focus: cycle steps follow the tiled order after a move and a swap" {
+    var fx = fixture.setUp("focus_test") orelse return;
+    defer fx.deinit();
+    const m = pipeline.model();
+
+    // Created in id order, which is also the spawn order, so the pool's
+    // first version (store order) is indistinguishable from the layout here.
+    const w1 = fx.createWindow();
+    const w2 = fx.createWindow();
+    const w3 = fx.createWindow();
+    const w4 = fx.createWindow();
+    for ([_]u32{ w1, w2, w3, w4 }) |w| {
+        try admit(w);
+        fx.flush();
+    }
+    const order = &m.ws[m.current.index].tiled_order;
+    try std.testing.expectEqualSlices(u32, &.{ w1, w2, w3, w4 }, order.constSlice());
+    try std.testing.expectEqual(w4, m.focused.?);
+
+    // Mod+Shift+j (the key dispatches to actions.moveFocused) walks the
+    // focused window one slot toward the head: [w1,w2,w4,w3]. From w4 the
+    // next step must be w3 (its new neighbour), where the id order would
+    // have wrapped around to w1.
+    actions.moveFocused(-1);
+    fx.flush();
+    try std.testing.expectEqualSlices(u32, &.{ w1, w2, w4, w3 }, order.constSlice());
+    try std.testing.expectEqual(w3, focus.cycleTarget(.forward).?);
+    try std.testing.expectEqual(w2, focus.cycleTarget(.reverse).?);
+
+    // Mod+Tab (swap_master) exchanges the focused and previous slots: with
+    // w3 then w2 focused, [w1,w2,w4,w3] becomes [w1,w3,w4,w2]. w2 now sits
+    // in the LAST slot, so a forward step must wrap to w1, not step to w3
+    // the way the id order would.
+    focus.grabFocusWithDuty(w3, .user_command, null);
+    focus.grabFocusWithDuty(w2, .user_command, null);
+    fx.flush();
+    actions.swapPrimaryAction(false);
+    fx.flush();
+    try std.testing.expectEqualSlices(u32, &.{ w1, w3, w4, w2 }, order.constSlice());
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w1, focus.cycleTarget(.forward).?);
+    try std.testing.expectEqual(w4, focus.cycleTarget(.reverse).?);
+}
+
 test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel suppression)" {
     var fx = fixture.setUp("focus_test") orelse return;
     defer fx.deinit();

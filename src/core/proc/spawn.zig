@@ -57,13 +57,18 @@ fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     failWithTag(pipe_write);
 }
 
+const second_fork_failed = "hana: second fork failed\n";
+
 /// Intermediate child: forks the grandchild, forwards its PID over the
 /// spawn pipe tagged as tag_pid, then exits so the grandchild is
 /// re-parented to init.
 fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
     const grandchild_pid = c.fork();
     if (grandchild_pid < 0) {
-        log.err("Second fork failed", .{});
+        // Raw write(2) only (same discipline as signals.writeLiteral):
+        // anything that allocates or takes a lock is unsafe in a forked
+        // child before exec.
+        _ = std.os.linux.write(2, second_fork_failed.ptr, second_fork_failed.len);
         std.process.exit(1);
     }
     if (grandchild_pid == 0) {

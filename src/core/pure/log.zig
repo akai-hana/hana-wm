@@ -26,9 +26,16 @@ inline fn log(
     // any stderr from a passing test step as a failure ("failed command:"),
     // and our tests deliberately exercise recoverable, warn-inducing paths.
     // Production builds are unaffected (is_test == false).
-    if (@import("builtin").is_test) return;
+    // A test that needs to observe a log-emitting path (e.g. a recoverable
+    // overflow it wants to assert was reported) opens the hatch; by default
+    // the runner's "any stderr fails the step" rule still holds.
+    if (@import("builtin").is_test and !test_emit) return;
     log_fn("[{s}] " ++ fmt, .{module} ++ args);
 }
+
+/// Test-only override for the silence-above rule (see `log`). False (the
+/// default) keeps every test binary silent.
+pub var test_emit: bool = false;
 
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
     log(std.log.err, fmt, moduleFromSrc(@src()), args);
@@ -70,7 +77,7 @@ pub fn WindowedProfiler(
         var max_ns: i128 = 0;
         const window_size: u64 = 200;
 
-        fn note(ns: i128) void {
+        pub fn note(ns: i128) void {
             if (ns < min_ns) min_ns = ns;
             if (ns > max_ns) max_ns = ns;
             total_ns += ns;
@@ -78,7 +85,7 @@ pub fn WindowedProfiler(
             if (count >= window_size) flush();
         }
 
-        fn flush() void {
+        pub fn flush() void {
             const avg: f64 = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(count));
             logFn(fmt, .{ count, avg, min_ns, max_ns });
             count = 0;

@@ -110,6 +110,25 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
             return self.len;
         }
 
+        /// Same shape as Store.Item, so one loop shape covers both maps.
+        pub const Item = struct { key: u32, val: *const V };
+
+        /// Forward iterator over live entries, mirroring Store.Iterator so
+        /// callers can range an IdMap and a Store with the same shape.
+        pub const Iterator = struct {
+            map: *const Self,
+            pos: usize = 0,
+            pub fn next(self: *Iterator) ?Item {
+                if (self.pos >= self.len) return null;
+                const i = self.pos;
+                self.pos += 1;
+                return .{ .key = self.keys[i], .val = &self.vals[i] };
+            }
+        };
+        pub fn iterator(self: *const Self) Iterator {
+            return .{ .map = self };
+        }
+
         pub fn clear(self: *Self) void {
             self.keys = @splat(empty);
             self.vals = undefined;

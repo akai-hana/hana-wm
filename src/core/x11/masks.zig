@@ -56,7 +56,7 @@ pub const lock_modifiers: [8]u16 = .{
 /// under a SendEvent, so masking recovers the true code; extension bases can
 /// legitimately sit at/above 0x80, so extension-range tests compare the RAW
 /// type byte before any mask (see isRandrEvent).
-pub const synthetic_event_mask: u8 = 0x7f;
+pub const core_event_code_mask: u8 = 0x7f;
 
 pub const EventMasks = struct {
     // DWM verbatim (setup() in dwm.c): SubstructureRedirect|Notify, ButtonPress,
