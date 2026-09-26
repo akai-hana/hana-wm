@@ -1,7 +1,7 @@
 //! Canonical scaling formulas: pure functions of a ScalableValue, no DPI
 //! lookup.
 //!
-//! `display/scale.zig` (which measures DPI) and `config/` (which parses
+//! `display/dpi.zig` (which measures DPI) and `config/` (which parses
 //! ScalableValues) both call into these, so there is exactly one formula to
 //! maintain. X-free and allocation-free: the DPI probe stays on the x11 side.
 

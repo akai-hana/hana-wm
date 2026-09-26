@@ -149,6 +149,24 @@ pub fn init(
     state = .{ .conn = conn, .screen = screen, .root = root, .alloc = alloc, .config = config };
 }
 
+/// Deinit and free the config box `State` owns, using the allocator `State`
+/// was initialized with. `core.init` is the only producer, so this is the
+/// only way the box is ever released.
+pub fn deinitOwnedConfig() void {
+    const cs = &state.?;
+    cs.config.deinit(cs.alloc);
+    cs.alloc.destroy(cs.config);
+}
+
+/// Swap in a freshly allocated config box and release the one being displaced.
+/// Ownership moves with the pointer, which is what makes the two call sites
+/// (shutdown and reload) able to share this one call: neither has to reason
+/// about whether the box it is holding is still the live one.
+pub fn replaceOwnedConfig(new_config: *types.Config) void {
+    deinitOwnedConfig();
+    state.?.config = new_config;
+}
+
 /// Stays outside State: unlike State's fields it has a safe default
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.

@@ -13,7 +13,6 @@ const helpers = @import("helpers");
 const build_options = @import("build_options");
 const tiling = @import("tiling");
 // Scroll-only tests runtime-skip below, but the stub must still expose the
-const geom = @import("geom");
 // two members their bodies reference so a scroll-less tree compiles.
 const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {
     fn slotWidth(_: i32) i32 {
@@ -34,12 +33,12 @@ const Placement = tiling.Placement;
 /// here is a registry bug, not a test condition, so a silent 0 would corrupt
 /// every golden rect (layout 0 is master).
 const kLayoutMissing = "tiling test: registry missing layout";
-const K_MASTER: u8 = @intCast(tiling.layoutByName("master") orelse @panic(kLayoutMissing));
-const K_MONOCLE: u8 = @intCast(tiling.layoutByName("monocle") orelse @panic(kLayoutMissing));
-const K_GRID: u8 = @intCast(tiling.layoutByName("grid") orelse @panic(kLayoutMissing));
-const K_FIB: u8 = @intCast(tiling.layoutByName("fibonacci") orelse @panic(kLayoutMissing));
-const K_LEAF: u8 = @intCast(tiling.layoutByName("leaf") orelse @panic(kLayoutMissing));
-const K_SCROLL: u8 = @intCast(tiling.layoutByName("scroll") orelse @panic(kLayoutMissing));
+const K_MASTER: u8 = tiling.layoutByName("master") orelse @panic(kLayoutMissing);
+const K_MONOCLE: u8 = tiling.layoutByName("monocle") orelse @panic(kLayoutMissing);
+const K_GRID: u8 = tiling.layoutByName("grid") orelse @panic(kLayoutMissing);
+const K_FIB: u8 = tiling.layoutByName("fibonacci") orelse @panic(kLayoutMissing);
+const K_LEAF: u8 = tiling.layoutByName("leaf") orelse @panic(kLayoutMissing);
+const K_SCROLL: u8 = tiling.layoutByName("scroll") orelse @panic(kLayoutMissing);
 
 // Variant indexes owned by each module: grid's "relaxed" is variant 1 of
 // {"rigid","relaxed"}; monocle's "gaps" is variant 1 of {"gapless","gaps"}.
@@ -50,14 +49,14 @@ const Fixture = struct {
     m: model.Model,
     hv: tiling.HintsView,
     hint_buf: [model.store_capacity]model.SizeHints = undefined,
-    wa: geom.Rect,
+    wa: model.Rect,
 
     fn init(self: *Fixture, wins: []const model.WindowId) !void {
         try self.initAt(wins, helpers.std_wa);
     }
 
     /// init with an explicit work area, for the non-standard-geometry cases.
-    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: geom.Rect) !void {
+    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: model.Rect) !void {
         self.* = .{
             .m = .{},
             .hv = undefined,
@@ -311,16 +310,22 @@ test "monocle gaps variant" {
     const out = computeOf(K_MONOCLE, v);
 
     try testing.expectEqual(@as(usize, 3), out.len);
-    // total_margin = doubledBorder(4) + inset*2 (16) = 20
-    try expectP(&out, 0, 12, 8, 8, 780, 580, true);
-    // Emission order: top first, then hidden in list order.
-    try expectP(&out, 1, 11, 0, 0, 0, 0, false);
+    // Emission order is View.order for every layout, monocle included: the
+    // focused window's POSITION in the list no longer changes where it is
+    // emitted. Visibility is the separate axis -- 12 is focused, so it holds
+    // the rect and its siblings are parked.
+    // total_margin = model.doubledBorder(4) + inset*2 (16) = 20
+    try expectP(&out, 0, 11, 0, 0, 0, 0, false);
+    try expectP(&out, 1, 12, 8, 8, 780, 580, true);
     try expectP(&out, 2, 13, 0, 0, 0, 0, false);
 
     // Without the gaps variant the inset is zero: full size minus borders only.
+    // Same View.order emission, so the focused window is still at index 1.
     v.env.variant_idx = 0;
     const out2 = computeOf(K_MONOCLE, v);
-    try expectP(&out2, 0, 12, 0, 0, 796, 596, true);
+    try expectP(&out2, 0, 11, 0, 0, 0, 0, false);
+    try expectP(&out2, 1, 12, 0, 0, 796, 596, true);
+    try expectP(&out2, 2, 13, 0, 0, 0, 0, false);
 }
 
 // size hints are applied centrally at emit time (inc snap + centring).
@@ -347,7 +352,7 @@ test "hints applied at emit" {
 // (floating.sizeHintLimits); this guards against min enforcement leaking into
 // the shared hint path.
 test "applyHints ignores declared minimums" {
-    const rect: geom.Rect = .{ .x = 8, .y = 8, .width = 780, .height = 580 };
+    const rect: model.Rect = .{ .x = 8, .y = 8, .width = 780, .height = 580 };
     try testing.expectEqual(rect, tiling.applyHints(rect, .{ .min_width = 1000, .min_height = 1000 }));
 }
 
@@ -488,11 +493,13 @@ test "emission order pin across layouts" {
         try testing.expectEqual(@as(model.WindowId, 13), out.constSlice()[2].win);
     }
 
-    // Monocle emits the focused window first, then hidden in list order.
+    // Monocle obeys the same positional contract as the other five: emission
+    // follows View.order, so the focused window (12) is emitted in its own
+    // slot rather than hoisted to the front.
     const out_mono = computeOf(K_MONOCLE, tuned(&fx));
     try testing.expectEqual(@as(usize, 3), out_mono.len);
-    try testing.expectEqual(@as(model.WindowId, 12), out_mono.constSlice()[0].win);
-    try testing.expectEqual(@as(model.WindowId, 11), out_mono.constSlice()[1].win);
+    try testing.expectEqual(@as(model.WindowId, 11), out_mono.constSlice()[0].win);
+    try testing.expectEqual(@as(model.WindowId, 12), out_mono.constSlice()[1].win);
     try testing.expectEqual(@as(model.WindowId, 13), out_mono.constSlice()[2].win);
 }
 

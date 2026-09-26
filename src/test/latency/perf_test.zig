@@ -1,4 +1,4 @@
-//! Micro-benchmarks for model/sync hot paths.
+//! Micro-benchmarks for model/reconcile hot paths.
 //!
 //! Run: zig build test -Dbench --summary all (timing goes to stdout/stderr
 //! only under -Dbench; the default suite runs these as silent

@@ -189,24 +189,30 @@ fn tryParseTomlFile(
 fn mergeOneFile(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
+    read: *std.ArrayList([]const u8),
     dir_path: []const u8,
     name: []const u8,
 ) !void {
     const path = try std.fs.path.join(allocator, &.{ dir_path, name });
-    var doc = (try parseAndMerge(allocator, dst, path, "Merged: {s}")) orelse return;
-    try mergeIncludes(allocator, dst, &doc, dir_path);
+    var doc = (try parseAndMerge(allocator, dst, read, path, "Merged: {s}")) orelse return;
+    try mergeIncludes(allocator, dst, &doc, read, dir_path);
 }
 
-/// Parse-merge-log tail shared by mergeOneFile and mergeIncludes.
+/// Parse-merge-log tail shared by mergeOneFile and mergeIncludes. A file that
+/// parses and merges is appended to `read`, which is how the re-exec snapshot
+/// learns what the load actually consumed; a file that fails returns before
+/// recording, so `read` ends up holding exactly the files that contributed.
 fn parseAndMerge(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
+    read: *std.ArrayList([]const u8),
     path: []const u8,
     comptime msg: []const u8,
 ) !?parser.Document {
     var doc = tryParseTomlFile(allocator, path, dst) orelse return null;
     try parser.mergeDocumentsInto(allocator, dst, &doc);
     log.info(msg, .{path});
+    try read.append(allocator, path);
     return doc;
 }
 
@@ -219,8 +225,15 @@ fn mergeIncludes(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
     src_doc: *parser.Document,
+    read: *std.ArrayList([]const u8),
     dir_path: []const u8,
 ) !void {
+    // `src_doc` and `dst` are the SAME document on the parseFileDoc path, and
+    // that is the intent: each included file is merged into the document whose
+    // `include` list we are walking. It is safe because the arena never moves
+    // an existing allocation, so the `includes` slice below stays valid while
+    // the loop merges into it.
+    //
     // The `include` key is copied into `dst` by mergeDocumentsInto, so mark it
     // consumed there as well: otherwise warnUnconsumed would flag it as a typo.
     dst.root.markConsumed("include");
@@ -233,7 +246,7 @@ fn mergeIncludes(
             continue;
         }
         const abs = try std.fs.path.join(allocator, &.{ dir_path, rel });
-        var inc_doc = (try parseAndMerge(allocator, dst, abs, "Merged (include): {s}")) orelse continue;
+        var inc_doc = (try parseAndMerge(allocator, dst, read, abs, "Merged (include): {s}")) orelse continue;
         if (inc_doc.root.get("include")) |_| {
             log.warn("{s}: nested 'include' inside an included file is not " ++ "supported; its include list is skipped", .{abs});
         }
@@ -288,10 +301,10 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
 const DirInput = struct { dir_path: []const u8, names: []const []u8 };
 
 /// Merges every file named in `in.names` (directory-loading order) into one
-/// arena document.
-fn parseDirDoc(a: std.mem.Allocator, in: DirInput) !parser.Document {
+/// arena document, recording each consumed file in `read`.
+fn parseDirDoc(a: std.mem.Allocator, read: *std.ArrayList([]const u8), in: DirInput) !parser.Document {
     var merged = parser.Document.init(a);
-    for (in.names) |name| try mergeOneFile(a, &merged, in.dir_path, name);
+    for (in.names) |name| try mergeOneFile(a, &merged, read, in.dir_path, name);
     return merged;
 }
 
@@ -387,7 +400,73 @@ const GoodSource = struct {
     /// Heap-allocated copy of the winning search location (a dir or a file).
     path: []u8,
     is_dir: bool,
+    /// The config files the winning load actually read, in merge order, each
+    /// owned by the same allocator as `path`. The snapshot copies exactly
+    /// these rather than the whole tree: the config dir is a user-owned
+    /// location that also holds plenty hana never reads (a vendored
+    /// `.opencode` tree, a `node_modules`, VCS metadata), and freezing all of
+    /// it turned a three-file config into a thousands-of-files tmpfs copy on
+    /// every boot.
+    files: [][]u8,
+    /// Size and mtime of each entry in `files` as of the last successful
+    /// refresh, or null when the snapshot is not known to mirror the source.
+    /// An unchanged reload compares these and writes nothing at all.
+    stamps: ?[]FileStamp,
 };
+
+/// One resolved config file's identity, captured when it is snapshotted.
+const FileStamp = struct { size: u64, mtime: i96 };
+
+/// Backing storage for the resolved-config file set of the most recent load.
+/// Module-level because the set must outlive the load-scoped parse arena (it
+/// is consumed at snapshot time, after the load has returned), and because
+/// discarding it wholesale is then one arena reset instead of per-path free
+/// bookkeeping. `publishReadFiles` installs a FRESH arena per load and frees
+/// the previous one, so a set is never released by a different load's
+/// allocator.
+var read_files_arena: ?std.heap.ArenaAllocator = null;
+
+/// The config files the most recent successful load consumed, in merge order.
+/// Read (never owned) by `rememberGoodSource` at the end of a winning load.
+var load_read_files: [][]const u8 = &.{};
+
+/// Publishes this load's resolved file set, releasing the previous load's.
+fn publishReadFiles(items: []const []const u8) !void {
+    if (read_files_arena) |arena| arena.deinit();
+    read_files_arena = null;
+    load_read_files = &.{};
+    var fresh: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    errdefer fresh.deinit();
+    const a = fresh.allocator();
+    var out: std.ArrayList([]const u8) = .empty;
+    try out.ensureTotalCapacity(a, items.len);
+    // Copy the bytes, not just the slice headers: `items` aliases the
+    // load-scoped parse arena, which the caller resets as soon as this load
+    // returns, long before refreshSnapshot reads the set.
+    for (items) |p| try out.append(a, try a.dupe(u8, p));
+    read_files_arena = fresh;
+    load_read_files = out.items;
+}
+
+/// Dupe `items` into a freshly allocated list owned by `allocator`; released
+/// with `freeFileList`. An empty input yields a zero-length slice, which
+/// `freeFileList` releases as a no-op.
+fn dupeFileList(allocator: std.mem.Allocator, items: []const []const u8) ![][]u8 {
+    const out = try allocator.alloc([]u8, items.len);
+    errdefer allocator.free(out);
+    for (items, 0..) |item, i| {
+        out[i] = allocator.dupe(u8, item) catch |err| {
+            for (out[0..i]) |done| allocator.free(done);
+            return err;
+        };
+    }
+    return out;
+}
+
+fn freeFileList(allocator: std.mem.Allocator, files: [][]u8) void {
+    for (files) |f| allocator.free(f);
+    allocator.free(files);
+}
 
 /// The most recently loaded-and-validated user config location. Mutated by
 /// every successful load/reload; read by refreshSnapshot at re-exec time.
@@ -395,11 +474,54 @@ const GoodSource = struct {
 /// after the winning load holds it.
 var last_good_source: ?GoodSource = null;
 
+/// True when two resolved file lists name the same files in the same order.
+/// The lists are merge-ordered, so a positional compare is exact.
+fn sameFileList(a: []const []u8, b: []const []u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (!std.mem.eql(u8, x, y)) return false;
+    }
+    return true;
+}
+
 fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir: bool) void {
     // OOM is silent: the snapshot just keeps the previous good source.
     const duped = allocator.dupe(u8, path) catch return;
-    if (last_good_source) |g| allocator.free(g.path);
-    last_good_source = .{ .path = duped, .is_dir = is_dir };
+    const files = dupeFileList(allocator, load_read_files) catch {
+        allocator.free(duped);
+        return;
+    };
+    var kept_stamps: ?[]FileStamp = null;
+    if (last_good_source) |g| {
+        // Carry the stamps over when this load resolved the very same source
+        // to the very same files. That is what lets a no-op reload take the
+        // "nothing changed" fast path instead of re-freezing the snapshot on
+        // every SIGHUP. The stamps are parallel to `files`, so reusing them
+        // against an identical list is index-for-index correct.
+        const same = g.is_dir == is_dir and std.mem.eql(u8, g.path, path) and sameFileList(g.files, files);
+        if (same) kept_stamps = g.stamps;
+        // The freshly duped path/files supersede the old pair either way, so
+        // the old ones are always released here; the stamps are the only state
+        // that can survive into the new record.
+        allocator.free(g.path);
+        freeFileList(allocator, g.files);
+        if (!same) {
+            if (g.stamps) |s| allocator.free(s);
+        }
+    }
+    last_good_source = .{ .path = duped, .is_dir = is_dir, .files = files, .stamps = kept_stamps };
+}
+
+/// Releases the good-source state. In a running hana this lives for the whole
+/// process in a long-lived arena and is only ever replaced, never torn down;
+/// tests call this so the DebugAllocator can account for every byte.
+pub fn deinitGoodSource(allocator: std.mem.Allocator) void {
+    if (last_good_source) |g| {
+        allocator.free(g.path);
+        freeFileList(allocator, g.files);
+        if (g.stamps) |s| allocator.free(s);
+    }
+    last_good_source = null;
 }
 
 /// Snapshot dir a re-exec boots from. XDG_RUNTIME_DIR is already per-user, so
@@ -427,18 +549,83 @@ pub fn reexecSnapshotPathZ() ?[:0]const u8 {
     return std.heap.c_allocator.dupeZ(u8, snap) catch null;
 }
 
-/// Best-effort empty of `d`'s immediate entries (recursive via deleteTree), so
-/// a refresh that lost a file never leaves a stale copy behind.
-fn clearDir(io: std.Io, d: std.Io.Dir) void {
-    var it = d.iterate();
-    while (it.next(io) catch return) |entry| {
-        d.deleteTree(io, entry.name) catch {};
-    }
+/// Removes `abs_path` and everything under it. `deleteTree` is a Dir method
+/// with no absolute-path variant, so this splits off the parent and deletes
+/// the final component by name.
+fn deleteTreeAbsolute(io: std.Io, abs_path: []const u8) void {
+    const base = std.fs.path.basename(abs_path);
+    const parent = std.fs.path.dirname(abs_path) orelse return;
+    if (base.len == 0) return;
+    var d = std.Io.Dir.openDirAbsolute(io, parent, .{}) catch return;
+    defer d.close(io);
+    d.deleteTree(io, base) catch {};
 }
 
-/// Freezes the last-good config source into the snapshot dir, so a re-exec
-/// boots an identical config without re-reading the live config tree.
-/// Best-effort: a failed copy keeps the previous snapshot, still self-consistent.
+/// One resolved config file paired with the path it takes inside the snapshot.
+const SnapFile = struct { rel: []const u8 };
+
+/// `path` relative to `root`, or null when it does not live under it. An
+/// `include` may point outside the config dir (`../shared.toml`), and such a
+/// file is deliberately not snapshotted: the tree walk this replaced never
+/// copied it either, so the successor resolves it the same way the original
+/// load did.
+fn relativeTo(allocator: std.mem.Allocator, root: []const u8, path: []const u8) !?[]const u8 {
+    if (!std.mem.startsWith(u8, path, root)) return null;
+    var rel = path[root.len..];
+    while (rel.len != 0 and std.fs.path.isSep(rel[0])) rel = rel[1..];
+    if (rel.len == 0) return null;
+    return try allocator.dupe(u8, rel);
+}
+
+/// True when the snapshot already holds exactly `files` and the source files
+/// are untouched since the last successful refresh -- the no-op-reload fast
+/// path, so a reload that changes nothing does no writes at all. Contents are
+/// compared as an exact set (not just presence), so a source that was RENAMED
+/// cannot leave its old name behind in the snapshot for the successor to load
+/// as a config file the user deleted.
+fn snapshotCurrent(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    snap: []const u8,
+    files: []const SnapFile,
+    prev: ?[]const FileStamp,
+    now: []const FileStamp,
+) bool {
+    const old = prev orelse return false;
+    if (old.len != now.len or files.len != now.len) return false;
+    for (old, now) |a, b| {
+        if (a.size != b.size or a.mtime != b.mtime) return false;
+    }
+    var d = std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch return false;
+    defer d.close(io);
+    var w = d.walk(allocator) catch return false;
+    defer w.deinit();
+    var seen: std.ArrayList([]const u8) = .empty;
+    while (w.next(io) catch return false) |entry| {
+        if (entry.kind == .directory) continue;
+        seen.append(allocator, entry.path) catch return false;
+    }
+    if (seen.items.len != files.len) return false;
+    for (files) |f| {
+        var found = false;
+        for (seen.items) |s| {
+            if (std.mem.eql(u8, s, f.rel)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+/// Freezes the last-good config's resolved file set into the snapshot dir, so
+/// a re-exec boots an identical config without re-reading the live config tree.
+/// Only the files the load actually consumed are copied (see `GoodSource.files`
+/// for why the whole tree is not), and the new snapshot is assembled beside the
+/// old one and swapped in, so a copy that fails part-way leaves the previous
+/// snapshot intact. Best-effort: a failed refresh keeps the previous snapshot,
+/// still self-consistent.
 pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
     const g = last_good_source orelse return;
     const io = std.Options.debug_io;
@@ -446,34 +633,79 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
     defer allocator.free(snap);
     // A re-exec boot whose own source IS the snapshot has nothing to copy.
     if (std.mem.eql(u8, g.path, snap)) return;
+    if (g.files.len == 0) return;
 
-    var dest = std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => blk: {
-            std.Io.Dir.createDirAbsolute(io, snap, std.Io.File.Permissions.default_dir) catch return;
-            break :blk std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch return;
-        },
-        else => return,
-    };
-    defer dest.close(io);
-    clearDir(io, dest);
+    // Scratch for the resolved-to-snapshot path mapping; outlives no call here.
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
 
-    if (g.is_dir) {
-        const src = std.Io.Dir.openDirAbsolute(io, g.path, .{ .iterate = true }) catch return;
-        defer src.close(io);
-        var w = src.walk(allocator) catch return;
-        defer w.deinit();
-        while (w.next(io) catch return) |entry| {
-            // createDirPath for the entry's parents is implied by make_path.
-            if (entry.kind == .directory) continue;
-            // Every file is copied (not just .toml): includes resolve relative
-            // to the config dir and may reference non-.toml assets.
-            std.Io.Dir.copyFile(src, entry.path, dest, entry.path, io, .{ .make_path = true, .replace = true }) catch {};
-        }
-    } else {
-        // A single-file config becomes <snapshot>/config.toml, which the
-        // directory loader picks up (fallback.toml is skipped by name).
-        std.Io.Dir.copyFile(std.Io.Dir.cwd(), g.path, dest, "config.toml", io, .{ .replace = true }) catch return;
+    // Snapshot destinations are relative to the source ROOT: for a directory
+    // source that is the config dir itself, for a single-file source the file's
+    // own directory -- so the file lands as `config.toml` and its includes keep
+    // the subdirectory the loader will resolve them against.
+    const root = if (g.is_dir) g.path else (std.fs.path.dirname(g.path) orelse ".");
+    var files: std.ArrayList(SnapFile) = .empty;
+    for (g.files) |f| {
+        const rel = (relativeTo(sa, root, f) catch return) orelse {
+            log.warn("Snapshot: '{s}' is outside '{s}'; not freezing it", .{ f, root });
+            continue;
+        };
+        files.append(sa, .{ .rel = rel }) catch return;
     }
+    if (files.items.len == 0) return;
+
+    const src = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return;
+    defer src.close(io);
+
+    const stamps = allocator.alloc(FileStamp, files.items.len) catch return;
+    defer allocator.free(stamps);
+    for (files.items, 0..) |f, i| {
+        const st = src.statFile(io, f.rel, .{}) catch return;
+        stamps[i] = .{ .size = st.size, .mtime = st.mtime.nanoseconds };
+    }
+    if (snapshotCurrent(io, sa, snap, files.items, g.stamps, stamps)) return;
+
+    const staging = std.fmt.allocPrint(sa, "{s}.new", .{snap}) catch return;
+    deleteTreeAbsolute(io, staging);
+    if (!writeSnapshot(io, src, snap, staging, files.items)) {
+        deleteTreeAbsolute(io, staging);
+        return;
+    }
+    deleteTreeAbsolute(io, snap);
+    std.Io.Dir.renameAbsolute(staging, snap, io) catch {
+        deleteTreeAbsolute(io, staging);
+        return;
+    };
+
+    // Remember what was frozen so the next unchanged reload can skip all of it.
+    const kept = allocator.dupe(FileStamp, stamps) catch return;
+    if (last_good_source) |cur| {
+        if (cur.stamps) |old| allocator.free(old);
+    }
+    last_good_source.?.stamps = kept;
+}
+
+/// Assembles the complete snapshot under `staging`. Returns false (leaving
+/// `staging` to the caller to remove) if any file fails to copy, so a partial
+/// snapshot is never swapped into place.
+fn writeSnapshot(
+    io: std.Io,
+    src: std.Io.Dir,
+    snap: []const u8,
+    staging: []const u8,
+    files: []const SnapFile,
+) bool {
+    _ = snap;
+    std.Io.Dir.createDirAbsolute(io, staging, .default_dir) catch return false;
+    var dest = std.Io.Dir.openDirAbsolute(io, staging, .{ .iterate = true }) catch return false;
+    defer dest.close(io);
+    for (files) |f| {
+        // make_path for the entry's parents is implied by an include's
+        // `themes/...` subdirectory.
+        std.Io.Dir.copyFile(src, f.rel, dest, f.rel, io, .{ .make_path = true, .replace = true }) catch return false;
+    }
+    return true;
 }
 
 /// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
@@ -576,18 +808,22 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config 
 /// resolution base directory.
 const FileInput = struct { path: []const u8, base_dir: []const u8 };
 
-/// Parses one config file plus its `include`s into an arena document.
-fn parseFileDoc(a: std.mem.Allocator, in: FileInput) !parser.Document {
+/// Parses one config file plus its `include`s into an arena document,
+/// recording the file and every consumed include in `read`.
+fn parseFileDoc(a: std.mem.Allocator, read: *std.ArrayList([]const u8), in: FileInput) !parser.Document {
     var doc = try parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
-    try mergeIncludes(a, &doc, &doc, in.base_dir);
+    try read.append(a, in.path);
+    try mergeIncludes(a, &doc, &doc, read, in.base_dir);
     return doc;
 }
 
 /// Parse inputs for `parseFallbackDoc`: the embedded fallback TOML text.
 const FallbackInput = struct { toml: []const u8 };
 
-/// Parses the embedded fallback TOML into an arena document.
-fn parseFallbackDoc(a: std.mem.Allocator, in: FallbackInput) !parser.Document {
+/// Parses the embedded fallback TOML into an arena document. The fallback
+/// lives in the binary, so it contributes no files to the snapshot.
+fn parseFallbackDoc(a: std.mem.Allocator, read: *std.ArrayList([]const u8), in: FallbackInput) !parser.Document {
+    _ = read;
     return try parser.parse(a, in.toml, "<embedded fallback>");
 }
 
@@ -595,7 +831,9 @@ fn parseFallbackDoc(a: std.mem.Allocator, in: FallbackInput) !parser.Document {
 /// parsed Document(s) (and their aliased file buffers) while `parse` fills a
 /// document from the arena allocator; `buildConfigFromDoc` then dupes every
 /// owned Config string from the backing `allocator` before the arena reset
-/// reclaims the documents.
+/// reclaims the documents. `parse` also fills `read` with the config files it
+/// consumed, which is republished into module state (see publishReadFiles)
+/// because the re-exec snapshot needs it after this arena dies.
 fn parseAndBuild(
     allocator: std.mem.Allocator,
     comptime parse: anytype,
@@ -604,32 +842,39 @@ fn parseAndBuild(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var doc = try parse(a, in);
-    return buildConfigFromDoc(allocator, &doc);
+    var read: std.ArrayList([]const u8) = .empty;
+    var doc = try parse(a, &read, in);
+    var cfg = try buildConfigFromDoc(allocator, &doc);
+    publishReadFiles(read.items) catch |err| {
+        cfg.deinit(allocator);
+        return err;
+    };
+    return cfg;
 }
 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
-    var cfg = try parseAndBuild(allocator, parseFallbackDoc, FallbackInput{ .toml = fallback_toml });
-    // If the terminal detection/dupe below errors, free the built config
-    // rather than leaking it (the `try` above means buildConfigFromDoc's own
-    // errdefer already handled its internal failures).
-    errdefer cfg.deinit(allocator);
-    const terminal = fallback.detectTerminal();
-    for (cfg.keybindings.items) |*kb| {
-        if (kb.action == .exec and std.mem.eql(u8, kb.action.exec, "auto_terminal")) {
-            // Dupe BEFORE freeing the old string: if the dupe throws (OOM),
-            // the `try` propagates and the `errdefer cfg.deinit(allocator)`
-            // above frees kb.action.exec — which must still point at the live
-            // "auto_terminal" allocation, not an already-freed pointer.
-            const new_exec = try allocator.dupe(u8, terminal);
-            allocator.free(kb.action.exec);
-            kb.action.exec = new_exec;
-        }
-    }
+    // The auto_terminal substitution happens in parseAction, so the embedded
+    // fallback and a user config go through the identical path.
+    const cfg = try parseAndBuild(allocator, parseFallbackDoc, FallbackInput{ .toml = fallback_toml });
 
     log.info("Loaded fallback configuration with auto-detection", .{});
     return cfg;
+}
+
+/// Cached terminal probe. `auto_terminal` is resolved at parse time so a user
+/// config gets the same substitution the embedded fallback always had -- the
+/// PATH walk is a sequence of blocking exec probes, so it runs at most once
+/// per process. Holds a `'static` string (see fallback.detectTerminal).
+var cached_terminal: ?[]const u8 = null;
+
+fn resolveAutoTerminal(allocator: std.mem.Allocator) ![]const u8 {
+    const t = cached_terminal orelse blk: {
+        const probed = fallback.detectTerminal();
+        cached_terminal = probed;
+        break :blk probed;
+    };
+    return allocator.dupe(u8, t);
 }
 
 /// Builds the built-in default Config: every scalar knob seeds from
@@ -1203,6 +1448,12 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
     if (action_map.get(cmd)) |a| return a;
     inline for (workspace_action_specs) |spec| {
         if (tryParseWorkspace(cmd, spec.base ++ "_")) |ws| return spec.make(ws);
+    }
+    // Resolved here, not in the fallback loader: a USER config binding
+    // "auto_terminal" used to reach the shell verbatim, where it is not a
+    // command, so the bind parsed fine and then silently did nothing.
+    if (std.mem.eql(u8, cmd, "auto_terminal")) {
+        return .{ .exec = try resolveAutoTerminal(allocator) };
     }
     // The fallback is exec so any shell command can be bound, but a bare word
     // resembling a built-in action is almost always a typo, and running it as

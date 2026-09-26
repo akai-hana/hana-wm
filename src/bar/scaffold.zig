@@ -62,10 +62,18 @@ pub fn keyedWidthState(comptime tag: []const u8, comptime Key: type) type {
             cached = width;
             cached_key = key;
         }
-        /// The stored width when a store happened, else `fallback` (caller's
-        /// probe width).
-        pub fn naturalWidth(_: *const anyopaque, fallback: u16) u16 {
-            return if (cached > 0) cached else fallback;
+        /// The stored width when it was measured for `key`, else `fallback`
+        /// (caller's probe width). A width stored under a DIFFERENT key is as
+        /// stale as no width at all: the segment is about to stop filling that
+        /// span, so reserving it would pin the row at the outgoing view's size
+        /// until the next draw had already reflowed around it.
+        pub fn naturalWidth(key: Key, _: *const anyopaque, fallback: u16) u16 {
+            if (cached > 0) {
+                if (cached_key) |ck| {
+                    if (ck == key) return cached;
+                }
+            }
+            return fallback;
         }
         /// Drops the stored width+key so the next draw re-measures.
         pub fn invalidate() void {

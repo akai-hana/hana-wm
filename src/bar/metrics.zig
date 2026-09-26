@@ -13,7 +13,7 @@
 const std = @import("std");
 
 const core = @import("core");
-const scale = @import("scale");
+const scale = @import("dpi");
 
 /// Default point size for scaled metrics; also the size embedded in the
 /// fallback font description (`default_fallback_font`), so drawing's

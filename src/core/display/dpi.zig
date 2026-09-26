@@ -188,5 +188,8 @@ pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
 pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = scaling.scaleToPixels(value, screen_height_f);
-    return @max(bar_min_height_px, scaling.roundToU16(scaled_px, 0.0));
+    // clampBarHeight, not a bare @max: the bare floor honored
+    // bar_min_height_px but silently ignored bar_max_height_px, so a large
+    // `height` could hand the bar more of the screen than the policy allows.
+    return clampBarHeight(@intFromFloat(scaled_px));
 }

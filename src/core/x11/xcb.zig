@@ -9,7 +9,7 @@ pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");
     // Provides xcb_poll_for_reply, used by the x11 request module's poll-first reply collection.
     @cInclude("xcb/xcbext.h");
-    // Provides randr refresh-rate detection used by display/scale.zig and bar pacing.
+    // Provides randr refresh-rate detection used by display/dpi.zig and bar pacing.
     @cInclude("xcb/randr.h");
     // Provides xcb_xkb_id (XKB extension opcode lookup) and
     // xcb_xkb_per_client_flags, used to enable detectable auto-repeat so a held

@@ -23,8 +23,8 @@ pub const stack_balance_step: f32 = 0.5;
 pub const max_primary_swing: f32 = 6.0;
 
 /// Maximum number of concurrently minimized windows. Hoisted from the minimize
-/// module's `max_minimized` so the model layer (which may import only std +
-/// utils + constants) can reach it without build_options. Distinct from
+/// module's `max_minimized` so the model layer (which may import only std
+/// plus the xcb-free shelf) can reach it without build_options. Distinct from
 /// `max_tiled_windows`: this bounds the minimized-window buffer, not the
 /// tiled-window pool.
 pub const max_minimized: usize = 32;
@@ -39,13 +39,13 @@ pub const xkb_retry_delay_ms: u64 = 20;
 pub const x11_min_keycode: u8 = 8;
 /// The keycode space is 0..255; tables and bitsets covering the full range are
 /// sized from this.
-pub const x11_max_keycode = 256;
+pub const x11_max_keycode: usize = 256;
 
 // Offscreen positioning
 // Windows on inactive workspaces are parked here so they are hidden without
 // being unmapped (unmapping causes some apps to pause).
 //
-// X11's ConfigureWindow encodes x/y as INT16 on the wire (hence geom.Rect.x/y
+// X11's ConfigureWindow encodes x/y as INT16 on the wire (hence Rect.x/y
 // being i16), so -32768 is the hard floor. The old -4000 only cleared a single
 // 3840px-wide display: on multi-monitor layouts with a display left of primary,
 // ultrawides, or 5K/6K panels, -4000 can land back inside real screen estate.
@@ -108,4 +108,4 @@ pub const baseline_dpi: f32 = 96.0;
 /// capacity, applied per ws). Buffers sized from this are indexed by
 /// usize/u16, so raising it only costs memory; keep it a compile-time bound
 /// so stack buffers stay stack buffers.
-pub const max_tiled_windows = 64;
+pub const max_tiled_windows: usize = 64;

@@ -499,7 +499,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     //
     // Returning true (not false) keeps the release from falling through to WM
     // keybind dispatch.
-    if (event.response_type & masks.synthetic_event_mask != xcb.XCB_KEY_PRESS) return true;
+    if (event.response_type & masks.core_event_code_mask != xcb.XCB_KEY_PRESS) return true;
 
     const syms = g.key_syms orelse return false;
 

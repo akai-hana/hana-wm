@@ -27,7 +27,6 @@ const constants = @import("constants");
 const log = @import("log");
 
 const model = @import("model");
-const geometry = @import("geom");
 const requests = @import("requests");
 /// Stacking mode vocabulary for a request. `above` is currently the only mode
 /// the WM emits.
@@ -43,8 +42,8 @@ pub const Sink = struct {
 
     pub const VTable = struct {
         map: *const fn (*anyopaque, model.WindowId) void,
-        geom: *const fn (*anyopaque, model.WindowId, geometry.Rect, ?Stack) void,
-        geom_bordered: *const fn (*anyopaque, model.WindowId, geometry.Rect, u16, ?Stack) void,
+        geom: *const fn (*anyopaque, model.WindowId, model.Rect, ?Stack) void,
+        geom_bordered: *const fn (*anyopaque, model.WindowId, model.Rect, u16, ?Stack) void,
         border_width: *const fn (*anyopaque, model.WindowId, u16) void,
         border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,
         park: *const fn (*anyopaque, model.WindowId) void,
@@ -58,12 +57,12 @@ pub const Sink = struct {
     pub inline fn map(self: Sink, win: model.WindowId) void {
         self.vt.map(self.ptr, win);
     }
-    pub inline fn geom(self: Sink, win: model.WindowId, rect: geometry.Rect, stack: ?Stack) void {
+    pub inline fn geom(self: Sink, win: model.WindowId, rect: model.Rect, stack: ?Stack) void {
         self.vt.geom(self.ptr, win, rect, stack);
     }
     /// Geometry + border width merged into one configure request; the shape a
     /// workspace switch emits for every arriving window.
-    pub inline fn geomBordered(self: Sink, win: model.WindowId, rect: geometry.Rect, bw: u16, stack: ?Stack) void {
+    pub inline fn geomBordered(self: Sink, win: model.WindowId, rect: model.Rect, bw: u16, stack: ?Stack) void {
         self.vt.geom_bordered(self.ptr, win, rect, bw, stack);
     }
     pub inline fn borderWidth(self: Sink, win: model.WindowId, bw: u16) void {
@@ -112,7 +111,7 @@ pub const XcbSink = struct {
 
     /// Configure X|Y|W|H, merging a stack mode into the SAME request when
     /// one is requested (never a separate round of requests for geometry+raise).
-    fn geomShim(ptr: *anyopaque, win: u32, rect: geometry.Rect, stack: ?Stack) void {
+    fn geomShim(ptr: *anyopaque, win: u32, rect: model.Rect, stack: ?Stack) void {
         requests.configureWindow(
             XcbSink.fromPtr(ptr).conn,
             win,
@@ -125,7 +124,7 @@ pub const XcbSink = struct {
     /// Geometry + border-width in ONE configure: the common workspace-switch
     /// shape (an arriving window re-sends both), so the two go out as a single
     /// request instead of two round trips of the config queue.
-    fn geomBorderedShim(ptr: *anyopaque, win: u32, rect: geometry.Rect, bw: u16, stack: ?Stack) void {
+    fn geomBorderedShim(ptr: *anyopaque, win: u32, rect: model.Rect, bw: u16, stack: ?Stack) void {
         requests.configureWindow(
             XcbSink.fromPtr(ptr).conn,
             win,

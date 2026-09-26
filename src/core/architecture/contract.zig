@@ -42,7 +42,6 @@ const build_options = @import("build_options");
 const model = @import("model");
 
 const bounded = @import("bounded");
-const geom = @import("geom");
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
 /// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
@@ -74,9 +73,9 @@ pub fn activeLayoutKind(kind: u8) ?u8 {
 }
 
 /// The chrome-surface hook set a surface module binds to. The bar binds its
-/// `surfaces` value to this; when no surface is compiled in, core's
-/// generated `surfaces.Surfaces` is the comptime `null` type and every
-/// `if (build_options.has_bar)` call site compiles away.
+/// `surfaces` value to this; when no surface is compiled in, the generated
+/// `surfaces.Surfaces` is a full set of no-op hooks (see build.zig), so this is
+/// ONE type in every build and call sites never test a build flag.
 pub const Surfaces = struct {
     // Boot lifecycle, invoked from startup through surfaces.Surfaces so the
     // boot sequence never needs to name the bar module directly.
@@ -84,7 +83,11 @@ pub const Surfaces = struct {
     deinit: *const fn () void,
     // Event-loop hooks.
     handleExpose: *const fn (*const xcb.xcb_expose_event_t) void,
-    updateIfDirty: *const fn () anyerror!void,
+    /// No error union: the bar records its own failures (module draw errors
+    /// are logged and leave the segment dirty) rather than propagating, and an
+    /// `anyerror!void` here forced every call site to write a `catch` arm that
+    /// could only ever log the same thing.
+    updateIfDirty: *const fn () void,
     pollTimeoutMs: *const fn () i32,
     onPollWakeup: *const fn () void,
     updateClock: *const fn () void,
@@ -96,10 +99,6 @@ pub const Surfaces = struct {
     handleRandrEvent: *const fn (*anyopaque) void,
     runPendingRedetect: *const fn (core.Connection) void,
     onReload: *const fn () void,
-    /// Re-points the bar's config copy at the live config without rebuilding
-    /// the surface. Called on config reloads that leave the bar untouched
-    /// (changes.bar == false); see bar.zig `reload`.
-    refreshConfig: *const fn () void,
     // Input routing. The chrome overlay pre-empts key handling (returns true
     // when it consumed the key), button presses on the surface window are
     // routed to it, and the three surface config actions mutate chrome state.
@@ -230,7 +229,7 @@ pub const WindowModule = struct {
     // Floating family (floating module; "floating" is model vocabulary)
     /// Update a floating window's rect on the model (no-op for
     /// tiled/unknown).
-    setFloatingRect: ?*const fn (*model.Model, model.WindowId, geom.Rect) void = null,
+    setFloatingRect: ?*const fn (*model.Model, model.WindowId, model.Rect) void = null,
     /// Honor a configure request against a floating window record on the
     /// model. Returns the decision (geometry_applied / border_only /
     /// ignored).
@@ -246,7 +245,7 @@ pub const WindowModule = struct {
     updateDrag: ?*const fn (i16, i16) void = null,
     isDragging: ?*const fn () bool = null,
     isResizingWindow: ?*const fn (u32) bool = null,
-    getDragLastRect: ?*const fn () geom.Rect = null,
+    getDragLastRect: ?*const fn () model.Rect = null,
     cancelDragForWindow: ?*const fn (u32) void = null,
 };
 
@@ -281,8 +280,11 @@ pub const single_binder_hooks = [_][]const u8{
 /// Returns null when no compiled-in module provides
 /// the hook (the "no owner" fallback). Core callers use this to reach a
 /// window/bar subsystem through the build-generated registry, never by naming a
-/// module. The registry is passed in (not captured) so the contract module
-/// stays free of an import edge into the generated-registry layer.
+/// module. The registry is passed in (not captured) so dispatch sites never
+/// depend on the generated-registry layer. The one deliberate exception is
+/// this file's own re-export of the generated `tiling_modules` (:48-49):
+/// `tiling_mods` must shrink to an empty slice when no layout is compiled in,
+/// which needs the registry visible here rather than at each of its callers.
 pub fn providerOf(
     comptime T: type,
     registry: []const T,
@@ -435,6 +437,7 @@ pub const Segment = struct {
     measureString: ?*const fn () []const u8 = null,
     /// Reserved width in the row; `frame` is `*const segment.Frame`,
     /// `clock_width` the measured clock width for segments that need it.
+    ///
     naturalWidth: ?*const fn (*const anyopaque, u16) u16 = null,
     /// Draw at `x`, return advanced `x`. `ctx` is `*segment.DrawCtx`
     /// (bar-built scratch shared by every segment draw).
@@ -498,7 +501,11 @@ pub const Layout = struct {
     /// Canonical name ("master", "monocle", ...). Config text resolves to the
     /// module by name; names also drive the cycle order (config order wins).
     name: []const u8 = "",
-    /// Placement computation; must append exactly one placement per window.
+    /// Placement computation. CONTRACT: must append exactly one placement per
+    /// window in `View.order` order -- the sink consumes `List` positionally,
+    /// so a skipped, duplicated, or reordered window is a silently wrong
+    /// screen rather than a visible failure. `tiling.compute` asserts this at
+    /// the dispatch seam.
     compute: ?*const fn (*const View, *List) void = null,
     /// Number of variants this layout exposes for cycle_variant actions.
     variant_count: u8 = 1,
@@ -536,7 +543,7 @@ pub const Layout = struct {
 pub const View = struct {
     order: []const model.WindowId,
     params: *const model.LayoutParams,
-    workarea: geom.Rect,
+    workarea: model.Rect,
     hints: *const HintsView,
     focused: ?model.WindowId,
     // Environment resolved by the CALLER from config.
@@ -545,12 +552,12 @@ pub const View = struct {
 
 /// Sentinel rect for parked placements: the zero rect. The sync layer derives
 /// parked geometry from its own policy, never from this.
-pub const parked_rect: geom.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+pub const parked_rect: model.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 
 /// A placement computed for one window (see View.order).
 pub const Placement = struct {
     win: model.WindowId,
-    rect: geom.Rect,
+    rect: model.Rect,
     visible: bool,
 };
 
@@ -579,7 +586,7 @@ pub const HintsView = struct {
 /// per-layout booleans that each new layout would grow. Resolved from config
 /// by the reconciler's caller; the core carries no layout-feature booleans.
 pub const Env = struct {
-    margins: geom.Margins = .{},
+    margins: model.Margins = .{},
     min_dim: u16 = 0,
     primary_on_right: bool = false,
     variant_idx: u8 = 0,

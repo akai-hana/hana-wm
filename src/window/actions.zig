@@ -59,8 +59,6 @@ const surfaces = @import("surfaces").Surfaces;
 const wincache = @import("wincache");
 const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
-const cycle = @import("cycle");
-const geom = @import("geom");
 const time = @import("time");
 
 const ledger = @import("ledger");
@@ -159,7 +157,7 @@ fn focusFallback(m: *model_mod.Model, reason: focus.Reason) focus.FocusTransitio
     var excluded: ?model_mod.WindowId = null;
     while (model_mod.fallbackFocusCandidate(m, m.current, excluded)) |winner| {
         const prep = prepareAndSetFocus(m, winner, reason);
-        if (prep == .none and focus.lastRejectWasNoInput()) {
+        if (prep == .no_input) {
             excluded = winner;
             continue;
         }
@@ -467,7 +465,7 @@ fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.W
 /// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
 /// window's geometry (1 XCB call) instead of replaying all windows. Called
 /// from the drag provider's updateDrag on every motion event.
-pub fn dragRect(win: model_mod.WindowId, r: geom.Rect) void {
+pub fn dragRect(win: model_mod.WindowId, r: model_mod.Rect) void {
     const wm = providerOf(.setFloatingRect) orelse return;
     const m = pipeline.mut(&gate);
     wm.setFloatingRect.?(m, win, r);
@@ -521,8 +519,8 @@ pub fn isResizingWindow(win: model_mod.WindowId) bool {
 /// Last committed drag rect, for resize-path geometry replay. Zero rect
 /// fallback when no module provides the hook, matching the old no-floating
 /// default.
-pub fn getDragLastRect() geom.Rect {
-    const zero = geom.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
+pub fn getDragLastRect() model_mod.Rect {
+    const zero = model_mod.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
     const wm = providerOf(.getDragLastRect) orelse return zero;
     return wm.getDragLastRect.?();
 }
@@ -555,7 +553,7 @@ pub fn stepVariantDir(dir: i32) void {
     const m = pipeline.mut(&gate);
     const p = &m.ws[m.current.index].params;
     const n = tiling.variantCount(p.kind);
-    p.variant_idx = @intCast(cycle.wrapIndex(p.variant_idx, dir, n));
+    p.variant_idx = @intCast(model_mod.wrapIndex(p.variant_idx, dir, n));
     retile(.{ .full_redraw = true }, null);
 }
 
@@ -898,10 +896,11 @@ pub fn switchTo(ws_idx: u8) void {
 
     const t1: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
-    // The server grab body below is pure fire-and-forget XCB (focus
-    // transition + reconcile), so no blocking wait ever freezes input while
-    // the grab is held. All decision work — focus-candidate selection and
-    // the FocusTransition prep — runs here, model-local or cache-backed,
+    // The server grab (pipeline.withServerGrab, not a local bracket) wraps
+    // pure fire-and-forget XCB (focus transition + reconcile), so no blocking
+    // wait ever freezes input while the grab is held. All decision work —
+    // focus-candidate selection and the FocusTransition prep — runs here,
+    // model-local or cache-backed,
     // BEFORE grabServer so a fast-following keypress is never starved by this
     // switch (the drop-safety fix).
 
@@ -956,14 +955,18 @@ pub fn switchTo(ws_idx: u8) void {
 /// given rect with no home-list membership, mirroring detachTiledToFloating's
 /// anchor/home_ws state. The reconcile tail then sizes it floating in one
 /// reconcile, so a float-rule spawn never flashes a tiled slot.
-pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?geom.Rect) void {
+pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?model_mod.Rect) void {
     const m = pipeline.mut(&gate);
-    if (m.store.has(win)) return; // double-manage guard
+    if (tracking.isManaged(win)) return; // double-manage guard, see tracking.isManaged
 
     // A defined refusal (store or home-list full) leaves the window
     // unmanaged.
     model_mod.register(m, win, if (on_current) null else model_mod.WSId.fromIndex(target_ws)) catch {
         log.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
+        // Evict, or a refused window's XID lingers in the cache forever: XIDs
+        // are recycled, so the next client to be handed this id would inherit
+        // a stale title/child entry and read the wrong window.
+        wincache.removeWindow(win);
         return;
     };
     // Bridge the cached WM_NORMAL_HINTS into the model entry at registration.
@@ -1018,6 +1021,24 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
     // before xcb_set_input_focus, so both map+focus land under one grab.
     const ft = prepareAndSetFocus(m, win, .window_spawn);
     pipeline.reconcileGrabFocus(.{}, ft, .after, null);
+}
+
+/// The tail shared with session adoption: put X input focus on whatever the
+/// model says is focused, inside one grab AFTER geometry, or -- when nothing is
+/// focused -- reconcile under the grab with no focus handoff.
+///
+/// Adopted windows are already mapped, so the mapRequest path's ordering
+/// ("map, then focus, in the same grab") is satisfied here for the same
+/// reason. Both callers need this to be identical: a session that adopts 40
+/// windows and then focuses differently from a session that spawned them is a
+/// bug that only shows up after a re-exec.
+pub fn focusAfterGeometry() void {
+    if (pipeline.model().focused) |focused| {
+        const ft = prepareAndSetFocus(pipeline.mut(&gate), focused, .window_spawn);
+        pipeline.reconcileGrabFocus(.{}, ft, .after, null);
+    } else {
+        pipeline.reconcileUnderGrabNow(.{});
+    }
 }
 
 /// Unmanage tail: close/destroy/unmap of a managed window. Local

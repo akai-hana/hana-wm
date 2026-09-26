@@ -6,6 +6,7 @@
 //! reconcileNow() (retile/EWMH/manage/unmanage), and the
 //! fullscreenToggleWindow/workspace hooks routed from the window layer.
 
+const std = @import("std");
 const model_mod = @import("model");
 const core = @import("core");
 const focus = @import("focus");
@@ -176,7 +177,19 @@ fn preReconcileDuties() void {
 /// atomicity bracket. `body` is a value-capturing struct with a
 /// `fn call(self, c: *Ctx) void` method (the codebase's closure idiom); each
 /// entry point captures the args its compose needs.
+/// Nesting depth of the server grab. `XGrabServer` is NOT reentrant and has no
+/// matching "already held" state: a nested grab followed by an ungrab would
+/// release the OUTER grab too, so the rest of the session would run ungrabbed
+/// while believing it holds the lock -- the exact class of bug that produces
+/// "a request failed for no visible reason" reports hours later. One counter
+/// at the single seam every grab goes through turns that into an assert at the
+/// point of the mistake.
+var grab_depth: u32 = 0;
+
 fn withServerGrab(body: anytype) void {
+    std.debug.assert(grab_depth == 0);
+    grab_depth += 1;
+    defer grab_depth -= 1;
     const c = ctx();
     c.sink.grabServer();
     defer c.sink.ungrabAndFlush();
@@ -302,7 +315,7 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             // client's ConfigureNotify confirms non-fullscreen dimensions.
             if (self.kind != .exit) {
                 // Immediate bar unmap when fullscreen claims the usable area.
-                if (build_options.has_bar) surfaces.hideBarForFullscreen();
+                surfaces.hideBarForFullscreen();
             } else {
                 // Exit: deferred bar show (unchanged path).
                 if (instance.focused) |w| {
@@ -322,8 +335,8 @@ pub inline fn reconcileNow() void {
 /// Run pre-reconcile duties and return the pipeline context for the caller
 /// to manage a manual server grab. The caller MUST call
 /// ctx.sink.ungrabAndFlush() when done (typically via defer). A manual-grab
-/// seam for callers needing a bespoke grab body: switchTo and the fullscreen
-/// EWMH write.
+/// seam for callers needing a bespoke grab body: the fullscreen EWMH write.
+/// (switchTo used to be the other caller; it now goes through withServerGrab.)
 pub fn grabCtx() *reconcile.Ctx {
     preReconcileDuties();
     return ctx();

@@ -11,7 +11,6 @@
 //!
 //! `reconcile`'s header documents the four behavioural reads of this ledger.
 
-const geom = @import("geom");
 const model = @import("model");
 const contract = @import("contract");
 
@@ -22,14 +21,29 @@ const contract = @import("contract");
 ///     origin would collide with a "never sent" marker value);
 ///   - rect: the last VISIBLE geometry sent (survives parks);
 ///   - parked: whether the latest reconcile parked it;
-///   - bw: the last border width sent for a visible window (0 while parked/never);
-///   - pixel: the last border pixel sent for a visible window (0 while parked/never).
+///   - bw: the last border width sent (0 if never sent);
+///   - pixel: the last border pixel sent (0 if never sent).
+///
+/// bw/pixel deliberately SURVIVE a park. The park write flips only `parked`;
+/// zeroing them would make the unpark transition see a changed border and
+/// repaint, which is the border flash the park/unpark path exists to avoid.
+/// "The last value sent" is the honest invariant: these record what X was
+/// told, not what is currently on screen.
 pub const SentEntry = struct {
-    rect: geom.Rect = contract.parked_rect,
+    rect: model.Rect = contract.parked_rect,
     has_rect: bool = false,
     parked: bool = false,
     bw: u16 = 0,
     pixel: u32 = 0,
+    /// Set when a ConfigureNotify says this window changed its own geometry
+    /// while we had it parked offscreen. The reconcile's off-workspace fast
+    /// path elides windows already parked in the ledger, which is what makes
+    /// the sweep cheap -- but it would also elide a client that moved itself
+    /// back on-screen behind our back, leaving it visibly stranded until some
+    /// unrelated event happened to force a full recompute. This flag is the
+    /// escape hatch: it costs one flag, and it only ever makes the reconciler
+    /// do MORE work, never less.
+    parked_dirty: bool = false,
 };
 
 const State = struct {
@@ -75,6 +89,16 @@ pub fn forget(win: model.WindowId) void {
 /// width-only send so the next full reconcile's need_bw check
 /// (`!last.has_rect or last.bw != bw`) elides the redundant resend. No-op
 /// when the ledger is full or the get-or-put errors (sentGetOrPut contract).
+/// Note that a parked window changed its own geometry, so the next reconcile
+/// must re-park it instead of taking the elision. Called from the
+/// ConfigureNotify route for MANAGED windows only: an unmanaged client's
+/// configure says nothing about our park.
+pub fn markParkedDirty(win: model.WindowId) void {
+    const e = sentGet(win) orelse return;
+    if (!e.parked) return; // only the parked fast path can elide a repair
+    st.sent.getPtr(win).?.parked_dirty = true;
+}
+
 pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
     const gop = sentGetOrPut(win) orelse return;
     gop.bw = w;
@@ -82,7 +106,7 @@ pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
 
 /// Record a visible (non-parked) send in the ledger. Shared by the full
 /// reconcile (border width/pixel known) and the drag-tick fast path (0,0).
-pub fn markSentVisible(e: *SentEntry, rect: geom.Rect, bw: u16, pixel: u32) void {
+pub fn markSentVisible(e: *SentEntry, rect: model.Rect, bw: u16, pixel: u32) void {
     e.* = .{ .rect = rect, .has_rect = true, .parked = false, .bw = bw, .pixel = pixel };
 }
 
@@ -96,7 +120,7 @@ fn visibleSent(win: model.WindowId) ?SentEntry {
 
 /// Last visible geometry we sent to `win`, or null when never sent /
 /// currently parked.
-pub fn lastRectFor(win: model.WindowId) ?geom.Rect {
+pub fn lastRectFor(win: model.WindowId) ?model.Rect {
     const e = visibleSent(win) orelse return null;
     return e.rect;
 }

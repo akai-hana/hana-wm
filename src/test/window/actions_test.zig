@@ -13,7 +13,6 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
-const geom = @import("geom");
 
 const ledger = @import("ledger");
 test "actions: mapRequest admits, maps, and focuses a window" {
@@ -42,7 +41,7 @@ test "actions: mapRequest admits a float-rule window floating at its rect" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    const rect = geom.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
+    const rect = model.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
     actions.mapRequest(win, 0, true, rect);
     fx.flush();
 

@@ -1,5 +1,32 @@
-//! Single source of truth for management state.
-//! Layer rule: pure core (no X11, no feature imports). Single-threaded.
+//! The domain model: the WM's management state, plus the operations on it.
+//!
+//! "Model" is the model-view-controller sense -- state + operations, with no
+//! I/O. Not "the model of a window": this file is the whole window manager's
+//! state, of which windows are one part. `Model` holds the per-window `store`
+//! *and* the per-workspace array, the current workspace, the focused id, and
+//! the all-view toggle; the vocabulary (`Entry`, `WsState`, `LayoutParams`,
+//! `BaseMode`, `Presence`, `Mask`, and the `Rect`/`Margins` value objects) is
+//! the shared language every other layer is written against. Note the
+//! distinction from `src/window/`, which is a *directory* naming the
+//! client-lifecycle subsystem (create / destroy / configure, ICCCM, focus,
+//! borders, drag) -- a slice of feature code, not a layer of the DAG. The two
+//! are orthogonal: nothing here is owned by `window/`, and `tiling/`, `bar/`,
+//! `config/`, `input/`, and `window/` all depend on this file rather than the
+//! reverse.
+//!
+//! Geometry lives here rather than in a `geom` module because it is not a
+//! utility: `Rect`/`Margins` are value objects the state holds (`BaseMode.
+//! floating`, `Placement`), and the two coordinate helpers exist only to serve
+//! them -- `satI16` clamps into `Rect`'s own i16 range, `toXcbCoord` adapts a
+//! `Rect` field to the wire. `satI16` is also used by the pure `tiling/` layer,
+//! which is why these cannot live on the x11 side. The one adapter that IS
+//! genuinely xcb-typed, `rectFromXcb`, stays in `x11/requests.zig`.
+//!
+//! Layer rule: pure core (no X11, no feature imports). The only imports are
+//! `std` and other xcb-free vocabulary, so this file cannot reach the
+//! connection in `core.zig` -- that is what makes it a DAG root.
+//! Single-threaded.
+//!
 //! Feature transitions live in the window layer's optional modules; this file
 //! exports only shared vocabulary types, queries, and core focus/tiling
 //! intrinsics.
@@ -7,8 +34,6 @@ const std = @import("std");
 const constants = @import("constants");
 
 const bounded = @import("bounded");
-const cycle = @import("cycle");
-const geom = @import("geom");
 /// Alias of the canonical WindowId (`@import("ids").WindowId`; see ids.zig).
 pub const WindowId = @import("ids").WindowId;
 /// Alias of the canonical WorkspaceId (`@import("ids").WorkspaceId`). Model
@@ -16,10 +41,76 @@ pub const WindowId = @import("ids").WindowId;
 /// read as array indices via `.index`. See the ids.zig header for the
 /// single-definition rationale.
 pub const WSId = @import("ids").WorkspaceId;
+
+/// Position and dimensions of a managed window, relative to the root window
+/// (the total display area).
+pub const Rect = struct {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    border_width: u16 = 0,
+
+    pub inline fn eql(self: Rect, other: Rect) bool {
+        return self.x == other.x and self.y == other.y and self.width == other.width and
+            self.height == other.height and self.border_width == other.border_width;
+    }
+
+    /// Geometry only, ignoring `border_width`.
+    ///
+    /// `eql` and `eqlGeom` exist because a `Rect` carries BOTH geometry and a
+    /// border width, but the two are sent by different requests and tracked by
+    /// different sent-state (a geometry configure vs the ledger's `bw` field).
+    /// Comparing a whole `Rect` to decide "did the geometry move" therefore
+    /// reads a field the comparison does not own, so a border-width-only
+    /// change reads as a move and buys a spurious configure plus raise. Use
+    /// `eql` only when the border width is part of the comparison.
+    pub inline fn eqlGeom(self: Rect, other: Rect) bool {
+        return self.x == other.x and self.y == other.y and self.width == other.width and
+            self.height == other.height;
+    }
+};
+
+/// Gap and border widths applied around a tiled window.
+pub const Margins = struct {
+    gap: u16 = 0,
+    border: u16 = 0,
+};
+
+/// Twice the border width (left+right / top+bottom inset).
+pub inline fn doubledBorder(m: Margins) u16 {
+    return 2 *| m.border;
+}
+
+/// Saturating i16 coordinate clamp: narrows an i32 coordinate into the i16
+/// `Rect` range, clamping instead of wrapping so a single pathological value
+/// can't cross the whole screen in ReleaseFast.
+pub inline fn satI16(v: i32) i16 {
+    return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
+}
+
+/// Reinterprets a signed X11 coordinate (i16 on the wire) as the u32 value
+/// XCB's configure_window value array expects.
+pub inline fn toXcbCoord(v: i16) u32 {
+    return @bitCast(@as(i32, v));
+}
+
+/// Modulo-wraps `idx` by signed `dir` into [0, n); 0 for an empty range.
+/// The one modulo-wrap in the tree, powering the round-robin focus and
+/// layout-direction cycles, so those callers name the operation instead of
+/// reaching into a shared grab bag for it.
+pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
+    if (n == 0) return 0;
+    return @intCast(@mod(@as(i64, @intCast(idx)) + dir, @as(i64, @intCast(n))));
+}
+
 pub const Mask = u64;
 
 /// Mask bit for workspace `ws`. Precondition: `ws.index < 64` (u64 mask).
 pub inline fn bit(ws: WSId) Mask {
+    // A shift by >= bitSizeOf would silently produce a wrong mask in safe
+    // modes, so make raising max_workspaces a loud build failure.
+    std.debug.assert(ws.index < @bitSizeOf(Mask));
     return @as(Mask, 1) << @intCast(ws.index);
 }
 
@@ -84,7 +175,7 @@ pub const BaseMode = union(enum) {
     /// holds a tiled window; findHome). Visibility on other tagged workspaces
     /// is a sync-time mask filter (engine stays mask-agnostic).
     tiled,
-    floating: geom.Rect,
+    floating: Rect,
 };
 
 /// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden
@@ -113,8 +204,8 @@ const WsState = struct {
     params: LayoutParams = .{},
 };
 
-/// Bounded sorted-key collection re-exported via the utils facade; the model's
-/// window store and the sync ledger share it without either naming core.
+/// Bounded sorted-key collection re-exported from the pure shelf; the model's
+/// window store and the reconcile ledger share it without either naming core.
 pub const Store = bounded.Store;
 
 /// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated);
@@ -145,8 +236,11 @@ pub const Model = struct {
 /// Removes `win` from a bounded membership list. Shared by the substrate
 /// (register/unregister) and the focus slice (setFocus); anytype because
 /// OrderList and MruList share the shape but not the capacity.
+/// Thin delegate to BoundedList.removeValue, kept as a free function because
+/// the typed-list spelling reads better at the call sites than a method on a
+/// generic the caller would have to name.
 pub fn removeValue(list: anytype, win: WindowId) void {
-    if (list.indexOfScalar(win)) |i| list.orderedRemove(i);
+    _ = list.removeValue(win);
 }
 
 /// The workspace whose tiled_order holds win (single-membership invariant).
@@ -174,10 +268,16 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
 }
 
 pub fn unregister(m: *Model, win: WindowId) void {
-    const home = findHome(m, win);
     if (!m.store.remove(win)) return;
-    if (home) |h| removeValue(&m.ws[h.index].tiled_order, win);
-    for (&m.ws) |*s| removeValue(&s.focus_mru, win);
+    // Scrub EVERY workspace's lists, not just the cached home_ws. A stale id
+    // left in some other ws's tiled_order would make a later layout pass move
+    // or draw a window the store no longer has, and there is no way to detect
+    // that from the entry once it is gone. Whole-model scan, provably
+    // idempotent, and it removes the home_ws-then-unregister ordering dance.
+    for (&m.ws) |*s| {
+        removeValue(&s.tiled_order, win);
+        removeValue(&s.focus_mru, win);
+    }
     if (m.focused == win) m.focused = null;
 }
 
@@ -291,6 +391,56 @@ fn qualifies(m: *const Model, cand: WindowId, ws: WSId, excluded: ?WindowId) boo
     return visibleOn(m, cand, ws);
 }
 
+/// The visible windows of `ws` in ON-SCREEN order, for focus cycling: writes
+/// them into `buf` and returns the count (0 when `buf` is empty). Ordered by
+/// layout, not by window id, because the cycle must follow the arrangement:
+/// `ws`'s tiled_order first (the same slice the layout engine tiles, so master
+/// slots lead and the stack follows), then the visible windows with no tiled
+/// slot here -- floating ones and multi-tagged windows homed on another
+/// workspace -- in store order. Anchoring to tiled_order is what makes a
+/// cycle step track a move or a master swap: those rewrite that list in place
+/// (stepTiled / swapFocusedWithPrevious), so the cycle reorders with the
+/// screen instead of staying on the order windows happened to be created in.
+///
+/// A covering occupant collapses the pool to that one window: it owns the
+/// screen, so nothing behind it is reachable. Membership is exactly
+/// `visibleEntry` (parked never cycles; the tag test is relaxed while
+/// all_view_active drives visibility), so the pool can never disagree with the
+/// focus-visible model. `seen` is per-call stack scratch marking the store
+/// slots already admitted, so the two passes can't double-admit a window.
+pub fn collectCyclePool(m: *const Model, ws: WSId, buf: []WindowId) usize {
+    if (coveringOccupantOnWs(m, ws)) |occ| {
+        if (buf.len == 0) return 0;
+        buf[0] = occ;
+        return 1;
+    }
+    var seen: [store_capacity]bool = [_]bool{false} ** store_capacity;
+    var n: usize = 0;
+    // Pass 1: the shown workspace's tiled order == screen order. indexOf
+    // locates the store row, at() reads it -- one search per window, matching
+    // the reconciler's order build.
+    for (m.ws[ws.index].tiled_order.constSlice()) |w| {
+        if (n == buf.len) break;
+        const slot = m.store.indexOf(w) orelse continue;
+        const e = m.store.at(slot).val;
+        if (!visibleEntry(m, e, ws)) continue;
+        seen[slot] = true;
+        buf[n] = w;
+        n += 1;
+    }
+    // Pass 2: the untiled tail, after the tiled run. Store order, so floating
+    // windows keep a stable order among themselves.
+    for (0..m.store.count()) |slot| {
+        if (n == buf.len) break;
+        if (seen[slot]) continue;
+        const row = m.store.at(slot);
+        if (!visibleEntry(m, row.val, ws)) continue;
+        buf[n] = row.key;
+        n += 1;
+    }
+    return n;
+}
+
 /// Minimize-fallback target policy. The window layer's focusFallback
 /// delegates here, and tests exercise the same logic without linking the
 /// protocol layers. Tier order on workspace `ws`: focus MRU (newest first),
@@ -352,7 +502,7 @@ pub fn stepTiled(m: *Model, win: WindowId, dir: i32) void {
     const len = list.len;
     if (len < 2) return;
     const from = list.indexOfScalar(win) orelse return;
-    moveTiled(list, win, from, cycle.wrapIndex(from, dir, len));
+    moveTiled(list, win, from, wrapIndex(from, dir, len));
 }
 
 /// Slot swap: exchanges the first two tiled slots of the current workspace

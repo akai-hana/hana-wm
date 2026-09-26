@@ -7,14 +7,12 @@ const log = @import("log");
 
 const contract = @import("contract");
 
-const cycle = @import("cycle");
-const geom = @import("geom");
 const scaling = @import("scaling");
 /// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
 /// clamp, then aspect clamp (with a re-snap, since a client may declare both).
 /// Declared minimums are intentionally NOT enforced: tiling owns window size
 /// (the policy lives on `model.SizeHints.min_width`).
-pub fn applyHints(rect: geom.Rect, h: model.SizeHints) geom.Rect {
+pub fn applyHints(rect: model.Rect, h: model.SizeHints) model.Rect {
     if (h.isEmpty()) return rect;
     var width: u16 = rect.width;
     var height: u16 = rect.height;
@@ -85,7 +83,7 @@ pub const List = contract.List;
 pub const LayoutCtx = struct {
     v: *const View,
     out: *List,
-    m: geom.Margins,
+    m: model.Margins,
     min_dim: u16,
 
     pub inline fn init(v: *const View, out: *List) LayoutCtx {
@@ -107,13 +105,13 @@ pub fn focusedElse(
 /// Pane-inset total: the outer gap on both sides plus both border widths,
 /// saturating. The single source of the "2×gap + 2×border" shrink used by
 /// master, monocle, and scroll.
-pub inline fn totalInset(gap_amount: u16, m: geom.Margins) u16 {
-    return gap_amount *| 2 +| geom.doubledBorder(m);
+pub inline fn totalInset(gap_amount: u16, m: model.Margins) u16 {
+    return gap_amount *| 2 +| model.doubledBorder(m);
 }
 
 /// Interior-boundary half-gap: the seam between two adjacent panes carries
 /// half a gap per side so neighboring windows together share one full gap.
-pub inline fn seamGap(m: geom.Margins) u16 {
+pub inline fn seamGap(m: model.Margins) u16 {
     return m.gap / 2;
 }
 
@@ -124,10 +122,10 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
 }
 
 /// Full-rect inset by `margin` (shrinkClamped width/height at fixed origin).
-pub inline fn insetRect(x: i32, y: i32, w: u16, h: u16, margin: u16, min_dim: u16) geom.Rect {
+pub inline fn insetRect(x: i32, y: i32, w: u16, h: u16, margin: u16, min_dim: u16) model.Rect {
     return .{
-        .x = geom.satI16(x),
-        .y = geom.satI16(y),
+        .x = model.satI16(x),
+        .y = model.satI16(y),
         .width = shrinkClamped(w, margin, min_dim),
         .height = shrinkClamped(h, margin, min_dim),
     };
@@ -149,9 +147,12 @@ pub const Region = struct {
 
 /// Work-area rect inset by the outer gap; x/y are i32, w/h u16
 /// (threaded through some layouts' recursion).
-pub inline fn outerArea(wa: geom.Rect, gap: u16) Region {
+pub inline fn outerArea(wa: model.Rect, gap: u16) Region {
     return .{
-        .x = @intCast(gap),
+        // Both edges take the work area's own origin plus the gap, not the gap
+        // alone: a work area that does not start at x=0 (a side claim) was
+        // silently placed back at the screen's left edge.
+        .x = wa.x +| @as(i32, gap),
         .y = clampYToU16(wa.y) +| gap,
         .w = wa.width -| gap *| 2,
         .h = wa.height -| gap *| 2,
@@ -183,22 +184,22 @@ pub inline fn cellStride(cell: u16, gap: u16, i: u16) u16 {
 /// Append one placement. If the list is already at capacity this is a silent
 /// skip (drop the new placement) rather than an overflow — ReleaseFast never
 /// traps, and a full list means we're already showing the outer edges.
-inline fn appendPlacement(out: *List, win: model.WindowId, rect: geom.Rect, visible: bool) void {
+inline fn appendPlacement(out: *List, win: model.WindowId, rect: model.Rect, visible: bool) void {
     if (!out.append(.{ .win = win, .rect = rect, .visible = visible })) return;
 }
 
 /// Emit a visible placement with the window's size hints applied to `rect`.
-pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: geom.Rect) void {
+pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: model.Rect) void {
     appendPlacement(out, win, applyHints(rect, v.hints.forWin(win)), true);
 }
 
 /// Emit a visible placement built from integer tiling coordinates, narrowing
-/// x/y through geom.satI16. The shared row-emission shape every module used
-/// to hand-build as `geom.Rect{ .x = satI16(...), ... }` + emitView.
+/// x/y through model.satI16. The shared row-emission shape every module used
+/// to hand-build as `model.Rect{ .x = model.satI16(...), ... }` + emitView.
 pub inline fn emitRect(v: *const View, out: *List, win: model.WindowId, x: i32, y: i32, w: u16, h: u16) void {
     emitView(v, out, win, .{
-        .x = geom.satI16(x),
-        .y = geom.satI16(y),
+        .x = model.satI16(x),
+        .y = model.satI16(y),
         .width = w,
         .height = h,
     });
@@ -223,8 +224,12 @@ pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: 
 /// every other window in `windows`. Shared by fibonacci and leaf, whose
 /// "region can't fit two children" fallbacks both reduce to this shape.
 pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId, r: Region) void {
+    // windows[0] is evaluated eagerly as focusedElse's fallback, so an empty
+    // slice would trap before the "region can't fit two children" case this
+    // exists to handle could even be reached.
+    if (windows.len == 0) return;
     const top = focusedElse(ctx.v, windows, windows[0]);
-    emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, geom.doubledBorder(ctx.m), ctx.min_dim));
+    emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, model.doubledBorder(ctx.m), ctx.min_dim));
     showOneHideRest(ctx.out, windows, top);
 }
 
@@ -234,10 +239,25 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
 /// conditional-import definition).
 const tiling_mods = contract.tiling_mods;
 
+/// The layout used when none is configured, and the fallback when a name
+/// fails to resolve. Named so "a typo here silently becomes some layout" is
+/// greppable rather than a bare 0 at each use.
+pub const default_kind: u8 = 0;
+
+comptime {
+    // The kind is a u8 index and the config list is sized max_layouts, so a
+    // registry that outgrows either would truncate or overrun at runtime.
+    std.debug.assert(tiling_mods.len <= model.max_layouts);
+    std.debug.assert(tiling_mods.len <= std.math.maxInt(u8));
+}
+
 /// Resolve a config layout name to its registry index (case-insensitive match
 /// on module names), or null when unregistered.
-pub fn layoutByName(name: []const u8) ?usize {
-    for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return i;
+/// Returns the registry index as the `u8` kind it will actually be stored as,
+/// not a `usize` the caller has to cast. The kind IS a u8, so returning usize
+/// only created a truncation footgun at eight call sites.
+pub fn layoutByName(name: []const u8) ?u8 {
+    for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return @intCast(i);
     return null;
 }
 
@@ -288,7 +308,7 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     };
     if (n == 0) return cur;
     for (indices[0..n], 0..) |idx, i| if (idx == cur) {
-        return indices[cycle.wrapIndex(i, dir, n)];
+        return indices[model.wrapIndex(i, dir, n)];
     };
     return indices[if (dir >= 0) 0 else n - 1];
 }
@@ -311,6 +331,11 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
     if (m.compute) |f| f(v, out);
+    // One placement per window, in View.order order: the sink consumes `out`
+    // positionally, so a layout that skipped or reordered a window degraded
+    // silently into a wrong screen. Make that a loud failure instead. Zero
+    // release cost (std.debug.assert).
+    std.debug.assert(out.len == v.order.len);
 }
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of

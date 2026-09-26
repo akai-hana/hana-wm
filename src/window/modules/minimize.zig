@@ -14,6 +14,7 @@
 const std = @import("std");
 const constants = @import("constants");
 const model = @import("model");
+const log = @import("log");
 const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 const bounded = @import("bounded");
@@ -131,8 +132,11 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // through the minimize — minimize only remapped presence to `.parked`), so
     // core's model-based coverage read (`coveringOccupantOnWs`) recognizes it
     // again as the screen owner. Plain windows restore to `.present`.
-    const covering = window.isCoveringMode(m, win);
-    e.presence = if (covering) .covering else .present;
+    // Read the core intent off the entry rather than asking the fullscreen
+    // module: a peer-module hop is a second source of truth that a session
+    // restore can disagree with, which is exactly how a minimized fullscreen
+    // window used to come back as a plain tiled one.
+    e.presence = if (e.covering_ws != null) .covering else .present;
     _ = g_recs.orderedRemove(idx);
 }
 
@@ -271,7 +275,15 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (bytes.len != 9 or bytes[0] != min_magic) return false; // not our blob; let the loop continue
     if (g_recs.indexOfByIdField(.win, win) != null) return true; // already adopted; idempotent
     if (m.store.getPtr(win) == null) return true; // window gone; claim the blob, nothing to park
-    if (g_recs.len >= MAX_MINIMIZED) return false;
+    if (g_recs.len >= MAX_MINIMIZED) {
+        // Still claim the blob (true), just without adopting the record.
+        // Returning false said "not my blob", so the restore loop kept asking
+        // every other module, none matched, and the window was left in
+        // whatever presence the model had -- parked, i.e. permanently
+        // invisible, with no way to recover until the next full restart.
+        log.warn("minimize: record list full; window 0x{x} not restored minimized", .{win});
+        return true;
+    }
     // Slice the payload back out via a byte-aligned copy (persist buffers are
     // byte-aligned; the extern struct's align(1) u32s load unaligned safely).
     const raw = std.mem.bytesToValue(PackedMinimize, bytes[0..@sizeOf(PackedMinimize)]);

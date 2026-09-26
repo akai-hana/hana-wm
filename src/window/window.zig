@@ -25,7 +25,6 @@ const model_mod = @import("model");
 
 const atoms = @import("atoms");
 const bounded = @import("bounded");
-const geom = @import("geom");
 const requests = @import("requests");
 const scaling = @import("scaling");
 const time = @import("time");
@@ -137,6 +136,12 @@ const State = struct {
     // config, valid until the next rebuild.
     float_rules: std.StringHashMapUnmanaged(void) = .{},
 
+    // Warn-once latch for client-message diagnostics (see
+    // handleClientMessage): a looping pager would otherwise flood the log.
+    // Lives in State so `state = .{}` in init() resets it, matching the stated
+    // reset discipline of this struct.
+    warned_active_ignore: bool = false,
+
     // Child XID -> managed toplevel XID (see "Child window resolution").
     child_cache: bounded.BoundedList(ChildEntry, child_cache_capacity) = .{},
 
@@ -164,7 +169,7 @@ pub fn markBordersFlushed() void {
 }
 
 /// Returns null if the window does not exist or is not yet mapped.
-pub fn getGeometry(conn: core.Connection, win: u32) ?geom.Rect {
+pub fn getGeometry(conn: core.Connection, win: u32) ?model_mod.Rect {
     const reply = xcb.xcb_get_geometry_reply(conn, xcb.xcb_get_geometry(conn, win), null) orelse
         return null;
     defer std.c.free(reply);
@@ -319,7 +324,9 @@ pub inline fn isInvalidWindow(win: u32) bool {
     return win == 0 or win == core.getState().root or usable_area_mod.isSurfaceWindow(win);
 }
 
-inline fn isValidManagedWindow(win: u32) bool {
+/// True when `win` is a real manage target we are tracking. The single
+/// predicate for "is this window ours" (events.zig, reconcile paths).
+pub inline fn isValidManagedWindow(win: u32) bool {
     return !isInvalidWindow(win) and tracking.isManaged(win);
 }
 
@@ -365,7 +372,14 @@ fn findAdmissionRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?AdmissionRul
     const class_end = std.mem.indexOfScalar(u8, class_raw, 0) orelse class_raw.len;
     const class = class_raw[0..class_end];
 
-    // O(1) hash lookups: class first (when non-empty), then instance.
+    return matchRule(instance, class);
+}
+
+/// The WM_CLASS rule match, split from the XCB property read above so the
+/// POLICY is testable without a server: two O(1) hash lookups, class first
+/// (when non-empty) then instance, float rules winning over workspace rules at
+/// each step. Reading a property is not part of this decision.
+fn matchRule(instance: []const u8, class: []const u8) ?AdmissionRule {
     if (class.len > 0) {
         if (state.?.float_rules.contains(class)) return .{ .workspace = null, .float = true };
         if (state.?.rules_map.get(class)) |ws| return .{ .workspace = ws, .float = false };
@@ -604,10 +618,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const conn = core.getState().conn;
     const t0: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
-    // Double-manage guard: a window can send multiple MapRequest events (e.g.
-    // an unmap+remap race while the first is still processing); without it,
-    // the model registration and property queries below would fire twice.
-    if (tracking.isManaged(win)) return;
+    if (tracking.isManaged(win)) return; // double-manage guard, see tracking.isManaged
 
     // Snapshot the pointer position now so the crossing the map generates can
     // be matched against it (see snapshotSpawnCursor / suppressSpawnCrossing).
@@ -658,21 +669,10 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 /// and its keyboard grabs seeded. One map-request path, one adoption path, one
 /// admission policy.
 ///
-/// `cacheChildWindow` maps the window to root: for a MapRequest toplevel its
-/// parent IS root, and for adoption root is the only meaningful parent (there
-/// is no map-request event), so both paths funnel through the same cache write,
-/// an entry keyed on the (now-managed) toplevel itself, which
-/// findManagedWindow's direct `is_managed` hit short-circuits anyway.
-/// `target_ws` is the already-resolved target workspace and `float` mirrors the
-/// MapRequest admission decision. The float seed's geometry is fetched here: at
-/// admission there is no LastSent entry yet (no reconcile has run), so
-/// detachTiledToFloating's `ledger.lastRectFor` would find nothing; the one
-/// extra xcb_get_geometry round-trip supplies the window's natural rect.
 fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool) void {
     const cs = core.getState();
-    const float_rect: ?geom.Rect = if (float) getGeometry(cs.conn, win) else null;
+    const float_rect: ?model_mod.Rect = if (float) getGeometry(cs.conn, win) else null;
     actions.mapRequest(win, target_ws, on_current, float_rect);
-    cacheChildWindow(win, cs.root);
 }
 
 /// Linear scan for a window's restore record. Restore files are small
@@ -833,8 +833,8 @@ pub fn adoptRootWindows() !usize {
     try entries.ensureTotalCapacity(alloc, child_count);
 
     for (children[0..child_count]) |win| {
-        // Double-manage guard (parity with handleMapRequest): never re-admit a
-        // window another path already manages.
+        // Same guard as handleMapRequest: never re-admit a window another path
+        // already manages.
         if (tracking.isManaged(win)) continue;
 
         // The WM's own bar window is a root child we created; leave it alone.
@@ -925,13 +925,13 @@ fn unmanageWindow(win: u32) void {
     // with its input model queried BEFORE the grab.
     wincache.removeWindow(win);
 
-    // Capture the covering record and focus ownership BEFORE
-    // tracking.removeWindow (the workspace layer's removeWindow facade ->
-    // unregister) drops the model entry: after that, actions.unmanage could
-    // never know that the closed window held focus (m.focused is already
-    // cleared), so closing a window left the workspace unfocused until a
-    // pointer event re-focused it. Both facts ride ctx into
-    // actions.unmanage, which runs the same close fallback as the hide path.
+    // Capture the covering record and focus ownership BEFORE anything drops
+    // the model entry: afterwards, actions.unmanage could never know that the
+    // closed window held focus (m.focused is already cleared), so closing a
+    // window left the workspace unfocused until a pointer event re-focused it.
+    // Both facts ride ctx into actions.unmanage, which runs the same close
+    // fallback as the hide path -- and which is also the sole unregistrar
+    // (unregister below), so this function does not also drop the entry.
     const model = if (pipeline.initialized) pipeline.model() else null;
     const fs_ws: ?model_mod.WSId = if (model) |m|
         (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(m, win) else null)
@@ -949,12 +949,18 @@ fn unmanageWindow(win: u32) void {
     // fired it from events.zig first, and every hook is idempotent
     // (find-then-clear), so the repeat for the same window is harmless.
     dispatchAll(.onWindowGone, .{win});
-    if (build_options.has_workspaces) tracking.removeWindow(win);
 
     // Drop the MODEL entry, resolve the post-close focus target (fallback
     // tiers) and reconcile under one grab. Idempotent: a window withdrawn
     // via unmap+destroy runs this once per event; unregister/fallback no-op
     // on the second invocation.
+    //
+    // actions.unmanage owns the unregister. This used to ALSO call
+    // tracking.removeWindow (itself just a facade over model.unregister)
+    // behind a `has_workspaces` condition: two unregisters for one withdrawal,
+    // and the build-flag gate meant a no-workspaces build never dropped the
+    // entry here at all, leaving the second call doing different work than the
+    // one it was written to mirror.
     actions.unmanage(&actx, win);
 }
 
@@ -972,7 +978,7 @@ const geometry_mask: u16 =
     xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
     xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
 
-fn sendConfigureNotify(win: u32, rect: geom.Rect) void {
+fn sendConfigureNotify(win: u32, rect: model_mod.Rect) void {
     var ev = std.mem.zeroes(xcb.xcb_configure_notify_event_t);
     ev.response_type = xcb.XCB_CONFIGURE_NOTIFY;
     ev.event = win;
@@ -1001,7 +1007,7 @@ fn sendConfigureNotify(win: u32, rect: geom.Rect) void {
 ///      never retiled; a fallback, not a hot path.
 ///
 /// Returns null when even the fallback fails (window gone).
-fn resolveConfigureGeometry(win: u32) ?geom.Rect {
+fn resolveConfigureGeometry(win: u32) ?model_mod.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
     if (reconcile.truthRect(pipeline.model(), win)) |rect| {
         // Report the border width we actually last sent for this window
@@ -1116,7 +1122,10 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
         return;
     }
 
-    if (pipeline.initialized and tracking.isManaged(win)) {
+    // isValidManagedWindow, not a bare isManaged: every other consumer of this
+    // predicate already filters the invalid-window sentinel first, and one
+    // spelling means a chrome XID cannot slip through this path.
+    if (pipeline.initialized and isValidManagedWindow(win)) {
         handleManagedConfigureRequest(win, event, mask);
         return;
     }
@@ -1132,8 +1141,8 @@ fn sendRequestedConfigure(
     mask: u16,
 ) void {
     const fields = .{
-        .{ xcb.XCB_CONFIG_WINDOW_X, geom.toXcbCoord(event.x) },
-        .{ xcb.XCB_CONFIG_WINDOW_Y, geom.toXcbCoord(event.y) },
+        .{ xcb.XCB_CONFIG_WINDOW_X, model_mod.toXcbCoord(event.x) },
+        .{ xcb.XCB_CONFIG_WINDOW_Y, model_mod.toXcbCoord(event.y) },
         .{ xcb.XCB_CONFIG_WINDOW_WIDTH, event.width },
         .{ xcb.XCB_CONFIG_WINDOW_HEIGHT, event.height },
         .{ xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, event.border_width },
@@ -1355,6 +1364,11 @@ fn parseSizeHintsIntoCache(
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_ws = model_mod.WSId.fromIndex(cur);
+    // One store pass for the whole sweep: each per-window color decision needs
+    // "does this window's workspace have a covering occupant", and asking that
+    // per window made the sweep O(N^2) in store scans.
+    var occupants: [constants.max_workspaces]?model_mod.WindowId = @splat(null);
+    borders.coveringOccupants(pipeline.model(), &occupants);
     for (tracking.allWindows()) |entry| {
         const win = entry.win;
         if (!model_mod.maskedOn(entry.mask, cur_ws)) continue;
@@ -1365,7 +1379,7 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         if (comptime skip_tiled) {
             if (build_options.has_tiling and tilingActive() and tracking.isTiledMode(win)) continue;
         }
-        const color = borders.resolveBorderColor(win);
+        const color = borders.resolveBorderColorWith(win, &occupants);
         // Same CacheMap dedup in both sweep variants: windows with a cache
         // entry skip the XCB call when their color is unchanged; uncached
         // ones get an entry created and colored in one step.
@@ -1397,7 +1411,6 @@ pub fn updateWorkspaceBordersIfNeeded() void {
 
 /// Warn-once latches for client-message diagnostics (see
 /// handleClientMessage): pager loops would otherwise flood the log.
-var warned_active_ignore: bool = false;
 var warned_unmanaged_state: bool = false;
 
 pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
@@ -1407,8 +1420,8 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     // fire once per process so a looping pager cannot flood the log.
     const net_active = atoms.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
-        if (!warned_active_ignore) {
-            warned_active_ignore = true;
+        if (!state.?.warned_active_ignore) {
+            state.?.warned_active_ignore = true;
             log.warn("Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented", .{event.window});
         }
         return;

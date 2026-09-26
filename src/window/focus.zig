@@ -13,7 +13,6 @@ const pipeline = @import("pipeline");
 const model_mod = @import("model");
 
 const atoms = @import("atoms");
-const cycle = @import("cycle");
 const requests = @import("requests");
 // Private transition-layer gate for mutable model access (per-owner token,
 // see tracking.gate).
@@ -32,12 +31,6 @@ const State = struct {
     /// bookkeeping). Not a second store; readers go through getFocused().
     last_applied: ?u32 = null,
     suppress_reason: core.FocusSuppressReason = .none,
-    /// True when the most recent prepareFocus returned `.none` because the
-    /// target resolved to a no_input input model (as opposed to the
-    /// already-applied dedup). Call sites that mutate the model themselves
-    /// read `lastRejectWasNoInput()` synchronously after prepareFocus.
-    no_input_reject: bool = false,
-
     // Most recent X event timestamp, maintained for external consumers that
     // need it for protocol ordering. focus.zig itself always uses CurrentTime
     // (0), see "Timestamp handling" below.
@@ -102,15 +95,6 @@ pub inline fn getSuppressReason() core.FocusSuppressReason {
 /// private `state`.
 pub fn protocolParityHolds() bool {
     return getFocused() == state.?.last_applied;
-}
-
-/// True when the most recent prepareFocus returned `.none` because the
-/// target resolved to a no_input input model. prepareFocus returns `.none`
-/// for both the no_input verdict and the already-applied dedup; call sites
-/// that write the model on their own read this right after prepareFocus to
-/// tell the two apart (a no_input target must never take model focus).
-pub inline fn lastRejectWasNoInput() bool {
-    return state.?.no_input_reject;
 }
 
 /// True when an incoming EnterNotify should be silently ignored.
@@ -244,18 +228,10 @@ const CommitFlags = struct {
     /// and globally_active hover (raising is its only focus signal).
     raise: bool,
 
-    /// Send WM_TAKE_FOCUS after xcb_set_input_focus. Required for
-    /// locally_active and globally_active input models.
-    send_wm_take_focus: bool,
-
-    /// Authoritative WM_TAKE_FOCUS advertisement from the caller's own live
-    /// protocol query (setFocus path, one round trip saved).
+    /// Authoritative WM_TAKE_FOCUS advertisement: the caller already holds a
+    /// live protocol answer, so the round trip is saved. True means "the new
+    /// input focus is ours, advertise it".
     take_focus_known: bool,
-
-    /// Bump the core focus fact so focus-consuming surfaces (e.g. the bar's
-    /// title segment) redraw. False only inside a server grab; the caller
-    /// triggers the synchronous in-grab redraw (bar.redrawInsideGrab) instead.
-    schedule_bar: bool,
 
     /// New suppress_reason. setFocus derives it via suppressionFor(); direct
     /// callers hardcode `.none`.
@@ -296,6 +272,13 @@ pub const ClearFocusIntent = struct {
 pub const FocusTransition = union(enum) {
     set: SetFocusIntent,
     clear: ClearFocusIntent,
+    /// Focus must not move: the target's input model is `no_input`. Distinct
+    /// from `.none`, which is the already-applied dedup. This used to be a
+    /// module-global flag read synchronously after the call, with the rule
+    /// "a no_input target must never take model focus" living only in a
+    /// comment; as a union limb the compiler carries the verdict to every
+    /// consumer and no read can be forgotten or reordered.
+    no_input: void,
     none: void,
 };
 
@@ -326,9 +309,7 @@ fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
         .flags = .{
             .set_input_focus = opts.force_set_input_focus or resolved.model != .globally_active,
             .raise = opts.raise,
-            .send_wm_take_focus = true,
             .take_focus_known = resolved.take_focus,
-            .schedule_bar = true,
             .new_suppress = opts.new_suppress,
         },
     } };
@@ -336,7 +317,6 @@ fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
 
 pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     const conn = core.getState().conn;
-    state.?.no_input_reject = false;
     if (window.isInvalidWindow(win)) return .none;
 
     // Liveness guard first: a destroyed window must never be re-focused or
@@ -349,13 +329,11 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
 
     const resolved = window.peekInputModelResolved(win) orelse window.provisionalResolution();
     if (resolved.model == .no_input) {
-        // Expose the no_input verdict to call sites: it returns the same
-        // `.none` as a dedup skip, and callers that mutate the model on their
-        // own need to tell them apart (a no_input target must never take
-        // model focus, and a lone no_input window should leave X focus on the
-        // root rather than anywhere it can't be reached).
-        state.?.no_input_reject = true;
-        return .none;
+        // Its own limb, not `.none`: callers that mutate the model on their
+        // own must be able to tell this apart from a dedup skip (a no_input
+        // target must never take model focus, and a lone no_input window
+        // should leave X focus on the root rather than anywhere unreachable).
+        return .no_input;
     }
 
     // Dedup: the same window already owns applied focus. A no-op for most
@@ -432,10 +410,14 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             if (intent.flags.set_input_focus) focusNow(conn, intent.win);
             if (intent.flags.raise) requests.raiseWindow(conn, intent.win);
 
-            if (intent.flags.send_wm_take_focus and intent.flags.take_focus_known)
+            if (intent.flags.take_focus_known)
                 window.sendWMTakeFocusKnown(conn, intent.win, 0, true);
 
-            if (intent.flags.schedule_bar) core.focus.bump();
+            // Always bump: focus-consuming surfaces (the bar's title segment)
+            // must redraw whenever focus moved. Inside a server grab the
+            // redraw happens synchronously via bar.redrawInsideGrab, and the
+            // fact bump is what orders it.
+            core.focus.bump();
 
             advertiseActiveWindow(intent.win);
         },
@@ -443,7 +425,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             if (intent.old) |old_win| grabButtons(old_win, false);
             clearTail();
         },
-        .none => {},
+        .no_input, .none => {},
     }
 }
 
@@ -523,6 +505,9 @@ pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) voi
         pipeline.focusOnlyCommit(ft);
         return;
     }
+    // The duty runs on the .before leg only; reaching here means this is that
+    // call site, so the handoff must still be pending.
+    std.debug.assert(duty != null);
     pipeline.reconcileGrabFocus(.{}, ft, .before, duty);
 }
 
@@ -570,43 +555,20 @@ pub fn drainTilingOpSettle() void {
 
 var cycle_buf: [model_mod.store_capacity]u32 = undefined;
 
-/// Build an ordered list of currently-visible windows for cycling.
-///
-/// A covering (fullscreen) occupant owns the viewed workspace's screen: it
-/// is the only window actually on screen, so the cycle pool collapses to it.
-/// Cycling then re-focuses/re-raises the occupant instead of fading focus
-/// into windows parked behind fullscreen.
-/// Otherwise, all visible windows in tracking-table order (the store scan's
-/// per-entry mask/presence, so no per-window re-lookups); the pool list is
-/// never fed. Emits exactly the predicate `visibleEntry` uses -- skipped when
-/// parked, tagged-on-current OR in view-all (`all_view_active`) -- so the
-/// cycle pool can never disagree with the focus-visible model (this was the
-/// prior divergence: the pool tested the tag bit while visibleEntry honored
-/// view-all).
-/// Returns the count written into `cycle_buf`, or 0 if none.
+/// Count of currently-visible windows on the current workspace, in on-screen
+/// order, written into `cycle_buf`; 0 when none. The ordering itself lives in
+/// model.collectCyclePool, which anchors the cycle on the workspace's
+/// tiled_order -- so Mod+j/k follows the arrangement and a move/swap reorders
+/// the cycle with it.
 fn collectVisibleWindows() usize {
     const m = pipeline.model();
-    if (model_mod.coveringOccupantOnWs(m, m.current)) |occ| {
-        cycle_buf[0] = occ;
-        return 1;
-    }
-    var len: usize = 0;
-    for (tracking.allWindows()) |entry| {
-        if (len == cycle_buf.len) break;
-        // Mirrors model.visibleEntry: parked never cycles, and the tag test is
-        // relaxed while all_view_active drives visibility (see the parent doc).
-        if (entry.presence == .parked) continue;
-        if (!m.all_view_active and !model_mod.maskedOn(entry.mask, m.current)) continue;
-        cycle_buf[len] = entry.win;
-        len += 1;
-    }
-    return len;
+    return model_mod.collectCyclePool(m, m.current, cycle_buf[0..]);
 }
 
 /// Returns the next (forward=true) or previous (forward=false) index in a
 /// circular list of `len` elements, starting from `idx`.
 inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
-    return cycle.wrapIndex(idx, if (forward) 1 else -1, len);
+    return model_mod.wrapIndex(idx, if (forward) 1 else -1, len);
 }
 
 /// Resolve the visible window a focus-cycle step would land on, or null when

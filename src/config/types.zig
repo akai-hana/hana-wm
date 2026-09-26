@@ -156,7 +156,13 @@ pub const Action = union(enum) {
                 for (acts) |*a| a.deinit(allocator);
                 allocator.free(acts);
             },
-            else => {},
+            // Payload-free variants.
+            .all_workspaces, .close_window, .dump_state, .grow_stack, .minimize_window, .move_to_workspace, .move_window_next, .move_window_prev, .pin_window, .reload_config, .reload_hana, .swap_master, .switch_workspace, .toggle_bar_position, .toggle_bar_visibility, .toggle_floating_window, .toggle_fullscreen, .toggle_prompt, .toggle_tag, .unminimize, .unminimize_all => {},
+            // Copy payloads (Dir, u8): nothing to free.
+            .set_master_width, .set_master_count, .cycle_focus, .cycle_layout, .cycle_variants, .scroll_view => {},
+            // Deliberately no `else`: a new Action variant carrying an owned
+            // allocation has to name its free here, at compile time. A
+            // catch-all would make every future payload leak by default.
         }
     }
 };
@@ -164,7 +170,9 @@ pub const Action = union(enum) {
 pub const Keybind = struct {
     modifiers: u16, // u16 per XCB spec; xcb_grab_key rejects wider types
     keysym: u32, // xcb_keysym_t is u32 by X11 protocol spec; never narrowed
-    keycode: ?u8 = null,
+    // No keycode: it is derived from the live keyboard, not authored, and
+    // storing it here made a config-reload's keycodes indistinguishable from
+    // the config file's contents. `keybind.ResolvedBind` carries it instead.
     action: Action,
 };
 

@@ -74,7 +74,7 @@ var g_slot_width: [subs.len]u16 = @splat(0);
 /// Last drawn width of readout `idx` (the row reservation): 0 until the first
 /// draw (and forever when a readout has no value to show, e.g. `batt` with no
 /// battery), so an absent readout's slot fully collapses and never opens a
-/// gap -- the bar lays out exactly what the segment paints. Mirrors segdraw's
+/// gap -- the bar lays out exactly what the segment paints. Mirrors scaffold's
 /// widthState default. Read by the segment's naturalWidth hook.
 var g_last: [subs.len][render_buf_len]u8 = undefined;
 var g_len: [subs.len]usize = @splat(0);

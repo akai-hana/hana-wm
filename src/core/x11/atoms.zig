@@ -45,7 +45,7 @@ pub const AtomCache = struct {
     _NET_WM_PID: u32,
     // Root-window focus advertisement: read by focus.zig's setFocus path.
     _NET_ACTIVE_WINDOW: u32,
-    // X resource-database atom: read by display/scale.zig for Xft.dpi.
+    // X resource-database atom: read by display/dpi.zig for Xft.dpi.
     RESOURCE_MANAGER: u32,
 };
 

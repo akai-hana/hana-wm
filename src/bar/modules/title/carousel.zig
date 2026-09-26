@@ -41,7 +41,7 @@ fn cyclePx(text_w: u16) f32 {
 }
 
 /// Frame cadence follows the detected monitor refresh rate (see
-/// refresh.detectedHz), so each frame advances by one display period
+/// hz.detectedHz), so each frame advances by one display period
 /// and motion is locked to the monitor's scanout. Motion itself is
 /// sub-pixel: the fractional offset is handed straight to cairo, so at
 /// high refresh rates frames differ by less than a pixel and scrolling

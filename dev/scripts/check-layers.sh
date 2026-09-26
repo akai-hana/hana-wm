@@ -3,7 +3,7 @@
 # import each other (both are core systems) around a hub-and-spoke model of
 # a single core model + sink. These rules enforce the one policy the
 # split actually cares about -- wire mutations belong behind the reconcile
-# boundary, and the pure layers (model/geom/tiling/config) must stay xcb-pure --
+# boundary, and the pure layers (model/tiling/config) must stay xcb-pure --
 # plus formatting. Each rule
 
 # exits non-zero when its policy is violated outside a documented allowlist.
@@ -65,8 +65,11 @@ wire_allowed() {
 
         # Root-window keygrab installation at startup and click-focus
         # stack-mode: startup is pre-WM-loop; the restack routes through
-        # sync force_restack in a later cleanup.
-        src/main.zig|src/input/input.zig) ;;
+        # sync force_restack in a later cleanup. main no longer appears here:
+        # its root-event-mask claim and flush moved into
+        # core/x11/requests.zig (claimWindowManagerRole / flush), so the
+        # composition root no longer names xcb.
+        src/input/input.zig) ;;
 
         # Wire PRIMITIVES: core/x11/requests.zig hosts configureWindow /
         # raiseWindow / setBorderPixel / grabServer, and core/x11/atoms.zig
@@ -120,10 +123,10 @@ wire_allowed() {
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
         # buffer after others' queued requests). events.zig is the core
-        # event-loop flush; refresh.zig is the RandR (bar-side) detection
+        # event-loop flush; hz.zig is the RandR (bar-side) detection
         # flush; prompt.zig is the bar's keyboard grab-drop flush. These are
         # documented non-mutations, not Rule-1 sends.
-        src/core/loop/events.zig|src/bar/refresh.zig|src/bar/modules/prompt/prompt.zig) ;;
+        src/core/loop/events.zig|src/bar/hz.zig|src/bar/modules/prompt/prompt.zig) ;;
 
         *) return 1 ;;
     esac
@@ -180,23 +183,23 @@ while IFS= read -r line; do
     viol "rule 2 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
-# Rule 3: no xcb imports/references in the pure architecture vocabulary
-# (model.zig, geom.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+# Rule 3: no xcb imports/references in the pure model vocabulary, tiling/, or
+# config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
 # awk strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
-# it sweeps for any `xcb` token in the pure model/geom files, tiling/, and
-# config/ after
+# it sweeps for any `xcb` token in the model file, tiling/, and config/ after
 # comment removal -- imports AND re-exported bare references alike. (The
 # complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
 # a pure module can import an xcb-using sibling and pass there, so Rule 3, not
-# that scan, is the last line of defense on bodies. Only the xcb-free
-# vocabulary files are swept (model.zig, geom.zig): their pure/ siblings carry
-# no xcb tokens by construction, and architecture/contract.zig -- now a
-# sibling of model/geom rather than a pure/ file -- declares xcb event TYPES
-# in its body, so it cannot sit on this side of the sweep.)
+# that scan, is the last line of defense on bodies. Only the model file is
+# swept: it is the pure root (state plus the Rect/Margins value objects and
+# their coordinate helpers), its pure/ siblings carry no xcb tokens by
+# construction, and architecture/contract.zig -- its sibling rather than a
+# pure/ file -- declares xcb event TYPES in its body, so it cannot sit on this
+# side of the sweep.)
 hits=$(
     while IFS= read -r f; do
         awk '
@@ -212,8 +215,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/architecture/model.zig src/core/architecture/geom.zig \
-                  src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/model.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

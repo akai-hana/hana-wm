@@ -19,6 +19,7 @@ const log = @import("log");
 const config = @import("config");
 const input = @import("input");
 const window = @import("window");
+const ledger = @import("ledger");
 const focus = @import("focus");
 
 const signals = @import("signals");
@@ -80,7 +81,7 @@ inline fn asHandler(comptime f: anytype) EventHandler {
 
 fn handleExpose(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_expose_event_t, event);
-    if (build_options.has_bar) surfaces.handleExpose(e);
+    surfaces.handleExpose(e);
 }
 
 fn handlePropertyNotify(event: *anyopaque) void {
@@ -91,6 +92,18 @@ fn handlePropertyNotify(event: *anyopaque) void {
 // Routes ConfigureNotify to the fullscreen deferred-bar-hide/show logic.
 fn handleConfigureNotify(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_configure_notify_event_t, event);
+    // A client that resizes itself while we had it parked offscreen has undone
+    // our park, and the off-workspace elision would not notice. Flag it so the
+    // next reconcile re-parks it (ledger.markParkedDirty).
+    //
+    // The managed-window filter is load-bearing, not an optimization: this
+    // event fires for every client on the display, including the ones we do
+    // not manage, and markParkedDirty already ignores anything not currently
+    // parked -- so an unfiltered call would be a wasted ledger lookup per
+    // configure event on the whole session. It also means a managed window's
+    // OWN configure (the echo of a park we just sent) sets a flag we then
+    // clear, costing one extra park resend per workspace switch and no more.
+    if (window.isValidManagedWindow(e.window)) ledger.markParkedDirty(e.window);
     window.dispatchAll(.notifyConfigureIfPending, .{ e.window, e.width, e.height });
 }
 
@@ -152,9 +165,10 @@ const dispatch_table = blk: {
 /// disabling refresh re-detection, misrouting the event in dispatch, and
 /// reclassifying a RandR event as a coalesceable motion in isMotion.
 fn isRandrEvent(t: u8) bool {
-    // RandR is a bar feature (render pacing); without a compiled bar the
-    // extension is never queried and no event can be one.
-    if (!build_options.has_bar) return false;
+    // RandR is a bar feature (render pacing). With no bar compiled in,
+    // `randrFirstEvent` is the no-op, which reports 0, and the `r != 0` test
+    // below is what makes this false -- so there is no build flag to consult
+    // here, and adding a hook to the contract cannot leave this unguarded.
     const r = surfaces.randrFirstEvent();
     return (r != 0 and t >= r and t <= r + 1);
 }
@@ -177,17 +191,24 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     if (isRandrEvent(event_type)) {
         // Pass the raw event: a CRTC-change payload carries the active mode id,
         // letting the bar resolve the rate from its cached mode table with zero
-        // XCB round-trips (see refresh.handleRandrNotifyEvent).
+        // XCB round-trips (see hz.handleRandrNotifyEvent).
         surfaces.handleRandrEvent(event);
         return;
     }
 
-    const idx = event_type & masks.synthetic_event_mask; // strip XCB synthetic-event bit
+    // `event_type` is the RAW byte. Bit 7 is XCB's SendEvent flag, so masking
+    // it off is how a synthetic event recovers its real core code -- but the
+    // same mask turns an EXTENSION event (bases at/above 0x80) into its low
+    // seven bits, aliasing it onto some unrelated core event. RandR is handled
+    // above; anything else in the extension range must be dropped here rather
+    // than aliased, which is why this test precedes the mask instead of relying
+    // on the bounds check after it.
+    if (event_type >= 0x80) return;
 
-    // Guard the fixed-size table: extension events live above XCB_GE_GENERIC
-    // and would index out of bounds. hana only selects core events today, but
-    // the moment anyone subscribes to an extension this would become a
-    // memory-safety bug; cheap insurance.
+    const idx = event_type & masks.core_event_code_mask; // strip XCB synthetic-event bit
+
+    // Bounds guard, belt to the 0x80 suspenders: hana only selects core events
+    // today, so nothing valid can reach here out of range.
     if (idx >= dispatch_table.len) return;
     if (dispatch_table[idx]) |handler| handler(event);
 }
@@ -212,7 +233,9 @@ const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
 fn fillGrabCookies(cookies: []CookieEntry) usize {
     var n: usize = 0;
     const cs = core.getState();
-    for (cs.config.keybindings.items) |kb| {
+    // The compiled list, not cs.config.keybindings: keycodes are derived from
+    // the live keyboard and deliberately not stored in config.
+    for (input.resolvedKeybinds()) |kb| {
         const keycode = kb.keycode orelse continue;
 
         // Check once per keybinding that the full lock-modifier set fits.
@@ -340,9 +363,19 @@ fn handleConfigReload() !void {
     // shutdown), so this reload never sees a null state.
     input.buildKeybinds(new_ptr.keybindings.items);
 
-    // Swap pointers: new config becomes live, old config is isolated.
-    const old_ptr = cs.config;
-    cs.config = new_ptr;
+    // Per-subsystem change detection, BEFORE the swap: it reads both boxes, and
+    // the swap below releases the old one. Detecting first is what lets the
+    // hand-off be a single core call instead of a pointer swap that leaves two
+    // sites reasoning about who frees what. Only tear down and rebuild the
+    // subsystems whose config actually changed -- e.g. a bar color tweak should
+    // not regrab keybindings, and a keybinding change should not rebuild the
+    // bar.
+    const changes = config.detectChanges(cs.config, new_ptr);
+
+    // Ownership moves to the new box and the displaced one is released in the
+    // same call, so shutdown's `core.deinitOwnedConfig()` and this reload can
+    // never both free the same box.
+    core.replaceOwnedConfig(new_ptr);
     committed = true;
 
     // Freeze the now-live config as the re-exec source: a later reload_hana
@@ -350,21 +383,11 @@ fn handleConfigReload() !void {
     // (possibly mid-edit or broken) config files.
     config.refreshSnapshot(cs.alloc);
 
-    // Per-subsystem change detection: only tear down and rebuild the
-    // subsystems whose config actually changed.  E.g. a bar color tweak
-    // should not regrab keybindings, and a keybinding change should not
-    // rebuild the bar.
-    const changes = config.detectChanges(old_ptr, new_ptr);
-
     if (build_options.has_bar) {
-        if (changes.bar) {
-            surfaces.onReload();
-        } else {
-            // The bar survives this reload, so re-point its config copy at the
-            // live config before the old one is freed below (same reason the
-            // applyReload failure path re-points).
-            surfaces.refreshConfig();
-        }
+        // The bar survives a reload that does not touch it: it reads the live
+        // config at draw time, so nothing has to be re-pointed and no copy can
+        // be left borrowing the config the caller is about to free.
+        if (changes.bar) surfaces.onReload();
     }
     if (changes.tiling) {
         actions.applyConfigReload();
@@ -376,11 +399,6 @@ fn handleConfigReload() !void {
         // Rebuild after the swap so borrowed key slices point into the new config's memory.
         window.buildRulesMap();
     }
-
-    // Free the displaced old config after subsystem reloads have moved on
-    // (the pointer box too; core.init() allocated it with alloc.create).
-    old_ptr.deinit(cs.alloc);
-    cs.alloc.destroy(old_ptr);
 
     if (changes.keys) grabKeybindings();
 
@@ -395,10 +413,6 @@ fn handleConfigReload() !void {
 // (which never returns: parent exits immediately, child execs).
 fn handleReexec() !void {
     const cs = core.getState();
-    const self_path = restart.selfPath() orelse {
-        log.err("Re-exec aborted: executable path unknown", .{});
-        return error.ExecutablePathUnknown;
-    };
     log.info("Re-executing new binary", .{});
 
     const path = try persist.defaultStatePath(cs.alloc);
@@ -408,15 +422,17 @@ fn handleReexec() !void {
     defer cs.alloc.free(path);
     try persist.save(cs.alloc, pipeline.model(), path);
 
-    // Hand the successor the frozen last-good config via HANA_CONFIG_DIR, so
-    // this re-exec swaps ONLY the binary. A re-exec boot that finds no
-    // snapshot (no user config was ever loaded) falls back to the normal
+    // One record for the whole hand-off. The snapshot is the frozen last-good
+    // config, so this re-exec swaps ONLY the binary; a re-exec boot that finds
+    // no snapshot (no user config was ever loaded) falls back to the normal
     // search, which reproduces today's fallback-only behavior.
-    if (config.reexecSnapshotPathZ()) |snap_z|
-        _ = c.setenv("HANA_CONFIG_DIR", snap_z, 1);
+    const handoff = restart.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
+        log.err("Re-exec aborted: executable path unknown", .{});
+        return error.ExecutablePathUnknown;
+    };
 
     xcb.xcb_disconnect(cs.conn);
-    restart.execNext(self_path, path);
+    restart.execNext(handoff);
 }
 
 /// One comptime-parameterized drain shared by the batch poll loop and the
@@ -466,7 +482,7 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
     // Exclude the RandR window before stripping the send_event bit; see
     // isRandrEvent for the raw-compare-before-mask rationale.
     if (isRandrEvent(t)) return false;
-    return (t & masks.synthetic_event_mask) == xcb.XCB_MOTION_NOTIFY;
+    return (t & masks.core_event_code_mask) == xcb.XCB_MOTION_NOTIFY;
 }
 
 /// Shared motion-run collapse used by both the batch loop and the queued
@@ -511,7 +527,7 @@ fn handleXcbEvents() void {
     // batch (focus/workspace/tiling/fullscreen). Any bump during dispatch OR
     // the post-batch drains below (pending focus confirm, tiling settle)
     // counts, so the comparison runs after the drains.
-    const facts_before = core.getState().facts;
+    facts_before = core.getState().facts;
 
     // Cap the number of events dispatched per batch so a chatty client
     // flooding PropertyNotify/ConfigureNotify can't starve the signal pipe and
@@ -575,28 +591,67 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     spawn.drainPendingSpawns();
 
-    if (build_options.has_bar)
-        surfaces.updateIfDirty() catch |err| log.err("Bar post-batch update failed: {}", .{err});
-    // Must run after the event-draining loop above: any EnterNotify a tiling
-    // reflow generated has to have already been dispatched (and filtered,
-    // since suppression is still active) before this lifts suppression.
-    // See beginTilingOpSettle's doc comment in focus.zig.
-    focus.drainTilingOpSettle();
-    // Run the per-batch border sweep only when a border-relevant fact
-    // actually changed this batch; a motion/expose-only batch skips the
-    // unconditional O(N) walk. Wire sends are unchanged either way (the sweep
-    // is CacheMap-dedup'd), so steady-state output is identical.
-    const facts = core.getState().facts;
-    if (!std.meta.eql(facts_before, facts)) {
-        window.updateWorkspaceBordersIfNeeded();
-    }
+    // The post-batch stages are ORDER-SENSITIVE, and the order used to be
+    // expressed only by the order these statements happened to be written in.
+    // As a table the sequence is one list: inserting a stage means inserting a
+    // line, and the reason each one sits where it does stays attached to it.
+    const post_batch_stages = [_]PostBatchStage{
+        // Repaint the bar. Before the focus settle below, because that lift can
+        // generate the EnterNotify this repaint needs to reflect.
+        .{ .name = "bar update", .run = postBatchBarUpdate },
+        // Must run after the event-draining loop above: any EnterNotify a
+        // tiling reflow generated has to have already been dispatched (and
+        // filtered, since suppression is still active) before this lifts
+        // suppression. See beginTilingOpSettle's doc comment in focus.zig.
+        .{ .name = "focus settle", .run = focus.drainTilingOpSettle },
+        // The border sweep, only when a border-relevant fact actually changed
+        // this batch; a motion/expose-only batch skips the unconditional O(N)
+        // walk. Wire sends are unchanged either way (the sweep is
+        // CacheMap-dedup'd), so steady-state output is identical. Last, because
+        // it reads the model the two stages above may have moved.
+        .{ .name = "border sweep", .run = postBatchBorderSweep },
+    };
+    for (post_batch_stages) |stage| stage.run();
 
     _ = xcb.xcb_flush(conn);
 }
 
-pub fn run() !void {
+/// Facts as of the start of the current event batch, for the post-batch border
+/// sweep to diff against. File-scope because the sweep runs from a stage table.
+var facts_before: core.Facts = undefined;
+
+const PostBatchStage = struct {
+    /// Only for diagnostics/debugging: a stage that hangs or misbehaves is
+    /// otherwise indistinguishable from the drain above it.
+    name: []const u8,
+    run: *const fn () void,
+};
+
+/// Post-batch stages live in named functions so the table above reads as a
+/// list of stages rather than as bodies inline in a struct literal.
+fn postBatchBarUpdate() void {
+    surfaces.updateIfDirty();
+}
+
+fn postBatchBorderSweep() void {
+    const facts = core.getState().facts;
+    if (std.meta.eql(facts_before, facts)) return;
+    window.updateWorkspaceBordersIfNeeded();
+}
+
+pub fn run() void {
     const cs = core.getState();
     const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(cs.conn);
+    // A dead connection reports -1. Polling -1 sets no revents and never
+    // returns POLLNVAL, and the loop's default deadline is -1 (block forever),
+    // so the process would sit here with a broken X connection and no way to
+    // learn it: no hang, no exit, no log line. Treat it as the end of the
+    // session instead.
+    if (x_fd < 0) {
+        log.err("X connection is no longer usable (fd={d}); ending the event loop", .{x_fd});
+        lifecycle.quit();
+        return;
+    }
     const signal_fd: std.posix.fd_t = signals.readFd();
 
     var fds = [_]std.posix.pollfd{
@@ -656,7 +711,7 @@ pub fn run() !void {
             handleReexec() catch |err| log.err("Re-exec failed: {}", .{err});
 
         if (ready == 0 and poll_timeout_ms >= 0) {
-            if (build_options.has_bar) surfaces.onPollWakeup();
+            surfaces.onPollWakeup();
             _ = xcb.xcb_flush(cs.conn);
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             log.err("X11 connection error, shutting down", .{});
@@ -669,7 +724,7 @@ pub fn run() !void {
         // performs synchronous XCB round-trips, so it must run here, outside
         // event dispatch, never mid-batch. RandR is a bar feature: without a
         // bar the extension is never queried and nothing is ever pending.
-        if (build_options.has_bar) surfaces.runPendingRedetect(cs.conn);
+        surfaces.runPendingRedetect(cs.conn);
 
         if (build_options.has_bar) surfaces.updateClock();
     }
