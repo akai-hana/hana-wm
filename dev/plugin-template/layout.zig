@@ -71,18 +71,23 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 // This layout's registry contribution: metadata + the dispatch hook. The
 // name is the config identity and the cycle-order key; icon/indicators are
 // rendered by the bar's layout/variants segments (no core switch over
-// layouts). `variant_count` must match the variants your compute actually
-// branches on; `fifo_variant` marks the variant index that toggles fifo
-// spawn; `variant_parse` maps config value-strings ("lifo"/"fifo", ...) to
-// variant indices. `tiling.layoutModule` fills name/icon/compute (typed
-// `*const fn(*const View, *List)`, no opaque cast) — mirror grid.zig /
-// master.zig.
-pub const module = tiling.layoutModule("template", "[T]", compute, .{
-    .variant_count = 1, // TODO: number of cycle_variant steps this layout has
-    // .fifo_variant = 1,             // variant index that toggles fifo spawn
-    // .variant_parse = tiling.variantParse(&.{ "rigid", "relaxed" }), // value-string map
+// layouts). Your variants go in the `variants` table below: one row per
+// cycle_variant step, each with its config value-string and its bar
+// indicator. `tiling.layoutModule` derives `variant_count`, `variant_parse`,
+// `indicators` and `fifo_variant` FROM THAT TABLE, so the four cannot drift
+// apart and there is no count to keep in sync by hand. To read your own
+// variant's ordinal inside `compute`, use
+// `tiling.variantIndex(&variants, "name")` rather than a literal index
+// (mirror grid.zig / monocle.zig). `tiling.layoutModule` also fills
+// name/icon/compute (typed `*const fn(*const View, *List)`, no opaque cast).
+const variants = [_]tiling.Variant{
+    // TODO: one row per cycle_variant step, e.g.
+    // .{ .name = "rigid", .indicator = "[^]" },
+    // .{ .name = "relaxed", .indicator = "=^=" },
+};
+
+pub const module = tiling.layoutModule("template", "[T]", compute, &variants, .{
     // .slotWidth = slotWidth,        // scroll viewport addon (scroll.zig)
     // .maxOffset = maxOffset,        // scroll viewport addon
     // .preReconcile = preReconcile,  // scroll viewport addon
-    // .indicators = &.{ "[^]", "=^=" }, // bar variants-segment strings
 });

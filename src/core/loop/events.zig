@@ -7,14 +7,6 @@ const core = @import("core");
 const xcb = core.xcb;
 const masks = @import("masks");
 
-// libc setenv for the re-exec hand-off's config-snapshot pin (HANA_CONFIG_DIR).
-// Mirroring restart.zig's pattern: the stdlib has no setenv wrapper, and the
-// re-exec path already relies on libc for exec/setenv. The value is freed by
-// no one by design -- it must outlive execv (which inherits environ).
-const c = @cImport({
-    @cInclude("stdlib.h");
-});
-
 const log = @import("log");
 const config = @import("config");
 const input = @import("input");
@@ -314,7 +306,7 @@ fn handleConfigReload() !void {
     const cs = core.getState();
 
     var source: config.DefaultSource = .fallback;
-    // Load the LIVE config tree, never the re-exec snapshot HANA_CONFIG_DIR
+    // Load the LIVE config tree, never the re-exec snapshot restart.config_dir_env
     // points at: the pin stays set for the whole process lifetime after the
     // first reload_hana, and honoring it here would re-read the frozen last-
     // good snapshot instead of the user's freshly edited files, so bind/theme
@@ -527,7 +519,7 @@ fn handleXcbEvents() void {
     // batch (focus/workspace/tiling/fullscreen). Any bump during dispatch OR
     // the post-batch drains below (pending focus confirm, tiling settle)
     // counts, so the comparison runs after the drains.
-    facts_before = core.getState().facts;
+    const facts_before = core.getState().facts;
 
     // Cap the number of events dispatched per batch so a chatty client
     // flooding PropertyNotify/ConfigureNotify can't starve the signal pipe and
@@ -595,36 +587,54 @@ fn handleXcbEvents() void {
     // expressed only by the order these statements happened to be written in.
     // As a table the sequence is one list: inserting a stage means inserting a
     // line, and the reason each one sits where it does stays attached to it.
-    const post_batch_stages = [_]PostBatchStage{
+    const post_batch_stages = .{
         // Repaint the bar. Before the focus settle below, because that lift can
         // generate the EnterNotify this repaint needs to reflect.
-        .{ .name = "bar update", .run = postBatchBarUpdate },
+        .{ .name = "bar update", .body = StageFn(postBatchBarUpdate){} },
         // Must run after the event-draining loop above: any EnterNotify a
         // tiling reflow generated has to have already been dispatched (and
         // filtered, since suppression is still active) before this lifts
         // suppression. See beginTilingOpSettle's doc comment in focus.zig.
-        .{ .name = "focus settle", .run = focus.drainTilingOpSettle },
+        .{ .name = "focus settle", .body = StageFn(focus.drainTilingOpSettle){} },
         // The border sweep, only when a border-relevant fact actually changed
         // this batch; a motion/expose-only batch skips the unconditional O(N)
         // walk. Wire sends are unchanged either way (the sweep is
         // CacheMap-dedup'd), so steady-state output is identical. Last, because
         // it reads the model the two stages above may have moved.
-        .{ .name = "border sweep", .run = postBatchBorderSweep },
+        .{ .name = "border sweep", .body = PostBatchBorderSweep{ .facts_before = facts_before } },
     };
-    for (post_batch_stages) |stage| stage.run();
+    // inline for: a tuple has no runtime iterator, and each element is a
+    // distinct closure type, so the dispatch must be unrolled.
+    inline for (post_batch_stages) |stage| stage.body.run();
 
     _ = xcb.xcb_flush(conn);
 }
 
-/// Facts as of the start of the current event batch, for the post-batch border
-/// sweep to diff against. File-scope because the sweep runs from a stage table.
-var facts_before: core.Facts = undefined;
+/// Post-batch stages live in named functions so the table in handleXcbEvents
+/// reads as a list of stages rather than as bodies inline in a struct literal.
+/// Each entry is a value-capturing struct with a `run(self)` method -- the
+/// codebase's closure idiom, same shape as the reconcile bodies in
+/// pipeline.zig -- so a stage can hold THIS batch's state. The table is a
+/// TUPLE, not an array: the stages have different captured types, and an array
+/// would have to erase them behind one uniform `body: anytype` field (which is
+/// not a legal field type anyway).
+///
+/// This used to be a bare `*const fn () void` plus a file-scope
+/// `facts_before` global, which made a batch's snapshot reachable from anywhere
+/// in the file and impossible to hand to a second batch.
+/// The border-sweep stage: skips the unconditional O(N) window walk unless a
+/// border-relevant fact actually changed during the batch. `facts_before` is
+/// the snapshot taken at the top of THIS batch, carried in the stage value
+/// rather than read from a file global. Declared as a type (not a
+/// `-> type` factory) because the snapshot is a runtime value: a function
+/// returning a type is comptime-evaluated, so it cannot take one.
+const PostBatchBorderSweep = struct {
+    facts_before: core.Facts,
 
-const PostBatchStage = struct {
-    /// Only for diagnostics/debugging: a stage that hangs or misbehaves is
-    /// otherwise indistinguishable from the drain above it.
-    name: []const u8,
-    run: *const fn () void,
+    fn run(self: @This()) void {
+        if (std.meta.eql(self.facts_before, core.getState().facts)) return;
+        window.updateWorkspaceBordersIfNeeded();
+    }
 };
 
 /// Post-batch stages live in named functions so the table above reads as a
@@ -633,10 +643,14 @@ fn postBatchBarUpdate() void {
     surfaces.updateIfDirty();
 }
 
-fn postBatchBorderSweep() void {
-    const facts = core.getState().facts;
-    if (std.meta.eql(facts_before, facts)) return;
-    window.updateWorkspaceBordersIfNeeded();
+/// Wraps a stateless `fn () void` in the closure shape the stage table holds.
+/// A no-op adapter rather than a second dispatch mechanism.
+fn StageFn(comptime f: *const fn () void) type {
+    return struct {
+        fn run(_: @This()) void {
+            f();
+        }
+    };
 }
 
 pub fn run() void {
@@ -654,10 +668,21 @@ pub fn run() void {
     }
     const signal_fd: std.posix.fd_t = signals.readFd();
 
-    var fds = [_]std.posix.pollfd{
-        .{ .fd = x_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 },
+    // Fixed slots first (x_fd, signal_fd) so the fd_xcb/fd_signal indices stay
+    // valid, then one slot per in-flight spawn pipe. The spawn count changes as
+    // commands come and go, so the set is a slice rebuilt each round rather
+    // than a fixed array: this is the "dynamic fd count" the item warns about,
+    // and it is bounded by spawn.max_read_fds.
+    var poll_buf: [2 + spawn.max_read_fds]std.posix.pollfd = undefined;
+    var spawn_fds: [spawn.max_read_fds]std.posix.fd_t = undefined;
+    poll_buf[fd_xcb] = .{ .fd = x_fd, .events = std.posix.POLL.IN, .revents = 0 };
+    poll_buf[fd_signal] = .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 };
+    const n_spawn: usize = blk: {
+        const rds = spawn.readFds(&spawn_fds);
+        for (rds, 2..) |fd, i| poll_buf[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+        break :blk rds.len;
     };
+    const fds: []std.posix.pollfd = poll_buf[0 .. 2 + n_spawn];
 
     while (lifecycle.running.load(.acquire)) {
         // No built-in deadline: with no timer sources the loop blocks until
@@ -672,7 +697,7 @@ pub fn run() void {
             if (ms >= 0) poll_timeout_ms = ms;
         }
 
-        const poll_rc = std.os.linux.poll(&fds, fds.len, poll_timeout_ms);
+        const poll_rc = std.os.linux.poll(fds.ptr, fds.len, poll_timeout_ms);
         const ready: usize = switch (std.posix.errno(poll_rc)) {
             .SUCCESS => @intCast(poll_rc),
             .INTR => continue,
@@ -691,6 +716,17 @@ pub fn run() void {
         // makes the consumption below see the flag it just set.
         if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
             signals.drainAndDispatch(signal_fd);
+
+        // A spawn pipe with output ready: drain it now instead of waiting for
+        // the next X event or SIGCHLD. POLL.ERR/POLL.HUP count too, because a
+        // child that exits without writing still has to be read to EOF for
+        // finishSpawn to classify the result. Non-blocking by construction.
+        var spawn_ready = false;
+        for (fds[2..]) |pf| {
+            if ((pf.revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0)
+                spawn_ready = true;
+        }
+        if (spawn_ready) spawn.drainPendingSpawns();
 
         // The reload flag is set by SIGHUP and the reload_config keybinding
         // (proc.reload, which writes a wake byte to the pipe; the byte can be

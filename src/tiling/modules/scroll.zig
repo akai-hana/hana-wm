@@ -97,7 +97,7 @@ fn preReconcileHook(p: model.LayoutParams, n: usize, wa_width: u16) model.Layout
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hooks.
-pub const module = tiling.layoutModule("scroll", "[|]", compute, .{
+pub const module = tiling.layoutModule("scroll", "[|]", compute, &.{}, .{
     .slotWidth = slotWidth,
     .maxOffset = maxOffset,
     .preReconcile = preReconcileHook,

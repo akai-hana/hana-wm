@@ -316,19 +316,26 @@ pub fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
 }
 
 /// Resolves the registry index of every module whose capability field `name`
-/// is set (e.g. "self_ticking"), in registry order. Used by the bar as its
-/// ROLE SET: capabilities with multiple binders (self_ticking, center_slot)
-/// fan out / split evenly over the whole set rather than first-match wins.
+/// is set, in registry order. Used by the bar as its ROLE SET: capabilities
+/// with multiple binders (self_ticking, center_slot) fan out / split evenly
+/// over the whole set rather than first-match wins.
+///
+/// `name` is a FIELD, not a string: it is typed `std.meta.FieldEnum(Segment)`
+/// so a renamed or removed capability is a compile error at every call site.
+/// The string form made a typo silently resolve the empty set, which is the
+/// same shape as "this role has no binders" -- the failure mode that reads as
+/// a working bar with one segment missing.
+///
 /// Comptime-friendly: when `modules` is comptime-known (a generated registry)
 /// the returned slice is a comptime value, so empty-set guards
 /// (`.len == 0`) dead-code-eliminate.
 pub fn findAllByCapability(
     modules: []const contract.Segment,
-    comptime name: []const u8,
+    comptime name: std.meta.FieldEnum(contract.Segment),
 ) []const usize {
     var result: []const usize = &.{};
     for (modules, 0..) |m, idx| {
-        if (@field(m, name)) {
+        if (@field(m, @tagName(name))) {
             result = result ++ [_]usize{idx};
         }
     }

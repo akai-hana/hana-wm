@@ -72,7 +72,24 @@ fn barPlainColor(key: []const u8) Knob {
 /// fallback when [bar.properties] is absent; the drun variant keeps null so
 /// the read-time fallbacks in BarConfig apply.
 fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) Knob {
-    return .{ .places = &.{place(types.section_bar_properties, key)}, .target = target, .kind = .{ .color_from = sibling }, .requires = types.section_bar, .copy_when_absent = copy_when_absent };
+    return .{
+        .places = &.{place(types.section_bar_properties, key)},
+        .target = target,
+        .kind = .{ .color_from = sibling },
+        .requires = types.section_bar,
+        .copy_when_absent = copy_when_absent,
+        .needs = &.{"bar." ++ sibling},
+    };
+}
+
+/// Same dependency, declared the same way, for the `color_opt` kind.
+fn barColorOpt(places: []const Placement, target: []const u8, sibling: []const u8) Knob {
+    return .{
+        .places = places,
+        .target = target,
+        .kind = .{ .color_opt = sibling },
+        .needs = &.{"bar." ++ sibling},
+    };
 }
 
 /// Title accent color: copies `sibling` when [bar.properties] is absent.
@@ -85,9 +102,11 @@ fn barDrunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
     return barColor(key, target, sibling, false);
 }
 
-/// Every scalar knob, exactly once. ORDER MATTERS twice: workspaces.count
-/// precedes icon-padding (config.zig pads icons to the count), and base bar
-/// colors precede the color_from chain that borrows them as fallbacks.
+/// Every scalar knob, exactly once. ORDER MATTERS in two places, and only one
+/// of them is checked: workspaces.count precedes icon-padding (config.zig pads
+/// icons to the count) is a comment-only convention, while the base-bar-colors
+/// precede the color_from chain ordering is ENFORCED below by each knob's
+/// `needs` list.
 pub const knobs = [_]Knob{
     // [drag]
     knob(&.{place(types.section_drag, "enabled")}, "drag_enabled", .b),
@@ -163,14 +182,14 @@ pub const knobs = [_]Knob{
     knob(&.{place(types.section_bar, "transparency")}, "bar.transparency", .ratio),
     // Falls back to the bar-wide fg (its historical default) -- but only
     // when the key is present; absent keeps the field null.
-    knob(&.{place(types.section_bar, "indicator_color")}, "bar.indicator_color", .{ .color_opt = "fg" }),
+    barColorOpt(&.{place(types.section_bar, "indicator_color")}, "bar.indicator_color", "fg"),
     // Selected workspace tag: an individually-set indicator glyph color for the
     // current tag. It falls back at read time to indicator_color, then the
     // tag's text color. The selected tag's icon TEXT color/styles are NOT a
     // scalar knob -- they use the same color+underline/bold/italic composite
     // path as any segment, via the [bar.properties] entry "workspaces_selected"
     // (see BarConfig.workspaceTextFg/workspaceIconProps).
-    knob(&.{place(types.section_bar, "selected_indicator_color")}, "bar.selected_indicator_color", .{ .color_opt = "fg" }),
+    barColorOpt(&.{place(types.section_bar, "selected_indicator_color")}, "bar.selected_indicator_color", "fg"),
 
     // [bar.properties] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
@@ -184,6 +203,29 @@ pub const knobs = [_]Knob{
     barDrunColor("drun_fg", "bar.drun_fg", "fg"),
     barDrunColor("drun_prompt_color", "bar.drun_prompt_color", types.palette_primary_color),
 };
+
+comptime {
+    // `needs` is a topological order: every target a knob reads must be
+    // supplied by a knob EARLIER in the table. This is what the table comment
+    // used to assert by hand ("base bar colors precede the color_from chain"),
+    // minus the checking. A future knob inserted above a `barPlainColor` it
+    // depends on, or a renamed sibling, fails here instead of silently
+    // resolving the DEFAULT color.
+    @setEvalBranchQuota(40_000);
+    for (knobs, 0..) |k, i| {
+        for (k.needs) |needed| {
+            var found: bool = false;
+            for (knobs, 0..) |producer, j| {
+                if (j < i and std.mem.eql(u8, producer.target, needed)) found = true;
+            }
+            if (!found) @compileError(
+                "schema.knobs: knob '" ++ k.target ++ "' reads '" ++ needed ++
+                    "', which no EARLIER knob supplies; move that knob above it " ++
+                    "(or fix the sibling name)",
+            );
+        }
+    }
+}
 
 /// True when `key` is one of the [bar.properties] scalar knobs; every OTHER
 /// key in that table is a bar segment name (a per-segment color + style
@@ -256,6 +298,16 @@ pub const Knob = struct {
     requires: []const u8 = "",
     /// Assign the fallback default even when no placement matched.
     copy_when_absent: bool = false,
+    /// Targets this knob READS to resolve its value (the sibling a
+    /// `color_from`/`color_opt` kind falls back to), by dotted path. This is
+    /// the ORDERING constraint stated as data: the dependency used to be a
+    /// string embedded in `kind` plus a comment in the table saying "base
+    /// colors precede the color_from chain", which nothing checked. A knob
+    /// moved up or a sibling renamed would silently read the DEFAULT value
+    /// instead of the configured one -- the knob still parsed, the color was
+    /// just wrong, and only a visual diff of the bar would show it. The
+    /// comptime assert below turns the ordering into a build failure.
+    needs: []const []const u8 = &.{},
 };
 
 // Type-level access into Config by dotted path.

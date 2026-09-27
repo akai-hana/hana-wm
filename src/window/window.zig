@@ -130,6 +130,9 @@ const State = struct {
     // Keys borrow slices from the config, valid until the next rebuild.
     rules_map: std.StringHashMapUnmanaged(u8) = .{},
 
+    /// Caller-owned scratch for tracking.allWindowsInto (border sweeps).
+    snapshot: [model_mod.store_capacity]tracking.Entry = undefined,
+
     // Float-rule fast-lookup map: WM_CLASS name -> float, rebuilt from the
     // same config rules (entries whose `float` bit is set). First rule wins;
     // a name lives in exactly one of the two maps. Keys borrow slices from the
@@ -932,7 +935,7 @@ fn unmanageWindow(win: u32) void {
     // Both facts ride ctx into actions.unmanage, which runs the same close
     // fallback as the hide path -- and which is also the sole unregistrar
     // (unregister below), so this function does not also drop the entry.
-    const model = if (pipeline.initialized) pipeline.model() else null;
+    const model = if (pipeline.initialized()) pipeline.model() else null;
     const fs_ws: ?model_mod.WSId = if (model) |m|
         (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(m, win) else null)
     else
@@ -1125,7 +1128,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     // isValidManagedWindow, not a bare isManaged: every other consumer of this
     // predicate already filters the invalid-window sentinel first, and one
     // spelling means a chrome XID cannot slip through this path.
-    if (pipeline.initialized and isValidManagedWindow(win)) {
+    if (pipeline.initialized() and isValidManagedWindow(win)) {
         handleManagedConfigureRequest(win, event, mask);
         return;
     }
@@ -1344,7 +1347,7 @@ fn parseSizeHintsIntoCache(
         .min_aspect = aspect.min,
         .max_aspect = aspect.max,
     };
-    if (pipeline.initialized) if (pipeline.mut(&gate).store.getPtr(win)) |e| {
+    if (pipeline.initialized()) if (pipeline.mut(&gate).store.getPtr(win)) |e| {
         e.size_hints = hints;
         return;
     };
@@ -1369,7 +1372,7 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     // per window made the sweep O(N^2) in store scans.
     var occupants: [constants.max_workspaces]?model_mod.WindowId = @splat(null);
     borders.coveringOccupants(pipeline.model(), &occupants);
-    for (tracking.allWindows()) |entry| {
+    for (tracking.allWindowsInto(&state.?.snapshot)) |entry| {
         const win = entry.win;
         if (!model_mod.maskedOn(entry.mask, cur_ws)) continue;
         // Parked (offscreen/minimized) windows are invisible; recoloring
@@ -1465,5 +1468,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
 /// Called on config reload.
 pub fn reloadBorders() void {
-    for (tracking.allWindows()) |entry| borders.apply(core.getState().conn, entry.win);
+    for (tracking.allWindowsInto(&state.?.snapshot)) |entry| {
+        borders.apply(core.getState().conn, entry.win);
+    }
 }

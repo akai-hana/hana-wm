@@ -276,9 +276,9 @@ run_scenarios() {
         "src/bar/modules/systatus/batt.zig"
 
     run_scenario \
-        "bar segment: -cpu -mem (systatus subs)" \
+        "bar segment: -cpu -ram (systatus subs)" \
         "src/bar/modules/systatus/cpu.zig" \
-        "src/bar/modules/systatus/mem.zig"
+        "src/bar/modules/systatus/ram.zig"
 
     run_scenario \
         "bar segment: -volume -brightness (slider subs)" \

@@ -12,6 +12,7 @@ const helpers = @import("helpers");
 
 const build_options = @import("build_options");
 const tiling = @import("tiling");
+const contract = @import("contract");
 // Scroll-only tests runtime-skip below, but the stub must still expose the
 // two members their bodies reference so a scroll-less tree compiles.
 const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {
@@ -40,10 +41,20 @@ const K_FIB: u8 = tiling.layoutByName("fibonacci") orelse @panic(kLayoutMissing)
 const K_LEAF: u8 = tiling.layoutByName("leaf") orelse @panic(kLayoutMissing);
 const K_SCROLL: u8 = tiling.layoutByName("scroll") orelse @panic(kLayoutMissing);
 
-// Variant indexes owned by each module: grid's "relaxed" is variant 1 of
-// {"rigid","relaxed"}; monocle's "gaps" is variant 1 of {"gapless","gaps"}.
-const GRID_RELAX_VARIANT: u8 = 1;
-const MONOCLE_GAP_VARIANT: u8 = 1;
+/// The ordinal of `vname` in layout `kind`'s own variant table, read back
+/// through that module's `variant_parse`. The test constants used to be
+/// hardcoded 1s with the table spelled out in a comment; a row inserted above
+/// "relaxed" would have moved the real ordinal and left the test exercising
+/// the RIGID path while asserting RELAXED golden rects -- which is how this
+/// kind of constant rots. Asking the module is the only version that cannot.
+fn variantOrdinal(kind: u8, vname: []const u8) u8 {
+    const parse = contract.tiling_mods[kind].variant_parse orelse
+        @panic("tiling test: layout has no variant table");
+    return parse(vname) orelse @panic("tiling test: unknown variant name");
+}
+
+const GRID_RELAX_VARIANT: u8 = variantOrdinal(K_GRID, "relaxed");
+const MONOCLE_GAP_VARIANT: u8 = variantOrdinal(K_MONOCLE, "gaps");
 
 const Fixture = struct {
     m: model.Model,

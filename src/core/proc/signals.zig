@@ -13,8 +13,9 @@ const lifecycle = @import("lifecycle");
 const pipe_read = 0;
 const pipe_write = 1;
 
-/// Bytes drained per read from the self-pipe: draining a burst in one syscall
-/// rather than one per byte keeps the signal handler and the event loop cheap.
+/// Bytes read per syscall from the self-pipe. The pipe holds only wake tokens
+/// (whose value is ignored), so this is just a read size: big enough that a
+/// coalesced burst is cleared in one call.
 const drain_buf_size: usize = 16;
 
 var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
@@ -43,29 +44,26 @@ fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
     // clamped signal still lands in the bitmap and still gets dispatched.
     const bit: u6 = @intCast(@min(@intFromEnum(signo), 63));
     _ = pending_signals.fetchOr(@as(u64, 1) << bit, .release);
-    const byte: u8 = @intCast(@intFromEnum(signo));
-    writeSignalByte(byte);
+    writeWakeToken();
 }
 
-/// Async-signal-safe, non-blocking write of one signal byte to the self-pipe,
-/// with full-pipe recovery. When the pipe is full (EAGAIN) the queued backlog
-/// is drained and the write retried so THIS byte lands; the drained bytes carry
-/// no state (the handler records signal state in `pending_signals`), so
-/// discarding them only coalesces wakeups.
-fn writeSignalByte(byte: u8) void {
-    const rfd = signal_pipe[pipe_read];
+/// The one byte written to the self-pipe. Its VALUE carries nothing: the
+/// reader (`drainAndDispatch`) drains whatever is there and then consumes the
+/// whole `pending_signals` bitmap, so the pipe is a wake token, not a queue.
+/// The handler used to write the signal number and, on EAGAIN, drain the
+/// backlog in the handler itself and retry -- which spent a read loop in
+/// async-signal context to preserve a value nothing read.
+const wake_token: u8 = 1;
+
+/// Async-signal-safe, non-blocking write of the single wake token.
+///
+/// EAGAIN needs no recovery: a full pipe means an UNCONSUMED token is already
+/// queued, which is precisely the state this write exists to create, and the
+/// reader's bitmap swap collects every signal that arrived in the meantime.
+fn writeWakeToken() void {
     const wfd = signal_pipe[pipe_write];
-    while (true) {
-        const rc: isize = @bitCast(std.os.linux.write(wfd, &[_]u8{byte}, 1));
-        if (rc > 0) return; // landed
-        const err: usize = @intCast(-rc);
-        if (err == @intFromEnum(std.posix.E.AGAIN) and rfd >= 0) {
-            var buf: [drain_buf_size]u8 = undefined;
-            while (@as(isize, @bitCast(std.os.linux.read(rfd, &buf, buf.len))) > 0) {}
-            continue;
-        }
-        return; // other error or closed fd: give up (lossy, as before)
-    }
+    const rc: isize = @bitCast(std.os.linux.write(wfd, &[_]u8{wake_token}, 1));
+    if (rc <= 0) return; // pipe full (already awake) or closed fd: lossy, as before
 }
 
 // Re-entry guard for the SIGUSR2 backtrace dump: a second USR2 arriving
@@ -266,10 +264,10 @@ fn dispatchSignal(pending_sig: u8) void {
 }
 /// Drains the non-blocking signal pipe and dispatches each pending signal.
 ///
-/// The pipe is read purely as a wake token; signal state lives in
-/// `pending_signals`. Reading first, then consuming the bitmap, means a signal
-/// that arrives after the swap re-arms the pipe (writeSignalByte always lands
-/// once it has drained the backlog), so the next poll drains and consumes it.
+/// The pipe is read purely as a wake token (see `wake_token`); signal state
+/// lives in `pending_signals`. Reading first, then consuming the bitmap, means a
+/// signal that arrives after the swap re-arms the pipe, so the next poll drains
+/// and consumes it.
 ///
 /// std.os.linux.read returns usize; a kernel error wraps a negative value into
 /// a huge unsigned number an unsigned comparison would never catch. Bitcast to

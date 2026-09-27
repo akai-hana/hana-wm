@@ -495,8 +495,8 @@ fn buildFallbackTomlModule(
 /// stays byte-identical.
 const surfaces_generated_source =
     \\const build_options = @import("build_options");
-    \\const xcb = @import("xcb");
     \\const core = @import("core");
+    \\const xcb = core.xcb;
     \\const types = @import("types");
     \\
     \\// No-op hooks for a build with no surface module compiled in. The point
@@ -603,8 +603,14 @@ fn buildSurfacesModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Module {
+    // The no-op hook set needs `core` and `types` for the parameter types
+    // (xcb comes from core's re-export, same as contract.zig:39), so both are
+    // registered up front -- the generated source is analyzed for its
+    // signatures whether or not a surface module is present.
     const mod = makeGeneratedModule(b, target, optimize, "surfaces.zig", surfaces_generated_source, &[_]Import{
         .{ .name = "build_options", .module = build_opts },
+        .{ .name = "core", .module = discovered.get("core").? },
+        .{ .name = "types", .module = discovered.get("types").? },
     });
     // The chrome-surface module is referenceable (`@import("bar")`) only when
     // its source was discovered; the comptime has_bar guard keeps the

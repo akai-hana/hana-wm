@@ -425,7 +425,11 @@ inline fn tilingOp(comptime op: anytype, arg: anytype) void {
 
 /// Logs a full WM state snapshot at info level. Used for diagnostics only.
 fn dumpState() void {
-    const all = tracking.allWindows();
+    // Diagnostics only, called from the log hook: a stack array is the right
+    // owner here (no State to hang it off), and it keeps tracking free of
+    // module-level scratch.
+    var scratch: [model.store_capacity]tracking.Entry = undefined;
+    const all = tracking.allWindowsInto(&scratch);
 
     log.info("========== STATE DUMP ==========", .{});
     log.info("Focused:        {?x}", .{focus.getFocused()});

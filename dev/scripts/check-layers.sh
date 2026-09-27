@@ -50,6 +50,16 @@ wire_allowed() {
         # _NET_ACTIVE_WINDOW property write).
         src/window/focus.zig) ;;
 
+        # pipeline.raiseWindowNow and its one caller (the floating drag tick):
+        # raising the dragged window is a STACKING write, and it goes out
+        # through sync's sanctioned `sink.stackOnly` primitive followed by
+        # `sink.flush` -- ungrabbed, which is the drag-tick policy. The guard
+        # matches the literal `raiseWindow` inside the name, so the sanctioned
+        # boundary needs an explicit entry rather than a name that dodges the
+        # pattern. Surviving wire traffic: one stack-mode-above
+        # xcb_configure_window, which is exactly what the primitive exists for.
+        src/core/loop/pipeline.zig|src/window/modules/floating.zig) ;;
+
         # Detectable auto-repeat enablement (enableDetectableAutoRepeat in
         # src/input/xkbcommon.zig): a ONE-SHOT, STARTUP-ONLY XKB negotiation
         # that issues xcb_xkb_per_client_flags + its reply and

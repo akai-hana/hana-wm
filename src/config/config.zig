@@ -2036,58 +2036,126 @@ pub const ConfigChanges = struct {
     keys: bool = false,
 };
 
-/// The three detectors compare per-subsystem content summaries. They
-/// deliberately stay hand-maintained field lists, not derivations from
-/// `schema.knobs`: keysChanged is entirely bespoke (bindings have no knob
-/// entries and compare pair-based), while bar/tiling carry non-knob content
-/// (fonts, workspace icons, color overrides, layout/rule tables) a knob scan
-/// could not see.
-/// Bar-subsystem content: every field of BarConfig compared logically
-/// (arrays by items, optionals by inner value, strings by contents).
+/// The three detectors compare per-subsystem content summaries. They stay
+/// field lists, not derivations from `schema.knobs`: keysChanged is entirely
+/// bespoke (bindings have no knob entries and compare pair-based), while
+/// bar/tiling carry non-knob content (fonts, workspace icons, color overrides,
+/// layout/rule tables) a knob scan could not see. `barChanged` at least binds
+/// its list to a comptime coverage check, so the list cannot fall behind
+/// `BarConfig`.
+/// How one `BarConfig` field is compared on reload. `direct` is `==` for
+/// scalars/enums/colors; `meta` is `std.meta.eql` for the types `==` does
+/// not resolve (the `ScalableValue` union, an `ArrayList` string slice, an
+/// optional string); the rest need their own deep compare.
+const BarCmp = union(enum) {
+    direct,
+    meta,
+    string_map: type,
+    layouts,
+};
+
+/// ONE declared entry per `BarConfig` field. The comparison is generated from
+/// this table rather than hand-written, because the hand-written list was the
+/// silent-drift hazard it looks like: every one of the 43 fields happened to be
+/// listed, so nothing failed, and a 44th field added later would compile, parse
+/// and reload -- and simply never rebuild the bar. The comptime block below
+/// turns that into a compile error.
+const bar_cmp = [_]struct { field: std.meta.FieldEnum(types.BarConfig), by: BarCmp }{
+    .{ .field = .enabled, .by = .direct },
+    .{ .field = .vim_mode, .by = .direct },
+    .{ .field = .bar_position, .by = .direct },
+    .{ .field = .bg, .by = .direct },
+    .{ .field = .fg, .by = .direct },
+    .{ .field = .selected_bg, .by = .direct },
+    .{ .field = .selected_fg, .by = .direct },
+    .{ .field = .primary_color, .by = .direct },
+    .{ .field = .secondary_color, .by = .direct },
+    .{ .field = .alternative_color, .by = .direct },
+    .{ .field = .text_color, .by = .direct },
+    .{ .field = .title_accent_color, .by = .direct },
+    .{ .field = .title_unfocused_accent, .by = .direct },
+    .{ .field = .title_minimized_accent, .by = .direct },
+    .{ .field = .indicator_location, .by = .direct },
+    .{ .field = .indicator_padding, .by = .direct },
+    .{ .field = .indicator_color, .by = .direct },
+    .{ .field = .selected_indicator_color, .by = .direct },
+    .{ .field = .carousel_enabled, .by = .direct },
+    .{ .field = .carousel_speed_px_s, .by = .direct },
+    .{ .field = .drun_bg, .by = .direct },
+    .{ .field = .drun_fg, .by = .direct },
+    .{ .field = .drun_prompt_color, .by = .direct },
+    .{ .field = .transparency, .by = .direct },
+
+    .{ .field = .height, .by = .meta },
+    .{ .field = .fonts, .by = .meta },
+    .{ .field = .font_size, .by = .meta },
+    .{ .field = .spacing, .by = .meta },
+    .{ .field = .workspace_icons, .by = .meta },
+    .{ .field = .indicator_size, .by = .meta },
+    .{ .field = .workspace_tag_width, .by = .meta },
+    .{ .field = .indicator_focused, .by = .meta },
+    .{ .field = .indicator_unfocused, .by = .meta },
+    .{ .field = .clock_format, .by = .meta },
+    .{ .field = .volume_format, .by = .meta },
+    .{ .field = .volume_muted_format, .by = .meta },
+    .{ .field = .brightness_format, .by = .meta },
+    .{ .field = .brightness_device, .by = .meta },
+    .{ .field = .drun_prompt, .by = .meta },
+
+    .{ .field = .segment_fg, .by = .{ .string_map = types.Color } },
+    .{ .field = .segment_value_fg, .by = .{ .string_map = types.Color } },
+    .{ .field = .segment_props, .by = .{ .string_map = types.SegmentProps } },
+    .{ .field = .layout, .by = .layouts },
+};
+
+comptime {
+    // 43 fields x 43 entries, plus the reverse check.
+    @setEvalBranchQuota(20_000);
+    for (std.meta.fields(types.BarConfig)) |f| {
+        var count: usize = 0;
+        for (bar_cmp) |c| {
+            if (std.mem.eql(u8, @tagName(c.field), f.name)) count += 1;
+        }
+        if (count != 1) @compileError(
+            "BarConfig field '" ++ f.name ++ "' appears " ++
+                std.fmt.comptimePrint("{d}", .{count}) ++
+                " times in bar_cmp; it must appear exactly once, or a bar " ++
+                "config change is silently ignored on reload",
+        );
+    }
+    for (bar_cmp) |c| {
+        if (!@hasField(types.BarConfig, @tagName(c.field))) @compileError(
+            "bar_cmp lists '" ++ @tagName(c.field) ++ "', which is not a BarConfig field",
+        );
+    }
+}
+
+/// `old` and `new` agree on one field, per the table's declared strategy.
+fn barFieldEql(
+    comptime field: std.meta.FieldEnum(types.BarConfig),
+    comptime by: BarCmp,
+    old: *const types.BarConfig,
+    new: *const types.BarConfig,
+) bool {
+    const a = @field(old, @tagName(field));
+    const b = @field(new, @tagName(field));
+    return switch (by) {
+        .direct => a == b,
+        .meta => std.meta.eql(a, b),
+        .string_map => |T| eqlStringMap(T, &a, &b),
+        .layouts => eqlBarLayouts(a.items, b.items),
+    };
+}
+
+/// Bar-subsystem content: every field of BarConfig, compared by the declared
+/// strategy in `bar_cmp` (see the drift note there).
 fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
-    return old.enabled != new.enabled or
-        old.vim_mode != new.vim_mode or
-        old.bar_position != new.bar_position or
-        !std.meta.eql(old.height, new.height) or
-        !std.meta.eql(old.fonts.items, new.fonts.items) or
-        !std.meta.eql(old.font_size, new.font_size) or
-        !std.meta.eql(old.spacing, new.spacing) or
-        old.bg != new.bg or
-        old.fg != new.fg or
-        old.selected_bg != new.selected_bg or
-        old.selected_fg != new.selected_fg or
-        old.primary_color != new.primary_color or
-        old.secondary_color != new.secondary_color or
-        old.alternative_color != new.alternative_color or
-        old.text_color != new.text_color or
-        old.title_accent_color != new.title_accent_color or
-        old.title_unfocused_accent != new.title_unfocused_accent or
-        old.title_minimized_accent != new.title_minimized_accent or
-        !std.meta.eql(old.workspace_icons.items, new.workspace_icons.items) or
-        !std.meta.eql(old.indicator_size, new.indicator_size) or
-        !std.meta.eql(old.workspace_tag_width, new.workspace_tag_width) or
-        old.indicator_location != new.indicator_location or
-        old.indicator_padding != new.indicator_padding or
-        !std.meta.eql(old.indicator_focused, new.indicator_focused) or
-        !std.meta.eql(old.indicator_unfocused, new.indicator_unfocused) or
-        old.indicator_color != new.indicator_color or
-        old.selected_indicator_color != new.selected_indicator_color or
-        !std.meta.eql(old.clock_format, new.clock_format) or
-        !std.meta.eql(old.volume_format, new.volume_format) or
-        !std.meta.eql(old.volume_muted_format, new.volume_muted_format) or
-        !std.meta.eql(old.brightness_format, new.brightness_format) or
-        !std.meta.eql(old.brightness_device, new.brightness_device) or
-        old.carousel_enabled != new.carousel_enabled or
-        old.carousel_speed_px_s != new.carousel_speed_px_s or
-        old.drun_bg != new.drun_bg or
-        old.drun_fg != new.drun_fg or
-        old.drun_prompt_color != new.drun_prompt_color or
-        !std.meta.eql(old.drun_prompt, new.drun_prompt) or
-        !eqlStringMap(types.Color, &old.segment_fg, &new.segment_fg) or
-        !eqlStringMap(types.Color, &old.segment_value_fg, &new.segment_value_fg) or
-        !eqlStringMap(types.SegmentProps, &old.segment_props, &new.segment_props) or
-        !eqlBarLayouts(old.layout.items, new.layout.items) or
-        old.transparency != new.transparency;
+    // `inline for`: the strategy union carries a `type` payload, so each
+    // entry is comptime-only and `c` has to be bound at comptime.
+    inline for (bar_cmp) |c| {
+        if (!barFieldEql(c.field, c.by, old, new)) return true;
+    }
+    return false;
 }
 
 /// Tiling-subsystem content: TilingConfig, plus the workspaces/fullscreen/
