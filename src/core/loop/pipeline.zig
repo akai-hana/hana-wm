@@ -28,15 +28,19 @@ const scaling = @import("scaling");
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
-/// True after init(); tracking's facade gates every model access on this so
-/// boot order never touches the undefined global instance.
-pub var initialized: bool = false;
+/// True after init(); kept as a named predicate so callers read as
+/// "is the model live" rather than reaching for a bare global. The VALUE now
+/// comes from core's single boot phase, so it cannot disagree with core.isReady()
+/// the way two independently-set latches could.
+pub inline fn initialized() bool {
+    return core.isModelReady();
+}
 
 var instance: model_mod.Model = undefined;
 pub fn init() void {
     instance = .{}; // bounded lists: no allocator inside the model
     g_sink = .{ .conn = core.getState().conn };
-    initialized = true;
+    core.markModelReady();
     ledger.init();
 }
 /// READ-ONLY access to the WM model (single source of truth). The return type
@@ -45,7 +49,7 @@ pub fn init() void {
 /// the transition-layer gate (`pipeline.mut`); only modules that own model
 /// transitions declare a private `Gate` (actions/window/focus/tracking).
 pub inline fn model() *const model_mod.Model {
-    if (!initialized) @panic("pipeline.model() called before init()");
+    if (!initialized()) @panic("pipeline.model() called before init()");
     return &instance;
 }
 
@@ -60,7 +64,7 @@ pub const Gate = struct {};
 /// discarded.
 pub inline fn mut(g: *const Gate) *model_mod.Model {
     _ = g;
-    if (!initialized) @panic("pipeline.mut() called before init()");
+    if (!initialized()) @panic("pipeline.mut() called before init()");
     return &instance;
 }
 
@@ -69,19 +73,19 @@ pub inline fn mut(g: *const Gate) *model_mod.Model {
 /// name resolution pre-init. An unresolvable config name (removed module,
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
-    if (initialized) return model().ws[model().current.index].params.kind;
+    if (initialized()) return model().ws[model().current.index].params.kind;
     return defaultIndexForLayoutName(core.getState().config.tiling.layout);
 }
 
 /// Resolves a config layout name to a registry index (see
-/// model.LayoutParams.kind), collapsing to the neutral default (index 0) when
-/// the name does not resolve. Loud, never silent: an unresolvable/removed
+/// model.LayoutParams.kind), collapsing to `contract.default_kind` when the
+/// name does not resolve. Loud, never silent: an unresolvable/removed
 /// layout name is a config bug. Shared by getCurrentLayout (pre-init fallback)
 /// and persist's restored-layout degradation, so both site types resolve
 /// config names identically.
 pub fn defaultIndexForLayoutName(name: []const u8) u8 {
-    if (!build_options.has_tiling) return 0;
-    return tiling.layoutKindFallingBack(name, 0);
+    if (!build_options.has_tiling) return contract.default_kind;
+    return tiling.layoutKindFallingBack(name, contract.default_kind);
 }
 
 var g_sink: xcb_sink.XcbSink = undefined;
@@ -121,6 +125,14 @@ pub fn tilingEnv(p: *const model_mod.LayoutParams) contract.Env {
 /// same scaled config fact (see tilingEnv), colors from config.tiling.
 /// Only valid after init().
 fn ctx() *reconcile.Ctx {
+    // Inside a server grab the ctx belongs to the operation that TOOK the
+    // grab: rebuilding it there would recompute `.workarea`/`.bar_win` from
+    // live state under a body that has already committed to them (the
+    // fullscreen path unmaps the bar inside the same grab), and would re-run
+    // the pre-reconcile duties after geometry was already applied, leaving
+    // the model and the server disagreeing. Inside a grab, read the in-flight
+    // ctx via currentCtx(); to start a new operation, call prepare().
+    std.debug.assert(grab_depth == 0);
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     const p = &model().ws[model().current.index].params;
@@ -172,6 +184,39 @@ fn preReconcileDuties() void {
     p.* = md.preReconcile.?(p.*, n, wa.width);
 }
 
+/// The ONE place a reconcile ctx is built and the one place pre-reconcile
+/// duties run. Every reconcile-family entry point calls this exactly once,
+/// always before reading the ctx: the scroll layout's duty mutates the model
+/// (viewport clamp), so it has to be folded into the geometry that follows it
+/// rather than applied as a separate pass. Previously four entry points each
+/// paired `preReconcileDuties()` with their own `ctx()` call, which is what
+/// let a hook deep inside a grab ask for a second, divergent ctx.
+fn prepare() *reconcile.Ctx {
+    preReconcileDuties();
+    return ctx();
+}
+
+/// The ctx of the grab currently in flight, for a hook that must queue its
+/// writes into somebody else's atomic bracket (the EWMH fullscreen write).
+/// Asserts a grab IS held: outside one there is no in-flight ctx to borrow,
+/// and the right answer is to start an operation with prepare() or to use a
+/// named entry point. Deliberately does NOT run the pre-reconcile duties --
+/// the enclosing operation already ran them.
+pub fn currentCtx() *reconcile.Ctx {
+    std.debug.assert(grab_depth > 0);
+    return &g_ctx;
+}
+
+/// Raise `win` to the top of the stack immediately, outside any server grab,
+/// then flush. The drag-tick path needs only these two ungrabbed requests;
+/// it used to borrow `grabCtx`, which ran a full pre-reconcile duty pass and
+/// built an entire retile ctx for them.
+pub fn raiseWindowNow(win: model_mod.WindowId) void {
+    const s = syncSink();
+    s.stackOnly(win, .above);
+    s.flush();
+}
+
 /// Runs a reconcile-family body under one X server grab, always
 /// releasing+flushing on exit (defer), so no grab site can forget the
 /// atomicity bracket. `body` is a value-capturing struct with a
@@ -186,20 +231,89 @@ fn preReconcileDuties() void {
 /// point of the mistake.
 var grab_depth: u32 = 0;
 
-fn withServerGrab(body: anytype) void {
+/// Server-grab ownership as a token: taking it grabs, dropping it ungrabs AND
+/// flushes. Every exit path releases it, including an early return or a failed
+/// reconcile inside the body -- which is precisely the failure mode the bar's
+/// hand-written `requests.grabServer` / `ungrabAndFlush` pairs had to repeat
+/// by hand at every early return (its re-anchor path had one).
+///
+/// The ctx is built when the grab is TAKEN, not on demand, so every wire write
+/// and every reconcile inside the bracket is computed against one ctx. It
+/// carries its own `reconcileNow` for exactly that reason: a caller cannot
+/// reconcile against a different ctx than the one its geometry is bracketed
+/// by, and it cannot reach pipeline's flushless reconcile at all.
+pub const ScopedGrab = struct {
+    /// The ctx this bracket reconciles against, or null for a grab that was
+    /// only ever for wire writes.
+    c: ?*reconcile.Ctx,
+    s: sink.Sink,
+
+    /// Releases the grab and flushes. Asserts rather than tolerating a double
+    /// release: an extra release would ungrab a grab this token does not own.
+    pub fn deinit(self: ScopedGrab) void {
+        std.debug.assert(grab_depth > 0);
+        grab_depth -= 1;
+        self.s.ungrabAndFlush();
+    }
+
+    /// Flushless reconcile inside this bracket, against this token's ctx.
+    /// Asserts the token was taken with a ctx (grabScoped always is). This is
+    /// the bar's replacement for the old pub pipeline.reconcileNow(), which
+    /// let a grabbed caller reconcile against a ctx its geometry writes were
+    /// not bracketed by.
+    pub fn reconcileNow(self: ScopedGrab) void {
+        std.debug.assert(self.c != null);
+        reconcile.run(&instance, self.c.?, .{});
+    }
+};
+
+/// Takes the server grab, building the reconcile ctx first (ctx() refuses to
+/// build under a grab) and returning the token that owns it.
+pub fn grabScoped() ScopedGrab {
     std.debug.assert(grab_depth == 0);
+    const c = prepare();
+    const s = syncSink();
+    s.grabServer();
     grab_depth += 1;
-    defer grab_depth -= 1;
-    const c = ctx();
-    c.sink.grabServer();
-    defer c.sink.ungrabAndFlush();
-    body.call(c);
+    return .{ .c = c, .s = s };
+}
+
+/// Takes the server grab WITHOUT building a reconcile ctx, for a client that
+/// only needs atomic wire writes and runs no geometry pass (the bar config
+/// reload: destroy old + create new + map). Deliberately does NOT run the
+/// pre-reconcile duties: those mutate the model for a reconcile that is meant
+/// to follow, and with no reconcile following they would leave the model and
+/// the server disagreeing -- the exact hazard ScopedGrab.reconcileNow exists
+/// to prevent. Use grabScoped() when a reconcile is coming.
+pub fn grabOnly() ScopedGrab {
+    std.debug.assert(grab_depth == 0);
+    const s = syncSink();
+    s.grabServer();
+    grab_depth += 1;
+    return .{ .c = null, .s = s };
+}
+
+fn withServerGrab(body: anytype) void {
+    const g = grabScoped();
+    defer g.deinit();
+    body.call(g.c.?);
 }
 
 /// Grab server, reconcile, then ungrabAndFlush, atomically.
 pub inline fn reconcileUnderGrabNow(o: reconcile.Opts) void {
-    preReconcileDuties();
-    reconcile.reconcileUnderGrab(&instance, ctx(), o);
+    // reconcileUnderGrab runs its OWN grab/ungrab bracket, so this must not go
+    // through withServerGrab (a nested grab's ungrab would release the outer
+    // one). It still builds the ctx exactly once, via prepare().
+    reconcile.reconcileUnderGrab(&instance, prepare(), o);
+}
+
+/// The common case: reconcile under a fresh server grab with DEFAULT opts.
+/// The bare `reconcileUnderGrabNow(.{})` call site reads as "pass the empty
+/// options struct", which invites the reader to hunt for what the defaults
+/// are; this alias states the intent. `reconcileUnderGrabNow` stays for the
+/// sites that really do set `force_restack`.
+pub inline fn reconcileGrab() void {
+    reconcileUnderGrabNow(.{});
 }
 
 /// Grab server, run the focus transition, reconcile, then ungrabAndFlush
@@ -326,18 +440,17 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     }{ .o = o, .t = t, .win = win, .prev_fs_win = prev_fs_win, .kind = kind });
 }
 
-/// Flushless reconcile against the current ctx (drag tick path).
+/// Flushless reconcile against a FRESH ctx and no grab (drag tick path). Kept
+/// public for the drag tick, which needs no atomicity; the grabbed case moved
+/// onto ScopedGrab.reconcileNow so a grabbed caller cannot reach a reconcile
+/// that would build a second ctx.
 pub inline fn reconcileNow() void {
-    preReconcileDuties();
-    reconcile.run(&instance, ctx(), .{});
+    reconcile.run(&instance, prepare(), .{});
 }
 
-/// Run pre-reconcile duties and return the pipeline context for the caller
-/// to manage a manual server grab. The caller MUST call
-/// ctx.sink.ungrabAndFlush() when done (typically via defer). A manual-grab
-/// seam for callers needing a bespoke grab body: the fullscreen EWMH write.
-/// (switchTo used to be the other caller; it now goes through withServerGrab.)
-pub fn grabCtx() *reconcile.Ctx {
-    preReconcileDuties();
-    return ctx();
-}
+// The old `grabCtx` manual-grab seam is gone. It could be called from inside
+// a grab -- the fullscreen EWMH hook did exactly that -- and it rebuilt the
+// ctx, re-ran the pre-reconcile duties, and documented a
+// `caller MUST ungrabAndFlush` contract its one in-grab caller could not
+// honour without releasing the enclosing grab. Its callers now use
+// currentCtx() to join a grab in flight, or a named entry point.

@@ -26,7 +26,7 @@ const gate: pipeline.Gate = .{};
 /// True once pipeline.init ran; every model access is gated on this so boot
 /// order never touches the undefined global instance.
 fn modelReady() bool {
-    return pipeline.initialized;
+    return pipeline.initialized();
 }
 
 fn m() ?*const model_mod.Model {
@@ -60,20 +60,28 @@ pub inline fn windowCount() usize {
 /// NOTE: rebuild-per-call is correct for correctness; a dirty flag
 /// would need mutation hooks to track when the model store changes.
 ///
-/// Read-only SNAPSHOT of the model registry, rebuilt per call (bounded by the
-/// store capacity; call sites are redraw/focus-scan paths, not hot loops).
-/// Do not retain across mutations.
-var snapshot_buf: [model_mod.store_capacity]Entry = undefined;
-
-pub fn allWindows() []const Entry {
+/// Read-only SNAPSHOT of the model registry into the CALLER's buffer,
+/// returning the filled prefix. Do not retain across mutations.
+///
+/// The buffer is caller-owned on purpose. This used to be one module-level
+/// array, which was the last global mutable scratch in the window layer: it
+/// was correct only because every walk is short and non-reentrant, and any
+/// future call made from inside another's loop would have had its snapshot
+/// overwritten mid-iteration. A caller now passes its own State-local array,
+/// so the aliasing is not expressible. The old `@min(count, buf.len)` clamp is
+/// an assert instead: silently returning a SHORT snapshot reads like "those
+/// are all the windows", which is the bug this whole function is shaped to
+/// avoid.
+pub fn allWindowsInto(buf: []Entry) []const Entry {
     const mm = m() orelse return &.{};
-    const n = @min(mm.store.count(), snapshot_buf.len);
+    const n = mm.store.count();
+    std.debug.assert(buf.len >= n);
     var i: usize = 0;
     var it = mm.store.iterator();
     while (it.next()) |row| : (i += 1) {
-        snapshot_buf[i] = .{ .win = row.key, .mask = row.val.mask, .presence = row.val.presence };
+        buf[i] = .{ .win = row.key, .mask = row.val.mask, .presence = row.val.presence };
     }
-    return snapshot_buf[0..n];
+    return buf[0..n];
 }
 
 // Per-workspace focus MRU (facade over model.ws[ws].focus_mru)
@@ -115,7 +123,7 @@ pub fn deinit() void {
 /// tracking query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    if (pipeline.initialized) return pipeline.model().current.index;
+    if (pipeline.initialized()) return pipeline.model().current.index;
     return null;
 }
 

@@ -99,7 +99,7 @@ fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
     if (opts.with_focus) {
         // Focus lands before geometry (focus-before).
         pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, .before, null);
-    } else pipeline.reconcileUnderGrabNow(if (opts.restack) .{ .force_restack = true } else .{});
+    } else if (opts.restack) pipeline.reconcileUnderGrabNow(.{ .force_restack = true }) else pipeline.reconcileGrab();
 }
 
 /// Shared hide/close withdraw tail: when the withdrawn window was the
@@ -480,7 +480,7 @@ pub fn detachToFloating(win: model_mod.WindowId) void {
     if (isCoveringMode(m, win)) return;
     if (e.anchor != .tiled) return;
     if (!detachTiledToFloating(m, e, win)) return;
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 // floating drag commands (registry loops)
@@ -560,7 +560,7 @@ pub fn stepVariantDir(dir: i32) void {
 pub fn adjustPrimaryWidthAction(delta: f32) void {
     const m = pipeline.mut(&gate);
     model_mod.adjustPrimaryWidth(m, delta);
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 pub fn adjustPrimaryCount(delta: i32) void {
@@ -571,14 +571,14 @@ pub fn adjustPrimaryCount(delta: i32) void {
     const m = pipeline.mut(&gate);
     const p = &m.ws[m.current.index].params;
     p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, max_primary_count)));
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 pub fn adjustSecondaryBalance(delta: f32) void {
     const m = pipeline.mut(&gate);
     const p = &m.ws[m.current.index].params;
     p.secondary_balance = std.math.clamp(p.secondary_balance + delta, -constants.max_primary_swing, constants.max_primary_swing);
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 /// swap_master: exchanges the focused window's tiled slot with the previously
@@ -607,7 +607,7 @@ pub fn moveFocused(delta: i32) void {
     // Modulo wrap (dwm stack rotate): stepping past either edge of the home
     // list's tiled order cycles back around, matching the focus-step parity.
     model_mod.stepTiled(m, win, delta);
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 /// Clamp an updated viewport offset to the layout's content span and stamp
@@ -624,7 +624,7 @@ pub fn viewportStep(dir: i32) void {
     const p = vp.p;
     const sc = vp.sc;
     commitViewport(p, sc, p.viewport_offset + dir * sc.slot_w, sc.tiled_count);
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
@@ -763,8 +763,8 @@ pub fn seedParamsFromConfig() void {
     const cfg = &cs.config.tiling;
 
     // Config layout names resolve to registry ids here, once per seed;
-    // unresolvable names fall back loudly to the default.
-    const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, 0);
+    // unresolvable names fall back loudly to the neutral default.
+    const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, contract.default_kind);
     const lookups = seedLookups(cfg);
 
     const m = pipeline.mut(&gate);
@@ -834,7 +834,7 @@ fn resolveVariant(
 
 pub fn applyConfigReload() void {
     seedParamsFromConfig();
-    pipeline.reconcileUnderGrabNow(.{});
+    pipeline.reconcileGrab();
 }
 
 // workspace switch
@@ -1037,7 +1037,7 @@ pub fn focusAfterGeometry() void {
         const ft = prepareAndSetFocus(pipeline.mut(&gate), focused, .window_spawn);
         pipeline.reconcileGrabFocus(.{}, ft, .after, null);
     } else {
-        pipeline.reconcileUnderGrabNow(.{});
+        pipeline.reconcileGrab();
     }
 }
 

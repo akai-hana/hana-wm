@@ -172,9 +172,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // has already ungrabAndFlush'd); routed through sync's sanctioned stack
     // primitive + flush so wire stays in sync. Drag ticks keep going flushless
     // via the targeted dragTick (1 configure, no grab).
-    const c = pipeline.grabCtx();
-    c.sink.stackOnly(win, .above);
-    c.sink.flush();
+    pipeline.raiseWindowNow(win);
 }
 
 fn computeMoveRect(

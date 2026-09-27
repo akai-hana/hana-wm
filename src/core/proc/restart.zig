@@ -119,7 +119,7 @@ pub fn selfPathZ() ?[:0]const u8 {
 /// the parent's exit made the session script return and xinit tore down
 /// Xorg mid-hand-off.)
 ///
-/// The restore path crosses the hand-off in HANA_RESTORE: execv inherits
+/// The restore path crosses the hand-off in `restore_env`: execv inherits
 /// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
 /// environment is the one channel a fresh boot can see.
 /// The complete re-exec hand-off, assembled once and owned by `restart`.
@@ -130,6 +130,22 @@ pub fn selfPathZ() ?[:0]const u8 {
 /// for one transition means the sequence has to be re-derived at every call
 /// site, and nothing can assert the set is complete. Naming the record makes
 /// "what crosses the hand-off" a single declaration.
+/// The environment variables that carry the re-exec hand-off. The WRITER
+/// (`execNext`) and the READER (boot, via `restorePathFromEnv`) have to agree
+/// exactly, and both sides used to spell the names as string literals at their
+/// own site. A typo on the reading side is the worst kind of bug here: the
+/// lookup simply returns null, so a re-exec'd instance boots as a COLD boot
+/// and silently adopts nothing, with no error anywhere.
+pub const restore_env = "HANA_RESTORE";
+pub const config_dir_env = "HANA_CONFIG_DIR";
+
+/// The restore path a previous instance handed over, or null when this is a
+/// cold boot. Borrowed from the process environment -- do not free, and do not
+/// retain past the adoption.
+pub fn restorePathFromEnv() ?[*:0]const u8 {
+    return std.c.getenv(restore_env);
+}
+
 pub const Handoff = struct {
     /// Sentinel-terminated (`selfPathZ()`); this process's own image.
     self_path: [:0]const u8,
@@ -161,12 +177,12 @@ pub fn execNext(handoff: Handoff) noreturn {
     const self_z = handoff.self_path;
     const restore_z = mustDupeZ(handoff.restore_path, "restore path");
 
-    if (c.setenv("HANA_RESTORE", restore_z, 1) != 0) {
+    if (c.setenv(restore_env, restore_z, 1) != 0) {
         log.err("restart: setenv failed", .{});
         std.process.exit(1);
     }
     if (handoff.config_snapshot) |snap_z|
-        _ = c.setenv("HANA_CONFIG_DIR", snap_z, 1);
+        _ = c.setenv(config_dir_env, snap_z, 1);
     _ = c.execv(self_z, @ptrCast(&[_:null]?[*:0]const u8{ self_z, null }));
     // Only reachable when exec failed; the X connection is already closed,
     // so there is nothing left to do but end the session.

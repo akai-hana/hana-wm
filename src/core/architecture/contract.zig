@@ -48,6 +48,17 @@ const bounded = @import("bounded");
 pub const tiling_mods =
     if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
+/// The neutral layout: registry index 0, the fallback for an unresolvable
+/// config layout name and for a restored `kind` that no longer resolves.
+///
+/// NAMED because the index alone hid the consequence. Every degradation path
+/// (unresolvable name, removed layout, pre-init state) passed a bare `0`, so
+/// "falls back to layout 0" was invisible at the call site while being the
+/// single most consequential constant in the config layer: index 0 is whatever
+/// the sorted registry happens to put first, and a typo in a layout name
+/// therefore quietly selected a different layout. Now every use greps.
+pub const default_kind: u8 = 0;
+
 /// Bounds-checked registry lookup for `kind` (the single owner of the
 /// `kind >= tiling_mods.len` guard). Returns the registry entry, or null when
 /// kind is out of range (including the absent-tiling empty registry). Every
@@ -268,6 +279,57 @@ pub const single_binder_hooks = [_][]const u8{
     "stopDrag",         "updateDrag",            "isDragging",
     "isResizingWindow", "getDragLastRect",       "cancelDragForWindow",
 };
+
+/// The complementary half of the classification: `WindowModule` hooks whose
+/// dispatch is an explicit registry LOOP, so several modules may bind them
+/// and every one is adopted. Together with `single_binder_hooks` this is a
+/// PARTITION of the contract, asserted below -- which is the point. The
+/// at-most-one check for a newly added first-match hook only runs if the name
+/// is listed, so an unlisted new hook silently escaped it; naming both halves
+/// makes a new hook a compile error instead.
+pub const multi_binder_hooks = [_][]const u8{
+    "init",                     "deinit",
+    "notifyConfigureIfPending", "onWindowGone",
+    "serializeWindow",          "deserializeWindow",
+    "setEwmhFullscreenState",   "armPendingBarHide",
+    "armPendingBarShow",
+};
+
+/// True when `name` appears in `list`; called at comptime by the partition
+/// check below.
+fn isListed(list: []const []const u8, name: []const u8) bool {
+    for (list) |hook| if (std.mem.eql(u8, hook, name)) return true;
+    return false;
+}
+
+comptime {
+    // 36 fields x up to 27 names, twice over.
+    @setEvalBranchQuota(20_000);
+    // Every `WindowModule` hook is classified exactly once across the two
+    // lists, and no list names a field that no longer exists. `s == m` fails
+    // for BOTH the "added a hook, forgot to classify it" case and the
+    // "classified it as both" case.
+    for (std.meta.fields(WindowModule)) |f| {
+        const s = isListed(&single_binder_hooks, f.name);
+        const m = isListed(&multi_binder_hooks, f.name);
+        if (s == m) @compileError(
+            "WindowModule hook '" ++ f.name ++ "' must be listed in EXACTLY one of " ++
+                "single_binder_hooks / multi_binder_hooks (single=" ++
+                if (s) "yes" else "no" ++ ", multi=" ++ if (m) "yes" else "no" ++
+                    "); it is the dispatch cardinality, not a detail",
+        );
+    }
+    for (single_binder_hooks) |hook| {
+        if (!@hasField(WindowModule, hook)) @compileError(
+            "single_binder_hooks lists '" ++ hook ++ "', which is not a WindowModule field",
+        );
+    }
+    for (multi_binder_hooks) |hook| {
+        if (!@hasField(WindowModule, hook)) @compileError(
+            "multi_binder_hooks lists '" ++ hook ++ "', which is not a WindowModule field",
+        );
+    }
+}
 
 /// Dispatch family for every generated registry element type (`WindowModule`,
 /// `Segment`, ...). The SINGLE canonical loops every owner layer routes its

@@ -64,4 +64,4 @@ fn tileRegion(
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module = tiling.layoutModule("leaf", "BSP", compute, .{});
+pub const module = tiling.layoutModule("leaf", "BSP", compute, &.{}, .{});

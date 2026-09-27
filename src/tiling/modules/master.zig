@@ -327,9 +327,14 @@ inline fn windowHeight(i: u16, count: u16, available: u16, min_dim: u16) u16 {
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module = tiling.layoutModule("master", "[]=", compute, .{
-    .variant_count = 2,
-    .fifo_variant = 1,
-    .variant_parse = tiling.variantParse(&.{ "lifo", "fifo" }),
-    .indicators = &.{ "[N]", "=N=" },
-});
+/// The ONE variant table. `fifo_variant`, `variant_count`, `variant_parse`
+/// and `indicators` are all derived from it by layoutModule.
+const variants = [_]tiling.Variant{
+    .{ .name = "lifo", .indicator = "[N]" },
+    .{ .name = "fifo", .indicator = "=N=", .fifo = true },
+};
+
+/// Ordinal of the fifo variant, read from the table above.
+pub const fifo_variant: u8 = tiling.variantIndex(&variants, "fifo");
+
+pub const module = tiling.layoutModule("master", "[]=", compute, &variants, .{});

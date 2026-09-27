@@ -64,8 +64,8 @@ const collect_hidden_set = window.providerOf(.collectHiddenSet);
 // bar still compiles and no-ops when ALL segments are removed.
 const bar_mods = @import("bar_modules").modules;
 
-const self_ticking_ids: []const usize = segmod.findAllByCapability(&bar_mods, "self_ticking");
-const center_slot_ids: []const usize = segmod.findAllByCapability(&bar_mods, "center_slot");
+const self_ticking_ids: []const usize = segmod.findAllByCapability(&bar_mods, .self_ticking);
+const center_slot_ids: []const usize = segmod.findAllByCapability(&bar_mods, .center_slot);
 
 /// Primary center-slot segment: the FIRST center-slot binder in registry
 /// order (config order within a center layout). Title-centric bar behaviors
@@ -568,6 +568,10 @@ const State = struct {
     win: WindowCtx,
     render: RenderCtx,
 
+    /// Caller-owned scratch for tracking.allWindowsInto (window walks during
+    /// a frame build). State-local so two walks cannot share one buffer.
+    snapshot: [model.store_capacity]tracking.Entry = undefined,
+
     vis: Visibility = .{},
     dirty: Dirty = .{},
     clock: Clock = .{},
@@ -790,6 +794,11 @@ const State = struct {
     /// for every configured self-ticker in ANY cluster (left/center/right);
     /// unconfigured self-tickers stay invalid and are never repainted.
     fn recordSelfTickerScope(self: *State, frame: *const segmod.Frame, name: []const u8, x: u16) void {
+        // `comptime` on the length: with no self-ticking segment compiled in,
+        // `Clock.segs` is a zero-length array and the indexed store below is
+        // still analyzed, which is a compile error. The length is a comptime
+        // constant, so this drops the whole body before it is analyzed.
+        if (comptime self_ticking_ids.len == 0) return;
         if (selfTickerIndex(name)) |i| {
             self.clock.segs[i] = .{
                 .x = x,
@@ -864,7 +873,7 @@ const State = struct {
             // OR-accumulate all window masks in a single pass, collecting the
             // current workspace's windows on the way.
             var combined_mask: u64 = 0;
-            for (tracking.allWindows()) |entry| {
+            for (tracking.allWindowsInto(&self.snapshot)) |entry| {
                 combined_mask |= entry.mask;
                 if (cur_bit != 0 and model.maskedOn(entry.mask, cur_ws) and
                     self.frame.wins_len < max_frame_windows)
@@ -1111,6 +1120,9 @@ const State = struct {
     /// Repaints every self-ticking segment whose on-screen content is stale
     /// (second rolled over). Cheap region-scoped blits, one per ticker.
     fn drawClockOnly(self: *State) void {
+        // Same comptime guard as recordSelfTickerScope: the loop body indexes
+        // `segs`, which is zero-length when nothing self-ticks.
+        if (comptime self_ticking_ids.len == 0) return;
         for (self_ticking_ids, 0..) |cid, i| {
             const sc = self.clock.segs[i];
             if (!sc.valid) continue;
@@ -1173,7 +1185,7 @@ fn performDraw() void {
     // the last full scan (any such change clears this gate via markDirty/
     // markDirtySource), so the cached post-draw last_ctx snapshot is still
     // accurate. Reuse it in place of scanLiveFrame + fillDrawCtx: those two
-    // re-walk tracking.allWindows() and rebuild the title/minute snapshot on
+    // re-walk tracking.allWindowsInto() and rebuild the title/minute snapshot on
     // every marquee tick, and the marquee advances 60x/sec.
     if (!s.dirty.flag and s.frame.ctx_valid and
         !s.hasLayoutSegmentDirty())
@@ -1214,10 +1226,6 @@ fn submitDrawBlockingFull() void {
     const s = gBar.state orelse return;
     s.markDirty();
     performDraw();
-}
-
-inline fn ungrabAndFlush() void {
-    requests.ungrabAndFlush(core.getState().conn);
 }
 
 /// Requests the next draw to repaint every segment and mark the whole bar
@@ -1327,6 +1335,15 @@ pub fn reload() void {
 
 fn applyReload(old: *State, height: u16) !void {
     const cs = core.getState();
+    // The reload tears down and rebuilds the bar window, so the whole swap has
+    // to be atomic: without a grab the old bar can be destroyed and the new one
+    // not yet mapped, which shows as a blank shelf. This path used to call
+    // ungrabAndFlush() at the end while NOTHING here took a grab -- an unpaired
+    // xcb_ungrab_server. grabOnly (not grabScoped) because the reload runs no
+    // geometry pass: building a ctx here would run the pre-reconcile duties,
+    // and with no reconcile to follow they would mutate the model for nothing.
+    const grab = pipeline.grabOnly();
+    defer grab.deinit();
     // Module caches (font widths, caret geometry) are built against the old
     // config; the new one is live from here on either way, so drop them up
     // front, including on the failure path below, where the surviving bar
@@ -1355,7 +1372,6 @@ fn applyReload(old: *State, height: u16) !void {
     submitDrawBlockingFull();
     if (new_state.vis.shown) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
     _ = xcb.xcb_destroy_window(cs.conn, old.win.win_id);
-    ungrabAndFlush();
     old.render.dc.deinit();
     old.deinit();
 }
@@ -1388,7 +1404,10 @@ pub fn toggleBarSegmentAnchor() void {
     // self-ticker bound so a stale tick cannot region-scope a repaint before
     // the layout pass re-records them.
     for (&s.clock.segs) |*sc| sc.valid = false;
-    requests.grabServer(cs.conn);
+    // One token owns grab+ungrab+flush, so the early return below (and any
+    // future one) releases it without having to remember.
+    const grab = pipeline.grabScoped();
+    defer grab.deinit();
     _ = xcb.xcb_configure_window(
         cs.conn,
         s.win.win_id,
@@ -1402,7 +1421,6 @@ pub fn toggleBarSegmentAnchor() void {
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         window.markBordersFlushed();
-        ungrabAndFlush();
         return;
     };
     const no_fullscreen = !visibility.barForcedHiddenByFullscreen(current_ws);
@@ -1412,10 +1430,9 @@ pub fn toggleBarSegmentAnchor() void {
     // changes because the work area geometry changed, affecting all window
     // placements. This is a write-path side effect from a rendering module,
     // documented in the check-layers.sh allowlist.
-    if (no_fullscreen) pipeline.reconcileNow();
+    if (no_fullscreen) grab.reconcileNow();
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
-    ungrabAndFlush();
     log.info("Bar position toggled to: {s}", .{@tagName(cs.config.bar.bar_position)});
 }
 
@@ -1591,7 +1608,12 @@ pub fn setBarState(action: types.Action) void {
 fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
     s.vis.shown = should_be_visible;
     const conn = core.getState().conn;
-    if (do_reconcile) requests.grabServer(conn);
+    // Optional token: the workspace-switch path (do_reconcile false) must NOT
+    // grab, and the conditional used to be two hand-matched sites (grab here,
+    // ungrabAndFlush at the bottom) that a new early return could unpair.
+    var grab: ?pipeline.ScopedGrab = null;
+    if (do_reconcile) grab = pipeline.grabScoped();
+    defer if (grab) |g| g.deinit();
     _ = if (should_be_visible) xcb.xcb_map_window(conn, s.win.win_id) else xcb.xcb_unmap_window(conn, s.win.win_id);
     // Draw AFTER the map request so the blit lands in an already-mapped
     // window. A copy queued to an unmapped window is discarded by the server
@@ -1621,10 +1643,9 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
         }
     }
     syncScreenClaim();
-    if (do_reconcile) {
-        pipeline.reconcileNow();
+    if (grab) |g| {
+        g.reconcileNow();
         if (should_be_visible) raiseBar();
-        ungrabAndFlush();
     }
 }
 

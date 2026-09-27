@@ -190,7 +190,12 @@ pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) vo
 // actions.fullscreenToggleWindow, keeping the advertisement protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
-    pipeline.grabCtx().sink.setEwmhFullscreen(
+    // currentCtx, NOT a fresh ctx: this hook runs inside the fullscreen
+    // operation's grab, and the doc says so. Asking for a new ctx here (the
+    // old grabCtx) rebuilt `.workarea`/`.bar_win` mid-grab and re-ran the
+    // pre-reconcile duties after geometry had already been applied, so the
+    // model and the server could disagree before the single ungrabAndFlush.
+    pipeline.currentCtx().sink.setEwmhFullscreen(
         win,
         g_net_wm_state,
         g_net_wm_state_fullscreen,

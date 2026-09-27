@@ -191,8 +191,35 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     }));
 }
 
-/// Drains pending spawn entries non-blockingly (every event batch and on
-/// SIGCHLD), until EOF or a full buffer; a full buffer already holds both
+/// Upper bound on `readFds` output, so the event loop can size its poll set
+/// once instead of growing it. Matches the table capacity, so a full table is
+/// representable.
+pub const max_read_fds: usize = max_pending_spawns;
+
+/// Copies the read end of every pending spawn pipe into `buf` and returns how
+/// many were written. Entries whose pipe is already closed (buffer full, or
+/// EOF already seen) are skipped, so the count can shrink between calls.
+///
+/// The event loop polls exactly these fds, which is what removes the last
+/// unbounded-latency path in the spawn hand-off: a spawn whose output is ready
+/// but which produced no X event and no signal used to wait for the next
+/// unrelated wakeup, because the pipe was only drained from inside the X event
+/// batch (`drainPendingSpawns` at the end of `handleXcbEvents`) and from
+/// SIGCHLD. A command that prints and exits while the X socket stays silent
+/// therefore stalled until some other client happened to talk to the server.
+pub fn readFds(buf: []std.posix.fd_t) []std.posix.fd_t {
+    var n: usize = 0;
+    for (g_pending.slice()) |*entry| {
+        if (entry.spawn_fd == null) continue;
+        if (n == buf.len) break;
+        buf[n] = entry.spawn_fd.?;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+/// Drains pending spawn entries non-blockingly (every event batch, on SIGCHLD,
+/// and now on spawn-pipe readiness), until EOF or a full buffer; a full buffer already holds both
 /// possible messages, so EOF needn't be awaited. finishSpawn() classifies.
 pub fn drainPendingSpawns() void {
     if (g_pending.len == 0) return;

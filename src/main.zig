@@ -44,10 +44,7 @@ pub const std_options: std.Options = .{
 
 pub fn main() !void {
     const x = try connectToX();
-    // Only disconnect when the connection never errored. A dropped X
-    // server has already torn the stream down; xcb_disconnect on an errored
-    // connection can crash inside libxcb's teardown.
-    defer if (xcb.xcb_connection_has_error(x.conn) == 0) xcb.xcb_disconnect(x.conn);
+    defer x.deinit();
 
     // Intern the atom cache before any module reads atoms: scale.detectDpi()
     // resolves RESOURCE_MANAGER through the cache, so it must be populated
@@ -116,8 +113,8 @@ pub fn main() !void {
     requests.flush(x.conn);
     log.info("hana booted up successfully!", .{});
 
-    // Re-exec session hand-off (restart.execNext sets HANA_RESTORE).
-    if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
+    // Re-exec session hand-off (restart.execNext sets restart_env).
+    if (restart.restorePathFromEnv()) |restore_path_z| {
         restore.adoptSession(std.mem.span(restore_path_z));
     }
 
@@ -129,7 +126,7 @@ pub fn main() !void {
     // them and the successor would adopt unrelated windows. (After a crash
     // or a re-exec the file is exactly what recovery needs, which is why
     // this runs only here.)
-    if (std.c.getenv("HANA_RESTORE")) |restore_path_z| {
+    if (restart.restorePathFromEnv()) |restore_path_z| {
         std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, std.mem.span(restore_path_z)) catch |err| switch (err) {
             error.FileNotFound => {},
             else => log.warn("Could not remove restore file: {}", .{err}),
@@ -138,10 +135,22 @@ pub fn main() !void {
     log.info("Shutting down gracefully...", .{});
 }
 
+/// The X connection, OWNING. `deinit` encodes the has-error rule that every
+/// call site used to have to remember: a connection that has errored was
+/// already torn down by the server, and `xcb_disconnect` on it can crash
+/// inside libxcb's teardown, while a LIVE connection must be disconnected or
+/// the process leaks the socket (and, for a WM, the root grab survives until
+/// the kernel reaps it). Both facts live in one method now.
 const XSession = struct {
     conn: core.Connection,
     screen: core.Screen,
     root: core.WindowId,
+
+    /// Disconnects a healthy connection; a no-op on an errored one.
+    fn deinit(self: XSession) void {
+        if (xcb.xcb_connection_has_error(self.conn) != 0) return;
+        xcb.xcb_disconnect(self.conn);
+    }
 };
 
 fn connectToX() !XSession {
@@ -149,8 +158,16 @@ fn connectToX() !XSession {
 
     if (xcb.xcb_connection_has_error(conn) != 0) {
         log.err("X11 connection failed", .{});
+        // Nothing to release: the error already tore the stream down, which is
+        // why XSession.deinit skips errored connections too.
         return error.X11ConnectionFailed;
     }
+
+    // From here the connection is LIVE, so every remaining exit must release
+    // it. These two returns used to leak it: a null screen iterator, and a
+    // failed WM-role claim (which is the common one -- another WM holding
+    // SubstructureRedirect means we exit right here).
+    errdefer xcb.xcb_disconnect(conn);
 
     const screen = xcb.xcb_setup_roots_iterator(
         xcb.xcb_get_setup(conn),

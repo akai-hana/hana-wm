@@ -123,10 +123,63 @@ pub inline fn borderWidth() u16 {
 
 var state: ?State = null;
 
-/// True once init() ran. Guards boot-time config latches (e.g. the tracking
-/// workspace-count latch) that a test harness may invoke before core.is ready.
+/// How far boot has progressed. ONE answer to "is it safe to touch the model
+/// yet?", replacing the two independent latches this used to have: `state !=
+/// null` here and `pipeline.initialized` there. Two latches meant the
+/// pipeline could be initialized while core was not, or vice versa, and every
+/// consumer had to pick one and hope -- a test harness that set
+/// `pipeline.initialized = true` by hand was in a state the real boot sequence
+/// could never produce. Phase is monotone: init() advances it, and every
+/// consumer reads this one.
+pub const Phase = enum {
+    /// Nothing initialized: getState() would panic, no model exists.
+    uninit,
+    /// core.init() has run: State is live, so config/conn/screen are safe to
+    /// read. The model may not exist yet.
+    core_ready,
+    /// pipeline.init() has run: the model instance and its sink exist, so
+    /// model()/mut() are safe to call. Terminal.
+    model_ready,
+};
+
+var phase: Phase = .uninit;
+
+/// The current boot phase. Single source of truth for readiness.
+pub inline fn currentPhase() Phase {
+    return phase;
+}
+
+/// Records that core.init() has run, i.e. State is live. Asserts boot starts
+/// clean: a second core.init() would silently orphan the first State and the
+/// config box it owns.
+pub inline fn markCoreReady() void {
+    std.debug.assert(phase == .uninit);
+    phase = .core_ready;
+}
+
+/// Records that the model pipeline is live. Deliberately does NOT require
+/// .core_ready first: a headless unit-test fixture has no X connection and so
+/// can never establish State, yet still needs a model (the old
+/// `pipeline.initialized = true` latch did exactly that). In production the
+/// order is core.init() then pipeline.init(), fixed by main's call sequence.
+pub inline fn markModelReady() void {
+    phase = .model_ready;
+}
+
+/// True once core.init() ran, i.e. State (conn/screen/config/alloc) is live.
+/// Guards boot-time config latches (e.g. the tracking workspace-count latch)
+/// that a test harness may invoke before core is ready. Reads State itself
+/// rather than the phase: "is State populated" is a fact about State, and a
+/// headless fixture legitimately answers no while still having a model.
 pub inline fn isReady() bool {
     return state != null;
+}
+
+/// True once the model exists and model()/mut() are safe. This is the single
+/// replacement for the old `pipeline.initialized` latch, and the one answer
+/// every model consumer reads.
+pub inline fn isModelReady() bool {
+    return phase == .model_ready;
 }
 
 /// Panics if called before init().
@@ -147,6 +200,7 @@ pub fn init(
     config: *types.Config,
 ) void {
     state = .{ .conn = conn, .screen = screen, .root = root, .alloc = alloc, .config = config };
+    markCoreReady();
 }
 
 /// Deinit and free the config box `State` owns, using the allocator `State`

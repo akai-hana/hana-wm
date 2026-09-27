@@ -352,13 +352,87 @@ pub fn variantParse(comptime names: []const []const u8) fn ([]const u8) ?u8 {
     }.parse;
 }
 
+/// One row of a layout module's variant table: the config value-string, the
+/// bar indicator glyph drawn for it, and whether it is the fifo-spawn variant.
+pub const Variant = struct {
+    /// Value-string parsed out of the config file.
+    name: []const u8,
+    /// Bar indicator for this variant (the layouts segment draws it).
+    indicator: []const u8,
+    /// True for the one variant that toggles fifo spawn order.
+    fifo: bool = false,
+};
+
+/// The names column of a variant table, as the slice `variantParse` takes.
+fn variantNames(comptime variants: []const Variant) []const []const u8 {
+    const arr: [variants.len][]const u8 = blk: {
+        var a: [variants.len][]const u8 = undefined;
+        for (variants, 0..) |v, i| a[i] = v.name;
+        break :blk a;
+    };
+    return &arr;
+}
+
+/// The indicator column of a variant table, as `Layout.indicators`.
+fn variantIndicators(comptime variants: []const Variant) []const []const u8 {
+    const arr: [variants.len][]const u8 = blk: {
+        var a: [variants.len][]const u8 = undefined;
+        for (variants, 0..) |v, i| a[i] = v.indicator;
+        break :blk a;
+    };
+    return &arr;
+}
+
+/// The ordinal of the `fifo` variant, or null when the table marks none.
+fn variantFifo(comptime variants: []const Variant) ?u8 {
+    if (variants.len == 0) return null;
+    for (variants, 0..) |v, i| {
+        if (v.fifo) return @intCast(i);
+    }
+    return null;
+}
+
+/// Ordinal of the named variant in a module's OWN table, at comptime.
+/// Replaces each module's hand-numbered constant (`const variant_gaps = 1`):
+/// inserting or reordering a row moved the constant out from under the code
+/// that compared against it, and nothing reported the shift -- the layout then
+/// computed the other variant's geometry under a test that still passed.
+pub fn variantIndex(comptime variants: []const Variant, comptime vname: []const u8) u8 {
+    for (variants, 0..) |v, i| {
+        if (comptime std.mem.eql(u8, v.name, vname)) return @intCast(i);
+    }
+    @compileError("no variant named '" ++ vname ++ "' in this module's variant table");
+}
+
 /// Assemble a layout module's registry entry: `name`/`icon` are the display
-/// stems, `f` the compute hook, and `extra` the baseline `contract.Layout`
-/// fields (variants, indicators, property hints). Build-generated registry.
-pub fn layoutModule(comptime name: []const u8, comptime icon: []const u8, comptime f: anytype, comptime extra: contract.Layout) contract.Layout {
+/// stems, `f` the compute hook, `variants` the ONE table the variant metadata
+/// is derived from, and `extra` the remaining `contract.Layout` fields
+/// (property hints). Build-generated registry.
+///
+/// The variant-derived contract fields (`variant_count`, `variant_parse`,
+/// `indicators`, `fifo_variant`) are NOT settable through `extra` and are
+/// computed from `variants` here. They were four hand-maintained parallel
+/// lists per module; they happened to agree, so nothing failed, and adding a
+/// variant row while forgetting `fifo_variant` would leave a layout whose
+/// cycle advertised a variant that the bar rendered as the empty-indicator
+/// sentinel. One table makes `indicators.len == variant_count` by construction.
+pub fn layoutModule(
+    comptime name: []const u8,
+    comptime icon: []const u8,
+    comptime f: anytype,
+    comptime variants: []const Variant,
+    comptime extra: contract.Layout,
+) contract.Layout {
     var m = extra;
     m.name = name;
     m.icon = icon;
     m.compute = f;
+    m.variant_count = @intCast(variants.len);
+    m.fifo_variant = variantFifo(variants);
+    m.variant_parse = if (variants.len == 0) null else variantParse(variantNames(variants));
+    m.indicators = if (variants.len == 0) null else variantIndicators(variants);
+    // The four derived fields are assigned AFTER `extra` is copied in, so a
+    // stale value in an `extra` literal is overwritten rather than honored --
+    // the table is the single source, which is the whole point.
     return m;
 }

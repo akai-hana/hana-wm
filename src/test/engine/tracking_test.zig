@@ -5,7 +5,7 @@
 //! current-workspace visibility, and on parked state.
 //!
 //! The facade reads the process-global `pipeline` model, so the fixture
-//! drives that global (`pipeline.initialized` + `pipeline.mut(&gate)`)
+//! drives that global (`pipeline.initialized()` + `pipeline.mut(&gate)`)
 //! instead of a local model, and reconciles the SAME instance the facade
 //! reads. The sync sink is the recorder (no live X needed; these are
 //! headless and run in every `zig build test`).
@@ -13,6 +13,7 @@
 const std = @import("std");
 const testing = std.testing;
 
+const core = @import("core");
 const model = @import("model");
 const pipeline = @import("pipeline");
 const tracking = @import("tracking");
@@ -37,7 +38,12 @@ var gate: pipeline.Gate = .{};
 /// Then every reconcile in a test runs over `pipeline.model()` so facade and
 /// ledger observe the identical state.
 fn pipelineModel() *model.Model {
-    pipeline.initialized = true;
+    // Advance the real boot phase instead of forging a private latch. The
+    // phase is monotone and core.init() may not have run in a unit test, so
+    // markModelReady is allowed from .uninit here precisely because the test
+    // stands in for the whole boot sequence; the point is that the fixture and
+    // production now read the SAME readiness answer.
+    core.markModelReady();
     const m = pipeline.mut(&gate);
     m.* = helpers.makeModel();
     helpers.testReset();

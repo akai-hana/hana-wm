@@ -74,7 +74,7 @@ pub fn deinit() void {
 /// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
-    if (pipeline.initialized) {
+    if (pipeline.initialized()) {
         return pipeline.model().focused;
     }
     return state.?.last_applied;

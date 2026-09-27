@@ -5,7 +5,14 @@ const tiling = @import("tiling");
 const model = @import("model");
 
 // Variant index of the "relaxed" variant; must match variantParse order below.
-const variant_relaxed = 1;
+/// The ONE variant table for this layout.
+const variants = [_]tiling.Variant{
+    .{ .name = "rigid", .indicator = "[#]" },
+    .{ .name = "relaxed", .indicator = "[~]" },
+};
+
+/// Ordinal of the "relaxed" variant, read from the table above.
+const variant_relaxed: u8 = tiling.variantIndex(&variants, "relaxed");
 
 /// Even share of `total` across `count` cells, with a full `gap` between every
 /// pair plus one at each outer edge. The cell math behind grid's rigid and
@@ -71,8 +78,4 @@ inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module = tiling.layoutModule("grid", "[+]", compute, .{
-    .variant_count = 2,
-    .variant_parse = tiling.variantParse(&.{ "rigid", "relaxed" }),
-    .indicators = &.{ "[#]", "[~]" },
-});
+pub const module = tiling.layoutModule("grid", "[+]", compute, &variants, .{});

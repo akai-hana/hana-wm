@@ -4,7 +4,14 @@
 const tiling = @import("tiling");
 
 // Variant index of the "gaps" variant; must match variantParse order below.
-const variant_gaps = 1;
+/// The ONE variant table for this layout.
+const variants = [_]tiling.Variant{
+    .{ .name = "gapless", .indicator = "<->" },
+    .{ .name = "gaps", .indicator = ">-<" },
+};
+
+/// Ordinal of the "gaps" variant, read from the table above.
+const variant_gaps: u8 = tiling.variantIndex(&variants, "gaps");
 
 /// Compute monocle layout. Origin top-left, y-down. Gaps: full gap on each
 /// screen edge when gaps enabled, else zero. All dimensions are u16 and
@@ -33,8 +40,4 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module = tiling.layoutModule("monocle", "[M]", compute, .{
-    .variant_count = 2,
-    .variant_parse = tiling.variantParse(&.{ "gapless", "gaps" }),
-    .indicators = &.{ "<->", ">-<" },
-});
+pub const module = tiling.layoutModule("monocle", "[M]", compute, &variants, .{});

@@ -106,4 +106,4 @@ inline fn splitAndAdvance(
 }
 
 /// This layout's registry contribution: metadata plus the dispatch hook.
-pub const module = tiling.layoutModule("fibonacci", "[@]", compute, .{});
+pub const module = tiling.layoutModule("fibonacci", "[@]", compute, &.{}, .{});
