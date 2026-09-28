@@ -14,6 +14,9 @@ const testing = std.testing;
 // src/core/pure/log.zig silences all std.log diagnostics in test binaries,
 // so this stays quiet on success.
 const config = @import("config");
+const constants = @import("constants");
+const paths = @import("paths");
+const scaling = @import("scaling");
 const scratch = @import("scratch");
 
 fn writeAndRead(alloc: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]u8 {
@@ -691,4 +694,91 @@ test "a single-file config source still snapshots as config.toml" {
     defer freeTree(alloc, got);
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("config.toml", got[0]);
+}
+
+// ---------------------------------------------------------------------------
+// 15.1 / 15.6 / 15.12: boot degradation, search policy, load ceilings
+// ---------------------------------------------------------------------------
+
+test "15.1: a config that parses but fails validate falls back at BOOT" {
+    const alloc = testing.allocator;
+    const box = try Sandbox.init(alloc, "invalid-boot");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+    defer config.deinitGoodSource(alloc);
+
+    // Valid TOML, semantically impossible: 500% is far outside the
+    // [min_master_width, max_master_width] band. Before 15.1 this was the
+    // config that took the WM down at boot while a typo'd key did not.
+    // The `%` matters: a bare number parses as an ABSOLUTE pixel value, which
+    // validation accepts (the screen width is not known here), so `500` would
+    // be a perfectly good config and the test would prove nothing.
+    try box.write("hana/config.toml", "[tiling]\nmaster_width = 500%\n");
+
+    var source: config.DefaultSource = .fallback;
+    var loaded = try config.loadConfigDefault(alloc, &source, true);
+    defer loaded.deinit(alloc);
+    // The LOAD succeeds (validate runs later, at boot) ...
+    try testing.expectEqual(config.DefaultSource.user, source);
+    // ... and it is the load that reports the problem, as a load always does.
+    try testing.expectError(error.InvalidConfig, config.validate(&loaded));
+
+    // `load` is the boot entry point, and it must come back with a config
+    // rather than the error. Exercised for real, not simulated: the fallback
+    // is loaded, validated, and returned.
+    var booted = try config.load(alloc);
+    defer booted.deinit(alloc);
+    try config.validate(&booted);
+    // The fallback's own master width (55%), not the impossible 500%.
+    try testing.expect(booted.tiling.master_width.is_percentage);
+    try testing.expect(scaling.asRatio(booted.tiling.master_width) <= constants.max_master_width);
+}
+
+test "15.6: an EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // The regression: getenv returned a non-null empty string, so the old code
+    // used "" as the config home and `path.join("", "hana")` produced the
+    // RELATIVE path "hana" -- the config search silently became relative to the
+    // working directory, so the same config tree gave two different WMs
+    // depending on where hana was started.
+    const from_empty = try paths.configHome(&buf, "", "/home/u");
+    try testing.expectEqualStrings("/home/u/.config", from_empty);
+    try testing.expect(std.fs.path.isAbsolute(from_empty));
+
+    // Set and non-empty: wins over HOME, as the spec says.
+    const from_xdg = try paths.configHome(&buf, "/xdg/here", "/home/u");
+    try testing.expectEqualStrings("/xdg/here", from_xdg);
+
+    // Unset, and the HOME-unset case the loader now warns about (it passes "/"
+    // so the search stays absolute instead of collapsing to a bare "hana").
+    const from_home = try paths.configHome(&buf, null, "/");
+    try testing.expectEqualStrings("/.config", from_home);
+    try testing.expect(std.fs.path.isAbsolute(from_home));
+}
+
+test "15.12: a config tree over the file ceiling is refused, not partially loaded" {
+    const alloc = testing.allocator;
+    const box = try Sandbox.init(alloc, "toomany");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+    defer config.deinitGoodSource(alloc);
+
+    // One file over the ceiling, each a valid, tiny, distinct config. A load
+    // that skipped the surplus would still "succeed" and quietly drop them.
+    var name_buf: [32]u8 = undefined;
+    for (0..config.max_config_files + 1) |i| {
+        const name = try std.fmt.bufPrint(&name_buf, "hana/c{d:0>3}.toml", .{i});
+        try box.write(name, "[binds]\n");
+    }
+
+    var source: config.DefaultSource = .fallback;
+    try testing.expectError(
+        error.TooManyConfigFiles,
+        config.loadConfigDefault(alloc, &source, false),
+    );
 }

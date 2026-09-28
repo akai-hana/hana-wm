@@ -41,8 +41,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     // Clamped internally (self-contained); the optional pre-clamp grow duty is
     // described at the module header.
-    const max_off = maxOffset(windows.len, slot_w, screen_w);
-    const scroll: i32 = @max(0, @min(v.params.viewport_offset, max_off));
+    const scroll: i32 = clampOffset(v.params.viewport_offset, windows.len, screen_w);
 
     // Border subtracted here (once); emitView's applyHints never touches it.
     const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.totalInset(m.gap, m), v.env.min_dim);
@@ -82,6 +81,19 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     }
 }
 
+/// THE scroll clamp (14.7): a viewport offset is always in [0, max_off] for
+/// the CURRENT window count and slot width. Two sites need that and they used
+/// to spell it differently -- `@max(0, @min(...))` in the layout,
+/// `std.math.clamp` in the pre-reconcile grow duty -- so tightening one bound
+/// (a different max_off, a signed-vs-unsigned edge) would silently not apply
+/// to the other, and the two answers disagree by exactly the window that
+/// scrolls the furthest.
+fn clampOffset(offset: i32, n: usize, wa_width: u16) i32 {
+    const slot_w = slotWidth(wa_width);
+    const max_off = maxOffset(n, slot_w, wa_width);
+    return @max(0, @min(offset, max_off));
+}
+
 /// Pre-reconcile duty (pure): snap right when the visible count grew
 /// (spawn/restore/tag-add), then clamp to content. Takes the workspace's
 /// layout params BY VALUE; the pipeline choke point applies the returned
@@ -91,7 +103,7 @@ fn preReconcileHook(p: model.LayoutParams, n: usize, wa_width: u16) model.Layout
     const max_off = maxOffset(n, slot_w, wa_width);
     var next = p;
     if (n > next.viewport_prev_count) next.viewport_offset = max_off;
-    next.viewport_offset = std.math.clamp(next.viewport_offset, 0, max_off);
+    next.viewport_offset = clampOffset(next.viewport_offset, n, wa_width);
     next.viewport_prev_count = @intCast(n);
     return next;
 }

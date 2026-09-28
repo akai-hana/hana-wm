@@ -1277,6 +1277,7 @@ fn createBar(height: u16, y_pos: i16) !BarSetup {
 pub fn init() !void {
     const cs = core.getState();
     std.debug.assert(cs.config.bar.enabled);
+    warnUnknownSegments();
     barwin.initAtoms();
     hz.ensureRefreshRateDetected(cs.conn);
     const height = calcBarHeightAndFontSize();
@@ -1317,9 +1318,34 @@ pub fn deinit() void {
     usable_area.clearSurfaceWindow();
 }
 
+/// Warns about every segment name in the live bar layout that does not resolve
+/// to a registry entry. All four layout consumers skip an unresolvable name
+/// (`segId(name) orelse continue`), so a typo -- or a segment dropped from the
+/// build -- silently shortens the bar with nothing on stderr to say which entry
+/// is the problem. The layout tree is flat (`BarLayout` is a position plus a
+/// segment list), so one nested loop is the whole walk.
+///
+/// This lives here, not in `config.validate`, because the registry is a
+/// `bar_modules` comptime table: config sits below the bar in the dependency
+/// graph and importing upward would break the no-bar build.
+fn warnUnknownSegments() void {
+    if (comptime !hasRegisteredSegments()) return;
+    const cfg = &core.getState().config.bar;
+    for (cfg.layout.items) |lay| {
+        for (lay.segments.items) |name| {
+            if (segId(name) == null) log.warn(
+                "Bar: segment '{s}' is not registered; ignoring it. Check the " ++
+                    "spelling, or whether this build includes the module.",
+                .{name},
+            );
+        }
+    }
+}
+
 pub fn reload() void {
     const old = gBar.state orelse {
         if (core.getState().config.bar.enabled) {
+            warnUnknownSegments();
             init() catch |err| log.err("Bar init failed: {}", .{err});
         }
         return;
@@ -1328,6 +1354,7 @@ pub fn reload() void {
         deinit();
         return;
     }
+    warnUnknownSegments();
     const height = calcBarHeightAndFontSize();
     applyReload(old, height) catch |err| {
         log.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});

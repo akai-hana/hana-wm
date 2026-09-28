@@ -3,6 +3,7 @@
 
 const model = @import("model");
 const tiling = @import("tiling");
+const shrinkClamped = tiling.shrinkClamped;
 const Region = tiling.Region;
 
 // Clockwise spiral direction for the next window split.
@@ -85,15 +86,16 @@ inline fn splitAndAdvance(
     const off_x: i32 = if (split_x) @intCast(off) else 0;
     const off_y: i32 = if (split_x) 0 else @intCast(off);
 
-    tiling.emitRect(
-        ctx.v,
-        ctx.out,
-        win,
-        cur.x + off_x,
-        cur.y + off_y,
-        (if (split_x) win_dim else cur.w) -| border2,
-        (if (split_x) cur.h else win_dim) -| border2,
-    );
+    // Border via `shrinkClamped` (14.6), not `-| border2`. The saturating
+    // subtract floors at 0, so in the degenerate case -- a split region no
+    // wider than the two borders -- the window was emitted with width 0. Every
+    // other emitter in the tree floors at `min_dim`, which is what keeps a
+    // positive area: a zero-area rect is not "small", it is a window the server
+    // cannot map sensibly. The pixels only move in that degenerate case, which
+    // is why it needed the tiny-workarea pin to be visible at all.
+    const w = shrinkClamped(if (split_x) win_dim else cur.w, border2, ctx.v.env.min_dim);
+    const h = shrinkClamped(if (split_x) cur.h else win_dim, border2, ctx.v.env.min_dim);
+    tiling.emitRect(ctx.v, ctx.out, win, cur.x + off_x, cur.y + off_y, w, h);
     // Advance the remainder origin along the split axis (forward only), then
     // shrink the remainder along that axis by the taken strip.
     if (split_x) {

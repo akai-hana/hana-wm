@@ -25,6 +25,17 @@ pub fn applyHints(rect: model.Rect, h: model.SizeHints) model.Rect {
 
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
     // convention); cross-multiplied to avoid FP division per retile.
+    //
+    // BOTH OR NEITHER (13.8): one bound alone is not a weaker constraint here,
+    // it is a DIFFERENT one, and applying it alone is a trap worth naming. A
+    // max bound alone clamps the offending DIMENSION, so a 200x50 window under
+    // `max_aspect = 4` would become 200x50 still (200/50 = 4, at the limit) but
+    // a 400x50 one would have its WIDTH clamped to 200 -- the window gets
+    // narrower instead of taller, so the client is told to resize its content
+    // area rather than being given a shape closer to its ratio. With the pair
+    // present, the SAME window is fixed through the axis the ratio says is
+    // wrong (its height, here). So the gate is `min > 0 AND max > 0`, not
+    // "each independently": the two halves of one rule.
     if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
         const fw: f32 = @floatFromInt(width);
         const fh: f32 = @floatFromInt(height);
@@ -330,19 +341,77 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
     const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
-    if (m.compute) |f| f(v, out);
-    // One placement per window, in View.order order: the sink consumes `out`
-    // positionally, so a layout that skipped or reordered a window degraded
-    // silently into a wrong screen. Make that a loud failure instead. Zero
-    // release cost (std.debug.assert).
+    if (m.compute) |f| {
+        // The layout writes into SCRATCH and the engine emits into `out` in
+        // `v.order` position (14.9). The order is a property of the SINK
+        // (it consumes `out` positionally against a per-slot table built from
+        // `order`), not something each layout can be trusted to reproduce:
+        // master's overflow grid is column-major, so it emitted `100 101 110
+        // 102..109` where the order said `100 101 102..110` -- a real screen
+        // bug (each window was given another window's rect) that no golden
+        // test could see, because every golden looked at windows it knew by
+        // name rather than at the position. Making it an engine invariant
+        // means a future layout cannot reintroduce it by choosing a tidier
+        // traversal than a row-major one.
+        var scratch: List = .{};
+        f(v, &scratch);
+        emitInOrder(v, &scratch, out);
+    }
+    // One placement per window, in View.order order (asserted, and now
+    // GUARANTEED by emitInOrder above). The length check catches a dropped or
+    // doubled window; comparing the window id at each index catches a
+    // REORDERED one, which keeps the length while swapping whose rect is
+    // whose. Both are std.debug.assert: no release cost.
     //
-    // The length check (added with §13 item 1) catches a dropped or doubled
-    // window; it cannot catch a REORDERED one, which keeps the length while
-    // swapping whose rect is whose. Comparing the window id at each index
-    // closes that: the order is `v.order`, so any mismatch means the module
-    // emitted out of order, whatever the length.
+    // Note these asserts are only live in Debug/ReleaseSafe. The unit tests
+    // build ReleaseFast by default (build.zig resolveOptimize), where they
+    // compile out -- which is why the 14.9 invariant sweep exists as an
+    // ordinary test rather than only as asserts.
     std.debug.assert(out.len == v.order.len);
     for (out.constSlice(), v.order) |p, win| std.debug.assert(p.win == win);
+}
+
+/// Re-emit `scratch` into `out` in `v.order` position.
+///
+/// Fast path: the layout already emitted in order (five of the six do), so
+/// this is one comparison pass plus a copy and no searching. Otherwise each
+/// order position takes the placement whose window it names, and `taken` keeps
+/// a duplicate from satisfying two positions -- without it, a layout that
+/// emitted window 5 twice and dropped window 4 would silently hand window 5's
+/// single rect to both positions, which is the same wrong-screen outcome the
+/// reordering exists to prevent, wearing a passing length check.
+fn emitInOrder(v: *const View, scratch: *const List, out: *List) void {
+    const order = v.order;
+    const ps = scratch.constSlice();
+    if (ps.len == order.len) {
+        var already = true;
+        for (ps, order) |p, win| {
+            if (p.win != win) {
+                already = false;
+                break;
+            }
+        }
+        if (already) {
+            for (ps) |p| _ = out.append(p);
+            return;
+        }
+    }
+
+    var taken: [model.store_capacity]bool = @splat(false);
+    for (order) |win| {
+        var found = false;
+        for (ps, 0..) |p, k| {
+            if (taken[k] or p.win != win) continue;
+            taken[k] = true;
+            _ = out.append(p);
+            found = true;
+            break;
+        }
+        // No match for this position: emit a placeholder so the placement
+        // COUNT still matches and the caller's per-index assert names the
+        // missing window, instead of a count mismatch that names nothing.
+        if (!found) _ = out.append(.{ .win = win, .rect = contract.parked_rect, .visible = false });
+    }
 }
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of

@@ -13,6 +13,7 @@ const helpers = @import("helpers");
 const build_options = @import("build_options");
 const tiling = @import("tiling");
 const contract = @import("contract");
+const config = @import("config");
 // Scroll-only tests runtime-skip below, but the stub must still expose the
 // two members their bodies reference so a scroll-less tree compiles.
 const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else struct {
@@ -89,7 +90,7 @@ const Fixture = struct {
             .order = s.tiled_order.constSlice(),
             .params = &s.params,
             .workarea = self.wa,
-            .hints = &self.hv,
+            .hints = self.hv,
             .focused = self.m.focused,
         };
     }
@@ -246,20 +247,29 @@ test "fibonacci overflow fallback" {
 
     try testing.expectEqual(@as(usize, 40), out.len);
     var visible_count: usize = 0;
-    var raised_found = false;
+    var raised: ?Placement = null;
     for (out.constSlice()) |p| {
         if (p.visible) {
             visible_count += 1;
-            if (p.win == 75) raised_found = true;
+            if (p.win == 75) raised = p;
         } else {
             try testing.expectEqual(tiling.parked_rect.x, p.rect.x);
             try testing.expectEqual(tiling.parked_rect.width, p.rect.width);
         }
     }
     try testing.expectEqual(@as(usize, 6), visible_count);
-    try testing.expect(raised_found);
     // The raised window sits in the leftover region, hint-free here.
-    try expectP(&out, 5, 75, 128, 104, 12, 36, true);
+    //
+    // Addressed BY WINDOW, not by index. This used to be `expectP(&out, 5, 75,
+    // ...)` -- position 5 -- which is exactly the property 14.9 had to remove:
+    // fibonacci emitted the raised window early, so the index that held it was
+    // a function of the traversal, not of the layout. The rect is the golden
+    // value; the slot it lands in is the engine's business.
+    const r = raised orelse return error.RaisedWindowMissing;
+    try testing.expectEqual(@as(i32, 128), @as(i32, r.rect.x));
+    try testing.expectEqual(@as(i32, 104), @as(i32, r.rect.y));
+    try testing.expectEqual(@as(u16, 12), r.rect.width);
+    try testing.expectEqual(@as(u16, 36), r.rect.height);
 }
 
 // leaf BSP splits the longer axis first, ties favour vertical.
@@ -543,4 +553,130 @@ test "layout cycle is config-order and wraps" {
         k = tiling.cycleKind(k, 1, &names);
         try testing.expectEqual(ring[if (i + 1 == n) 0 else i + 1], k);
     }
+}
+
+/// The shared placement-invariant checker (14.9). Every layout's own tests pin
+/// GOLDEN rects, which is exactly the blind spot: a golden test passes when a
+/// layout emits the right numbers for the right window and nothing at all says
+/// anything about the properties that must hold for EVERY input. These five
+/// are the ones a golden cannot see:
+///
+///   1. count     -- one placement per ordered window (tiling.compute asserts
+///                   this too, but a skipped window there is a ReleaseFast no-op);
+///   2. win set   -- the same windows, each exactly once, in order;
+///   3. in bounds -- no rect escapes the work area (a negative or overflowing
+///                   rect is a real screen bug the server will not report);
+///   4. area      -- a VISIBLE placement has positive area (zero-area is not
+///                   "small", it is unmappable);
+///   5. overlap   -- two VISIBLE placements do not overlap: the layouts' one
+///                   shared failure mode, and the one a per-layout golden is
+///                   least likely to catch because each golden only looks at
+///                   its own windows.
+fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
+    const order = v.order;
+    try testing.expectEqual(order.len, out.len);
+    const ps = out.constSlice();
+    for (ps, order) |p, win| try testing.expectEqual(win, p.win);
+    for (ps, 0..) |p, i| {
+        const r = p.rect;
+        if (!p.visible) continue;
+        try testing.expect(r.width > 0);
+        try testing.expect(r.height > 0);
+        const x0 = @as(i32, r.x);
+        const y0 = @as(i32, r.y);
+        const x1 = x0 + @as(i32, r.width);
+        const y1 = y0 + @as(i32, r.height);
+        try testing.expect(x0 >= @as(i32, wa.x));
+        try testing.expect(y0 >= @as(i32, wa.y));
+        try testing.expect(x1 <= @as(i32, wa.x) + @as(i32, wa.width));
+        try testing.expect(y1 <= @as(i32, wa.y) + @as(i32, wa.height));
+        for (ps[0..i]) |q| {
+            if (!q.visible) continue;
+            const qx0 = @as(i32, q.rect.x);
+            const qy0 = @as(i32, q.rect.y);
+            const qx1 = qx0 + @as(i32, q.rect.width);
+            const qy1 = qy0 + @as(i32, q.rect.height);
+            const disjoint = x1 <= qx0 or qx1 <= x0 or y1 <= qy0 or qy1 <= y0;
+            try testing.expect(disjoint);
+        }
+    }
+}
+
+// The sweep: every registered layout x every variant x n = 0..12, at the
+// standard work area AND at a deliberately hostile 120x120 one (where
+// min_dim floors and clamps actually engage instead of being no-ops).
+test "14.9: every layout satisfies the placement invariants at every size" {
+    if (!build_options.has_tiling) return error.SkipZigTest;
+    const areas = [_]model.Rect{ helpers.std_wa, .{ .x = 0, .y = 0, .width = 120, .height = 120 } };
+    var kinds: usize = 0;
+    for (contract.tiling_mods, 0..) |lm, kind| {
+        if (lm.compute == null) continue;
+        kinds += 1;
+        const vcount: usize = if (lm.variant_count == 0) 1 else lm.variant_count;
+        for (0..vcount) |vi| {
+            for (0..13) |n| {
+                var wins: [12]model.WindowId = undefined;
+                for (wins[0..n], 0..) |*w, i| w.* = @intCast(100 + i);
+                var fx: Fixture = undefined;
+                for (areas) |wa| {
+                    fx.initAt(wins[0..n], wa) catch |err| return err;
+                    // The variant lives in the model (View.params is a const
+                    // handle to it), so seed it before building the View.
+                    fx.m.ws[0].params.variant_idx = @intCast(vi);
+                    var v = fx.view();
+                    v.env = helpers.std_env;
+                    const out = computeOf(@intCast(kind), v);
+                    assertInvariants(&out, v, wa) catch |err| {
+                        // Dump both sequences: an order mismatch is only
+                        // actionable next to the two lists that disagree.
+                        std.debug.print("14.9 FAIL {s} variant={d} n={d} wa={d}x{d}: {s}\n", .{
+                            lm.name, vi, n, wa.width, wa.height, @errorName(err),
+                        });
+                        std.debug.print("  order   :", .{});
+                        for (v.order) |w| std.debug.print(" {d}", .{w});
+                        std.debug.print("\n  emitted :", .{});
+                        for (out.constSlice()) |p| std.debug.print(" {d}", .{p.win});
+                        std.debug.print("\n  rects   :", .{});
+                        for (out.constSlice()) |p|
+                            std.debug.print(" ({d},{d} {d}x{d}{s})", .{
+                                p.rect.x,                         p.rect.y, p.rect.width, p.rect.height,
+                                if (p.visible) "" else " hidden",
+                            });
+                        std.debug.print("\n", .{});
+                        return err;
+                    };
+                }
+            }
+        }
+    }
+    try testing.expect(kinds >= 6); // the six layouts the tree ships
+}
+
+// The config-side layout-name grammar and the layout registry are kept in sync
+// here, in the test, because neither side may import the other: config sits
+// below tiling in the layer order. Both directions matter and each was a
+// silent failure. A spelling the registry no longer has is dropped from the
+// parse, so a user's config entry stops working with no diagnostic. A registry
+// layout the grammar omits is unselectable, and the seed-time resolver just
+// logs a warning naming a fallback the user never asked for.
+test "config layout names and the layout registry agree" {
+    var checked: usize = 0;
+    for (config.layout_name_grammar.keys()) |spelling| {
+        // The master-stack spellings fold to the canonical "master" at the
+        // storage site, so compare the folded form.
+        const canon = config.canonicalLayoutName(spelling);
+        if (tiling.layoutByName(canon) == null) {
+            std.debug.print("config accepts layout '{s}' but the registry has no '{s}'\n", .{ spelling, canon });
+            return error.ConfigAcceptsUnknownLayout;
+        }
+        checked += 1;
+    }
+    for (contract.tiling_mods) |m| {
+        if (!config.isLayoutName(m.name)) {
+            std.debug.print("layout '{s}' is registered but the config grammar cannot spell it\n", .{m.name});
+            return error.LayoutUnspellableInConfig;
+        }
+    }
+    // Guard against the loops above going vacuous if the grammar were emptied.
+    try testing.expect(checked >= 6);
 }

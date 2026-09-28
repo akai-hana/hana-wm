@@ -122,12 +122,11 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
         hints_buf[nn] = e.size_hints;
         nn += 1;
     }
-    const hv = tiling.HintsView{ .order = order_buf[0..nn], .hints = hints_buf[0..nn] };
     const view = tiling.View{
         .order = order_buf[0..nn],
         .params = &m.ws[m.current.index].params,
         .workarea = screen,
-        .hints = &hv,
+        .hints = .{ .order = order_buf[0..nn], .hints = hints_buf[0..nn] },
         .focused = m.focused,
         .env = helpers.std_env,
     };

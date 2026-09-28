@@ -1,7 +1,8 @@
 //! Filesystem path helpers.
 //! Shared $PATH walking for the config-side terminal detector (fallback.zig)
 //! and the prompt's command completer (prompt.zig): one probe order, one
-//! common-dir fast path, no duplicated split/scan logic.
+//! common-dir fast path, no duplicated split/scan logic. Also the home of the
+//! XDG config-home policy (configHome), which the config loader consumes.
 
 const std = @import("std");
 
@@ -63,6 +64,33 @@ pub fn exeInDir(buf: []u8, dir: []const u8, name: []const u8) bool {
         0,
     ));
     return rc == 0;
+}
+
+/// XDG config-home resolution, the one place that policy lives (it was inline
+/// in config.searchPaths, which is the only caller but is not the right owner
+/// for a rule about environment variables).
+///
+/// `$XDG_CONFIG_HOME` wins when set AND non-empty; otherwise `$HOME/.config`.
+/// An EMPTY value counts as unset, per the XDG spec and for a concrete reason:
+/// joining `""` with the app name yields a RELATIVE path, so `XDG_CONFIG_HOME=""`
+/// silently redirected the config search to the current working directory --
+/// a config that boots differently depending on where hana was started. The
+/// old `getenv`-is-non-null test took the empty string at face value and hit
+/// exactly that.
+///
+/// Writes into `buf` and returns the slice; `buf` is caller-owned so the
+/// previous arena-dupe-then-free dance disappears.
+pub fn configHome(buf: []u8, xdg: ?[]const u8, home: []const u8) ![]const u8 {
+    if (xdg) |x| {
+        if (x.len != 0) return std.fmt.bufPrint(buf, "{s}", .{x}) catch error.NameTooLong;
+    }
+    // The caller passes "/" for an unset HOME (so the result stays absolute),
+    // and a bare "{s}/.config" would then be "//.config" -- harmless, but it
+    // leaks into every warning and path comparison that mentions the config
+    // home. Join semantics, not string concatenation.
+    if (home.len != 0 and home[home.len - 1] == '/')
+        return std.fmt.bufPrint(buf, "{s}.config", .{home}) catch error.NameTooLong;
+    return std.fmt.bufPrint(buf, "{s}/.config", .{home}) catch error.NameTooLong;
 }
 
 /// POSIX mode for files that must never be world/group-writable: the session

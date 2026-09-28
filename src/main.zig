@@ -42,7 +42,47 @@ pub const std_options: std.Options = .{
     .allow_stack_tracing = true,
 };
 
+/// The longest captured diagnostic line `--check-config` can print without
+/// truncating it; a longer one is clipped rather than wrapped, so the count is
+/// never the thing a reader has to reconstruct.
+const check_line_buf = 1024;
+
+/// True when the process was asked to validate its config and stop. Checked
+/// before ANY X11 work on purpose: a config check that needs a display (or
+/// claims a window-manager role) is unusable from CI, which is the only place
+/// it earns its keep.
+fn checkConfigRequested() bool {
+    var it = std.process.argsWithAllocator(alloc) catch return false;
+    defer it.deinit();
+    _ = it.skip(); // argv[0]
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--check-config")) return true;
+    }
+    return false;
+}
+
+fn runCheckConfig() !void {
+    var diag: log.Collector = .{ .allocator = alloc };
+    defer diag.deinit();
+    try config.checkConfig(alloc, &diag);
+    const n = diag.count();
+    var buf: [check_line_buf]u8 = undefined;
+    for (diag.items.items) |d| {
+        // A diagnostic longer than the buffer is clipped with a marker rather
+        // than silently cut, so a truncated line is never mistaken for a
+        // complete one.
+        const line = try log.Collector.line(d, &buf);
+        std.debug.print("{s}{s}\n", .{ line, if (line.len == buf.len) "  [truncated]" else "" });
+    }
+    std.debug.print("hana --check-config: {d} diagnostic(s) in the loaded config\n", .{n});
+    // Non-zero ONLY for warn/err: a clean load and a clean check agree, which
+    // is what lets a CI job gate on this.
+    std.process.exit(if (n == 0) 0 else 1);
+}
+
 pub fn main() !void {
+    if (checkConfigRequested()) try runCheckConfig();
+
     const x = try connectToX();
     defer x.deinit();
 

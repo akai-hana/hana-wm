@@ -77,6 +77,11 @@ pub const Ctx = struct {
     color_of: *const fn (model.WindowId, *const model.Model) u32,
     /// Bar/top window raised by force_restack; null when no bar.
     bar_win: ?model.WindowId = null,
+    /// Whether a layout module may place windows (13.6). The CALLER resolves
+    /// it -- normally `contract.activeLayoutKind(kind) != null` -- so this file
+    /// asks the same question the bar asks without reading core config state
+    /// itself, and so the reconcile stays drivable with a bare model.
+    layout_active: bool = true,
 };
 
 pub const Opts = struct { force_restack: bool = false };
@@ -142,7 +147,6 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
     // the resolved kind also subsumes the no-tiling build (an empty registry
     // resolves to null).
     const params = &m.ws[m.current.index].params;
-    const layout_active = contract.activeLayoutKind(params.kind) != null;
     if (fs_win == null) {
         var n: usize = 0;
         const tiled = &m.ws[m.current.index].tiled_order;
@@ -161,11 +165,13 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             n += 1;
         }
         if (n > 0) {
-            if (layout_active) {
-                const hv = contract.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
-                const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
-                tiling.compute(params.kind, &view, &placements);
-            } else {
+            // `comptime` on the build flag is load-bearing: it prunes the
+            // `tiling.compute` reference in a no-tiling build, where the seam
+            // is an empty struct (the file-header invariant). A plain runtime
+            // `ctx.layout_active` would not, and the seam lookup would fail to
+            // compile in exactly the build that must not mention tiling.
+            const float_all = if (comptime !build_options.has_tiling) true else !ctx.layout_active;
+            if (float_all) {
                 // Tiling off: every window floats at the full work area. The
                 // alternative -- emit nothing -- is not a neutral "no layout",
                 // it is a broken screen: a `.tiled` entry with no placement is
@@ -173,7 +179,12 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
                 // whatever rect it last had (windows piled on one spot). The
                 // same fallback is what a no-tiling build gets, so "no layout
                 // modules" and "layout disabled" have ONE answer.
-                for (order_buf[0..n]) |w| placements.append(.{ .win = w, .rect = wa, .visible = true });
+                for (order_buf[0..n]) |w| {
+                    _ = placements.append(.{ .win = w, .rect = wa, .visible = true });
+                }
+            } else {
+                const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = .{ .order = order_buf[0..n], .hints = hints_buf[0..n] }, .focused = m.focused, .env = ctx.env };
+                tiling.compute(params.kind, &view, &placements);
             }
         }
     }

@@ -5,6 +5,7 @@ const std = @import("std");
 const constants = @import("constants");
 const fallback = @import("fallback");
 const log = @import("log");
+const paths_mod = @import("paths");
 const ids = @import("ids");
 const keysyms = @import("keysyms");
 const masks = @import("masks");
@@ -99,6 +100,31 @@ fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void 
 
 pub const max_file_bytes = 1024 * 1024;
 
+/// Ceilings for ONE config load. `max_file_bytes` bounds a single file, which
+/// on its own leaves the load itself unbounded: a config dir holding thousands
+/// of small files, or an `include` list naming the same file a few thousand
+/// times, all stay under the per-file cap and still cost thousands of reads,
+/// parses and arena merges before boot finishes. These two bound the load as a
+/// whole.
+///
+/// Exceeding either fails the load (`TooManyConfigFiles` / `TooManyConfigBytes`)
+/// rather than warning and skipping: silently dropping config files yields a
+/// config that is subtly NOT the user's, which is the failure mode this module
+/// spends the most comments defending against. Both bounds sit far above any
+/// real config (the reference set is 6 files, ~30KB).
+pub const max_config_files = 128;
+pub const max_total_config_bytes = 8 * 1024 * 1024;
+
+/// The files one load consumed, in merge order, plus their running byte total.
+/// The list is what the re-exec snapshot freezes; the total is the half of the
+/// load ceiling that a file COUNT cannot express. Both counters move in one
+/// place (`parseAndMerge`), the single choke point every read passes through, so
+/// a new file-reading path cannot forget to check them.
+const ReadSet = struct {
+    paths: std.ArrayList([]const u8) = .empty,
+    bytes: usize = 0,
+};
+
 /// Initial allocation for the read-with-growth path (stat failed or reported
 /// zero, e.g. procfs/sysfs/pipes). Doubles until the whole file is read.
 const read_growth_initial_bytes = 64 * 1024;
@@ -159,11 +185,17 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 /// Read/parse errors propagate to the caller, who decides how to handle them.
 /// `allocator` must be arena-backed: the file buffer and the parsed Document
 /// alias it, released together by the caller's load-scoped arena reset.
-fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?parser.Document {
+fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?ParsedToml {
     const raw = try readFileAlloc(allocator, path);
     if (raw.len == 0) return null;
-    return try parser.parse(allocator, raw, path);
+    // `raw.len`, not a stat: it is the count of bytes actually READ, so the load
+    // ceiling cannot be evaded by a file whose stat lies (the growth path
+    // already covers a stat that reports 0 or fails outright).
+    return .{ .doc = try parser.parse(allocator, raw, path), .bytes = raw.len };
 }
+
+/// A parsed file plus the number of bytes it came from.
+const ParsedToml = struct { doc: parser.Document, bytes: usize };
 
 /// warn-and-skip wrapper around parseTomlFile, the "never crash on bad
 /// config" path shared by the directory loader and `include` resolution.
@@ -174,14 +206,14 @@ fn tryParseTomlFile(
     allocator: std.mem.Allocator,
     path: []const u8,
     dst: *parser.Document,
-) ?parser.Document {
-    const doc = parseTomlFile(allocator, path) catch |err| {
+) ?ParsedToml {
+    const parsed = parseTomlFile(allocator, path) catch |err| {
         dst.had_errors = true;
         log.warn("Skipping '{s}': {}", .{ path, err });
         return null;
     };
-    if (doc == null) log.info("Skipping empty file: {s}", .{path});
-    return doc;
+    if (parsed == null) log.info("Skipping empty file: {s}", .{path});
+    return parsed;
 }
 
 /// Parses and merges one config file (path = `dir_path` + `name`) into `dst`,
@@ -189,7 +221,7 @@ fn tryParseTomlFile(
 fn mergeOneFile(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
-    read: *std.ArrayList([]const u8),
+    read: *ReadSet,
     dir_path: []const u8,
     name: []const u8,
 ) !void {
@@ -205,15 +237,31 @@ fn mergeOneFile(
 fn parseAndMerge(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
-    read: *std.ArrayList([]const u8),
+    read: *ReadSet,
     path: []const u8,
     comptime msg: []const u8,
 ) !?parser.Document {
-    var doc = tryParseTomlFile(allocator, path, dst) orelse return null;
-    try parser.mergeDocumentsInto(allocator, dst, &doc);
+    // Ceilings first, so a tree over the limit costs a counter check rather
+    // than the read it was about to do.
+    if (read.paths.items.len >= max_config_files) {
+        dst.had_errors = true;
+        log.err("Config load reads more than {d} files (at '{s}'); refusing to continue. " ++
+            "A config dir or include list that large is almost certainly not a config.", .{ max_config_files, path });
+        return error.TooManyConfigFiles;
+    }
+    const doc = tryParseTomlFile(allocator, path, dst) orelse return null;
+    if (read.bytes + doc.bytes > max_total_config_bytes) {
+        dst.had_errors = true;
+        log.err("Config load exceeds {d}KB across all files (at '{s}'); refusing to continue. " ++
+            "Split the config, or raise max_total_config_bytes.", .{ max_total_config_bytes / 1024, path });
+        return error.TooManyConfigBytes;
+    }
+    read.bytes += doc.bytes;
+    var owned = doc.doc;
+    try parser.mergeDocumentsInto(allocator, dst, &owned);
     log.info(msg, .{path});
-    try read.append(allocator, path);
-    return doc;
+    try read.paths.append(allocator, path);
+    return owned;
 }
 
 /// Merges files listed in `include = [...]` from `src_doc` into `dst`;
@@ -225,7 +273,7 @@ fn mergeIncludes(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
     src_doc: *parser.Document,
-    read: *std.ArrayList([]const u8),
+    read: *ReadSet,
     dir_path: []const u8,
 ) !void {
     // `src_doc` and `dst` are the SAME document on the parseFileDoc path, and
@@ -302,18 +350,43 @@ const DirInput = struct { dir_path: []const u8, names: []const []u8 };
 
 /// Merges every file named in `in.names` (directory-loading order) into one
 /// arena document, recording each consumed file in `read`.
-fn parseDirDoc(a: std.mem.Allocator, read: *std.ArrayList([]const u8), in: DirInput) !parser.Document {
+fn parseDirDoc(a: std.mem.Allocator, read: *ReadSet, in: DirInput) !parser.Document {
     var merged = parser.Document.init(a);
     for (in.names) |name| try mergeOneFile(a, &merged, read, in.dir_path, name);
     return merged;
 }
 
+/// Errors that mean "nothing to load HERE", so the search moves on without a
+/// warning. One list for the search: the previous spelling had the dir loop and
+/// the file loop pass their own inline set each, so the two could drift without
+/// anything noticing, and a typo'd entry is a warning that never fires.
+/// (NotDir is inert for a single-file path, which is why one set fits both.)
+///
+/// The pinned-snapshot branch in `loadConfigDefault` keeps its own switch on
+/// purpose: there a parse failure is ALSO non-fatal -- a broken snapshot must
+/// not swap the embedded fallback over an otherwise-fine user config -- which
+/// is the opposite of the search, where a parse failure must reach the caller.
+const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
+
+/// Load failures that mean "this config cannot be used", as opposed to "there
+/// is nothing here". All of them are handled identically at both ends: `load`
+/// (boot) falls back to the embedded config, and the reload path lets them
+/// propagate so the live config is kept. The set is named so the search's
+/// hard-fail list and boot's fallback list cannot drift apart -- they are the
+/// same policy, spelled twice, and the ceilings (15.12) joined both.
+fn isFatalLoadError(err: anyerror) bool {
+    return switch (err) {
+        error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes => true,
+        else => false,
+    };
+}
+
 fn tryLoadOrWarn(
-    comptime loader: anytype,
+    loader: LoadFn,
     allocator: std.mem.Allocator,
     path: []const u8,
     comptime err_msg: []const u8,
-    comptime silent: []const anyerror,
+    silent: []const anyerror,
 ) !?types.Config {
     return loader(allocator, path) catch |err| {
         // A parse error must reach the caller. On reload it makes the
@@ -321,7 +394,7 @@ fn tryLoadOrWarn(
         // at boot `load` catches it and falls back to the embedded config.
         // Swallowing it here is what silently installed the fallback over a
         // user's typo'd config.
-        if (err == error.ConfigParseFailed) return err;
+        if (isFatalLoadError(err)) return err;
         for (silent) |e| if (err == e) return null;
         log.warn(err_msg, .{ path, err });
         return null;
@@ -347,17 +420,59 @@ const SearchPaths = struct {
     }
 };
 
+/// The shape every search location's loader has: both the dir loader and the
+/// single-file loader take exactly (allocator, path).
+const LoadFn = *const fn (std.mem.Allocator, []const u8) anyerror!types.Config;
+
+/// The user-config search order, declared ONCE. Adding a location (a second
+/// per-user dir, a system-wide `/etc/hana`) is a new enum tag plus one line in
+/// `loadConfigDefault`'s switch; the priority order, the loader, the
+/// "nothing here" error set and the warn wording are all decided by the tag
+/// rather than by the order the loops happen to be written in.
+const search_order = [_]SearchLoc{
+    .xdg_dir,
+    .local_dir,
+    .xdg_file,
+    .local_file,
+};
+
+const SearchLoc = enum { xdg_dir, local_dir, xdg_file, local_file };
+
+/// One resolved search location: where to look, how to read it, and whether
+/// the source is a directory (which the re-exec snapshot records). Built per
+/// tag inside `loadConfigDefault`; the failure wording comes from the tag too.
+const SearchAttempt = struct {
+    path: []const u8,
+    load: LoadFn,
+    is_dir: bool,
+};
+
 fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
-    const home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "/";
-    const xdg_config_home = std.c.getenv("XDG_CONFIG_HOME");
-    // Always dupe and always free: the arena makes the extra dupe of the
-    // ~20-byte path negligible, and ownership never has to be tracked.
-    const config_home = if (xdg_config_home) |ch|
-        try allocator.dupe(u8, std.mem.span(ch))
-    else
-        try std.fmt.allocPrint(allocator, "{s}/.config", .{home});
-    defer allocator.free(config_home);
-    const xdg_dir = try std.fs.path.join(allocator, &.{ config_home, "hana" });
+    // An unset or empty HOME used to be taken as "/" with no word to the user,
+    // so the search silently became `/.config/hana` and then `./config/` -- a
+    // WM that came up with a different config than every other launch, with
+    // nothing on stderr to say so. Name the substitution instead.
+    const home: []const u8 = if (std.c.getenv("HOME")) |h| blk: {
+        const s = std.mem.span(h);
+        break :blk if (s.len == 0) "/" else s;
+    } else blk: {
+        log.warn("HOME is unset; the config search falls back to /.config/hana and ./config", .{});
+        break :blk "/";
+    };
+    const xdg_config_home: ?[]const u8 = if (std.c.getenv("XDG_CONFIG_HOME")) |ch| blk: {
+        const s = std.mem.span(ch);
+        // Empty means unset (XDG spec) -- see paths.configHome. Passing it on
+        // as-is would make the config dir relative to the cwd.
+        break :blk if (s.len == 0) null else s;
+    } else null;
+    var ch_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const config_home = try paths_mod.configHome(&ch_buf, xdg_config_home, home);
+    // Joined through a stack buffer and duped once: `fs.path.join` allocates its
+    // result in the arena, and this is an intermediate (the owned copy below is
+    // what SearchPaths returns), so an arena-allocated join would be freed only
+    // by the arena reset -- a leak the load-scoped-arena tests correctly catch.
+    var xdg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const xdg_dir = try allocator.dupe(u8, try std.fmt.bufPrint(&xdg_buf, "{s}/hana", .{config_home}));
     errdefer allocator.free(xdg_dir);
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -744,22 +859,33 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
         }
     }
 
-    // Try directories first (contain multiple .toml files), then single files.
-    const dir_attempts = [_][]const u8{ paths.xdg_dir, paths.local_dir };
-    for (dir_attempts) |dir|
-        if (try tryLoadOrWarn(loadConfigFromDir, allocator, dir, "Config load error from {s}: {}", &.{ error.FileNotFound, error.NotDir })) |cfg| {
-            rememberGoodSource(allocator, dir, true);
+    // Try directories first (they can hold several .toml files), then single
+    // files. The order comes from `search_order`; each tag resolves its path,
+    // loader, provenance and wording in one switch, so a new location cannot
+    // be added with a missing or mismatched field.
+    inline for (search_order) |loc| {
+        const at: SearchAttempt = switch (loc) {
+            .xdg_dir => .{ .path = paths.xdg_dir, .load = loadConfigFromDir, .is_dir = true },
+            .local_dir => .{ .path = paths.local_dir, .load = loadConfigFromDir, .is_dir = true },
+            .xdg_file => .{ .path = paths.xdg_file, .load = loadConfig, .is_dir = false },
+            .local_file => .{ .path = paths.local_file, .load = loadConfig, .is_dir = false },
+        };
+        // `loc` is comptime (inline for), so the log format stays comptime-known
+        // -- which is why it is chosen from the tag rather than carried in
+        // `at`, where the runtime path would make the whole struct runtime.
+        const err_msg = switch (loc) {
+            .xdg_dir, .local_dir => "Config load error from {s}: {}",
+            .xdg_file, .local_file => "hana: config file '{s}' found but failed to load: {}; falling back",
+        };
+        // `orelse continue` would read better, but a labeled-`inline for` body
+        // rejects it (comptime control flow in a runtime block); the explicit
+        // `if` is the same thing and costs one line.
+        if (try tryLoadOrWarn(at.load, allocator, at.path, err_msg, &silent_missing)) |cfg| {
+            rememberGoodSource(allocator, at.path, at.is_dir);
             source.* = .user;
             return cfg;
-        };
-
-    const file_attempts = [_][]const u8{ paths.xdg_file, paths.local_file };
-    for (file_attempts) |path|
-        if (try tryLoadOrWarn(loadConfig, allocator, path, "hana: config file '{s}' found but failed to load: {}; falling back", &.{error.FileNotFound})) |cfg| {
-            rememberGoodSource(allocator, path, false);
-            source.* = .user;
-            return cfg;
-        };
+        }
+    }
 
     log.info("No config found, using fallback with auto-detection", .{});
     source.* = .fallback;
@@ -789,6 +915,42 @@ pub fn validate(cfg: *const types.Config) !void {
     } else if (mw.value < 0.0) {
         return invalid("master_width {d}px must be >= 0", .{mw.value});
     }
+    warnOnly(cfg);
+}
+
+/// The warn-first half of validation: values that are legal but almost certainly
+/// not what the user meant, or that a subsystem will silently clamp. They must
+/// NOT fail the load -- the plan this comes from flagged that risk, and it is
+/// the right call: a config that boots with a loud warning is recoverable, and
+/// a config that refuses to boot over a cosmetic value is not. Every entry here
+/// is therefore `log.warn` with no effect on the returned Config.
+///
+/// Kept separate from the failing checks above on purpose, so the line between
+/// "wrong config" and "odd config" is visible in the source rather than implied
+/// by whether a given `return invalid(...)` happens to be present.
+///
+/// NOT here, on purpose: bar segment names and layout names are validated
+/// against the `bar_modules` / `tiling_mods` registries, and those live in
+/// their own modules -- config is below both in the dependency graph, so
+/// importing them to check names would invert it and break the no-bar and
+/// no-tiling builds the modularity matrix exists to prove. The name checks
+/// therefore sit with their owners (see `bar.warnUnknownSegments` and
+/// `tiling`'s registry resolution), which is the only place they can see the
+/// registry.
+fn warnOnly(cfg: *const types.Config) void {
+    if (cfg.workspaces.count == 0)
+        log.warn("workspaces.count is 0; the WM will have no workspace to draw", .{});
+    if (cfg.tiling.master_count == 0)
+        log.warn("tiling.master_count is 0; layouts will fall back to 1 master pane", .{});
+    // A percentage font size of 0 (or a negative pixel size) is a typo, not a
+    // design: the bar's text metrics then compute a zero or negative height and
+    // the bar draws as a bare strip.
+    if (cfg.bar.font_size.is_percentage) {
+        if (scaling.asRatio(cfg.bar.font_size) <= 0.0)
+            log.warn("bar.font_size is 0%; the bar will have no readable text", .{});
+    } else if (cfg.bar.font_size.value <= 0.0) {
+        log.warn("bar.font_size is {d}px; the bar will have no readable text", .{cfg.bar.font_size.value});
+    }
 }
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
@@ -810,11 +972,16 @@ const FileInput = struct { path: []const u8, base_dir: []const u8 };
 
 /// Parses one config file plus its `include`s into an arena document,
 /// recording the file and every consumed include in `read`.
-fn parseFileDoc(a: std.mem.Allocator, read: *std.ArrayList([]const u8), in: FileInput) !parser.Document {
-    var doc = try parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
-    try read.append(a, in.path);
-    try mergeIncludes(a, &doc, &doc, read, in.base_dir);
-    return doc;
+fn parseFileDoc(a: std.mem.Allocator, read: *ReadSet, in: FileInput) !parser.Document {
+    var parsed = try parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
+    // This path cannot breach either ceiling by itself -- one file, already
+    // bounded by max_file_bytes, which is under max_total_config_bytes, and the
+    // count starts at zero -- so it only records. Its `include`s go through
+    // parseAndMerge, which does check both.
+    read.bytes += parsed.bytes;
+    try read.paths.append(a, in.path);
+    try mergeIncludes(a, &parsed.doc, &parsed.doc, read, in.base_dir);
+    return parsed.doc;
 }
 
 /// Parse inputs for `parseFallbackDoc`: the embedded fallback TOML text.
@@ -822,7 +989,7 @@ const FallbackInput = struct { toml: []const u8 };
 
 /// Parses the embedded fallback TOML into an arena document. The fallback
 /// lives in the binary, so it contributes no files to the snapshot.
-fn parseFallbackDoc(a: std.mem.Allocator, read: *std.ArrayList([]const u8), in: FallbackInput) !parser.Document {
+fn parseFallbackDoc(a: std.mem.Allocator, read: *ReadSet, in: FallbackInput) !parser.Document {
     _ = read;
     return try parser.parse(a, in.toml, "<embedded fallback>");
 }
@@ -842,10 +1009,10 @@ fn parseAndBuild(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var read: std.ArrayList([]const u8) = .empty;
+    var read: ReadSet = .{};
     var doc = try parse(a, &read, in);
     var cfg = try buildConfigFromDoc(allocator, &doc);
-    publishReadFiles(read.items) catch |err| {
+    publishReadFiles(read.paths.items) catch |err| {
         cfg.deinit(allocator);
         return err;
     };
@@ -853,7 +1020,18 @@ fn parseAndBuild(
 }
 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
-    const fallback_toml = fallback.getFallbackToml() orelse return error.FallbackMissing;
+    // The embedded fallback is the FLOOR, not a dependency: if it is somehow
+    // absent (a build that did not embed it, a truncated binary), returning a
+    // boot-fatal error here made a missing convenience file take the WM down
+    // with it. `getDefaultConfig` is the same defaults the embedded TOML
+    // encodes -- it seeds every scalar from `types.Config`'s field
+    // initializers -- so the floor holds even with nothing embedded. The only
+    // thing lost is the fallback's own tuned values, and that is reported
+    // rather than hidden.
+    const fallback_toml = fallback.getFallbackToml() orelse {
+        log.warn("Embedded fallback config missing; using the code defaults instead", .{});
+        return getDefaultConfig(allocator);
+    };
     // The auto_terminal substitution happens in parseAction, so the embedded
     // fallback and a user config go through the identical path.
     const cfg = try parseAndBuild(allocator, parseFallbackDoc, FallbackInput{ .toml = fallback_toml });
@@ -1475,23 +1653,67 @@ fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action {
 /// concern and happens separately via `input.buildKeybinds` once the config is
 /// live; see `input/keybind.zig`. DPI-scaled bar metrics are derived by the
 /// bar itself (see bar/metrics.zig) rather than stored on the config.
+/// Loads the default config with every warn/err diagnostic CAPTURED into
+/// `collector` instead of only reaching stderr, then throws the config away.
+///
+/// This is the whole of `hana --check-config`: a config problem the WM merely
+/// warns about at boot is invisible to anyone not reading the log, and
+/// "validate my hana.conf" is a question worth answering without an X server,
+/// without spawning a window manager, and with an exit code a CI job can read.
+/// It runs the REAL load path -- same search order, same fallback, same
+/// warn-and-continue decisions -- so a check that passes means the config the
+/// WM would actually take is the config that was checked.
+///
+/// The collector is installed here rather than passed down: see
+/// `log.Collector`. Restored on every exit path, including the error path, so
+/// a failed check cannot leave later diagnostics pointing at a dead bag.
+pub fn checkConfig(allocator: std.mem.Allocator, collector: *log.Collector) !void {
+    const saved = log.collector;
+    log.collector = collector;
+    defer log.collector = saved;
+    var cfg = try load(allocator);
+    cfg.deinit(allocator);
+}
+
 pub fn load(allocator: std.mem.Allocator) !types.Config {
     var source: DefaultSource = .fallback;
-    var cfg = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
-        // A malformed user config at BOOT falls back to the embedded
-        // config (the WM must still start). On reload the parse error
-        // propagates instead, so the live config is kept.
-        error.ConfigParseFailed => blk: {
-            log.warn("Config parse error at startup; using the embedded fallback", .{});
-            break :blk try loadFallbackConfig(allocator);
-        },
-        else => return err,
+    // A user config that will not START is one the WM must not die on, and
+    // `validate` failing is exactly that condition -- so it degrades the same
+    // way a parse error already does. It used to propagate, which made the two
+    // failure classes behave differently for no defensible reason: a typo'd
+    // key survived boot and a semantically impossible value did not, even
+    // though the second is the one the user cannot see without reading the
+    // log. Both are now "this config is not usable, fall back".
+    //
+    // `errdefer` is scoped to the labeled block so each `loaded` is released
+    // exactly once: on the fallback path explicitly (the block then yields the
+    // REPLACEMENT config), and on any error return from inside it.
+    const cfg = blk: {
+        var loaded = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
+            // A config that is broken, out of range, or over a load ceiling is
+            // not usable, so boot falls back to the embedded config (the WM must
+            // still start). On reload the same errors propagate instead, so the
+            // live config is kept -- `isFatalLoadError` is the shared list.
+            error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes => blk2: {
+                log.warn("Unusable config at startup ({s}); using the embedded fallback", .{@errorName(err)});
+                break :blk2 try loadFallbackConfig(allocator);
+            },
+            else => return err,
+        };
+        errdefer loaded.deinit(allocator);
+        validate(&loaded) catch |err| switch (err) {
+            error.InvalidConfig => {
+                log.warn("Config failed validation at startup; using the embedded fallback", .{});
+                loaded.deinit(allocator);
+                break :blk try loadFallbackConfig(allocator);
+            },
+        };
+        break :blk loaded;
     };
-    errdefer cfg.deinit(allocator);
-    try validate(&cfg);
     // A successful boot config becomes the re-exec hand-off snapshot (binary-
-    // only reload). Guarded to a valid config so a parse-error fallback never
-    // overwrites the previous good snapshot.
+    // only reload). Guarded to a valid config so a parse-error or
+    // validation-error fallback never overwrites the previous good snapshot
+    // (both now reach here through the same path, see above).
     refreshSnapshot(allocator);
     return cfg;
 }
@@ -1641,7 +1863,12 @@ fn isWorkspaceList(s: []const u8) bool {
 /// grammar, not an authoritative registry — layout names resolve to
 /// `tiling_modules` registry indices at seed time (engine.layoutByName), and
 /// unknown names pass through so third-party addon layouts keep working.
-const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
+/// Public so the tiling test can assert this list and the layout registry
+/// agree in BOTH directions -- the two sides cannot import each other (config
+/// is below tiling), so neither can check itself, and a drift between them is
+/// silent: a name here that the registry dropped is skipped at parse, a layout
+/// in the registry missing here is unselectable.
+pub const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
     .{ "master", {} },  .{ "master-stack", {} }, .{ "master_stack", {} },
     .{ "monocle", {} }, .{ "grid", {} },         .{ "fibonacci", {} },
     .{ "leaf", {} },    .{ "scroll", {} },
@@ -1662,7 +1889,9 @@ fn normalizeLayoutName(buf: *[max_layout_name]u8, name: []const u8) ?[]const u8 
 }
 
 /// Whether `name` is one of the known layout-name spellings (grammar test).
-fn isLayoutName(name: []const u8) bool {
+/// Public for the same reason as `layout_name_grammar`: the tiling test uses
+/// this to check the registry can be spelled, without config importing tiling.
+pub fn isLayoutName(name: []const u8) bool {
     var buf: [max_layout_name]u8 = undefined;
     const lowered = normalizeLayoutName(&buf, name) orelse return false;
     return layout_name_grammar.has(lowered);
