@@ -14,7 +14,7 @@
 //! This file is INTENTIONALLY inert. It implements the full seam mechanics
 //! around a trivial per-window "flagged" bit so every hook is real,
 //! copy-pasteable code, but nothing in the WM ever sets the bit:
-//! serializeWindow returns null (no blob), coveringOccupantOnWs returns null
+//! serializeWindow returns null (no blob), visibleCoveringOnWs returns null
 //! (no claim), and boot/tests are byte-identical with and without the file.
 //! Drop it into src/window/modules/ and `zig build test` stays green — that
 //! is the contract's litmus test. `zig build check` additionally compiles
@@ -165,11 +165,12 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
 // OPTIONAL hooks — bind only what your feature owns; everything else stays
 // null and every dispatch loop skips this module for that hook.
 
-/// Screen-cover seam (contract.WindowModule.coveringOccupantOnWs): "which
-/// window owns the screen on `ws`, if any". sync resolves coverage directly
-/// from the model's core `coveringOccupantOnWs` scan; this hook exists for
-/// the ACTIONS/workspaces layer, which asks the same question per workspace
-/// through the registry. Rules:
+/// Screen-cover seam (contract.WindowModule.visibleCoveringOnWs): "which
+/// covering window is actually USABLE on `ws`, if any" -- covering AND
+/// anchored AND visible, an AND of all three. This is deliberately a
+/// different question from the model's `coveringOccupantOnWs` scan, which is
+/// an anchor-or-visible OR; both exist and both are used, which is why the two
+/// are named differently. Rules:
 ///   - first module in registry order that returns non-null claims the ws;
 ///   - a STOPPED (parked) window must never claim (returns null) — this is
 ///     how minimize-from-fullscreen ghosts correctly release the screen;
@@ -177,10 +178,14 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
 ///     covering window is parked by sync (no per-module wire traffic).
 ///
 /// A module that never claims a screen leaves this null. (The pre-Round-3
-/// `coverageOn` hook is gone; the covering family is now
-/// toggleCovering/isCoveringMode/coveringWsOf/isCoveringOnWs/
-/// coveringOccupantOnWs — fullscreen.zig binds the family.)
-pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
+/// `coverageOn` hook is gone, and so are `isCoveringMode`, `coveringWsOf` and
+/// `isCoveringOnWs` -- those three were pure reads of the model's
+/// `covering_ws` field, so they are model queries now
+/// (`model.isCovering` / `model.coveringWsOf` / `model.isCoveringOn`) rather
+/// than hooks that resolve to null when no covering module is bound. The
+/// remaining covering family is toggleCovering / visibleCoveringOnWs /
+/// releaseCovering / moveCoveringTo -- fullscreen.zig binds the family.)
+pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     for (g_recs.constSlice()) |rec| {
         if (!rec.flag) continue; // TODO: your "claims the screen" predicate
         const e = m.store.get(rec.win) orelse continue;
@@ -202,8 +207,11 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
 //      model.zig — never inside either module.
 // Pattern (mirrored from workspaces/floating):
 //   if (build_options.has_fullscreen) {
-//       if (@import("fullscreen").isFullscreenMode(m, win)) return .ignored;
+//       if (model.isCovering(m, win)) return .ignored;
 //   }
+// Prefer a model query when one answers the question: whether a window is
+// covering is a model fact, so there is no seam to reach across. Reach for
+// `@import` only for a capability the model does not record.
 
 // This module's window sub-system contribution: the build-generated registry
 // reads this exact export. Only the fields you set are dispatched; changing
@@ -212,8 +220,10 @@ pub fn coveringOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.Window
 //   // Hide/restore family (minimize.zig): the model `.parked` presence.
 //   .hideWindow / .restoreWindow / .restoreCandidateOn / .restoreOnWs /
 //   .latestHiddenOnWs / .isWindowHidden / .collectHiddenSet
-//   // Covering family (fullscreen.zig): toggle + ws/anchor queries.
-//   .toggleCovering / .isCoveringMode / .coveringWsOf / .isCoveringOnWs
+//   // Covering family (fullscreen.zig): toggle + the screen-occupant scan +
+//   // one-way release + retarget. The "is it covering" predicates are NOT
+//   // here: they are model queries (see note above).
+//   .toggleCovering / .visibleCoveringOnWs / .releaseCovering / .moveCoveringTo
 //   // Workspaces family (workspaces.zig): tag/mask mutations.
 //   .sendToWs / .addToWs / .removeFromWs / .togglePin / .toggleAllView
 //   // Floating + pointer drag family (floating.zig).
@@ -227,5 +237,5 @@ pub const module: @import("contract").WindowModule = .{
     .onWindowGone = onWindowGone,
     .serializeWindow = serializeWindow,
     .deserializeWindow = deserializeWindow,
-    .coveringOccupantOnWs = coveringOccupantOnWs,
+    .visibleCoveringOnWs = visibleCoveringOnWs,
 };

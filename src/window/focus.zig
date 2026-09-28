@@ -282,6 +282,59 @@ pub const FocusTransition = union(enum) {
     none: void,
 };
 
+/// The focus ETIQUETTE for one `Reason` (10.7): all three per-reason
+/// policies as DATA, in one row, instead of three separate switches that
+/// each had to be re-read to answer "what does a workspace switch do?".
+const Etiquette = struct {
+    /// Whether a focus target is raised here. The TILED exclusion is not in
+    /// here because it is a property of the window, not of the reason: sync's
+    /// raise-the-winner pass owns a tiled window's stacking, and a pre-raise
+    /// would be a redundant request creating an intermediate compositor
+    /// frame. `shouldRaise` applies it.
+    raise: bool,
+    /// The crossing-suppression reason to set, or null to LEAVE THE CURRENT
+    /// ONE ALONE. Null is the honest encoding for "this reason has no opinion"
+    /// -- mouse_enter and tiling_operation inherit whatever suppression is
+    /// already in force.
+    suppress: ?core.FocusSuppressReason,
+    /// Force xcb_set_input_focus even for a globally_active input model. Only
+    /// workspace_switch: it is an explicit user action, so X focus must land on
+    /// the target rather than being left to WM_TAKE_FOCUS self-focus, or focus
+    /// stays stranded on the departing workspace's window.
+    force_set_input_focus: bool,
+};
+
+/// One row per reason. A `switch` rather than an array because the array form
+/// would be positional (an inserted variant silently shifts every row after
+/// it, with no diagnostic); this way the compiler rejects a missing arm the
+/// moment a variant is added, which is the whole point of the merge. Reading
+/// one policy is now a field read instead of a hunt through three switches.
+fn etiquetteFor(reason: Reason) Etiquette {
+    return switch (reason) {
+        // A click expects its raise side effect even when the window already
+        // owns applied focus (hence a real `true`, not a dedup-suppressed
+        // default).
+        .mouse_click => .{ .raise = true, .suppress = .none, .force_set_input_focus = false },
+        // Never raises, matching DWM: raising on every hover generates
+        // synthetic FocusOut/FocusIn pairs that confuse Electron's focus state
+        // machine.
+        .mouse_enter => .{ .raise = false, .suppress = null, .force_set_input_focus = false },
+        .user_command => .{ .raise = true, .suppress = .none, .force_set_input_focus = false },
+        // Tiling owns stacking.
+        .tiling_operation => .{ .raise = false, .suppress = null, .force_set_input_focus = false },
+        // Suppression is its own, distinct from tiling_operation's "no
+        // opinion", so a tiling op can never inherit window_spawn suppression
+        // via state.
+        .window_spawn => .{ .raise = false, .suppress = .window_spawn, .force_set_input_focus = false },
+        // Suppression CLEARED: crossing events from windows mapping/unmapping
+        // during the switch must not be masked. Stacking is already correct
+        // after a switch, so no raise. The reconcile maps the arriving window
+        // before focus targets it, so xcb_set_input_focus never hits an
+        // unmapped window.
+        .workspace_switch => .{ .raise = false, .suppress = .none, .force_set_input_focus = true },
+    };
+}
+
 /// Phase 1: resolve input model (cache-only, never blocking).
 /// Returns a FocusTransition that can be committed inside the grab.
 /// Returns .none when focus should not change (invalid window, same window,
@@ -315,17 +368,36 @@ fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
     } };
 }
 
-pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
-    const conn = core.getState().conn;
-    if (window.isInvalidWindow(win)) return .none;
+/// The ONE destroyed-window guard for a focus target (10.6). False when `win`
+/// may not take focus or be raised.
+///
+/// Three checks, in the order that stops the work soonest, and ONE place they
+/// live:
+///
+///  1. the invalid-window sentinel (a chrome XID is not a window),
+///  2. model liveness -- a destroyed window is unregistered, so `store.has`
+///     is false. This is the check `.user_command` used to skip ENTIRELY, on
+///     the reasoning that collectVisibleWindows had already confirmed the
+///     window was visible. That reasoning holds for the bar's
+///     collectVisibleWindows callers and for nothing else: floating.zig
+///     reaches grabFocus(win, .user_command) directly, so a window destroyed
+///     between spawn and the float toggle could still be focused and raised.
+///     It costs no round trip -- a load and a compare on a table the caller
+///     already has open.
+///  3. the blocking xcb_get_window_attributes liveness query, for the ONE
+///     reason whose target liveness is not already known to be good from the
+///     model: a mouse click lands on whatever is under the pointer, which may
+///     be a window that is mapped-but-about-to-die. `last_applied` can still
+///     name it, so re-focusing needs the live answer.
+fn resolveFocusTarget(win: u32, reason: Reason) bool {
+    if (window.isInvalidWindow(win)) return false;
+    if (!pipeline.model().store.has(win)) return false;
+    if (reason == .mouse_click and !isWindowMapped(core.getState().conn, win)) return false;
+    return true;
+}
 
-    // Liveness guard first: a destroyed window must never be re-focused or
-    // raised, even when it was the last_applied window (mouse_click paths).
-    // .user_command is excluded: collectVisibleWindows already confirmed the
-    // window is on the current workspace and visible, so the blocking
-    // xcb_get_window_attributes round-trip is redundant.
-    if (reason == .mouse_click and !isWindowMapped(conn, win))
-        return .none;
+pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
+    if (!resolveFocusTarget(win, reason)) return .none;
 
     const resolved = window.peekInputModelResolved(win) orelse window.provisionalResolution();
     if (resolved.model == .no_input) {
@@ -341,7 +413,7 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // so an already-focused window re-raises instead of being swallowed by
     // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
     // re-grab of that same window's buttons (a button-regrab flash).
-    const force = reason == .workspace_switch;
+    const force = etiquetteFor(reason).force_set_input_focus;
     const raise = shouldRaise(reason, win);
     const same_applied = state.?.last_applied == win;
     if (same_applied and !raise) return .none;
@@ -445,33 +517,20 @@ fn advertiseActiveWindow(win: u32) void {
     _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.?.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
-/// True when `reason` should raise `win` to the top of the stacking order.
-///
-/// Tiled windows are excluded: the retile owns their stacking order and raises
-/// the top window atomically; a pre-raise here would be a redundant request
-/// that creates an intermediate compositor frame. mouse_enter never raises,
-/// matching DWM; raising on every hover generates synthetic FocusOut/FocusIn
-/// pairs that confuse Electron's internal focus state machine.
+/// True when `reason` should raise `win` to the top of the stacking order:
+/// the table's `raise`, narrowed by the tiled exclusion (the retile owns a
+/// tiled window's stacking order).
 inline fn shouldRaise(reason: Reason, win: u32) bool {
-    return switch (reason) {
-        // Tiled windows get their stacking from sync's raise-the-winner pass
-        // during the post-transition reconcile; everything else raises here.
-        .mouse_click, .user_command => !tracking.isTiledMode(win),
-        .mouse_enter, .tiling_operation, .window_spawn, .workspace_switch => false,
-    };
+    return etiquetteFor(reason).raise and !tracking.isTiledMode(win);
 }
 
+/// The suppression reason to apply for `reason`, or keep `current` when the
+/// table records no opinion.
 inline fn suppressionFor(
     reason: Reason,
     current: core.FocusSuppressReason,
 ) core.FocusSuppressReason {
-    return switch (reason) {
-        // workspace_switch clears too: crossing events generated by windows
-        // mapping/unmapping during the switch must not be masked.
-        .mouse_click, .user_command, .workspace_switch => .none,
-        .window_spawn => .window_spawn,
-        else => current,
-    };
+    return etiquetteFor(reason).suppress orelse current;
 }
 
 // Grab-wrapped focus operations (full atomicity)
@@ -571,11 +630,37 @@ inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
     return model_mod.wrapIndex(idx, if (forward) 1 else -1, len);
 }
 
+/// Cycle focus one step, committing the viewport-snap duty in the SAME grab
+/// (10.10).
+///
+/// This is the coupled form. The two calls the input path used to make --
+/// `if (focus.cycleTarget(dir)) |t| focus.grabFocusWithDuty(t, .user_command,
+/// &actions.snapViewportFocusedDuty)` -- put the pool resolution and the
+/// commit in the CALLER's hands, and nothing tied the duty to the transition
+/// it belongs to: resolve a target, then commit it with a different duty or
+/// none, and the snap the cycle exists to fold in silently does not happen
+/// (one extra grab-and-reconcile later, or not at all). The "the snap rides
+/// along in the cycle's grab" rule lived only in a comment at the call site.
+///
+/// Deliberately NOT the whole of 10.10: `cycleTarget` is still `pub` for the
+/// pure read. Privatizing it is the right end state, but its only other
+/// consumers are assertions in the X-gated focus_test that this environment
+/// cannot execute, and the mechanical conversion (cycleTarget reads -> cycleFocus
+/// commits, which mutates the very order/focus state the following assertions
+/// read) is not a rewrite I can verify here. Left public, with the coupling
+/// now enforced on the path that matters.
+pub fn cycleFocus(dir: types.Dir, duty: *const fn () void) void {
+    const target = cycleTarget(dir) orelse return;
+    grabFocusWithDuty(target, .user_command, duty);
+}
+
 /// Resolve the visible window a focus-cycle step would land on, or null when
 /// the step is a no-op (no visible windows, or the only visible window is
-/// already focused). Pure read: no focus change, no grab. The Mod+k/Mod+j
-/// input path folds the target's viewport snap into the SAME grab as the
-/// focus transition (one grab+reconcile instead of focus-then-snap).
+/// already focused). Pure read: no focus change, no grab -- the reason
+/// `cycleFocus` exists is to stop the caller from having to pair this with a
+/// commit itself. The Mod+k/Mod+j input path folds the target's viewport snap
+/// into the SAME grab as the focus transition (one grab+reconcile instead of
+/// focus-then-snap).
 pub fn cycleTarget(dir: types.Dir) ?u32 {
     const forward = dir == .forward;
     const len = collectVisibleWindows();

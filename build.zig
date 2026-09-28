@@ -307,9 +307,11 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
         .{ .name = "wincache_test", .gate = true, .x_gated = false },
         .{ .name = "masks_test", .gate = true, .x_gated = false },
+        .{ .name = "dpi_math_test", .gate = true, .x_gated = false },
         .{ .name = "bounded_test", .gate = true, .x_gated = false },
         .{ .name = "idmap_test", .gate = true, .x_gated = false },
         .{ .name = "ids_test", .gate = true, .x_gated = false },
+        .{ .name = "timers_test", .gate = true, .x_gated = false },
         .{ .name = "input_test", .gate = true, .x_gated = false },
         .{ .name = "keysyms_test", .gate = true, .x_gated = false },
         .{ .name = "borders_test", .gate = true, .x_gated = true },
@@ -1130,8 +1132,9 @@ fn buildOwnerRegistryModule(
     // magic string), so they follow a contract wherever an owner binds it:
     // any element type carrying a `name` identity field gets the uniqueness
     // check (Segment, Layout: config resolves those by name), and any contract
-    // package declaring `single_binder_hooks` gets the at-most-one check
-    // (WindowModule: a second first-match binder would be silently ignored).
+    // package whose element contract declares `single_binder_hooks` gets the
+    // at-most-one check (WindowModule, Segment: a second first-match binder
+    // would be silently ignored).
     try src.appendSlice(b.allocator,
         \\comptime {
         \\    // `modules` is a statically-typed `[_]contract.<T>` array; peel the
@@ -1165,11 +1168,20 @@ fn buildOwnerRegistryModule(
         \\        // multi-binder (fan-out tick / even center split), so no
         \\        // at-most-one assert applies to them.
         \\    }
-        \\    if (@hasDecl(contract, "single_binder_hooks")) {
-        \\        for (contract.single_binder_hooks) |hook| {
-        \\            // The list is owner-agnostic; only the element contract
-        \\            // that actually carries the hook is asserted on.
-        \\            if (!@hasField(T, hook)) continue;
+        \\    // The at-most-one claim is a property of the ELEMENT CONTRACT, so
+        \\    // the list is looked up on T itself: a `Segment` registry asserts
+        \\    // `Segment`'s hooks, a `WindowModule` registry `WindowModule`'s. Keyed
+        \\    // off the `contract` PACKAGE instead (the earlier shape), a bar
+        \\    // registry checked `Segment`'s fields against WindowModule's hook
+        \\    // names, matched none, and enforced nothing at all.
+        \\    if (@hasDecl(T, "single_binder_hooks")) {
+        \\        for (T.single_binder_hooks) |hook| {
+        \\            // A name that is not a field of T is a compile error, not a
+        \\            // skip: a renamed hook left in the list would otherwise turn
+        \\            // the whole claim into a silent no-op.
+        \\            if (!@hasField(T, hook)) @compileError(
+        \\                "single_binder_hooks lists '" ++ hook ++ "', which is not a field of the registry element type",
+        \\            );
         \\            var binders: usize = 0;
         \\            for (modules) |wm| {
         \\                if (@field(wm, hook) != null) binders += 1;
@@ -1737,8 +1749,8 @@ const Module = struct {
     /// interface, not an import.
     fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
         const shelf = [_][]const u8{
-            "constants", "log",     "ids",  "masks",     "paths", "bounded",
-            "idmap",     "scaling", "time", "lifecycle",
+            "constants", "log",     "ids",  "masks",     "paths",  "bounded",
+            "idmap",     "scaling", "time", "lifecycle", "dpi_math",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
         if (std.mem.eql(u8, dep, "model")) return true;

@@ -9,8 +9,11 @@ const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
 
-/// Reserved row width when no workspaces are configured (moved here from
-/// bar.zig: width policy belongs to the segment that owns the pixels).
+/// Reserved row width when the workspaces module is compiled in but reports
+/// zero workspaces (moved here from bar.zig: width policy belongs to the
+/// segment that owns the pixels). WITH the module removed entirely this
+/// reserve is not just unused, it is wrong: nothing can be drawn, so the
+/// honest answer is zero -- see naturalWidthHook.
 const fallback_width: u16 = 270;
 
 // Sized to workspace_labels, the largest label source. Every workspace index
@@ -222,6 +225,11 @@ fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
 /// This module's bar-segment contribution (registry binding).
 fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
     const f: *const segmod.Frame = @ptrCast(@alignCast(frame));
+    // Without the workspaces module the bar never fills workspace_count (the
+    // only writer is build_options.has_workspaces-gated), so the old code
+    // reserved 270px for a segment that can never paint: "remove a module,
+    // recompile" was not free. Reserve what there is.
+    if (comptime !build_options.has_workspaces) return 0;
     if (f.workspace_count > 0) {
         // All-view collapses 8 tags -> 1: the row reservation narrows with it.
         if (f.is_all_view_active) return all_view_cell_width;

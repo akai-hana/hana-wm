@@ -11,7 +11,9 @@ const scaffold = @import("scaffold");
 // Layout registry (build-generated); the active layout is a `u8` index into
 // it, and each module carries its own variant indicator list. Empty when the
 // tiling subsystem is absent.
-const tiling_mods = contract.tiling_mods;
+
+// No `tiling_mods` local: the variants module resolves its metadata through
+// contract.activeLayoutMeta, so it never names the tiling registry at all.
 
 /// Empty-indicator sentinel: a layout with no variant indicator reserves no
 /// row width (the segment draws nothing and contributes a 0-width slot).
@@ -22,14 +24,22 @@ const no_variant_icon = "";
 /// (pipeline); the contract's pure `activeLayoutKind` applies the
 /// registry/tiling gates for both this module and its layout sibling.
 fn getIndicator() []const u8 {
-    if (tiling_mods.len == 0) return no_variant_icon;
-    const kind = contract.activeLayoutKind(pipeline.getCurrentLayout()) orelse return no_variant_icon;
-    const mod = tiling_mods[kind];
-    const inds = mod.indicators orelse return no_variant_icon;
-    const m = pipeline.model();
-    const idx = m.ws[m.current.index].params.variant_idx;
-    if (idx >= inds.len) return no_variant_icon;
-    return inds[idx];
+    return contract.activeLayoutMeta(
+        pipeline.getCurrentLayout(),
+        struct {
+            /// The indicator is the ACTIVE VARIANT's entry, so the variant
+            /// lookup happens here (inside the pick, which owns the registry
+            /// module) rather than in the shared helper: the layout segment
+            /// has no variant dimension, and this is the only place that does.
+            fn pick(m: contract.Layout) ?[]const u8 {
+                const inds = m.indicators orelse return null;
+                const idx = pipeline.getCurrentVariantIdx();
+                if (idx >= inds.len) return null;
+                return inds[idx];
+            }
+        }.pick,
+        no_variant_icon,
+    );
 }
 
 /// Returns the updated x position after drawing the segment, or the original

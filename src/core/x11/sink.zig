@@ -48,7 +48,7 @@ pub const Sink = struct {
         border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,
         park: *const fn (*anyopaque, model.WindowId) void,
         stack_only: *const fn (*anyopaque, model.WindowId, Stack) void,
-        set_ewmh_fullscreen: *const fn (*anyopaque, model.WindowId, u32, u32, bool) void,
+        set_state_atom: *const fn (*anyopaque, model.WindowId, u32, u32, bool) void,
         flush: *const fn (*anyopaque) void,
         grab_server: *const fn (*anyopaque) void,
         ungrab_and_flush: *const fn (*anyopaque) void,
@@ -77,8 +77,12 @@ pub const Sink = struct {
     pub inline fn stackOnly(self: Sink, win: model.WindowId, s: Stack) void {
         self.vt.stack_only(self.ptr, win, s);
     }
-    pub inline fn setEwmhFullscreen(self: Sink, win: model.WindowId, state_atom: u32, fs_atom: u32, is_fullscreen: bool) void {
-        self.vt.set_ewmh_fullscreen(self.ptr, win, state_atom, fs_atom, is_fullscreen);
+    /// Add (`add`) or remove (`!add`) one `_NET_WM_STATE` atom on `win`,
+    /// preserving every other atom in the list. Generalized from the
+    /// fullscreen-only shim (5.5): the read-merge-replace dance is list
+    /// editing, and nothing about it is specific to fullscreen.
+    pub inline fn setStateAtom(self: Sink, win: model.WindowId, state_atom: u32, atom: u32, add: bool) void {
+        self.vt.set_state_atom(self.ptr, win, state_atom, atom, add);
     }
     pub inline fn flush(self: Sink) void {
         self.vt.flush(self.ptr);
@@ -166,11 +170,11 @@ pub const XcbSink = struct {
         }
     }
 
-    /// Set/clear `fs_atom` in the `_NET_WM_STATE` list on `win` while PRESERVING
-    /// any other atoms already listed (a REPLACE that writes only the fullscreen
-    /// atom would nuke e.g. _NET_WM_STATE_ABOVE/_STICKY the client set). One
+    /// Add/remove `atom` in the `_NET_WM_STATE` list on `win` while PRESERVING
+    /// any other atoms already listed (a REPLACE that writes only the one atom
+    /// would nuke e.g. _NET_WM_STATE_ABOVE/_STICKY the client set). One
     /// blocking get_property round-trip then one replace-mode change_property;
-    /// only reachable from a fullscreen toggle, so the round-trip is acceptable.
+    /// only reachable from a state-atom toggle, so the round-trip is acceptable.
     ///
     /// The read buffer is bounded, so a list longer than `max_ewmh_states`
     /// would be silently TRUNCATED by the REPLACE (dropping the client's other
@@ -178,12 +182,12 @@ pub const XcbSink = struct {
     /// touching the property rather than corrupting it.
     const max_ewmh_states = 64;
 
-    fn setEwmhFullscreenShim(
+    fn setStateAtomShim(
         ptr: *anyopaque,
         win: u32,
         state_atom: u32,
-        fs_atom: u32,
-        is_fullscreen: bool,
+        atom: u32,
+        add: bool,
     ) void {
         const conn = XcbSink.fromPtr(ptr).conn;
 
@@ -196,21 +200,21 @@ pub const XcbSink = struct {
                 // More atoms on the wire than we can preserve: rewriting would
                 // drop them. Leave the property alone.
                 if (reply.*.bytes_after != 0) {
-                    log.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping fullscreen update", .{ win, max_ewmh_states });
+                    log.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping state-atom update", .{ win, max_ewmh_states });
                     return;
                 }
                 const raw = xcb.xcb_get_property_value(reply) orelse return;
                 const n: usize = @intCast(reply.*.value_len);
                 const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, state_atoms.len)];
                 for (existing) |a| {
-                    if (a == fs_atom or a == 0) continue;
+                    if (a == atom or a == 0) continue;
                     state_atoms[count] = a;
                     count += 1;
                 }
             }
         }
-        if (is_fullscreen and count < state_atoms.len) {
-            state_atoms[count] = fs_atom;
+        if (add and count < state_atoms.len) {
+            state_atoms[count] = atom;
             count += 1;
         }
 
@@ -249,7 +253,7 @@ const xcb_vtable: Sink.VTable = .{
     .border_pixel = XcbSink.borderPixelShim,
     .park = XcbSink.parkShim,
     .stack_only = XcbSink.stackOnlyShim,
-    .set_ewmh_fullscreen = XcbSink.setEwmhFullscreenShim,
+    .set_state_atom = XcbSink.setStateAtomShim,
     .flush = XcbSink.flushShim,
     .grab_server = XcbSink.grabShim,
     .ungrab_and_flush = XcbSink.ungrabAndFlushShim,

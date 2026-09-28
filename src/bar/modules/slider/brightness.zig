@@ -137,34 +137,50 @@ pub fn readPctFrom(base: []const u8, class: Class, dev: []const u8) ?u8 {
 /// (missing device, permission denied, read-only mount). Raw POSIX I/O: the
 /// node must be written as-is, and O_TRUNC keeps file-backed lookalikes
 /// (used by tests) from keeping stale tail bytes.
-fn writeU32File(path: []const u8, val: u32) bool {
+/// Why a sysfs write did not happen. `denied` is the ONLY outcome that says
+/// something about this user's authority on the node; every other failure is
+/// transient and says nothing, so it must not latch the module read-only.
+pub const WriteResult = enum { ok, denied, transient };
+
+/// Maps an errno to the two failure classes. EACCES/EPERM mean the kernel
+/// refused this user; anything else (ENOENT while a driver rebinds, EIO, EISDIR
+/// on a file-backed lookalike, ENOSPC) is a condition that can differ on the
+/// very next commit.
+fn classify(err: std.posix.E) WriteResult {
+    return switch (err) {
+        .ACCES, .PERM => .denied,
+        else => .transient,
+    };
+}
+
+fn writeU32File(path: []const u8, val: u32) WriteResult {
     var pz: [std.fs.max_path_bytes]u8 = undefined;
-    if (path.len >= pz.len) return false;
+    if (path.len >= pz.len) return .transient;
     @memcpy(pz[0..path.len], path);
     pz[path.len] = 0;
     var vbuf: [16]u8 = undefined;
-    const txt = std.fmt.bufPrint(&vbuf, "{d}", .{val}) catch return false;
+    const txt = std.fmt.bufPrint(&vbuf, "{d}", .{val}) catch return .transient;
     const fd = c.open(&pz, c.O_WRONLY | c.O_TRUNC);
-    if (fd < 0) return false;
+    if (fd < 0) return classify(std.posix.errno(-fd));
     defer _ = c.close(fd);
     var off: usize = 0;
     while (off < txt.len) {
         const n = c.write(fd, txt.ptr + off, txt.len - off);
-        if (n <= 0) return false;
+        if (n <= 0) return classify(std.posix.errno(-n));
         off += @intCast(n);
     }
-    return true;
+    return .ok;
 }
 
 /// Applies a normalized 0-100 level straight to the kernel's `brightness`
 /// node. Returns false when the write did not happen (no device, denied).
-pub fn applyPctTo(base: []const u8, class: Class, dev: []const u8, pct: u8) bool {
-    if (dev.len == 0) return false;
-    const max = readMaxOf(base, class, dev) orelse return false;
-    if (max == 0) return false;
+pub fn applyPctTo(base: []const u8, class: Class, dev: []const u8, pct: u8) WriteResult {
+    if (dev.len == 0) return .transient;
+    const max = readMaxOf(base, class, dev) orelse return .transient;
+    if (max == 0) return .transient;
     const raw = rawFromPct(@min(pct, 100), max);
     var p: [std.fs.max_path_bytes]u8 = undefined;
-    const path = attrPath(&p, base, class, dev, "brightness") orelse return false;
+    const path = attrPath(&p, base, class, dev, "brightness") orelse return .transient;
     return writeU32File(path, raw);
 }
 
@@ -276,10 +292,12 @@ fn brightnessctlApply(pct: u8) bool {
     return slider.runOk(cmd);
 }
 
-/// True when the current backend commits with a single native sysfs write
-/// (microseconds, no subprocess) -- the case that needs no throttling.
-fn commitIsNative() bool {
-    return g_backend == .sysfs;
+/// The latency class of one commit on the live backend: a direct sysfs write
+/// is microseconds and needs no window, while the `brightnessctl` fallback is
+/// a fork+exec that does. Named value (see `slider.CommitCost`) rather than
+/// the bare bool this used to be.
+fn commitCost() slider.CommitCost {
+    return if (g_backend == .sysfs) .immediate else .rate_limited;
 }
 
 /// Applies a level to whatever backend can write: a direct sysfs write when
@@ -288,19 +306,38 @@ fn commitIsNative() bool {
 /// set only when every path fails (sysfs denied and no working
 /// brightnessctl). Scheduled by the slider core's throttle, which owns the
 /// commit clock.
+/// The one clamp every level passes: 0-100 % is all the backend ever
+/// receives. `commitPct` and `previewPct` MUST go through the same function --
+/// they used to clamp independently, and when `previewPct` forgot to, a
+/// scroll/drag motion could display a level the backend then refused.
+fn clampPct(v: u8) u8 {
+    return @min(v, 100);
+}
+
 fn commitPct(v: u8) void {
-    const pct = @min(v, 100);
+    const pct = clampPct(v);
     const direct = g_backend == .sysfs;
     // A usable device may still deny the write (root-only node, no udev
     // rule): fall back to the spawn, and remember the flip so every later
     // commit spawns and stays rate-limited (once per window, not per event).
-    const ok = if (direct and applyPctTo("", g_class, g_dev[0..g_dev_len], pct))
-        true
-    else if (brightnessctlApply(pct)) blk: {
-        if (direct) g_backend = .brightnessctl;
-        break :blk true;
-    } else false;
-    g_read_only = !ok;
+    const wrote: WriteResult = if (direct) applyPctTo("", g_class, g_dev[0..g_dev_len], pct) else .transient;
+    var ok = wrote == .ok;
+    if (!ok) {
+        // A usable device may still refuse the write (root-only node, no udev
+        // rule): fall back to the spawn, and remember the flip so every later
+        // commit spawns and stays rate-limited (once per window, not per event).
+        if (brightnessctlApply(pct)) {
+            if (direct) g_backend = .brightnessctl;
+            ok = true;
+        }
+    }
+    // Latch read-only ONLY on a permission denial that the fallback also could
+    // not work around. The old `g_read_only = !ok` latched on ANY failure, so
+    // one transient EIO -- or the brightness node briefly vanishing while a
+    // driver rebound -- turned the module into a permanent, silent no-op for
+    // the rest of the session, with the segment still rendering a level the
+    // user could not actually change.
+    g_read_only = !ok and wrote == .denied;
 }
 
 /// One-shot apply (press, drag end): commit then re-read so the display
@@ -313,7 +350,7 @@ fn applyPct(v: u8) void {
 /// Optimistic display update from a scroll/drag motion: the label follows
 /// immediately while the backend write is committed by the core's scheduler.
 fn previewPct(v: u8) void {
-    g_pct = v;
+    g_pct = clampPct(v);
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}`
@@ -359,7 +396,7 @@ pub const sub: slider.Sub = .{
     .read = readBrightness,
     .pct = currentPct,
     .preview = previewPct,
-    .commit_is_native = commitIsNative,
+    .commit_cost = commitCost,
     .commit = commitPct,
     .apply = applyPct,
     .label = label,

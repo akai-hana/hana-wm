@@ -296,7 +296,8 @@ pub const TilingConfig = struct {
     pub fn masterCountLookup(self: *const TilingConfig) [constants.max_workspaces]?u8 {
         var lookup: [constants.max_workspaces]?u8 = .{null} ** constants.max_workspaces;
         for (self.workspace_master_count_overrides.items) |o| {
-            if (o.workspace_idx.index < constants.max_workspaces)
+            // One validity notion, not a second inline range test (7.6).
+            if (o.workspace_idx.isValid())
                 lookup[o.workspace_idx.index] = o.count;
         }
         return lookup;
@@ -311,7 +312,7 @@ pub const TilingConfig = struct {
     pub fn workspaceLayoutLookup(self: *const TilingConfig) [constants.max_workspaces]?usize {
         var lookup: [constants.max_workspaces]?usize = .{null} ** constants.max_workspaces;
         for (self.workspace_layout_overrides.items, 0..) |o, oi| {
-            if (o.workspace_idx.index < constants.max_workspaces)
+            if (o.workspace_idx.isValid())
                 lookup[o.workspace_idx.index] = oi;
         }
         return lookup;

@@ -8,19 +8,26 @@
 //! This partition issues NO X11 requests. The eponymous `bar.zig` imports it
 //! one-way (bar -> visibility), applies a decision, and performs the
 //! map/unmap + screen-claim + reconcile glue; visibility.zig never imports
-//! bar.zig, so every wire token stays in the orchestrator.
+//! bar.zig, so every wire token stays in the orchestrator. It also does not
+//! import the pipeline: the model is a parameter, so every decision is a pure
+//! function of what the caller handed in.
 
 const build_options = @import("build_options");
 const model = @import("model");
-const pipeline = @import("pipeline");
 
 /// True when a fullscreen window on `ws` forces the bar hidden (shared-screen
 /// reaction). Compile-time folded when the fullscreen module is absent: the
 /// model read is comptime-unreachable, matching the inlined guards that used
 /// to live at each decision site.
-pub fn barForcedHiddenByFullscreen(ws: u8) bool {
+/// `m` is the model the decision is made AGAINST, passed in rather than
+/// reached for through pipeline. visibility.zig no longer imports the pipeline
+/// at all, so a decision can no longer be computed against a model that is not
+/// the one its caller is about to act on -- the two used to be reached
+/// independently, and the bar's own comment noted the dependency was the only
+/// thing keeping the partition honest.
+pub fn barForcedHiddenByFullscreen(m: *const model.Model, ws: u8) bool {
     return if (build_options.has_fullscreen)
-        model.coveringOccupantOnWs(pipeline.model(), model.WSId.fromIndex(ws)) != null
+        model.coveringOccupantOnWs(m, model.WSId.fromIndex(ws)) != null
     else
         false;
 }
@@ -37,20 +44,38 @@ pub fn shouldBeVisible(is_globally_visible: bool, forced_hidden_by_fullscreen: b
 /// (`applyFullscreenVisibility`): recompute the desired visibility from the
 /// workspace + user level, folded with the bar's present mapped state so the
 /// caller can return without touching the wire when nothing changes.
-pub const DesiredVisibility = struct {
-    should_be_visible: bool,
-    needs_change: bool,
+/// Why the bar wants the visibility it wants. The POLICY states the target and
+/// why; COMPARING that target against the bar's currently mapped state belongs
+/// to the orchestrator, because that comparison reads live window state and is
+/// the thing that decides whether any wire request happens.
+pub const Reason = enum {
+    /// The user toggle and the current workspace both want the bar shown.
+    user_and_workspace,
+    /// The user turned the bar off.
+    user_hidden,
+    /// A fullscreen window on this workspace claims the whole screen.
+    fullscreen_claims_screen,
 };
 
-pub fn desiredVisibility(ws: u8, is_visible: bool, is_globally_visible: bool) DesiredVisibility {
-    const should_be_visible = shouldBeVisible(
-        is_globally_visible,
-        barForcedHiddenByFullscreen(ws),
-    );
-    return .{
-        .should_be_visible = should_be_visible,
-        .needs_change = should_be_visible != is_visible,
-    };
+pub const DesiredVisibility = struct {
+    should_be_visible: bool,
+    reason: Reason,
+};
+
+/// `is_visible` (the bar's mapped state) is deliberately NOT a parameter.
+/// `desiredVisibility` used to take it and return `needs_change`, making one
+/// function both the policy and the comparator, so the bar then early-returned
+/// on a field the policy had already folded in. Asking the policy for the
+/// target and reason, and letting the caller compare, is one step instead of
+/// two and keeps the mapped state at the one place that can see it.
+pub fn desiredVisibility(m: *const model.Model, ws: u8, is_globally_visible: bool) DesiredVisibility {
+    if (is_globally_visible) {
+        if (barForcedHiddenByFullscreen(m, ws)) {
+            return .{ .should_be_visible = false, .reason = .fullscreen_claims_screen };
+        }
+        return .{ .should_be_visible = true, .reason = .user_and_workspace };
+    }
+    return .{ .should_be_visible = false, .reason = .user_hidden };
 }
 
 /// Decision for `dismissAfterPrompt`: whether the prompt's forced-show
@@ -59,6 +84,6 @@ pub fn desiredVisibility(ws: u8, is_visible: bool, is_globally_visible: bool) De
 /// override (e.g. the fullscreen window closes on its own), so this is
 /// recomputed from the CURRENT workspace at prompt-exit time rather than
 /// trusting the decision made at activation.
-pub fn keepPromptOverride(ws: u8, is_globally_visible: bool) bool {
-    return shouldBeVisible(is_globally_visible, barForcedHiddenByFullscreen(ws));
+pub fn keepPromptOverride(m: *const model.Model, ws: u8, is_globally_visible: bool) bool {
+    return shouldBeVisible(is_globally_visible, barForcedHiddenByFullscreen(m, ws));
 }

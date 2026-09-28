@@ -20,6 +20,7 @@ const actions = @import("actions");
 const restart = @import("restart");
 const persist = @import("persist");
 const spawn = @import("spawn");
+const timers = @import("timers");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 const lifecycle = @import("lifecycle");
@@ -684,18 +685,25 @@ pub fn run() void {
     };
     const fds: []std.posix.pollfd = poll_buf[0 .. 2 + n_spawn];
 
+    // Core owns the timer list; the surfaces hook is one entry in it (see
+    // timers.Timers). Built once, outside the loop, because the source set
+    // cannot change while the loop runs.
+    var source_buf: [1]timers.Source = undefined;
+    const n_sources: usize = if (build_options.has_bar) blk: {
+        source_buf[0] = surfaces.pollTimeoutMs;
+        break :blk 1;
+    } else 0;
+    const loop_timers: timers.Timers = .{ .sources = source_buf[0..n_sources] };
+
     while (lifecycle.running.load(.acquire)) {
         // No built-in deadline: with no timer sources the loop blocks until
-        // an X event or signal arrives. Timer sources are exclusively a bar
-        // concern (clock segment, prompt cursor blink, carousel marquee) and
-        // contribute deadlines through surfaces.pollTimeoutMs(); a non-negative
-        // deadline means a timeout wake must be handed to the bar for repaint,
-        // never worked around in core.
-        var poll_timeout_ms: i32 = -1;
-        if (build_options.has_bar) {
-            const ms = surfaces.pollTimeoutMs();
-            if (ms >= 0) poll_timeout_ms = ms;
-        }
+        // an X event or signal arrives. Timer sources today are exclusively a
+        // bar concern (clock segment, prompt cursor blink, carousel marquee),
+        // and the bar contributes exactly ONE entry -- it reduces over its own
+        // modules. A second core-side timer is a new list entry here, not a
+        // new branch at the call site, and a timeout wake must be handed to
+        // the bar for repaint rather than worked around in core.
+        const poll_timeout_ms: i32 = loop_timers.deadlineMs() orelse -1;
 
         const poll_rc = std.os.linux.poll(fds.ptr, fds.len, poll_timeout_ms);
         const ready: usize = switch (std.posix.errno(poll_rc)) {

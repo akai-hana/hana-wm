@@ -5,15 +5,19 @@ const core = @import("core");
 const xcb = core.xcb;
 const model = @import("model");
 const constants = @import("constants");
-const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const wincache = @import("wincache");
+const requests = @import("requests");
 const window = @import("window");
 
 const ledger = @import("ledger");
-/// Pure focused/unfocused pixel pick: 0 for screen-covering windows,
-/// focused or unfocused color otherwise. Headless-testable.
+/// Pure focused/unfocused pixel pick, for callers that already know whether
+/// `win` is focused. Headless-testable.
+///
+/// The decision itself is `model.focusedBorderColor` (9.6), which the pipeline
+/// also uses; this remains only for the callers that hold a `focused` bool
+/// rather than a model reference.
 pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
     return if (focused) focused_px else unfocused_px;
 }
@@ -106,7 +110,9 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
     // unfindable window falls back to whether the CURRENT workspace has a
     // covering occupant.
     if (isBehindCoveringWindowWith(m, win, m.current, build_options.has_fullscreen, occupants)) return 0;
-    return borderColorOf(focus.getFocused() == win, cfg.border_focused, cfg.border_unfocused);
+    // 9.6: the model is the focus source, so this cannot drift from the
+    // pipeline's own pick (which used to be a second copy of this ternary).
+    return model.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
 /// Applies the configured border width to `win`, skipping the configure when
@@ -123,14 +129,15 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
     if (build_options.has_tiling) ledger.markSentBorderWidth(win, w);
 }
 
-/// Applies both border width and color to `win`. Color goes through the
-/// layout-cache dedup so repeated sweeps don't spam ChangeWindowAttributes;
-/// that dedup always records the sent/verified color, keeping the cache
-/// truthful across forced values applied outside it (fullscreen's pixel 0)
-/// so the next real color change is never stale-skipped. The dedup owns the
-/// unconditional-send fallback when the cache is full.
+/// Applies both border width and color to `win`. The color dedup lives in the
+/// SENT LEDGER (11.4), beside the width record and the reconcile's own
+/// `need_pixel` check, so the sweep and the reconcile derive "has this pixel
+/// already gone out" from one record. Deriving it from the wincache entry
+/// instead is what let a pixel sent by the reconcile go unrecorded for the
+/// sweep (and vice versa), which is the stale-skip class of bug the old
+/// comment here described as prevented.
 pub fn apply(conn: core.Connection, win: u32) void {
     applyWidth(conn, win);
     const c = resolveBorderColor(win);
-    wincache.sendBorderColorIfChanged(win, c);
+    if (ledger.markSentBorderPixelIfChanged(win, c)) requests.setBorderPixel(conn, win, c);
 }

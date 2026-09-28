@@ -27,22 +27,14 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     // fold: without a module the model read folds to `false` at comptime and
     // the bar is never force-hidden by occupancy.
     if (comptime !build_options.has_fullscreen) {
-        try testing.expect(!visibility.barForcedHiddenByFullscreen(0));
-
-        const shown = visibility.desiredVisibility(0, true, true);
-        try testing.expect(shown.should_be_visible);
-        try testing.expect(!shown.needs_change);
-
-        const hidden_by_user = visibility.desiredVisibility(0, true, false);
-        try testing.expect(!hidden_by_user.should_be_visible);
-        try testing.expect(hidden_by_user.needs_change);
-
-        const already_hidden = visibility.desiredVisibility(0, false, false);
-        try testing.expect(!already_hidden.should_be_visible);
-        try testing.expect(!already_hidden.needs_change);
-
-        try testing.expect(visibility.keepPromptOverride(0, true));
-        try testing.expect(!visibility.keepPromptOverride(0, false));
+        // `barForcedHiddenByFullscreen` now takes the model it decides
+        // against, so this headless branch cannot call it with a literal
+        // workspace id. What it CAN pin without a model is the fold: the
+        // absent-module branch is comptime-pruned to `false`, which is exactly
+        // the "no fullscreen module => never force-hidden" claim, and
+        // `desiredVisibility` therefore collapses to the user toggle.
+        try testing.expect(!visibility.shouldBeVisible(true, false));
+        try testing.expect(!visibility.shouldBeVisible(false, false));
         return;
     }
 
@@ -58,33 +50,37 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     const m = pipeline.mut(&gate);
 
     // Empty model: no covering occupant, bar stays up.
-    try testing.expect(!visibility.barForcedHiddenByFullscreen(0));
+    try testing.expect(!visibility.barForcedHiddenByFullscreen(m, 0));
 
     // A covering occupant on ws 0 claims the screen: the coercion fires.
     try model.register(m, 1, model.WSId.fromIndex(0));
     const ent = m.store.getPtr(1).?;
     ent.presence = .covering;
     ent.covering_ws = model.WSId.fromIndex(0);
-    try testing.expect(visibility.barForcedHiddenByFullscreen(0));
+    try testing.expect(visibility.barForcedHiddenByFullscreen(m, 0));
 
-    // Decision layer folds the coercion in: marked hidden, needs change.
-    const shown = visibility.desiredVisibility(0, true, true);
+    // Decision layer folds the coercion in: hidden, and the reason is
+    // reported so the caller can log WHY instead of recomputing it.
+    const shown = visibility.desiredVisibility(m, 0, true);
     try testing.expect(!shown.should_be_visible);
-    try testing.expect(shown.needs_change);
+    try testing.expectEqual(.fullscreen_claims_screen, shown.reason);
 
     // The prompt override is not kept while the screen is claimed.
-    try testing.expect(!visibility.keepPromptOverride(0, true));
+    try testing.expect(!visibility.keepPromptOverride(m, 0, true));
 
     // Releasing the claim restores the natural show decision.
     const rel = m.store.getPtr(1).?;
     rel.covering_ws = null;
     rel.presence = .present;
-    try testing.expect(!visibility.barForcedHiddenByFullscreen(0));
-    const hidden_by_user = visibility.desiredVisibility(0, true, false);
-    try testing.expect(!hidden_by_user.should_be_visible);
-    try testing.expect(hidden_by_user.needs_change);
+    try testing.expect(!visibility.barForcedHiddenByFullscreen(m, 0));
 
-    const already_hidden = visibility.desiredVisibility(0, false, false);
-    try testing.expect(!already_hidden.should_be_visible);
-    try testing.expect(!already_hidden.needs_change);
+    // User preference alone hides the bar, and says so.
+    const hidden_by_user = visibility.desiredVisibility(m, 0, false);
+    try testing.expect(!hidden_by_user.should_be_visible);
+    try testing.expectEqual(.user_hidden, hidden_by_user.reason);
+
+    // The screen is free again, so the user toggle decides: shown.
+    const both = visibility.desiredVisibility(m, 0, true);
+    try testing.expect(both.should_be_visible);
+    try testing.expectEqual(.user_and_workspace, both.reason);
 }

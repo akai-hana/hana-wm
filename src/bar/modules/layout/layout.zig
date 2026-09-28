@@ -12,7 +12,9 @@ const scaffold = @import("scaffold");
 // it, and each module carries its own bar icon metadata. Empty (and
 // unreachable: the icon falls back to "><>") when the tiling subsystem is
 // absent.
-const tiling_mods = contract.tiling_mods;
+
+// No `tiling_mods` local: the layout module resolves its metadata through
+// contract.activeLayoutMeta, so it never names the tiling registry at all.
 
 /// Fallback glyph when no tiling layout is resolvable (tiling disabled or the
 /// tiling subsystem absent: all windows float by definition).
@@ -24,9 +26,15 @@ const fallback_icon = "><>";
 /// pure `activeLayoutKind` applies the registry/tiling gates for both this
 /// module and its variants sibling.
 fn getIcon() []const u8 {
-    if (tiling_mods.len == 0) return fallback_icon;
-    const kind = contract.activeLayoutKind(pipeline.getCurrentLayout()) orelse return fallback_icon;
-    return tiling_mods[kind].icon orelse fallback_icon;
+    return contract.activeLayoutMeta(
+        pipeline.getCurrentLayout(),
+        struct {
+            fn pick(m: contract.Layout) ?[]const u8 {
+                return m.icon;
+            }
+        }.pick,
+        fallback_icon,
+    );
 }
 
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {

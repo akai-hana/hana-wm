@@ -400,3 +400,29 @@ test "actions: layout kind and variant step through the registry" {
         try std.testing.expectEqual(@as(u8, 0), p.variant_idx); // wrapped
     }
 }
+
+// 10.5: the fact-bump invariant, pinned at the entry that owns it.
+//
+// Eight actions reconcile through the plain `pipeline.reconcileGrab` alias.
+// The bump used to be the caller's job and those eight did not do it, so
+// nothing but this assertion kept the invariant true. The bump is now inside
+// the alias; the `retile` paths are covered by the geometry assertions above,
+// which all route through it.
+//
+// X-gated like the rest of this file: `reconcileGrab` takes a real server
+// grab, so this skips headless.
+test "actions: the plain reconcile alias bumps the window fact" {
+    var fx = fixture.setUp("actions_test") orelse return;
+    defer fx.deinit();
+
+    const win = fx.createWindow();
+    actions.mapRequest(win, 0, true, null);
+    fx.flush();
+
+    // A tiling op that reconciles through the plain alias: toggleFloating
+    // ends in pipeline.reconcileGrab with no focus handoff.
+    const before = core.window.rev();
+    actions.toggleFloating(win);
+    fx.flush();
+    try std.testing.expect(core.window.rev() != before);
+}

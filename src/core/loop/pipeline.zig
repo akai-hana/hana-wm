@@ -13,6 +13,8 @@ const focus = @import("focus");
 const xcb_sink = @import("sink");
 const usable_area = @import("usable_area");
 const build_options = @import("build_options");
+const log = @import("log");
+const time = @import("time");
 const surfaces = @import("surfaces").Surfaces;
 // Fullscreen EWMH/bar-arming hooks via the build-generated `window_modules`
 // registry (the loop below no-ops without fullscreen).
@@ -77,6 +79,15 @@ pub inline fn getCurrentLayout() u8 {
     return defaultIndexForLayoutName(core.getState().config.tiling.layout);
 }
 
+/// Returns the current workspace's active tiling variant index (see
+/// model.WSParams.variant_idx) from the live model state, checked at the one
+/// place that already owns the workspace-index rule. A bar module used to
+/// hand-walk `model().ws[model().current.index].params.variant_idx` itself,
+/// duplicating this lookup AND its unchecked @intCast; now it asks.
+pub inline fn getCurrentVariantIdx() usize {
+    return @intCast(model().ws[model().current.index].params.variant_idx);
+}
+
 /// Resolves a config layout name to a registry index (see
 /// model.LayoutParams.kind), collapsing to `contract.default_kind` when the
 /// name does not resolve. Loud, never silent: an unresolvable/removed
@@ -97,11 +108,16 @@ inline fn syncSink() sink.Sink {
 
 var g_ctx: reconcile.Ctx = undefined;
 
-/// The tiling engine environment for a workspace's layout params, resolved
-/// from live config (scaled margins, min_dim, master side, variant index).
-/// Shared by `ctx()` and the test fixture's placement expectations, so the
-/// fixture mirrors production env resolution instead of hand-building it.
-pub fn tilingEnv(p: *const model_mod.LayoutParams) contract.Env {
+/// The tiling engine environment for a workspace, resolved from live config
+/// (scaled margins, min_dim, master side). Shared by `ctx()` and the test
+/// fixture's placement expectations, so the fixture mirrors production env
+/// resolution instead of hand-building it.
+///
+/// It takes no layout params: everything left in `Env` is a config-derived
+/// constant, while the workspace's VARIANT index is model state that reaches a
+/// layout module as `View.params.variant_idx`. It used to be copied in here as
+/// well, which gave one fact two homes and had the layouts reading the copy.
+pub fn tilingEnv() contract.Env {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     return .{
@@ -111,18 +127,12 @@ pub fn tilingEnv(p: *const model_mod.LayoutParams) contract.Env {
         },
         .min_dim = cs.config.tiling.min_window_dim,
         .primary_on_right = cs.config.tiling.master_side == .right,
-        // The model already stores the variant index for the current
-        // workspace's layout params; pass it through generically. Each
-        // layout MODULE translates this index to its own behavior
-        // (e.g. monocle.gap_variant, grid.relax_variant) inside its own
-        // file — the core carries no layout-feature booleans.
-        .variant_idx = p.variant_idx,
     };
 }
 
 /// Builds the per-retile Ctx from live state: workarea via bar's helper,
-/// margins/min_dim and variant booleans from config, border width from the
-/// same scaled config fact (see tilingEnv), colors from config.tiling.
+/// margins/min_dim/master side from config (see tilingEnv), colors from
+/// config.tiling.
 /// Only valid after init().
 fn ctx() *reconcile.Ctx {
     // Inside a server grab the ctx belongs to the operation that TOOK the
@@ -135,8 +145,7 @@ fn ctx() *reconcile.Ctx {
     std.debug.assert(grab_depth == 0);
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
-    const p = &model().ws[model().current.index].params;
-    const env = tilingEnv(p);
+    const env = tilingEnv();
     g_ctx = .{
         .sink = syncSink(),
         .screen = .{
@@ -159,7 +168,7 @@ fn ctx() *reconcile.Ctx {
 /// m.focused, so this is the same single source of truth.
 fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     const cfg = &core.getState().config.tiling;
-    return if (m.focused == win) cfg.border_focused else cfg.border_unfocused;
+    return model_mod.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
 pub inline fn dragTick(win: model_mod.WindowId) void {
@@ -176,12 +185,19 @@ fn preReconcileDuties() void {
     // model()/mut()) because this is the model owner applying the active
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
     // module receives a mutable pointer into the model anymore).
-    const p = &instance.ws[instance.current.index].params;
+    //
+    // 8.8: the WRITE goes through model.applyParamsDelta rather than a raw
+    // `*LayoutParams` taken from the model. The value-in/value-out shape
+    // already stopped layout modules from mutating; this closes the last
+    // un-gated channel, which was this pipeline function itself holding a
+    // mutable pointer into model state across a call into a layout module.
+    const ws = instance.current;
+    const p = instance.ws[ws.index].params;
     const md = contract.moduleOf(p.kind) orelse return;
     if (md.preReconcile == null) return;
-    const n = model_mod.tiledCountOnWs(&instance, instance.current);
+    const n = model_mod.tiledCountOnWs(&instance, ws);
     const wa = usable_area.workArea(core.getState().screen);
-    p.* = md.preReconcile.?(p.*, n, wa.width);
+    model_mod.applyParamsDelta(&instance, ws, md.preReconcile.?(p, n, wa.width));
 }
 
 /// The ONE place a reconcile ctx is built and the one place pre-reconcile
@@ -299,20 +315,54 @@ fn withServerGrab(body: anytype) void {
     body.call(g.c.?);
 }
 
+/// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
+/// clock held by each server-grab retile -- the exact latency a user feels
+/// across a tiling op. Gated by `build_options.profile_key` (the same flag as
+/// the key-dispatch path) so release WMs compile it out.
+///
+/// This lived in `reconcile` next to the `reconcileUnderGrab` it instrumented
+/// (5.4). The bracket belongs to the pipeline, so the measurement of the
+/// bracket belongs here with it.
+const retile_prof = log.WindowedProfiler(
+    build_options.profile_key,
+    "[RETILE_PROF] last {} grab-retiles: avg={d:.0}ns min={d}ns max={d}ns",
+    std.log.info,
+);
+
 /// Grab server, reconcile, then ungrabAndFlush, atomically.
 pub inline fn reconcileUnderGrabNow(o: reconcile.Opts) void {
-    // reconcileUnderGrab runs its OWN grab/ungrab bracket, so this must not go
-    // through withServerGrab (a nested grab's ungrab would release the outer
-    // one). It still builds the ctx exactly once, via prepare().
-    reconcile.reconcileUnderGrab(&instance, prepare(), o);
+    // 5.4: this used to be exempt from withServerGrab because
+    // `reconcile.reconcileUnderGrab` ran its OWN grab/ungrab bracket, and a
+    // nested grab's ungrab would release the outer one. That second bracket is
+    // gone: grab ownership now lives here and only here, so this is just
+    // withServerGrab with the profiler around it.
+    const t0: i128 = if (retile_prof.enabled) time.monotonicNs() else 0;
+    defer if (retile_prof.enabled) retile_prof.note(time.monotonicNs() - t0);
+    withServerGrab(struct {
+        o: reconcile.Opts,
+        fn call(self: @This(), c: *reconcile.Ctx) void {
+            reconcile.run(&instance, c, self.o);
+        }
+    }{ .o = o });
 }
 
-/// The common case: reconcile under a fresh server grab with DEFAULT opts.
+/// The common case: reconcile under a fresh server grab with DEFAULT opts,
+/// bumping the WINDOW fact first (10.5).
+///
 /// The bare `reconcileUnderGrabNow(.{})` call site reads as "pass the empty
 /// options struct", which invites the reader to hunt for what the defaults
 /// are; this alias states the intent. `reconcileUnderGrabNow` stays for the
 /// sites that really do set `force_restack`.
+///
+/// The bump lives HERE, not in each caller. Eight actions reconciled through
+/// this alias with no bump at all, so the bar could read a stale window fact
+/// after geometry moved -- the invariant was "remember to bump", held only by
+/// the actions that happened to route through `retile`. Making the default
+/// path bump is what makes it impossible to forget. A bump is a monotonic
+/// `rev +%= 1` compared once per tick, so a site that wants a bump for its
+/// own reasons may take a double bump here without a second work pass.
 pub inline fn reconcileGrab() void {
+    core.window.bump();
     reconcileUnderGrabNow(.{});
 }
 
@@ -323,9 +373,16 @@ pub inline fn reconcileGrab() void {
 /// must be mapped before xcb_set_input_focus targets it).
 ///
 /// `duty` (usually null) runs inside the grab after the focus protocol and
-/// before the reconcile when focus lands first. Lets a caller fold a
+/// before the reconcile WHEN FOCUS LANDS FIRST. Lets a caller fold a
 /// model-derived adjustment that depends on the new focus (the viewport snap)
 /// into the same reconcile instead of opening a second grab.
+///
+/// 10.8: it runs ONLY on the `.before` leg, so a `.after` caller passing a
+/// duty had it dropped with no diagnostic -- the function returned normally
+/// and the caller reasonably believed its adjustment had been folded in.
+/// `assert`ed here rather than left to the doc, because the drop is silent and
+/// the symptom (a viewport that does not move, or geometry computed against a
+/// stale focus) points nowhere near this argument.
 pub const FocusOrder = enum {
     before,
     after,
@@ -337,6 +394,8 @@ pub inline fn reconcileGrabFocus(
     order: FocusOrder,
     duty: ?*const fn () void,
 ) void {
+    // The duty is only ever invoked on the `.before` leg (see `call` below).
+    std.debug.assert(!(order == .after and duty != null));
     preReconcileDuties();
     withServerGrab(struct {
         o: reconcile.Opts,

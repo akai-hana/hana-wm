@@ -24,10 +24,8 @@ const title_mod = @import("title");
 /// sub-registry generation), so dropping this file degrades the title to its
 /// built-in static (ellipsis) rendering with zero core edits.
 pub const addon: title_mod.Scroller = .{
-    .cyclePx = cyclePx,
-    .scrollingActive = scrollingActive,
     .offsetFor = offsetFor,
-    .resetForShow = resetForShow,
+    .pivot = pivot,
     .pollDeadlineMs = pollDeadlineMs,
 };
 
@@ -51,19 +49,19 @@ var last_frame_ms: i64 = 0;
 var active_win: u32 = 0;
 var active_hash: u64 = 0;
 var scrolling: bool = false;
-/// Set when the bar re-appears after a hide (see resetForShow): consumed by the
-/// next offsetFor call so the first frame after a show continues from the last
-/// shown offset instead of advancing across the whole hidden gap.
-var bar_shown: bool = false;
+/// Set when the bar re-appears after a hide, or when config changed and the
+/// scroller must re-measure (see `pivot`): consumed by the next offsetFor call
+/// so that frame rebases its elapsed-time clock at `now` instead of integrating
+/// across the whole gap.
+var pivot_next_frame: bool = false;
 
-/// True while the last offsetFor() call produced an active scroll. The title
-/// segment forwards this through its Segment needsRepaint hook, which the
-/// bar consults on every draw to keep the title segment out of the
-/// snapshot-diff skip: marquee frames repaint moving pixels whose data
-/// hasn't changed.
-pub fn scrollingActive() bool {
-    return scrolling;
-}
+/// The `enabled` policy the last `offsetFor` call was handed. The scroller is
+/// GIVEN its policy by draw and never goes looking for it: `pollDeadlineMs`
+/// reads this instead of the live config, so the bar module stops reading
+/// global config for a value a draw already had. At most one frame stale, and
+/// config cannot change without a draw following (a reload invalidates and
+/// redraws).
+var marquee_enabled: bool = true;
 
 /// Advances the marquee by the time elapsed since the previous call and
 /// returns the SUB-PIXEL pixel offset the text should be drawn at (0 is the
@@ -82,19 +80,20 @@ pub fn offsetFor(
     enabled: bool,
     speed_px_s: u16,
     now_ms: i64,
-) f32 {
+) title_mod.Scroll {
     const hash = std.hash.Wyhash.hash(0, title);
     const continues = scrolling and win == active_win and hash == active_hash;
 
+    marquee_enabled = enabled;
     scrolling = enabled and text_w > avail_w;
     active_win = win;
     active_hash = hash;
-    if (bar_shown) {
-        // The bar was hidden between frames: dt would span the entire hidden
-        // gap and teleport the marquee to an arbitrary point of its cycle.
-        // Pivot this frame at "now" so motion resumes from the last shown
-        // offset (a continuation, not a jump).
-        bar_shown = false;
+    if (pivot_next_frame) {
+        // The bar was hidden between frames, or config changed: dt would span
+        // that whole gap and teleport the marquee to an arbitrary point of its
+        // cycle. Pivot this frame at "now" so motion resumes from the last
+        // shown offset (a continuation, not a jump).
+        pivot_next_frame = false;
         last_frame_ms = now_ms;
     }
     const dt_ms = now_ms - last_frame_ms;
@@ -105,32 +104,34 @@ pub fn offsetFor(
         // enable, overflow start): show the head of the title and let
         // motion begin next frame.
         offset_px = 0;
-        return 0;
+        return .{ .off = 0, .cycle = cyclePx(text_w), .active = false };
     }
 
     if (dt_ms > 0)
         offset_px += @as(f32, @floatFromInt(speed_px_s)) * @as(f32, @floatFromInt(dt_ms)) / 1000.0;
     const cycle = cyclePx(text_w);
     offset_px = @mod(offset_px, cycle);
-    return offset_px;
+    return .{ .off = offset_px, .cycle = cycle, .active = true };
 }
 
 /// Milliseconds until the next marquee frame, for the bar's poll-timeout
 /// minimum: one display period at `hz`, rounded up so wakes never land past
 /// a scanout. Returns -1 when inactive (no wakeup contribution), mirroring
 /// prompt.blinkPollTimeoutMs.
-pub fn pollDeadlineMs(now_ms: i64, enabled: bool, hz: f64) i32 {
-    if (!enabled or !scrolling) return -1;
+pub fn pollDeadlineMs(now_ms: i64, hz: f64) i32 {
+    if (!marquee_enabled or !scrolling) return -1;
     const period_ms: i64 = @intFromFloat(@ceil(1000.0 / @max(hz, 1.0)));
     const until_next = period_ms - (now_ms - last_frame_ms);
     return @intCast(@max(1, until_next));
 }
 
-/// Called by the bar on show (map). Flags the next offsetFor call to pivot its
-/// elapsed-time base at that frame, so resuming a scroll across a hidden gap
-/// continues from the last shown offset instead of teleporting.
-fn resetForShow() void {
-    bar_shown = true;
+/// Rebase the elapsed-time clock at the next `offsetFor` call, so motion
+/// continues from the last shown offset instead of integrating the whole gap
+/// that passed while nothing was drawn. Two callers, one operation: the bar
+/// showing again after a hide, and a config reload (the new speed/width change
+/// what a cycle even is, so the next frame must not integrate across them).
+pub fn pivot() void {
+    pivot_next_frame = true;
 }
 
 /// Clears all marquee state. Test hook: the vars are module-global by
@@ -141,5 +142,6 @@ pub fn resetForTesting() void {
     active_win = 0;
     active_hash = 0;
     scrolling = false;
-    bar_shown = false;
+    pivot_next_frame = false;
+    marquee_enabled = true;
 }

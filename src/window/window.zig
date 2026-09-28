@@ -25,6 +25,7 @@ const model_mod = @import("model");
 
 const atoms = @import("atoms");
 const bounded = @import("bounded");
+const idmap = @import("idmap");
 const requests = @import("requests");
 const scaling = @import("scaling");
 const time = @import("time");
@@ -39,7 +40,7 @@ const gate: pipeline.Gate = .{};
 /// Thin typed forward onto the single canonical `contract` dispatch family.
 pub fn providerOf(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
-) ?contract.WindowModule {
+) ?*const contract.WindowModule {
     return contract.providerOf(contract.WindowModule, window_mods[0..], field);
 }
 
@@ -66,6 +67,16 @@ pub fn dispatchAll(
     contract.callAll(contract.WindowModule, window_mods[0..], field, args);
 }
 
+/// Fallible fan-out: every module that binds `field` runs, and the first error
+/// propagates. The lifecycle `init` fan-out is the only user (module init can
+/// fail; module deinit cannot).
+pub fn dispatchAllTry(
+    comptime field: std.meta.FieldEnum(contract.WindowModule),
+    args: anytype,
+) anyerror!void {
+    return contract.callAllTry(contract.WindowModule, window_mods[0..], field, args);
+}
+
 /// Like dispatchAll but returns true at the first provider whose hook does;
 /// false when no provider binds the hook or none returns true.
 pub fn dispatchFirstTrue(
@@ -75,11 +86,10 @@ pub fn dispatchFirstTrue(
     return contract.callFirstTrue(contract.WindowModule, window_mods[0..], field, args);
 }
 
-/// True when `win` is currently screen-covering via a covering-mode module
-/// (fullscreen). Shared by the configure-resolution and client-message paths;
-/// actions aliases this as its dispatch seam.
+/// True when `win` holds covering intent (12.4: a model query -- see
+/// contract.WindowModule for why the covering-mode hook is gone).
 pub fn isCoveringMode(m: *const model_mod.Model, win: u32) bool {
-    return callHookBool(.isCoveringMode, .{ m, win });
+    return model_mod.isCovering(m, win);
 }
 
 // ICCCM protocol surface (ICCCM 4.1.2/4.1.7) lives in icccm.zig; window.zig
@@ -144,9 +154,22 @@ const State = struct {
     // Lives in State so `state = .{}` in init() resets it, matching the stated
     // reset discipline of this struct.
     warned_active_ignore: bool = false,
+    /// Warn-once latch for the client-message diagnostic in
+    /// handleClientMessage; pager loops would otherwise flood the log. Lives
+    /// in State (9.3) beside `warned_active_ignore` so ONE re-init path resets
+    /// both -- `state = .{}` used to reset one and leave this module global
+    /// alive, so the two latches disagreed about "once per process".
+    warned_unmanaged_state: bool = false,
 
     // Child XID -> managed toplevel XID (see "Child window resolution").
-    child_cache: bounded.BoundedList(ChildEntry, child_cache_capacity) = .{},
+    /// child XID -> managed toplevel (9.7: IdMap, not a BoundedList).
+    ///
+    /// A BoundedList needed a linear scan per lookup, and the lookup sits on
+    /// the slow path of a BLOCKING xcb_query_tree round trip -- a list miss
+    /// cost a linear scan, a hit cost a round trip saved, and at cap the
+    /// append silently dropped so the walk repeated forever. Keyed storage
+    /// makes the hit O(1) with no capacity cliff.
+    child_cache: idmap.IdMap(u32, child_cache_capacity) = .{},
 
     // True when a grab-flush path already swept floating borders this batch,
     // so the event loop can skip the redundant second sweep. Reset at the
@@ -193,18 +216,30 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?model_mod.Rect {
 // (a flat array; Electron/Qt nest at most a handful of children per app).
 const child_cache_capacity: usize = 64;
 
-const ChildEntry = struct { id: u32, managed: u32 };
-
 /// Record that `child` resolves to `managed` so future tree walks are skipped.
 fn cacheChildWindow(child: u32, managed: u32) void {
     if (child == managed) return; // direct hit, not a child, nothing to cache
-    // At cap, append silently drops, the tree walk fallback is always correct.
-    _ = state.?.child_cache.upsertById(.id, child, .{ .id = child, .managed = managed });
+    // At cap, put returns false and the entry is dropped; the tree walk
+    // fallback is always correct, so a miss only costs the walk it would have
+    // paid anyway.
+    _ = state.?.child_cache.put(child, managed);
 }
 
 /// Called from unmanageWindow so stale child entries don't linger.
+///
+/// A value-keyed sweep, which is the one thing keyed storage does NOT make
+/// O(1): collect first, then remove. Removing inside the iteration would
+/// tombstone slots the live iterator is walking over.
 fn evictChildCache(managed_win: u32) void {
-    _ = state.?.child_cache.removeAllById(.managed, managed_win);
+    var stale: [child_cache_capacity]u32 = undefined;
+    var n: usize = 0;
+    var it = state.?.child_cache.iterator();
+    while (it.next()) |item| {
+        if (item.val.* != managed_win) continue;
+        stale[n] = item.key;
+        n += 1;
+    }
+    for (stale[0..n]) |child| _ = state.?.child_cache.remove(child);
 }
 
 /// Walks up the X11 window tree from `win` to find the managed toplevel.
@@ -218,8 +253,7 @@ pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn 
 
     // Cache hit; validate the cached toplevel is still managed (it may have
     // been unmanaged since the entry was written), else fall through.
-    if (state.?.child_cache.indexOfById(win)) |i| {
-        const managed = state.?.child_cache.items[i].managed;
+    if (state.?.child_cache.get(win)) |managed| {
         if (is_managed(managed)) return managed;
     }
 
@@ -281,7 +315,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     wincache.init(alloc);
     // Uniform lifecycle dispatch: each compiled-in sub-system's init runs,
     // absent modules aren't in the array, so nothing else needs a has_* guard.
-    for (window_mods) |m| if (m.init) |init_fn| try init_fn();
+    try dispatchAllTry(.init, .{});
     // Pre-allocate spawn queue capacity for the common case (a handful of
     // concurrent spawns). Failure is non-fatal; the list grows on demand.
     state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
@@ -298,7 +332,7 @@ pub fn deinit() void {
     wincache.deinit();
     // Uniform lifecycle dispatch: every compiled-in sub-system's deinit runs,
     // absent modules aren't in the array.
-    for (window_mods) |m| if (m.deinit) |deinit_fn| deinit_fn();
+    dispatchAll(.deinit, .{});
     // Free heap-backed state before the reset below wipes the struct; a bare
     // `state = .{}` would leak the spawn queue's and rules map's backing memory.
     if (state.?.alloc) |a| {
@@ -937,7 +971,7 @@ fn unmanageWindow(win: u32) void {
     // (unregister below), so this function does not also drop the entry.
     const model = if (pipeline.initialized()) pipeline.model() else null;
     const fs_ws: ?model_mod.WSId = if (model) |m|
-        (if (providerOf(.coveringWsOf)) |wm| wm.coveringWsOf.?(m, win) else null)
+        model_mod.coveringWsOf(m, win) // 12.4: model query, not a peer dispatch
     else
         null;
     var actx: actions.Ctx = .{
@@ -1386,7 +1420,11 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         // Same CacheMap dedup in both sweep variants: windows with a cache
         // entry skip the XCB call when their color is unchanged; uncached
         // ones get an entry created and colored in one step.
-        wincache.sendBorderColorIfChanged(win, color);
+        // 11.4: the dedup is the sent ledger's, not a cache entry's -- see
+        // borders.apply for why one record has to answer this for both the sweep
+        // and the reconcile.
+        if (ledger.markSentBorderPixelIfChanged(win, color))
+            requests.setBorderPixel(core.getState().conn, win, color);
     }
 }
 
@@ -1411,10 +1449,6 @@ pub fn updateWorkspaceBordersIfNeeded() void {
 }
 
 // ClientMessage: EWMH fullscreen requests from applications
-
-/// Warn-once latches for client-message diagnostics (see
-/// handleClientMessage): pager loops would otherwise flood the log.
-var warned_unmanaged_state: bool = false;
 
 pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (event.format != 32) return;
@@ -1441,8 +1475,8 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     const win = event.window;
     if (!isValidManagedWindow(win)) {
-        if (!warned_unmanaged_state) {
-            warned_unmanaged_state = true;
+        if (!state.?.warned_unmanaged_state) {
+            state.?.warned_unmanaged_state = true;
             log.warn("Ignoring _NET_WM_STATE request for unmanaged window 0x{x}", .{win});
         }
         return;

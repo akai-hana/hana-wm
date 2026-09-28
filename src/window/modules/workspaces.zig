@@ -38,14 +38,25 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     }
 }
 
+/// Move `win`'s covering intent to `dest`, or drop it when a resident occupant
+/// there swallows the transfer.
+///
+/// 12.8: the demote direction is EXPLICIT. This used to demote by calling
+/// `toggleCovering`, whose correctness depended entirely on a guard the caller
+/// had already proved -- `win` really was covering. Toggle is a two-edged verb:
+/// if that proof were ever lost (a reordered check, a new caller, a provider
+/// that reports covering differently) the "demote" silently became a fullscreen
+/// ENTRY, and the failure is a window jumping to screen-covering, not a no-op.
+/// `releaseCovering` only goes one way, so the wrong-direction mistake is
+/// unrepresentable.
 fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
-    const occupant = if (providerOf(.coveringOccupantOnWs)) |wm|
-        wm.coveringOccupantOnWs.?(m, dest)
+    const occupant = if (providerOf(.visibleCoveringOnWs)) |wm|
+        wm.visibleCoveringOnWs.?(m, dest)
     else
         null;
     if (occupant != null and occupant != win) {
-        if (providerOf(.toggleCovering)) |wm| {
-            _ = wm.toggleCovering.?(m, win);
+        if (providerOf(.releaseCovering)) |wm| {
+            wm.releaseCovering.?(m, win);
         }
         return; // a resident owner swallows the transfer
     }
@@ -58,8 +69,11 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 /// into de-fullscreen rather than clobbering the resident. Ghost records
 /// (minimized-from-fullscreen) move their ws too, following the parked mask.
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
-    const covering_ws = providerOf(.coveringWsOf) orelse return;
-    const fws = covering_ws.coveringWsOf.?(m, win) orelse return;
+    // 12.4: model query, not a peer-module dispatch. The dispatch returned
+    // null when no covering module is bound, which made "is this window
+    // covering" answer false in such a build -- while the model still held the
+    // intent, and persisted.zig restores it across a session restart.
+    const fws = model.coveringWsOf(m, win) orelse return;
     if (fws.eql(ws)) return;
     retargetOrDropFullscreen(m, win, ws);
 }
@@ -71,11 +85,10 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
     e.mask &= ~model.bit(ws);
-    if (providerOf(.isCoveringOnWs)) |wm| {
-        if (wm.isCoveringOnWs.?(m, win, ws)) {
-            const dest = model.lowestBit(e.mask) orelse unreachable;
-            retargetOrDropFullscreen(m, win, dest);
-        }
+    // 12.4: model query (see transferFullscreenOnMove).
+    if (model.isCoveringOn(m, win, ws)) {
+        const dest = model.lowestBit(e.mask) orelse unreachable;
+        retargetOrDropFullscreen(m, win, dest);
     }
     return true;
 }

@@ -52,3 +52,28 @@ test "slotAt skips zero-width slots" {
     try testing.expectEqual(@as(?usize, 1), slotAt(0, &slots));
     try testing.expectEqual(@as(?usize, null), slotAt(31, &slots));
 }
+
+test "a zero-width slot still maps an offset instead of dividing by zero" {
+    // The first-click case (26.3): before the segment's first draw there is
+    // no painted width, so the mapping must still be defined and monotonic.
+    // pctFromSlot clamps the denominator to 1, so any offset saturates rather
+    // than wrapping or trapping.
+    try testing.expectEqual(@as(u8, 0), slider.pctFromSlot(0, 0, 0));
+    try testing.expectEqual(@as(u8, 100), slider.pctFromSlot(0, 0, 1));
+    try testing.expectEqual(@as(u8, 100), slider.pctFromSlot(0, 0, 99));
+}
+
+test "pctFromSlot is the same mapping the click hit-test bounds" {
+    // The hit-test rejects `offset >= bound` and the mapping saturates at
+    // offset == bound, so no in-range click can land outside 0-100 and no
+    // out-of-range click is accepted.
+    const bound: u16 = 80;
+    for (0..@as(u32, bound) * 2) |raw| {
+        const off: u16 = @intCast(raw);
+        if (off >= bound) continue;
+        const pct = slider.pctFromSlot(0, bound, off);
+        try testing.expect(pct <= 100);
+    }
+    try testing.expectEqual(@as(u8, 0), slider.pctFromSlot(0, bound, 0));
+    try testing.expectEqual(@as(u8, 100), slider.pctFromSlot(0, bound, bound));
+}

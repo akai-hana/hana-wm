@@ -24,14 +24,36 @@ const requests = @import("requests");
 /// entries directly, so the actions.mapRequest bridge needs no conversion.
 pub const SizeHints = model_mod.SizeHints;
 
+/// Cached-title capacity, in bytes. A title longer than this is truncated at
+/// store time.
+///
+/// 256 is chosen from the consumer, not from the 1024-byte `title_fetch_len`
+/// fetch: the bar truncates for display against the available width, so the
+/// tail of a long title was never rendered anyway. Keeping the cache inline
+/// costs `max_window_cache` (512) x this, so a buffer sized to the FETCH
+/// rather than to the DISPLAY would have tripled the cache for bytes no
+/// reader can see.
+const max_title_len = 256;
+
 const WindowData = struct {
-    border_color: u32 = 0,
     hints: SizeHints = .{},
-    /// Cached _NET_WM_NAME / WM_NAME, duped into `title_alloc`. Owned: freed
-    /// on overwrite (storeTitle), on removeWindow, and on deinit. The only
-    /// non-POD field in the entry; every other writer touches only its own
-    /// field, so no other path can leak or clobber it.
-    title: []const u8 = "",
+    /// Cached _NET_WM_NAME / WM_NAME in a fixed inline buffer (11.5).
+    ///
+    /// This was heap-duped into a module allocator, which made the title the
+    /// only non-POD field in the entry and bought three ownership
+    /// obligations: free on overwrite, free on removeWindow, and a
+    /// free-everything walk in deinit. Every one of those was a place to
+    /// forget the free -- `storeTitle` had to free the fresh copy on the
+    /// at-capacity path, and a missed free leaked per title rewrite, bounded
+    /// by nothing but the client's patience. The entry is now POD: no
+    /// allocator, no free paths, nothing to leak, and `removeWindow`/`deinit`
+    /// are plain map operations.
+    title_buf: [max_title_len]u8 = @splat(0),
+    title_len: u16 = 0,
+
+    fn title(self: *const WindowData) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
 };
 
 const CacheMap = std.AutoHashMap(u32, WindowData);
@@ -48,8 +70,6 @@ const max_entries = constants.max_window_cache;
 var cache: ?CacheMap = null;
 
 /// Allocator titles are duped into; set by init alongside the map's.
-var title_alloc: ?std.mem.Allocator = null;
-
 /// Returns a pointer to the live cache. Panics in all build modes when
 /// called before init(); never silent UB.
 inline fn live() *CacheMap {
@@ -65,28 +85,37 @@ pub inline fn getOpt() ?*CacheMap {
 
 pub fn init(alloc: std.mem.Allocator) void {
     cache = CacheMap.init(alloc);
-    title_alloc = alloc;
 }
 
 pub fn deinit() void {
-    if (cache) |*c| {
-        const a = title_alloc.?;
-        var it = c.iterator();
-        while (it.next()) |e| freeTitle(a, e.value_ptr.title);
-        c.deinit();
-    }
+    if (cache) |*c| c.deinit();
     cache = null;
-    title_alloc = null;
-}
-
-inline fn freeTitle(alloc: std.mem.Allocator, title: []const u8) void {
-    if (title.len != 0) alloc.free(title);
 }
 
 /// Centralizes the get-or-put-with-default pattern for writers that don't
 /// distinguish "existing" from "new".  Returns `error.CacheFull` when the
-/// cache has reached `max_entries`, which callers treat like OOM (skip the
-/// update gracefully).
+/// cache has reached `max_entries`.
+///
+/// THE AT-CAPACITY POLICY (11.6), in one place, because it used to be
+/// re-decided per writer: a cache that is at capacity SKIPS the update and
+/// carries on. Caching is an optimization -- every reader has a correct
+/// fall-through -- so dropping an entry costs a slower path, never a wrong
+/// answer. The two rules that follow from that, both enforced by callers:
+///
+///  * a writer holding a freshly allocated value frees it before returning
+///    (storeTitle), and
+///  * a writer whose value MUST reach the server does not go through here at
+///    all. That was the third, divergent behavior: the border-pixel dedup
+///    used to catch `error.CacheFull` and send unconditionally, because a
+///    skipped dedup must not become a skipped send. It now asks the sent
+///    ledger instead (ledger.markSentBorderPixelIfChanged), which owns that
+///    "send anyway" rule on its own.
+///
+/// The ceiling is deliberately ABOVE the model's store_capacity, not equal to
+/// it: an unmapped or never-admitted client can still deliver property
+/// notifications and earn a cache entry, so sizing the cache AT the model
+/// bound would let transient clients evict live entries and make the cache the
+/// binding constraint where the model is meant to be.
 fn getOrPutDefault(win: u32) !*WindowData {
     const c = live();
     if (c.count() >= max_entries) return error.CacheFull;
@@ -98,7 +127,7 @@ fn getOrPutDefault(win: u32) !*WindowData {
 /// No-op if every field is zero (nothing declared).
 pub fn cacheSizeHints(win: u32, hints: SizeHints) void {
     if (hints.isEmpty()) return;
-    const wd = getOrPutDefault(win) catch return; // OOM: leave hints uncached.
+    const wd = getOrPutDefault(win) catch return; // at capacity: skip (see getOrPutDefault)
     wd.hints = hints;
 }
 
@@ -120,32 +149,7 @@ pub fn peekHints(win: u32) SizeHints {
 /// WM_NORMAL_HINTS and the cached title in one operation. No-op when never
 /// cached.
 pub fn removeWindow(window_id: u32) void {
-    const c = live();
-    if (c.getPtr(window_id)) |wd| {
-        const a = title_alloc.?;
-        freeTitle(a, wd.title);
-        _ = c.remove(window_id);
-    }
-}
-
-/// Sends the border-pixel change for `win` unless the cache already shows
-/// that exact color as applied, and RECORDS the color either way. The
-/// recording is load-bearing, not just an optimization: values forced
-/// outside this function (fullscreen's pixel 0) must end up in the cache,
-/// or the next real color change dedups against a stale value and is
-/// silently skipped -- the un-fullscreen "lost borders" bug. Sends
-/// unconditionally when the cache is full (bounded by max_entries like every
-/// other writer), so callers never need their own fallback.
-pub fn sendBorderColorIfChanged(win: u32, color: u32) void {
-    const conn = core.getState().conn;
-    const wd = getOrPutDefault(win) catch {
-        // Cache full (bounded by max_entries): refuse to grow, send anyway.
-        requests.setBorderPixel(conn, win, color);
-        return;
-    };
-    if (wd.border_color == color) return;
-    wd.border_color = color;
-    requests.setBorderPixel(conn, win, color);
+    _ = live().remove(window_id);
 }
 
 // Window-title cache
@@ -279,26 +283,28 @@ fn takePropertyReply(
 /// reaches it through `collectTitleCookies`), which the headless
 /// `wincache_test` exercises for the overwrite/free/cap lifecycle.
 pub fn storeTitle(win: u32, title: []const u8) void {
-    const alloc = title_alloc orelse return;
     const c = live();
-    const owned = alloc.dupe(u8, title) catch return;
     if (c.getPtr(win)) |wd| {
-        freeTitle(alloc, wd.title);
-        wd.title = owned;
+        setTitle(wd, title);
         return;
     }
     // New entry: the shared getOrPutDefault path enforces the at-capacity
     // drop; overwrites above stay exempt from the ceiling.
-    const wd = getOrPutDefault(win) catch {
-        alloc.free(owned);
-        return;
-    };
-    wd.title = owned;
+    const wd = getOrPutDefault(win) catch return;
+    setTitle(wd, title);
+}
+
+/// Copy into the inline buffer, truncating at `max_title_len`. A short title
+/// does NOT need a terminator: `peekTitle` slices by `title_len`.
+fn setTitle(wd: *WindowData, title: []const u8) void {
+    const n = @min(title.len, max_title_len);
+    @memcpy(wd.title_buf[0..n], title[0..n]);
+    wd.title_len = @intCast(n);
 }
 
 /// The bar's read path: the cached title for `win`, or "" when absent.
 /// Pure cache hit -- never touches the wire.
 pub fn peekTitle(win: u32) []const u8 {
     const wd = dataFor(win) orelse return "";
-    return wd.title;
+    return wd.title();
 }

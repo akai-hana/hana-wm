@@ -74,7 +74,7 @@ test "applyPctTo writes the raw value derived from the percent" {
     const base_len = try tmp.dir.realPath(io, &base);
     const base_path = base[0..base_len];
 
-    try std.testing.expect(brightness.applyPctTo(base_path, .backlight, "test", 50));
+    try std.testing.expectEqual(brightness.WriteResult.ok, brightness.applyPctTo(base_path, .backlight, "test", 50));
 
     var buf: [16]u8 = undefined;
     const f = try tmp.dir.openFile(io, "class/backlight/test/brightness", .{});
@@ -97,17 +97,17 @@ test "applyPctTo clamps percent to 100" {
     const base_len = try tmp.dir.realPath(io, &base);
     const base_path = base[0..base_len];
 
-    try std.testing.expect(brightness.applyPctTo(base_path, .backlight, "test", 200));
+    try std.testing.expectEqual(brightness.WriteResult.ok, brightness.applyPctTo(base_path, .backlight, "test", 200));
     try std.testing.expectEqual(@as(?u8, 100), brightness.readPctFrom(base_path, .backlight, "test"));
 }
 
-test "applyPctTo returns false for a missing device" {
+test "applyPctTo reports transient for a missing device" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var base: [std.fs.max_path_bytes]u8 = undefined;
     const base_len = try tmp.dir.realPath(io, &base);
     const base_path = base[0..base_len];
-    try std.testing.expect(!brightness.applyPctTo(base_path, .backlight, "nope", 50));
+    try std.testing.expectEqual(brightness.WriteResult.transient, brightness.applyPctTo(base_path, .backlight, "nope", 50));
 }
 
 test "findDevice picks the lexicographically smallest usable backlight" {
@@ -187,6 +187,6 @@ test "findDevice resolves an led-prefixed pin to the LED class" {
     try std.testing.expectEqualStrings("kbd", dev[0..n]);
     try std.testing.expect(cls == .leds);
     try std.testing.expectEqual(@as(?u8, 50), brightness.readPctFrom(base_path, cls, dev[0..n]));
-    try std.testing.expect(brightness.applyPctTo(base_path, cls, dev[0..n], 25));
+    try std.testing.expectEqual(brightness.WriteResult.ok, brightness.applyPctTo(base_path, cls, dev[0..n], 25));
     try std.testing.expectEqual(@as(?u8, 25), brightness.readPctFrom(base_path, cls, dev[0..n]));
 }

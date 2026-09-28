@@ -127,6 +127,21 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             std.mem.copyForwards(T, self.items[i..self.len], self.items[i + 1 .. self.len + 1]);
         }
 
+        /// Inserts `item` at the FRONT, first evicting the tail (oldest) entry
+        /// if the list is at `capacity`. This is the "newest N" pattern (an MRU
+        /// list), and it is a container operation rather than a caller's
+        /// three-line dance: the old sequence was `if (len == cap) evict_tail`
+        /// then `insert(0, item)`, and getting that order wrong (inserting
+        /// first) silently drops a NEWER entry.
+        ///
+        /// Returns false only if `capacity` is 0, which no real caller sets.
+        pub fn pushFrontEvictingTail(self: *Self, item: T) bool {
+            if (capacity == 0) return false;
+            if (self.len == capacity) self.orderedRemove(self.len - 1);
+            _ = self.insert(0, item);
+            return true;
+        }
+
         /// Removes the first item matching `match`, order-preserving. pub for
         /// the plugin templates (a sample provider's per-window record
         /// cleanup) and the id-keyed form below.
@@ -210,7 +225,8 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 /// ceiling (stack-allocated arrays). Keys stay sorted at all times: get /
 /// getPtr / has use O(log n) binary search; put and remove shift arrays to
 /// keep sorted order. Single-threaded like BoundedList (event-loop thread).
-/// Capacity is absolute: put returns error.StoreFull once full, no eviction.
+/// Capacity is absolute: put returns error.CapacityFull once full, no
+/// eviction.
 ///
 /// The backing arrays are contiguous, so a *V from getPtr/put stays valid as
 /// long as its key's slot does not move; slots move only on remove(k), a
@@ -258,7 +274,7 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             return self.exactAt(k) != null;
         }
 
-        pub fn put(self: *Self, k: K, v: V) error{StoreFull}!*V {
+        pub fn put(self: *Self, k: K, v: V) error{CapacityFull}!*V {
             // One lowerBound for both the in-place update and the insertion
             // position (exactAt would re-scan after the miss).
             const pos = self.lowerBound(k);
@@ -266,7 +282,7 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
                 self.vals[pos] = v;
                 return &self.vals[pos];
             }
-            if (self.len == capacity) return error.StoreFull;
+            if (self.len == capacity) return error.CapacityFull;
             std.mem.copyBackwards(K, self.keys[pos + 1 .. self.len + 1], self.keys[pos..self.len]);
             std.mem.copyBackwards(V, self.vals[pos + 1 .. self.len + 1], self.vals[pos..self.len]);
             self.keys[pos] = k;

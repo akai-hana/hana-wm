@@ -106,10 +106,15 @@ pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
 
 pub const Mask = u64;
 
-/// Mask bit for workspace `ws`. Precondition: `ws.index < 64` (u64 mask).
+/// Mask bit for workspace `ws`.
+///
+/// Two preconditions, both tied to `constants.max_workspaces` rather than
+/// restating its number: the index must name a real workspace, and it must
+/// fit the u64 mask. A shift by >= bitSizeOf would silently produce a wrong
+/// mask in safe modes, so raising max_workspaces past 64 is a loud build
+/// failure rather than a corrupt membership mask.
 pub inline fn bit(ws: WSId) Mask {
-    // A shift by >= bitSizeOf would silently produce a wrong mask in safe
-    // modes, so make raising max_workspaces a loud build failure.
+    std.debug.assert(ws.isValid());
     std.debug.assert(ws.index < @bitSizeOf(Mask));
     return @as(Mask, 1) << @intCast(ws.index);
 }
@@ -257,8 +262,13 @@ pub fn findHome(m: *const Model, win: WindowId) ?WSId {
 pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!void {
     if (m.store.has(win)) return;
     const target: WSId = hint_ws orelse m.current;
+    // Bounds-checked: `ws` is a FIXED [max_workspaces] array, so an out-of-range
+    // target (reachable from a lenient `WorkspaceId.fromIndex` on a config
+    // path) would index out of the model. Fail at the boundary that created
+    // the id, not silently on the array read below.
+    std.debug.assert(target.isValid());
     // Defined-capacity refusal with rollback, BEFORE any observable state change.
-    const ptr = m.store.put(win, .{ .mask = bit(target), .anchor = .tiled }) catch return error.CapacityFull;
+    const ptr = m.store.put(win, .{ .mask = bit(target), .anchor = .tiled }) catch |e| return e;
     if (!m.ws[target.index].tiled_order.append(win)) {
         _ = m.store.remove(win);
         return error.CapacityFull;
@@ -325,11 +335,39 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     return n;
 }
 
+/// The workspace `win`'s covering capture anchors to (12.4), or null when it
+/// holds no covering intent.
+///
+/// GHOST: reports the workspace even while the entry's presence is parked
+/// (minimized-from-covering leaves `covering_ws` set), so callers
+/// classifying a drop can read the true target before teardown.
+pub fn coveringWsOf(m: *const Model, win: WindowId) ?WSId {
+    const e = m.store.get(win) orelse return null;
+    return e.covering_ws;
+}
+
+/// Whether `win` holds covering intent at all. One definition of the question,
+/// so the "is it covering" test cannot differ between callers (12.4).
+pub inline fn isCovering(m: *const Model, win: WindowId) bool {
+    return coveringWsOf(m, win) != null;
+}
+
+/// Whether `win`'s covering capture targets `ws`. Does NOT consult visibility:
+/// this is pre-toggle classification and was-covering capture, not an
+/// occupancy question (for that see `coveringOccupantOnWs`).
+pub fn isCoveringOn(m: *const Model, win: WindowId, ws: WSId) bool {
+    const fws = coveringWsOf(m, win) orelse return false;
+    return fws.eql(ws);
+}
+
 /// The covering occupant owning the screen on `ws`: anchor-or-visibility OR
 /// union. Pure core computation, so sync/bar resolve the screen owner without
 /// enumerating optional subsystems. At most one occupant per ws by the
 /// reconciler. (fullscreen's occupant hook is a stricter AND scan: covering +
 /// anchored + visible — see fullscreen.fullscreenOccupantOnWs.)
+/// The first covering occupant on `ws`: rec.ws == ws AND
+/// present-not-parked AND visibleOn. At most one module binds
+/// this.
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -370,11 +408,43 @@ pub fn setFocus(m: *Model, win: WindowId) void {
     if (!m.store.has(win)) return;
     m.focused = win;
     const list = &m.ws[m.current.index].focus_mru;
-    removeValue(list, win);
-    // Newest-first insert; insert only fails at capacity, so drop the OLDEST
-    // (tail) entry first, keeping the newest mru_capacity wins retained.
-    if (list.len == mru_capacity) list.orderedRemove(list.len - 1);
-    _ = list.insert(0, win);
+    // Re-focusing an already-tracked window moves it to the front WITHOUT
+    // spending an eviction, so the newest `mru_capacity` DISTINCT windows are
+    // the ones retained. Then front-insert, evicting the oldest (tail) at
+    // capacity -- one call, so the order (evict, then insert) cannot be
+    // transposed at the call site.
+    const already = list.removeValue(win);
+    if (!already) _ = list.pushFrontEvictingTail(win) else _ = list.insert(0, win);
+}
+
+/// The ONE focused/unfocused border-pixel pick (9.6).
+///
+/// This lived as `borders.borderColorOf(focused, ...)` in the window layer
+/// while the core pipeline carried its own copy of the same ternary, so the
+/// two could drift and nothing would notice. It lives here because `model` is
+/// on the pure layer's allowlist -- reachable from core AND the window layer,
+/// whereas the obvious home (`borders`) is import-closed to core.
+///
+/// `m` supplies the focus source so the caller does not have to pass a
+/// possibly-different answer (borders used `focus.getFocused()`, the pipeline
+/// read `m.focused`; those agree in production but nothing enforced it).
+pub inline fn focusedBorderColor(m: *const Model, win: WindowId, focused_px: u32, unfocused_px: u32) u32 {
+    return if (m.focused == win) focused_px else unfocused_px;
+}
+
+/// Applies a layout module's pre-reconcile delta to `ws`'s params, IN PLACE,
+/// through the model (8.8).
+///
+/// The hook is value-in/value-out (`old -> new`), and the pipeline used to
+/// write the result straight back through a raw `*LayoutParams` it took from
+/// the model. That pointer was an un-gated mutation channel into the model:
+/// anything holding it could rewrite a field the model owns (or reach another
+/// workspace) with no check. Routing the write through here means the model
+/// decides whether `ws` is addressable, and the pipeline holds no pointer
+/// into model state at all.
+pub fn applyParamsDelta(m: *Model, ws: WSId, delta: anytype) void {
+    std.debug.assert(ws.isValid());
+    m.ws[ws.index].params = delta;
 }
 
 /// Model-side focus drop (minimize/close with no eligible successor).

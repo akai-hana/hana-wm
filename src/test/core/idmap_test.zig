@@ -76,3 +76,19 @@ test "IdMap: clear drops live entries and tombstones" {
     try testing.expect(m.put(9, 90));
     try testing.expectEqual(@as(?u32, 90), m.get(9));
 }
+
+test "idmap iterator visits every live entry" {
+    var m = IdMap(u32, 8){};
+    // Scattered ids: put hashes them across the table, so a forward scan of
+    // keys[0..len] would read unoccupied slots and stop early.
+    const keys = [_]u32{ 101, 202, 303, 404, 505 };
+    for (keys, 0..) |k, v| try std.testing.expect(m.put(k, @as(u32, @intCast(v))));
+
+    var seen: std.AutoHashMap(u32, u32) = .init(std.testing.allocator);
+    defer seen.deinit();
+    var it = m.iterator();
+    while (it.next()) |item| try seen.put(item.key, item.val.*);
+
+    try std.testing.expectEqual(keys.len, seen.count());
+    for (keys, 0..) |k, v| try std.testing.expectEqual(@as(u32, @intCast(v)), seen.get(k).?);
+}

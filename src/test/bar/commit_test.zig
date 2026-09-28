@@ -15,25 +15,25 @@ fn record(pct: u8) void {
     g_last_pct = pct;
 }
 
-test "native commits apply on every event, never throttled" {
+test "immediate commits apply on every event, never throttled" {
     var t = slider.Throttle{ .interval_ms = 80 };
     g_calls = 0;
     t.last_ms = slider.nowMs();
-    t.apply(true, 50, record);
-    t.apply(true, 51, record);
+    t.apply(.immediate, 50, record);
+    t.apply(.immediate, 51, record);
     try testing.expectEqual(@as(usize, 2), g_calls);
     try testing.expectEqual(@as(u8, 51), g_last_pct);
     try testing.expectEqual(false, t.pending);
 }
 
-test "spawn commits throttle, coalesce, and flush after the window" {
+test "rate-limited commits throttle, coalesce, and flush after the window" {
     var t = slider.Throttle{ .interval_ms = 80 };
     g_calls = 0;
-    t.apply(false, 40, record); // first spawn: the window is "elapsed"
+    t.apply(.rate_limited, 40, record); // first spawn: the window is "elapsed"
     try testing.expectEqual(@as(usize, 1), g_calls);
     try testing.expectEqual(false, t.pending);
 
-    t.apply(false, 41, record); // inside the window: owed, not sent
+    t.apply(.rate_limited, 41, record); // inside the window: owed, not sent
     try testing.expectEqual(@as(usize, 1), g_calls);
     try testing.expectEqual(true, t.pending);
 
@@ -50,10 +50,10 @@ test "spawn commits throttle, coalesce, and flush after the window" {
 test "finish lands an owed value at drag end regardless of the window" {
     var t = slider.Throttle{ .interval_ms = 80 };
     g_calls = 0;
-    t.apply(false, 10, record);
+    t.apply(.rate_limited, 10, record);
     try testing.expectEqual(@as(usize, 1), g_calls);
 
-    t.apply(false, 11, record); // owed
+    t.apply(.rate_limited, 11, record); // owed
     t.finish(12, record); // drag end force-lands it
     try testing.expectEqual(@as(usize, 2), g_calls);
     try testing.expectEqual(@as(u8, 12), g_last_pct);
@@ -66,8 +66,8 @@ test "finish lands an owed value at drag end regardless of the window" {
 test "reset restarts the clock and clears an owed commit" {
     var t = slider.Throttle{ .interval_ms = 80 };
     g_calls = 0;
-    t.apply(false, 1, record);
-    t.apply(false, 2, record); // owed
+    t.apply(.rate_limited, 1, record);
+    t.apply(.rate_limited, 2, record); // owed
     try testing.expectEqual(true, t.pending);
 
     t.reset();

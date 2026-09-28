@@ -42,7 +42,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     // In relaxed mode a partial last row shares the full screen width.
     const last_row_count = n % grid.cols;
-    const partial_cell_w: u16 = if (v.env.variant_idx == variant_relaxed and last_row_count != 0)
+    const partial_cell_w: u16 = if (v.params.variant_idx == variant_relaxed and last_row_count != 0)
         paneCell(screen_w, @intCast(last_row_count), m.gap)
     else
         cell_w;

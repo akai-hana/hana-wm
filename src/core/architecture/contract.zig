@@ -45,6 +45,10 @@ const bounded = @import("bounded");
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
 /// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
+///
+/// This is the file's ONE edge into a generated implementation module, and it
+/// is intentional -- see `activeLayoutKind`'s comment for the correction to
+/// the "no implementation-module edge" claim that used to sit here.
 pub const tiling_mods =
     if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
@@ -73,14 +77,49 @@ pub fn moduleOf(kind: u8) ?*const Layout {
 /// The active tiling layout registry index, when the model-derived `kind` is
 /// live for the built layout registry under the tiling-enabled config fact;
 /// null otherwise (disabled, or the tiling subsystem absent: all windows float
-/// by definition). Pure, so the contract stays free of an
-/// implementation-module edge: callers pass the live kind from
-/// `pipeline.getCurrentLayout()` (the layout/variants bar segments), and this
-/// applies the registry/tiling gates they would otherwise each repeat.
+/// by definition). Takes the kind as a PARAMETER, so callers pass the live
+/// value from `pipeline.getCurrentLayout()` (the layout/variants bar segments)
+/// and this applies the registry/tiling gates they would otherwise each repeat.
+///
+/// One caveat on "no implementation-module edge", because this file used to
+/// claim it had none: it does have exactly one, the generated `tiling_modules`
+/// registry re-exported at the top of this file (see `tiling_mods`). That edge
+/// is deliberate -- it is what lets `moduleOf` resolve a name and a variant
+/// count through the same registry the layout modules bind to -- and it is why
+/// the claim, not the import, is what was wrong. Everything else here reaches
+/// a module through the registry passed in by the caller, and the bar layer is
+/// reached only as `*anyopaque` (see `Segment`).
 pub fn activeLayoutKind(kind: u8) ?u8 {
     if (!core.tilingEnabled()) return null;
     if (moduleOf(kind) == null) return null;
     return kind;
+}
+
+/// The active layout's bar metadata, as one call the layout and variants
+/// segments share instead of each repeating the gate-plus-lookup pair and
+/// supplying its own fallback. `pick` receives the resolved registry module so
+/// the caller owns only its OWN fallback text, which is genuinely
+/// per-segment ("no variant icon" vs "><>").
+///
+/// The two callers were the section's only copy-paste and would have drifted
+/// the moment a third consumer appeared; the shape that actually differs
+/// between them is the fallback, so that is the only thing left parameterised.
+/// `kind` stays a parameter (the live value from `pipeline.getCurrentLayout()`)
+/// for the same reason `activeLayoutKind` takes one: this file reads no
+/// pipeline state.
+///
+/// The parameter is `Layout` by name, not `@TypeOf(tiling_mods[0])`: with the
+/// tiling module removed the registry is EMPTY, and indexing [0] to name a
+/// type is a compile error in exactly the build that needs the signature.
+/// `pick` returns null when the layout has no entry for this segment's
+/// dimension (no icon, no indicator, variant out of range), which is a
+/// DIFFERENT condition from the gates above -- so null propagates to the
+/// caller's own fallback rather than being an empty string the caller might
+/// legitimately want to draw.
+pub fn activeLayoutMeta(kind: u8, comptime pick: fn (Layout) ?[]const u8, fallback: []const u8) []const u8 {
+    if (tiling_mods.len == 0) return fallback;
+    const resolved = activeLayoutKind(kind) orelse return fallback;
+    return pick(tiling_mods[resolved]) orelse fallback;
 }
 
 /// The chrome-surface hook set a surface module binds to. The bar binds its
@@ -99,7 +138,10 @@ pub const Surfaces = struct {
     /// `anyerror!void` here forced every call site to write a `catch` arm that
     /// could only ever log the same thing.
     updateIfDirty: *const fn () void,
-    pollTimeoutMs: *const fn () i32,
+    /// The nearest wakeup this surface wants, or null for "block until an
+    /// fd is ready". The loop reduces this over its own `Timers` list, so the
+    /// surface reports ONE answer and does not re-state the min/absence rule.
+    pollTimeoutMs: *const fn () ?i32,
     onPollWakeup: *const fn () void,
     updateClock: *const fn () void,
     // RandR hooks (refresh-rate detection). The engine lives with the bar
@@ -144,6 +186,41 @@ pub const Surfaces = struct {
 /// order == the generated registry's order == deterministic filesystem scan
 /// order.
 pub const WindowModule = struct {
+    /// The hooks whose contract is "at most one module binds this": dispatch is
+    /// first-match (`providerOf`/`callFirst`/`callFirstBool`), so a second
+    /// binder would be silently ignored. Every other hook is adopted by
+    /// explicit registry loops (init/deinit, notifyConfigureIfPending,
+    /// onWindowGone, the serialize/deserialize persistence seam,
+    /// setEwmhFullscreenState, armPendingBarHide/Show) and may have many
+    /// binders. The build-generated `window_modules` registry asserts at
+    /// comptime that each field below has <= 1 binder.
+    pub const single_binder_hooks = [_][]const u8{
+        "hideWindow",          "restoreWindow",    "restoreCandidateOn",
+        "restoreOnWs",         "latestHiddenOnWs", "isWindowHidden",
+        "collectHiddenSet",    "toggleCovering",   "visibleCoveringOnWs",
+        "releaseCovering",     "moveCoveringTo",   "sendToWs",
+        "addToWs",             "removeFromWs",     "togglePin",
+        "toggleAllView",       "setFloatingRect",  "honorConfigureRequest",
+        "startDrag",           "stopDrag",         "updateDrag",
+        "isDragging",          "isResizingWindow", "getDragLastRect",
+        "cancelDragForWindow",
+    };
+
+    /// The complementary half of the classification: `WindowModule` hooks whose
+    /// dispatch is an explicit registry LOOP, so several modules may bind them
+    /// and every one is adopted. Together with `single_binder_hooks` this is a
+    /// PARTITION of the contract, asserted below -- which is the point. The
+    /// at-most-one check for a newly added first-match hook only runs if the
+    /// name is listed, so an unlisted new hook silently escaped it; naming both
+    /// halves makes a new hook a compile error instead.
+    pub const multi_binder_hooks = [_][]const u8{
+        "init",                     "deinit",
+        "notifyConfigureIfPending", "onWindowGone",
+        "serializeWindow",          "deserializeWindow",
+        "setEwmhFullscreenState",   "armPendingBarHide",
+        "armPendingBarShow",
+    };
+
     // Lifecycle. Uniform `anyerror!void` so the dispatch loop can `try` each.
     init: ?*const fn () anyerror!void = null,
     deinit: ?*const fn () void = null,
@@ -203,19 +280,26 @@ pub const WindowModule = struct {
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
     toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
-    /// True when `win` holds a covering record (regardless of model
-    /// presence — ghost state while minimized).
-    isCoveringMode: ?*const fn (*const model.Model, model.WindowId) bool = null,
-    /// The workspace `win` is covering, per its module record. Reports
-    /// the ws even while the model presence is parked (ghost).
-    coveringWsOf: ?*const fn (*const model.Model, model.WindowId) ?model.WSId = null,
-    /// True when `win` has a covering record targeting `ws` (does NOT
-    /// consult visibility).
-    isCoveringOnWs: ?*const fn (*const model.Model, model.WindowId, model.WSId) bool = null,
-    /// The first covering occupant on `ws`: rec.ws == ws AND
-    /// present-not-parked AND visibleOn. At most one module binds
+    // 12.4: `isCoveringMode`, `coveringWsOf` and `isCoveringOnWs` are GONE.
+    // Each body was a pure read of the model's `covering_ws` field, so the
+    // three hooks were three copies of a model query behind a dispatch that
+    // returns null when no covering module is bound -- meaning "is this window
+    // covering" answered FALSE in such a build while the model held the
+    // intent. The queries are now `model.coveringWsOf` / `model.isCovering` /
+    // `model.isCoveringOn`, which cannot be unbound.
+    /// The STRICT covering occupant on `ws`: covering AND anchored AND visible
+    /// (an AND of all three, where the model's `coveringOccupantOnWs` is an
+    /// anchor-or-visible OR). Both exist and both are used: the model scan
+    /// answers "who owns the screen", the strict one answers "which covering
+    /// window is actually usable here". Renamed from `coveringOccupantOnWs`
+    /// (12.5) because sharing a name with the model scan is what let the two
+    /// different semantics read as interchangeable. At most one module binds
     /// this.
-    coveringOccupantOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
+    visibleCoveringOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
+    /// One-way covering release: clear `win`'s covering intent and presence.
+    /// Unlike `toggleCovering` this never ENTERS covering mode, so a peer that
+    /// means "demote" cannot turn into "promote" (12.8).
+    releaseCovering: ?*const fn (*model.Model, model.WindowId) void = null,
     /// Retarget `win`'s covering intent to `ws` without dropping it (a
     /// covering window stays covering across a workspace move/tag change).
     /// Peer-service seam for the workspaces module; the binding module owns
@@ -260,46 +344,32 @@ pub const WindowModule = struct {
     cancelDragForWindow: ?*const fn (u32) void = null,
 };
 
-/// The `WindowModule` hooks whose contract is "at most one module binds
-/// this": dispatch is first-match (`providerOf`/`callFirst`/`callFirstBool`), so
-/// a second binder would be silently ignored. Every other hook is adopted
-/// by explicit registry loops (init/deinit, notifyConfigureIfPending,
-/// onWindowGone, the serialize/deserialize persistence seam,
-/// setEwmhFullscreenState, armPendingBarHide/Show) and may have many
-/// binders. The build-generated `window_modules` registry asserts at comptime
-/// that each field below has <= 1 binder.
-pub const single_binder_hooks = [_][]const u8{
-    "hideWindow",       "restoreWindow",         "restoreCandidateOn",
-    "restoreOnWs",      "latestHiddenOnWs",      "isWindowHidden",
-    "collectHiddenSet", "toggleCovering",        "isCoveringMode",
-    "coveringWsOf",     "isCoveringOnWs",        "coveringOccupantOnWs",
-    "moveCoveringTo",   "sendToWs",              "addToWs",
-    "removeFromWs",     "togglePin",             "toggleAllView",
-    "setFloatingRect",  "honorConfigureRequest", "startDrag",
-    "stopDrag",         "updateDrag",            "isDragging",
-    "isResizingWindow", "getDragLastRect",       "cancelDragForWindow",
-};
-
-/// The complementary half of the classification: `WindowModule` hooks whose
-/// dispatch is an explicit registry LOOP, so several modules may bind them
-/// and every one is adopted. Together with `single_binder_hooks` this is a
-/// PARTITION of the contract, asserted below -- which is the point. The
-/// at-most-one check for a newly added first-match hook only runs if the name
-/// is listed, so an unlisted new hook silently escaped it; naming both halves
-/// makes a new hook a compile error instead.
-pub const multi_binder_hooks = [_][]const u8{
-    "init",                     "deinit",
-    "notifyConfigureIfPending", "onWindowGone",
-    "serializeWindow",          "deserializeWindow",
-    "setEwmhFullscreenState",   "armPendingBarHide",
-    "armPendingBarShow",
-};
-
+/// The binder lists live ON the contract type (`WindowModule.single_binder_hooks`
+/// and `.multi_binder_hooks`) rather than as package-level lists, because the
+/// at-most-one assert is a per-CONTRACT claim: the build-generated registry
+/// finds it with `@hasDecl(T, "single_binder_hooks")` and enforces it on
+/// whichever element type declares it. As package-level lists keyed off
+/// `WindowModule` hook names, a `Segment` registry would have checked its own
+/// fields against another contract's names -- and found nothing, silently,
+/// leaving `Segment`'s at-most-one hooks unenforced.
 /// True when `name` appears in `list`; called at comptime by the partition
 /// check below.
 fn isListed(list: []const []const u8, name: []const u8) bool {
     for (list) |hook| if (std.mem.eql(u8, hook, name)) return true;
     return false;
+}
+
+/// Every name in a contract's binder list must be a real field of that
+/// contract, and must appear once. A renamed hook left behind in a list would
+/// otherwise turn into an `@hasField` that quietly skips -- the exact "unlisted
+/// new hook silently escaped" failure the lists exist to prevent, just pointing
+/// the other way.
+fn assertListedFields(comptime T: type, comptime list_name: []const u8, list: []const []const u8) void {
+    for (list) |hook| {
+        if (!@hasField(T, hook)) @compileError(
+            "T." ++ list_name ++ " lists '" ++ hook ++ "', which is not a " ++ @typeName(T) ++ " field",
+        );
+    }
 }
 
 comptime {
@@ -309,9 +379,16 @@ comptime {
     // lists, and no list names a field that no longer exists. `s == m` fails
     // for BOTH the "added a hook, forgot to classify it" case and the
     // "classified it as both" case.
+    //
+    // This is a `WindowModule`-only property, unlike the at-most-one binder
+    // count: it holds because EVERY WindowModule field is a hook with a
+    // dispatch cardinality. `Segment` carries data fields too (name, props,
+    // dirty_sources, clickable), so there is nothing to partition there -- it
+    // declares only the at-most-one hooks and the generated registry enforces
+    // the count.
     for (std.meta.fields(WindowModule)) |f| {
-        const s = isListed(&single_binder_hooks, f.name);
-        const m = isListed(&multi_binder_hooks, f.name);
+        const s = isListed(&WindowModule.single_binder_hooks, f.name);
+        const m = isListed(&WindowModule.multi_binder_hooks, f.name);
         if (s == m) @compileError(
             "WindowModule hook '" ++ f.name ++ "' must be listed in EXACTLY one of " ++
                 "single_binder_hooks / multi_binder_hooks (single=" ++
@@ -319,16 +396,9 @@ comptime {
                     "); it is the dispatch cardinality, not a detail",
         );
     }
-    for (single_binder_hooks) |hook| {
-        if (!@hasField(WindowModule, hook)) @compileError(
-            "single_binder_hooks lists '" ++ hook ++ "', which is not a WindowModule field",
-        );
-    }
-    for (multi_binder_hooks) |hook| {
-        if (!@hasField(WindowModule, hook)) @compileError(
-            "multi_binder_hooks lists '" ++ hook ++ "', which is not a WindowModule field",
-        );
-    }
+    assertListedFields(WindowModule, "single_binder_hooks", &WindowModule.single_binder_hooks);
+    assertListedFields(WindowModule, "multi_binder_hooks", &WindowModule.multi_binder_hooks);
+    assertListedFields(Segment, "single_binder_hooks", &Segment.single_binder_hooks);
 }
 
 /// Dispatch family for every generated registry element type (`WindowModule`,
@@ -347,12 +417,22 @@ comptime {
 /// this file's own re-export of the generated `tiling_modules` (:48-49):
 /// `tiling_mods` must shrink to an empty slice when no layout is compiled in,
 /// which needs the registry visible here rather than at each of its callers.
+/// Returns a POINTER into `registry`, not a copy of the element: a
+/// `WindowModule` is 36 function-pointer fields, and returning it by value made
+/// every single-binder dispatch copy the whole struct to reach one of them.
+/// The registry is build-generated static data (`&[_]WindowModule{...}`), so
+/// the pointer is as long-lived as the program; a caller that outlives the
+/// registry slice it passed would have been broken before this too, since the
+/// by-value return hid the aliasing rather than preventing it.
 pub fn providerOf(
     comptime T: type,
     registry: []const T,
     comptime field: std.meta.FieldEnum(T),
-) ?T {
-    for (registry) |m| if (@field(m, @tagName(field)) != null) return m;
+) ?*const T {
+    var i: usize = 0;
+    while (i < registry.len) : (i += 1) {
+        if (@field(registry[i], @tagName(field)) != null) return &registry[i];
+    }
     return null;
 }
 
@@ -389,6 +469,21 @@ pub fn callAll(
     args: anytype,
 ) void {
     for (registry) |m| if (@field(m, @tagName(field))) |f| @call(.auto, f, args);
+}
+
+/// Fan-out dispatch for a FALLIBLE hook: calls every module that binds `field`,
+/// in registry order, and propagates the first error -- so a module whose
+/// lifecycle init fails stops the fan-out, exactly as the hand-rolled
+/// `for ... try` loop it replaces did. The point is ONE dispatch family for
+/// lifecycle hooks, not a different failure policy; the lifecycle sites that
+/// are infallible (every `deinit` hook) use `callAll`.
+pub fn callAllTry(
+    comptime T: type,
+    registry: []const T,
+    comptime field: std.meta.FieldEnum(T),
+    args: anytype,
+) anyerror!void {
+    for (registry) |m| if (@field(m, @tagName(field))) |f| try @call(.auto, f, args);
 }
 
 /// Fan-out bool dispatch: true as soon as any module whose hook binds `field`
@@ -452,6 +547,21 @@ pub const BarOverlay = struct {
 };
 
 pub const Segment = struct {
+    /// The `Segment` hooks whose contract is "at most one segment binds this".
+    /// `measureString` supplies THE row's reserved-width probe and `overlay`
+    /// the single runtime overlay; both are reached by first-match lookup, so a
+    /// second binder would be silently ignored. Declared on the TYPE (not as a
+    /// package-level list of `WindowModule` names) so the generated
+    /// `bar_modules` registry finds it with `@hasDecl(T, "single_binder_hooks")`
+    /// and enforces the count on the fields that actually carry it.
+    ///
+    /// `naturalWidth` is deliberately NOT listed: every segment binds its own
+    /// (it is that segment's reserved width, not a shared facility), so
+    /// listing it would be false and the count assert would reject every
+    /// two-segment bar.
+    pub const single_binder_hooks = [_][]const u8{
+        "measureString", "overlay",
+    };
     /// Config identity ("workspaces", "title", "clock", "layout", "variants").
     /// Unique across the registry; config text resolves to the module by name.
     name: []const u8 = "",
@@ -647,9 +757,14 @@ pub const HintsView = struct {
 /// Caller-resolved environment, one bundled field per layout knob instead of
 /// per-layout booleans that each new layout would grow. Resolved from config
 /// by the reconciler's caller; the core carries no layout-feature booleans.
+/// The variant index is NOT a field here: it is config- and workspace-owned
+/// state that lives in `View.params.variant_idx`, and it used to be copied into
+/// this struct as well. Two homes for one fact, with the copy the layout
+/// modules actually read, so a params change that forgot to refresh the copy
+/// would have driven layout from a stale variant. Each layout module reads
+/// `v.params.variant_idx` and translates it to its own spelling.
 pub const Env = struct {
     margins: model.Margins = .{},
     min_dim: u16 = 0,
     primary_on_right: bool = false,
-    variant_idx: u8 = 0,
 };

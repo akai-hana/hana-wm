@@ -93,3 +93,18 @@ test "a width stored for one mode is not reserved for the next" {
     try std.testing.expectEqual(narrow, W.naturalWidth(.date, ctx, narrow));
     W.invalidate();
 }
+
+test "staleness keys on the format's bytes, not its address" {
+    // Same second, same bytes, different slices: NOT stale.
+    try std.testing.expect(!clock.stalenessFor(7, 7, "%H:%M", "%H:%M"));
+    // Same second, same address, different bytes: stale (the pointer compare
+    // this replaced would have called this unchanged).
+    var buf: [5]u8 = "%H:%M".*;
+    try std.testing.expect(clock.stalenessFor(7, 7, "%H:%M:%S", &buf));
+    // Different second: stale regardless of format.
+    try std.testing.expect(clock.stalenessFor(8, 7, "%H:%M", "%H:%M"));
+    // Format change of equal length: stale.
+    try std.testing.expect(clock.stalenessFor(7, 7, "%I:%M", "%H:%M"));
+    // Prefix relationship: stale.
+    try std.testing.expect(clock.stalenessFor(7, 7, "%H:%M:%S", "%H:%M"));
+}

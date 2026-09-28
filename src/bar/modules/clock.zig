@@ -97,17 +97,26 @@ pub fn cycledMode(m: DisplayMode, forward: bool) DisplayMode {
 var rendered_sec: i64 = -1;
 var rendered_fmt: []const u8 = "";
 
+/// The staleness predicate, pure so a test can drive it without a live wall
+/// clock. Keyed on the format's BYTES, not on its pointer: a reload frees the
+/// old config arena, so a re-parse can land a different format at a recycled
+/// address, and a pointer compare would call that "unchanged" (or, worse,
+/// "changed" for a format that did not move).
+pub fn stalenessFor(sec: i64, rendered_sec_val: i64, fmt: []const u8, rendered_fmt_val: []const u8) bool {
+    return sec != rendered_sec_val or !std.mem.eql(u8, fmt, rendered_fmt_val);
+}
+
 /// True when the segment on screen no longer matches (sec, fmt).
 /// Callers pass the base configured format so reloads invalidate without a
 /// separate flag; the segment folds its own display-mode format in on top of
-/// it (the effective format), so a mode cycle changes the compared pointer
-/// and the next bar.updateClock repaints the clock. Drawing clears staleness
+/// it (the effective format), so a mode cycle changes the compared bytes and
+/// the next bar.updateClock repaints the clock. Drawing clears staleness
 /// as a side effect of rendering; a failed draw leaves it stale so the next
 /// boundary retries.
 fn secondElapsed(base_fmt: []const u8) bool {
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(base_fmt, mode);
-    return sec != rendered_sec or fmt.ptr != rendered_fmt.ptr;
+    return stalenessFor(sec, rendered_sec, fmt, rendered_fmt);
 }
 
 /// Deadline arithmetic, factored out pure so tests can drive the clock.
@@ -136,6 +145,21 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(drawing.clockFormat(config), mode);
+    // Record the attempt BEFORE rendering. A persistent render failure (e.g.
+    // fonts unavailable) must degrade to one retry per boundary -- the
+    // second-boundary cadence -- never to a per-event-batch retry storm, and
+    // only an assignment placed ahead of the fallible call can promise that.
+    // (Placed after, as this once was, a failing formatTime left the record
+    // untouched and every event batch retried -- the exact storm the comment
+    // promised to prevent. A >=128-byte clock_format made it permanent, since
+    // the stack buffer could never be large enough.) A genuine transient miss
+    // simply shows the previous second for up to one extra second, exactly as
+    // the cadence design intends.
+    rendered_sec = sec;
+    rendered_fmt = fmt;
+    // Propagation is fine: the record above is already written, so a failure
+    // still leaves the next retry one boundary away rather than one event
+    // batch away.
     const str = try formatTime(&buf, sec, fmt);
     // Refresh the mode's reserved width once per mode; the probe is stable, so
     // per-second text-width drift never re-lays the row.
@@ -146,13 +170,6 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
                 2 * config.scaledSegmentPadding(height),
         );
     }
-    // Record the attempt before rendering: a persistent render failure
-    // (e.g. fonts unavailable) must degrade to one retry per boundary --
-    // the second-boundary cadence -- never to a per-event-batch retry storm.
-    // A genuine transient miss simply shows the previous second for up to
-    // one extra second, exactly as the cadence design intends.
-    rendered_sec = sec;
-    rendered_fmt = fmt;
     return drawing.drawPaddedSegment(dc, config, height, start_x, "clock", str, measureStringFor(mode), config.segmentProps("clock"));
 }
 

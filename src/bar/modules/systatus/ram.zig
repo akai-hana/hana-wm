@@ -5,7 +5,7 @@
 const std = @import("std");
 const systatus = @import("systatus");
 
-fn parseRamField(s: []const u8, key: []const u8) ?u64 {
+pub fn parseRamField(s: []const u8, key: []const u8) ?u64 {
     var lines = std.mem.splitScalar(u8, s, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, key)) continue;
@@ -17,16 +17,25 @@ fn parseRamField(s: []const u8, key: []const u8) ?u64 {
     return null;
 }
 
-/// Used memory %: 100 * (total - available) / total. Null when meminfo is
-/// unreadable.
-fn read() ?u8 {
-    var buf: [4096]u8 = undefined;
-    const s = systatus.readSmallFile("/proc/meminfo", &buf) orelse return null;
-    const total = parseRamField(s, "MemTotal:") orelse return null;
-    const avail = parseRamField(s, "MemAvailable:") orelse return null;
+/// Used memory %: 100 * (total - available) / total, clamped at 100 for the
+/// (real) case of available exceeding total. Pure, so the clamp is testable.
+pub fn usedPct(total: u64, avail: u64) ?u8 {
     if (total == 0) return null;
     const used = total -| avail;
     return @intCast(@min((used * 100) / total, 100));
+}
+
+/// Used memory %, or null when meminfo is unreadable or -- because the read is
+/// truncation-aware -- too large to trust whole. A meminfo past the buffer
+/// used to look exactly like one with no `MemAvailable`, i.e. "no RAM" instead
+/// of the I/O problem it is.
+fn read() ?u8 {
+    var buf: [4096]u8 = undefined;
+    const r = systatus.readFileChecked("/proc/meminfo", &buf) orelse return null;
+    if (r.truncated) return null;
+    const total = parseRamField(r.bytes, "MemTotal:") orelse return null;
+    const avail = parseRamField(r.bytes, "MemAvailable:") orelse return null;
+    return usedPct(total, avail);
 }
 
 /// This readout's binding to the systatus surface (`systatus.Sub`).
@@ -35,12 +44,3 @@ pub const sub: systatus.Sub = .{
     .label = "RAM",
     .read = read,
 };
-
-const testing = std.testing;
-
-test "parseRamField extracts the value" {
-    const s = "MemTotal:       16299896 kB\nMemAvailable:    12345678 kB\nMemFree:          111 kB\n";
-    try testing.expectEqual(@as(?u64, 16299896), parseRamField(s, "MemTotal:"));
-    try testing.expectEqual(@as(?u64, 12345678), parseRamField(s, "MemAvailable:"));
-    try testing.expectEqual(@as(?u64, null), parseRamField(s, "SwapTotal:"));
-}

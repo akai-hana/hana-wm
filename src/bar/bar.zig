@@ -233,7 +233,7 @@ fn calcBarHeightAndFontSize() u16 {
         }
         return height;
     }
-    const m = probeMetrics(null) orelse return scale.default_bar_height_px;
+    const m = probeMetrics(null) orelse return scale.bar_height_policy.default_px;
     return scale.clampBarHeight(@max(1, m.ascent + m.descent));
 }
 
@@ -255,10 +255,11 @@ pub fn onPollWakeup() void {
 }
 
 /// Combines every module's poll deadline (clock tick, prompt caret blink,
-/// carousel scroll) into the shortest non-negative wait. Negatives mean
-/// "no wake needed" and are ignored; when every module returns negative the
-/// bar sleeps without polling.
-pub fn pollTimeoutMs() i32 {
+/// carousel scroll) into the shortest non-negative wait, or null when no
+/// module wants one. Module hooks still speak in negatives ("no wake needed");
+/// THIS is the single place that turns that into absence, because it is the
+/// bar's whole contribution to core's deadline reduction (see core/loop/timers).
+pub fn pollTimeoutMs() ?i32 {
     // A hidden bar paints nothing, so no per-frame deadline (clock tick,
     // caret blink, carousel scroll) can make progress: the modules would
     // re-arm polling forever without ever being drawn to, spinning the event
@@ -268,14 +269,14 @@ pub fn pollTimeoutMs() i32 {
     if (gBar.state) |s| {
         if (!s.vis.shown) return -1;
     }
-    var timeout: i32 = -1;
+    var nearest: ?i32 = null;
     for (bar_mods) |m| {
         if (m.pollTimeoutMs) |h| {
             const t = h();
-            if (t >= 0) timeout = if (timeout < 0) t else @min(timeout, t);
+            if (t >= 0 and (nearest == null or t < nearest.?)) nearest = t;
         }
     }
-    return timeout;
+    return nearest;
 }
 
 /// Routes a keypress through every module that consumes one (the chrome
@@ -915,7 +916,11 @@ const State = struct {
         if (segAt(id).draw == null) return reportDrewNothing(x);
         // The DrawCtx is shared mutable scratch: pin the reserved width into it
         // immediately before the draw so width-reading renderers (the title)
-        // advance correctly.
+        // advance correctly. `name` goes in the same way, so a module can
+        // resolve its own themed colors (the slider's fill reads
+        // segmentValueFg(name)) without the draw hook carrying a per-segment
+        // argument.
+        ctx.name = name;
         ctx.width = width orelse self.measureSegmentWidth(&ctx.frame, name);
         return segAt(id).draw.?(ctx, x) catch |e| {
             log.warnOnErr(e, "bar drawSegment");
@@ -1295,17 +1300,13 @@ pub fn init() !void {
         .dismissAfterPrompt = dismissAfterPrompt,
         .isBarWindow = isBarWindow,
     };
-    for (bar_mods) |m| {
-        if (m.init) |h| try h(cs.alloc, cs.conn, &g_bar_handlers);
-    }
+    try contract.callAllTry(contract.Segment, bar_mods[0..], .init, .{ cs.alloc, cs.conn, &g_bar_handlers });
     syncScreenClaim();
 }
 
 pub fn deinit() void {
     const alloc = core.getState().alloc;
-    for (bar_mods) |m| {
-        if (m.deinit) |h| h(alloc);
-    }
+    contract.callAll(contract.Segment, bar_mods[0..], .deinit, .{alloc});
     if (gBar.state) |s| {
         _ = xcb.xcb_destroy_window(s.win.conn, s.win.win_id);
         s.render.dc.deinit();
@@ -1423,7 +1424,7 @@ pub fn toggleBarSegmentAnchor() void {
         window.markBordersFlushed();
         return;
     };
-    const no_fullscreen = !visibility.barForcedHiddenByFullscreen(current_ws);
+    const no_fullscreen = !visibility.barForcedHiddenByFullscreen(pipeline.model(), current_ws);
     // The bar's edge changed (claim synced above); the reconcile below
     // re-derives every placement from the new usable area.
     // LAYERING NOTE: The bar triggers reconciliation after visibility/position
@@ -1578,7 +1579,7 @@ pub fn dismissAfterPrompt() void {
     if (!gBar.prompt_forced_visible) return;
     gBar.prompt_forced_visible = false;
     const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const should_show = visibility.keepPromptOverride(current_ws, s.vis.preferred);
+    const should_show = visibility.keepPromptOverride(pipeline.model(), current_ws, s.vis.preferred);
     if (should_show) return; // conditions changed while the prompt was open; stay visible
     s.vis.shown = false;
     _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
@@ -1687,12 +1688,15 @@ pub fn applyFullscreenVisibility() void {
 /// vs the fullscreen-fact reaction (reconciles inside the claim).
 fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
     const s = gBar.state orelse return;
-    const decision = visibility.desiredVisibility(ws, s.vis.shown, s.vis.preferred);
-    if (!decision.needs_change) return;
+    const decision = visibility.desiredVisibility(pipeline.model(), ws, s.vis.preferred);
+    // The comparison against the bar's mapped state is the ORCHESTRATOR's, not
+    // the policy's: the policy returns the target and why, and deciding whether
+    // to touch the wire stays here.
+    if (decision.should_be_visible == s.vis.shown) return;
     applyVisibility(s, decision.should_be_visible, do_reconcile);
     log.info(
-        "Bar {s} for workspace {d}",
-        .{ if (decision.should_be_visible) "shown" else "hidden", ws },
+        "Bar {s} for workspace {d} ({s})",
+        .{ if (decision.should_be_visible) "shown" else "hidden", ws, @tagName(decision.reason) },
     );
 }
 

@@ -189,8 +189,8 @@ test "grid relaxed partial row" {
     var fx: Fixture = undefined;
     try fx.init(&.{ 11, 12, 13, 14, 15 });
 
-    var v = tuned(&fx);
-    v.env.variant_idx = GRID_RELAX_VARIANT;
+    fx.m.ws[0].params.variant_idx = GRID_RELAX_VARIANT;
+    const v = tuned(&fx);
 
     const out = computeOf(K_GRID, v);
 
@@ -205,7 +205,7 @@ test "grid relaxed partial row" {
     try expectP(&out, 4, 15, 404, 304, 384, 284, true);
 
     // Rigid mode keeps the column width in the partial row.
-    v.env.variant_idx = 0;
+    fx.m.ws[0].params.variant_idx = 0;
     const outr = computeOf(K_GRID, v);
     try expectP(&outr, 3, 14, 8, 304, 252, 284, true);
     try expectP(&outr, 4, 15, 272, 304, 252, 284, true);
@@ -315,8 +315,8 @@ test "monocle gaps variant" {
 
     model.setFocus(&fx.m, 12);
 
-    var v = tuned(&fx);
-    v.env.variant_idx = MONOCLE_GAP_VARIANT;
+    fx.m.ws[0].params.variant_idx = MONOCLE_GAP_VARIANT;
+    const v = tuned(&fx);
 
     const out = computeOf(K_MONOCLE, v);
 
@@ -332,7 +332,7 @@ test "monocle gaps variant" {
 
     // Without the gaps variant the inset is zero: full size minus borders only.
     // Same View.order emission, so the focused window is still at index 1.
-    v.env.variant_idx = 0;
+    fx.m.ws[0].params.variant_idx = 0;
     const out2 = computeOf(K_MONOCLE, v);
     try expectP(&out2, 0, 11, 0, 0, 0, 0, false);
     try expectP(&out2, 1, 12, 0, 0, 796, 596, true);
