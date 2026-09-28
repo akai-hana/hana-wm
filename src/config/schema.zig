@@ -204,6 +204,164 @@ pub const knobs = [_]Knob{
     barDrunColor("drun_prompt_color", "bar.drun_prompt_color", types.palette_primary_color),
 };
 
+/// Resolves a dotted path from `types.Config` to the FIELD TYPE it names, or
+/// null when any step is missing. Comptime only -- the path is always a
+/// comptime string built by the knob builders, never a runtime value.
+fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
+    comptime {
+        var cur = root;
+        var it = std.mem.splitScalar(u8, path, '.');
+        while (it.next()) |seg| {
+            const fields = @typeInfo(cur).@"struct".fields;
+            var next: ?type = null;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, seg)) {
+                    next = f.type;
+                    break;
+                }
+            }
+            const t = next orelse return null;
+            // The last segment is the answer, even when its type is a struct:
+            // ScalableValue IS a struct, and treating it as a waypoint made every
+            // size/percentage knob look like a dangling path.
+            if (it.peek() == null) return t;
+            // Otherwise a struct continues the walk (tiling., workspaces.) and
+            // anything else means the path went deeper than the type allows.
+            if (@typeInfo(t) == .@"struct" and t != f64) {
+                cur = t;
+            } else return null;
+        }
+        return null;
+    }
+}
+
+/// The config subtrees a knob target may address, as prefix + type. A target is
+/// written relative to its subtree (`gap_width`, `bar.bg`) EXCEPT for the
+/// handful of top-level Config knobs (`snap_distance`, `fullscreen_enabled`),
+/// which carry no prefix -- hence the empty-prefix entry.
+const target_roots = [_]struct { prefix: []const u8, ty: type }{
+    .{ .prefix = "", .ty = types.Config },
+    .{ .prefix = "tiling.", .ty = types.TilingConfig },
+    .{ .prefix = "bar.", .ty = types.BarConfig },
+    .{ .prefix = "workspaces.", .ty = types.WorkspaceConfig },
+};
+
+/// Resolves a knob target against the subtrees above, returning the field type.
+fn resolveTarget(comptime target: []const u8) ?type {
+    inline for (target_roots) |r| {
+        if (std.mem.startsWith(u8, target, r.prefix)) {
+            return fieldTypeAt(r.ty, target[r.prefix.len..]);
+        }
+    }
+    return null;
+}
+
+/// True when `path` names a field whose value is a plain scalar the schema
+/// knobs are expected to own: bool, int, float, or one of the config value
+/// types. Containers (ArrayList, maps) and nested structs are excluded -- they
+/// are the bespoke cases, declared below.
+fn isScalarLeaf(comptime t: type) bool {
+    if (t == types.ScalableValue or t == types.Color) return true;
+    return switch (@typeInfo(t)) {
+        // Owned string leaves: the shape that leaks (see
+        // types.bar_owned_str_fields) and that `copy_when_absent` knobs set.
+        .optional => |o| o.child == []const u8,
+        .pointer => |p| p.size == .slice and p.child == u8,
+        // Enums are config-visible leaves too: a layout/gap enum nobody parses
+        // is dead in exactly the same way an int nobody parses is.
+        .@"enum", .bool, .int, .float, .comptime_int, .comptime_float => true,
+        else => false,
+    };
+}
+
+/// Config fields that are legitimately NOT schema knobs: the containers and
+/// the fields a bespoke parser owns. Each entry is a contract, not an
+/// exemption -- the reason is why the schema table must not claim it.
+pub const bespoke_fields = [_][]const u8{
+    // Owned containers, filled by the bespoke parsers that own their grammar.
+    "tiling.layouts",
+    "tiling.layout",
+    "tiling.variants",
+    "tiling.workspace_layout_overrides",
+    "tiling.workspace_master_count_overrides",
+    "workspaces.rules",
+    "workspaces.count",
+    "bar.layout",
+    "bar.workspace_icons",
+    "bar.fonts",
+    "bar.segment_fg",
+    "bar.segment_value_fg",
+    "bar.segment_props",
+    "bar.height",
+    // Opt-in strings the schema assigns only when the key is present; each
+    // carries its own default at read time (types.default_*).
+    "bar.clock_format",
+    "bar.drun_prompt",
+    "bar.indicator_focused",
+    "bar.indicator_unfocused",
+    "bar.volume_format",
+    "bar.volume_muted_format",
+    "bar.brightness_format",
+    "bar.brightness_device",
+};
+
+comptime {
+    // ~120 knobs x 4 subtrees x field walks, plus the coverage pass below.
+    @setEvalBranchQuota(400_000);
+    // Every knob target must name a REAL field. A renamed field, or a typo in
+    // a builder's target string, previously produced a knob that parsed,
+    // validated and assigned into nothing at all -- the config key worked, the
+    // value went nowhere, and no build failed.
+    for (knobs) |k| {
+        if (resolveTarget(k.target) == null) @compileError(
+            "schema.knobs: target '" ++ k.target ++ "' does not name a field of Config, " ++
+                "TilingConfig, BarConfig or WorkspacesConfig",
+        );
+    }
+
+    // The reverse: a scalar field of the four config structs that no knob
+    // targets and that `bespoke_fields` does not claim is a DEAD FIELD -- it
+    // compiles, it parses, and it is always at its initializer. Reported as
+    // ONE error listing all of them, so a big addition is a single fix list.
+    //
+    // Plain comptime string accumulation, not an ArrayList: this runs in a
+    // container-scope `comptime` block where a method call on a local list
+    // resolves to the UNBOUND `append(list, item)` and reports a bogus arity
+    // error only once a dead field actually makes the line reachable.
+    var unclaimed: []const u8 = "";
+    var unclaimed_n: usize = 0;
+    for (target_roots) |r| {
+        for (std.meta.fields(r.ty)) |f| {
+            if (!isScalarLeaf(f.type)) continue;
+            const path = r.prefix ++ f.name;
+            var covered = false;
+            for (knobs) |k| {
+                if (std.mem.eql(u8, k.target, path)) covered = true;
+            }
+            for (bespoke_fields) |b| {
+                if (std.mem.eql(u8, b, path)) covered = true;
+            }
+            if (!covered) {
+                unclaimed = unclaimed ++ path ++ ", ";
+                unclaimed_n += 1;
+            }
+        }
+    }
+    if (unclaimed_n != 0) @compileError(
+        "schema: " ++ std.fmt.comptimePrint("{d}", .{unclaimed_n}) ++
+            " config fields are neither a knob target nor listed in bespoke_fields, " ++
+            "so no code path would ever write them (they would be dead): " ++ unclaimed,
+    );
+    // A bespoke entry that names nothing is a stale exemption, which would
+    // quietly let a future rename escape the check above.
+    for (bespoke_fields) |b| {
+        if (resolveTarget(b) == null) @compileError(
+            "schema.bespoke_fields: '" ++ b ++ "' does not name a field of Config, " ++
+                "TilingConfig, BarConfig or WorkspacesConfig",
+        );
+    }
+}
+
 comptime {
     // `needs` is a topological order: every target a knob reads must be
     // supplied by a knob EARLIER in the table. This is what the table comment

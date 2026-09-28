@@ -472,3 +472,65 @@ test "ledger: the border-pixel dedup does not swallow a real black border" {
     try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // changed
     try testing.expect(!ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // elided
 }
+
+// 13.6: layout activation is ONE question, and "no active layout" still has to
+// produce a screen. Before this, the geometry path was gated on the COMPILE-time
+// `has_tiling` while the bar reported the active layout from
+// `contract.activeLayoutKind` (enabled AND registered). Gating on the resolved
+// kind alone is not enough: a `.tiled` entry with no placement is parked on
+// first sight (invisible) and frozen at its last rect afterwards (piled up), so
+// the inactive path must supply geometry rather than none.
+test "13.6: an inactive layout floats every window at the work area" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    helpers.regCur(&fx.m, 201);
+    helpers.regCur(&fx.m, 202);
+    model.setFocus(&fx.m, 201);
+
+    // Baseline: the layout is active, so the engine tiles and both windows get
+    // their own cell. Recorded to prove the inactive path below is a real
+    // difference and not the same numbers under another name.
+    fx.reconcile(.{});
+    // Map precedes geometry, so find 201's first geometry op rather than
+    // assuming a position.
+    var tiled_rect: ?model.Rect = null;
+    for (fx.rec.ops.items) |op| switch (op) {
+        .geom => |g| if (g.win == 201) {
+            tiled_rect = g.rect;
+        },
+        .geom_bw => |g| if (g.win == 201) {
+            tiled_rect = g.rect;
+        },
+        else => {},
+    };
+    try testing.expect(!tiled_rect.?.eql(helpers.std_wa));
+
+    // The inactive path: same model, same windows, only the resolved flag off.
+    fx.rec.clear();
+    ledger.init();
+    fx.ctx.layout_active = false;
+    fx.reconcile(.{});
+
+    var seen: usize = 0;
+    for (fx.rec.ops.items) |op| switch (op) {
+        .geom => |g| {
+            if (g.win != 201 and g.win != 202) continue;
+            try testing.expect(g.rect.eql(helpers.std_wa));
+            seen += 1;
+        },
+        .geom_bw => |g| {
+            if (g.win != 201 and g.win != 202) continue;
+            try testing.expect(g.rect.eql(helpers.std_wa));
+            seen += 1;
+        },
+        .park => |w| {
+            // Neither window may park: parking is the "invisible on first
+            // sight" failure this path exists to prevent.
+            try testing.expect(w != 201 and w != 202);
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), seen);
+}

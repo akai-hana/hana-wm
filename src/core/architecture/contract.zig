@@ -716,7 +716,12 @@ pub const View = struct {
     order: []const model.WindowId,
     params: *const model.LayoutParams,
     workarea: model.Rect,
-    hints: *const HintsView,
+    /// BY VALUE (13.5), not a pointer to a caller's stack local. The pointer
+    /// form was the tree's only intra-frame dangling-pointer hazard: the
+    /// `HintsView` outlived the frame that owned it for as long as any layout
+    /// module kept the `View`, and nothing in the type said so. A value cannot
+    /// dangle, and every call site already had the struct in hand.
+    hints: HintsView,
     focused: ?model.WindowId,
     // Environment resolved by the CALLER from config.
     env: Env = .{},
@@ -745,7 +750,7 @@ pub const HintsView = struct {
     hints: []const model.SizeHints,
 
     /// Returns hints BY VALUE with a default fallback.
-    pub fn forWin(self: *const HintsView, win: model.WindowId) model.SizeHints {
+    pub fn forWin(self: HintsView, win: model.WindowId) model.SizeHints {
         std.debug.assert(self.order.len == self.hints.len);
         for (self.order, self.hints) |w, h| {
             if (w == win) return h;

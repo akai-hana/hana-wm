@@ -39,6 +39,17 @@ const std = @import("std");
 const log = @import("log");
 const types = @import("types");
 
+/// A parsed value.
+///
+/// Deliberately carries NO source span (16.1/16.3): the section already records
+/// the source line of every key it inserted (`lines_in_order` / `lineOfKey`),
+/// and that is the line a user needs -- a knob error is reported against a KEY
+/// PATH inside a section, and every diagnostic in this file reaches the section
+/// that owns the key. Putting a line/column on each of the six union variants
+/// instead would mean 30 construction sites carrying it, plus every method that
+/// synthesizes or returns a `Value` (lastScalar/asScalar/accumulate), all to
+/// report a number already available one level up. See the 16.1 note in the
+/// ledger for the full argument.
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
@@ -235,8 +246,8 @@ pub const Section = struct {
         // format serves both cases.
         const decls: usize = val.array.list.items.len;
         log.warn(
-            "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations); scalar reads use the last value",
-            .{ key, if (self.name.len == 0) "root" else self.name, decls },
+            "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations, first at line {d}); scalar reads use the last value",
+            .{ key, if (self.name.len == 0) "root" else self.name, decls, self.lineOfKey(key) orelse 0 },
         );
     }
 
@@ -261,14 +272,33 @@ pub const Section = struct {
         if (out == null) {
             if (self.pairs.get(key)) |v| {
                 log.warn(
-                    "Key '{s}' in section [{s}] expects {s}, got {s}; ignoring (keeping default)",
-                    .{ key, self.name, typeLabel(T), valueTypeLabel(v) },
+                    "Key '{s}' in section [{s}] expects {s}, got {s} (line {d}); ignoring (keeping default)",
+                    .{ key, self.name, typeLabel(T), valueTypeLabel(v), self.lineOfKey(key) orelse 0 },
                 );
             }
         }
         return out;
     }
 };
+
+/// What the reader was looking for when it gave up, in the reader's own terms.
+///
+/// The error NAMES alone ("InvalidValue") tell a user which bucket to blame and
+/// nothing about what to write instead, and this dialect is hand-written, so
+/// the accepted forms are a deliberate list (see the file header) that a user
+/// cannot infer from the error. Each variant states the form it was parsing.
+/// OutOfMemory is absent on purpose: it is not a syntax complaint, it is a
+/// retryable allocator failure, and no amount of "expected" text helps.
+fn expectedForm(err: ParseError) []const u8 {
+    return switch (err) {
+        error.InvalidSyntax => "a bare key (letters, digits, '_', '-', '+', '/', '.'), optionally quoted",
+        error.InvalidSection => "a section header of the form [name] (one level, no quotes needed)",
+        error.InvalidValue => "a value: a number, true/false, a quoted string, a [list], " ++
+            "a color (#RRGGBB / 0xRRGGBB), or a size with a unit (10, 10%, 10px)",
+        error.InvalidColor => "a 24-bit color: #RRGGBB, 0xRRGGBB, or a 6/8-digit hex number",
+        error.OutOfMemory => "enough memory to continue parsing",
+    };
+}
 
 fn typeLabel(comptime T: type) []const u8 {
     return switch (T) {
@@ -1213,9 +1243,9 @@ const Parser = struct {
         const kv = self.parseKeyValuePair() catch |err| {
             self.had_errors.* = true;
             if (self.last_key.len > 0)
-                self.warnLine("invalid key-value (key '{s}'): {}", .{ self.last_key, err })
+                self.warnLine("invalid value for key '{s}': {s} (got {s})", .{ self.last_key, expectedForm(err), @errorName(err) })
             else
-                self.warnLine("invalid key-value: {}", .{err});
+                self.warnLine("invalid value: {s} (got {s})", .{ expectedForm(err), @errorName(err) });
             self.skipToNewline();
             return;
         };
@@ -1282,7 +1312,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []c
                 continue;
             }
             const section_name = p.parseSection() catch |err| {
-                p.skipBadLine("invalid section: {}", .{err});
+                p.skipBadLine("invalid section header: {s} (got {s})", .{ expectedForm(err), @errorName(err) });
                 continue;
             };
 

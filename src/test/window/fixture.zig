@@ -394,7 +394,6 @@ pub const Fx = struct {
             n += 1;
         }
 
-        const hv = tiling.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
         var placements: tiling.List = .{};
         tiling.compute(
             p.kind,
@@ -402,7 +401,7 @@ pub const Fx = struct {
                 .order = order_buf[0..n],
                 .params = p,
                 .workarea = self.workArea(),
-                .hints = &hv,
+                .hints = .{ .order = order_buf[0..n], .hints = hints_buf[0..n] },
                 .focused = m.focused,
                 .env = pipeline.tilingEnv(),
             },
