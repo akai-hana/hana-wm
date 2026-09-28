@@ -24,6 +24,7 @@ const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
 
+const scaffold = @import("scaffold");
 const time = @import("time");
 const read_interval_ms: i64 = 2000;
 
@@ -55,27 +56,74 @@ pub const Sub = struct {
 /// entry becomes one standalone bar segment named `sub.name`.
 pub const subs = @import("systatus_subs").subs;
 
-/// Opens `path` and reads its full contents into `buf`, returning the
-/// bytes read, or null when the file is absent/unreadable. Shared open+read
-/// stanza behind every readout's /proc or /sys probe.
-pub fn readSmallFile(path: []const u8, buf: []u8) ?[]const u8 {
+/// One file read, with truncation reported rather than hidden.
+pub const FileRead = struct {
+    bytes: []const u8,
+    /// True when the read filled `buf` completely, so the tail was dropped and
+    /// the contents cannot be trusted whole. `readSmallFile` used to discard
+    /// this, which made a /proc/meminfo larger than the buffer
+    /// indistinguishable from a meminfo with no MemAvailable: a truncated file
+    /// read as "no RAM" rather than as the I/O problem it is.
+    truncated: bool,
+};
+
+/// Opens `path` and reads its contents into `buf`, reporting whether the
+/// buffer was filled (see `FileRead.truncated`). Null when absent/unreadable.
+pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
     const io = std.Options.debug_io;
     var f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
     defer f.close(io);
     const n = f.readPositionalAll(io, buf, 0) catch return null;
-    return buf[0..n];
+    return .{ .bytes = buf[0..n], .truncated = n == buf.len };
 }
+
+/// Opens `path` and reads its full contents into `buf`, returning the
+/// bytes read, or null when the file is absent/unreadable. Shared open+read
+/// stanza behind every readout's /proc or /sys probe. Callers that can be
+/// hurt by a short read (a /proc file that grows past the buffer) should use
+/// `readFileChecked` and treat `truncated` as a failed read.
+pub fn readSmallFile(path: []const u8, buf: []u8) ?[]const u8 {
+    const r = readFileChecked(path, buf) orelse return null;
+    return r.bytes;
+}
+
+/// Consecutive failed reads tolerated before a readout collapses. One
+/// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must not
+/// blank the segment: collapsing the row on a single failure caused a visible
+/// blink plus a spurious re-lay on every hiccup. After this many consecutive
+/// misses the readout is treated as genuinely gone (battery removed, file
+/// deleted) and the slot collapses for real.
+const miss_tolerance: u8 = 3;
+
+/// How long a readout that has collapsed as ABSENT goes unprobed before it is
+/// given one more chance. Without this, a desktop with no battery paid eight
+/// futile /sys/class/power_supply opens every 2 s forever; with a plain
+/// one-way latch it would never notice a battery being hot-swapped in. The
+/// slow re-probe is the cost of not being wrong in either direction: the
+/// absent readout is silent (no slot reserved) but not abandoned.
+const absent_reprobe_ms: i64 = 30_000;
 
 /// Per-segment state, indexed by registry position (segment i == subs[i]).
 var g_armed: [subs.len]bool = @splat(false);
+/// Consecutive failed reads for readout `idx`; reset on every successful read.
+/// Drives the sticky last-good window (see `miss_tolerance`).
+var g_misses: [subs.len]u8 = @splat(0);
+/// True once readout `idx` exhausted its miss tolerance and collapsed: its
+/// segment reserves nothing, and its poll slows to `absent_reprobe_ms` instead
+/// of hammering an answer that is not coming. Cleared by the first success.
+var g_absent: [subs.len]bool = @splat(false);
 var g_pending_redraw: [subs.len]bool = @splat(false);
 var g_next_read_ms: [subs.len]i64 = @splat(0);
-var g_slot_width: [subs.len]u16 = @splat(0);
-/// Last drawn width of readout `idx` (the row reservation): 0 until the first
-/// draw (and forever when a readout has no value to show, e.g. `batt` with no
-/// battery), so an absent readout's slot fully collapses and never opens a
-/// gap -- the bar lays out exactly what the segment paints. Mirrors scaffold's
-/// widthState default. Read by the segment's naturalWidth hook.
+/// The last drawn width of a readout is NOT tracked here any more: it is the
+/// shared `scaffold.widthState` singleton for that readout's name, which owns
+/// the store / consume / naturalWidth triple. The bar-private copy of that
+/// triple (a `g_slot_width` array plus an inline "did the width change? mark
+/// dirty" at the draw site) was a second implementation of code that already
+/// existed, and the two could drift; every readout is comptime-indexed by
+/// `segmentFor`, so one instantiation per name is exactly the state each needs.
+fn widthStateFor(comptime idx: usize) type {
+    return scaffold.widthState(subs[idx].name);
+}
 var g_last: [subs.len][render_buf_len]u8 = undefined;
 var g_len: [subs.len]usize = @splat(0);
 /// Byte range of the numeric readout ("42%") inside `g_last`; `g_value_len ==
@@ -103,6 +151,12 @@ fn refresh(idx: usize) bool {
     var value_start: usize = 0;
     var value_len: usize = 0;
     if (sub.read()) |value| {
+        g_misses[idx] = 0;
+        // Recovering from absence re-fills the rendered text, so the ordinary
+        // `changed` check below requests the redraw and the width store
+        // re-expands the slot -- nothing extra is needed for the recovery
+        // path, only the latch itself has to be cleared.
+        g_absent[idx] = false;
         var num: [16]u8 = undefined;
         const value_text = std.fmt.bufPrint(&num, "{d}%", .{value}) catch "";
         n = appendText(&buf, n, sub.label);
@@ -110,6 +164,16 @@ fn refresh(idx: usize) bool {
         value_start = n;
         n = appendText(&buf, n, value_text);
         value_len = value_text.len;
+    } else {
+        // Sticky last-good: within the tolerance window KEEP whatever is
+        // already in g_last and report no change, so the segment keeps
+        // painting the last known-good reading. Once the window is exhausted
+        // fall through with n == 0, which is the real collapse.
+        if (g_misses[idx] < miss_tolerance) g_misses[idx] += 1;
+        if (g_misses[idx] < miss_tolerance) return false;
+        // Tolerated window exhausted: genuinely absent, so latch it and let
+        // the poll back off to the slow re-probe cadence.
+        g_absent[idx] = true;
     }
 
     const changed = g_len[idx] != n or !std.mem.eql(u8, g_last[idx][0..n], buf[0..n]);
@@ -124,27 +188,39 @@ fn refresh(idx: usize) bool {
 /// first draw (when the bar actually renders it), so an unconfigured readout
 /// never wakes the loop. Returns -1 while unarmed, ms until the next read
 /// otherwise (0 = due now).
-fn pollDeadlineMsFor(idx: usize) i32 {
+fn pollDeadlineMsFor(comptime idx: usize) i32 {
     if (!g_armed[idx]) return -1;
+    // An absent readout still contributes a wakeup, but only on the slow
+    // re-probe cadence: stopping entirely would make a hot-swapped battery or
+    // a since-boot /sysfs file invisible forever.
+    const interval: i64 = if (g_absent[idx]) absent_reprobe_ms else read_interval_ms;
     const left = g_next_read_ms[idx] - time.realtimeMs();
     if (left <= 0) return 0;
-    return @intCast(@min(left, read_interval_ms));
+    return @intCast(@min(left, interval));
 }
 
-fn onPollWakeupFor(idx: usize) void {
+fn onPollWakeupFor(comptime idx: usize) void {
     if (!g_armed[idx]) return;
     if (time.realtimeMs() < g_next_read_ms[idx]) return;
-    g_next_read_ms[idx] = time.realtimeMs() + read_interval_ms;
+    // The next deadline is set from the same absent/present decision the poll
+    // itself makes, so the backing-off and the wakeup cannot disagree.
+    g_next_read_ms[idx] = time.realtimeMs() +
+        (if (g_absent[idx]) absent_reprobe_ms else read_interval_ms);
     if (refresh(idx)) g_pending_redraw[idx] = true;
 }
 
-fn consumeRedrawRequestFor(idx: usize) bool {
+/// A redraw is owed for either reason the segment can change shape: the
+/// TEXT changed (refresh), or the painted WIDTH changed (widthState). Both are
+/// consumed here, so the caller sees one answer and neither source can leak a
+/// stale request.
+fn consumeRedrawRequestFor(comptime idx: usize) bool {
     const p = g_pending_redraw[idx];
     g_pending_redraw[idx] = false;
-    return p;
+    return p or widthStateFor(idx).consumeRedrawRequest();
 }
 
-fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
+fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !u16 {
+    const W = widthStateFor(idx);
     const c = segmod.castDraw(ctx);
     if (!g_armed[idx]) {
         g_armed[idx] = true;
@@ -156,10 +232,9 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     // readout -- no battery, unreadable file -- takes no space. The reserved
     // slot collapses on the next re-layout.
     if (g_len[idx] == 0) {
-        if (g_slot_width[idx] != 0) {
-            g_slot_width[idx] = 0;
-            g_pending_redraw[idx] = true;
-        }
+        // W.store(0) marks the redraw request itself when the width actually
+        // changed, so the collapse needs no private bookkeeping.
+        W.store(0);
         return x;
     }
 
@@ -171,11 +246,9 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
 
     // Track the ACTUAL painted width, not the row reservation: the row must
     // follow the text or the segment locks onto the startup probe and paints
-    // over its right neighbors ("RAM 42%" clipped by the next slot). A width
-    // change marks the segment dirty so the bar re-lays out.
-    const drawn = end_x - x;
-    if (drawn != g_slot_width[idx]) g_pending_redraw[idx] = true;
-    g_slot_width[idx] = drawn;
+    // over its right neighbors ("RAM 42%" clipped by the next slot). W.store
+    // raises the redraw request on change, so the bar re-lays out.
+    W.store(end_x - x);
     return end_x;
 }
 
@@ -194,8 +267,8 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
         fn redraw() bool {
             return consumeRedrawRequestFor(i);
         }
-        fn naturalWidth(_: *const anyopaque, _: u16) u16 {
-            return g_slot_width[i];
+        fn naturalWidth(frame: *const anyopaque, fallback: u16) u16 {
+            return widthStateFor(i).naturalWidth(frame, fallback);
         }
         fn draw(ctx: *anyopaque, x: u16) anyerror!u16 {
             return drawFor(i, ctx, x);

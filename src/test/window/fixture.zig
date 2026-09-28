@@ -404,7 +404,7 @@ pub const Fx = struct {
                 .workarea = self.workArea(),
                 .hints = &hv,
                 .focused = m.focused,
-                .env = pipeline.tilingEnv(p),
+                .env = pipeline.tilingEnv(),
             },
             &placements,
         );

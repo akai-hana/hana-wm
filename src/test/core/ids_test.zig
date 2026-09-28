@@ -9,6 +9,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const ids = @import("ids");
+const constants = @import("constants");
 
 test "ids: fromIndex round-trips the index and eql compares it" {
     const a = ids.WorkspaceId.fromIndex(3);
@@ -20,4 +21,29 @@ test "ids: fromIndex round-trips the index and eql compares it" {
 
 test "ids: fromIndex accepts wider ints via the checked internal cast" {
     try testing.expectEqual(@as(u8, 5), ids.WorkspaceId.fromIndex(@as(u16, 5)).index);
+}
+
+// --- workspace validity: ONE notion (7.6/7.7) -----------------------------
+
+test "isValidWorkspaceIndex is the single range definition" {
+    try testing.expect(ids.isValidWorkspaceIndex(0));
+    try testing.expect(ids.isValidWorkspaceIndex(constants.max_workspaces - 1));
+    try testing.expect(!ids.isValidWorkspaceIndex(constants.max_workspaces));
+    try testing.expect(!ids.isValidWorkspaceIndex(255));
+}
+
+test "WorkspaceId.isValid agrees with the free function" {
+    try testing.expect(ids.WorkspaceId.fromIndex(3).isValid());
+    // The lenient constructor admits an out-of-range value ON PURPOSE, so
+    // this is the case every fixed-size consumer must check for itself.
+    const oob = ids.WorkspaceId.fromIndex(constants.max_workspaces);
+    try testing.expect(!oob.isValid());
+    try testing.expectEqual(!ids.isValidWorkspaceIndex(oob.index), !oob.isValid());
+}
+
+test "fromIndexChecked is the loud constructor for internal callers" {
+    try testing.expectEqual(
+        @as(u8, 5),
+        ids.WorkspaceId.fromIndexChecked(5).index,
+    );
 }

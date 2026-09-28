@@ -95,6 +95,37 @@ pub fn insertSlice(es: *EditorState, slice: []const u8) void {
     es.cursor += n;
 }
 
+/// Removes [from, to) from the buffer and places the cursor at `from`.
+///
+/// The mode-aware clamp lives here rather than in the caller: in NORMAL mode a
+/// cursor may sit ON the last character (it addresses it, so the next motion
+/// has something to act on), and a delete that emptied the tail would
+/// otherwise leave normal mode addressing `len`, one past the end. Five
+/// divergent memmove+clamp copies existed between this module and the vim
+/// extensor; this is the one that owns the rule, and both now call it.
+pub fn deleteRange(es: *EditorState, from: usize, to: usize) void {
+    if (from >= to or to > es.len) return;
+    const n = to - from;
+    std.mem.copyForwards(u8, es.buf[from .. es.len - n], es.buf[to..es.len]);
+    es.len -= n;
+    es.cursor = from;
+    if (es.mode == .normal and es.len > 0 and es.cursor >= es.len)
+        es.cursor = es.len - 1;
+}
+
+/// Overwrites in place at `pos` with `bytes`, up to the end of the current
+/// content. The length CANNOT change: this is a replacement primitive for
+/// edits that keep the buffer's extent (a case toggle, an in-place rewrite of
+/// a run), not an insert. Overflow past the end of the content is dropped
+/// rather than appending, so a caller cannot silently grow the buffer by using
+/// the overwrite to mean an insert.
+pub fn overwriteAt(es: *EditorState, pos: usize, bytes: []const u8) void {
+    if (pos >= es.len) return;
+    const n = @min(bytes.len, es.len - pos);
+    if (n == 0) return;
+    @memcpy(es.buf[pos..][0..n], bytes[0..n]);
+}
+
 pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
     return sym >= 0x20 and sym <= 0x7e;
 }
@@ -295,10 +326,6 @@ const PromptState = struct {
     // Ghost text: the completion suffix shown dimmed after the cursor.
     ghost_buf: [max_completion_len:0]u8 = .{0} ** max_completion_len,
     ghost_len: usize = 0,
-    // True when the current buffer contains at least one space.  Maintained
-    // incrementally so `updateGhost` can skip a full buffer scan on every call.
-    has_space: bool = false,
-
     is_blink_visible: bool = true,
 
     // Caret geometry cached after the first insert-mode draw.  Font metrics
@@ -548,10 +575,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 /// the ghost suggestion (a mode handler may have deleted or inserted text),
 /// and schedule a redraw.  Returns true (event consumed).
 fn finishKeyPress(action: Action, refresh_blink: bool) bool {
-    const prev_len = g.vim_state.len;
     handleAction(action);
-    if (g.vim_state.len != prev_len)
-        g.has_space = std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null;
     updateGhost();
     if (refresh_blink) g.is_blink_visible = true;
     g.layout_dirty = true;
@@ -580,7 +604,7 @@ fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
     g.blink_repaint = false;
     // While covered, title's pollTimeoutMsHook contributes no marquee wakeup
     // (title owns that decision), so no explicit carousel pause is needed here.
-    return drawActive(ctx.dc, ctx.config, ctx.height, x, ctx.width);
+    return drawActive(ctx.dc, &ctx.config, ctx.height, x, ctx.width);
 }
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
@@ -600,7 +624,6 @@ fn handleAction(action: Action) void {
 fn activate() void {
     g.vim_state.reset();
     g.ghost_len = 0;
-    g.has_space = false;
     g.layout_dirty = true;
     // Load completions and history on first activation.
     if (!g.is_completions_loaded) loadCompletions();
@@ -753,7 +776,14 @@ fn updateGhost() void {
     g.ghost_len = 0;
 
     if (g.vim_state.mode != .insert or g.vim_state.len == 0 or
-        g.vim_state.cursor != g.vim_state.len or g.has_space) return;
+        g.vim_state.cursor != g.vim_state.len) return;
+    // "No space typed yet" is a property OF THE BUFFER, not cached state. It
+    // used to be a `has_space` field maintained at exactly two sites, and a
+    // third edit path that changed the buffer without updating it silently
+    // suppressed (or wrongly enabled) the ghost. The buffer here is at most
+    // `max_input` (256) bytes and was already scanned by every candidate
+    // lookup below, so deriving it costs nothing measurable.
+    if (std.mem.indexOfScalar(u8, g.vim_state.buf[0..g.vim_state.len], ' ') != null) return;
 
     const prefix = g.vim_state.buf[0..g.vim_state.len];
 
@@ -1292,7 +1322,9 @@ fn drawNormalMode(
 /// scrollable region keeps the cursor in view.
 fn drawActive(
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    // By pointer, not by value: this is a per-frame draw that only READS
+    // config, and a full `BarConfig` struct copy per frame bought nothing.
+    config: *const types.BarConfig,
     height: u16,
     start_x: u16,
     width: u16,

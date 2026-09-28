@@ -103,21 +103,23 @@ const ReverseEntry = struct { keysym: u32, keycode: u8 };
 /// map: the whole index is 248 * 8 bytes and never needs an allocator.
 ///
 /// Ties (two keycodes carrying the same level-0 keysym) keep the LOWEST
-/// keycode, matching the scan this replaces.
-fn buildReverseIndex(table: [constants.x11_max_keycode]u32) [reverse_capacity]ReverseEntry {
+/// keycode, matching the scan this replaces. `len` is the LIVE count, returned
+/// alongside the array so it cannot drift from what was actually written.
+const BuiltReverse = struct { index: [reverse_capacity]ReverseEntry, len: usize };
+
+fn buildReverseIndex(table: [constants.x11_max_keycode]u32) BuiltReverse {
     var out: [reverse_capacity]ReverseEntry = undefined;
     var n: usize = 0;
     for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
         const sym = table[kc];
         if (sym == xkb.XKB_KEY_NoSymbol) continue;
-        // Ascending keycode, so a duplicate keysym is already present: keep
-        // the first (lowest keycode) and skip.
-        if (n > 0 and out[n - 1].keysym == sym) continue;
         out[n] = .{ .keysym = sym, .keycode = @intCast(kc) };
         n += 1;
     }
     // Insertion sort: n is tiny (one entry per physical key) and this runs
-    // once per keymap, not per keybinding.
+    // once per keymap, not per keybinding. The `>` (not `>=`) comparison makes
+    // it STABLE, which is what lets the compaction below mean "lowest keycode
+    // wins": equal keysyms keep the ascending-keycode scan order.
     var i: usize = 1;
     while (i < n) : (i += 1) {
         const item = out[i];
@@ -127,32 +129,26 @@ fn buildReverseIndex(table: [constants.x11_max_keycode]u32) [reverse_capacity]Re
         }
         out[j] = item;
     }
-    return out;
+    // Compacting adjacent duplicates AFTER the sort is what makes the
+    // lowest-keycode tie-break real. Doing it during the scan instead
+    // (comparing against the last APPENDED entry) only catches duplicates that
+    // happen to be adjacent in KEYCODE order, and keysyms are not ordered by
+    // keycode: with kc10=X, kc11=Y, kc12=X the scan-side check compares X
+    // against Y, misses the tie, and appends both. After the sort the two X
+    // entries sit next to each other, and the bisection in keysymToKeycode can
+    // land on either one -- so a binding on a keysym carried by two keys could
+    // grab the higher keycode and silently stop responding to the lower one.
+    var w: usize = 0;
+    for (out[0..n]) |e| {
+        if (w > 0 and out[w - 1].keysym == e.keysym) continue;
+        out[w] = e;
+        w += 1;
+    }
+    return .{ .index = out, .len = w };
 }
 
 /// Keycodes in the X11 range, minus the reserved low ones.
 const reverse_capacity = constants.x11_max_keycode - constants.x11_min_keycode;
-
-/// How many entries `buildReverseIndex` actually filled. Both are O(keymap) on
-/// purpose: they run together, so keeping them in step needs no shared mutable
-/// state to go wrong.
-fn countReverseIndex(table: [constants.x11_max_keycode]u32) usize {
-    var n: usize = 0;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
-        if (table[kc] == xkb.XKB_KEY_NoSymbol) continue;
-        n += 1;
-    }
-    // Duplicates (same level-0 keysym on two keycodes) collapse to one entry.
-    var dup: usize = 0;
-    var prev: u32 = 0;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
-        const sym = table[kc];
-        if (sym == xkb.XKB_KEY_NoSymbol) continue;
-        if (sym == prev) dup += 1;
-        prev = sym;
-    }
-    return n - dup;
-}
 
 pub const XkbState = struct {
     context: *xkb_context,
@@ -187,11 +183,12 @@ pub const XkbState = struct {
         const device_id = try retryDeviceId(xcb_conn);
 
         const table = try tableForDevice(ctx, xcb_conn, device_id);
+        const built = buildReverseIndex(table);
         return XkbState{
             .context = ctx,
             .keysym_by_keycode = table,
-            .reverse_index = buildReverseIndex(table),
-            .reverse_len = countReverseIndex(table),
+            .reverse_index = built.index,
+            .reverse_len = built.len,
         };
     }
 
@@ -214,8 +211,9 @@ pub const XkbState = struct {
             return;
         };
         self.keysym_by_keycode = table;
-        self.reverse_index = buildReverseIndex(table);
-        self.reverse_len = countReverseIndex(table);
+        const built = buildReverseIndex(table);
+        self.reverse_index = built.index;
+        self.reverse_len = built.len;
     }
 
     /// Returns the level-0 keysym for `keycode`, unaffected by lock modifiers

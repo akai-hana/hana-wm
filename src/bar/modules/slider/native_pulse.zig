@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const time = @import("time");
+const slider = @import("slider");
 
 const c = @cImport({
     @cInclude("fcntl.h");
@@ -216,19 +217,27 @@ fn volumePct(pvol: []const u8, channels: u8) ?u8 {
     var sum: u64 = 0;
     for (0..n) |i| sum += readLE(u32, pvol, 4 + i * 4);
     const avg = sum / n;
-    return @intCast(@min(@as(u64, avg) * 100 / PA_VOLUME_NORM, 100));
+    // The SHARED map, not a local formula: this used to truncate
+    // (`avg * 100 / PA_VOLUME_NORM`), while `buildCvolume` truncated the other
+    // way (`pct * PA_VOLUME_NORM / 100`). The two disagree by up to 1% on 96 of
+    // 101 levels, so writing 5% and reading it back showed 4%, and the segment
+    // fought the user. slider.rawFromPct/pctFromRaw round to nearest in both
+    // directions, which makes the round trip exact. native_alsa already routed
+    // through it; this is the same fix for the pulse backend.
+    return slider.pctFromRaw(u32, @intCast(avg), 0, PA_VOLUME_NORM);
 }
 
 /// Builds a `pa_cvolume` (channels byte + per-channel u32 values) for `pct`
-/// into `out` (needs >= 4 + channels*4 bytes). Linear mapping matches
-/// `pa_sw_volume_from_percentage`.
+/// into `out` (needs >= 4 + channels*4 bytes). Uses the shared percent<->raw
+/// map, so it agrees with `volumePct` and with `pa_sw_volume_from_percentage`
+/// to the nearest step.
 fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
     const n: usize = if (channels > 32) 32 else @as(usize, channels);
     if (n == 0) return false;
     if (out.len < 4 + n * 4) return false;
     @memset(out[0 .. 4 + n * 4], 0);
     out[0] = @intCast(n);
-    const v: u32 = @intCast(@as(u64, @min(pct, 100)) * PA_VOLUME_NORM / 100);
+    const v: u32 = slider.rawFromPct(u32, pct, 0, PA_VOLUME_NORM);
     for (0..n) |i| writeLE(u32, out, 4 + i * 4, v);
     return true;
 }

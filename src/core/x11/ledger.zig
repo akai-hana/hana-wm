@@ -30,11 +30,17 @@ const contract = @import("contract");
 /// "The last value sent" is the honest invariant: these record what X was
 /// told, not what is currently on screen.
 pub const SentEntry = struct {
-    rect: model.Rect = contract.parked_rect,
+    /// Last VISIBLE geometry sent. Undefined until `has_rect` says a geometry
+    /// was sent -- there is deliberately NO sentinel default (5.8): `has_rect`
+    /// is the explicit "never sent" flag, so a sentinel rect would be dead
+    /// weight that reads like a load-bearing marker. 5.1's claim that bw/pixel
+    /// survive a park is about THESE two fields, not `rect`.
+    rect: model.Rect,
     has_rect: bool = false,
     parked: bool = false,
     bw: u16 = 0,
     pixel: u32 = 0,
+
     /// Set when a ConfigureNotify says this window changed its own geometry
     /// while we had it parked offscreen. The reconcile's off-workspace fast
     /// path elides windows already parked in the ledger, which is what makes
@@ -44,6 +50,16 @@ pub const SentEntry = struct {
     /// escape hatch: it costs one flag, and it only ever makes the reconciler
     /// do MORE work, never less.
     parked_dirty: bool = false,
+
+    /// A record for a window nothing has been sent to yet. `has_rect` is
+    /// false, which is the ONLY thing that makes this a valid blank -- `rect`
+    /// holds a meaningless zero and every reader must gate on `has_rect`
+    /// first (`visibleSent` does). 5.8 removed `rect`'s struct-literal default
+    /// so the sentinel could not be mistaken for a real marker; construction
+    /// is explicit here instead of implicit at every use site.
+    pub fn blank() SentEntry {
+        return .{ .rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
+    }
 };
 
 const State = struct {
@@ -73,7 +89,7 @@ pub fn sentGet(win: model.WindowId) ?SentEntry {
 /// pub: the reconciler, plus the test verification seam (perf_test).
 pub fn sentGetOrPut(win: model.WindowId) ?*SentEntry {
     if (st.sent.getPtr(win)) |r| return r;
-    return st.sent.put(win, .{}) catch null;
+    return st.sent.put(win, SentEntry.blank()) catch null;
 }
 
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
@@ -102,6 +118,31 @@ pub fn markParkedDirty(win: model.WindowId) void {
 pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
     const gop = sentGetOrPut(win) orelse return;
     gop.bw = w;
+}
+
+/// Record a border-pixel send unless that exact pixel is already recorded, and
+/// report whether the caller must actually send (11.4).
+///
+/// This is the ONE border-pixel dedup. It was in `wincache` (`border_color`)
+/// while the reconcile's own dedup read THIS record's `pixel` field, so the
+/// same fact was tracked in two places that could disagree: the reconcile sent
+/// a pixel through the sink without touching the cache, and the sweep sent
+/// through the cache without touching the ledger. Deriving both from one record
+/// is what removes the class of bug, not just the duplicate field.
+///
+/// Two reasons the answer is not simply `pixel != new`:
+///  * `has_rect` gates the comparison. A blank record's `pixel` is 0, and a
+///    genuinely black border must still be SENT -- without the gate, the very
+///    first sweep would elide a real 0-pixel send. `has_rect` means "a visible
+///    geometry was ever sent", i.e. "we know the server's current pixel".
+///  * a full ledger returns TRUE (send anyway). A missed dedup costs one
+///    redundant ChangeWindowAttributes; a missed send leaves a wrong border,
+///    which is the same fallback the cache-full case used to have.
+pub fn markSentBorderPixelIfChanged(win: model.WindowId, pixel: u32) bool {
+    const gop = sentGetOrPut(win) orelse return true;
+    if (gop.has_rect and gop.pixel == pixel) return false;
+    gop.pixel = pixel;
+    return true;
 }
 
 /// Record a visible (non-parked) send in the ledger. Shared by the full

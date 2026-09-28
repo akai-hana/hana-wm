@@ -18,7 +18,7 @@ const variant_gaps: u8 = tiling.variantIndex(&variants, "gaps");
 /// shrunk via shrinkClamped (floor clamped to min_dim).
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
-    const gaps = v.env.variant_idx == variant_gaps;
+    const gaps = v.params.variant_idx == variant_gaps;
     const inset: u16 = if (gaps) m.gap else 0;
     const total_margin = tiling.totalInset(inset, m);
 

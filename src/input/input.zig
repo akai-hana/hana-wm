@@ -87,10 +87,21 @@ pub fn resolvedKeybinds() []const keybind.ResolvedBind {
     return resolved_binds;
 }
 
-/// Releases the dispatch map. Call before the config whose keybindings the
-/// entries point into is freed (shutdown).
+/// Releases the dispatch map AND the compiled keybind list. Call before the
+/// config whose keybindings the entries point into is freed (shutdown).
+///
+/// The list was allocated by `buildKeybinds` via `alloc.realloc` and this used
+/// to free only the dispatch map, leaking the list on every shutdown. The
+/// `len != 0` guard is not cosmetic: the initial value is a `&.{}` pointing at
+/// a static empty slice, and freeing that would be handing the allocator a
+/// pointer it never produced.
 pub fn deinitKeybinds() void {
-    keybind_resolver.deinit(core.getState().alloc);
+    const alloc = core.getState().alloc;
+    keybind_resolver.deinit(alloc);
+    if (resolved_binds.len != 0) {
+        alloc.free(resolved_binds);
+        resolved_binds = &.{};
+    }
 }
 
 /// Rebuilds the keymap/keysym table after the server changes the keyboard
@@ -384,11 +395,10 @@ fn executeAction(action: *const types.Action) void {
         // Cycle focus forward/backward. The viewport snap runs as a duty
         // inside the focus transition's single grab (see
         // actions.snapViewportFocusedDuty), so a cycle that scrolls the
-        // viewport is still one grab+reconcile, not focus-then-snap's two.
-        .cycle_focus => |dir| {
-            if (focus.cycleTarget(dir)) |target|
-                focus.grabFocusWithDuty(target, .user_command, &actions.snapViewportFocusedDuty);
-        },
+        // viewport is still one grab+reconcile, not focus-then-snap's two --
+        // and 10.10's cycleFocus pairs the target with that duty, so the
+        // pairing is no longer this call site's responsibility.
+        .cycle_focus => |dir| focus.cycleFocus(dir, &actions.snapViewportFocusedDuty),
 
         // Workspaces. workspaces.zig self-gates to a single implicit
         // workspace when core.getState().config.workspaces.enabled is false,

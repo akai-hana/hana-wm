@@ -79,7 +79,7 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = fullscreen.fullscreenOccupantOnWs(&m, model.WSId.fromIndex(0));
+        _ = fullscreen.visibleCoveringOnWs(&m, model.WSId.fromIndex(0));
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));

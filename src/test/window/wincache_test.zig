@@ -32,7 +32,12 @@ test "size-hints round-trip and empty-hints no-op" {
     try testing.expectEqual(wincache.SizeHints{}, wincache.peekHints(4));
 }
 
-test "title ownership: overwrite frees prior, remove frees owned" {
+// 11.5: the title is a fixed inline buffer now, so there is no ownership left
+// to test -- which is the point. This used to be "title ownership: overwrite
+// frees prior, remove frees owned", which asserted the three free paths that
+// no longer exist. What remains worth pinning is the copy semantics they used
+// to interfere with, plus the truncation bound that replaced the allocator.
+test "title store: overwrite replaces in place, remove clears, oversize truncates" {
     const alloc = std.testing.allocator;
     wincache.init(alloc);
     defer wincache.deinit();
@@ -47,6 +52,22 @@ test "title ownership: overwrite frees prior, remove frees owned" {
     wincache.removeWindow(7);
     wincache.storeTitle(99, "");
     try testing.expectEqualStrings("", wincache.peekTitle(99));
+
+    // Truncation at the inline bound: a title longer than the buffer is cut,
+    // and the result is a valid slice (sliced by title_len, not terminator-
+    // terminated), so nothing reads past what was stored.
+    var long: [1024]u8 = @splat('x');
+    long[0] = 'a';
+    wincache.storeTitle(7, &long);
+    const got = wincache.peekTitle(7);
+    try testing.expectEqual(@as(usize, 256), got.len);
+    try testing.expectEqual(@as(u8, 'a'), got[0]);
+    try testing.expectEqual(@as(u8, 'x'), got[255]);
+
+    // A short title after a long one is NOT padded with the old bytes: the
+    // length is authoritative, so the stale tail cannot leak into the read.
+    wincache.storeTitle(7, "short");
+    try testing.expectEqualStrings("short", wincache.peekTitle(7));
 }
 
 test "at-capacity cache drops new entries but keeps overwrites" {

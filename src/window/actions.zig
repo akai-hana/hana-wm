@@ -34,8 +34,8 @@ const isCoveringMode = window.isCoveringMode;
 /// module AND hook (active covering record on ws), null without a fullscreen
 /// module. Contrast the OR scan `model.coveringOccupantOnWs`.
 fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
-    return if (providerOf(.coveringOccupantOnWs)) |prov|
-        prov.coveringOccupantOnWs.?(m, m.current)
+    return if (providerOf(.visibleCoveringOnWs)) |prov|
+        prov.visibleCoveringOnWs.?(m, m.current)
     else
         null;
 }
@@ -43,7 +43,7 @@ fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
 /// Convenience: true when `win` is the covering (fullscreen) occupant on its
 /// workspace.
 fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
-    return callHookBool(.isCoveringOnWs, .{ m, win, m.current });
+    return model_mod.isCoveringOn(m, win, m.current); // 12.4: model query
 }
 
 /// Shared change guard for the tag/pin actions: the window must be present in
@@ -93,13 +93,29 @@ const RetileOpts = struct {
     bump_fullscreen: bool = false,
 };
 
+/// The one fact-bump + reconcile entry for a tiling action.
+///
+/// Each branch names which facts IT bumps. The plain branch deliberately does
+/// NOT bump the window fact: `pipeline.reconcileGrab` owns that bump now
+/// (10.5), so the eight actions that reconcile through the plain alias get the
+/// invariant without having to remember it, and this one cannot double-bump on
+/// the way there. The focus and restack branches call reconcile variants that
+/// do not bump at all, so those two still bump the window fact here.
 fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
-    if (opts.full_redraw) core.layout.bump() else core.window.bump();
-    if (opts.bump_fullscreen) core.fullscreen.bump();
     if (opts.with_focus) {
+        if (opts.full_redraw) core.layout.bump() else core.window.bump();
+        if (opts.bump_fullscreen) core.fullscreen.bump();
         // Focus lands before geometry (focus-before).
         pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, .before, null);
-    } else if (opts.restack) pipeline.reconcileUnderGrabNow(.{ .force_restack = true }) else pipeline.reconcileGrab();
+    } else if (opts.restack) {
+        if (opts.full_redraw) core.layout.bump() else core.window.bump();
+        if (opts.bump_fullscreen) core.fullscreen.bump();
+        pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
+    } else {
+        if (opts.full_redraw) core.layout.bump();
+        if (opts.bump_fullscreen) core.fullscreen.bump();
+        pipeline.reconcileGrab();
+    }
 }
 
 /// Shared hide/close withdraw tail: when the withdrawn window was the
@@ -132,7 +148,7 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
     const m = pipeline.mut(&gate);
     const was_focused = m.focused == win;
     const fs_ws_before =
-        if (providerOf(.coveringWsOf)) |prov| prov.coveringWsOf.?(m, win) else null;
+        model_mod.coveringWsOf(m, win); // 12.4: model query
 
     wm.hideWindow.?(m, win) catch return; // Pre-refusal (CapacityFull)
 

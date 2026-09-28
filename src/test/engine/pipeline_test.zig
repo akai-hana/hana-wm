@@ -13,6 +13,7 @@ const actions = @import("actions");
 const fixture = @import("fixture");
 const xcb = core.xcb;
 const ledger = @import("ledger");
+const fullscreen = if (@import("build_options").has_fullscreen) @import("fullscreen") else struct {};
 
 /// Two mapped windows, the arrangement most pipeline tests seed.
 fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
@@ -146,4 +147,72 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     try std.testing.expectEqual(w2, m.focused.?);
     try std.testing.expectEqual(w2, fx.inputFocus());
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+}
+
+// 12.7: the deferred bar transition is resolved from MODEL TRUTH, and the
+// pending entry is per-window. The two properties the single-slot,
+// dimensions-only version got wrong: it dropped a second window's pending
+// intent, and it re-showed the bar whenever a window's ConfigureNotify stopped
+// reporting screen dimensions -- even if the model still recorded a covering
+// occupant.
+test "pipeline: deferred bar waits for model truth and keeps per-window entries" {
+    var fx = fixture.setUp("pipeline_test") orelse return;
+    defer fx.deinit();
+    const cs = core.getState();
+    const sw: u16 = @intCast(cs.screen.width_in_pixels);
+    const sh: u16 = @intCast(cs.screen.height_in_pixels);
+    const small_w: u16 = sw / 2;
+    const small_h: u16 = sh / 2;
+
+    const w1, const w2 = seedTwo(fx);
+
+    // 1. A pending HIDE is not confirmed by a non-fullscreen report: the
+    //    window must REPORT screen dimensions before the bar moves.
+    fullscreen.armPendingBarHide(w1);
+    const before = core.fullscreen.rev();
+    fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
+    try std.testing.expectEqual(before, core.fullscreen.rev());
+    //    The entry survived, so a later matching report still resolves it.
+    fullscreen.notifyConfigureIfPending(w1, sw, sh);
+    try std.testing.expectEqual(before + 1, core.fullscreen.rev());
+
+    // 2. MODEL TRUTH gates the hide. Screen-sized dimensions with a model that
+    //    says NOT covering must NOT move the bar: that combination is a client
+    //    reporting fullscreen-shaped geometry after being told to leave, and
+    //    hiding the bar there is the bug the dimensions-only version had.
+    fullscreen.armPendingBarHide(w1);
+    const before2 = core.fullscreen.rev();
+    fullscreen.notifyConfigureIfPending(w1, sw, sh);
+    try std.testing.expectEqual(before2, core.fullscreen.rev());
+
+    // 3. PER WINDOW: arming w2 must not evict w1's pending entry.
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
+    const before3 = core.fullscreen.rev();
+    fullscreen.armPendingBarHide(w1);
+    fullscreen.armPendingBarShow(w2);
+    fullscreen.notifyConfigureIfPending(w2, small_w, small_h);
+    //    w2's show resolved only because w1 no longer covers the screen.
+    try std.testing.expectEqual(before3 + 1, core.fullscreen.rev());
+    //    w1's own entry is still pending and still hidden-intent: a second
+    //    report resolves it on its own account, not as w2's leftover.
+    const before4 = core.fullscreen.rev();
+    fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
+    try std.testing.expectEqual(before4, core.fullscreen.rev());
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
+    fullscreen.notifyConfigureIfPending(w1, sw, sh);
+    try std.testing.expectEqual(before4 + 1, core.fullscreen.rev());
+
+    // 4. A pending SHOW for a window that still covers does not move the bar:
+    //    screen dimensions are the show's confirmation, so use them, and the
+    //    model must agree nothing covers.
+    const before5 = core.fullscreen.rev();
+    fullscreen.armPendingBarShow(w1);
+    fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
+    try std.testing.expectEqual(before5, core.fullscreen.rev()); // w1 still covers
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
+    fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
+    try std.testing.expectEqual(before5 + 1, core.fullscreen.rev());
 }

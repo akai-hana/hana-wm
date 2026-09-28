@@ -267,16 +267,6 @@ fn setCursor(vs: *EditorState, mr: MotionResult) void {
     vs.cursor = @min(mr.pos, vs.len -| 1);
 }
 
-fn deleteRange(vs: *EditorState, from: usize, to: usize) void {
-    if (from >= to or to > vs.len) return;
-    const n = to - from;
-    std.mem.copyForwards(u8, vs.buf[from .. vs.len - n], vs.buf[to..vs.len]);
-    vs.len -= n;
-    vs.cursor = from;
-    if (vs.mode == .normal and vs.len > 0 and vs.cursor >= vs.len)
-        vs.cursor = vs.len - 1;
-}
-
 fn yankRange(vs: *EditorState, from: usize, to: usize) void {
     if (from >= to or to > vs.len) return;
     const n = to - from;
@@ -286,7 +276,7 @@ fn yankRange(vs: *EditorState, from: usize, to: usize) void {
 
 fn deleteAndYank(vs: *EditorState, from: usize, to: usize) void {
     yankRange(vs, from, to);
-    deleteRange(vs, from, to);
+    prompt.deleteRange(vs, from, to);
 }
 
 fn clearAndYankAll(vs: *EditorState) void {
@@ -312,13 +302,14 @@ inline fn toggleCaseChar(ch: u8) u8 {
 
 fn toggleCaseOnce(vs: *EditorState) void {
     if (vs.cursor >= vs.len) return;
-    vs.buf[vs.cursor] = toggleCaseChar(vs.buf[vs.cursor]);
+    const toggled = [_]u8{toggleCaseChar(vs.buf[vs.cursor])};
+    prompt.overwriteAt(vs, vs.cursor, &toggled);
     if (vs.cursor + 1 < vs.len) vs.cursor += 1;
 }
 
 fn ctrlW(vs: *EditorState) void {
     if (vs.cursor == 0) return;
-    deleteRange(vs, wordScanBwd(false, vs, false, 1), vs.cursor);
+    prompt.deleteRange(vs, wordScanBwd(false, vs, false, 1), vs.cursor);
 }
 
 fn applyOperator(vs: *EditorState, op: u8, mr: MotionResult) void {

@@ -17,7 +17,7 @@
 //!      card control would write a different volume.
 //!   4. `amixer` subprocess (fallback).
 //!
-//! `commit_is_native` reports whether THIS sub's commits go through an
+//! `commit_cost` reports whether THIS sub's commits go through an
 //! in-process native call (microseconds, no subprocess): the slider core
 //! throttles only the spawned paths. The 0-100 % clamp in `commit` is the
 //! single guard for every caller's value; scrolling at the boundary computes
@@ -142,13 +142,15 @@ fn readVolume() bool {
     return !had_value or g_pct != old_pct or g_muted != old_muted;
 }
 
-/// True when the current backend commits through an in-process native call
-/// (cheap: one ioctl or one libpulse round trip), which needs no throttling.
-fn commitIsNative() bool {
+/// The latency class of one commit on the live backend: an in-process libpulse
+/// or ALSA call is cheap and needs no window; an unresolved backend means every
+/// commit is a `pactl`/`amixer` spawn, which does. Named value (see
+/// `slider.CommitCost`) rather than the bare bool this used to be.
+fn commitCost() slider.CommitCost {
     return switch (g_backend) {
-        .pulse => g_native_pulse != null,
-        .alsa => g_native_alsa != null,
-        .unknown => false,
+        .pulse => if (g_native_pulse != null) .immediate else .rate_limited,
+        .alsa => if (g_native_alsa != null) .immediate else .rate_limited,
+        .unknown => .rate_limited,
     };
 }
 
@@ -157,8 +159,16 @@ fn commitIsNative() bool {
 /// caller's value (slider, scroll, config): 0-100 % is all the backend ever
 /// receives. Scheduled by the slider core's throttle, which owns the commit
 /// clock.
+/// The one clamp every level passes: 0-100 % is all the backend ever
+/// receives. `commitPct` and `previewPct` MUST go through the same function --
+/// they used to clamp independently, and when `previewPct` forgot to, a
+/// scroll/drag motion could display a level the backend then refused.
+fn clampPct(v: u8) u8 {
+    return @min(v, 100);
+}
+
 fn commitPct(v: u8) void {
-    const pct = @min(v, 100);
+    const pct = clampPct(v);
     switch (g_backend) {
         .pulse => {
             // Native: an in-process libpulse set (no fork/exec/pipe at all).
@@ -196,7 +206,7 @@ fn applyPct(v: u8) void {
 /// Optimistic display update from a scroll/drag motion: the label follows
 /// immediately while the backend write is committed by the core's scheduler.
 fn previewPct(v: u8) void {
-    g_pct = v;
+    g_pct = clampPct(v);
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}` and
@@ -255,7 +265,7 @@ pub const sub: slider.Sub = .{
     .read = readVolume,
     .pct = currentPct,
     .preview = previewPct,
-    .commit_is_native = commitIsNative,
+    .commit_cost = commitCost,
     .commit = commitPct,
     .apply = applyPct,
     .label = label,

@@ -15,11 +15,13 @@ const std = @import("std");
 const constants = @import("constants");
 const model = @import("model");
 const log = @import("log");
-const window = @import("window");
 // Peers reach each other's hooks through the generated window registry,
 const bounded = @import("bounded");
 // never by naming a sibling module: deleting a sibling only shortens the
-// registry, and capabilities stay provider-agnostic.
+// registry, and capabilities stay provider-agnostic. 12.1 removed minimize's
+// last `window.*` use (the covering-mode peek), so it imports no window-layer
+// module at all now -- which is the peer rule actually holding rather than
+// just being documented next to a violation.
 
 fn resetState() void {
     g_recs.clear();
@@ -172,7 +174,17 @@ fn bestSeq(
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
         if (skip_covering) {
-            if (window.isCoveringMode(m, rec.win)) continue;
+            // 12.1: read the model's covering intent directly instead of
+            // asking a PEER MODULE through the contract hook. The hook's
+            // answer is only right when the covering module is compiled in --
+            // `isCoveringMode` is null otherwise, so this scan silently kept
+            // picking screen-covering windows as restore candidates in a build
+            // without that module. `covering_ws` is the model-side truth,
+            // written on capture, cleared on release, and PERSISTED (persist
+            // restores it), so it is also the right answer during a session
+            // restore, before the covering module has rebuilt its own state.
+            const covering = if (m.store.get(rec.win)) |e| e.covering_ws != null else false;
+            if (covering) continue;
         }
         const better = switch (order) {
             .fifo => best == null or rec.seq < best_seq,

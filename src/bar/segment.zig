@@ -82,6 +82,14 @@ pub const DrawCtx = struct {
     /// Reserved row width for the segment currently being drawn.
     width: u16 = 0,
 
+    /// The configured name of the segment currently being drawn, e.g. "cpu" or
+    /// "volume". Set by bar.drawSegment from the name it already had in hand,
+    /// so a module can resolve its OWN themed colors without a second argument
+    /// threaded through the registry draw hook (which is shared by every
+    /// segment). Empty when a caller builds a DrawCtx without drawing a
+    /// specific segment.
+    name: []const u8 = "",
+
     /// Title addon's minimized-state service (registered each draw). The
     /// bar caches it into State so it can invoke the synthesis on every scan.
     minimized_api: MinimizedApi = .{},
@@ -106,7 +114,6 @@ pub const DrawCtx = struct {
             .height = self.height,
             .start_x = start_x,
             .width = width,
-            .conn = self.conn,
         };
     }
 
@@ -150,14 +157,16 @@ pub const WindowInfo = struct {
     minimized: bool,
 };
 
-/// Stable per-call rendering context: geometry, draw state, and connection.
+/// Stable per-call rendering context: geometry and draw state. It carries no
+/// X connection: the title draw had one only to call
+/// `hz.ensureRefreshRateDetected`, which `bar.init` primes at startup, and a
+/// render that mutates global detection state is a phase violation.
 pub const TitleRenderContext = struct {
     dc: *drawing.DrawContext,
     config: types.BarConfig,
     height: u16,
     start_x: u16,
     width: u16,
-    conn: core.Connection,
 };
 
 /// Per-frame volatile snapshot captured before drawing.

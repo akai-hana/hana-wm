@@ -6,8 +6,10 @@
 //! live in `segment.zig` (shared across bar segments); this module only owns
 //! the rendering of the title slot and the prompt overlay.
 
-const core = @import("core");
-
+// The title reads no global state at all: config arrives per draw on the
+// render context, and even the refresh rate is only *read* (the hz memo
+// `bar.init` primes). A DRAW must not detect a refresh rate, because
+// detection writes that shared memo.
 const hz = @import("hz");
 
 const types = @import("types");
@@ -21,13 +23,48 @@ const time = @import("time");
 // `title_subs` registry is driven by file presence alone, so this module
 // never names it. Dropping carousel.zig just shortens `addons` and the title
 // falls back to its real built-in static (ellipsis) rendering -- no stub.
-pub const Scroller = struct {
-    cyclePx: *const fn (text_w: u16) f32,
-    scrollingActive: *const fn () bool,
-    offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, now_ms: i64) f32,
-    resetForShow: *const fn () void,
-    pollDeadlineMs: *const fn (now_ms: i64, enabled: bool, hz: f64) i32,
+/// The whole scroll decoration for one frame, as ONE value. Declared HERE, in
+/// the contract, not in the extensor: the seam's shape must not depend on
+/// whether carousel.zig is present, which is the whole point of the addon
+/// registry.
+///
+/// The title used to call `offsetFor` for the offset and then separately ask
+/// `scrollingActive` whether the scroll was live and call `cyclePx` for its
+/// period -- three seam calls whose agreement was a cross-member invariant
+/// nothing enforced, with `cyclePx` duplicated in the title so it could
+/// re-derive the period from a width it had measured itself.
+pub const Scroll = struct {
+    /// Sub-pixel x offset for the title head (0 = resting position).
+    off: f32,
+    /// Period in px: the offset wraps at this, and the scrolled text run is
+    /// [x0, x0 + cycle).
+    cycle: f32,
+    /// True while this frame produced live motion. Marquee frames repaint
+    /// moving pixels whose data has not changed, so the title's needsRepaint
+    /// hook forwards exactly this bit.
+    active: bool,
 };
+
+pub const Scroller = struct {
+    /// The whole scroll decoration for one frame, in one call: offset, cycle
+    /// and the active bit. Three separate seam queries (offsetFor /
+    /// scrollingActive / cyclePx) had to agree with each other across the
+    /// seam boundary, and the title carried its own copy of cyclePx to make
+    /// that possible.
+    offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, now_ms: i64) Scroll,
+    pivot: *const fn () void,
+    pollDeadlineMs: *const fn (now_ms: i64, hz: f64) i32,
+};
+comptime {
+    // The seam is a SINGLETON slot, and taking `addons[0]` said nothing about
+    // that: a second `Scroller` addon was silently dropped while the registry
+    // kept looking like a registry. One decorator composes; two need the seam
+    // to become a capability query.
+    if (@import("title_subs").addons.len > 1) @compileError(
+        "title: at most one Scroller addon is supported; " ++
+            "a second one would be silently dropped by the addons[0] slot",
+    );
+}
 const scroller: ?Scroller = if (@import("title_subs").addons.len != 0)
     @import("title_subs").addons[0]
 else
@@ -67,7 +104,10 @@ fn drawInner(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
 ) !u16 {
-    hz.ensureRefreshRateDetected(ctx.conn);
+    // No refresh-rate detection here: `bar.init` primes it once at startup, and
+    // detection writes global state (the monitor's Hz memo every other segment
+    // reads), so calling it from a DRAW made a render mutate the state the next
+    // frame's pacing decision depends on. The field it needed is gone with it.
     const window_count = snapshot.current_ws_wins.len;
     // Empty workspace: fill the background and return the segment's end x.
     if (window_count == 0) {
@@ -150,7 +190,8 @@ fn drawMarqueeCell(
     now: i64,
 ) !void {
     if (scroller) |s| {
-        const off = s.offsetFor(
+        const scroll = advanceScroll(
+            s,
             win,
             txt,
             text_w,
@@ -159,11 +200,11 @@ fn drawMarqueeCell(
             ctx.config.carousel_speed_px_s,
             now,
         );
-        if (s.scrollingActive()) {
-            const cycle = s.cyclePx(text_w);
+        if (scroll.active) {
+            const cycle = scroll.cycle;
             // Anchor the scroll at the padded text start (same spot static mode uses),
             // so enabling the carousel continues seamlessly from where the head sat.
-            const x0: f64 = @as(f64, @floatFromInt(sg.text_x)) - off;
+            const x0: f64 = @as(f64, @floatFromInt(sg.text_x)) - scroll.off;
             try ctx.dc.drawTextScrolled(
                 sg.seg_x,
                 sg.seg_w,
@@ -222,7 +263,7 @@ fn drawFittedTitle(
         // Unfocused cells never touch the carousel: it tracks exactly one
         // cell per frame, the focused one.
         if (scroll_enabled) {
-            if (scroller) |s| _ = s.offsetFor(window, title, text_w, sg.avail_w, false, 0, now);
+            if (scroller) |s| _ = advanceScroll(s, window, title, text_w, sg.avail_w, false, 0, now);
         }
         try ctx.dc.drawText(sg.text_x, baseline_y, title, text_fg);
     } else if (scroll_enabled)
@@ -300,7 +341,7 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     // offset instead of catching the whole session in one frame.
     if (overlay_was_active) {
         overlay_was_active = false;
-        if (scroller) |s| s.resetForShow();
+        if (scroller) |s| s.pivot();
     }
     return renderTitle(c, x);
 }
@@ -335,12 +376,7 @@ fn pollTimeoutMsHook() i32 {
     // re-arms motion via offsetFor. The title owns this decision, so the
     // overlay never reaches into the scroller to pause it.
     if (overlayActive()) return -1;
-    if (scroller) |s|
-        return s.pollDeadlineMs(
-            time.monotonicMs(),
-            core.getState().config.bar.carousel_enabled,
-            hz.detectedHz(),
-        );
+    if (scroller) |s| return s.pollDeadlineMs(time.monotonicMs(), hz.detectedHz());
     return -1;
 }
 
@@ -354,14 +390,47 @@ fn pollTimeoutMsHook() i32 {
 /// than forcing a whole-bar redraw.
 fn needsRepaintHook() bool {
     if (overlay) |o| if (o.is_active()) return o.needsRepaint();
-    return if (scroller) |s| s.scrollingActive() else false;
+    return scroll_active;
+}
+
+/// The last frame's scroll-active bit, recorded from the single seam call.
+/// This is the title's copy of what used to be an out-of-band `scrollingActive`
+/// QUERY on the seam: the value now arrives together with the offset it
+/// describes, and the title remembers it for the one consumer that is not a
+/// draw (needsRepaintHook).
+var scroll_active: bool = false;
+
+/// The single point where the title talks to the scroller, so the active bit
+/// cannot be recorded on the draw path and forgotten on the retire path.
+fn advanceScroll(
+    s: Scroller,
+    win: u32,
+    txt: []const u8,
+    text_w: u16,
+    avail_w: u16,
+    enabled: bool,
+    speed_px_s: u16,
+    now_ms: i64,
+) Scroll {
+    const scroll = s.offsetFor(win, txt, text_w, avail_w, enabled, speed_px_s, now_ms);
+    scroll_active = scroll.active;
+    return scroll;
 }
 
 /// The bar fires this on every show (map). A marquee that was scrolling when
 /// the bar hid must resume from its last shown offset rather than catching
 /// the whole hidden gap in one frame (which would land it mid-cycle).
 fn onBarShownHook() void {
-    if (scroller) |s| s.resetForShow();
+    if (scroller) |s| s.pivot();
+}
+
+/// Fired by the bar when a reload invalidates every segment cache. Config is
+/// about to change the scroller's own inputs (carousel speed, the bar's
+/// padding, the cell's usable width), so the elapsed-time base is rebased
+/// instead of integrated across the change: without this, a reload mid-scroll
+/// produced one frame whose dt spanned the old and the new geometry at once.
+fn invalidateReloadCachesHook() void {
+    if (scroller) |s| s.pivot();
 }
 
 /// This module's bar-segment contribution (registry binding).
@@ -375,4 +444,5 @@ pub const module: @import("contract").Segment = .{
     .draw = drawHook,
     .onClick = onClickHook,
     .onBarShown = onBarShownHook,
+    .invalidateReloadCaches = invalidateReloadCachesHook,
 };

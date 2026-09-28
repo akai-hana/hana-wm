@@ -13,6 +13,7 @@
 #   ./dev/scripts/check-modularity.sh -v           # verbose (show build output)
 #   ./dev/scripts/check-modularity.sh -p "bar"     # only run scenarios matching pattern
 #   ./dev/scripts/check-modularity.sh -k           # keep temp copies on failure
+#   ./dev/scripts/check-modularity.sh -O Debug     # cheaper scenario builds
 #   ./dev/scripts/check-modularity.sh --clean      # remove stale temp copies
 
 set -euo pipefail
@@ -35,6 +36,12 @@ VERBOSE=0
 KEEP_ON_FAILURE=0
 PATTERN=""
 JOBS=1
+# Optimize mode for the scenario builds. A bare `zig build` defaults to
+# ReleaseFast (see resolveOptimize in build.zig), so every scenario was paying
+# for full codegen. These builds only assert that a feature-deleted tree still
+# COMPILES, which Debug proves just as well and far more cheaply; the release
+# modes are still covered by the gate's own `zig build`.
+OPTIMIZE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         -k|--keep-on-failure) KEEP_ON_FAILURE=1; shift ;;
         -p|--pattern) PATTERN="$2"; shift 2 ;;
         -j|--jobs) JOBS="$2"; shift 2 ;;
+        -O|--optimize) OPTIMIZE="$2"; shift 2 ;;
         --clean) echo "Removing $TEMP_BASE"; rm -rf "$TEMP_BASE"; exit 0 ;;
         -h|--help)
             sed -n '2,/^$/{ s/^# \?//; p }' "$0"
@@ -103,10 +111,12 @@ try_build() {
     local log="$root/_build.log"
     (
         cd "$root"
+        local -a opts=(-j"$JOBS")
+        [[ -n "$OPTIMIZE" ]] && opts+=("-Doptimize=$OPTIMIZE")
         if [[ "$VERBOSE" -eq 1 ]]; then
-            zig build -j"$JOBS" 2>&1
+            zig build "${opts[@]}" 2>&1
         else
-            zig build -j"$JOBS" >"$log" 2>&1
+            zig build "${opts[@]}" >"$log" 2>&1
         fi
     )
 }

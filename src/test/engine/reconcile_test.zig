@@ -446,3 +446,29 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectLen(1);
     try fx.rec.expectPark(0, 901);
 }
+
+// 11.4: the border-pixel dedup the sweep and the reconcile now share.
+//
+// The subtle case is pixel 0. A blank ledger record's `pixel` field is 0, so a
+// comparison of `pixel != new` alone would elide the very first send for a
+// window whose configured border colour is genuinely black -- the border would
+// never be set at all. `has_rect` is what distinguishes "we know the server's
+// current pixel" from "we have never sent one".
+test "ledger: the border-pixel dedup does not swallow a real black border" {
+    ledger.init();
+
+    // Blank record, black border: MUST send, even though the stored default
+    // already reads 0.
+    try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0));
+
+    // Now the record exists but no visible geometry was ever sent, so the
+    // stored 0 is still not an assertion about the server.
+    try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0));
+
+    // A real geometry send records the pixel, and from here the dedup works.
+    const e = ledger.sentGetOrPut(900).?;
+    ledger.markSentVisible(e, .{ .x = 0, .y = 0, .width = 10, .height = 10 }, 2, 0);
+    try testing.expect(!ledger.markSentBorderPixelIfChanged(900, 0)); // elided
+    try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // changed
+    try testing.expect(!ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // elided
+}

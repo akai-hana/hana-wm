@@ -12,7 +12,7 @@
 //!
 //! A fullscreen window is a *ghost* while minimized: minimize parks the model
 //! entry (`presence == .parked`) but leaves `covering_ws` set, so
-//! `fullscreenWsOf` still reports the ws and restore re-claims the screen
+//! `model.coveringWsOf` still reports the ws and restore re-claims the screen
 //! (minimize.restore reposts `.covering`).
 
 const core = @import("core");
@@ -25,18 +25,72 @@ const atoms = @import("atoms");
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
 
-/// Window awaiting ConfigureNotify confirmation of a deferred bar
-/// transition: fullscreen enter (hide the bar) or exit (show it). The two
-/// intents are mutually exclusive (arming one clears the other), so a single
-/// optional entry carries both. Null when none pending; set by the arm
-/// pair; cleared by notifyConfigureIfPending, resolvePendingBarShow,
-/// resetState, onWindowGone.
-var g_pending_bar: ?PendingBar = null;
-
-const PendingBar = struct {
+/// One window's pending bar intent. Public because it is `PendingBarTable`'s
+/// element type: a private element would leak through `take`'s signature.
+pub const PendingBar = struct {
     win: u32,
     hide: bool,
 };
+
+/// Windows awaiting ConfigureNotify confirmation of a deferred bar transition:
+/// enter (hide the bar) or exit (show it). The two intents are mutually
+/// exclusive PER WINDOW (arming one clears the other for that window), so one
+/// entry per window carries both.
+///
+/// PER WINDOW, not one slot (12.7). A single optional slot meant arming a
+/// second window's intent silently DISCARDED the first: that window's
+/// ConfigureNotify then found nothing pending, never bumped the fact, and its
+/// bar state stayed whatever the second window decided -- a hide that never
+/// hides, or a show that never shows, with nothing in the log. A covering
+/// transition is in flight for at most one window per workspace, so a handful
+/// of entries is ample.
+///
+/// AT THE BOUND: the new arm takes the last slot, so the window that held that
+/// slot loses its transition. That is a real (if far-out-of-range) loss, and
+/// it is why `max` is 8 rather than 2: the single-slot bug dropped a transition
+/// on the SECOND concurrent arm, and 8 keeps the practical path at zero loss.
+/// The bound is a memory ceiling, not a silent-drop budget.
+pub const PendingBarTable = struct {
+    pub const max = 8;
+    entries: [max]PendingBar = undefined,
+    len: usize = 0,
+
+    /// Upsert `win`'s intent, replacing any existing entry for it.
+    pub fn arm(self: *PendingBarTable, win: u32, hide: bool) void {
+        for (self.entries[0..self.len], 0..) |e, i| {
+            if (e.win != win) continue;
+            self.entries[i] = .{ .win = win, .hide = hide };
+            return;
+        }
+        if (self.len == max) {
+            // Refuse to grow (len is the memory ceiling). Reuse the last
+            // slot, whose previous holder loses its transition -- see the
+            // AT THE BOUND note on the type.
+            self.entries[max - 1] = .{ .win = win, .hide = hide };
+            return;
+        }
+        self.entries[self.len] = .{ .win = win, .hide = hide };
+        self.len += 1;
+    }
+
+    /// Remove and return `win`'s pending intent, or null when it has none.
+    pub fn take(self: *PendingBarTable, win: u32) ?PendingBar {
+        for (self.entries[0..self.len], 0..) |e, i| {
+            if (e.win != win) continue;
+            const found = e;
+            self.entries[i] = self.entries[self.len - 1];
+            self.len -= 1;
+            return found;
+        }
+        return null;
+    }
+
+    pub fn clear(self: *PendingBarTable) void {
+        self.len = 0;
+    }
+};
+
+var g_pending_bars: PendingBarTable = .{};
 
 // EWMH atoms for _NET_WM_STATE_FULLSCREEN, resolved from the shared atom
 // cache (atoms.initAtomCache) in init(). Zero (XCB_ATOM_NONE) when the cache
@@ -46,7 +100,7 @@ var g_net_wm_state_fullscreen: xcb.xcb_atom_t = 0;
 
 // Shared reset sequence used by both init() and deinit() to keep them in sync.
 fn resetState() void {
-    g_pending_bar = null;
+    g_pending_bars.clear();
     g_net_wm_state = 0;
     g_net_wm_state_fullscreen = 0;
 }
@@ -102,42 +156,28 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     return true;
 }
 
-/// True when `win` holds a covering (fullscreen) capture, derived from the
-/// MODEL's core `covering_ws` intent. Reports true even while the model
-/// presence is parked — a minimized-from-fullscreen window keeps `covering_ws`
-/// set — so the ghost state is preserved. Reading the model here keeps this
-/// predicate consistent with `fullscreenWsOf` and the core
-/// `coveringOccupantOnWs`, with no module record to drift out of lockstep.
-pub fn isFullscreenMode(m: *const model.Model, win: model.WindowId) bool {
-    const e = m.store.get(win) orelse return false;
-    return e.covering_ws != null;
-}
-
-/// The workspace `win`'s covering capture anchors to, per the MODEL's core
-/// `covering_ws` intent. GHOST: still reports the ws even while the model
-/// presence is parked (minimized-from-fullscreen: minimize leaves
-/// `covering_ws` set), so callers classifying drops/withdraw-without-destroy
-/// can read the true target before teardown.
-pub fn fullscreenWsOf(m: *const model.Model, win: model.WindowId) ?model.WSId {
-    const e = m.store.get(win) orelse return null;
-    return e.covering_ws;
-}
-
-/// Whether `win`'s covering capture targets `ws`. Unlike
-/// fullscreenOccupantOnWs this does NOT consult visibility; callers use it for
-/// pre-toggle classification and was-fullscreen captures. Reads the model's
-/// `covering_ws` intent.
-pub fn isFullscreenOnWs(m: *const model.Model, win: model.WindowId, ws: model.WSId) bool {
-    const fws = fullscreenWsOf(m, win) orelse return false;
-    return fws.eql(ws);
-}
+// 12.4: `isFullscreenMode`, `fullscreenWsOf` and `isFullscreenOnWs` are GONE.
+// Each was a private copy of a model read (`covering_ws`), reached through a
+// contract dispatch that resolves to null when no covering module is bound --
+// so "is this window covering" was false in a build without one, and became
+// a per-provider answer for a per-field fact. The queries are `model.isCovering`,
+// `model.coveringWsOf` and `model.isCoveringOn`; they carry the same GHOST
+// semantics these had (a minimized-from-covering window keeps `covering_ws`
+// set and still reports its workspace).
 
 /// Clears `win`'s covering intent, returning the window to plain presence.
 /// The anchor needs no replay: nothing mutates a covering window's anchor
 /// (floating's setFloatingRect is gated on `presence != .covering`), so the
 /// base mode stands as recorded. Shared by the toggle-offs and the
 /// occupant-eviction path.
-fn releaseCovering(m: *model.Model, win: model.WindowId) void {
+/// One-way covering release (12.8): clears the intent and the covering
+/// presence, and does nothing at all if `win` is not covering.
+///
+/// `toggleCovering` reaches this same body, but only after proving the window
+/// IS covering. A peer that means "demote" (the workspaces move/tag seam) must
+/// not have to re-derive that proof to use a two-edged verb safely, so this is
+/// the entry that cannot turn a demote into a fullscreen entry.
+pub fn releaseCovering(m: *model.Model, win: model.WindowId) void {
     const e = m.store.getPtr(win) orelse return;
     e.presence = .present;
     e.covering_ws = null; // release the core covering intent
@@ -151,8 +191,8 @@ fn releaseCovering(m: *model.Model, win: model.WindowId) void {
 /// record, so there is no separate registry to scan. At most one visible
 /// occupant per ws is guaranteed by sync (others parked).
 /// Contrast `model.coveringOccupantOnWs` (OR: anchor-or-visibility union).
-/// Routed through contract.coveringOccupantOnWs for the workspaces move/tag seam.
-pub fn fullscreenOccupantOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
+/// Routed through contract.visibleCoveringOnWs for the workspaces move/tag seam.
+pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
         const e = row.val;
@@ -195,7 +235,7 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     // old grabCtx) rebuilt `.workarea`/`.bar_win` mid-grab and re-ran the
     // pre-reconcile duties after geometry had already been applied, so the
     // model and the server could disagree before the single ungrabAndFlush.
-    pipeline.currentCtx().sink.setEwmhFullscreen(
+    pipeline.currentCtx().sink.setStateAtom(
         win,
         g_net_wm_state,
         g_net_wm_state_fullscreen,
@@ -211,55 +251,58 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
 /// non-fullscreen ones (exit). Safe for every ConfigureNotify; no-ops when
 /// nothing is pending or dimensions don't match.
 pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
-    const pending = g_pending_bar orelse return;
-    if (pending.win != win) return;
+    const pending = g_pending_bars.take(win) orelse return;
 
     const cs = core.getState();
     const screen_w = @as(u16, @intCast(cs.screen.width_in_pixels));
     const screen_h = @as(u16, @intCast(cs.screen.height_in_pixels));
 
-    // Deferred bar hide (enter-fullscreen path): window must report exactly
-    // screen dimensions before we hide the bar. Deferred bar show (exit
-    // path) must report non-fullscreen dimensions first. The branch carries
-    // the mutual exclusion explicitly: both can never match for the same win.
-    // In both cases we only bump core's fullscreen-occupancy fact; the bar
-    // (a consumer) derives its own hide/show from that fact.
+    // The ConfigureNotify DIMENSIONS are the confirmation that the server has
+    // caught up, but the decision itself is MODEL TRUTH (12.7): the bar
+    // follows `presence == .covering`, not "the numbers went back to normal".
+    // Inferring hide/show from the dimensions is what let the bar re-show
+    // while the model still recorded a covering occupant (a client that
+    // reports screen-sized geometry after being told to leave fullscreen) --
+    // the bar would come back over a covering window and stay.
+    const m = pipeline.model();
+    const covering = if (m.store.get(win)) |e| e.presence == .covering else false;
+
     if (pending.hide) {
-        if (width == screen_w and height == screen_h) {
-            g_pending_bar = null;
+        // Enter: the window must have REPORTED screen dimensions, and the
+        // model must agree it is covering.
+        if (width == screen_w and height == screen_h and covering) {
             core.fullscreen.bump();
         }
     } else if (width != screen_w or height != screen_h) {
-        resolvePendingBarShow();
+        // Exit: the window has reported non-fullscreen dimensions. Bump only
+        // when the model agrees nothing here is covering; if a DIFFERENT window
+        // still covers, the bar must stay hidden, and that is the model's
+        // answer rather than this window's geometry.
+        if (!covering) core.fullscreen.bump();
     }
-}
-
-fn resolvePendingBarShow() void {
-    g_pending_bar = null;
-    core.fullscreen.bump();
 }
 
 /// Arm the deferred bar-hide from the fullscreenToggle path.
 pub fn armPendingBarHide(win: u32) void {
-    g_pending_bar = .{ .win = win, .hide = true };
+    g_pending_bars.arm(win, true);
 }
 
 /// Arm the deferred bar-show after an exit reconcile (armed AFTER geometry
 /// settles).
 pub fn armPendingBarShow(win: u32) void {
-    g_pending_bar = .{ .win = win, .hide = false };
+    g_pending_bars.arm(win, false);
 }
 
 /// Record cleanup on window teardown; the wire layer fires this (events /
 /// unmanage) after removing the store entry. Also clears any pending deferred
 /// bar op so the bar doesn't stay stuck (both show and hide cases).
 pub fn onWindowGone(win: u32) void {
-    const pending = g_pending_bar orelse return;
-    if (pending.win != win) return;
-    if (pending.hide)
-        g_pending_bar = null
-    else
-        resolvePendingBarShow();
+    const pending = g_pending_bars.take(win) orelse return;
+    // A pending HIDE just dies with the window. A pending SHOW must still
+    // bump: the window is gone, so the bar has to be re-derived, and the
+    // model's covering scan will now come back empty. Note the entry is
+    // already taken, so there is nothing left to clear.
+    if (!pending.hide) core.fullscreen.bump();
 }
 
 /// This module's window sub-system contribution: lifecycle + coverage seam +
@@ -273,9 +316,7 @@ pub const module: @import("contract").WindowModule = .{
     .armPendingBarHide = armPendingBarHide,
     .armPendingBarShow = armPendingBarShow,
     .toggleCovering = toggleFullscreen,
-    .isCoveringMode = isFullscreenMode,
-    .coveringWsOf = fullscreenWsOf,
-    .isCoveringOnWs = isFullscreenOnWs,
-    .coveringOccupantOnWs = fullscreenOccupantOnWs,
+    .visibleCoveringOnWs = visibleCoveringOnWs,
+    .releaseCovering = releaseCovering,
     .moveCoveringTo = moveFullscreenTo,
 };

@@ -239,7 +239,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
                     .border_pixel = pixelShim,
                     .park = parkShim,
                     .stack_only = stackShim,
-                    .set_ewmh_fullscreen = ewmhShim,
+                    .set_state_atom = ewmhShim,
                     .flush = flushShim,
                     .grab_server = grabShim,
                     .ungrab_and_flush = ungrabShim,

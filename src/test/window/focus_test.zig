@@ -287,3 +287,40 @@ test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel s
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expect(focus.protocolParityHolds());
 }
+
+// 10.6: the destroyed-window guard applies to `.user_command` too.
+//
+// The guard used to be `if (reason == .mouse_click and !isWindowMapped(...))`,
+// with `.user_command` excluded because the bar's collectVisibleWindows
+// callers had already confirmed visibility. floating.zig reaches
+// grabFocus(win, .user_command) directly, so that reasoning did not hold
+// there: a window destroyed between admission and the toggle could be focused
+// and raised. The new model-side `store.has` check closes it with no round
+// trip, and this is the regression test for that specific path.
+//
+// X-gated like the rest of this file (grabFocus takes a real server grab).
+test "focus: a destroyed window cannot take focus via user_command" {
+    var fx = fixture.setUp("focus_test") orelse return;
+    defer fx.deinit();
+
+    const w1 = fx.createWindow();
+    try admit(w1);
+    fx.flush();
+
+    const m = pipeline.model();
+    const m2 = pipeline.mut(&.{});
+
+    // Destroy the window behind the model's back: the entry leaves the store
+    // (what a DestroyNotify would do) but no event is delivered, so this is
+    // the exact window a stale caller could still be holding.
+    model.unregister(m2, w1);
+    fx.flush();
+
+    try std.testing.expect(!m.store.has(w1));
+
+    // The direct `.user_command` route the guard used to let through.
+    focus.grabFocus(w1, .user_command);
+    fx.flush();
+
+    try std.testing.expect(m.focused == null or m.focused.? != w1);
+}

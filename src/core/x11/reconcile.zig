@@ -63,7 +63,6 @@ const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
 const ledger = @import("ledger");
 const sink = @import("sink");
-const time = @import("time");
 
 pub const Ctx = struct {
     sink: sink.Sink,
@@ -81,30 +80,6 @@ pub const Ctx = struct {
 };
 
 pub const Opts = struct { force_restack: bool = false };
-
-/// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
-/// clock held by each server-grab retile -- the exact latency a user feels
-/// across a tiling op -- plus how many store entries were walked (the full
-/// path walks every entry each reconcile, modulo the off-workspace fast path).
-/// Gated by `build_options.profile_key` (the same flag as the key-dispatch
-/// path) so release WMs compile it out.
-const retile_prof = log.WindowedProfiler(
-    build_options.profile_key,
-    "[RETILE_PROF] last {} grab-retiles: avg={d:.0}ns min={d}ns max={d}ns",
-    std.log.info,
-);
-
-pub fn reconcileUnderGrab(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
-    // grab_server -> reconcile(opts) -> optional top/bar restack ->
-    // ungrabAndFlush. Zero round trips inside.
-    const t0: i128 = if (retile_prof.enabled) time.monotonicNs() else 0;
-    ctx.sink.grabServer();
-    defer {
-        ctx.sink.ungrabAndFlush();
-        if (retile_prof.enabled) retile_prof.note(time.monotonicNs() - t0);
-    }
-    run(m, ctx, opts);
-}
 
 /// Fast-path reconcile for drag ticks: sends ONLY geometry for the dragged
 /// window, skipping all other windows, the tiling compute, and border/map
@@ -159,7 +134,16 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
     // its placement in O(1) instead of an O(N) scan per window. Stack scratch,
     // no allocation, matching the file's fixed-capacity style.
     var pl_of_slot: [model.store_capacity]?usize = [_]?usize{null} ** model.store_capacity;
-    if (build_options.has_tiling and fs_win == null) {
+    // 13.6: ONE activation gate, and it also SUPPLIES the geometry. This used
+    // to be `build_options.has_tiling` (a COMPILE-time fact) while the bar
+    // reported the active layout from `contract.activeLayoutKind` (enabled AND
+    // registered), so with `tiling.enabled = false` the bar showed "no layout"
+    // and the geometry still tiled -- two answers to one question. Gating on
+    // the resolved kind also subsumes the no-tiling build (an empty registry
+    // resolves to null).
+    const params = &m.ws[m.current.index].params;
+    const layout_active = contract.activeLayoutKind(params.kind) != null;
+    if (fs_win == null) {
         var n: usize = 0;
         const tiled = &m.ws[m.current.index].tiled_order;
         for (tiled.constSlice()) |w| {
@@ -176,11 +160,21 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             hints_buf[n] = e.size_hints;
             n += 1;
         }
-        const hv = contract.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
-        const params = &m.ws[m.current.index].params;
-        const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
         if (n > 0) {
-            tiling.compute(params.kind, &view, &placements);
+            if (layout_active) {
+                const hv = contract.HintsView{ .order = order_buf[0..n], .hints = hints_buf[0..n] };
+                const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = &hv, .focused = m.focused, .env = ctx.env };
+                tiling.compute(params.kind, &view, &placements);
+            } else {
+                // Tiling off: every window floats at the full work area. The
+                // alternative -- emit nothing -- is not a neutral "no layout",
+                // it is a broken screen: a `.tiled` entry with no placement is
+                // parked on first sight (invisible) and thereafter frozen at
+                // whatever rect it last had (windows piled on one spot). The
+                // same fallback is what a no-tiling build gets, so "no layout
+                // modules" and "layout disabled" have ONE answer.
+                for (order_buf[0..n]) |w| placements.append(.{ .win = w, .rect = wa, .visible = true });
+            }
         }
     }
 
@@ -231,7 +225,7 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
         // lost (one per-reconcile warning at the loop's end; sends never depend on
         // the ledger).
         const gop = ledger.sentGetOrPut(win);
-        const last = (if (gop) |g| g.* else ledger.SentEntry{});
+        const last = (if (gop) |g| g.* else ledger.SentEntry.blank());
 
         // OFF-WORKSPACE FAST PATH: a desire that is PROVABLY parked (not the
         // covering winner, not on the current ws, or presence parked) and is

@@ -335,7 +335,14 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     // positionally, so a layout that skipped or reordered a window degraded
     // silently into a wrong screen. Make that a loud failure instead. Zero
     // release cost (std.debug.assert).
+    //
+    // The length check (added with §13 item 1) catches a dropped or doubled
+    // window; it cannot catch a REORDERED one, which keeps the length while
+    // swapping whose rect is whose. Comparing the window id at each index
+    // closes that: the order is `v.order`, so any mismatch means the module
+    // emitted out of order, whatever the length.
     std.debug.assert(out.len == v.order.len);
+    for (out.constSlice(), v.order) |p, win| std.debug.assert(p.win == win);
 }
 
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of

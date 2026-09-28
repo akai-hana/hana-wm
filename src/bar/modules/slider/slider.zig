@@ -68,11 +68,28 @@ const scroll_step: u8 = 2;
 /// how far ahead a single wake can be scheduled.
 const max_cadence_ms: i64 = 5000;
 
-/// Spawn-commit window shared by every control. A fork+exec+pipe+waitpid
+/// Spawn-commit window DEFAULT for every control. A fork+exec+pipe+waitpid
 /// blocks the WM's event loop for ~1-5 ms, so a per-event spawn throttled the
 /// whole WM under a fast drag or scroll; coalescing onto the newest value
-/// keeps a sweep to at most one spawn per window. Native commits ignore it.
+/// keeps a sweep to at most one spawn per window. `immediate` commits ignore
+/// it, and a control whose spawn is cheaper than average can declare a
+/// tighter window of its own via `Sub.commit_window_ms`.
 const throttle_ms: i64 = 80;
+
+/// The latency class of ONE commit on a control, as a value the scheduler
+/// switches on rather than a boolean the shell has to interpret.
+///
+/// It stays a function (not a plain field) because the class is genuinely a
+/// per-BACKEND fact that resolves at runtime, not a per-control constant:
+/// brightness writes sysfs in microseconds when that backend is live but
+/// spawns `brightnessctl` when it is not, and volume is native over libpulse
+/// or ALSA depending on what it attached to. A static field would have to
+/// claim the cheaper class and then throttle a sysfs write that needs no
+/// window, or claim the spawn class and lag a native drag. What changed is
+/// that the answer is a NAMED class instead of a bare bool, so the scheduler
+/// reads `cost == .immediate` rather than a predicate whose meaning lives in
+/// the control's comment.
+pub const CommitCost = enum { immediate, rate_limited };
 
 /// The WM's single time base: monotonic-ish wall time in ms.
 pub fn nowMs() i64 {
@@ -100,8 +117,8 @@ pub const Throttle = struct {
     /// Decides one event. `write` is the control's commit callback, comptime
     /// so the scheduler inlines into the caller (factoring it here costs
     /// nothing at runtime).
-    pub fn apply(self: *Throttle, native: bool, pct: u8, write: anytype) void {
-        if (native or nowMs() -| self.last_ms >= self.interval_ms) {
+    pub fn apply(self: *Throttle, cost: CommitCost, pct: u8, write: anytype) void {
+        if (cost == .immediate or nowMs() -| self.last_ms >= self.interval_ms) {
             self.land(pct, write);
         } else {
             self.pending = true;
@@ -278,9 +295,15 @@ pub const Sub = struct {
     /// label render shows without a backend round trip; the next read
     /// reconciles truth.
     preview: *const fn (u8) void,
-    /// True when THIS control's commits are native in-process calls (one
-    /// ioctl / sysfs write / libpulse round trip) and need no throttling.
-    commit_is_native: *const fn () bool,
+    /// The latency class of one commit on this control, as a named value (see
+    /// `CommitCost`). `immediate` commits are cheap in-process writes and are
+    /// never coalesced; `rate_limited` ones pass through the throttle window.
+    commit_cost: *const fn () CommitCost,
+    /// This control's own spawn-commit window in ms, or null to share the core
+    /// default (`throttle_ms`). Per-control so a control whose subprocess is
+    /// cheap enough to afford a tighter sweep can say so as data instead of
+    /// living with the shared window. Ignored for `immediate` commits.
+    commit_window_ms: ?i16 = null,
     /// Writes `pct` to the backend (native call or subprocess spawn). The
     /// 0-100 clamp is the control's single guard.
     commit: *const fn (u8) void,
@@ -316,6 +339,13 @@ var g_inst: [subs.len]Instance = [_]Instance{.{}} ** subs.len;
 var g_armed: [subs.len]bool = @splat(false);
 var g_pending_redraw: [subs.len]bool = @splat(false);
 var g_throttle: [subs.len]Throttle = [_]Throttle{.{ .interval_ms = throttle_ms }} ** subs.len;
+
+/// Applies control `idx`'s declared commit window to its scheduler, once the
+/// control is known. Called at arm time; a control that shares the default
+/// keeps it.
+fn applyCommitWindow(idx: usize) void {
+    if (subs[idx].commit_window_ms) |w| g_throttle[idx].interval_ms = w;
+}
 /// Whether this control is currently scrubbed by a press-hold (one exclusive
 /// drag per segment).
 var g_drag: [subs.len]bool = @splat(false);
@@ -330,10 +360,27 @@ pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
     return @intCast(@min(v, 100));
 }
 
+/// The width the bar reserves for control `idx`, and the ONE denominator for
+/// everything that needs a slider's width: the row reservation
+/// (`naturalWidthFor`), the drag mapping (`pctAt`) and the click hit-test
+/// (`onClickFor`).
+///
+/// These used to disagree on the first frame. `slot_w` is the last PAINTED
+/// width, so it is 0 until the segment's first draw completes, and
+/// `onClickFor` rejected every click while it was 0 -- the very first press on
+/// a freshly laid-out slider did nothing at all, and the drag denominator and
+/// the row reservation fell back to different values. Falling back to the same
+/// declared probe width in all three places gives the hit-test and the drag
+/// range one denominator from frame one.
+fn reservedWidth(idx: usize) u16 {
+    const measured = g_inst[idx].slot_w;
+    return if (measured != 0) measured else subs[idx].probeNaturalWidth;
+}
+
 /// The slider denominator for control `idx` at pointer `offset` (the single
-/// slot spans [0, slot_w)).
+/// slot spans [0, reservedWidth)).
 fn pctAt(idx: usize, offset: u16) u8 {
-    return pctFromSlot(0, g_inst[idx].slot_w, offset);
+    return pctFromSlot(0, reservedWidth(idx), offset);
 }
 
 fn present(idx: usize) bool {
@@ -346,7 +393,7 @@ fn present(idx: usize) bool {
 fn commitPreview(idx: usize, pct: u8) void {
     const sub = subs[idx];
     sub.preview(pct);
-    g_throttle[idx].apply(sub.commit_is_native(), pct, sub.commit);
+    g_throttle[idx].apply(sub.commit_cost(), pct, sub.commit);
 }
 
 /// Poll deadline for control `idx`: the segment doesn't arm itself until its
@@ -386,18 +433,18 @@ fn consumeRedrawRequestFor(idx: usize) bool {
 
 fn naturalWidthFor(idx: usize) u16 {
     if (!present(idx)) return 0;
-    return if (g_inst[idx].slot_w != 0) g_inst[idx].slot_w else subs[idx].probeNaturalWidth;
+    return reservedWidth(idx);
 }
 
-/// Drag-mode loading bar for one control: paints its whole reserved slot with
-/// a background strip plus a fill (the title segment's minimized accent) and
-/// overlays the live percentage centered in the slot, in the bar-wide fg
-/// (regular text color, not the segment's accent). Returns the slot's far
-/// edge WITHOUT feeding `slot_w`: the label width must survive the scrub so
-/// the drag-end redraw re-renders it in place.
+/// Drag-mode loading bar for one control: track, fill, centered percentage.
+/// Returns the slot's far edge WITHOUT feeding `slot_w`: the label width must
+/// survive the scrub so the drag-end redraw re-renders it in place.
 fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
     const height = dc.height;
     dc.dc.fillRect(x, 0, slot, height, dc.config.bg);
+    // Half the padding, so the fill's edges sit one padding inside the slot:
+    // the same visual margin a text segment keeps between its background and
+    // its glyphs. At least one pixel, or a 1px-tall bar paints nothing.
     const pad = @max(@as(u16, 1), dc.config.scaledSegmentPadding(height) / 2);
     const inner_w = slot -| pad * 2;
     const inner_h = height -| pad * 2;
@@ -421,6 +468,7 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
         _ = sub.read();
         g_armed[idx] = true;
         inst.next_read_ms = nowMs() + sub.read_interval_ms;
+        applyCommitWindow(idx);
     }
     // Absent backend: nothing to show (a zero-width slot, unclickable, never
     // polled past arm); naturalWidth reports 0, so the layout leaves no gap.
@@ -428,7 +476,7 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     // While scrubbed the control is a loading bar; the label resumes on the
     // drag-end redraw.
     if (g_drag[idx]) {
-        return drawDragBar(dc, x, inst.slot_w, sub.pct());
+        return drawDragBar(dc, x, reservedWidth(idx), sub.pct());
     }
     const label = sub.label(dc.config, &inst.scratch);
     const end_x = try drawing.drawPaddedSegmentValue(dc.dc, dc.config, dc.height, x, sub.name, label.text, label.value, dc.config.segmentProps(sub.name));
@@ -457,7 +505,12 @@ fn onClickFor(
 ) bool {
     const sub = subs[idx];
     if (!left and !right) return false;
-    if (g_inst[idx].slot_w == 0 or offset >= g_inst[idx].slot_w) return false;
+    if (!present(idx)) return false;
+    // Bound by the SAME width the row reserved, not by the last painted width:
+    // a press that arrives before the first draw still maps to a level instead
+    // of being dropped.
+    const bound = reservedWidth(idx);
+    if (offset >= bound) return false;
     if (left) {
         if (!sub.writable()) return false;
         // Enter drag mode immediately, and restart the commit clock after

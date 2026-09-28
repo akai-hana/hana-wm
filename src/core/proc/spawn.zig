@@ -18,6 +18,7 @@ const c = @cImport({
 
 const core = @import("core");
 const log = @import("log");
+const time = @import("time");
 const tracking = @import("tracking");
 const window = @import("window");
 
@@ -123,6 +124,19 @@ fn resolveCmdZ(alloc: std.mem.Allocator, cmd: []const u8, buf: *[stack_cmd_capac
 /// optional trailing (or leading) tag_failed byte.
 const spawn_msg_max: usize = pid_msg_len + 1;
 
+/// Longest command text kept per pending spawn, for diagnostics. A failed
+/// spawn used to be reported as nothing at all (or, for a wedged pipe, as
+/// silence forever), so there was no way to tell "the command failed" from
+/// "hana lost track of the command".
+const cmd_report_max: usize = 96;
+
+/// How long a pending entry may stay unresolved before it is dropped as stuck
+/// (4.8). The whole conversation is a few bytes between two forks of the same
+/// parent, so anything still open after this has already lost the outcome; a
+/// table of 16 such entries is a permanent wedge on `exec` (every later spawn
+/// refused with SpawnQueueFull).
+const spawn_timeout_ms: i64 = 5_000;
+
 /// Lifecycle state for a single double-fork spawn.
 const PendingSpawn = struct {
     pid: c_int, // PID of intermediate child; used for targeted waitpid.
@@ -130,6 +144,17 @@ const PendingSpawn = struct {
     buf: [spawn_msg_max]u8 = undefined, // Accumulates bytes until the conversation ends.
     len: usize = 0, // Valid bytes accumulated in buf so far.
     spawn_ws: ?u8, // Target workspace for window.registerSpawn.
+    /// Truncated command text (not NUL-terminated; use `cmd_len`). Present
+    /// only so finishSpawn's failure report and the stuck-entry expiry can
+    /// say WHICH command they are talking about.
+    cmd: [cmd_report_max]u8 = undefined,
+    cmd_len: u8 = 0,
+    /// Monotonic start of this entry, for the stuck-entry deadline (4.8).
+    started_ms: i64 = 0,
+
+    fn command(self: *const PendingSpawn) []const u8 {
+        return self.cmd[0..self.cmd_len];
+    }
 };
 
 // std.BoundedArray was removed in the Zig 0.16 toolchain; bounded.BoundedList
@@ -184,11 +209,16 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     // when the MapRequest arrives (once per window), so no round-trip here.
 
     // The capacity pre-check above guarantees room, so append cannot fail.
-    std.debug.assert(g_pending.append(.{
+    var entry = PendingSpawn{
         .pid = pid,
         .spawn_fd = pipe_fds[0],
         .spawn_ws = spawn_ws,
-    }));
+        .started_ms = time.monotonicMs(),
+    };
+    const keep = @min(cmd.len, cmd_report_max);
+    @memcpy(entry.cmd[0..keep], cmd[0..keep]);
+    entry.cmd_len = @intCast(keep);
+    std.debug.assert(g_pending.append(entry));
 }
 
 /// Upper bound on `readFds` output, so the event loop can size its poll set
@@ -246,19 +276,43 @@ pub fn drainPendingSpawns() void {
             }
         }
 
+        // 4.8: the pipe closing is not a deadline. A stuck entry (pipe open,
+        // or closed with the child never reaped) is dropped once it is older
+        // than spawn_timeout_ms, so 16 stuck entries can no longer wedge
+        // `exec` forever behind SpawnQueueFull.
+        if (entry.started_ms != 0 and time.monotonicMs() - entry.started_ms > spawn_timeout_ms) {
+            log.warn("spawn stuck for {d}ms, dropping: '{s}'", .{
+                spawn_timeout_ms,
+                entry.command(),
+            });
+            entry.spawn_fd = null;
+            if (entry.pid > 0) {
+                // One last non-blocking reap so the common case (child gone,
+                // signal not yet delivered) does not leak a zombie.
+                if (c.waitpid(entry.pid, null, c.WNOHANG) > 0) entry.pid = -1;
+            }
+            g_pending.swapRemove(i);
+            continue;
+        }
+
         if (entry.spawn_fd != null) {
             i += 1;
             continue;
         }
 
         // The intermediate child wrote EOF (or its fd errored closed), so it
-        // has already exited; reap it eagerly here rather than leaving a
-        // zombie until SIGCHLD is next delivered. Same WNOHANG/WNOHANG-only
-        // policy as reapPendingChildren: never blocks the event loop.
-        if (entry.pid > 0) {
-            _ = c.waitpid(entry.pid, null, c.WNOHANG);
+        // has just exited; reap it eagerly here rather than leaving a zombie
+        // until SIGCHLD is next delivered. Same WNOHANG/WNOHANG-only policy
+        // as reapPendingChildren: never blocks the event loop.
+        //
+        // 4.2: clear `pid` ONLY when waitpid actually reaped. This used to be
+        // unconditional, which was the bug: a WNOHANG that returned 0 (the
+        // child had closed its fd but not yet exited) disarmed the only
+        // reaper for that pid, and the entry is removed below -- so the
+        // intermediate child became a permanent zombie. `spawn_is_closed`
+        // keeps the entry in the table until the reap really happened.
+        if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
             entry.pid = -1;
-        }
 
         finishSpawn(entry);
         g_pending.swapRemove(i);
@@ -299,11 +353,16 @@ fn finishSpawn(entry: *PendingSpawn) void {
         }
     }
 
-    if (!failed) {
-        if (entry.spawn_ws) |ws| {
-            const pid_u32: u32 = if (grandchild > 0) @intCast(grandchild) else 0;
-            window.registerSpawn(core.WorkspaceId.fromIndex(ws), pid_u32);
-        }
+    if (failed) {
+        // 4.4: a failed spawn used to be completely silent. `entry.cmd` is
+        // the truncated command, so this is now actionable: which command,
+        // and that execvp (or the second fork) is what failed.
+        log.warn("spawn failed: '{s}' (exec did not succeed)", .{entry.command()});
+        return;
+    }
+    if (entry.spawn_ws) |ws| {
+        const pid_u32: u32 = if (grandchild > 0) @intCast(grandchild) else 0;
+        window.registerSpawn(core.WorkspaceId.fromIndex(ws), pid_u32);
     }
 }
 
@@ -311,6 +370,15 @@ fn finishSpawn(entry: *PendingSpawn) void {
 /// SIGCHLD handler; the spawn-pipe drain stays in signals.zig so it doesn't
 /// run twice per SIGCHLD.
 pub fn reapPendingChildren() void {
+    // 4.2: ONE reaper path. The per-pid loop alone was not enough -- a SIGCHLD
+    // that arrived for a pid hana no longer had a pending entry for (the
+    // entry was removed on pipe-close, and an early version cleared `pid`
+    // before the child was actually reaped) was a zombie nothing would ever
+    // collect. waitpid(-1, WNOHANG) sweeps every child hana owns, so the
+    // hand-off is idempotent and cannot miss one; it returns -ECHILD the
+    // moment hana has no unreaped children, which is a cheap no-op.
+    while (c.waitpid(-1, null, c.WNOHANG) > 0) {}
+
     for (g_pending.slice()) |*entry| {
         if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
             entry.pid = -1;

@@ -10,6 +10,7 @@ const log = @import("log");
 
 const types = @import("types");
 const atoms = @import("atoms");
+const dpi_math = @import("dpi_math");
 const scaling = @import("scaling");
 
 const baseline_dpi = constants.baseline_dpi;
@@ -18,35 +19,34 @@ const baseline_dpi = constants.baseline_dpi;
 // resolution, so font sizing degrades more gracefully on smaller screens.
 const font_baseline_height: f32 = 1080.0;
 
-/// Minimum bar height in pixels. Exposed so callers can validate config values
-/// before passing them to scaleBarHeight.
-pub const bar_min_height_px: u16 = 20;
+/// The bar-height policy as ONE value (6.8). These were three loose pub consts
+/// a caller had to know to apply together; nothing stopped someone clamping
+/// against the min and forgetting the cap. Grouping them makes "the policy"
+/// a thing you can pass, not a convention you have to remember.
+pub const BarHeightPolicy = struct {
+    /// Minimum bar height in pixels. Callers validate config values against
+    /// this before calling scaleBarHeight.
+    min_px: u16 = 20,
+    /// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured
+    /// bar derives its height from font metrics, and this bounds that
+    /// derivation so a huge fallback font can't take over the whole screen.
+    max_px: u16 = 200,
+    /// Fallback bar height when even font metrics are unavailable: a small
+    /// strip-sized default that stays in proportion on any screen.
+    default_px: u16 = 24,
+};
 
-/// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured bar
-/// derives its height from font metrics, and this bounds that derivation so
-/// a huge fallback font can't take over the whole screen.
-pub const bar_max_height_px: u16 = 200;
+pub const bar_height_policy: BarHeightPolicy = .{};
 
-/// Fallback bar height when even font metrics are unavailable: a small
-/// strip-sized default that stays in proportion on any screen.
-pub const default_bar_height_px: u16 = 24;
-
-/// Clamps an auto-derived bar height (from font metrics, in pixels) into
-/// [bar_min_height_px, bar_max_height_px].
+/// Clamps an auto-derived bar height (from font metrics, in pixels) into the
+/// policy's range, BOTH ends.
 pub fn clampBarHeight(px: i32) u16 {
     return @intCast(std.math.clamp(
         px,
-        @as(i32, @intCast(bar_min_height_px)),
-        @as(i32, @intCast(bar_max_height_px)),
+        @as(i32, @intCast(bar_height_policy.min_px)),
+        @as(i32, @intCast(bar_height_policy.max_px)),
     ));
 }
-
-/// Reasonable-DPI band applied to both the geometry-derived and Xft.dpi paths.
-/// Values outside this range (or non-finite) are rejected as misconfiguration
-/// rather than being fed straight into Pango, where 0/negative/NaN DPI would
-/// produce divide-by-zero or garbage font metrics.
-const min_reasonable_dpi: f32 = 50.0;
-const max_reasonable_dpi: f32 = 300.0;
 
 /// Maximum number of u32 words to request for the RESOURCE_MANAGER property (4 KB).
 /// Xft.dpi is almost always near the start; a smaller fetch is faster and
@@ -55,9 +55,6 @@ const resource_manager_max_len: u32 = 1024;
 
 /// Larger retry fetch (16 KB) used when Xft.dpi is not in the first probe.
 const resource_manager_retry_len: u32 = 4096;
-
-/// Inches per meter, i.e. mm per inch: converts screen mm to pixels-per-inch.
-const mm_per_inch: f32 = 25.4;
 
 /// Result of probing RESOURCE_MANAGER. `.got_string` is true when a
 /// structurally valid string came back (regardless of whether it held an
@@ -70,18 +67,6 @@ const XftProbe = struct {
     /// resource string" from "the probe window was too small to see it".
     possibly_truncated: bool = false,
 };
-
-/// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
-fn parseXftDpi(resource_str: []const u8) ?f32 {
-    const prefix = "Xft.dpi:";
-    const idx = std.mem.indexOf(u8, resource_str, prefix) orelse return null;
-    const rest_raw = resource_str[idx + prefix.len ..];
-    const rest = std.mem.trim(u8, rest_raw, " \t");
-    // The value ends at the next newline or end of string.
-    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-    const value = std.mem.trim(u8, rest[0..end], " \t\r");
-    return std.fmt.parseFloat(f32, value) catch null;
-}
 
 /// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi
 /// from it.
@@ -99,7 +84,7 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
     return .{
         .got_string = true,
-        .dpi = parseXftDpi(resource_str),
+        .dpi = dpi_math.parseXftDpi(resource_str),
         // Truncation is `bytes_after > 0`, not the value_len hitting the
         // requested cap (a string of exactly cap length is complete).
         .possibly_truncated = prop_reply.*.bytes_after > 0,
@@ -127,41 +112,29 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
     return probeXftDpi(conn, root, atom, resource_manager_retry_len).dpi;
 }
 
-/// Computes DPI from the screen's physical dimensions reported by X.
-/// Returns baseline_dpi if the screen reports 0mm dimensions (e.g. virtual displays).
-fn calcDpiFromGeometry(screen: core.Screen) f32 {
-    const width_px: f32 = @floatFromInt(screen.width_in_pixels);
-    const height_px: f32 = @floatFromInt(screen.height_in_pixels);
-    const width_mm: f32 = @floatFromInt(screen.width_in_millimeters);
-    const height_mm: f32 = @floatFromInt(screen.height_in_millimeters);
-    if (width_mm == 0 or height_mm == 0) {
-        log.warn("Display reports 0mm dimensions, using baseline DPI", .{});
-        return baseline_dpi;
-    }
-    const dpi_x = (width_px / width_mm) * mm_per_inch;
-    const dpi_y = (height_px / height_mm) * mm_per_inch;
-    const avg_dpi = (dpi_x + dpi_y) / 2.0;
-    log.info("Calculated DPI: X={d:.1}, Y={d:.1}, Average={d:.1}", .{ dpi_x, dpi_y, avg_dpi });
-    return avg_dpi;
-}
-
-fn isReasonableDpi(dpi: f32) bool {
-    return std.math.isFinite(dpi) and dpi >= min_reasonable_dpi and dpi <= max_reasonable_dpi;
-}
-
 /// Detect DPI: Xft.dpi from X resources -> geometry calculation -> baseline_dpi (96).
 /// Called once at startup; core.dpi_info holds the result for the process lifetime.
 pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     if (readXftDpi(conn, screen)) |xft_dpi| {
-        if (isReasonableDpi(xft_dpi)) {
+        if (dpi_math.isReasonableDpi(xft_dpi)) {
             log.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
             return xft_dpi;
         }
         log.warn("Ignoring unreasonable Xft.dpi value {d:.1}", .{xft_dpi});
     }
 
-    const geometry_dpi = calcDpiFromGeometry(screen);
-    if (!isReasonableDpi(geometry_dpi)) {
+    // 6.3: the formula is pure and returns null for a 0mm screen (the
+    // "virtual display" case), so the decision and its log stay here.
+    const geometry_dpi = dpi_math.calcDpiFromGeometry(.{
+        .width_px = screen.width_in_pixels,
+        .height_px = screen.height_in_pixels,
+        .width_mm = screen.width_in_millimeters,
+        .height_mm = screen.height_in_millimeters,
+    }) orelse {
+        log.warn("Display reports 0mm dimensions, using baseline DPI", .{});
+        return baseline_dpi;
+    };
+    if (!dpi_math.isReasonableDpi(geometry_dpi)) {
         log.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
         return baseline_dpi;
     }
@@ -184,7 +157,8 @@ pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
     return scaling.roundToU16(raw, 1.0);
 }
 
-/// Converts a scalable bar height value to pixels, clamped to bar_min_height_px.
+/// Converts a scalable bar height value to pixels, clamped into the
+/// bar-height policy's range.
 pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = scaling.scaleToPixels(value, screen_height_f);

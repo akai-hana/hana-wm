@@ -324,3 +324,94 @@ test "vim insert keeps the readline Ctrl set (single word delete)" {
     _ = vim.handleCtrl(&es, 'u');
     try testing.expectEqual(@as(usize, 0), es.len);
 }
+
+// --- the buffer mutators the extensor now shares --------------------------
+
+test "deleteRange removes a range and places the cursor at its start" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "hello world");
+    es.cursor = es.len;
+
+    prompt.deleteRange(&es, 5, 11);
+    try testing.expectEqualStrings("hello", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 5), es.len);
+    try testing.expectEqual(@as(usize, 5), es.cursor);
+}
+
+test "deleteRange rejects an empty or out-of-bounds range" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "abc");
+
+    prompt.deleteRange(&es, 2, 2); // empty
+    prompt.deleteRange(&es, 0, 99); // past the end
+    prompt.deleteRange(&es, 3, 1); // inverted
+    try testing.expectEqualStrings("abc", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 3), es.len);
+}
+
+test "deleteRange clamps the normal-mode cursor onto the last character" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "abcd");
+    es.mode = .normal;
+    es.cursor = 4; // addresses one past the end
+
+    // Deleting the tail would leave normal mode addressing `len`, i.e. one
+    // past the end; the buffer's own mutator pulls it back onto 'd'.
+    prompt.deleteRange(&es, 2, 4);
+    try testing.expectEqualStrings("ab", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 1), es.cursor);
+}
+
+test "deleteRange leaves an insert-mode cursor at the deletion point" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "abcd");
+    es.mode = .insert;
+    es.cursor = 4;
+
+    // Insert mode has no such clamp: the cursor may legally sit at the end.
+    prompt.deleteRange(&es, 2, 4);
+    try testing.expectEqual(@as(usize, 2), es.cursor);
+    try testing.expectEqual(@as(usize, 2), es.len);
+}
+
+test "overwriteAt replaces bytes without changing the length" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "abcd");
+
+    prompt.overwriteAt(&es, 1, "XY");
+    try testing.expectEqualStrings("aXYd", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 4), es.len);
+}
+
+test "overwriteAt truncates at the end of the content and cannot append" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "ab");
+
+    // An overwrite past the end is dropped, not appended: the primitive
+    // cannot be used to mean an insert.
+    prompt.overwriteAt(&es, 2, "more");
+    try testing.expectEqualStrings("ab", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 2), es.len);
+
+    // A write straddling the end keeps only the in-range part.
+    prompt.overwriteAt(&es, 1, "ZQQ");
+    try testing.expectEqualStrings("aZ", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 2), es.len);
+}
+
+test "overwriteAt at or past the end is a no-op" {
+    var es = try prompt.EditorState.init(testing.allocator, 64);
+    defer es.deinit();
+    prompt.insertSlice(&es, "ab");
+
+    prompt.overwriteAt(&es, 2, "x");
+    prompt.overwriteAt(&es, 9, "x");
+    try testing.expectEqualStrings("ab", es.buf[0..es.len]);
+    try testing.expectEqual(@as(usize, 2), es.len);
+}

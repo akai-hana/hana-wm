@@ -115,18 +115,36 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
 
         /// Forward iterator over live entries, mirroring Store.Iterator so
         /// callers can range an IdMap and a Store with the same shape.
+        ///
+        /// Walks the SLOT ARRAY and skips empty and tombstone slots, bounded by
+        /// a live-count countdown. It cannot scan `keys[0..len]`: `put` places
+        /// each entry at a Fibonacci-hashed slot with linear probing, so live
+        /// entries are scattered and a dense prefix scan would return whatever
+        /// unoccupied slots it hit (reading the `empty` sentinel as a live key
+        /// of 0) and then stop at `len`.
         pub const Iterator = struct {
             map: *const Self,
             pos: usize = 0,
+            remaining: usize,
+
             pub fn next(self: *Iterator) ?Item {
-                if (self.pos >= self.len) return null;
-                const i = self.pos;
-                self.pos += 1;
-                return .{ .key = self.keys[i], .val = &self.vals[i] };
+                // `pos` advances on EVERY step, not on the continue
+                // expression: a `while (...) : (self.pos += 1)` form skips the
+                // increment on the `return` path, so the iterator would return
+                // the same slot forever while only the countdown moved.
+                while (self.pos < slots and self.remaining > 0) {
+                    const i = self.pos;
+                    self.pos += 1;
+                    const k = self.map.keys[i];
+                    if (k == empty or k == tomb) continue;
+                    self.remaining -= 1;
+                    return .{ .key = k, .val = &self.map.vals[i] };
+                }
+                return null;
             }
         };
         pub fn iterator(self: *const Self) Iterator {
-            return .{ .map = self };
+            return .{ .map = self, .remaining = self.len };
         }
 
         pub fn clear(self: *Self) void {
