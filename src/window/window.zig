@@ -776,17 +776,27 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
     // the record carried no ext), the entry stays present and reconciles
     // on-screen -- the graceful degrade.
     //
-    // Claim resolution: the blob is stamped with the claiming module's
-    // registry ordinal at save time (persist.ext_format_version). Adoption
-    // FAST-PATHS on that ordinal; when it no longer resolves (module removed,
-    // registry shifted) or its hook declines, the magic-byte scan over every
-    // module's self-identifying format tag claims it instead.
+    // Claim resolution: the blob is stamped with the claiming module's NAME at
+    // save time (persist.ext_format_version). Adoption fast-paths on the name;
+    // when the name no longer resolves (the module was removed or renamed) or
+    // its hook declines, the magic-byte scan over every module's
+    // self-identifying format tag claims it instead. Blobs written by the
+    // pre-name format still resolve through their registry ordinal.
     if (record.ext) |stored| {
-        const stamped = stored.len >= persist.ext_header_len and
-            stored[0] == persist.ext_format_version;
-        const payload: []const u8 = if (stamped) stored[persist.ext_header_len..] else stored;
-        if (stamped) {
-            const ordinal: usize = stored[1];
+        // A recognised header narrows WHICH module is asked first; it never
+        // decides the outcome, because the payload's own magic bytes do that.
+        // Anything unrecognised (a foreign version, a truncated header) is
+        // passed through whole, exactly as an unstamped blob was.
+        const payload: []const u8 = persist.extPayload(stored) orelse stored;
+        if (persist.extClaimantName(stored)) |name| {
+            for (window_mods) |mod| {
+                if (!std.mem.eql(u8, mod.name, name)) continue;
+                if (mod.deserializeWindow) |f| {
+                    if (f(win, payload, model)) return;
+                }
+                break; // named claimant found; the scan below is the fallback
+            }
+        } else if (persist.extLegacyOrdinal(stored)) |ordinal| {
             if (ordinal < window_mods.len) {
                 if (window_mods[ordinal].deserializeWindow) |f| {
                     if (f(win, payload, model)) return;

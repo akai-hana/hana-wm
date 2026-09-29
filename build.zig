@@ -292,6 +292,9 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "brightness_test", .gate = has_seg_brightness, .x_gated = false },
         .{ .name = "commit_test", .gate = true, .x_gated = false },
         .{ .name = "slider_test", .gate = true, .x_gated = false },
+        .{ .name = "width_state_test", .gate = true, .x_gated = false },
+        .{ .name = "metrics_test", .gate = true, .x_gated = false },
+        .{ .name = "font_probe_test", .gate = true, .x_gated = false },
         .{ .name = "native_alsa_test", .gate = true, .x_gated = false },
         .{ .name = "native_pulse_test", .gate = true, .x_gated = false },
         .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces, .x_gated = false },
@@ -307,6 +310,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
         .{ .name = "wincache_test", .gate = true, .x_gated = false },
         .{ .name = "masks_test", .gate = true, .x_gated = false },
+        .{ .name = "sink_test", .gate = true, .x_gated = false },
         .{ .name = "dpi_math_test", .gate = true, .x_gated = false },
         .{ .name = "bounded_test", .gate = true, .x_gated = false },
         .{ .name = "idmap_test", .gate = true, .x_gated = false },
@@ -1164,6 +1168,18 @@ fn buildOwnerRegistryModule(
         \\                n += 1;
         \\            }
         \\        }
+        \\        // A module that persists a window must be NAMED: the save path
+        \\        // stamps the claiming module's name so adoption survives a registry
+        \\        // reorder, and an unnamed claimant could only fall back to the
+        \\        // magic-byte scan for every window it ever saved. Caught here
+        \\        // rather than at save time, where it would warn per window.
+        \\        if (@hasField(T, "serializeWindow")) {
+        \\            for (modules) |wm| {
+        \\                if (@field(wm, "serializeWindow") != null and wm.name.len == 0) @compileError(
+        \\                    "window module binds serializeWindow but has no name; persistence stamps the claimant name, so an unnamed claimant cannot be fast-pathed",
+        \\                );
+        \\            }
+        \\        }
         \\        // Role capabilities (self_ticking, center_slot) are deliberately
         \\        // multi-binder (fan-out tick / even center split), so no
         \\        // at-most-one assert applies to them.
@@ -1717,8 +1733,10 @@ const Module = struct {
         // Rect/Margins value objects that state holds. `satI16` is also needed
         // by the pure tiling layer, which is why the coordinate helpers cannot
         // live on the x11 side. The shelf siblings in src/core/pure/ are
-        // xcb-free by construction; contract's xcb event TYPES keep
-        // architecture/contract.zig out of both this guard and Rule 3's sweep.
+        // xcb-free by construction. architecture/contract.zig joined the pure
+        // set when its xcb event TYPES and the Surfaces hook set moved out to
+        // architecture/contract_x11.zig, so it is now guarded by BOTH this
+        // import-edge scan and Rule 3's body sweep.
         const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig"))
             "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))

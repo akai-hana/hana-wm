@@ -19,9 +19,8 @@ const build_options = @import("build_options");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
-const model = @import("model");
-// Layout-name resolution for diagnostics; via the build-generated tiling_seam.
-const tiling = @import("tiling_seam").tiling;
+const diag = @import("diag");
+const cursor = @import("cursor");
 // Bar hook set; the core-owned `surfaces` composition root, absent-safe.
 const surfaces = @import("surfaces").Surfaces;
 // `grabKeybindings` lives in events.zig (mutual runtime-only dependency).
@@ -77,7 +76,7 @@ pub fn buildKeybinds(keybindings: []types.Keybind) void {
     };
     resolved_binds = keybind.resolveKeycodes(keybindings, state, resolved_binds);
     keybind.reportUnresolved(resolved_binds);
-    keybind_resolver.rebuildDispatchMap(keybindings, alloc);
+    keybind_resolver.rebuildDispatchMap(keybindings, alloc, core.config_rev.rev());
 }
 
 /// The keybindings with keycodes resolved against the live XKB state, for
@@ -128,34 +127,42 @@ pub fn handleMappingNotify() void {
 
 /// Grabs mouse buttons on the root window and applies the user's cursor theme.
 pub fn setup(conn: core.Connection, screen: core.Screen) void {
-    setupGrabs(conn, screen.root);
-    XcbCursor.setupRoot(conn, screen);
+    events.grabMouseButtons();
+    cursor.Cursor.setupRoot(conn, screen);
+    reportUndeliverableMouseBinds();
 }
 
-/// Grabs Super+Button{1,2,3,4,5} (including the scroll buttons) on the root
-/// window for all lock_modifiers combinations (NumLock, CapsLock,
-/// ScrollLock, and their combinations).
-fn setupGrabs(conn: core.Connection, root: u32) void {
-    const mouse_buttons = [_]u8{ constants.mouse_button_left, constants.mouse_button_middle, constants.mouse_button_right, constants.mouse_button_scroll_up, constants.mouse_button_scroll_down };
-    for (mouse_buttons) |button| {
-        for (masks.lock_modifiers) |lock| {
-            _ = xcb.xcb_grab_button(
-                conn,
-                0,
-                root,
-                xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-                    xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
-                    xcb.XCB_EVENT_MASK_POINTER_MOTION,
-                xcb.XCB_GRAB_MODE_SYNC,
-                xcb.XCB_GRAB_MODE_SYNC,
-                root,
-                xcb.XCB_NONE,
-                button,
-                @intCast(masks.mod_super | lock),
-            );
+/// Warns about every `[binds]` mouse entry the root grab can never deliver.
+///
+/// This is the worst failure mode a config surface has: the bind parses, the
+/// config loads, `configChanged` sees no change, the user presses the combo
+/// and the click simply goes to the client. Nothing anywhere else reports it.
+/// De-duplicated by the (modifiers, button) pair, so a dead combo bound three
+/// times is reported once, and the message names the binding's index in config
+/// order so it can be found.
+pub fn reportUndeliverableMouseBinds() void {
+    const binds = core.getState().config.mouse_bindings.items;
+    // The grab as `setupGrabs` actually makes it, handed to the pure rule so
+    // that rule needs no knowledge of the X layer and stays unit-testable.
+    const grab: keybind.MouseGrabSpec = .{
+        .buttons = &events.mouse_grab_buttons,
+        .modifiers = masks.mod_super,
+        .lock_bits = masks.lock_bits,
+    };
+    var reported: usize = 0;
+    for (binds, 0..) |mb, i| {
+        const reason = keybind.undeliverableMouseBindReason(mb, grab) orelse continue;
+        var dup = false;
+        for (binds[0..i]) |earlier| {
+            if (earlier.button == mb.button and earlier.modifiers == mb.modifiers) dup = true;
         }
+        if (dup) continue;
+        reported += 1;
+        log.warn(
+            "Mouse binding #{} (mods=0x{x:0>4} button={}) can never fire: {s}",
+            .{ i + 1, mb.modifiers, mb.button, reason },
+        );
     }
-    _ = xcb.xcb_flush(conn);
 }
 
 // Key-dispatch latency instrumentation. Measures the wall-clock time from
@@ -187,11 +194,14 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
 
     // O(1) dispatch via the (modifiers << 32 | keysym) map built by
     // input.buildKeybinds.
-    const matched = keybind_resolver.lookup(mods, keysym);
+    const matched = keybind_resolver.lookup(mods, keysym, core.config_rev.rev());
 
     // The chrome overlay owns all key input while active; routing is handled
     // inside it (input flows in, true = consumed, before keybinding dispatch).
-    if (build_options.has_bar) if (surfaces.chromeHandleKeypress(event, matched)) return;
+    // No `has_bar` guard: `chromeHandleKeypress` is a no-op hook that returns
+    // false when no surface module is compiled in, so the flag test was
+    // duplicating a decision the `surfaces` type already made.
+    if (surfaces.chromeHandleKeypress(event, matched)) return;
 
     if (matched) |action| {
         // Per-key dispatch logs are `.debug` so release WMs (default log
@@ -220,7 +230,9 @@ pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
 /// always false in a bar-less build, where `surfaces` compiles to the null
 /// plugin type and the shape is pruned at comptime.
 inline fn onBarWindow(win: u32) bool {
-    return build_options.has_bar and surfaces.isBarWindow(win);
+    // Same reasoning as above: `isBarWindow` answers false with no surface
+    // module, so the `has_bar` half of the `and` was dead.
+    return surfaces.isBarWindow(win);
 }
 
 /// Dispatches a priority-ordered button-press event, splitting the two named
@@ -247,42 +259,113 @@ fn handleBarButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: 
     return true;
 }
 
+/// The facts a button press is routed on, taken as FIELDS so the routing rule
+/// is a pure function of them: the dispatch below cannot be exercised without
+/// an X server and a live grab, but this can.
+pub const MousePress = struct {
+    /// Super was held, i.e. the press came through the root grab rather than
+    /// being delivered to a client.
+    super_held: bool,
+    button: u8,
+    /// The press landed on a managed, non-root window.
+    target_managed: bool,
+    /// A config mouse bind matched and has ALREADY been dispatched (which
+    /// released the grab as part of dispatching). Set by the caller, in the
+    /// order `classifyMousePress` documents, because the lookup needs the live
+    /// config and the managed-window id.
+    bind_fired: bool,
+};
+
+/// What a press should do, and -- the part that used to be implicit -- what
+/// happens to the grab afterwards. Every arm of the dispatch below is one of
+/// these, and the dispatch is exhaustive with no `else`, so a new arm that
+/// forgets to settle the grab is a compile error rather than a frozen
+/// keyboard and pointer.
+pub const MouseIntent = union(enum) {
+    /// Super+scroll: a viewport bind, or a plain release when unbound. Checked
+    /// before the managed-window guard because scroll binds do not target a
+    /// window, so they must still fire over the desktop and the bar.
+    scroll_bind,
+    /// The press landed on the root or an unmanaged window.
+    unmanaged,
+    /// Plain click on a managed window: focus it.
+    focus_click,
+    /// A config mouse bind already ran; the grab was released with it.
+    bound_action,
+    /// Super+left/right with no bind: start a drag and keep the grab.
+    start_drag,
+    /// Super+any other button, unbound: replay as a plain click, which is what
+    /// thaws both devices. Omitting it is how a grab silently freezes input.
+    replay,
+};
+
+/// The mouse routing rule, as a pure function.
+///
+/// The ORDER here is the whole contract, and it is why this is worth pinning:
+/// scroll binds precede the managed-window guard; focus precedes the bind
+/// lookup; the drag and the replay fallback are both "Super and unbound", and
+/// only the button number tells them apart.
+pub fn classifyMousePress(p: MousePress) MouseIntent {
+    if (p.super_held and
+        (p.button == constants.mouse_button_scroll_up or p.button == constants.mouse_button_scroll_down))
+    {
+        // A fired scroll bind reports the SAME intent as any other fired bind,
+        // so every intent has exactly one grab outcome and a path cannot
+        // release twice (or, once the discipline is trusted, not at all).
+        return if (p.bind_fired) .bound_action else .scroll_bind;
+    }
+    if (!p.target_managed) return .unmanaged;
+    if (!p.super_held) return .focus_click;
+    if (p.bind_fired) return .bound_action;
+    if (p.button == constants.mouse_button_left or p.button == constants.mouse_button_right)
+        return .start_drag;
+    return .replay;
+}
+
 /// The managed-window path: scroll-wheel binds, focus, config mouse-bind
 /// lookup, drag, and the unbound-Super replay fallback.
 fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) void {
     const cs = core.getState();
     const mods = masks.normalizeModifiers(event.state);
 
-    // Scroll-wheel binds (buttons 4/5) are viewport actions that don't target
-    // a specific window, so they're checked before the managed-window guard
-    // that would otherwise discard events fired over the desktop/bar.
-    if (super_held and (event.detail == constants.mouse_button_scroll_up or event.detail == constants.mouse_button_scroll_down)) {
-        if (!tryConfigMouseBind(mods, event.detail, 0, event.time)) releaseGrab(event.time);
-        return;
-    }
-
     const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
-    if (clicked_window == cs.root or managed_window == 0) return releaseGrab(event.time);
+    const target_managed = clicked_window != cs.root and managed_window != 0;
 
-    if (!super_held) {
-        focus.grabFocus(managed_window, .mouse_click);
-        releaseGrab(event.time);
-        return;
+    // A scroll bind is looked up FIRST, with window 0, because it does not
+    // target a window and must fire over the desktop and the bar too; every
+    // other bind targets the clicked window, which is not known to be managed
+    // until the lookup above has run. `classifyMousePress` documents the order.
+    const scroll_bind = super_held and (event.detail == constants.mouse_button_scroll_up or
+        event.detail == constants.mouse_button_scroll_down);
+    const bind_fired = if (scroll_bind)
+        tryConfigMouseBind(mods, event.detail, 0, event.time)
+    else if (target_managed and super_held)
+        tryConfigMouseBind(mods, event.detail, managed_window, event.time)
+    else
+        false;
+
+    const intent = classifyMousePress(.{
+        .super_held = super_held,
+        .button = event.detail,
+        .target_managed = target_managed,
+        .bind_fired = bind_fired,
+    });
+
+    // Exhaustive, no `else`: an arm that forgets to settle the grab, or a new
+    // intent, stops the build.
+    switch (intent) {
+        .scroll_bind, .unmanaged, .replay => releaseGrab(event.time),
+        .focus_click => {
+            focus.grabFocus(managed_window, .mouse_click);
+            releaseGrab(event.time);
+        },
+        // The bind dispatch already released the grab.
+        .bound_action => {},
+        .start_drag => {
+            if (build_options.has_floating) actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+            keepDragGrab(event.time);
+        },
     }
-
-    if (tryConfigMouseBind(mods, event.detail, managed_window, event.time)) return;
-
-    if (event.detail == constants.mouse_button_left or event.detail == constants.mouse_button_right) {
-        if (build_options.has_floating) actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
-        keepDragGrab(event.time);
-        return;
-    }
-
-    // Unbound Super+button on a managed window (e.g. Super+Middle when no
-    // binding matches): no drag, no action — but the grab's activation FROZE
-    // both devices. Replay the pointer as a plain click and thaw the keyboard;
-    // returning without an allow_events would leave both frozen indefinitely.
-    releaseGrab(event.time);
 }
 
 /// Stops any active drag and updates the last event timestamp.
@@ -367,7 +450,7 @@ fn executeAction(action: *const types.Action) void {
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => lifecycle.reload(),
         .reload_hana => restart.requestReexec(),
-        .dump_state => dumpState(),
+        .dump_state => diag.dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
             log.err("exec failed: {}", .{err}),
         // A `+` batch is fire-and-forget: members are launched together, no
@@ -381,9 +464,10 @@ fn executeAction(action: *const types.Action) void {
             if (pipeline.model().focused) |win| actions.fullscreenToggleWindow(win);
         },
 
-        .toggle_floating_window => if (focus.getFocused()) |win| tilingOp(actions.toggleFloating, win),
-        .cycle_layout => |dir| tilingOp(actions.cycleLayoutKind, dirSign(i32, dir)),
-        .cycle_variants => |dir| tilingOp(actions.stepVariantDir, dirSign(i32, dir)),
+        .toggle_floating_window => if (focus.getFocused()) |win|
+            grafted(.toggle_floating_window, actions.toggleFloating, win),
+        .cycle_layout => |dir| grafted(.cycle_layout, actions.cycleLayoutKind, dirSign(i32, dir)),
+        .cycle_variants => |dir| grafted(.cycle_variants, actions.stepVariantDir, dirSign(i32, dir)),
         .set_master_width => |dir| actions.adjustPrimaryWidthAction(dirSign(f32, dir) * constants.master_width_step),
         .set_master_count => |dir| actions.adjustPrimaryCount(dirSign(i32, dir)),
         .grow_stack => |dir| actions.adjustSecondaryBalance(dirSign(f32, dir) * constants.stack_balance_step),
@@ -410,9 +494,12 @@ fn executeAction(action: *const types.Action) void {
         .pin_window => if (focus.getFocused()) |wid| actions.pinToggle(wid),
 
         // Bar: visibility toggle, position toggle, and chrome-overlay toggle.
-        .toggle_bar_visibility => if (build_options.has_bar) surfaces.setBarState(.toggle_bar_visibility),
-        .toggle_bar_position => if (build_options.has_bar) surfaces.toggleBarSegmentAnchor(),
-        .toggle_prompt => if (build_options.has_bar) surfaces.chromeToggleOverlay(),
+        // The three bar-chrome actions call their hooks directly: each is a
+        // no-op without a surface module, so guarding them with `has_bar`
+        // repeated a decision the `surfaces` type already encodes.
+        .toggle_bar_visibility => surfaces.setBarState(.toggle_bar_visibility),
+        .toggle_bar_position => surfaces.toggleBarSegmentAnchor(),
+        .toggle_prompt => surfaces.chromeToggleOverlay(),
 
         // Minimize: minimize, unminimize (LIFO/FIFO), and restore all.
         .minimize_window => actions.minimize(focus.getFocused()),
@@ -421,11 +508,23 @@ fn executeAction(action: *const types.Action) void {
     }
 }
 
-/// Runs a tiling op under the standard graft scaffolding shared by the
-/// cycle/step/toggle actions: suppress transient focus noise around the
-/// mutation, then re-settle tiling. `op` is an actions fn taking the arg type
-/// the action carries (step direction, or the floating toggle's window id).
-inline fn tilingOp(comptime op: anytype, arg: anytype) void {
+/// The one way to run a scaffolded tiling op. `tag` is the action it runs, and
+/// the `comptime` check makes `types.needsTilingFocusScaffold` a GATE rather
+/// than documentation: grafting a tag the type says does not need it (or
+/// renaming an arm so the graft silently covers a different tag) is a build
+/// error, not a runtime surprise.
+///
+/// The error sits in the `else` branch because Zig prunes the untaken branch
+/// of a comptime-known `if` without analyzing it: `if (!cond) @compileError(..)`
+/// is dead code in exactly the case it exists to catch, and was verified to
+/// compile clean. The converse -- a tag declared as needing the scaffold but
+/// dispatched through a plain arm -- is invisible from here, so the
+/// `tiling scaffold table matches the dispatcher's grafted set` test closes
+/// that direction.
+inline fn grafted(comptime tag: std.meta.Tag(types.Action), comptime op: anytype, arg: anytype) void {
+    comptime if (types.needsTilingFocusScaffold(tag)) {} else @compileError(
+        "input.grafted used for an action types.needsTilingFocusScaffold does not declare",
+    );
     focus.setSuppressReason(.tiling_operation);
     op(arg);
     focus.beginTilingOpSettle();
@@ -434,61 +533,49 @@ inline fn tilingOp(comptime op: anytype, arg: anytype) void {
 // Diagnostics
 
 /// Logs a full WM state snapshot at info level. Used for diagnostics only.
-fn dumpState() void {
-    // Diagnostics only, called from the log hook: a stack array is the right
-    // owner here (no State to hang it off), and it keeps tracking free of
-    // module-level scratch.
-    var scratch: [model.store_capacity]tracking.Entry = undefined;
-    const all = tracking.allWindowsInto(&scratch);
-
-    log.info("========== STATE DUMP ==========", .{});
-    log.info("Focused:        {?x}", .{focus.getFocused()});
-    log.info("Total windows:  {}", .{all.len});
-    log.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
-
-    if (build_options.has_workspaces) {
-        const ws_count = tracking.getWorkspaceCount();
-        for (0..ws_count) |i| {
-            var n: usize = 0;
-            for (all) |e| {
-                if (model.maskedOn(e.mask, core.WorkspaceId.fromIndex(i))) n += 1;
-            }
-            log.info(
-                "  WS{}: {} windows",
-                .{ i + 1, n },
-            );
-        }
-    }
-
-    if (build_options.has_tiling and core.tilingEnabled()) {
-        const m = pipeline.model();
-        log.info("Tiling enabled: true", .{});
-        log.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
-        log.info("Tiled windows:  {}", .{model.tiledCountOnWs(m, m.current)});
-    }
-
-    log.info("================================", .{});
-}
 
 // Helpers
+
+/// Last entry in `binds` matching (mods, button), or null.
+///
+/// The scan deliberately does NOT stop at the first match: the last entry wins,
+/// and every entry it shadows is reported through the same reporter the
+/// keyboard table uses. Taking the first match instead made one config mistake
+/// a warning on a key and silence on a button, and made the winner depend on
+/// file order in one path but not the other.
+///
+/// Pure over the slice (the only side effect is the warning) so the policy is
+/// testable without a live core state.
+pub fn findMouseBind(
+    binds: []const types.MouseBind,
+    mods: u16,
+    button: u8,
+) ?*const types.MouseBind {
+    var found: ?*const types.MouseBind = null;
+    for (binds, 0..) |*mb, i| {
+        if (mb.modifiers != mods or mb.button != button) continue;
+        if (found != null) keybind.logShadowConflict("Mouse binding", i, mods, "button", button);
+        found = mb;
+    }
+    return found;
+}
 
 /// Searches config mouse bindings for a modifier+button match and executes it.
 /// Returns true and releases the grab if a binding is found, false otherwise.
 fn tryConfigMouseBind(mods: u16, button: u8, win: u32, ts: u32) bool {
     // Linear scan is intentional: mouse bindings are few (~5-10), hash overhead not worth it.
-    for (core.getState().config.mouse_bindings.items) |*mb|
-        if (mb.modifiers == mods and mb.button == button) {
-            // Most mouse binds execute against the keyboard-focused window
-            // (executeAction); toggle_floating_window is inherently per-window
-            // and so targets the CLICKED window instead.
-            switch (mb.action) {
-                .toggle_floating_window => tilingOp(actions.toggleFloating, win),
-                else => executeAction(&mb.action),
-            }
-            releaseGrab(ts);
-            return true;
-        };
-    return false;
+    const mb = findMouseBind(core.getState().config.mouse_bindings.items, mods, button) orelse
+        return false;
+
+    // Most mouse binds execute against the keyboard-focused window
+    // (executeAction); toggle_floating_window is inherently per-window
+    // and so targets the CLICKED window instead.
+    switch (mb.action) {
+        .toggle_floating_window => grafted(.toggle_floating_window, actions.toggleFloating, win),
+        else => executeAction(&mb.action),
+    }
+    releaseGrab(ts);
+    return true;
 }
 
 /// Shared tail for releasing grab sequences. The two callers differ only in
@@ -516,44 +603,3 @@ inline fn releaseGrab(ts: u32) void {
 inline fn keepDragGrab(ts: u32) void {
     finishGrab(ts, xcb.XCB_ALLOW_ASYNC_POINTER);
 }
-
-// XcbCursor, declared manually because xcb_cursor_load_cursor is a static
-// inline function cImport cannot bind.
-
-const XcbCursor = struct {
-    const Context = opaque {};
-
-    extern fn xcb_cursor_context_new(
-        conn: core.Connection,
-        screen: *xcb.xcb_screen_t,
-        ctx: *?*Context,
-    ) c_int;
-    extern fn xcb_cursor_load_cursor(ctx: *Context, name: [*:0]const u8) u32;
-    extern fn xcb_cursor_context_free(ctx: ?*Context) void;
-
-    /// Applies the user's cursor theme to the root window. Falls back silently
-    /// if xcb-cursor is unavailable or the cursor cannot be loaded.
-    fn setupRoot(conn: core.Connection, screen: core.Screen) void {
-        var cursor_ctx: ?*Context = null;
-        if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0) return;
-        defer xcb_cursor_context_free(cursor_ctx);
-
-        const cursor = xcb_cursor_load_cursor(cursor_ctx.?, "left_ptr");
-        if (cursor == xcb.XCB_NONE) return;
-
-        const cookie = xcb.xcb_change_window_attributes_checked(
-            conn,
-            screen.root,
-            xcb.XCB_CW_CURSOR,
-            &[_]u32{cursor},
-        );
-        if (xcb.xcb_request_check(conn, cookie)) |err| {
-            log.err("Failed to set root cursor: error_code={}", .{err.*.error_code});
-            std.c.free(err);
-        }
-
-        // The server reference-counts cursors; freeing our handle is safe;
-        // it stays alive as long as the root window holds a reference.
-        _ = xcb.xcb_free_cursor(conn, cursor);
-    }
-};

@@ -308,6 +308,7 @@ pub fn onWindowGone(win: u32) void {
 /// This module's window sub-system contribution: lifecycle + coverage seam +
 /// the EWMH/bar protocol hooks.
 pub const module: @import("contract").WindowModule = .{
+    .name = "fullscreen",
     .init = init,
     .deinit = deinit,
     .notifyConfigureIfPending = notifyConfigureIfPending,

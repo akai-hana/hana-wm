@@ -38,6 +38,12 @@ pub inline fn isModifierKeysym(keysym: u32) bool {
 /// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
 /// the three lock modifiers in the historical grab order (size 0, the three
 /// singles, the three pairs, the triple). Consumers only iterate it / use `.len`.
+/// Every lock-modifier bit in one mask: the OR of `lock_modifiers` below.
+/// A binding compares equal regardless of lock-key state, so a rule about what
+/// a bind can match has to treat these bits as absent (input.zig's
+/// `undeliverableMouseBindReason` is the consumer).
+pub const lock_bits: u16 = mod_capslock | mod_numlock | mod_scrolllock;
+
 pub const lock_modifiers: [8]u16 = .{
     0,
     mod_capslock,

@@ -48,7 +48,10 @@ var g_polls: u32 = 0;
 /// prompt (`*const segment.BarHandlers` — presentForPrompt/dismissAfterPrompt/
 /// isBarWindow). Cast it on this side; leave null-ignored when your
 /// segment needs no bar services.
-pub fn init(allocator: std.mem.Allocator, conn: core.Connection, handlers: ?*const anyopaque) anyerror!void {
+/// `conn` is `*const anyopaque`, not `core.Connection`: `contract.zig` is
+/// xcb-free so the segment hook can name no X type. Cast it back with
+/// `@ptrCast(@constCast(conn))` if you actually need the connection.
+pub fn init(allocator: std.mem.Allocator, conn: *const anyopaque, handlers: ?*const anyopaque) anyerror!void {
     _ = conn;
     _ = handlers;
     g_active = false;

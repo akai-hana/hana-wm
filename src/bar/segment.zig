@@ -1,9 +1,11 @@
 //! Shared bar vocabulary for the segment modules.
 //!
-//! This is NOT a bar segment module: it holds the type-free vocabulary every
-//! segment module (and bar.zig) imports -- `Frame` (live workspace visitability),
-//! `DrawCtx` (the per-frame scratch bar builds for each segment's draw), the
-//! title render/snapshot machinery, and the prompt service-handle struct.
+//! This is NOT a bar segment module: it holds the shared vocabulary every
+//! segment module (and bar.zig) imports -- `Frame` (live workspace visitability;
+//! an alias for architecture/contract.zig's Frame, so the `naturalWidth` hook
+//! can type its frame parameter), `DrawCtx` (the per-frame scratch bar builds
+//! for each segment's draw), the title render/snapshot machinery, and the
+//! prompt service-handle struct.
 //!
 //! Segments are discovered under the bar's `modules/` directory and register
 //! into the build-generated `bar_modules.modules` array; the bar orchestrator
@@ -37,12 +39,11 @@ pub const BarHandlers = struct {
 /// Live workspace state for one bar frame, collected fresh by bar.zig every
 /// draw. The only segment-visible slice of WM state (besides what a segment
 /// reads directly from core).
-pub const Frame = struct {
-    workspace_count: u32 = 0,
-    current_workspace: u8 = 0,
-    is_all_view_active: bool = false,
-    workspace_has_windows: []const bool = &.{},
-};
+/// The bar's per-frame workspace facts. The DEFINITION lives in
+/// architecture/contract.zig so the `naturalWidth` hook can type its first
+/// parameter as a real `*const Frame`; this alias keeps `segmod.Frame` as the
+/// name every reader already uses.
+pub const Frame = contract.Frame;
 
 /// Minimized-state service the title addon exposes to the bar through the
 /// shared DrawCtx. The title segment owns all minimized-window
@@ -149,13 +150,10 @@ pub const offscreen_rect: model.Rect = .{
     .height = 0,
 };
 
-pub const WindowInfo = struct {
-    window: u32,
-    x: i16,
-    y: i16,
-    title: []const u8,
-    minimized: bool,
-};
+// The title segment's geometry -- its window list, the pixel-perfect tiling
+// shared by its draw and the bar's hit-test -- is not shared segment
+// vocabulary. It lives in modules/title/geom.zig, next to the only thing that
+// renders it (21.6).
 
 /// Stable per-call rendering context: geometry and draw state. It carries no
 /// X connection: the title draw had one only to call
@@ -180,127 +178,6 @@ pub const TitleSnapshot = struct {
     titles: []const []const u8 = &.{},
     geoms: []const ?model.Rect = &.{},
 };
-
-/// Builds the sorted WindowInfo list for the split view from the snapshot's
-/// per-window titles/geoms. The bar already resolved both per window id from
-/// in-process caches (WM title cache + sync truth-rect), so nothing here
-/// touches the wire and no positional batch exists to scramble. Windows with
-/// an unknown geometry are dropped, not padded.
-fn gatherAndSortWindowInfos(
-    snapshot: TitleSnapshot,
-    windows: []const u32,
-    out_window_info_buf: *[max_visible_windows]WindowInfo,
-) ?[]WindowInfo {
-    var info_count: usize = 0;
-    const win_count = @min(windows.len, max_visible_windows);
-    for (windows[0..win_count], 0..) |win, i| {
-        const wgeom = snapshot.geoms[i] orelse continue;
-        out_window_info_buf[info_count] = .{
-            .window = win,
-            .x = wgeom.x,
-            .y = wgeom.y,
-            .title = snapshot.titles[i],
-            .minimized = snapshot.minimized_set.contains(win),
-        };
-        info_count += 1;
-    }
-    if (info_count == 0) return null;
-    const window_infos = out_window_info_buf[0..info_count];
-    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
-    return window_infos;
-}
-
-/// Sort order for the split-view segment layout:
-///
-///   1. Non-minimized windows first (minimized shown last/rightmost, matching
-///      their visual demotion in tiling).
-///   2. On-screen before off-screen.  Negative-x windows (monocle background)
-///      are off-screen; demoting them stops artificial coordinates overriding
-///      real spatial ordering.
-///   3. Left-to-right by x, then top-to-bottom by y, keeps each window's
-///      segment stable across focus changes.
-///   4. Tie-break by window ID for deterministic ordering.
-///
-/// Focus is intentionally NOT a sort key: using it as a tie-break would
-/// reorder segments when two windows share coordinates, making the bar jump
-/// on focus changes. The focused window is highlighted via accent colour.
-fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
-    if (a.minimized != b.minimized) return !a.minimized;
-    const a_offscreen = a.x < 0;
-    const b_offscreen = b.x < 0;
-    if (a_offscreen != b_offscreen) return !a_offscreen;
-    if (a.x != b.x) return a.x < b.x;
-    if (a.y != b.y) return a.y < b.y;
-    return a.window < b.window;
-}
-
-/// Caller-frame scratch for the gather phase, shared verbatim by hitTest and
-/// the title module's draw.
-pub const GatherScratch = struct {
-    window_infos: [max_visible_windows]WindowInfo = undefined,
-
-    pub fn gather(
-        self: *GatherScratch,
-        snapshot: TitleSnapshot,
-        windows: []const u32,
-    ) ?[]WindowInfo {
-        return gatherAndSortWindowInfos(snapshot, windows, &self.window_infos);
-    }
-};
-
-/// A window resolved from a click inside the title segment.
-pub const ClickTarget = struct {
-    window: u32,
-    minimized: bool,
-};
-
-/// Pixel-perfect equal tiling shared by the title render and hit-testing:
-/// segment `i` of `count` spans [i*W/count, (i+1)*W/count). The tile width
-/// x-bounds sum exactly to `total_width` with no fractional residue.
-pub fn segmentBounds(total_width: u16, i: usize, count: u32) struct { x: u16, w: u16 } {
-    const x0: u16 = @intCast(@divFloor(@as(u32, @intCast(i)) * total_width, count));
-    const x1: u16 = @intCast(@divFloor(@as(u32, @intCast(i + 1)) * total_width, count));
-    return .{ .x = x0, .w = x1 - x0 };
-}
-
-/// Inverse of segmentBounds: the segment index under `offset_x` pixels, i.e.
-/// `partitionPoint(total_width, offset_x, count)` is the smallest `i` with
-/// `segmentBounds(total_width, i, count).x > offset_x`, clamped to `count-1`.
-pub fn segmentIndexOfX(total_width: u16, offset_x: u16, count: u32) usize {
-    return @intCast(@min(
-        count - 1,
-        @divFloor(@as(u32, offset_x) * count, @as(u32, total_width)),
-    ));
-}
-
-/// Resolves which window (if any) is displayed at `offset_x` pixels into the
-/// title segment, relative to the segment's start_x.
-/// Pure in-process hit-testing: titles/geoms come from the snapshot's cached
-/// per-window values, so it never touches the wire.
-pub fn hitTest(
-    ctx: TitleRenderContext,
-    snapshot: TitleSnapshot,
-    offset_x: u16,
-) ?ClickTarget {
-    const windows = snapshot.current_ws_wins;
-    if (windows.len == 0) return null;
-
-    if (windows.len == 1) {
-        const win = windows[0];
-        return .{ .window = win, .minimized = snapshot.minimized_set.contains(win) };
-    }
-
-    if (ctx.width == 0) return null;
-
-    var scratch: GatherScratch = .{};
-    const sorted = scratch.gather(snapshot, windows) orelse
-        return null;
-
-    const n: u32 = @intCast(sorted.len);
-    const idx = segmentIndexOfX(ctx.width, offset_x, n);
-    const info = sorted[idx];
-    return .{ .window = info.window, .minimized = info.minimized };
-}
 
 /// Which core fact-revision to mark-dirty with. Mirrors the `DirtySources`
 /// packed bitmask over bar segments; the bar calls `markDirtySource(src)` and

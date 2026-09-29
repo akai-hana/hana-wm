@@ -160,7 +160,10 @@ fn ctx() *reconcile.Ctx {
         .bar_win = usable_area.mappedSurfaceWindow(),
         // 13.6: resolved ONCE here, through the same call the bar uses, so
         // geometry and the bar's "no layout" report can never disagree.
-        .layout_active = contract.activeLayoutKind(model().ws[model().current.index].params.kind) != null,
+        .layout_active = contract.activeLayoutKind(
+            model().ws[model().current.index].params.kind,
+            core.tilingEnabled(),
+        ) != null,
     };
     return &g_ctx;
 }

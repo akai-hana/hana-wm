@@ -51,9 +51,8 @@ const check_line_buf = 1024;
 /// before ANY X11 work on purpose: a config check that needs a display (or
 /// claims a window-manager role) is unusable from CI, which is the only place
 /// it earns its keep.
-fn checkConfigRequested() bool {
-    var it = std.process.argsWithAllocator(alloc) catch return false;
-    defer it.deinit();
+fn checkConfigRequested(args: std.process.Args) bool {
+    var it = std.process.Args.Iterator.init(args);
     _ = it.skip(); // argv[0]
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--check-config")) return true;
@@ -80,8 +79,8 @@ fn runCheckConfig() !void {
     std.process.exit(if (n == 0) 0 else 1);
 }
 
-pub fn main() !void {
-    if (checkConfigRequested()) try runCheckConfig();
+pub fn main(init: std.process.Init) !void {
+    if (checkConfigRequested(init.minimal.args)) try runCheckConfig();
 
     const x = try connectToX();
     defer x.deinit();

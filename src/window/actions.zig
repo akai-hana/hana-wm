@@ -899,8 +899,8 @@ pub fn switchTo(ws_idx: u8) void {
     // correct screen claim / workarea for this workspace. Otherwise the bar's
     // deferred visibility update would require a SECOND reconcile on this
     // workspace, retiling Discord's geometry twice and causing a flicker.
-    if (build_options.has_bar)
-        surfaces.updateBarVisibilityForWorkspace(ws_idx);
+    // No `has_bar` guard: the hook is a no-op with no surface module.
+    surfaces.updateBarVisibilityForWorkspace(ws_idx);
     // Bump the core fullscreen fact only when the target workspace actually
     // carries a covering occupant: the bar's reactive path derives its claim
     // from the fact, so spuriously bumping it on every switch would churn a

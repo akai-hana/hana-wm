@@ -845,6 +845,16 @@ pub fn probeFontMetrics(
     defer g_object_unref(layout);
 
     var font = FontState{ .allocator = allocator, .pango_layout = layout };
+    // The probe owns a FontState exactly as the persistent draw state does, and
+    // loadFonts allocates a PangoFontDescription into it. The long-lived draw
+    // state frees its own at bar.zig's deinit; this one is stack-local with no
+    // such hook, so without this the description leaks once per probe.
+    // probeMetrics' two callers are bar create and bar reload, so the rate is
+    // per-reload, not per-frame -- a slow leak, but one that only ever grows
+    // and that a long-lived session pays repeatedly.
+    // Scoped immediately after construction so the `catch return null` below
+    // is covered too.
+    defer font.deinit();
     if (font_names.len > 0) font.loadFonts(font_names) catch return null;
     const asc, const desc = font.getMetrics();
     return .{ .ascent = asc, .descent = desc };
@@ -852,9 +862,15 @@ pub fn probeFontMetrics(
 
 /// Builds size-suffixed copies of the configured font list. Borrowed entries keep the
 /// config string's pointer, which freeSizedFontList uses to free only owned copies.
-pub fn buildSizedFontList(allocator: std.mem.Allocator, size_override: ?u16) ![][]const u8 {
+///
+/// `font_size` is the point size to build at, and it is REQUIRED rather than
+/// optional: it used to default to a module-level global that the bar set
+/// during height resolution, so drawing read the bar's font size out of
+/// process state that nothing in this signature mentioned (21.5). A caller
+/// measuring a trial size passes the trial; a caller drawing the bar passes
+/// the bar's resolved `Metrics`.
+pub fn buildSizedFontList(allocator: std.mem.Allocator, font_size: u16) ![][]const u8 {
     const cs = core.getState();
-    const font_size: u16 = size_override orelse bar_metrics.getScaledFontSize();
     const fonts = cs.config.bar.fonts.items;
     const sized = try allocator.alloc([]const u8, fonts.len);
     errdefer allocator.free(sized);
@@ -877,9 +893,9 @@ pub fn freeSizedFontList(allocator: std.mem.Allocator, sized: [][]const u8) void
 }
 
 /// Loads the configured fonts into `dc`. Called once per DrawContext creation.
-pub fn loadBarFonts(dc: *DrawContext, size_override: ?u16) !void {
+pub fn loadBarFonts(dc: *DrawContext, font_size: u16) !void {
     const cs = core.getState();
-    const sized = try buildSizedFontList(cs.alloc, size_override);
+    const sized = try buildSizedFontList(cs.alloc, font_size);
     defer freeSizedFontList(cs.alloc, sized);
     if (sized.len == 0) return; // keep Pango default, matching probeFontMetrics
     try dc.font.loadFonts(sized);

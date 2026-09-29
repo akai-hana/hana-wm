@@ -8,6 +8,7 @@ const actions = @import("actions");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
+const contract = @import("contract");
 
 /// Reserved row width when the workspaces module is compiled in but reports
 /// zero workspaces (moved here from bar.zig: width policy belongs to the
@@ -223,8 +224,7 @@ fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
 }
 
 /// This module's bar-segment contribution (registry binding).
-fn naturalWidthHook(frame: *const anyopaque, _: u16) u16 {
-    const f: *const segmod.Frame = @ptrCast(@alignCast(frame));
+fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
     // Without the workspaces module the bar never fills workspace_count (the
     // only writer is build_options.has_workspaces-gated), so the old code
     // reserved 270px for a segment that can never paint: "remove a module,
@@ -250,18 +250,11 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
     return idx;
 }
 
-fn onClickHook(
-    offset: u16,
-    left: bool,
-    right: bool,
-    _: *anyopaque,
-    _: *const fn (*anyopaque, u16) void,
-    _: *const fn () void,
-) bool {
-    const idx = resolveWorkspaceClick(offset) orelse return true;
-    if (left) {
+fn onClickHook(ctx: *const contract.ClickCtx) bool {
+    const idx = resolveWorkspaceClick(ctx.offset) orelse return true;
+    if (ctx.is_left) {
         actions.switchTo(@intCast(idx));
-    } else if (right) {
+    } else if (ctx.is_right) {
         const win = focus.getFocused() orelse return true;
         actions.moveWindowTo(win, @intCast(idx));
     }

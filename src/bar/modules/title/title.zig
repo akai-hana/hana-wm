@@ -16,6 +16,7 @@ const types = @import("types");
 
 const drawing = @import("drawing");
 const segmod = @import("segment");
+const geom = @import("geom");
 const contract = @import("contract");
 // The scrolling title addon (the carousel) binds its motion, cycle and
 const time = @import("time");
@@ -273,7 +274,7 @@ fn drawFittedTitle(
 }
 
 /// Renders one title segment per window in a horizontal split-view layout.
-/// The gather (gatherAndSortWindowInfos: build + sort up to max_visible_windows
+/// The gather (geom.gatherAndSortWindowInfos: build + sort up to max_visible_windows
 /// entries) and the width pass (Pango measureTextWidth per non-focused cell)
 /// are computed fresh each frame.
 fn drawSegmentedTitles(
@@ -285,7 +286,7 @@ fn drawSegmentedTitles(
     // is also built into the same bar-wide cap, so the count can never drift.
     if (windows.len == 0) return;
 
-    var scratch: segmod.GatherScratch = .{};
+    var scratch: geom.GatherScratch = .{};
     const sorted = scratch.gather(snapshot, windows) orelse return;
 
     const window_count: u32 = @intCast(sorted.len);
@@ -293,7 +294,7 @@ fn drawSegmentedTitles(
     const min_cell_w = ctx.config.scaledSegmentPadding(ctx.height) *| 2;
 
     for (sorted, 0..) |info, i| {
-        const bounds = segmod.segmentBounds(ctx.width, i, window_count);
+        const bounds = geom.segmentBounds(ctx.width, i, window_count);
         if (bounds.w == 0) continue;
         const segment_x = ctx.start_x + bounds.x;
 
@@ -346,26 +347,19 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
     return renderTitle(c, x);
 }
 
-fn onClickHook(
-    offset: u16,
-    left: bool,
-    right: bool,
-    state_ptr: *anyopaque,
-    title_click: *const fn (*anyopaque, u16) void,
-    redraw: *const fn () void,
-) bool {
-    _ = left;
-    _ = redraw;
+fn onClickHook(ctx: *const contract.ClickCtx) bool {
     const active = overlayActive();
-    if (right) {
+    if (ctx.is_right) {
         if (!active) if (overlay) |o| o.toggle();
     } else if (!active) {
-        title_click(state_ptr, offset);
+        // `state` and `title_click` travel together: the trampoline needs the
+        // same bar state this hook was handed.
+        ctx.title_click(ctx.state, ctx.offset);
     }
     return true;
 }
 
-fn naturalWidthHook(_: *const anyopaque, _: u16) u16 {
+fn naturalWidthHook(_: *const contract.Frame, _: u16) u16 {
     return segmod.title_min_width;
 }
 

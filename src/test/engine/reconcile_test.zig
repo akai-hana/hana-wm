@@ -497,11 +497,8 @@ test "13.6: an inactive layout floats every window at the work area" {
     // assuming a position.
     var tiled_rect: ?model.Rect = null;
     for (fx.rec.ops.items) |op| switch (op) {
-        .geom => |g| if (g.win == 201) {
-            tiled_rect = g.rect;
-        },
-        .geom_bw => |g| if (g.win == 201) {
-            tiled_rect = g.rect;
+        .configure => |c| if (c.win == 201) {
+            if (c.rect) |r| tiled_rect = r;
         },
         else => {},
     };
@@ -515,14 +512,10 @@ test "13.6: an inactive layout floats every window at the work area" {
 
     var seen: usize = 0;
     for (fx.rec.ops.items) |op| switch (op) {
-        .geom => |g| {
-            if (g.win != 201 and g.win != 202) continue;
-            try testing.expect(g.rect.eql(helpers.std_wa));
-            seen += 1;
-        },
-        .geom_bw => |g| {
-            if (g.win != 201 and g.win != 202) continue;
-            try testing.expect(g.rect.eql(helpers.std_wa));
+        .configure => |c| {
+            if (c.win != 201 and c.win != 202) continue;
+            try testing.expect(c.rect != null);
+            try testing.expect(c.rect.?.eql(helpers.std_wa));
             seen += 1;
         },
         .park => |w| {

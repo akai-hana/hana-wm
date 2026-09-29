@@ -113,6 +113,7 @@ pub fn allViewToggle(m: *model.Model) bool {
 /// lifecycle is handled by the tracking facade's init (count latch) and
 /// model state lives in the model.
 pub const module: @import("contract").WindowModule = .{
+    .name = "workspaces",
     .sendToWs = moveWindowToWs,
     .addToWs = tagAdd,
     .removeFromWs = tagRemove,

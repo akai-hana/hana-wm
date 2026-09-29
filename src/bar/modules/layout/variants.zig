@@ -6,6 +6,7 @@ const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const contract = @import("contract");
+const core = @import("core");
 const scaffold = @import("scaffold");
 
 // Layout registry (build-generated); the active layout is a `u8` index into
@@ -26,6 +27,7 @@ const no_variant_icon = "";
 fn getIndicator() []const u8 {
     return contract.activeLayoutMeta(
         pipeline.getCurrentLayout(),
+        core.tilingEnabled(),
         struct {
             /// The indicator is the ACTIVE VARIANT's entry, so the variant
             /// lookup happens here (inside the pick, which owns the registry

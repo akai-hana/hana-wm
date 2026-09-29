@@ -161,3 +161,62 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
     try testing.expect(model.visibleOn(&restored, 2, model.findHome(&restored, 2).?));
     try testing.expect(model.visibleOn(&restored, 3, model.findHome(&restored, 3).?));
 }
+
+// The per-window blob header changed from a 2-byte REGISTRY ORDINAL to a
+// variable-length CLAIMANT NAME, because an ordinal is a position in a
+// build-generated list: deleting or reordering an unrelated module renumbers
+// everything after it, and a saved session's fast path then points at a
+// different module. These pin both halves of the migration -- the new name
+// header, and that an old ordinal-stamped blob is still read rather than
+// silently dropped.
+
+test "ext header: a name-stamped blob round-trips claimant and payload" {
+    const name = "minimize";
+    const body = [_]u8{ 0x5A, 1, 2, 3, 4 };
+    const header_len = comptime persist.extHeaderLen(name.len);
+    // The exact shape the save path writes.
+    var blob: [header_len + body.len]u8 = undefined;
+    blob[0] = persist.ext_format_version;
+    blob[1] = @as(u8, @intCast(name.len));
+    @memcpy(blob[2..header_len], name);
+    @memcpy(blob[header_len..], &body);
+
+    try testing.expectEqualStrings(name, persist.extClaimantName(&blob).?);
+    // The payload starts right after the name: an off-by-one here would hand a
+    // module a blob whose magic byte is the name's first byte, which is
+    // exactly the silent non-claim the stamp was meant to avoid.
+    try testing.expectEqualSlices(u8, &body, persist.extPayload(&blob).?);
+    try testing.expect(persist.extLegacyOrdinal(&blob) == null);
+}
+
+test "ext header: truncated, foreign, and unstamped blobs never slice out of bounds" {
+    // Claims a 200-byte name in a 3-byte header.
+    const lying = [_]u8{ persist.ext_format_version, 200, 'x' };
+    try testing.expect(persist.extClaimantName(&lying) == null);
+    try testing.expect(persist.extPayload(&lying) == null);
+    // Too short to hold a version byte at all.
+    try testing.expect(persist.extPayload(&[_]u8{}) == null);
+    try testing.expect(persist.extPayload(&[_]u8{persist.ext_format_version}) == null);
+    // A future format we do not know: no header interpretation, and the
+    // caller falls back to passing the bytes through whole.
+    const future = [_]u8{ 99, 1, 2 };
+    try testing.expect(persist.extPayload(&future) == null);
+    try testing.expect(persist.extClaimantName(&future) == null);
+    try testing.expect(persist.extLegacyOrdinal(&future) == null);
+}
+
+test "ext header: a legacy ordinal-stamped blob still resolves" {
+    // What the previous format wrote: [version=1][ordinal][payload].
+    const legacy = [_]u8{ persist.ext_format_version_ordinal, 2, 0x5A, 0xFF };
+    try testing.expectEqual(@as(usize, 2), persist.extLegacyOrdinal(&legacy).?);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x5A, 0xFF }, persist.extPayload(&legacy).?);
+    // A name-stamped blob must NOT be read as a legacy ordinal: byte 1 is the
+    // name LENGTH there, so conflating the two would send "minimize" to
+    // registry slot 8. (An earlier draft of this test wrote 7 for a name that
+    // is 8 bytes long, and the reader correctly returned "minimiz" -- the
+    // length byte is authoritative, which is the property worth pinning.)
+    const modern = [_]u8{ persist.ext_format_version, 8, 'm', 'i', 'n', 'i', 'm', 'i', 'z', 'e', 0x5A };
+    try testing.expect(persist.extLegacyOrdinal(&modern) == null);
+    try testing.expectEqualStrings("minimize", persist.extClaimantName(&modern).?);
+    try testing.expectEqualSlices(u8, &[_]u8{0x5A}, persist.extPayload(&modern).?);
+}

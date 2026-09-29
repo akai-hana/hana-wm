@@ -10,7 +10,7 @@
 //! rather than forcing every primitive through `requests.zig`, and the
 //! check-layers allowlist covers this file). Each shim wraps the exact request
 //! pattern it consolidates here:
-//!   geom          ~ requests.configureWindow (plus the atomic raise variant
+//!   configure     ~ one xcb_configure_window, mask assembled from the
 //!                   that merges a stack mode into the same request)
 //!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent);
 //!                   inline xcb_configure_window in this seam
@@ -36,15 +36,55 @@ pub const Stack = enum { above };
 /// Production wires `XcbSink`; tests wire a recorder, which is the whole point
 /// of the vtable. One batch = everything queued between caller flushes (xcb
 /// buffers requests; the CALLER decides when to flush).
+/// The X11 wire form of one configure: a value array whose slots are ordered
+/// by the protocol (X, Y, WIDTH, HEIGHT, BORDER_WIDTH, STACK_MODE) plus the
+/// mask naming the live ones. X consumes value slots by mask bit, so the array
+/// is always full width and only the mask varies -- which is exactly why the
+/// slot order is positional magic and worth testing directly.
+pub const ConfigureWire = struct { mask: u16, values: [6]u32 };
+
+/// Assembles the configure request body. Split out of the shim so the slot
+/// order is assertable without an X connection: swapping slots 2 and 3 sends
+/// width as height, which X accepts and the WM discovers as every window
+/// rendered at the wrong aspect.
+pub fn configureWire(c: Configure) ConfigureWire {
+    var mask: u16 = 0;
+    var values = [_]u32{ 0, 0, 0, 0, 0, 0 };
+    if (c.rect) |r| {
+        mask |= xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
+            xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
+        values[0] = model.toXcbCoord(r.x);
+        values[1] = model.toXcbCoord(r.y);
+        values[2] = r.width;
+        values[3] = r.height;
+    }
+    if (c.bw) |bw| {
+        mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
+        values[4] = bw;
+    }
+    if (c.stack) |s| {
+        mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
+        values[5] = stackMode(s);
+    }
+    return .{ .mask = mask, .values = values };
+}
+
+/// One configure request, described by which parts of the window are changing.
+/// A null field means "leave it alone" -- X's own semantics for an unset
+/// configure mask bit, expressed instead of implied by which shim was called.
+pub const Configure = struct {
+    rect: ?model.Rect = null,
+    bw: ?u16 = null,
+    stack: ?Stack = null,
+};
+
 pub const Sink = struct {
     ptr: *anyopaque,
     vt: *const VTable,
 
     pub const VTable = struct {
         map: *const fn (*anyopaque, model.WindowId) void,
-        geom: *const fn (*anyopaque, model.WindowId, model.Rect, ?Stack) void,
-        geom_bordered: *const fn (*anyopaque, model.WindowId, model.Rect, u16, ?Stack) void,
-        border_width: *const fn (*anyopaque, model.WindowId, u16) void,
+        configure: *const fn (*anyopaque, model.WindowId, Configure) void,
         border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,
         park: *const fn (*anyopaque, model.WindowId) void,
         stack_only: *const fn (*anyopaque, model.WindowId, Stack) void,
@@ -57,16 +97,12 @@ pub const Sink = struct {
     pub inline fn map(self: Sink, win: model.WindowId) void {
         self.vt.map(self.ptr, win);
     }
-    pub inline fn geom(self: Sink, win: model.WindowId, rect: model.Rect, stack: ?Stack) void {
-        self.vt.geom(self.ptr, win, rect, stack);
-    }
-    /// Geometry + border width merged into one configure request; the shape a
-    /// workspace switch emits for every arriving window.
-    pub inline fn geomBordered(self: Sink, win: model.WindowId, rect: model.Rect, bw: u16, stack: ?Stack) void {
-        self.vt.geom_bordered(self.ptr, win, rect, bw, stack);
-    }
-    pub inline fn borderWidth(self: Sink, win: model.WindowId, bw: u16) void {
-        self.vt.border_width(self.ptr, win, bw);
+    /// Describe WHAT changed; the shim decides how many X bits that is. There
+    /// is no way for a caller to ask for "geometry and border width" as two
+    /// requests, which is the invariant the old `geom` + `geom_bordered` +
+    /// `border_width` trio had to be argued into at every call site.
+    pub inline fn configure(self: Sink, win: model.WindowId, c: Configure) void {
+        self.vt.configure(self.ptr, win, c);
     }
     pub inline fn borderPixel(self: Sink, win: model.WindowId, pixel: u32) void {
         self.vt.border_pixel(self.ptr, win, pixel);
@@ -113,38 +149,12 @@ pub const XcbSink = struct {
         _ = xcb.xcb_map_window(XcbSink.fromPtr(ptr).conn, win);
     }
 
-    /// Configure X|Y|W|H, merging a stack mode into the SAME request when
-    /// one is requested (never a separate round of requests for geometry+raise).
-    fn geomShim(ptr: *anyopaque, win: u32, rect: model.Rect, stack: ?Stack) void {
-        requests.configureWindow(
-            XcbSink.fromPtr(ptr).conn,
-            win,
-            rect,
-            if (stack) |s| stackMode(s) else null,
-            null,
-        );
-    }
-
-    /// Geometry + border-width in ONE configure: the common workspace-switch
-    /// shape (an arriving window re-sends both), so the two go out as a single
-    /// request instead of two round trips of the config queue.
-    fn geomBorderedShim(ptr: *anyopaque, win: u32, rect: model.Rect, bw: u16, stack: ?Stack) void {
-        requests.configureWindow(
-            XcbSink.fromPtr(ptr).conn,
-            win,
-            rect,
-            if (stack) |s| stackMode(s) else null,
-            bw,
-        );
-    }
-
-    fn borderWidthShim(ptr: *anyopaque, win: u32, bw: u16) void {
-        _ = xcb.xcb_configure_window(
-            XcbSink.fromPtr(ptr).conn,
-            win,
-            xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH,
-            &[_]u32{bw},
-        );
+    fn configureShim(ptr: *anyopaque, win: u32, c: Configure) void {
+        const w = configureWire(c);
+        // Nothing to say: an all-zero mask is a no-op request at best and a
+        // protocol error at worst, so drop it rather than send it.
+        if (w.mask == 0) return;
+        _ = xcb.xcb_configure_window(XcbSink.fromPtr(ptr).conn, win, w.mask, &w.values);
     }
 
     fn borderPixelShim(ptr: *anyopaque, win: u32, pixel: u32) void {
@@ -152,6 +162,16 @@ pub const XcbSink = struct {
     }
 
     /// Park = offscreen X + stack BELOW in ONE configure_window.
+    ///
+    /// Deliberately NOT folded into `configure`, even though that is now a
+    /// general "one configure, any combination" slot. Park asserts X only:
+    /// configure_window leaves unset mask bits alone, so sliding a window
+    /// offscreen costs one coordinate, whereas a `Configure.rect` would assert
+    /// Y/WIDTH/HEIGHT too and MOVE/RESIZE the window to whatever the caller
+    /// believed its geometry was. The park call site does not have a trustworthy
+    /// current rect to assert (it is the branch for a window that has never
+    /// been sent geometry), so collapsing this would turn a pure hide into a
+    /// speculative move. Keeping it separate is what makes that impossible.
     fn parkShim(ptr: *anyopaque, win: u32) void {
         _ = xcb.xcb_configure_window(
             XcbSink.fromPtr(ptr).conn,
@@ -247,9 +267,7 @@ pub const XcbSink = struct {
 /// shim table in every XcbSink::sink() call.
 const xcb_vtable: Sink.VTable = .{
     .map = XcbSink.mapShim,
-    .geom = XcbSink.geomShim,
-    .geom_bordered = XcbSink.geomBorderedShim,
-    .border_width = XcbSink.borderWidthShim,
+    .configure = XcbSink.configureShim,
     .border_pixel = XcbSink.borderPixelShim,
     .park = XcbSink.parkShim,
     .stack_only = XcbSink.stackOnlyShim,

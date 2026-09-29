@@ -149,7 +149,15 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 /// scaling.scaleToPixels because bar height is an absolute figure against
 /// the screen baseline, while font size keeps this inline relative-to-1080 form.
 pub fn scaleFontSize(value: types.ScalableValue, screen: core.Screen) u16 {
-    const screen_height: f32 = @floatFromInt(screen.height_in_pixels);
+    return scaleFontSizeForHeight(value, screen.height_in_pixels);
+}
+
+/// The screen-HEIGHT form of scaleFontSize, for callers that have a height but
+/// not a `core.Screen` (a cimport pointer). The bar's metric resolution takes
+/// its inputs as plain values so it can be resolved and tested without a live
+/// screen, and this is the only screen-derived input it needs.
+pub fn scaleFontSizeForHeight(value: types.ScalableValue, screen_height_px: u16) u16 {
+    const screen_height: f32 = @floatFromInt(screen_height_px);
     const raw = if (value.is_percentage)
         value.value * (screen_height / font_baseline_height)
     else

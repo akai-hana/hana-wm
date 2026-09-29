@@ -17,6 +17,7 @@ const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
 const scaffold = @import("scaffold");
+const contract = @import("contract");
 
 const time = @import("time");
 const c = @cImport(@cInclude("time.h"));
@@ -180,8 +181,12 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
 /// A mode cycle that has NOT drawn yet reports the bar's fresh probe instead
 /// of the outgoing mode's cached slot, so a reflow pass reserves the incoming
 /// mode's span instead of the one being left behind.
-fn naturalWidthHook(_: *const anyopaque, fallback: u16) u16 {
-    return W.naturalWidth(mode, @as(*const anyopaque, undefined), fallback);
+fn naturalWidthHook(_: *const contract.Frame, fallback: u16) u16 {
+    // The clock reads nothing from the frame, so it passes an undefined
+    // pointer straight through rather than materializing one. Now that the
+    // parameter is a real `*const Frame` this stays honest: the W-level hook
+    // ignores it, and the type says so at every hop.
+    return W.naturalWidth(mode, @as(*const contract.Frame, undefined), fallback);
 }
 
 /// Resets the mode width reservation so the next draw re-measures the active
@@ -224,15 +229,8 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
 /// path re-lays the row for the new mode's slot width (a narrower mode's text
 /// cannot be blitted into the outgoing mode's wider reservation), which is why
 /// this hook neither redraws nor measures anything itself.
-fn onClickHook(
-    _: u16,
-    left: bool,
-    _: bool,
-    _: *anyopaque,
-    _: *const fn (*anyopaque, u16) void,
-    _: *const fn () void,
-) bool {
-    mode = cycledMode(mode, left);
+fn onClickHook(ctx: *const contract.ClickCtx) bool {
+    mode = cycledMode(mode, ctx.is_left);
     return true;
 }
 

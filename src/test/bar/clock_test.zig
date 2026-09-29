@@ -6,6 +6,7 @@
 const std = @import("std");
 const clock = @import("clock");
 const scaffold = @import("scaffold");
+const contract = @import("contract");
 
 test "deadlineFromMs returns ms to next whole-second boundary" {
     // Exactly on a boundary: a full second to the next one.
@@ -76,7 +77,7 @@ test "a width stored for one mode is not reserved for the next" {
     // bar's fresh probe for that mode. Reporting the stale slot is what left
     // the row laid out at the previous mode's length after a click.
     const W = scaffold.keyedWidthState("clock_test", clock.DisplayMode);
-    const ctx: *const anyopaque = undefined;
+    const ctx: *const contract.Frame = undefined; // the clock hook reads nothing from it
     const wide: u16 = 190; // date_time
     const narrow: u16 = 80; // time
 

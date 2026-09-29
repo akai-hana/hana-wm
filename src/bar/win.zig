@@ -167,7 +167,10 @@ pub fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
     };
 }
 
-pub fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawContext {
+/// `font_size` is the bar's resolved point size, passed in rather than read
+/// from bar state: the draw context is built from values the caller already
+/// resolved, so it does not have to be re-derived here (21.5).
+pub fn createDrawContext(setup: BarWindowSetup, height: u16, font_size: u16) !*drawing.DrawContext {
     const cs = core.getState();
     const dc = try drawing.DrawContext.initWithVisual(
         cs.alloc,
@@ -181,6 +184,6 @@ pub fn createDrawContext(setup: BarWindowSetup, height: u16) !*drawing.DrawConte
         cs.config.bar.transparency,
     );
     errdefer dc.deinit();
-    try drawing.loadBarFonts(dc, null);
+    try drawing.loadBarFonts(dc, font_size);
     return dc;
 }

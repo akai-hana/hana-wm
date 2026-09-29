@@ -1,20 +1,53 @@
 //! Spawn engine: detached command execution for keybind `exec` actions.
 //!
-//! Double-fork so the grandchild re-parents to init and the WM never
-//! accumulates zombies. A single O_CLOEXEC pipe carries the outcome: success
-//! closes its copy automatically; otherwise the intermediate child writes
-//! tag_pid and the grandchild writes tag_failed only if execvp() fails; two
-//! independently-scheduled writers, so messages can arrive in either order
-//! (finishSpawn() handles both). EOF ends the conversation; entries resolve via
-//! drainPendingSpawns() (every event batch) or reapPendingChildren() (SIGCHLD).
+//! One fork plus setsid, with the WM installed as a child subreaper
+//! (makeSubreaper, called from core.init) so orphans re-parent to hana rather
+//! than accumulating somewhere nothing will collect them. A single O_CLOEXEC
+//! pipe carries the outcome: success closes the child's copy automatically, and
+//! execvp failure writes tag_failed before exiting. The spawned PID is known
+//! from fork() itself, so there is no pid message to parse and no second writer
+//! to race. EOF ends the conversation; entries resolve via drainPendingSpawns()
+//! (every event batch) or reapPendingChildren() (SIGCHLD).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
-// libc bindings for fork/exec/wait (no Zig stdlib wrappers exist for these low-level syscalls)
+// libc bindings for fork/exec/wait/prctl (no Zig stdlib wrappers exist for these
+// low-level syscalls)
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("sys/wait.h");
+    @cInclude("sys/prctl.h");
 });
+
+/// Installs hana as a child subreaper (PR_SET_CHILD_SUBREAPER), once, before
+/// anything forks.
+///
+/// Without it a single-fork spawn leaves the WM as the parent of every command
+/// it launches, and those commands' own orphaned grandchildren re-parent to
+/// init -- which is fine, except init is not the only thing that can exit: in
+/// a container the reaper is whatever PID 1 is, and a subreaper here means the
+/// orphan comes to hana instead, which then has to collect it. That collection
+/// is the existing `waitpid(-1, WNOHANG)` sweep in reapPendingChildren, so the
+/// subreaper adds no new reaping path -- it only changes who the orphan's
+/// parent is, to the one process that already sweeps.
+///
+/// Idempotent and cheap: one branch per spawn, because the flag is
+/// process-wide and cannot meaningfully be re-asserted.
+fn ensureSubreaper() void {
+    if (builtin.os.tag != .linux) return;
+    if (subreaper_installed) return;
+    if (c.prctl(c.PR_SET_CHILD_SUBREAPER, @as(c_ulong, 1), @as(c_ulong, 0), @as(c_ulong, 0), @as(c_ulong, 0)) != 0) {
+        // Not fatal: the spawn still runs, and the only loss is that an
+        // orphaned grandchild goes to init rather than to hana. Worth one
+        // line, because it means the subreaper invariant is not in force.
+        std.debug.print("hana: prctl(PR_SET_CHILD_SUBREAPER) failed; orphan reaping falls back to init\n", .{});
+        return;
+    }
+    subreaper_installed = true;
+}
+
+var subreaper_installed: bool = false;
 
 const core = @import("core");
 const log = @import("log");
@@ -24,17 +57,12 @@ const window = @import("window");
 
 const bounded = @import("bounded");
 const lifecycle = @import("lifecycle");
-/// Tags for the two possible messages written onto the spawn pipe. Sent as
-/// a leading byte so the reader can tell them apart no matter which order
-/// they arrive in (see finishSpawn()).
-const tag_pid: u8 = 0;
+/// The one message the spawn pipe can carry. Sent as a leading byte so a
+/// stray or unknown byte is still distinguishable from a clean EOF.
 const tag_failed: u8 = 1;
 
-/// Byte length of a tag_pid message: the tag plus a raw c_int.
-const pid_msg_len: usize = 1 + @sizeOf(c_int);
-
 /// Writes the tag_failed byte to the spawn pipe and exits: the signal that
-/// resolves this spawn as failed. Used on both post-fork failure paths.
+/// resolves this spawn as failed. The only post-fork failure path.
 fn failWithTag(pipe_write: c_int) noreturn {
     const msg = [1]u8{tag_failed};
     _ = c.write(pipe_write, &msg, msg.len);
@@ -48,53 +76,21 @@ fn execShell(cmd_z: [*:0]const u8) void {
     _ = c.execvp("/bin/sh", @ptrCast(&[_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null }));
 }
 
-/// Grandchild: detaches from the session and execs the command.
+/// Child of the WM: detaches from the WM's session and execs the command.
 /// On execvp failure, writes a tag_failed byte to pipe_write before exiting.
 /// On success this function never returns far enough to write anything;
 /// pipe_write's O_CLOEXEC copy closes itself as part of the exec.
-fn execAsGrandchild(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+fn execDetached(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
+    // setsid() here also makes the child a session leader, so an `exec` of a
+    // terminal emulator can acquire a controlling terminal. The old
+    // double-fork put the real process one level further down, where it was
+    // never a session leader and TIOCSCTTY was unavailable.
     _ = c.setsid();
     execShell(cmd_z);
     failWithTag(pipe_write);
 }
 
-const second_fork_failed = "hana: second fork failed\n";
-
-/// Intermediate child: forks the grandchild, forwards its PID over the
-/// spawn pipe tagged as tag_pid, then exits so the grandchild is
-/// re-parented to init.
-fn forkIntermediate(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
-    const grandchild_pid = c.fork();
-    if (grandchild_pid < 0) {
-        // Raw write(2) only (same discipline as signals.writeLiteral):
-        // anything that allocates or takes a lock is unsafe in a forked
-        // child before exec.
-        _ = std.os.linux.write(2, second_fork_failed.ptr, second_fork_failed.len);
-        std.process.exit(1);
-    }
-    if (grandchild_pid == 0) {
-        // Grandchild: keep pipe_write open rather than closing it up front.
-        // Its copy is O_CLOEXEC, so a successful execvp() closes it for us;
-        // execAsGrandchild only writes to it explicitly if exec fails.
-        execAsGrandchild(pipe_write, cmd_z);
-    }
-
-    const gp: c_int = grandchild_pid;
-    var msg: [pid_msg_len]u8 = undefined;
-    msg[0] = tag_pid;
-    @memcpy(msg[1..], std.mem.asBytes(&gp));
-    // A short/failed write (e.g. EPIPE after the WM closed the read end
-    // on shutdown) would leave the WM waiting on a conversation that never
-    // delivers a pid. In that case declare the spawn failed and exit
-    // non-zero; the grandchild (if any) still runs, just unrouted.
-    if (c.write(pipe_write, &msg, msg.len) != pid_msg_len) {
-        failWithTag(pipe_write);
-    }
-    _ = c.close(pipe_write);
-    std.process.exit(0);
-}
-
-// Pending spawn table (max 16 in-flight double-forks).
+// Pending spawn table (max 16 in-flight spawns).
 
 const max_pending_spawns: usize = 16;
 
@@ -120,9 +116,8 @@ fn resolveCmdZ(alloc: std.mem.Allocator, cmd: []const u8, buf: *[stack_cmd_capac
     return .{ .z = heap, .heap = heap };
 }
 
-/// Largest possible spawn-pipe conversation: a tag_pid message plus an
-/// optional trailing (or leading) tag_failed byte.
-const spawn_msg_max: usize = pid_msg_len + 1;
+/// Largest possible spawn-pipe conversation: a single tag_failed byte.
+const spawn_msg_max: usize = 1;
 
 /// Longest command text kept per pending spawn, for diagnostics. A failed
 /// spawn used to be reported as nothing at all (or, for a wedged pipe, as
@@ -137,9 +132,9 @@ const cmd_report_max: usize = 96;
 /// refused with SpawnQueueFull).
 const spawn_timeout_ms: i64 = 5_000;
 
-/// Lifecycle state for a single double-fork spawn.
+/// Lifecycle state for a single spawn.
 const PendingSpawn = struct {
-    pid: c_int, // PID of intermediate child; used for targeted waitpid.
+    pid: c_int, // PID of the spawned process; also the registerSpawn target.
     spawn_fd: ?c_int, // Read end of the spawn pipe (O_NONBLOCK). null once done.
     buf: [spawn_msg_max]u8 = undefined, // Accumulates bytes until the conversation ends.
     len: usize = 0, // Valid bytes accumulated in buf so far.
@@ -162,7 +157,7 @@ const PendingSpawn = struct {
 // is needed.
 var g_pending: bounded.BoundedList(PendingSpawn, max_pending_spawns) = .{};
 
-/// Spawns `cmd` as a detached grandchild (double-fork). Returns immediately;
+/// Spawns `cmd` as a detached child. Returns immediately;
 /// lifecycle is tracked in g_pending and resolved by drainPendingSpawns() /
 /// reapPendingChildren() without blocking the event loop.
 pub fn executeShellCommand(cmd: []const u8) !void {
@@ -189,6 +184,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
         return error.PipeFailed;
     };
 
+    ensureSubreaper();
     const pid = c.fork();
     if (pid < 0) {
         _ = c.close(pipe_fds[0]);
@@ -198,8 +194,11 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     }
 
     if (pid == 0) {
+        // Child: keep pipe_write open rather than closing it up front. Its
+        // copy is O_CLOEXEC, so a successful execvp() closes it for us;
+        // execDetached only writes to it explicitly if exec fails.
         _ = c.close(pipe_fds[0]);
-        forkIntermediate(pipe_fds[1], cmd_z);
+        execDetached(pipe_fds[1], cmd_z);
     }
 
     // Parent: close the write end so our read end eventually sees EOF.
@@ -328,45 +327,25 @@ pub fn drainPendingSpawns() void {
 fn finishSpawn(entry: *PendingSpawn) void {
     const data = entry.buf[0..entry.len];
 
-    var grandchild: c_int = -1;
-    var failed = data.len == 0;
-
-    var rest = data;
-    while (rest.len > 0) {
-        switch (rest[0]) {
-            tag_pid => {
-                if (rest.len < pid_msg_len) {
-                    failed = true;
-                    break;
-                }
-                grandchild = std.mem.bytesToValue(c_int, rest[1..][0..@sizeOf(c_int)]);
-                rest = rest[pid_msg_len..];
-            },
-            tag_failed => {
-                failed = true;
-                rest = rest[1..];
-            },
-            else => {
-                failed = true;
-                break;
-            },
-        }
-    }
+    // The only message the child can write is tag_failed; a clean EOF (no
+    // bytes at all) is success, because the O_CLOEXEC copy closed on a
+    // successful exec. Anything else is a protocol violation and treated as
+    // failure rather than silently registering a spawn that may not exist.
+    const failed = data.len != 0 and data[0] != tag_failed;
 
     if (failed) {
         // 4.4: a failed spawn used to be completely silent. `entry.cmd` is
         // the truncated command, so this is now actionable: which command,
-        // and that execvp (or the second fork) is what failed.
+        // and that execvp is what failed.
         log.warn("spawn failed: '{s}' (exec did not succeed)", .{entry.command()});
         return;
     }
     if (entry.spawn_ws) |ws| {
-        const pid_u32: u32 = if (grandchild > 0) @intCast(grandchild) else 0;
-        window.registerSpawn(core.WorkspaceId.fromIndex(ws), pid_u32);
+        window.registerSpawn(core.WorkspaceId.fromIndex(ws), @intCast(entry.pid));
     }
 }
 
-/// Reaps zombie intermediate children without blocking. Called from the
+/// Reaps zombie children without blocking. Called from the
 /// SIGCHLD handler; the spawn-pipe drain stays in signals.zig so it doesn't
 /// run twice per SIGCHLD.
 pub fn reapPendingChildren() void {
@@ -377,6 +356,11 @@ pub fn reapPendingChildren() void {
     // collect. waitpid(-1, WNOHANG) sweeps every child hana owns, so the
     // hand-off is idempotent and cannot miss one; it returns -ECHILD the
     // moment hana has no unreaped children, which is a cheap no-op.
+    //
+    // This sweep is also what makes the subreaper safe: an orphaned
+    // grandchild of a launched app re-parents to hana, and hana has no
+    // PendingSpawn entry for it at all -- only this waitpid(-1) ever collects
+    // it.
     while (c.waitpid(-1, null, c.WNOHANG) > 0) {}
 
     for (g_pending.slice()) |*entry| {
@@ -403,6 +387,7 @@ pub fn execSynchronous(cmd: []const u8) void {
     defer if (resolved.heap) |h| alloc.free(h);
     const cmd_z = resolved.z.ptr;
 
+    ensureSubreaper();
     const pid = c.fork();
     if (pid < 0) {
         log.err("Fork failed (synchronous exec): {s}", .{cmd});

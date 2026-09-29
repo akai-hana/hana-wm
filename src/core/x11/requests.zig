@@ -2,7 +2,7 @@
 //! documented EWMH/geometry/policy requests that sit above them.
 //!
 //! Split out of the former `wire` module. XCB is a request/reply protocol, so
-//! this is the request layer: `configureWindow`, `raiseWindow`,
+//! this is the request layer: `raiseWindow`,
 //! `setBorderPixel`, the server grab pair, the poll-first reply collector, the
 //! EWMH root advertisement, and the one xcb-typed geometry adapter. Atom ids
 //! come from `atoms.zig`; dispatch of these requests happens in `sink.zig`,
@@ -41,39 +41,6 @@ pub inline fn rectFromXcb(reply: *const xcb.xcb_get_geometry_reply_t) model.Rect
 }
 
 // Configure/raise/park primitives
-
-/// Moves and resizes `win`, optionally merging a stack mode and/or a border
-/// width into the same request (XCB consumes value slots by mask bit; the
-/// extra slots are ignored when their mask bits are clear). Merging the
-/// border width here collapses what would otherwise be a second configure
-/// request per window on a workspace switch.
-pub fn configureWindow(
-    conn: Connection,
-    win: u32,
-    rect: model.Rect,
-    stack_mode: ?u32,
-    border_width: ?u16,
-) void {
-    var mask: u16 = xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
-        xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
-    var values = [_]u32{
-        model.toXcbCoord(rect.x),
-        model.toXcbCoord(rect.y),
-        rect.width,
-        rect.height,
-        0, // border_width slot
-        0, // stack_mode slot
-    };
-    if (border_width) |bw| {
-        mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-        values[4] = bw;
-    }
-    if (stack_mode) |sm| {
-        mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
-        values[5] = sm;
-    }
-    _ = xcb.xcb_configure_window(conn, win, mask, &values);
-}
 
 pub inline fn raiseWindow(conn: Connection, win: u32) void {
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});

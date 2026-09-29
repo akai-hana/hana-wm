@@ -319,6 +319,7 @@ pub fn onWindowGone(win: u32) void {
 /// This module's window sub-system contribution: lifecycle + persistence
 /// seam + record cleanup for torn-down windows.
 pub const module: @import("contract").WindowModule = .{
+    .name = "minimize",
     .init = init,
     .deinit = deinit,
     .onWindowGone = onWindowGone,

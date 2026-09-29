@@ -8,6 +8,8 @@ const xcb = core.xcb;
 const log = @import("log");
 
 const types = @import("types");
+const contract = @import("contract");
+const contract_x11 = @import("contract_x11");
 
 const drawing = @import("drawing");
 const masks = @import("masks");
@@ -434,14 +436,16 @@ fn consumeRedrawRequest() bool {
 /// The completion/history/ghost buffers are embedded in the global (~99 KiB).
 fn init(
     allocator: std.mem.Allocator,
-    conn: core.Connection,
+    conn: *const anyopaque,
     bar_handlers: ?*const anyopaque,
 ) !void {
     if (g.vim_state.buf.len != 0) return; // already initialised
     g.handlers = @ptrCast(@alignCast(bar_handlers));
     g.allocator = allocator;
     g.vim_state = try EditorState.init(allocator, default_max_input);
-    g.key_syms = xcb_key_symbols_alloc(conn);
+    // The segment hook's connection is `*const anyopaque` (contract is
+    // X-free); the one segment that needs it casts back to the real handle.
+    g.key_syms = xcb_key_symbols_alloc(@ptrCast(@constCast(conn)));
     if (g.key_syms == null)
         log.warn("prompt: xcb_key_symbols_alloc failed: key input will not work", .{});
     // The addon lifecycle lives here: each registered engine binds its
@@ -497,10 +501,14 @@ fn closeWindowOrPromptUnderCursor() bool {
 /// `bound_action` is whatever the keybind map resolved for this key; pass
 /// `state.map.get(key)` directly; null is fine when there's no binding.
 fn handlePromptKeypress(
-    event: *const xcb.xcb_key_press_event_t,
+    event: *const contract.KeyPressEvent,
     bound_action: ?*const types.Action,
 ) bool {
     if (!g.is_active) return false;
+    // The hook receives the opaque event (contract is X-free); the fields are
+    // read here, on the X side, via `contract_x11`'s concrete type. The only
+    // producer is the bar's chrome keypress route.
+    const xevent: *const contract_x11.KeyPressEvent = @ptrCast(@alignCast(event));
 
     // When the mod key (Super) is held and a WM action is bound to this key,
     // let the normal dispatcher run so WM operations don't cancel the prompt;
@@ -508,10 +516,10 @@ fn handlePromptKeypress(
     // the cursor is over the bar itself.
     if (bound_action) |action| {
         if (action.* == .close_window) return closeWindowOrPromptUnderCursor();
-        if (event.state & xcb.XCB_MOD_MASK_4 != 0)
+        if (xevent.state & xcb.XCB_MOD_MASK_4 != 0)
             return false; // let WM dispatch execute the bind; prompt stays open
     }
-    return handleKeyPress(event);
+    return handleKeyPress(xevent);
 }
 
 /// Low-level key-press handler.  Called by `handlePromptKeypress` after all

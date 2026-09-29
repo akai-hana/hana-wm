@@ -53,6 +53,7 @@ const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
 const segmod = @import("segment");
+const scaffold = @import("scaffold");
 const contract = @import("contract");
 const time = @import("time");
 
@@ -325,10 +326,6 @@ const Instance = struct {
     /// Latched on the control's first read (the segment's first draw arms
     /// it; see `g_armed`).
     next_read_ms: i64 = 0,
-    /// The control's slot width from the last idle draw (a single-slot
-    /// segment spanning [0, slot_w) at the segment start): the click
-    /// hit-test range and the slider denominator.
-    slot_w: u16 = 0,
     /// Sub-scoped label scratch, so each control's label stays valid until
     /// its own next draw.
     scratch: [128]u8 = undefined,
@@ -352,7 +349,7 @@ var g_drag: [subs.len]bool = @splat(false);
 
 /// Linear slider mapping across a slot: a pointer offset (relative to the
 /// segment start) maps to 0-100 % of the slot. The bar records the click
-/// bound at the reserved width, which mirrors `slot_w` at draw time.
+/// bound at the reserved width, which mirrors the measured width at draw time.
 pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
     const w: u32 = @max(slot_w, 1);
     const base: u32 = @as(u32, offset) -| @as(u32, slot_x);
@@ -365,16 +362,34 @@ pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
 /// (`naturalWidthFor`), the drag mapping (`pctAt`) and the click hit-test
 /// (`onClickFor`).
 ///
-/// These used to disagree on the first frame. `slot_w` is the last PAINTED
-/// width, so it is 0 until the segment's first draw completes, and
-/// `onClickFor` rejected every click while it was 0 -- the very first press on
-/// a freshly laid-out slider did nothing at all, and the drag denominator and
-/// the row reservation fell back to different values. Falling back to the same
-/// declared probe width in all three places gives the hit-test and the drag
-/// range one denominator from frame one.
+/// These used to disagree on the first frame: the width was 0 until the
+/// segment's first draw completed, `onClickFor` rejected every click while it
+/// was 0 (so the very first press on a freshly laid-out slider did nothing at
+/// all), and the drag denominator and the row reservation fell back to
+/// DIFFERENT values. `widthState.resolved` is now that one rule (21.4), shared
+/// with systatus, so the hit-test, the drag range and the reservation cannot
+/// disagree about what "not measured yet" means.
+/// The shared `scaffold.widthState` singleton for this control's name, which
+/// owns the store / consumeRedrawRequest / resolved triple. The hand-rolled
+/// `slot_w` field plus its inline "did the width change? mark dirty" (21.4)
+/// was a second implementation of code systatus already used, and this module
+/// is comptime-indexed by `subs`, so one instantiation per name is exactly
+/// the state each control needs.
+fn widthStateFor(comptime idx: usize) type {
+    return scaffold.widthState(subs[idx].name);
+}
+
 fn reservedWidth(idx: usize) u16 {
-    const measured = g_inst[idx].slot_w;
-    return if (measured != 0) measured else subs[idx].probeNaturalWidth;
+    // Event handlers reach here with a RUNTIME idx (a pointer event names the
+    // control it landed on), while the width state is one comptime-tagged
+    // singleton per control. `inline for` keeps the selection comptime and
+    // leaves a straight-line compare per control -- the array is a compile-time
+    // constant of 2, so this is cheaper than any index it replaced, and there
+    // is no runtime `slot_w` mirror to fall out of sync with.
+    inline for (0..subs.len) |i| {
+        if (i == idx) return widthStateFor(i).resolved(subs[i].probeNaturalWidth);
+    }
+    unreachable;
 }
 
 /// The slider denominator for control `idx` at pointer `offset` (the single
@@ -437,7 +452,7 @@ fn naturalWidthFor(idx: usize) u16 {
 }
 
 /// Drag-mode loading bar for one control: track, fill, centered percentage.
-/// Returns the slot's far edge WITHOUT feeding `slot_w`: the label width must
+/// Returns the slot's far edge WITHOUT feeding the width state: the label width must
 /// survive the scrub so the drag-end redraw re-renders it in place.
 fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
     const height = dc.height;
@@ -459,7 +474,7 @@ fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
     return x + slot;
 }
 
-fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
+fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !u16 {
     const dc = segmod.castDraw(ctx);
     const sub = subs[idx];
     const inst = &g_inst[idx];
@@ -486,44 +501,39 @@ fn drawFor(idx: usize, ctx: *anyopaque, x: u16) !u16 {
     // path). A width change marks the segment dirty so the bar re-lays out.
     // The slot also feeds the click bound and the slider denominator.
     const drawn = end_x - x;
-    if (drawn != inst.slot_w) g_pending_redraw[idx] = true;
-    inst.slot_w = drawn;
+    // widthState.store owns the "changed -> owes a redraw" rule; the module's
+    // own pending flag is for the OTHER reason a slider repaints (its value
+    // committed). Both are consumed together, so neither can leak a request.
+    widthStateFor(idx).store(drawn);
+    if (widthStateFor(idx).consumeRedrawRequest()) g_pending_redraw[idx] = true;
     return end_x;
 }
 
 /// Left press: enter drag mode on the control and set its level at that
 /// position; right press: the control's secondary action (mute toggle),
 /// reserved for controls without one.
-fn onClickFor(
-    idx: usize,
-    offset: u16,
-    left: bool,
-    right: bool,
-    _: *anyopaque,
-    _: *const fn (*anyopaque, u16) void,
-    redraw: *const fn () void,
-) bool {
+fn onClickFor(idx: usize, ctx: *const contract.ClickCtx) bool {
     const sub = subs[idx];
-    if (!left and !right) return false;
+    if (!ctx.is_left and !ctx.is_right) return false;
     if (!present(idx)) return false;
     // Bound by the SAME width the row reserved, not by the last painted width:
     // a press that arrives before the first draw still maps to a level instead
     // of being dropped.
     const bound = reservedWidth(idx);
-    if (offset >= bound) return false;
-    if (left) {
+    if (ctx.offset >= bound) return false;
+    if (ctx.is_left) {
         if (!sub.writable()) return false;
         // Enter drag mode immediately, and restart the commit clock after
         // this press's set so the first motion doesn't double-send.
         g_drag[idx] = true;
-        sub.apply(pctAt(idx, offset));
+        sub.apply(pctAt(idx, ctx.offset));
         g_throttle[idx].reset();
     } else {
         const secondary = sub.secondary orelse return false;
         secondary();
     }
     g_pending_redraw[idx] = true;
-    redraw();
+    ctx.redraw();
     return true;
 }
 
@@ -594,21 +604,14 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
         fn redraw() bool {
             return consumeRedrawRequestFor(i);
         }
-        fn naturalWidth(_: *const anyopaque, _: u16) u16 {
+        fn naturalWidth(_: *const contract.Frame, _: u16) u16 {
             return naturalWidthFor(i);
         }
         fn draw(ctx: *anyopaque, x: u16) anyerror!u16 {
             return drawFor(i, ctx, x);
         }
-        fn onClick(
-            offset: u16,
-            left: bool,
-            right: bool,
-            a: *anyopaque,
-            trampoline: *const fn (*anyopaque, u16) void,
-            request_redraw: *const fn () void,
-        ) bool {
-            return onClickFor(i, offset, left, right, a, trampoline, request_redraw);
+        fn onClick(ctx: *const contract.ClickCtx) bool {
+            return onClickFor(i, ctx);
         }
         fn onScroll(dir: i8, request_redraw: *const fn () void) bool {
             return onScrollFor(i, dir, request_redraw);
