@@ -18,6 +18,7 @@ const constants = @import("constants");
 const paths = @import("paths");
 const scaling = @import("scaling");
 const scratch = @import("scratch");
+const log = @import("log");
 
 fn writeAndRead(alloc: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]u8 {
     const path = try scratch.scratchPath(alloc, "hana-cfgtest-", name);
@@ -781,4 +782,52 @@ test "15.12: a config tree over the file ceiling is refused, not partially loade
         error.TooManyConfigFiles,
         config.loadConfigDefault(alloc, &source, false),
     );
+}
+
+// The `--check-config` mode exists because a config rejection is a log line
+// nobody reads, and it only works if the loader's own warn/err sites are the
+// ones being counted. That is asserted here rather than assumed: each case
+// below names the SPECIFIC diagnostic it expects, so a bag that counted
+// unrelated noise, or counted nothing, fails here instead of passing CI.
+test "checkConfig collects the loader's own diagnostics" {
+    const alloc = testing.allocator;
+    var box = try Sandbox.init(alloc, "checkcfg");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+
+    // A typo'd key inside a recognized section: the sweep warns, and this is
+    // the whole class of mistake the mode exists to catch.
+    try box.write("hana/config.toml", "[tiling]\ngap_wdth = 9\n");
+    var diag: log.Collector = .{ .allocator = alloc };
+    defer diag.deinit();
+    try config.checkConfig(alloc, &diag);
+    try testing.expect(diag.count() > 0);
+    try testing.expect(diag.contains("gap_wdth"));
+    // Every captured diagnostic must reconstruct into the same shape the
+    // stderr path would have written -- that is what the mode prints.
+    var buf: [256]u8 = undefined;
+    for (diag.items.items) |d| {
+        const line = try log.Collector.line(d, &buf);
+        try testing.expect(line.len > "[x] ".len);
+        try testing.expect(std.mem.startsWith(u8, line, "["));
+    }
+
+    // A config the loader cannot parse at all: still diagnostics, and still no
+    // error return -- a broken config is a reportable RESULT, not a crash.
+    try box.write("hana/config.toml", "this is not toml [[[\n");
+    var bad: log.Collector = .{ .allocator = alloc };
+    defer bad.deinit();
+    try config.checkConfig(alloc, &bad);
+    try testing.expect(bad.count() > 0);
+
+    // The collector is restored on every path, so an installed-then-removed
+    // bag cannot keep intercepting later diagnostics.
+    try testing.expect(log.collector == null);
+
+    // A load keeps the winning source alive past its own arena (the
+    // snapshot re-exec needs it after the parse arena is gone), so the load
+    // allocator is still the owner of those bytes until this releases them.
+    config.deinitGoodSource(alloc);
 }

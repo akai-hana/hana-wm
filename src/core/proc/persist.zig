@@ -47,23 +47,75 @@ const MAX_WS = constants.max_workspaces;
 
 /// Wire-format revision of the restore file. Failed or older revisions are
 /// rejected in loadToGlobal rather than migrated. Bumped whenever the durable
-/// record shape changes; v5 adds the per-blob header (registry-ordinal
-/// stamping, see `ext_format_version`), so only v5+ restore files are
-/// accepted.
+/// record shape changes; v5 adds the per-blob header, so only v5+ restore
+/// files are accepted. The header's own format is versioned SEPARATELY
+/// (`ext_format_version`), because changing it does not change the durable
+/// record shape: a v5 file stamped with a v1 (ordinal) blob header is still a
+/// v5 file and is still read, so this constant did NOT move.
 const persist_version: u32 = 5;
 
 /// The per-window feature blob header format. Every blob persist stores is
-/// wrapped as `[ext_format_version][claiming registry ordinal][payload]` where
-/// the ordinal is the claiming module's index into the build-generated
-/// `window_modules` registry AT SAVE TIME. Adoption (window.applyRestoredRecord)
-/// fast-paths on that ordinal and falls back to the magic-byte scan when the
-/// ordinal no longer resolves (module removed, registry shifted) — the
+/// wrapped as `[ext_format_version][name length][claiming module name][payload]`
+/// -- the name is the module's stable `contract.WindowModule.name`, not its
+/// position in the build-generated `window_modules` registry. Adoption
+/// (window.applyRestoredRecord) fast-paths on the name and falls back to the
+/// magic-byte scan when the name no longer resolves (module removed or
+/// renamed) — the
 /// self-identifying format tags each module embeds in its payload keep the
 /// fallback unambiguous.
-pub const ext_format_version: u8 = 1;
+pub const ext_format_version: u8 = 2;
 
-/// Header byte length of a stamped blob (version + ordinal).
-pub const ext_header_len: usize = 2;
+/// Header byte length for a name-stamped blob: version + name length + the
+/// name itself. The name is variable-length, so this is a function of the
+/// module name rather than a constant -- a fixed 2-byte ordinal header is
+/// what [3.11] removed.
+pub fn extHeaderLen(name_len: usize) usize {
+    return 2 + name_len;
+}
+
+/// Byte offset of the payload for a blob stamped at `header`, or null when
+/// `header` is too short for the length it claims. A truncated or foreign
+/// header must not slice out of bounds, so the check is here rather than at
+/// the two call sites.
+pub fn extPayload(header: []const u8) ?[]const u8 {
+    if (header.len < 2) return null;
+    if (header[0] == ext_format_version) {
+        const name_len: usize = header[1];
+        const len = extHeaderLen(name_len);
+        if (header.len < len) return null;
+        return header[len..];
+    }
+    // Legacy ordinal header: [version=1][ordinal]. Still read, so a session
+    // saved by the previous format is adopted rather than silently dropped.
+    if (header[0] == ext_format_version_ordinal) {
+        if (header.len < 2) return null;
+        return header[2..];
+    }
+    return null;
+}
+
+/// The claimed module's `name`, for a name-stamped blob, or null when the
+/// blob is legacy, foreign, or truncated.
+pub fn extClaimantName(header: []const u8) ?[]const u8 {
+    if (header.len < 2 or header[0] != ext_format_version) return null;
+    const name_len: usize = header[1];
+    const len = extHeaderLen(name_len);
+    if (header.len < len) return null;
+    return header[2..len];
+}
+
+/// The legacy header's registry ordinal, for a v1 blob, or null.
+pub fn extLegacyOrdinal(header: []const u8) ?usize {
+    if (header.len < 2 or header[0] != ext_format_version_ordinal) return null;
+    return header[1];
+}
+
+/// Longest module name a blob header can carry in its one length byte.
+pub const max_stamped_name_len: usize = 255;
+
+/// The pre-name blob format: `[version=1][registry ordinal]`. Still READ (see
+/// `extPayload`) so a v5 session file keeps its parked windows, never written.
+pub const ext_format_version_ordinal: u8 = 1;
 
 /// Cap on the restore file's size. The file is a bounded JSON dump of the
 /// model (bounded stores/workspaces), so a file beyond this is junk (or a
@@ -171,9 +223,9 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
     while (it.next()) |item| : (widx += 1) {
         // Opaque feature blob: ask each module in registry order whether it
         // owns this window; the first module that returns bytes claims it, and
-        // the blob is stamped with its registry ordinal so adoption can
-        // fast-path on it (delete-modularity still falls back to the magic-byte
-        // scan when the ordinal no longer resolves). The model is handed across
+        // the blob is stamped with the module's stable name so adoption can
+        // fast-path on it (a deleted or renamed module still falls back to the
+        // magic-byte scan). The model is handed across
         // the seam AS-IS (a `*const` handle -- serialization never mutates, and
         // the contract type is const so this save path can't even @constCast:
         // writing through it is a compile error).
@@ -182,11 +234,36 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
             if (mod.serializeWindow) |f| {
                 if (f(m, item.key, allocator)) |body| {
                     defer allocator.free(body);
-                    const wrapped = try allocator.alloc(u8, ext_header_len + body.len);
+                    const mod_name = mod.name;
+                    if (mod_name.len == 0) {
+                        // Cannot happen: the generated window registry rejects
+                        // a serializing module with an empty name at compile
+                        // time. Reported rather than asserted because a blob
+                        // stamped with nothing degrades to the magic-byte scan
+                        // and is still correct -- just slower.
+                        log.warn(
+                            "persist: module #{} serializes windows but has no " ++
+                                "name; stamping an unnamed header (adoption will " ++
+                                "fall back to the magic-byte scan)",
+                            .{idx},
+                        );
+                    }
+                    if (mod_name.len > max_stamped_name_len) {
+                        log.warn(
+                            "persist: module name '{s}' is {} bytes, over the " ++
+                                "{} byte stamp limit; not stamping this window",
+                            .{ mod_name, mod_name.len, max_stamped_name_len },
+                        );
+                        blob = body;
+                        break;
+                    }
+                    const header_len = extHeaderLen(mod_name.len);
+                    const wrapped = try allocator.alloc(u8, header_len + body.len);
                     errdefer allocator.free(wrapped);
                     wrapped[0] = ext_format_version;
-                    wrapped[1] = @intCast(idx);
-                    @memcpy(wrapped[ext_header_len..], body);
+                    wrapped[1] = @intCast(mod_name.len);
+                    @memcpy(wrapped[2..header_len], mod_name);
+                    @memcpy(wrapped[header_len..], body);
                     blob = wrapped;
                     break;
                 }

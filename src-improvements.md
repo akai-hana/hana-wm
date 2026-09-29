@@ -176,7 +176,7 @@
 9. validate `variant_idx` on restore — NOT-DONE (`proc/persist.zig:384-393` still validates `kind` only).
 10. assert snapshot completeness — NOT-DONE (`Snapshot.workspaces` still `undefined` at `proc/persist.zig:161`, copied whole later).
 11. single `Handoff` owner — NOT-DONE.
-12. double-fork → `PR_SET_CHILD_SUBREAPER` — NOT-DONE (still double-fork + pipe tag protocol).
+12. double-fork → `PR_SET_CHILD_SUBREAPER` — DONE (single `fork`+`setsid`; PID comes from `fork()`, pipe carries only `tag_failed`, orphans re-parent to hana and are collected by the existing `waitpid(-1)` sweep).
 13. doc+micro fixes — NOT-DONE (e.g. ARCHITECTURE.md:184 "Signalfd-based" vs the actual self-pipe at `proc/signals.zig`).
 
 **Conceptual model (step 1).** hana's "session" is not a struct — it is a *file plus an execve*: `persist.zig` projects the model into a flat, versioned, atomically-renamed JSON shadow record set; `restart.zig` turns a flag (keybind or SIGUSR1) into an in-place `execv` of `/proc/self/exe`; `signals.zig` is the async→sync bridge (atomic bitmap + self-pipe wake token dispatched on the event loop); `spawn.zig` runs user commands as detached double-forks whose outcome returns over one pipe so the WM can route the resulting window by pid. Hand-off channels: the on-disk file (state) and the environment (`HANA_RESTORE` restart.zig:122, `HANA_CONFIG_DIR` events.zig:415-416, read at main.zig:122).

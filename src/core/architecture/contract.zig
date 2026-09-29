@@ -35,8 +35,6 @@
 //!     gate-holding restore path.
 
 const std = @import("std");
-const core = @import("core");
-const xcb = core.xcb;
 const types = @import("types");
 const build_options = @import("build_options");
 const model = @import("model");
@@ -89,8 +87,12 @@ pub fn moduleOf(kind: u8) ?*const Layout {
 /// the claim, not the import, is what was wrong. Everything else here reaches
 /// a module through the registry passed in by the caller, and the bar layer is
 /// reached only as `*anyopaque` (see `Segment`).
-pub fn activeLayoutKind(kind: u8) ?u8 {
-    if (!core.tilingEnabled()) return null;
+/// `tiling_enabled` is passed in rather than read from `core` because this file
+/// is X-free and `core` is not: the caller already has the live config fact,
+/// and making it a parameter is what keeps the gate visible in the signature
+/// instead of hidden behind an import.
+pub fn activeLayoutKind(kind: u8, tiling_enabled: bool) ?u8 {
+    if (!tiling_enabled) return null;
     if (moduleOf(kind) == null) return null;
     return kind;
 }
@@ -116,69 +118,16 @@ pub fn activeLayoutKind(kind: u8) ?u8 {
 /// DIFFERENT condition from the gates above -- so null propagates to the
 /// caller's own fallback rather than being an empty string the caller might
 /// legitimately want to draw.
-pub fn activeLayoutMeta(kind: u8, comptime pick: fn (Layout) ?[]const u8, fallback: []const u8) []const u8 {
+pub fn activeLayoutMeta(
+    kind: u8,
+    tiling_enabled: bool,
+    comptime pick: fn (Layout) ?[]const u8,
+    fallback: []const u8,
+) []const u8 {
     if (tiling_mods.len == 0) return fallback;
-    const resolved = activeLayoutKind(kind) orelse return fallback;
+    const resolved = activeLayoutKind(kind, tiling_enabled) orelse return fallback;
     return pick(tiling_mods[resolved]) orelse fallback;
 }
-
-/// The chrome-surface hook set a surface module binds to. The bar binds its
-/// `surfaces` value to this; when no surface is compiled in, the generated
-/// `surfaces.Surfaces` is a full set of no-op hooks (see build.zig), so this is
-/// ONE type in every build and call sites never test a build flag.
-pub const Surfaces = struct {
-    // Boot lifecycle, invoked from startup through surfaces.Surfaces so the
-    // boot sequence never needs to name the bar module directly.
-    init: *const fn () anyerror!void,
-    deinit: *const fn () void,
-    // Event-loop hooks.
-    handleExpose: *const fn (*const xcb.xcb_expose_event_t) void,
-    /// No error union: the bar records its own failures (module draw errors
-    /// are logged and leave the segment dirty) rather than propagating, and an
-    /// `anyerror!void` here forced every call site to write a `catch` arm that
-    /// could only ever log the same thing.
-    updateIfDirty: *const fn () void,
-    /// The nearest wakeup this surface wants, or null for "block until an
-    /// fd is ready". The loop reduces this over its own `Timers` list, so the
-    /// surface reports ONE answer and does not re-state the min/absence rule.
-    pollTimeoutMs: *const fn () ?i32,
-    onPollWakeup: *const fn () void,
-    updateClock: *const fn () void,
-    // RandR hooks (refresh-rate detection). The engine lives with the bar
-    // (render pacing is its only consumer); core's event loop forwards
-    // extension events and defers re-detection through these when a bar is
-    // compiled in, and drops the machinery entirely when it is not.
-    randrFirstEvent: *const fn () u8,
-    handleRandrEvent: *const fn (*anyopaque) void,
-    runPendingRedetect: *const fn (core.Connection) void,
-    onReload: *const fn () void,
-    // Input routing. The chrome overlay pre-empts key handling (returns true
-    // when it consumed the key), button presses on the surface window are
-    // routed to it, and the three surface config actions mutate chrome state.
-    chromeHandleKeypress: *const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool,
-    isBarWindow: *const fn (u32) bool,
-    handleButtonPress: *const fn (*const xcb.xcb_button_press_event_t) void,
-    /// Press-hold motion over the surface: X's implicit grab keeps delivering
-    /// motion to the surface window while a button is held, so a scrub-drag
-    /// (e.g. a slider sub, volume) can track the pointer even past the bar's
-    /// edge. The surface decides whether a segment drag is live and routes it.
-    handleButtonMotion: *const fn (*const xcb.xcb_motion_notify_event_t) void,
-    /// Releases end a press-hold scrub on the surface; the surface clears its
-    /// drag anchor here.
-    handleButtonRelease: *const fn (*const xcb.xcb_button_release_event_t) void,
-    setBarState: *const fn (types.Action) void,
-    /// Pre-computes and applies bar visibility for `ws` (X-free, no
-    /// reconcile) so the workspace-switch path gets the correct workarea on
-    /// the first reconcile.
-    updateBarVisibilityForWorkspace: *const fn (u8) void,
-    /// Immediately unmaps the bar and updates the screen claim, without a
-    /// separate reconcile. Called from the fullscreen-enter grab so the bar
-    /// disappears atomically with the fullscreen geometry — no deferred
-    /// ConfigureNotify wait. No-ops when the bar is already hidden.
-    hideBarForFullscreen: *const fn () void,
-    toggleBarSegmentAnchor: *const fn () void,
-    chromeToggleOverlay: *const fn () void,
-};
 
 /// The window sub-system hook set. Every module under a window-owner's
 /// `modules/` directory binds its `pub const module` value to this type,
@@ -220,6 +169,38 @@ pub const WindowModule = struct {
         "setEwmhFullscreenState",   "armPendingBarHide",
         "armPendingBarShow",
     };
+
+    /// `WindowModule` fields that are DATA rather than hooks, so they belong
+    /// in neither cardinality list: nothing dispatches them, and they have no
+    /// binder count.
+    ///
+    /// This exists because the partition assert below used to be stated as
+    /// "every field is a hook", which was true while the type carried nothing
+    /// but hooks, and stopped being true the moment a stable identity field
+    /// was added for persistence. The honest form of the invariant is "every
+    /// field is classified, as single-dispatch, multi-dispatch, or data" --
+    /// and a field still has to be classified to get here, so adding one
+    /// without a decision is still a compile error.
+    pub const non_hook_fields = [_][]const u8{"name"};
+
+    /// Stable identity for this module, used by persistence to stamp a saved
+    /// window with its CLAIMANT rather than the claimant's registry position.
+    /// Required (non-empty, unique) for any module binding `serializeWindow`;
+    /// the generated registry rejects the other case at compile time.
+    ///
+    /// Why a name and not the ordinal it replaces: the ordinal is a position
+    /// in a build-generated list, so removing or reordering an unrelated module
+    /// renumbers every module after it and a saved session's fast path starts
+    /// pointing at a DIFFERENT module -- which then either declines (recovered
+    /// by the magic-byte scan, after a wasted call that may mis-adopt) or
+    /// claims a blob it does not own. A name cannot shift. The cost is that a
+    /// rename invalidates that one module's saved blobs, which degrade to the
+    /// same scan -- strictly less damage than a reordering.
+    ///
+    /// The magic-byte scan stays the fallback either way, because a name only
+    /// narrows WHICH module is asked first; it is the payload's own self-
+    /// identifying tag that decides.
+    name: []const u8 = "",
 
     // Lifecycle. Uniform `anyerror!void` so the dispatch loop can `try` each.
     init: ?*const fn () anyerror!void = null,
@@ -375,18 +356,21 @@ fn assertListedFields(comptime T: type, comptime list_name: []const u8, list: []
 comptime {
     // 36 fields x up to 27 names, twice over.
     @setEvalBranchQuota(20_000);
-    // Every `WindowModule` hook is classified exactly once across the two
-    // lists, and no list names a field that no longer exists. `s == m` fails
-    // for BOTH the "added a hook, forgot to classify it" case and the
-    // "classified it as both" case.
+    // Every `WindowModule` field is classified exactly once across the two
+    // cardinality lists plus the data list, and no list names a field that no
+    // longer exists. `s == m` fails for BOTH the "added a hook, forgot to
+    // classify it" case and the "classified it as both" case; a field in
+    // `non_hook_fields` skips the check and is instead held to the inverse
+    // assert below (a data list naming a removed field is also an error).
     //
     // This is a `WindowModule`-only property, unlike the at-most-one binder
-    // count: it holds because EVERY WindowModule field is a hook with a
-    // dispatch cardinality. `Segment` carries data fields too (name, props,
-    // dirty_sources, clickable), so there is nothing to partition there -- it
-    // declares only the at-most-one hooks and the generated registry enforces
-    // the count.
+    // count: it holds because every `WindowModule` field is either a hook with
+    // a dispatch cardinality or one of the named data fields. `Segment` carries
+    // data fields too (name, props, dirty_sources, clickable) and is not
+    // partitioned at all -- it declares only the at-most-one hooks and the
+    // generated registry enforces the count.
     for (std.meta.fields(WindowModule)) |f| {
+        if (isListed(&WindowModule.non_hook_fields, f.name)) continue;
         const s = isListed(&WindowModule.single_binder_hooks, f.name);
         const m = isListed(&WindowModule.multi_binder_hooks, f.name);
         if (s == m) @compileError(
@@ -398,6 +382,7 @@ comptime {
     }
     assertListedFields(WindowModule, "single_binder_hooks", &WindowModule.single_binder_hooks);
     assertListedFields(WindowModule, "multi_binder_hooks", &WindowModule.multi_binder_hooks);
+    assertListedFields(WindowModule, "non_hook_fields", &WindowModule.non_hook_fields);
     assertListedFields(Segment, "single_binder_hooks", &Segment.single_binder_hooks);
 }
 
@@ -546,6 +531,62 @@ pub const BarOverlay = struct {
     needsRepaint: *const fn () bool,
 };
 
+/// The X key-press event a segment's `handleKeypress` hook receives, opaque.
+///
+/// The concrete struct lives in `contract_x11` (the X-aware half of the
+/// contract, which also holds `Surfaces`). Declaring it opaque here is what
+/// keeps this file importable by a non-X consumer -- a headless test, a
+/// config-only tool -- while still letting the one consumer that needs the
+/// fields (the prompt module) name the real type. An opaque type has no
+/// fields, so a hook that wants them must import `contract_x11` and cast,
+/// which is the correct place for that requirement to live.
+pub const KeyPressEvent = opaque {};
+
+/// Everything a segment's click hook needs, by name.
+///
+/// This was six positional parameters -- offset, two direction bools, the bar
+/// state, and two bar-provided fn pointers -- and every implementation had to
+/// restate the whole list to ignore most of it: the clock's hook discarded four
+/// of six, the tags hook three. Positionally, `offset: u16` and the two bools
+/// are indistinguishable at the call site, so a transposed pair type-checked.
+/// One named struct makes the ignored fields `_ = ctx.redraw` instead of six
+/// `_:` parameters, and leaves room to add a field (a timestamp, a modifier
+/// mask) without touching any implementation's signature.
+/// Live workspace facts every segment's hooks may read. Pure data, no bar
+/// types, so it lives HERE rather than in bar/segment.zig: the `naturalWidth`
+/// hook below takes it as a real `*const Frame`, and a hook signature cannot
+/// name a type the contract may not import. bar/segment.zig re-exports this
+/// (`pub const Frame = contract.Frame`), so every existing reader is
+/// unaffected -- and the hook no longer has to be documented as "the caller
+/// promises this is a Frame", which is a promise `*const anyopaque` cannot
+/// check.
+pub const Frame = struct {
+    workspace_count: u32 = 0,
+    current_workspace: u8 = 0,
+    is_all_view_active: bool = false,
+    workspace_has_windows: []const bool = &.{},
+};
+
+pub const ClickCtx = struct {
+    /// Pixels from the segment's recorded left edge. Compare against the width
+    /// the row reserved (`naturalWidth`), not the last painted width.
+    offset: u16,
+    /// True for button 1. Modules that step a direction read this as the sign
+    /// (left = +1, right = -1).
+    is_left: bool,
+    /// True for button 3.
+    is_right: bool,
+    /// The bar's segment state, kept opaque so modules do not depend on
+    /// `bar.zig`. The title module re-passes it to `title_click`, which is
+    /// why the field is a pointer and not a copy.
+    state: *anyopaque,
+    /// Bar-provided: route a left-click at `offset` into the title segment.
+    /// Takes the same `state` pointer, so the two travel together.
+    title_click: *const fn (*anyopaque, u16) void,
+    /// Bar-provided full redraw, safe to call inside an input grab.
+    redraw: *const fn () void,
+};
+
 pub const Segment = struct {
     /// The `Segment` hooks whose contract is "at most one segment binds this".
     /// `measureString` supplies THE row's reserved-width probe and `overlay`
@@ -595,7 +636,11 @@ pub const Segment = struct {
     // Lifecycle. `handlers` is a bar-provided service handle (function
     // pointers for chrome behaviors the segment must call back into); passed
     // once at init so segments never import the bar orchestrator.
-    init: ?*const fn (std.mem.Allocator, core.Connection, ?*const anyopaque) anyerror!void = null,
+    /// `conn` is the X connection, carried as `*const anyopaque` for the same
+    /// reason `KeyPressEvent` is: this file names no X type. The bar is the
+    /// only producer, and exactly one segment (the prompt, for
+    /// `xcb_key_symbols_alloc`) reads it.
+    init: ?*const fn (std.mem.Allocator, *const anyopaque, ?*const anyopaque) anyerror!void = null,
     deinit: ?*const fn (std.mem.Allocator) void = null,
     // Bar-frame services: uniform polls the orchestrator runs each loop,
     // regardless of whether the segment is configured.
@@ -607,23 +652,16 @@ pub const Segment = struct {
     /// Reserved row width probe (clock's measure string; bar measures the
     /// string at layout width). At most one module provides it.
     measureString: ?*const fn () []const u8 = null,
-    /// Reserved width in the row; `frame` is `*const segment.Frame`,
+    /// Reserved width in the row. `frame` is a real `*const Frame` (above) and
     /// `clock_width` the measured clock width for segments that need it.
-    ///
-    naturalWidth: ?*const fn (*const anyopaque, u16) u16 = null,
+    naturalWidth: ?*const fn (*const Frame, u16) u16 = null,
     /// Draw at `x`, return advanced `x`. `ctx` is `*segment.DrawCtx`
     /// (bar-built scratch shared by every segment draw).
     draw: ?*const fn (*anyopaque, u16) anyerror!u16 = null,
     /// Click dispatch for recorded bounds; mirrors the chrome-surface input
-    /// routing (state/title_click/redraw are bar-provided fn pointers).
-    onClick: ?*const fn (
-        u16,
-        bool,
-        bool,
-        *anyopaque,
-        *const fn (*anyopaque, u16) void,
-        *const fn () void,
-    ) bool = null,
+    /// routing (state/title_click/redraw are bar-provided fn pointers). All of
+    /// it arrives in one named `ClickCtx`.
+    onClick: ?*const fn (*const ClickCtx) bool = null,
     /// Scroll-wheel dispatch for recorded bounds (buttons 4/5, positive =
     /// wheel up; the bar maps button 4 -> +1, button 5 -> -1). Receives the
     /// scroll direction and the bar's redraw hook.
@@ -642,7 +680,12 @@ pub const Segment = struct {
     onDragEnd: ?*const fn (*const fn () void) void = null,
     // Chrome-overlay extras (bound into the chrome `Surfaces` hooks and polled
     // uniformly; the overlay segment is the only one that sets them).
-    handleKeypress: ?*const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool = null,
+    //
+    // `KeyPressEvent` is OPAQUE here and the X struct in `contract_x11`: this
+    // file is X-free, so the field cannot name an xcb type. The bar casts the
+    // real event into it and is the only producer, so the one `@ptrCast` in
+    // the system is at the seam that produces the value.
+    handleKeypress: ?*const fn (*const KeyPressEvent, ?*const types.Action) bool = null,
     consumeRedrawRequest: ?*const fn () bool = null,
     invalidateReloadCaches: ?*const fn () void = null,
     /// Fired by the bar on every show (map). Lets continuous-motion segments

@@ -1671,11 +1671,23 @@ pub fn checkConfig(allocator: std.mem.Allocator, collector: *log.Collector) !voi
     const saved = log.collector;
     log.collector = collector;
     defer log.collector = saved;
-    var cfg = try load(allocator);
+    // `snapshot = false`: a check must not WRITE the re-exec hand-off state.
+    // It runs the same load, but leaving a snapshot behind would be a
+    // validation run with a side effect -- and one that leaks by design, since
+    // the snapshot path is intentionally kept alive for the execv environ.
+    var cfg = try loadFor(allocator, false);
     cfg.deinit(allocator);
 }
 
 pub fn load(allocator: std.mem.Allocator) !types.Config {
+    return loadFor(allocator, true);
+}
+
+/// `load` with the one state-writing step made explicit. `snapshot` false is
+/// for read-only callers (`checkConfig`), which want the identical load
+/// decision -- same search order, same fallback, same warn-and-continue -- with
+/// none of the writes.
+fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !types.Config {
     var source: DefaultSource = .fallback;
     // A user config that will not START is one the WM must not die on, and
     // `validate` failing is exactly that condition -- so it degrades the same
@@ -1714,7 +1726,7 @@ pub fn load(allocator: std.mem.Allocator) !types.Config {
     // only reload). Guarded to a valid config so a parse-error or
     // validation-error fallback never overwrites the previous good snapshot
     // (both now reach here through the same path, see above).
-    refreshSnapshot(allocator);
+    if (snapshot) refreshSnapshot(allocator);
     return cfg;
 }
 

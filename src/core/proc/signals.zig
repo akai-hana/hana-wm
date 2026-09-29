@@ -252,7 +252,8 @@ fn dispatchSignal(pending_sig: u8) void {
         // handler, so flag work is safe.
         .USR1 => restart.requestReexec(),
         .TERM, .INT => lifecycle.quit(),
-        // SIGCHLD: an intermediate double-fork child has exited.
+        // SIGCHLD: a spawned child has exited (or, now that hana is a
+        // subreaper, an orphaned grandchild of one has re-parented to us).
         // Reap it with WNOHANG, then immediately drain the spawn pipes so
         // registerSpawn fires without waiting for the next XCB event batch.
         .CHLD => {

@@ -6,6 +6,7 @@ const drawing = @import("drawing");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
 const contract = @import("contract");
+const core = @import("core");
 const scaffold = @import("scaffold");
 
 // Layout registry (build-generated); the active layout is a `u8` index into
@@ -28,6 +29,7 @@ const fallback_icon = "><>";
 fn getIcon() []const u8 {
     return contract.activeLayoutMeta(
         pipeline.getCurrentLayout(),
+        core.tilingEnabled(),
         struct {
             fn pick(m: contract.Layout) ?[]const u8 {
                 return m.icon;

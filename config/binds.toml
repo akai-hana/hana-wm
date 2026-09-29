@@ -37,8 +37,8 @@ Mod+H       = "decrease_master"      # Shrink master area width
 Mod+L       = "increase_master"      # Grow master area width
 Mod+Shift+H = "decrease_master_count"
 Mod+Shift+L = "increase_master_count"
-Mod+N       = "grow_stack_top"       # Grow topmost slave, shrink the rest evenly
-Mod+O       = "grow_stack_bottom"    # Grow bottommost slave, shrink the rest evenly
+Mod+N       = "stack_top"            # Grow topmost slave, shrink the rest evenly
+Mod+O       = "stack_bottom"         # Grow bottommost slave, shrink the rest evenly
 
 # -- Focus cycling --
 Mod+j         = "focus_prev_window"

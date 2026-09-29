@@ -40,7 +40,9 @@ const window = @import("window");
 
 const drawing = @import("drawing");
 const metrics = @import("metrics");
+const Metrics = metrics.Metrics;
 const segmod = @import("segment");
+const title_geom = @import("geom");
 const barwin = @import("win");
 
 // Bar visibility subsystem (pure decisions only; bar.zig keeps the wire glue).
@@ -183,16 +185,22 @@ fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytyp
 
 // Bar height / font-size resolution.
 //
-// Owns everything needed to decide the bar's pixel height and effective font
-// size from config + font metrics, including the percentage-font-size probe
-// (which measures through drawing.probeFontMetrics' throwaway surface, no
-// live DrawContext is touched). The resolved font size is published to the
-// bar-owned metrics module (metrics.zig) for drawing to read; no config is
-// mutated.
+// The RULES live in bar/metrics.zig (`metrics.resolve`), which is pure: it
+// takes the configured values, the screen, and a font probe, and returns a
+// `Metrics` value. This section only supplies the two live pieces -- the
+// current config, and a probe that measures through
+// drawing.probeFontMetrics' throwaway surface (no live DrawContext is
+// touched) -- and threads the result into bar creation, draw-context
+// construction, and the surviving State's own value. No global, no config
+// mutation, and no save/restore: a bar's metrics belong to that bar (21.5).
 
-fn probeMetrics(size_override: ?u16) ?drawing.FontMetrics {
+/// Measures the configured fonts at `trial_pt`. The point size is always
+/// explicit: the only two callers are the metric probe itself (a fixed trial
+/// size) and `metrics.resolve`'s height decision, which measures at the
+/// DPI-scaled base.
+fn probeMetrics(trial_pt: u16) ?drawing.FontMetrics {
     const cs = core.getState();
-    const sized = drawing.buildSizedFontList(cs.alloc, size_override) catch return null;
+    const sized = drawing.buildSizedFontList(cs.alloc, trial_pt) catch return null;
     defer drawing.freeSizedFontList(cs.alloc, sized);
     return drawing.probeFontMetrics(
         cs.alloc,
@@ -201,40 +209,29 @@ fn probeMetrics(size_override: ?u16) ?drawing.FontMetrics {
     );
 }
 
-fn resolvePercentageFontSize(bar_height: u16) ?u16 {
-    // Probe metrics at a trial point size via the override parameter, so
-    // there is no save/mutate/restore round on cs.config. 100 pt is an
-    // arbitrary stable probe; only the ascent+descent ratio is used.
-    const trial_pt: u16 = 100;
+/// Resolves the bar's metrics from the live config and screen. The rules
+/// themselves live in `metrics.resolve` (21.5); this only supplies them.
+fn resolveBarMetrics() Metrics {
     const cs = core.getState();
-    const m = probeMetrics(trial_pt) orelse return null;
-    const px_per_pt: f32 = @as(f32, @floatFromInt(@max(1, m.ascent + m.descent))) /
-        @as(f32, @floatFromInt(trial_pt));
-    const max_size_pt = @as(f32, @floatFromInt(bar_height)) / px_per_pt;
-    const cfg_pct = cs.config.bar.font_size.value / 100.0;
-    // Clamp before casting, mirroring types.scaleToU16: a large font_size
-    // percentage must not wrap the u16 cast into UB in ReleaseFast.
-    const clamped = std.math.clamp(
-        max_size_pt * cfg_pct,
-        1.0,
-        @as(f32, std.math.maxInt(u16)),
-    );
-    return @as(u16, @intFromFloat(@round(clamped)));
+    return metrics.resolve(.{
+        .font_size = cs.config.bar.font_size,
+        .height = cs.config.bar.height,
+        .screen_height = cs.screen.height_in_pixels,
+    }, probeTextHeight);
 }
 
-fn calcBarHeightAndFontSize() u16 {
-    const cs = core.getState();
-    metrics.recompute();
-    if (cs.config.bar.height) |h| {
-        const height = scale.scaleBarHeight(h, cs.screen.height_in_pixels);
-        if (cs.config.bar.font_size.is_percentage) {
-            if (resolvePercentageFontSize(height)) |sz|
-                metrics.setScaledFontSize(sz);
-        }
-        return height;
-    }
-    const m = probeMetrics(null) orelse return scale.bar_height_policy.default_px;
-    return scale.clampBarHeight(@max(1, m.ascent + m.descent));
+/// The `metrics.Probe` adapter: the configured fonts' ascent+descent at a
+/// trial point size, or null when none could be measured.
+///
+/// Pango reports i16 and a descent is a positive-downward distance here, so
+/// the total is taken in i32 and floored at 0: a font that reports a
+/// pathological negative total must clamp to "no measurement" rather than
+/// wrap through `@intCast` in ReleaseFast.
+fn probeTextHeight(trial_pt: u16) ?u32 {
+    const m = probeMetrics(trial_pt) orelse return null;
+    const total: i32 = @as(i32, m.ascent) + @as(i32, m.descent);
+    if (total <= 0) return null;
+    return @intCast(total);
 }
 
 /// Uniform poll wakeup: runs every module's onPollWakeup hook (prompt caret
@@ -285,7 +282,11 @@ pub fn chromeHandleKeypress(
     event: *const xcb.xcb_key_press_event_t,
     matched: ?*const types.Action,
 ) bool {
-    return anyBoolHook(.handleKeypress, .{ event, matched });
+    // `Segment.handleKeypress` takes the OPAQUE `contract.KeyPressEvent`, so
+    // the cast happens here: this is the one place a real X key-press event
+    // enters the segment registry, and the bar is the only producer of it.
+    const key_event: *const contract.KeyPressEvent = @ptrCast(event);
+    return anyBoolHook(.handleKeypress, .{ key_event, matched });
 }
 
 /// Toggles the chrome overlay. Routed through the resolved title module's
@@ -314,8 +315,21 @@ fn titleIdBound(s: *State) ?SegBound {
 /// focus for the title). Exported as a `BarHandlers.dispatchClick`-shaped
 /// trampoline (see titleClickTrampoline).
 fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right: bool) void {
-    if (segAt(id).onClick) |oc|
-        _ = oc(offset, is_left, is_right, s, titleClickTrampoline, redrawInsideGrab);
+    if (segAt(id).onClick) |oc| {
+        // Named, not inline `&.{}`: the temporary is only guaranteed to live
+        // to the end of the call expression, and a `ctx` that outlived it (a
+        // module storing the pointer) would be a silent lifetime bug. This
+        // says the ctx cannot outlive the call.
+        const ctx: contract.ClickCtx = .{
+            .offset = offset,
+            .is_left = is_left,
+            .is_right = is_right,
+            .state = s,
+            .title_click = titleClickTrampoline,
+            .redraw = redrawInsideGrab,
+        };
+        _ = oc(&ctx);
+    }
 }
 
 /// Global bar coordination flags. Read and written exclusively on the main
@@ -783,9 +797,9 @@ const State = struct {
     /// naturalWidth hook, or 0 for an unknown/removed segment name.
     fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, name: []const u8) u16 {
         const id = segId(name) orelse return 0;
-        // The hook's first parameter is `*const anyopaque` (the contract keeps
-        // no import edge into the bar layer), so the cast to the shared
-        // segment Frame happens HERE, once, instead of at each call site.
+        // The hook takes a real `*const contract.Frame` (21.1), and
+        // `segmod.Frame` is an alias for exactly that, so this passes the
+        // frame through with no cast and no promise-in-a-comment.
         if (segAt(id).naturalWidth) |nw| return nw(frame, self.clock.width);
         return 0;
     }
@@ -1248,12 +1262,13 @@ const BarSetup = struct {
 
 /// Creates the bar window, off-screen draw context, and live State.
 /// On any failure, everything already created is freed before returning.
-fn createBar(height: u16, y_pos: i16) !BarSetup {
+fn createBar(m: Metrics, y_pos: i16) !BarSetup {
+    const height = m.height;
     const cs = core.getState();
     const setup = barwin.createBarWindow(height, y_pos);
     errdefer barwin.destroyBarWindow(cs.conn, setup.win_id, setup.colormap);
     barwin.setWindowProperties(setup.win_id, height);
-    const dc = try barwin.createDrawContext(setup, height);
+    const dc = try barwin.createDrawContext(setup, height, m.font_size);
     errdefer dc.deinit();
     log.info(
         "Bar transparency: {s}",
@@ -1280,8 +1295,8 @@ pub fn init() !void {
     warnUnknownSegments();
     barwin.initAtoms();
     hz.ensureRefreshRateDetected(cs.conn);
-    const height = calcBarHeightAndFontSize();
-    const bar = try createBar(height, barwin.calcBarYPos(height));
+    const m = resolveBarMetrics();
+    const bar = try createBar(m, barwin.calcBarYPos(m.height));
     gBar.state = bar.state;
     usable_area.setSurfaceWindow(bar.setup.win_id);
     // Map before the first draw (same rationale as applyVisibility: a blit to
@@ -1355,13 +1370,13 @@ pub fn reload() void {
         return;
     }
     warnUnknownSegments();
-    const height = calcBarHeightAndFontSize();
-    applyReload(old, height) catch |err| {
+    applyReload(old, resolveBarMetrics()) catch |err| {
         log.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
 
-fn applyReload(old: *State, height: u16) !void {
+fn applyReload(old: *State, m: Metrics) !void {
+    const height = m.height;
     const cs = core.getState();
     // The reload tears down and rebuilds the bar window, so the whole swap has
     // to be atomic: without a grab the old bar can be destroyed and the new one
@@ -1377,18 +1392,16 @@ fn applyReload(old: *State, height: u16) !void {
     // front, including on the failure path below, where the surviving bar
     // re-points at the NEW live config too.
     runVoidHook(.invalidateReloadCaches);
-    // calcBarHeightAndFontSize already re-derived the scaled font size from
-    // the NEW config (percentage sizes refine against the new height); if the
-    // new bar fails to materialize, the surviving bar must keep whatever font
-    // size actually matches its own height.
-    const old_scaled_font_size = metrics.getScaledFontSize();
-    const new_bar = createBar(height, barwin.calcBarYPos(height)) catch |err| {
+    // The new bar's metrics were resolved from the NEW config (percentage
+    // sizes refine against the new height). If it fails to materialize the
+    // surviving bar keeps its OWN metrics -- they live on the old State's
+    // value now, so there is no global left to save and put back (21.5).
+    const new_bar = createBar(m, barwin.calcBarYPos(height)) catch |err| {
         // The caller has already swapped cs.config to the new config and frees
         // the OLD config when this returns. The old bar survives this failed
         // reload; it used to need its cached config copy re-pointed here or the
         // next draw would read freed memory. It reads the live config now
         // (renderBar), so there is nothing to repair.
-        metrics.setScaledFontSize(old_scaled_font_size);
         return err;
     };
     const new_state = new_bar.state;
@@ -1926,7 +1939,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
 
 /// `offset` is the click position relative to the title segment's start.
 /// Resolves which window is under the click via the title snapshot captured
-/// by the last draw (hitTest never touches X11: titles/geoms come from the
+/// by the last draw (title_geom.hitTest never touches X11: titles/geoms come from the
 /// frame's in-process per-window caches), then:
 ///   - no window under the click -> no-op (empty title is handled by the
 ///     right-click prompt path in `handleButtonPress`, before this is called)
@@ -1937,7 +1950,7 @@ fn handleTitleClick(s: *State, offset: u16) void {
     if (s.frame.wins_len == 0) return;
     const tb = titleIdBound(s) orelse return;
 
-    const target = segmod.hitTest(
+    const target = title_geom.hitTest(
         s.frame.last_ctx.titleRenderContext(tb.x, tb.w),
         s.frame.last_ctx.titleSnapshot(),
         offset,
@@ -1965,7 +1978,7 @@ fn titleClickTrampoline(ptr: *anyopaque, offset: u16) void {
 /// lives in this module, so detaching the bar detaches its handlers. The hook
 /// types themselves live in the core-owned `plugin` interface contract, not
 /// here: this module only binds its functions to that contract.
-pub const surfaces = @import("contract").Surfaces{
+pub const surfaces = @import("contract_x11").Surfaces{
     .init = init,
     .deinit = deinit,
     .handleExpose = handleExpose,

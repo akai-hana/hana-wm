@@ -33,7 +33,28 @@ pub fn widthState(comptime tag: []const u8) type {
             cached = new_width;
         }
         /// Default naturalWidth: the last drawn width.
-        pub fn naturalWidth(_: *const anyopaque, _: u16) u16 {
+        pub fn naturalWidth(_: *const contract.Frame, _: u16) u16 {
+            return cached;
+        }
+        /// The width to reserve: the measured one, or `probe` until there IS
+        /// a measurement.
+        ///
+        /// `cached == 0` means "never painted", not "zero pixels wide" -- a
+        /// segment that has not drawn yet has no measured width, and reserving
+        /// 0 for it collapses the row on the very first layout pass. The
+        /// slider module had this rule hand-rolled against its own `slot_w`
+        /// and got it wrong once: the click hit-test rejected presses while
+        /// `slot_w` was 0, so the first click on a freshly laid-out slider did
+        /// nothing, while the drag denominator and the row reservation fell
+        /// back to DIFFERENT values in the same frame. One definition, used by
+        /// every consumer, is what keeps the hit-test, the drag range and the
+        /// reservation agreeing from frame one.
+        pub fn resolved(probe: u16) u16 {
+            return if (cached != 0) cached else probe;
+        }
+        /// The raw last-painted width, 0 when never painted. For callers that
+        /// genuinely need to distinguish the two (not the reservation).
+        pub fn measured() u16 {
             return cached;
         }
     };
@@ -67,7 +88,7 @@ pub fn keyedWidthState(comptime tag: []const u8, comptime Key: type) type {
         /// stale as no width at all: the segment is about to stop filling that
         /// span, so reserving it would pin the row at the outgoing view's size
         /// until the next draw had already reflowed around it.
-        pub fn naturalWidth(key: Key, _: *const anyopaque, fallback: u16) u16 {
+        pub fn naturalWidth(key: Key, _: *const contract.Frame, fallback: u16) u16 {
             if (cached > 0) {
                 if (cached_key) |ck| {
                     if (ck == key) return cached;
@@ -105,15 +126,8 @@ pub fn drawAndStore(
     return end_x;
 }
 
-const NaturalWidth = *const fn (*const anyopaque, u16) u16;
-const OnClick = *const fn (
-    u16,
-    bool,
-    bool,
-    *anyopaque,
-    *const fn (*anyopaque, u16) void,
-    *const fn () void,
-) bool;
+const NaturalWidth = *const fn (*const contract.Frame, u16) u16;
+const OnClick = *const fn (*const contract.ClickCtx) bool;
 
 /// Optional bindings for the segment, one field per contract.Segment hook the
 /// icon-ish modules can set. Unset fields keep the builder defaults.
@@ -155,16 +169,16 @@ fn drawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!u16 {
 /// adapter always carry a real direction step.
 fn clickHook(comptime action: anytype) OnClick {
     return struct {
-        fn f(_: u16, left: bool, _: bool, _: *anyopaque, _: *const fn (*anyopaque, u16) void, redraw: *const fn () void) bool {
-            action(if (left) 1 else -1);
-            redraw();
+        fn f(ctx: *const contract.ClickCtx) bool {
+            action(if (ctx.is_left) 1 else -1);
+            ctx.redraw();
             return true;
         }
     }.f;
 }
 
 /// The clock's naturalWidth: reserve the measured clock width itself.
-fn passthroughWidth(_: *const anyopaque, clock_width: u16) u16 {
+fn passthroughWidth(_: *const contract.Frame, clock_width: u16) u16 {
     return clock_width;
 }
 

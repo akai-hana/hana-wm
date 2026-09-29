@@ -267,7 +267,7 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
         fn redraw() bool {
             return consumeRedrawRequestFor(i);
         }
-        fn naturalWidth(frame: *const anyopaque, fallback: u16) u16 {
+        fn naturalWidth(frame: *const contract.Frame, fallback: u16) u16 {
             return widthStateFor(i).naturalWidth(frame, fallback);
         }
         fn draw(ctx: *anyopaque, x: u16) anyerror!u16 {

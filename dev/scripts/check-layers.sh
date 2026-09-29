@@ -60,6 +60,14 @@ wire_allowed() {
         # xcb_configure_window, which is exactly what the primitive exists for.
         src/core/loop/pipeline.zig|src/window/modules/floating.zig) ;;
 
+        # sink_test.zig asserts the VALUE SLOT ORDER of one configure_window
+        # (X, Y, WIDTH, HEIGHT, BORDER_WIDTH, STACK_MODE) by naming the
+        # XCB_CONFIG_WINDOW_* mask constants. It issues no wire traffic at all
+        # -- it is the pure `sink.configureWire` assembly, which is why the
+        # order is testable at all -- but the pattern cannot tell a constant
+        # from a call, so the assertion needs the explicit entry.
+        src/test/core/sink_test.zig) ;;
+
         # Detectable auto-repeat enablement (enableDetectableAutoRepeat in
         # src/input/xkbcommon.zig): a ONE-SHOT, STARTUP-ONLY XKB negotiation
         # that issues xcb_xkb_per_client_flags + its reply and
@@ -193,8 +201,8 @@ while IFS= read -r line; do
     viol "rule 2 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
-# Rule 3: no xcb imports/references in the pure model vocabulary, tiling/, or
-# config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+# Rule 3: no xcb imports/references in the pure model vocabulary, the window
+# contract, tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
 # awk strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
@@ -207,9 +215,11 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # that scan, is the last line of defense on bodies. Only the model file is
 # swept: it is the pure root (state plus the Rect/Margins value objects and
 # their coordinate helpers), its pure/ siblings carry no xcb tokens by
-# construction, and architecture/contract.zig -- its sibling rather than a
-# pure/ file -- declares xcb event TYPES in its body, so it cannot sit on this
-# side of the sweep.)
+# construction. architecture/contract.zig IS on this side of the sweep since
+# the xcb event TYPES moved out to its sibling contract_x11.zig: the contract
+# now names the key-press event as an opaque `KeyPressEvent` and carries the
+# connection as `*const anyopaque`, so it is xcb-free vocabulary and is swept
+# like any other pure file.)
 hits=$(
     while IFS= read -r f; do
         awk '
@@ -225,7 +235,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/architecture/model.zig src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/model.zig src/core/architecture/contract.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

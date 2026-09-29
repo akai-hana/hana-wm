@@ -105,7 +105,7 @@ pub fn reconcileDragTick(m: *const model.Model, snk: sink.Sink, win: model.Windo
         .tiled => return,
     };
 
-    snk.geom(win, rect, null);
+    snk.configure(win, .{ .rect = rect });
 
     // Update sent ledger so lastRectFor / toggleFloating see the live position.
     // Carry the last real border width/pixel across the drag. Writing
@@ -297,14 +297,14 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
 
             if (need_map) ctx.sink.map(win);
             if (need_pixel) ctx.sink.borderPixel(win, pixel);
-            // Merge border width into the geometry configure when both change
-            // (the common switch/unpark shape): one request instead of two.
-            if (need_bw and need_geom) {
-                ctx.sink.geomBordered(win, rect, bw, if (raise_winner) .above else null);
-            } else {
-                if (need_bw) ctx.sink.borderWidth(win, bw);
-                if (need_geom) ctx.sink.geom(win, rect, if (raise_winner) .above else null);
-            }
+            // One configure carrying everything that changed. Border width and
+            // geometry travel together on the common switch/unpark shape, and
+            // this can no longer express them as two separate requests.
+            if (need_bw or need_geom) ctx.sink.configure(win, .{
+                .rect = if (need_geom) rect else null,
+                .bw = if (need_bw) bw else null,
+                .stack = if (raise_winner) .above else null,
+            });
         }
 
         // Ledger write: record what we actually sent. A park preserves the

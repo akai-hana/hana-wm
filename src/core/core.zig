@@ -84,6 +84,14 @@ pub const Facts = struct {
     /// Bumped when the tiling/layout kind or variants change (bar: full
     /// redraw, including a title-data refetch).
     layout_rev: u32 = 0,
+    /// Bumped by `replaceOwnedConfig` on every live-config swap, including the
+    /// initial one. It exists so a table of POINTERS INTO the config's data --
+    /// the keybind dispatch map, which holds `*const Action` into the
+    /// keybindings slice -- can tell that it is stale without dereferencing
+    /// anything. The old config is freed at the swap, so reading through a
+    /// stale entry is a use-after-free; comparing a counter is not. See
+    /// `keybind.KeybindResolver.rebuildDispatchMap`.
+    config_rev: u32 = 0,
 };
 
 fn factAccessors(comptime field: []const u8) type {
@@ -101,6 +109,7 @@ pub const focus = factAccessors("focus_rev");
 pub const window = factAccessors("window_rev");
 pub const fullscreen = factAccessors("fullscreen_rev");
 pub const layout = factAccessors("layout_rev");
+pub const config_rev = factAccessors("config_rev");
 
 // Config-derived windowing facts (owned by core).
 // These are the only tiling facts other modules need; they read them here
@@ -219,6 +228,11 @@ pub fn deinitOwnedConfig() void {
 pub fn replaceOwnedConfig(new_config: *types.Config) void {
     deinitOwnedConfig();
     state.?.config = new_config;
+    // Bumped AFTER the swap and after the old box is freed: every consumer
+    // that compares against this value is deciding whether a pointer it holds
+    // is still live, so the counter has to change after the freeing, never
+    // before it.
+    config_rev.bump();
 }
 
 /// Stays outside State: unlike State's fields it has a safe default

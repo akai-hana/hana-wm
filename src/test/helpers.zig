@@ -93,9 +93,12 @@ pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
 
 pub const TestOp = union(enum) {
     map: model.WindowId,
-    geom: struct { win: model.WindowId, rect: model.Rect, stack: ?sinkmod.Stack },
-    geom_bw: struct { win: model.WindowId, rect: model.Rect, bw: u16, stack: ?sinkmod.Stack },
-    bw: struct { win: model.WindowId, w: u16 },
+    configure: struct {
+        win: model.WindowId,
+        rect: ?model.Rect,
+        bw: ?u16,
+        stack: ?sinkmod.Stack,
+    },
     pixel: struct { win: model.WindowId, p: u32 },
     park: model.WindowId,
     stack: struct { win: model.WindowId, s: sinkmod.Stack },
@@ -167,9 +170,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
         count: usize = 0,
         map: usize = 0,
         park: usize = 0,
-        geom: usize = 0,
-        geom_bw: usize = 0,
-        bw: usize = 0,
+        configure: usize = 0,
         pixel: usize = 0,
         total: usize = 0,
         ops: std.ArrayList(TestOp) = .empty,
@@ -191,19 +192,13 @@ pub fn TestSink(comptime mode: SinkMode) type {
             self.bump(.map, .{ .map = win });
         }
 
-        fn geomShim(self_ptr: *anyopaque, win: model.WindowId, rect: model.Rect, stack: ?sinkmod.Stack) void {
+        // The three configure shapes (geom, geom+border, border-only) are one
+        // recorded op now, because at the sink they are one request. Asserting
+        // on `.geom` / `.geom_bw` / `.bw` separately would be asserting on an
+        // encoding the production shim no longer has.
+        fn configureShim(self_ptr: *anyopaque, win: model.WindowId, c: sinkmod.Configure) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            self.bump(.geom, .{ .geom = .{ .win = win, .rect = rect, .stack = stack } });
-        }
-
-        fn geomBorderedShim(self_ptr: *anyopaque, win: model.WindowId, rect: model.Rect, bw: u16, stack: ?sinkmod.Stack) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
-            self.bump(.geom_bw, .{ .geom_bw = .{ .win = win, .rect = rect, .bw = bw, .stack = stack } });
-        }
-
-        fn bwShim(self_ptr: *anyopaque, win: model.WindowId, w: u16) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
-            self.bump(.bw, .{ .bw = .{ .win = win, .w = w } });
+            self.bump(.configure, .{ .configure = .{ .win = win, .rect = c.rect, .bw = c.bw, .stack = c.stack } });
         }
 
         fn pixelShim(self_ptr: *anyopaque, win: model.WindowId, p: u32) void {
@@ -233,9 +228,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
                 .ptr = self,
                 .vt = &.{
                     .map = mapShim,
-                    .geom = geomShim,
-                    .geom_bordered = geomBorderedShim,
-                    .border_width = bwShim,
+                    .configure = configureShim,
                     .border_pixel = pixelShim,
                     .park = parkShim,
                     .stack_only = stackShim,
@@ -260,6 +253,17 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(n, self.ops.items.len);
         }
 
+        /// Shared tail: the stack mode on op `i`, or its absence.
+        fn expectStack(self: *const Self, i: usize, stack: ?sinkmod.Stack) !void {
+            const op = self.ops.items[i];
+            if (stack) |s| {
+                try std.testing.expect(op.configure.stack != null);
+                try std.testing.expectEqual(s, op.configure.stack.?);
+            } else {
+                try std.testing.expect(op.configure.stack == null);
+            }
+        }
+
         pub fn expectGeom(
             self: *const Self,
             i: usize,
@@ -272,18 +276,19 @@ pub fn TestSink(comptime mode: SinkMode) type {
         ) !void {
             comptime if (mode != .record) @compileError("expectGeom requires record mode");
             const op = self.ops.items[i];
-            try std.testing.expect(op == .geom);
-            try std.testing.expectEqual(win, op.geom.win);
-            try std.testing.expectEqual(x, @as(i32, op.geom.rect.x));
-            try std.testing.expectEqual(y, @as(i32, op.geom.rect.y));
-            try std.testing.expectEqual(w, op.geom.rect.width);
-            try std.testing.expectEqual(h, op.geom.rect.height);
-            if (stack) |s| {
-                try std.testing.expect(op.geom.stack != null);
-                try std.testing.expectEqual(s, op.geom.stack.?);
-            } else {
-                try std.testing.expect(op.geom.stack == null);
-            }
+            try std.testing.expect(op == .configure);
+            const c = op.configure;
+            try std.testing.expectEqual(win, c.win);
+            try std.testing.expect(c.rect != null);
+            try std.testing.expectEqual(x, @as(i32, c.rect.?.x));
+            try std.testing.expectEqual(y, @as(i32, c.rect.?.y));
+            try std.testing.expectEqual(w, c.rect.?.width);
+            try std.testing.expectEqual(h, c.rect.?.height);
+            // `bw` is deliberately NOT asserted null: geometry and border width
+            // are now one request, so a switch that changes both sends one
+            // configure carrying both, and this helper only promises the
+            // geometry half. `expectBw` is the helper that pins exclusivity.
+            try self.expectStack(i, stack);
         }
 
         pub fn expectGeomRect(
@@ -308,19 +313,17 @@ pub fn TestSink(comptime mode: SinkMode) type {
         ) !void {
             comptime if (mode != .record) @compileError("expectGeomBw requires record mode");
             const op = self.ops.items[i];
-            try std.testing.expect(op == .geom_bw);
-            try std.testing.expectEqual(win, op.geom_bw.win);
-            try std.testing.expectEqual(rect.x, op.geom_bw.rect.x);
-            try std.testing.expectEqual(rect.y, op.geom_bw.rect.y);
-            try std.testing.expectEqual(rect.width, op.geom_bw.rect.width);
-            try std.testing.expectEqual(rect.height, op.geom_bw.rect.height);
-            try std.testing.expectEqual(bw, op.geom_bw.bw);
-            if (stack) |s| {
-                try std.testing.expect(op.geom_bw.stack != null);
-                try std.testing.expectEqual(s, op.geom_bw.stack.?);
-            } else {
-                try std.testing.expect(op.geom_bw.stack == null);
-            }
+            try std.testing.expect(op == .configure);
+            const c = op.configure;
+            try std.testing.expectEqual(win, c.win);
+            try std.testing.expect(c.rect != null);
+            try std.testing.expectEqual(rect.x, c.rect.?.x);
+            try std.testing.expectEqual(rect.y, c.rect.?.y);
+            try std.testing.expectEqual(rect.width, c.rect.?.width);
+            try std.testing.expectEqual(rect.height, c.rect.?.height);
+            try std.testing.expect(c.bw != null);
+            try std.testing.expectEqual(bw, c.bw.?);
+            try self.expectStack(i, stack);
         }
 
         pub fn expectPixel(self: *const Self, i: usize, win: model.WindowId, p: u32) !void {
@@ -334,9 +337,16 @@ pub fn TestSink(comptime mode: SinkMode) type {
         pub fn expectBw(self: *const Self, i: usize, win: model.WindowId, w: u16) !void {
             comptime if (mode != .record) @compileError("expectBw requires record mode");
             const op = self.ops.items[i];
-            try std.testing.expect(op == .bw);
-            try std.testing.expectEqual(win, op.bw.win);
-            try std.testing.expectEqual(w, op.bw.w);
+            try std.testing.expect(op == .configure);
+            // A border-width-only configure must stay border-width-only: the
+            // merged slot could trivially have started dragging a rect along,
+            // and a spurious X|Y|W|H on a window whose geometry the WM did not
+            // recompute is a real (if small) correctness regression.
+            try std.testing.expect(op.configure.bw != null);
+            try std.testing.expectEqual(w, op.configure.bw.?);
+            try std.testing.expect(op.configure.rect == null);
+            try std.testing.expect(op.configure.stack == null);
+            try std.testing.expectEqual(win, op.configure.win);
         }
 
         pub fn expectMap(self: *const Self, i: usize, win: model.WindowId) !void {

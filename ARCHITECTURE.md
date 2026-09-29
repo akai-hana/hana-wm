@@ -19,7 +19,7 @@ Four properties fall out of this design:
 
 Terminology used throughout:
 
-- **contract** — the interfaces declared in `src/core/architecture/contract.zig` (`Surfaces`, `WindowModule`, `Layout`, `Segment`, the `tiling_mods` conditional import). Open to any module that binds `pub const module`, closed to extension by the core.
+- **contract** — the interfaces declared in `src/core/architecture/contract.zig` (`WindowModule`, `Layout`, `Segment`, `ClickCtx`, the `tiling_mods` conditional import). xcb-free: the key-press event is an opaque `KeyPressEvent` and the segment connection is `*const anyopaque`. The X half (`Surfaces` and the concrete event type) lives in `src/core/architecture/contract_x11.zig` and is imported only by composition roots that already talk to the server. Open to any module that binds `pub const module`, closed to extension by the core.
 - **contractor (module)** — any file inside a `modules/` directory that binds one of those contracts via a comptime-structured `pub const module` declaration and is pulled into a generated registry. Dispatch is registry-first; nothing names a sibling module.
 - **core** — the always-compiled layer, grouped by role: `architecture/` (the xcb-free `model` — state *and* the `Rect`/`Margins` value objects — plus `contract`), `x11/` (the whole X contact surface), `loop/` (`pipeline`, `events`), `proc/` (`lifecycle`, `signals`, `spawn`, `restart`, `persist`), `display/` (`scale`, `usable_area`), and the xcb-free `pure/` shelf.
 - **model / config** — the two pure layers (no `xcb`), kept free of X by construction and enforced by the build. `architecture/contract.zig` sits with the model but *is* xcb-touching (it declares xcb event types), so it is outside the pure frontier.
@@ -39,7 +39,7 @@ src/                 All Zig sources (every .zig becomes a named module)
   main.zig           Entry point
   core/              Always-compiled core + contract + seams + shelf
     core.zig         Process-wide XCB state + shared types (directory facade)
-    architecture/    The shape of the WM: model.zig (xcb-free; state + geometry value objects) and contract.zig (xcb event types)
+    architecture/    The shape of the WM: model.zig + contract.zig (both xcb-free: state, geometry value objects, hook shapes; the key-press event is an opaque type) and contract_x11.zig (the xcb event TYPES + the Surfaces hook set)
     pure/            X-free shelf: ids, constants, bounded, idmap, log, paths, scaling, time, cycle
     loop/            Always-running orchestration: pipeline (model owner + reconcile choke point), events
     proc/            Process/hand-off cluster: lifecycle (reload flag + wake pipe), signals, spawn, restart, persist

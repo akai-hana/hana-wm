@@ -382,6 +382,7 @@ pub fn honorConfigureRequest(
 /// This module's window sub-system contribution: the floating drag/resize
 /// commands floating owns.
 pub const module: @import("contract").WindowModule = .{
+    .name = "floating",
     .startDrag = startDrag,
     .stopDrag = stopDrag,
     .updateDrag = updateDrag,

@@ -167,6 +167,65 @@ pub const Action = union(enum) {
     }
 };
 
+/// Actions that need the tiling-op focus scaffold: transient focus noise
+/// suppressed, then a settle grab, wrapped around the mutation.
+///
+/// This is a property OF THE ACTION, so it is declared here beside the union
+/// rather than left implicit in whichever switch arm happens to call the
+/// helper. The failure mode that motivated it: the graft lived at three
+/// dispatch arms, so a new mutating tag was scaffolded or not by which arm
+/// somebody wrote, and the answer was invisible at the type. The `switch` below
+/// has no `else` on purpose -- adding a variant is a compile error naming
+/// this decision, not a silent default.
+///
+/// Why only these three, when `set_master_width`, `swap_master`,
+/// `move_window_*` and `scroll_view` also mutate the layout: those reconcile
+/// inside the action itself (`actions.adjustPrimaryWidthAction` and friends
+/// each end in `pipeline.reconcileGrab`) and never move focus, so there is no
+/// transient focus event to suppress and no settle grab owed. The three
+/// grafted tags DO move focus as a side effect -- toggling float and cycling
+/// layout/variants re-derive the focused window -- so they take one grab for
+/// the whole operation instead of paying focus-then-reconcile's two.
+pub fn needsTilingFocusScaffold(comptime tag: std.meta.Tag(Action)) bool {
+    return switch (tag) {
+        // Re-derives focus as a side effect of the mutation.
+        .toggle_floating_window, .cycle_layout, .cycle_variants => true,
+        // Pure layout mutations: self-reconciling, focus-preserving.
+        .set_master_width,
+        .set_master_count,
+        .grow_stack,
+        .swap_master,
+        .move_window_next,
+        .move_window_prev,
+        .scroll_view,
+        .toggle_fullscreen,
+        // Everything else (lifecycle, bar chrome, workspaces/tags, exec,
+        // diagnostics, min/unminimize, sequence/parallel) touches neither the
+        // layout nor focus: each has its own focus transition where it needs
+        // one, and grafting here would suppress focus changes users asked for.
+        .close_window,
+        .reload_config,
+        .reload_hana,
+        .exec,
+        .sequence,
+        .parallel,
+        .dump_state,
+        .cycle_focus,
+        .switch_workspace,
+        .move_to_workspace,
+        .toggle_tag,
+        .all_workspaces,
+        .pin_window,
+        .toggle_bar_visibility,
+        .toggle_bar_position,
+        .toggle_prompt,
+        .minimize_window,
+        .unminimize,
+        .unminimize_all,
+        => false,
+    };
+}
+
 pub const Keybind = struct {
     modifiers: u16, // u16 per XCB spec; xcb_grab_key rejects wider types
     keysym: u32, // xcb_keysym_t is u32 by X11 protocol spec; never narrowed
