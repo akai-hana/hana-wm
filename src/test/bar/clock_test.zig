@@ -3,6 +3,10 @@
 //! wall clock; deadlineFromMs, effectiveFormatFor, and cycledMode are the only
 //! pieces with input-independent behavior worth pinning down.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: seg_clock
+
 const std = @import("std");
 const clock = @import("clock");
 const scaffold = @import("scaffold");

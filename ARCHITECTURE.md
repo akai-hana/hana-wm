@@ -322,6 +322,10 @@ The bar is an orchestrator with zero segment logic: every segment is a drop-in a
 
 - **`clock/clock.zig` (236)** — self-ticking clock (`self_ticking = true`, `pollTimeoutMs 1000`), `DisplayMode` cycling (`cycleDisplay`: left advances, right reverses), per-mode width probes.
 - **`tags/tags.zig` (230)** — workspace tags with active indicator, per-workspace icons/labels (`getLabel`), `invalidate()` on font/icon reload; click toggles workspace.
+- `layout/` is a SUBJECT grouping, not a build-recognized family: only packages in
+  build.zig's `sub_registry_specs` (systatus, prompt, title, slider) get a generated
+  sub-registry. These two files declare no `sub`/`addon` binding and are registered as
+  independent segments, so they are peers that share a subject, not subs of anything.
 - **`layout/layout.zig` (40)** — active tiling-layout icon (`getIcon` from the model + `contract.activeLayoutKind`; `fallback_icon "><>"` when tiling is absent — everything floats).
 - **`layout/variants.zig` (49)** — active layout variant string; 0-width slot when the active layout has no variant (`no_variant_icon = ""`), `with_collapse = true` so it appears/disappears without flicker.
 - **`systatus/systatus.zig` (216)** — iterates the generated `systatus_subs` registry of simple readouts, coalesced to `read_interval_ms 2000`, throttled, `max_readout_len 36`, `needsRepaint` false while contents unchanged.

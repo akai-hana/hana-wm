@@ -22,7 +22,9 @@ pub fn parseCapacity(contents: []const u8) ?u8 {
 }
 
 /// Charge % of the first present battery under /sys/class/power_supply.
-fn read() ?u8 {
+var g_num: [16]u8 = undefined;
+
+fn read() ?systatus.Sample {
     for (0..battery_probe_slots) |i| {
         var path_buf: [64]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/sys/class/power_supply/BAT{d}/capacity", .{i}) catch return null;
@@ -31,7 +33,7 @@ fn read() ?u8 {
         if (r.truncated) continue;
         // An unreadable/invalid slot is not fatal: try the next battery, and
         // only report absence once every probed slot has come up empty.
-        if (parseCapacity(r.bytes)) |v| return v;
+        if (parseCapacity(r.bytes)) |v| return systatus.percentSample(&g_num, v);
     }
     return null;
 }

@@ -21,7 +21,7 @@ const types = @import("types");
 
 const scaling = @import("scaling");
 test "core.borderWidth resolves absolute and percentage border widths" {
-    const fx = fixture.setUp("borders.width") orelse return;
+    const fx = try fixture.setUp("borders.width");
     defer fx.deinit();
 
     // Default config: absolute 2px, percentage disabled.
@@ -29,7 +29,8 @@ test "core.borderWidth resolves absolute and percentage border widths" {
 
     // A percentage is half the reference dimension (a border insets two
     // sides). Derive the expectation from the LIVE screen height so any
-    // display geometry passes.
+    // display geometry passes -- that live-resolution binding is the part only
+    // this file can test; the arithmetic is covered headlessly.
     fx.config.tiling.border_width = types.ScalableValue.percentage(2.0);
     const expected = scaling.scaleBorderWidth(
         types.ScalableValue.percentage(2.0),
@@ -43,7 +44,7 @@ test "core.borderWidth resolves absolute and percentage border widths" {
 }
 
 test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
-    const fx = fixture.setUp("borders.color") orelse return;
+    const fx = try fixture.setUp("borders.color");
     defer fx.deinit();
     fx.config.tiling.border_focused = 0x111111;
     fx.config.tiling.border_unfocused = 0x222222;
@@ -68,7 +69,7 @@ test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
 }
 
 test "borders.resolveBorderColor is 0 for a screen-covering window" {
-    const fx = fixture.setUp("borders.covering") orelse return;
+    const fx = try fixture.setUp("borders.covering");
     defer fx.deinit();
     fx.config.tiling.border_focused = 0x111111;
     fx.config.tiling.border_unfocused = 0x222222;

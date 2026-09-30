@@ -148,7 +148,7 @@ Segment behavior knobs:
   To make every commit a native, un-throttled write, install
   `contrib/udev/90-hana-backlight.rules` and add your user to the `video`
   group.
-- `clock_format` (strftime), `drun_prompt`, `carousel_enabled`,
+- `clock_format` (strftime), `run_prompt`, `carousel_enabled`,
   `carousel_speed_px_s`, `indicator_*` and the appearance/color knobs
   (usually themed).
 - Selected workspace tag: `selected_fg` colors the current tag's **icon text**
@@ -158,7 +158,9 @@ Segment behavior knobs:
   `workspaces`/`workspaces_selected` entries below.
 
 Per-segment accents live in `[bar.properties]` (`title`, `title_unfocused`,
-`title_minimized`, `drun_bg`, `drun_fg`, `drun_prompt_color`). Any other key
+`title_minimized`, `run_bg`, `run_fg`, `run_prompt_color`). The older
+`drun_prompt`, `drun_bg`, `drun_fg` and `drun_prompt_color` spellings are
+still accepted as aliases for the same settings. Any other key
 `<segment>` is that segment's text color and/or style: the first color-carrying
 item (`cpu = primary_color`) sets the text color and trailing
 `underline`/`bold`/`italic` flags set its style, e.g.

@@ -3,6 +3,10 @@
 //! properties, the prepare/apply split, dedup, and the clear path. Self-skips
 //! on machines without an X server so `zig build test` stays green headless.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling
+
 const std = @import("std");
 const core = @import("core");
 
@@ -42,7 +46,7 @@ fn enterNotify(fx: *fixture.Fx, win: u32, x: i16, y: i16) void {
 }
 
 test "focus: property-less window is passive; apply lands input focus" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -64,7 +68,7 @@ test "focus: property-less window is passive; apply lands input focus" {
 }
 
 test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -82,7 +86,7 @@ test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
 }
 
 test "focus: no_input window refuses focus (none transition)" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -97,7 +101,7 @@ test "focus: no_input window refuses focus (none transition)" {
 }
 
 test "focus: switching to an empty workspace clears input focus to root" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
 
     const win = fx.createWindow();
@@ -116,7 +120,7 @@ test "focus: switching to an empty workspace clears input focus to root" {
 }
 
 test "focus: destroyed window under a mouse_click is never re-focused (liveness before dedup)" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
 
     const win = fx.createWindow();
@@ -137,7 +141,7 @@ test "focus: destroyed window under a mouse_click is never re-focused (liveness 
 }
 
 test "focus: switch to a workspace with a never-shown window lands input focus" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -165,7 +169,7 @@ test "focus: switch to a workspace with a never-shown window lands input focus" 
 }
 
 test "focus: switch lands xcb_set_input_focus on globally_active window" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -200,7 +204,7 @@ test "focus: switch lands xcb_set_input_focus on globally_active window" {
 // rotation cycles identically -- the old id-ordered pool would agree with the
 // layout and hide the bug.
 test "focus: cycle steps follow the tiled order after a move and a swap" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -244,7 +248,7 @@ test "focus: cycle steps follow the tiled order after a move and a swap" {
 }
 
 test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel suppression)" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
     const xcb = core.xcb;
@@ -300,7 +304,7 @@ test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel s
 //
 // X-gated like the rest of this file (grabFocus takes a real server grab).
 test "focus: a destroyed window cannot take focus via user_command" {
-    var fx = fixture.setUp("focus_test") orelse return;
+    var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
 
     const w1 = fx.createWindow();

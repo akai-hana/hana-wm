@@ -4,6 +4,10 @@
 //! brightness.zig; this module covers the file-backed read/write and device
 //! resolution paths that need a real (temp) filesystem.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: seg_brightness
+
 const std = @import("std");
 const brightness = @import("brightness");
 

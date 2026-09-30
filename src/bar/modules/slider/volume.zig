@@ -5,8 +5,13 @@
 //! slider core owns the shared render shell, interaction, poll, and commit
 //! clock.
 //!
-//! Backends, most-native first (probed at the first read and cached; a read
-//! that stops answering re-probes):
+//! Backends, most-native first. The resolved backend is LATCHED (26.7): once a
+//! read has identified one, later reads go straight to it instead of re-walking
+//! the ladder, and a ladder that found nothing is negative-cached for a while
+//! so a dead daemon cannot cost a fresh set of subprocesses on every press,
+//! right-click and 5 s poll. Both directions are undone by the same trigger --
+//! a `pulseReachable` recheck, plus a slow deadline -- so a daemon that starts
+//! after we gave up on it is still picked up:
 //!   1. native PulseAudio (`native_pulse`): in-process libpulse, no
 //!      subprocess -- the path on PipeWire/PulseAudio machines, including
 //!      ones where no `pactl` binary exists.
@@ -48,6 +53,144 @@ var g_pct: u8 = 0;
 var g_muted: bool = false;
 var g_has_value: bool = false;
 
+/// (26.7) Negative cache for a ladder that found no working backend. Null
+/// until the first total failure. Without it every read against a dead daemon
+/// re-walked all four rungs -- up to three `popen`s, each blocking the WM
+/// loop -- and the poll, every press and every right-click paid it again.
+var g_ladder_failed_at_ms: ?i64 = null;
+/// When the daemon is next re-checked for having come back. Separate from the
+/// negative cache's deadline so the cheap reachability check can trigger a
+/// retry long before the cache expires.
+var g_pulse_recheck_at_ms: i64 = 0;
+/// Last observed daemon reachability, so a CHANGE can be recognised. Null
+/// until first observed.
+var g_pulse_reachable: ?bool = null;
+/// How long a failed ladder is trusted before being re-walked regardless.
+pub const reprobe_interval_ms: i64 = 15_000;
+
+/// What the negative cache says about one poll: whether the ladder may be
+/// walked, and separately whether the one-shot native-probe flags must be
+/// cleared so a fresh attach gets a chance. The two are independent -- the
+/// slow deadline re-walks WITHOUT forgetting the native probe, and a
+/// reachability flip forgets it -- so they are two fields, not one enum.
+pub const Probe = struct {
+    walk: bool,
+    forget_native: bool,
+};
+
+const ProbeDecision = enum { skip, retry, recheck };
+
+pub fn verdict(d: ProbeDecision) Probe {
+    return switch (d) {
+        .skip => .{ .walk = false, .forget_native = false },
+        .retry => .{ .walk = true, .forget_native = false },
+        .recheck => .{ .walk = false, .forget_native = false },
+    };
+}
+
+/// (26.7) The pure re-probe decision. All the timing policy, with no clock and
+/// no IO, so it is testable: whether a poll may walk the ladder again, and
+/// whether it must first re-ask whether a daemon is reachable.
+///
+///   - No recorded failure: the ladder has never run to completion, so it runs.
+///   - The slow deadline has passed: retry on the deadline alone.
+///   - The recheck window has arrived: ask again; a CHANGED answer is the
+///     trigger that finds a daemon started after we wrote it off, without
+///     paying for the ladder on every poll.
+///   - Otherwise: skip, which is the whole point of the negative cache.
+pub fn probeDecision(
+    now: i64,
+    failed_at_ms: ?i64,
+    recheck_at_ms: i64,
+    last_reachable: ?bool,
+    reachable: bool,
+) Probe {
+    // No recorded failure: the ladder has never run to completion, so run it
+    // even if the daemon looks exactly as it did last time. "Unchanged" is
+    // only evidence once there is a previous observation to be unchanged from.
+    if (failed_at_ms == null) return .{ .walk = true, .forget_native = false };
+    const failed_at = failed_at_ms.?;
+    if (now -| failed_at >= reprobe_interval_ms) {
+        return .{ .walk = true, .forget_native = false };
+    }
+    if (now >= recheck_at_ms) {
+        // The daemon was asked again. Only a CHANGED answer un-latches, and a
+        // change is also the only thing worth forgetting the native probe for.
+        const changed = last_reachable == null or last_reachable.? != reachable;
+        return .{ .walk = changed, .forget_native = changed };
+    }
+    return .{ .walk = false, .forget_native = false };
+}
+
+/// (26.7) Whether the ladder may be walked now. `probeDecision`'s clock and IO
+/// edge, and the only place that mutates the cache's own bookkeeping.
+fn probeDue() bool {
+    const now = slider.nowMs();
+    const recheck_window = now >= g_pulse_recheck_at_ms;
+    const reachable = if (recheck_window) native_pulse.pulseReachable() else false;
+    const probe = probeDecision(
+        now,
+        g_ladder_failed_at_ms,
+        g_pulse_recheck_at_ms,
+        g_pulse_reachable,
+        reachable,
+    );
+    if (recheck_window) {
+        g_pulse_recheck_at_ms = now + reprobe_interval_ms;
+        g_pulse_reachable = reachable;
+    }
+    // A daemon that appeared (or vanished) is worth a fresh native attach: the
+    // one-shot probed flag would otherwise write the machine off for the rest
+    // of the session. Only the reachability change grants this.
+    if (probe.forget_native) g_native_pulse_probed = false;
+    return probe.walk;
+}
+
+/// The rung a latched backend is read through. Named, not inlined into
+/// `readLatched`, so the backend -> rung mapping is checkable without a
+/// daemon: the point of the latch is that this mapping is consulted directly
+/// and never re-derived by re-walking the ladder.
+pub const Rung = enum { native_pulse, pactl, native_alsa, amixer, none };
+
+pub fn latchedRung(backend: Backend) Rung {
+    return latchedRungFor(backend, g_native_pulse != null, g_native_alsa != null);
+}
+
+/// The mapping itself, with the handle presence passed in rather than read, so
+/// every arm -- including the two native ones, which a headless unit test can
+/// never reach by attaching to a real daemon -- is checkable.
+pub fn latchedRungFor(backend: Backend, has_native_pulse: bool, has_native_alsa: bool) Rung {
+    return switch (backend) {
+        .pulse => if (has_native_pulse) .native_pulse else .pactl,
+        .alsa => if (has_native_alsa) .native_alsa else .amixer,
+        .unknown => .none,
+    };
+}
+
+/// (26.7) The level a press should show without re-reading. Null means "show
+/// nothing new": with no backend, `commitPct` wrote nothing, so echoing the
+/// value back would display a level the sink never accepted.
+pub fn optimisticLevel(backend: Backend, v: u8) ?u8 {
+    return if (backend == .unknown) null else clampPct(v);
+}
+
+/// The display level after a press. Value in, value out, so the "with no
+/// backend the display does not move" half of the contract is checkable: with
+/// `unknown`, `commitPct` wrote nothing, and echoing the value back would show
+/// a level the sink never accepted.
+pub fn optimisticAfter(backend: Backend, v: u8, current: u8) u8 {
+    return optimisticLevel(backend, v) orelse current;
+}
+
+/// The negative cache after one ladder run. A rung answered, so the cache is
+/// CLEARED -- an armed failure must never outlive the success that disproved
+/// it, or a recovered daemon would stay unwalked. Nothing answered, so it is
+/// armed at `now`, which is what stops the next poll, press and right-click
+/// from re-paying for up to three blocked subprocess spawns.
+pub fn noteLadderResult(ok: bool, now: i64) ?i64 {
+    return if (ok) null else now;
+}
+
 const pactl_vol_cmd = "pactl get-sink-volume @DEFAULT_SINK@";
 const pactl_mute_cmd = "pactl get-sink-mute @DEFAULT_SINK@";
 const amixer_vol_cmd = "amixer get Master";
@@ -69,6 +212,91 @@ fn parsePercent(out: []const u8) ?u8 {
 /// (native pulse -> pactl -> native ALSA -> amixer). Returns true when this
 /// read changed the displayed state.
 fn readVolume() bool {
+    // (26.7) A LATCHED backend is read directly. This is the change that takes
+    // the ladder off the hot path: previously every read re-walked the rungs
+    // from the top, re-attempting a native attach and, when the daemon was
+    // dead, spawning pactl/amixer on every poll, press and right-click.
+    if (g_backend != .unknown) {
+        if (readLatched()) |changed| return changed;
+        // The latched backend stopped answering (daemon restarted, card
+        // unplugged). Forget it and let the ladder decide again -- but the
+        // negative cache still applies, so this is not a free re-probe either.
+        g_backend = .unknown;
+    }
+    if (!probeDue()) return false;
+    return runLadder();
+}
+
+/// Reads only the currently latched backend. Returns null when that backend
+/// does not answer, which tells `readVolume` to fall back to the ladder.
+fn readLatched() ?bool {
+    const had_value = g_has_value;
+    const old_pct = g_pct;
+    const old_muted = g_muted;
+    switch (latchedRung(g_backend)) {
+        .native_pulse => {
+            if (g_native_pulse) |*np| {
+                if (np.readSink()) |snap| {
+                    g_pct = snap.pct;
+                    g_muted = snap.muted;
+                    g_has_value = true;
+                    return changedFrom(had_value, old_pct, old_muted);
+                }
+            } else {
+                var buf: [1024]u8 = undefined;
+                const out = slider.runOut(pactl_vol_cmd, &buf);
+                const p = parsePercent(out) orelse return null;
+                g_pct = p;
+                const out2 = slider.runOut(pactl_mute_cmd, &buf);
+                g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
+                g_has_value = true;
+                return changedFrom(had_value, old_pct, old_muted);
+            }
+        },
+        .pactl => {
+            var buf: [1024]u8 = undefined;
+            const out = slider.runOut(pactl_vol_cmd, &buf);
+            const p = parsePercent(out) orelse return null;
+            g_pct = p;
+            const out2 = slider.runOut(pactl_mute_cmd, &buf);
+            g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
+            g_has_value = true;
+            return changedFrom(had_value, old_pct, old_muted);
+        },
+        .native_alsa => {
+            if (g_native_alsa) |na| {
+                const p = na.readVolumePct() orelse return null;
+                g_pct = p;
+                g_muted = na.readMuted() orelse g_muted;
+                g_has_value = true;
+                return changedFrom(had_value, old_pct, old_muted);
+            } else return null;
+        },
+        .amixer => {
+            var buf: [1024]u8 = undefined;
+            const out = slider.runOut(amixer_vol_cmd, &buf);
+            const p = parsePercent(out) orelse return null;
+            g_pct = p;
+            g_muted = std.mem.indexOf(u8, out, "[off]") != null;
+            g_has_value = true;
+            return changedFrom(had_value, old_pct, old_muted);
+        },
+        .none => return null,
+    }
+    // A native handle that read but produced nothing is a failure to the
+    // caller too: fall through to the ladder.
+    return null;
+}
+
+fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
+    return !had_value or g_pct != old_pct or g_muted != old_muted;
+}
+
+/// The original four-rung ladder, now reached only when nothing is latched (or
+/// the latch went stale). Its native-attempt flags are cleared only on the slow
+/// re-probe trigger, so a daemon that appears later is retried rather than
+/// written off by a one-shot `*_probed` flag.
+fn runLadder() bool {
     const had_value = g_has_value;
     const old_pct = g_pct;
     const old_muted = g_muted;
@@ -138,8 +366,9 @@ fn readVolume() bool {
         }
     }
 
+    g_ladder_failed_at_ms = noteLadderResult(ok, slider.nowMs());
     if (!g_has_value) return false;
-    return !had_value or g_pct != old_pct or g_muted != old_muted;
+    return changedFrom(had_value, old_pct, old_muted);
 }
 
 /// The latency class of one commit on the live backend: an in-process libpulse
@@ -160,10 +389,11 @@ fn commitCost() slider.CommitCost {
 /// receives. Scheduled by the slider core's throttle, which owns the commit
 /// clock.
 /// The one clamp every level passes: 0-100 % is all the backend ever
-/// receives. `commitPct` and `previewPct` MUST go through the same function --
-/// they used to clamp independently, and when `previewPct` forgot to, a
-/// scroll/drag motion could display a level the backend then refused.
-fn clampPct(v: u8) u8 {
+/// receives. `commitPct` and every `write` mode MUST go through the same
+/// function -- they used to clamp independently, and when the preview path
+/// forgot to, a scroll/drag motion could display a level the backend then
+/// refused.
+pub fn clampPct(v: u8) u8 {
     return @min(v, 100);
 }
 
@@ -194,19 +424,29 @@ fn commitPct(v: u8) void {
     }
 }
 
-/// One-shot apply (press, drag end): commit then re-read so the display
-/// follows the sink immediately rather than on the next poll tick. The
-/// scroll/drag motion paths use the core's preview + throttle and their own
-/// optimistic display.
-fn applyPct(v: u8) void {
-    commitPct(v);
-    _ = readVolume();
-}
-
-/// Optimistic display update from a scroll/drag motion: the label follows
-/// immediately while the backend write is committed by the core's scheduler.
-fn previewPct(v: u8) void {
-    g_pct = clampPct(v);
+/// The one write entry point (26.8), replacing `previewPct` / `commitPct` /
+/// `applyPct`. See brightness.zig's for why the three were one function with a
+/// mode: the clamp and the display update existed three times each, and a
+/// preview that skipped the clamp showed a level the sink would refuse.
+fn write(w: slider.Write, v: u8) void {
+    switch (w) {
+        // Scroll/drag motion: the label follows immediately while the backend
+        // write is the core scheduler's business.
+        .preview => g_pct = optimisticAfter(g_backend, v, g_pct),
+        .commit => commitPct(v),
+        // Press set / drag end. (26.7) The follow-up read is gone: it forced a
+        // full re-probe -- and with an unresolved backend, up to three
+        // subprocess spawns blocking the WM loop -- on every press and every
+        // right-click. The value just committed IS the display value, so it is
+        // shown optimistically and the next poll confirms it against the real
+        // sink. With no backend the display does not move, because commitPct
+        // wrote nothing and echoing the value would show a level the sink
+        // never accepted.
+        .apply => {
+            commitPct(v);
+            g_pct = optimisticAfter(g_backend, v, g_pct);
+        },
+    }
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}` and
@@ -249,9 +489,12 @@ fn toggleMute() void {
     _ = readVolume();
 }
 
-// Current displayed level / write-gate hooks for the core.
-fn currentPct() u8 {
-    return g_pct;
+/// The displayed level, or null while the backend has never answered, which is
+/// what makes an audio-less machine reserve no slot and take no clicks. The
+/// absence and the value used to be a `{bool, u8}` pair latched together
+/// (26.8); one optional cannot hold half of them.
+fn currentLevel() ?u8 {
+    return if (g_has_value) g_pct else null;
 }
 
 fn writable() bool {
@@ -261,13 +504,12 @@ fn writable() bool {
 pub const sub: slider.Sub = .{
     .name = "volume",
     .read_interval_ms = 5000,
+    .level = currentLevel,
     .writable = writable,
     .read = readVolume,
-    .pct = currentPct,
-    .preview = previewPct,
+    .write = write,
     .commit_cost = commitCost,
-    .commit = commitPct,
-    .apply = applyPct,
+
     .label = label,
     .secondary = toggleMute,
     .probeNaturalWidth = 56,

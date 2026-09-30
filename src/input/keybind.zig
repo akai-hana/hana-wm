@@ -12,6 +12,7 @@ const log = @import("log");
 const types = @import("types");
 const keysyms = @import("keysyms");
 const xkbcommon = @import("xkbcommon");
+const masks = @import("masks");
 
 /// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
 /// config's keybindings, plus the keycode-resolution step that feeds it.
@@ -143,14 +144,17 @@ pub const KeybindResolver = struct {
 
     /// O(log n) keybinding lookup for use on the hot key-press path.
     /// Returns a pointer into the current config's keybindings slice, or null.
+    /// `mods` is a `BindingMods`, not a raw X modifier state: the table is
+    /// keyed by masked masks, so an unmasked value would be a silent
+    /// never-match (19.4).
     pub inline fn lookup(
         self: *const KeybindResolver,
-        mods: u16,
+        mods: masks.BindingMods,
         keysym: u32,
         live_config_rev: u32,
     ) ?*const types.Action {
         if (self.config_rev != live_config_rev) return self.reportStale(live_config_rev);
-        const idx = self.find(dispatchKey(mods, keysym)) orelse return null;
+        const idx = self.find(dispatchKey(masks.toMask(mods), keysym)) orelse return null;
         return self.entries.items[idx].action;
     }
 
@@ -206,7 +210,7 @@ pub const ResolvedBind = struct {
 /// now returns what it derived and the grab path consumes that.
 pub fn resolveKeycodes(
     keybindings: []const types.Keybind,
-    state: *xkbcommon.XkbState,
+    state: *const xkbcommon.XkbState,
     out: []ResolvedBind,
 ) []ResolvedBind {
     var n: usize = 0;

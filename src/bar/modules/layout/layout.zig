@@ -39,8 +39,8 @@ fn getIcon() []const u8 {
     );
 }
 
-fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
+fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
     return scaffold.drawAndStore("layout", dc, config, height, start_x, getIcon());
 }
 
-pub const module = scaffold.module("layout", draw, actions.cycleLayoutKind, .{ .with_collapse = false });
+pub const module = scaffold.module("layout", draw, actions.cycleLayoutKind, .{ .mode = .measured_no_relayout });

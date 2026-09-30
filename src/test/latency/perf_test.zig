@@ -4,6 +4,10 @@
 //! only under -Dbench; the default suite runs these as silent
 //! smokes so `zig build test` stays quiet).
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: minimize, fullscreen, workspaces
+
 const std = @import("std");
 const testing = std.testing;
 const model = @import("model");
@@ -15,7 +19,7 @@ const time = @import("time");
 // Bench marks only run (full iterations + timing output) under `-Dbench`.
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
-const bench = build_options.bench;
+const bench = build_options.bench; // (28.2) timings -> file
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -24,7 +28,7 @@ const Model = model.Model;
 const WindowId = model.WindowId;
 const WSId = model.WSId;
 
-const makeModel = helpers.makeModel;
+const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn between iterations
 
 const nowNs = time.monotonicNs;
 
@@ -61,7 +65,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 10));
-    if (bench) std.debug.print("[bench] findHome (100 wins, 10 ws): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) helpers.benchLog("[bench] findHome (100 wins, 10 ws): {d:.1} ns/call\n", .{per_call_ns});
 
     for (0..100) |i| {
         const e = m.store.get(@intCast(i + 1)).?;
@@ -83,7 +87,7 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) std.debug.print("[bench] fullscreenOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) helpers.benchLog("[bench] fullscreenOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: coveringOccupantOnWs store scan (50 wins)" {
@@ -100,7 +104,7 @@ test "bench: coveringOccupantOnWs store scan (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) std.debug.print("[bench] coveringOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) helpers.benchLog("[bench] coveringOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: moveWindowToWs round-trip (50 wins)" {
@@ -119,7 +123,7 @@ test "bench: moveWindowToWs round-trip (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 100));
-    if (bench) std.debug.print("[bench] moveWindowToWs round-trip (50 wins): {d:.1} ns/op\n", .{per_op_ns});
+    if (bench) helpers.benchLog("[bench] moveWindowToWs round-trip (50 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
 test "bench: minimize/restore cycle (32 wins, max budget)" {
@@ -140,7 +144,7 @@ test "bench: minimize/restore cycle (32 wins, max budget)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 64));
-    if (bench) std.debug.print("[bench] minimize/restore cycle (32 wins): {d:.1} ns/op\n", .{per_op_ns});
+    if (bench) helpers.benchLog("[bench] minimize/restore cycle (32 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
 test "bench: reorderTiled (50 wins)" {
@@ -155,11 +159,15 @@ test "bench: reorderTiled (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 2));
-    if (bench) std.debug.print("[bench] reorderTiled (50 wins): {d:.1} ns/op\n", .{per_op_ns});
+    if (bench) helpers.benchLog("[bench] reorderTiled (50 wins): {d:.1} ns/op\n", .{per_op_ns});
 }
 
 fn testColor(_: model.WindowId, _: *const model.Model) u32 {
-    return 100;
+    // (28.8) helpers.focused_pixel, not a literal 100. The literal was a
+    // second copy of a shared constant: changing the focused pixel would have
+    // left this returning the old value with no test failing, since nothing
+    // compared the two.
+    return helpers.focused_pixel;
 }
 
 test "bench: reconcile pass (50 windows)" {
@@ -179,7 +187,7 @@ test "bench: reconcile pass (50 windows)" {
     for (0..iterations) |_| reconcile.run(&m, &ctx, .{});
     const elapsed_ns = nowNs() - t0;
     const per_pass_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) std.debug.print("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
+    if (bench) helpers.benchLog("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
 }
 
 test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
@@ -239,7 +247,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     const per_full_ns = @as(f64, @floatFromInt(elapsed1)) / @as(f64, @floatFromInt(iterations));
 
     if (bench)
-        std.debug.print(
+        helpers.benchLog(
             "[drag] full reconcile (50 wins): {d:.1} ns/tick; targeted reconcileDragTick: {d:.1} ns/tick; speedup {d:.1}x\n",
             .{ per_full_ns, per_tick_ns, per_full_ns / per_tick_ns },
         );
@@ -254,7 +262,7 @@ test "bench: register (50 wins, home_ws cache setup)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_reg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 50));
-    if (bench) std.debug.print("[bench] register (50 wins): {d:.1} ns/reg\n", .{per_reg_ns});
+    if (bench) helpers.benchLog("[bench] register (50 wins): {d:.1} ns/reg\n", .{per_reg_ns});
 }
 
 test "bench: fallbackFocusCandidate (50 wins)" {
@@ -271,7 +279,7 @@ test "bench: fallbackFocusCandidate (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) std.debug.print("[bench] fallbackFocusCandidate (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) helpers.benchLog("[bench] fallbackFocusCandidate (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {
@@ -286,7 +294,7 @@ test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) std.debug.print("[bench] store.get ({d} wins, worst case): {d:.1} ns/call\n", .{ n, per_call_ns });
+    if (bench) helpers.benchLog("[bench] store.get ({d} wins, worst case): {d:.1} ns/call\n", .{ n, per_call_ns });
 }
 
 test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
@@ -320,8 +328,30 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));
 
     if (bench)
-        std.debug.print(
+        helpers.benchLog(
             "[bench] sent ledger ({d} wins): cold {d:.1} ns/op; warm {d:.1} ns/op ({d:.2} us/sweep)\n",
             .{ n, per_cold_ns, per_warm_ns, per_warm_ns * @as(f64, @floatFromInt(n)) / 1000.0 },
         );
+}
+
+test "bench mode records its timings to a file, not to stderr" {
+    // (28.2) The test protocol rejects any stderr, which is why bench output
+    // could never be printed: the one invocation that compiles bench mode
+    // (`zig build test -Dbench=true`) reported failure on a passing suite.
+    // This pins the replacement end to end -- a line written, and readable
+    // back -- so the file path cannot silently rot into a no-op.
+    if (!bench) return error.SkipZigTest;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, ".zig-cache/bench") catch |err| {
+        std.debug.print("bench dir: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    helpers.benchLog("bench-selftest {d}", .{@as(u32, 12345)});
+    const bytes = cwd.readFileAlloc(io, ".zig-cache/bench/timings.txt", testing.allocator, .limited(1 << 20)) catch |err| {
+        std.debug.print("bench read: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    defer testing.allocator.free(bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "bench-selftest 12345") != null);
 }

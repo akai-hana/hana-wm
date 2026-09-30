@@ -69,7 +69,7 @@ fn barPlainColor(key: []const u8) Knob {
 
 /// [bar.properties] color_from chain: reads a sibling bar field as fallback,
 /// gated on "bar". `copy_when_absent` (title variant) also assigns the
-/// fallback when [bar.properties] is absent; the drun variant keeps null so
+/// fallback when [bar.properties] is absent; the run variant keeps null so
 /// the read-time fallbacks in BarConfig apply.
 fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) Knob {
     return .{
@@ -98,7 +98,7 @@ fn barTitleColor(key: []const u8, target: []const u8, sibling: []const u8) Knob 
 }
 
 /// Drun accent color: stays null when [bar.properties] is absent.
-fn barDrunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
+fn barRunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
     return barColor(key, target, sibling, false);
 }
 
@@ -114,6 +114,9 @@ pub const knobs = [_]Knob{
 
     // [fullscreen]
     knob(&.{place(types.section_fullscreen, "enabled")}, "fullscreen_enabled", .b),
+
+    // [display]
+    knob(&.{place(types.section_display, "dpi")}, "dpi", .{ .opt_float = .{ .min = 20.0, .max = 1000.0 } }),
 
     // [bar.modules.workspaces] | [workspaces]
     knob(&.{ place(types.section_bar_modules_workspaces, "count"), place(types.section_workspaces, "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
@@ -172,7 +175,7 @@ pub const knobs = [_]Knob{
     barPlainColor(types.palette_text_color),
 
     knob(&.{place(types.section_bar, "clock_format")}, "bar.clock_format", .str),
-    knob(&.{place(types.section_bar, "drun_prompt")}, "bar.drun_prompt", .str),
+    knob(&.{place(types.section_bar, "run_prompt")}, "bar.run_prompt", .str),
     knob(&.{place(types.section_bar, "volume_format")}, "bar.volume_format", .str),
     knob(&.{place(types.section_bar, "volume_muted_format")}, "bar.volume_muted_format", .str),
     knob(&.{place(types.section_bar, "brightness_format")}, "bar.brightness_format", .str),
@@ -194,14 +197,26 @@ pub const knobs = [_]Knob{
     // [bar.properties] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
     // title accents additionally COPY their fallback when [bar.properties] is
-    // absent (they were unconditionally assigned); the drun trio stay null
+    // absent (they were unconditionally assigned); the run trio stay null
     // so the read-time fallbacks in BarConfig apply.
     barTitleColor("title", "bar.title_accent_color", types.palette_primary_color),
     barTitleColor("title_unfocused", "bar.title_unfocused_accent", types.palette_secondary_color),
     barTitleColor("title_minimized", "bar.title_minimized_accent", types.palette_alternative_color),
-    barDrunColor("drun_bg", "bar.drun_bg", "bg"),
-    barDrunColor("drun_fg", "bar.drun_fg", "fg"),
-    barDrunColor("drun_prompt_color", "bar.drun_prompt_color", types.palette_primary_color),
+    barRunColor("run_bg", "bar.run_bg", "bg"),
+    barRunColor("run_fg", "bar.run_fg", "fg"),
+    barRunColor("run_prompt_color", "bar.run_prompt_color", types.palette_primary_color),
+
+    // (27.7) Legacy spellings, kept working. The `drun_*` keys were named for
+    // a desktop-file launcher; the segment resolves a `$PATH` executable and
+    // runs it, so `run_*` is the honest name. These are ALIASES, not a second
+    // set of fields: each maps onto the same target as its canonical knob, so
+    // setting one assigns exactly the field the other would. A config that
+    // used the old keys keeps working with no edit, which is the whole reason
+    // this is a rename-with-alias rather than a rename.
+    knob(&.{place(types.section_bar, "drun_prompt")}, "bar.run_prompt", .str),
+    barRunColor("drun_bg", "bar.run_bg", "bg"),
+    barRunColor("drun_fg", "bar.run_fg", "fg"),
+    barRunColor("drun_prompt_color", "bar.run_prompt_color", types.palette_primary_color),
 };
 
 /// Resolves a dotted path from `types.Config` to the FIELD TYPE it names, or
@@ -296,7 +311,7 @@ pub const bespoke_fields = [_][]const u8{
     // Opt-in strings the schema assigns only when the key is present; each
     // carries its own default at read time (types.default_*).
     "bar.clock_format",
-    "bar.drun_prompt",
+    "bar.run_prompt",
     "bar.indicator_focused",
     "bar.indicator_unfocused",
     "bar.volume_format",
@@ -430,7 +445,7 @@ pub const Kind = union(enum) {
     /// Color accepting #RRGGBB / 0xRRGGBB / integer.
     color,
     /// Color defaulting to the CURRENT value of a named cfg.bar sibling
-    /// field (e.g. drun_bg->bg, title->primary_color); `copy_when_absent`
+    /// field (e.g. run_bg->bg, title->primary_color); `copy_when_absent`
     /// also assigns it when the knob's section is absent.
     color_from: []const u8,
     /// Like color_from, but assigned only when the KEY itself exists.
@@ -440,6 +455,9 @@ pub const Kind = union(enum) {
     ratio,
     /// Optional heap-dup'd string; absent leaves the field untouched.
     str,
+    /// Optional float; absent leaves the field at null (meaning "auto").
+    /// Out-of-range values warn and revert to absent, matching `int`.
+    opt_float: struct { min: f32, max: f32 },
     /// Enum parsed per EnumRead.
     enum_read: EnumRead,
 };
@@ -748,6 +766,18 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             .str => if (hit) |h| {
                 if (h.sec.getAsOrWarn([]const u8, h.key)) |val| try assignStr(allocator, p, val);
             },
+            .opt_float => |spec| if (hit) |h| {
+                if (h.sec.getAsOrWarn(f32, h.key)) |v| {
+                    // Out of range warns and leaves the field null, i.e. the
+                    // user gets detection rather than a silent absurd value.
+                    if (v < spec.min or v > spec.max) {
+                        log.warn(
+                            "{s}.{s} = {d} is outside {d}..{d}; ignoring and detecting instead",
+                            .{ h.sec.name, h.key, v, spec.min, spec.max },
+                        );
+                    } else p.* = v;
+                }
+            },
             .enum_read => |er| if (hit) |h| {
                 if (h.sec.getAsOrWarn([]const u8, h.key)) |s| {
                     const parsed = if (er.ci)
@@ -788,7 +818,7 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
 /// warn-and-skipped. A style-only entry keeps the
 /// segment's default `fg` (no color map entry is added).
 ///
-/// Runs after the knob loop so the known keys (title, drun_*, ...) are
+/// Runs after the knob loop so the known keys (title, run_*, ...) are
 /// distinguishable. Gated on [bar] exactly like the [bar.properties] chain;
 /// an absent table or section leaves the maps empty, so segment text falls
 /// back to `fg`. Keys are duped for the Config's lifetime.

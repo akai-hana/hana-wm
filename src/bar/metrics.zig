@@ -5,7 +5,7 @@
 //! configured height, screen) and, in two of the four cases, from a font
 //! measurement. They used to live in a module-level `var` written by
 //! `bar.calcBarHeightAndFontSize` and read back out of the global by
-//! `drawing.buildSizedFontList`, which made the bar's own font size reachable
+//! `drawing.SizedFontList`, which made the bar's own font size reachable
 //! only through mutable process state that a half-finished reload could leave
 //! wrong -- and that a failed reload had to save and restore by hand.
 //!

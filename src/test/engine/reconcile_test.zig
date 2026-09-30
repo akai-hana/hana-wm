@@ -1,6 +1,10 @@
 //! Golden-sequence tests for the sync layer: a recording sink captures every
 //! queued request; each scenario asserts the exact op sequence.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling, minimize, fullscreen
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -28,11 +32,11 @@ const Fixture = struct {
     ctx: recon.Ctx,
 
     fn init(self: *Fixture) void {
-        // setUpModel resets the minimize/fullscreen module stores, so
+        // makeModel resets the minimize/fullscreen/floating module stores, so
         // capacity/seq bookkeeping never leaks across scenarios and the
         // tests pass in any order.
         self.* = .{
-            .m = helpers.setUpModel(),
+            .m = helpers.makeModel(),
             .rec = .{},
             .ctx = undefined,
         };
@@ -526,4 +530,61 @@ test "13.6: an inactive layout floats every window at the work area" {
         else => {},
     };
     try testing.expectEqual(@as(usize, 2), seen);
+}
+
+// (28.1) The four ops that used to be silent shims. Before this, 4 of the
+// sink's 11 vtable entries recorded nothing at all, so no test could assert
+// that hana grabbed the server before a fullscreen change, that it flushed,
+// or that the EWMH fullscreen atom was even set -- the shims discarded every
+// argument. These drive the vtable directly, which is what "assertable" means
+// here: the fullscreen.zig path itself still needs live X atoms (it returns
+// early when they are NONE), so the END-TO-END transition remains untested
+// headless and is not claimed to be.
+
+test "record mode: EWMH set_state_atom records win, atom, and the add/remove sense" {
+    var rec: Recorder = .{};
+    defer rec.deinit();
+    const s = rec.sink();
+
+    s.setStateAtom(101, 7, 42, true);
+    s.setStateAtom(202, 7, 42, false);
+
+    try rec.expectLen(2);
+    // The sense is the whole point of the call: `add=true` claims fullscreen,
+    // `add=false` releases it, and a recorder that dropped the bool could not
+    // tell an enter from an exit.
+    try rec.expectEwmhFullscreen(0, 101, 42, true);
+    try rec.expectEwmhFullscreen(1, 202, 42, false);
+}
+
+test "record mode: grab, flush, and ungrab_and_flush are recorded, not swallowed" {
+    var rec: Recorder = .{};
+    defer rec.deinit();
+    const s = rec.sink();
+
+    s.grabServer();
+    s.setStateAtom(101, 7, 42, true);
+    s.ungrabAndFlush();
+
+    try rec.expectLen(3);
+    try rec.expectGrab(0);
+    try rec.expectEwmhFullscreen(1, 101, 42, true);
+    try rec.expectUngrab(2);
+}
+
+test "record mode: a bare flush is distinguishable from a grab" {
+    // Both used to be no-op shims, so "hana flushed" and "hana grabbed" were
+    // the same unobservable event. They are separate ops and must stay so.
+    var rec: Recorder = .{};
+    defer rec.deinit();
+    const s = rec.sink();
+
+    s.flush();
+    s.flush();
+    s.grabServer();
+
+    try rec.expectLen(3);
+    try rec.expectFlush(0);
+    try rec.expectFlush(1);
+    try rec.expectGrab(2);
 }

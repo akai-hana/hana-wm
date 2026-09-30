@@ -38,14 +38,38 @@ fn cyclePx(text_w: u16) f32 {
     return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(inter_title_gap_px));
 }
 
-/// Frame cadence follows the detected monitor refresh rate (see
-/// hz.detectedHz), so each frame advances by one display period
-/// and motion is locked to the monitor's scanout. Motion itself is
-/// sub-pixel: the fractional offset is handed straight to cairo, so at
-/// high refresh rates frames differ by less than a pixel and scrolling
-/// stays smooth instead of stuttering between integer pixels.
-var offset_px: f32 = 0;
-var last_frame_ms: i64 = 0;
+/// The motion clock (24.2).
+///
+/// This USED to be an accumulator: `offset_px += speed * dt/1000` once per
+/// frame, with `last_frame_ms` remembered so the next frame could measure the
+/// gap. That made the position a function of the whole call HISTORY, which
+/// has three bad properties, all of them latent bugs rather than visible
+/// ones. A duplicated draw advanced the offset twice, so the marquee ran at
+/// double speed for that step. A late draw integrated the entire gap in one
+/// step, which is a jump rather than motion. And a frame whose `dt` was lost
+/// (a path that returned early without updating `last_frame_ms`) silently
+/// changed the scroll speed forever after, because every later `dt` was
+/// measured from a stale base.
+///
+/// Instead there is an ANCHOR and the position is a pure function of the
+/// frame time: `mod((now - anchor_ms) * speed / 1000, cycle)`. Frame-rate
+/// independence is then true by construction rather than by argument -- any
+/// number of draws at any times agree on the position, so a duplicate frame
+/// is a no-op and a late frame shows where the marquee actually is.
+///
+/// `shown_off_px` is NOT an accumulator: nothing adds to it. It remembers the
+/// last offset actually handed out, and its only use is the `pivot` rebase
+/// below, which has to continue from the position on screen rather than from a
+/// position recomputed with a clock that has since moved.
+var anchor_ms: i64 = 0;
+/// The last offset handed to the renderer. Read only by `pivot`'s rebase.
+var shown_off_px: f32 = 0;
+/// When a frame was last handed out, for `pollDeadlineMs` to pace the bar's
+/// poll timeout to the display period. Deliberately NOT derived from
+/// `anchor_ms` + offset: after a `pivot` re-anchor that sum no longer names
+/// the last draw, and poll pacing that drifts is exactly the stutter the
+/// sub-pixel path exists to avoid.
+var last_drawn_ms: i64 = 0;
 var active_win: u32 = 0;
 var active_hash: u64 = 0;
 var scrolling: bool = false;
@@ -88,30 +112,45 @@ pub fn offsetFor(
     scrolling = enabled and text_w > avail_w;
     active_win = win;
     active_hash = hash;
-    if (pivot_next_frame) {
-        // The bar was hidden between frames, or config changed: dt would span
-        // that whole gap and teleport the marquee to an arbitrary point of its
-        // cycle. Pivot this frame at "now" so motion resumes from the last
-        // shown offset (a continuation, not a jump).
-        pivot_next_frame = false;
-        last_frame_ms = now_ms;
-    }
-    const dt_ms = now_ms - last_frame_ms;
-    last_frame_ms = now_ms;
-
     if (!scrolling or !continues) {
         // Inactive, or the first frame of a cell (focus change, rename,
         // enable, overflow start): show the head of the title and let
-        // motion begin next frame.
-        offset_px = 0;
+        // motion begin next frame. Anchoring at `now` is what makes the next
+        // frame read as "one frame's worth of motion from the head".
+        anchor_ms = now_ms;
+        shown_off_px = 0;
+        last_drawn_ms = now_ms;
+        pivot_next_frame = false;
         return .{ .off = 0, .cycle = cyclePx(text_w), .active = false };
     }
 
-    if (dt_ms > 0)
-        offset_px += @as(f32, @floatFromInt(speed_px_s)) * @as(f32, @floatFromInt(dt_ms)) / 1000.0;
+    const speed: f32 = @floatFromInt(speed_px_s);
+
+    if (pivot_next_frame) {
+        // The bar was hidden between frames, or config changed. The new speed
+        // and width change what a cycle even is, so evaluating
+        // `mod((now - anchor) * speed, cycle)` now would teleport the marquee
+        // to an arbitrary point of the NEW cycle. Re-anchor so the position at
+        // `now` is exactly the one still on screen: a continuation, not a
+        // jump. Speed 0 has no inverse, and at 0 the offset is 0 regardless.
+        pivot_next_frame = false;
+        anchor_ms = if (speed > 0)
+            now_ms - @as(i64, @intFromFloat(@round(shown_off_px * 1000.0 / speed)))
+        else
+            now_ms;
+    }
+
     const cycle = cyclePx(text_w);
-    offset_px = @mod(offset_px, cycle);
-    return .{ .off = offset_px, .cycle = cycle, .active = true };
+    // `cycle` is text_w + gap, so it is zero only if both are; a marquee needs
+    // an overflowing title, and `@mod` by zero is undefined rather than
+    // an error, so this is guarded rather than left to that invariant holding.
+    const off: f32 = if (cycle > 0)
+        @mod((@as(f32, @floatFromInt(now_ms - anchor_ms))) * speed / 1000.0, cycle)
+    else
+        0;
+    shown_off_px = off;
+    last_drawn_ms = now_ms;
+    return .{ .off = off, .cycle = cycle, .active = true };
 }
 
 /// Milliseconds until the next marquee frame, for the bar's poll-timeout
@@ -121,7 +160,7 @@ pub fn offsetFor(
 pub fn pollDeadlineMs(now_ms: i64, hz: f64) i32 {
     if (!marquee_enabled or !scrolling) return -1;
     const period_ms: i64 = @intFromFloat(@ceil(1000.0 / @max(hz, 1.0)));
-    const until_next = period_ms - (now_ms - last_frame_ms);
+    const until_next = period_ms - (now_ms - last_drawn_ms);
     return @intCast(@max(1, until_next));
 }
 
@@ -137,8 +176,9 @@ pub fn pivot() void {
 /// Clears all marquee state. Test hook: the vars are module-global by
 /// design (single bar, main thread only).
 pub fn resetForTesting() void {
-    offset_px = 0;
-    last_frame_ms = 0;
+    anchor_ms = 0;
+    shown_off_px = 0;
+    last_drawn_ms = 0;
     active_win = 0;
     active_hash = 0;
     scrolling = false;

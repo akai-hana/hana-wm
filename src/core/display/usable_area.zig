@@ -11,8 +11,26 @@
 //! hand core a final number; the subtraction math is core's, so the fact
 //! lives here, not in any particular surface. With no active claims, the
 //! usable area is the full screen (the natural state when the bar is absent).
+//!
+//! ## "Fullscreen means no work area" is NOT this module's rule (6.10)
+//!
+//! The tempting encoding -- core reads `fullscreen_rev` and hands placement a
+//! zero area while something is fullscreen -- is deliberately absent, and this
+//! paragraph is the contract that keeps it absent. Occupancy is expressed one
+//! way only: as claims. The bar already answers "a fullscreen window wants the
+//! whole screen" by RELEASING its claim (`hideBarForFullscreen` ->
+//! `applyVisibility` -> `publishClaim`), so the work area becomes the full
+//! screen without anyone special-casing fullscreen. Two encodings of the same
+//! fact would be one too many: they disagree the moment a second surface
+//! claims an edge, and there is no total order between "released because
+//! fullscreen" and "released because the bar is off" -- a bar that is both
+//! hidden AND fullscreen-covered would have to pick which story to tell, and
+//! the answer would depend on which module asked first.
+//!
+//! The remaining question this file does own is what a claim LARGER than the
+//! screen means, and the answer is the saturating subtraction below: a
+//! zero-sized rect, never a wrapped one. See `workAreaFrom`.
 
-const std = @import("std");
 const core = @import("core");
 const build_options = @import("build_options");
 const model = @import("model");
@@ -21,6 +39,17 @@ const model = @import("model");
 pub const Edge = enum { top, bottom, left, right };
 
 const Claim = struct {
+    /// Which monitor the claim is held on.
+    ///
+    /// A claim is a statement about a SCREEN, not about the process, so it
+    /// has to name its screen: on a multi-monitor setup two surfaces can hold
+    /// claims simultaneously on different monitors, and the usable area of
+    /// monitor 0 must not be shrunk by monitor 1's bar. Today there is exactly
+    /// one screen, so the default is the only correct answer and nothing
+    /// reads the field -- but the alternative was a claim whose subject was
+    /// implicit in the table it happened to sit in, which is precisely the
+    /// assumption that breaks the moment a second monitor appears.
+    monitor: u8 = 0,
     edge: Edge = .top,
     px: u16 = 0,
     active: bool = false,
@@ -69,20 +98,32 @@ pub fn isSurfaceWindow(win: core.WindowId) bool {
     return surface_win == win;
 }
 
-/// The chrome surface's window id when it currently occupies screen space
-/// (has an active claim); null otherwise. Used for raise-above stacking.
+/// The chrome surface's window id when IT currently occupies screen space;
+/// null otherwise. Used for raise-above stacking.
+///
+/// Keyed off the bar's own claim, not "any active claim". Those coincide only
+/// because `max_claims` is 1: the loop it replaced returned `surface_win` --
+/// unconditionally the BAR's window -- as soon as ANY claim was active, so
+/// the day a dock or taskbar adds the second slot, a dock alone claiming
+/// screen space would have the caller stack-raise a bar that is not on screen.
+/// The coincidence is now written down instead of relied on.
 pub fn mappedSurfaceWindow() ?core.WindowId {
-    for (claims) |c| if (c.active) return surface_win;
-    return null;
+    if (!build_options.has_bar) return null;
+    if (!claims[bar_id].active) return null;
+    return surface_win;
 }
 
 /// Sets (or re-sets) surface `id`'s claim. Calling this with a changed edge
 /// or pixel count replaces the previous claim; the caller is responsible for
 /// triggering any reconcile that new geometry requires.
 pub fn setClaim(comptime id: u8, edge: Edge, px: u16) void {
-    // comptime id + comptime-length array => the bounds check happens while
-    // compiling, not on first paint.
-    comptime std.debug.assert(id < claims.len);
+    // The bounds check is the indexing itself: `id` is comptime and `claims`
+    // has a comptime length, so a bad id is a compile error, in every build
+    // mode -- "cannot index into empty array" when has_bar is off, "index out
+    // of bounds" past `max_claims` otherwise. It is deliberately NOT a
+    // `std.debug.assert`: that is a no-op in ReleaseFast, which is the mode
+    // this ships in, so it would have read as a guarantee while checking
+    // nothing in every build that matters.
     claims[id] = .{ .edge = edge, .px = px, .active = px != 0 };
 }
 
@@ -117,6 +158,13 @@ fn claimInsets() [4]u32 {
 /// a rect off the end of the display. That behavior is load-bearing and was
 /// previously only reachable through a live screen, which is why it now has
 /// this seam.
+///
+/// A zero-sized result is a DEGENERATE CONFIGURATION, not a normal state and
+/// not a fullscreen encoding: it is reachable only when the sum of claims on
+/// an axis meets or exceeds the screen's extent along it (a bar taller than
+/// the display). Consumers must treat it as "nowhere to place", which is the
+/// honest answer, rather than as a signal about fullscreen. Reachable
+/// non-degenerately: no claims at all, which yields the full screen.
 pub fn workAreaFrom(screen_w: u32, screen_h: u32) model.Rect {
     const insets = claimInsets();
     return .{

@@ -97,3 +97,61 @@ test "fullscreen-absent build never resolves the current-ws fallback" {
     // off: the window keeps its color despite the current-ws occupant.
     try std.testing.expect(!borders.isBehindCoveringWindow(&m, 30, ws0, false));
 }
+
+// (28.4) The PURE CORES of the two live reads borders_test covers. The item
+// asked for the borders_test assertions to move here headless; taken literally
+// that is impossible, because `core.borderWidth()` and
+// `borders.resolveBorderColor()` both read `core.getState()` -- process-global
+// live state that does not exist without a server. What IS movable, and was
+// genuinely uncovered, is the pure decision each one delegates to: borders_test
+// used `scaling.scaleBorderWidth` as its ORACLE while never testing it, so a
+// regression in the scaling rule would have quietly changed both sides of its
+// own assertion at the same time.
+
+test "scaleBorderWidth: absolute passes through, percentage is half the reference" {
+    const scaling = @import("scaling");
+    const types = @import("types");
+
+    // Absolute ignores the reference dimension entirely -- a border is a
+    // border, not a fraction of the screen.
+    try std.testing.expectEqual(@as(u16, 7), scaling.scaleBorderWidth(types.ScalableValue.absolute(7.0), 600));
+    try std.testing.expectEqual(@as(u16, 7), scaling.scaleBorderWidth(types.ScalableValue.absolute(7.0), 4000));
+
+    // Percentage: a border insets two sides, so 2% of the height is 0.5x.
+    try std.testing.expectEqual(@as(u16, 6), scaling.scaleBorderWidth(types.ScalableValue.percentage(2.0), 600));
+    // Scales with the reference, unlike the absolute case.
+    try std.testing.expectEqual(@as(u16, 40), scaling.scaleBorderWidth(types.ScalableValue.percentage(2.0), 4000));
+}
+
+test "scaleBorderWidth: rounds half away from zero and clamps negatives" {
+    const scaling = @import("scaling");
+    const types = @import("types");
+
+    // 3% of 150 = 2.25 -> 2, 3% of 350 = 5.25 -> 5. A truncating
+    // implementation would agree on both, so use one that straddles .5:
+    // 3% of 50 = 0.75 -> 1, and 1% of 50 = 0.25 -> 0.
+    try std.testing.expectEqual(@as(u16, 1), scaling.scaleBorderWidth(types.ScalableValue.percentage(3.0), 50));
+    try std.testing.expectEqual(@as(u16, 0), scaling.scaleBorderWidth(types.ScalableValue.percentage(1.0), 50));
+    // A negative config value clamps to 0 rather than wrapping to 65535.
+    try std.testing.expectEqual(@as(u16, 0), scaling.scaleBorderWidth(types.ScalableValue.absolute(-4.0), 600));
+}
+
+test "focusedBorderColor reads the MODEL's focus, not a second copy" {
+    // (9.6) the single decision behind resolveBorderColor. Testing it headless
+    // is what lets borders_test keep being a thin integration check instead of
+    // the only place the color policy is exercised.
+    var m = helpers.makeModel();
+    try model.register(&m, 1, ws0);
+    try model.register(&m, 2, ws0);
+
+    // Nothing focused: the comparison is against m.focused, which is unset.
+    try std.testing.expectEqual(@as(u32, 0x222222), model.focusedBorderColor(&m, 1, 0x111111, 0x222222));
+
+    model.setFocus(&m, 1);
+    try std.testing.expectEqual(@as(u32, 0x111111), model.focusedBorderColor(&m, 1, 0x111111, 0x222222));
+    try std.testing.expectEqual(@as(u32, 0x222222), model.focusedBorderColor(&m, 2, 0x111111, 0x222222));
+
+    model.setFocus(&m, 2);
+    try std.testing.expectEqual(@as(u32, 0x222222), model.focusedBorderColor(&m, 1, 0x111111, 0x222222));
+    try std.testing.expectEqual(@as(u32, 0x111111), model.focusedBorderColor(&m, 2, 0x111111, 0x222222));
+}

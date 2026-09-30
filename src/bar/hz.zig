@@ -39,14 +39,22 @@ const max_cached_modes = 256;
 /// only recognise them once the extension has been queried.
 var randr_first_event: u8 = 0;
 
-/// Detected monitor refresh rate in Hz. Written by the main thread on initial
-/// detection and on RandR notify; read lock-free by render pacing.
-var detected_rate_hz: std.atomic.Value(f64) = std.atomic.Value(f64).init(default_hz);
+/// Detected monitor refresh rate in Hz.
+///
+/// A plain f64, not an atomic: the only reader is the title's poll deadline
+/// (title.zig), and that runs on the main thread inside the same loop that
+/// writes this value on detection and on RandR notify. The previous
+/// `std.atomic.Value` and its "read lock-free by render pacing" comment
+/// described a second reader that never existed -- there is no second thread
+/// here -- so the atomic bought nothing but implied a guarantee the code did
+/// not make.
+var detected_rate_hz: f64 = default_hz;
 
-/// Latest detected monitor refresh rate in Hz; 60 until RandR provides a
-/// sane reading, re-detected automatically on monitor reconfiguration.
+/// Latest detected monitor refresh rate in Hz; `default_hz` until RandR
+/// provides a sane reading, re-detected automatically on monitor
+/// reconfiguration. Main thread only.
 pub fn detectedHz() f64 {
-    return detected_rate_hz.load(.monotonic);
+    return detected_rate_hz;
 }
 
 /// Only ever touched by the main thread (bar.init / title draws / config
@@ -60,6 +68,15 @@ var last_redetect_ns: u64 = 0;
 /// events so later monitor re-configurations re-detect. Idempotent; safe to
 /// call from the main thread on every draw; the actual setup runs once and
 /// subsequent calls return immediately.
+///
+/// The one-shot is unconditional and that is deliberate, not an oversight:
+/// re-querying the extension on every draw would put an X round-trip in the
+/// draw path. So a machine where the query itself fails (no RandR at all) is
+/// detected once, never retried, and renders at `default_hz` for the rest of
+/// the session -- there would be no RandR events to wake a retry anyway. A
+/// failed *detection* after a successful query is different: the subscription
+/// is already in place, so RandR events keep arriving and each one drives
+/// `runPendingRedetect`, which is where a real retry happens.
 pub fn ensureRefreshRateDetected(conn: core.Connection) void {
     if (detection_initialized) return;
     detection_initialized = true;
@@ -216,6 +233,20 @@ fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
         // it would sit unconsumed and desync the next reply read on this
         // connection. Discard it (no reply allocation, no blocking wait).
         xcb.xcb_discard_reply(conn, primary_cookie.sequence);
+        // A re-detect that cannot read the screen is a screen whose mode
+        // table we do not have. Any table cached by an EARLIER detection
+        // describes a configuration that may no longer exist, and the CRTC
+        // fast path would answer from it without ever asking the server --
+        // publishing a rate for a mode that is not the one on screen. Drop it,
+        // so every event falls back to the debounced re-detect path until a
+        // read succeeds. Cheaper to be wrong slowly than confidently.
+        if (cached_mode_count != 0) {
+            log.warn(
+                "refresh: re-detect could not read the screen; dropping {} cached modes so the fast path cannot answer from a stale table",
+                .{cached_mode_count},
+            );
+            cached_mode_count = 0;
+        }
         return;
     };
     defer std.c.free(res);
@@ -307,7 +338,7 @@ fn pipelinedRefreshRateFromOutputs(
 
 fn publishDetectedRate(rate: f64) void {
     if (std.math.isFinite(rate) and rate >= min_sane_hz and rate <= max_sane_hz) {
-        detected_rate_hz.store(rate, .monotonic);
+        detected_rate_hz = rate;
         log.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
     } else {
         log.warn("Detected invalid refresh rate {d:.2} Hz, keeping fallback", .{rate});

@@ -11,6 +11,10 @@
 //! but the COMPUTE is O(total windows), so a retile's CPU cost grows with
 //! total window count even though few windows actually move.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling
+
 const std = @import("std");
 const model = @import("model");
 const tiling = @import("tiling");
@@ -29,7 +33,7 @@ const bench = build_options.bench;
 
 const WindowId = model.WindowId;
 
-const makeModel = helpers.makeModel;
+const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn between iterations
 const regCur = helpers.regCur;
 const nowNs = time.monotonicNs;
 
@@ -63,9 +67,13 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         const move_ns: f64 = @floatFromInt(nowNs() - t1);
 
         if (bench)
-            std.debug.print(
-                "[tiling] n={d} (1ws): steady reconcile={d:.1} ns/pass, layout-change reconcile={d:.1} ns, requests on change={d} (geom={d},map={d})\n",
-                .{ n, per_pass_ns, move_ns, move.total, move.geom, move.map },
+            helpers.benchLog(
+                "[tiling] n={d} (1ws): steady reconcile={d:.1} ns/pass, layout-change reconcile={d:.1} ns, requests on change={d} (configure={d},map={d})\n",
+                // (28.2) Was `move.geom`: TestSink has no `geom` counter. The
+                // configure counter is the geometry-send counter -- configure
+                // is how a moved window's new rect reaches the server -- so
+                // this prints the number the label always meant.
+                .{ n, per_pass_ns, move_ns, move.total, move.configure, move.map },
             );
     }
 }
@@ -93,7 +101,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
         if (bench)
-            std.debug.print(
+            helpers.benchLog(
                 "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass (current ws has only {d} windows)\n",
                 .{ total, per_ws, per_pass_ns, per_ws },
             );
@@ -141,7 +149,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const reconcile_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
     if (bench)
-        std.debug.print(
+        helpers.benchLog(
             "[tiling] n={d}: layout.compute={d:.1} ns/pass ({d:.1}% of reconcile), full reconcile walk={d:.1} ns/pass\n",
             .{ n, compute_ns, 100.0 * compute_ns / reconcile_ns, reconcile_ns },
         );
@@ -171,9 +179,12 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         ctx.sink.ungrabAndFlush();
 
         if (bench)
-            std.debug.print(
-                "[tiling] layout switch n={d}: {d} XCB requests queued in grab (geom={d}, map={d}, park={d}, bw={d}, pixel={d})\n",
-                .{ n, sink.total, sink.geom, sink.map, sink.park, sink.bw, sink.pixel },
+            helpers.benchLog(
+                "[tiling] layout switch n={d}: {d} XCB requests queued in grab (configure={d}, map={d}, park={d}, pixel={d})\n",
+                // (28.2) `sink` did not exist in this scope at all -- the sink
+                // here is `counting` -- and `geom`/`bw` are not TestSink
+                // fields. All four placeholders are read off `counting`.
+                .{ n, counting.total, counting.configure, counting.map, counting.park, counting.pixel },
             );
     }
 }

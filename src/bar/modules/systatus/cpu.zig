@@ -51,14 +51,17 @@ pub fn utilBetween(prev: ?Sample, cur: Sample) ?u8 {
 
 var cpu_prev: ?Sample = null;
 
-fn read() ?u8 {
+var g_num: [16]u8 = undefined;
+
+fn read() ?systatus.Sample {
     var buf: [512]u8 = undefined;
     const r = systatus.readFileChecked("/proc/stat", &buf) orelse return null;
     if (r.truncated) return null; // a partial /proc/stat cannot be summed
     const cur = parseCpuLine(r.bytes) orelse return null;
     const prev = cpu_prev;
     cpu_prev = cur;
-    return utilBetween(prev, cur);
+    const pct = utilBetween(prev, cur) orelse return null;
+    return systatus.percentSample(&g_num, pct);
 }
 
 /// This readout's binding to the systatus surface (`systatus.Sub`): the

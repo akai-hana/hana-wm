@@ -58,36 +58,43 @@ fn printStdout(comptime fmt: []const u8, args: anytype) void {
     w.flush() catch {};
 }
 
-/// Connects the per-process fixture, self-skipping when no X display is
-/// reachable — or when a live window manager owns the display (the fixture's
-/// real top-level windows would flicker as garbage on that WM's screen, so it
-/// refuses to draw onto a running session). `name` names the test in the SKIP
-/// message, when one is printed.
+/// Connects the per-process fixture, or returns `error.SkipZigTest` when no X
+/// display is reachable -- or when a live window manager owns the display (the
+/// fixture's real top-level windows would flicker as garbage on that WM's
+/// screen, so it refuses to draw onto a running session). `name` names the test
+/// in the SKIP banner.
 ///
-/// HANA_REQUIRE_X flips the skip into a hard failure: any environment set
-/// (e.g. `HANA_REQUIRE_X=1`) makes a headless or WM-owned run abort with a
-/// panic instead of silently self-passing, so a CI that believes it runs the
-/// integration layer can't be green while those tests actually skipped.
-pub fn setUp(name: []const u8) ?*Fx {
+/// (28.4) The skip is a real `error.SkipZigTest` rather than a null the caller
+/// turns into `orelse return`. The old shape made a skip a SILENT PASS: the
+/// test reported green to the runner and to any CI reading the log, so a run in
+/// which the entire integration layer never executed looked identical to a run
+/// in which it did. Zig's runner reports `error.SkipZigTest` as a SKIP, so the
+/// missing coverage becomes visible in the summary instead of hiding inside a
+/// pass.
+///
+/// HANA_REQUIRE_X still turns a skip into a hard failure, but it is now ONE
+/// check rather than a duplicated panic branch per skip reason: the reason
+/// decides only the message, and the requirement decides whether to abort.
+/// Callers write `try fixture.setUp("name")`.
+pub fn setUp(name: []const u8) error{SkipZigTest}!*Fx {
     const fx = Fx.connect(std.testing.allocator) orelse {
         switch (g_skip_reason) {
-            .live_wm => {
-                if (std.c.getenv("HANA_REQUIRE_X") != null) {
-                    std.debug.panic("HANA_REQUIRE_X is set but {s} found a live window manager on $DISPLAY (run it under dev/scripts/xtest.sh's Xvfb instead); {s} REQUIRED, not skipped", .{ name, name });
-                }
-                printStdout(
-                    "SKIP: {s}: $DISPLAY is owned by a live window manager. These tests create real top-level windows, which would flicker on-screen garbage on your running session. Run them isolated: dev/scripts/xtest.sh zig build test\n",
-                    .{name},
-                );
-            },
-            .no_x => {
-                if (std.c.getenv("HANA_REQUIRE_X") != null) {
-                    std.debug.panic("HANA_REQUIRE_X is set but no X display is reachable; {s} REQUIRED, not skipped", .{name});
-                }
-                printStdout("WARN: skipping X-gated test '{s}' (no display) -- set HANA_REQUIRE_X to fail instead of skipping\n", .{name});
-            },
+            .live_wm => printStdout(
+                "SKIP: {s}: $DISPLAY is owned by a live window manager. These tests create real windows.\n",
+                .{name},
+            ),
+            .no_x => printStdout(
+                "SKIP: {s}: no X display reachable -- set HANA_REQUIRE_X=1 to make this a hard failure.\n",
+                .{name},
+            ),
         }
-        return null;
+        if (std.c.getenv("HANA_REQUIRE_X") != null) {
+            std.debug.panic("HANA_REQUIRE_X is set but '{s}' cannot run: {s}", .{
+                name,
+                @tagName(g_skip_reason),
+            });
+        }
+        return error.SkipZigTest;
     };
     return fx;
 }
@@ -202,7 +209,9 @@ pub const Fx = struct {
         };
         fx.* = .{ .conn = conn, .scr = scr, .root = scr.*.root, .alloc = alloc, .config = types.Config{} };
 
-        core.init(conn, scr, scr.*.root, alloc, &fx.config);
+        // The baseline is what main would pass if the config had no [display]
+        // dpi override: these tests are about window plumbing, not scaling.
+        core.init(conn, scr, scr.*.root, alloc, &fx.config, constants.baseline_dpi);
         window.init(alloc) catch {
             std.heap.page_allocator.destroy(fx);
             return null;
@@ -372,56 +381,39 @@ pub const Fx = struct {
         self.flush();
     }
 
-    /// The layout engine's placement for a tiled window visible on the current
-    /// workspace, mirroring pipeline's Ctx/env resolution (non-tiling builds
-    /// have no engine; returns null). The engine emits the full footprint, so
-    /// the server's geometry (which includes border width) must equal it.
-    pub fn expectedPlacementOf(self: *const Fx, win: u32) ?model.Rect {
-        if (!build_options.has_tiling) return null;
-        const m = pipeline.model();
-        const ws = m.current;
-        const p = &m.ws[ws.index].params;
-
-        var order_buf: [max_order]u32 = undefined;
-        var hints_buf: [max_order]model.SizeHints = undefined;
-        var n: usize = 0;
-        for (m.ws[ws.index].tiled_order.constSlice()) |w| {
-            if (n >= max_order) break;
-            const e = m.store.get(w) orelse continue;
-            if (!model.taggedOn(e, ws)) continue;
-            order_buf[n] = w;
-            hints_buf[n] = e.size_hints;
-            n += 1;
-        }
-
-        var placements: tiling.List = .{};
-        tiling.compute(
-            p.kind,
-            &.{
-                .order = order_buf[0..n],
-                .params = p,
-                .workarea = self.workArea(),
-                .hints = .{ .order = order_buf[0..n], .hints = hints_buf[0..n] },
-                .focused = m.focused,
-                .env = pipeline.tilingEnv(),
-            },
-            &placements,
-        );
-        for (placements.constSlice()) |pl| {
-            if (pl.win == win and pl.visible) return pl.rect;
-        }
-        return null;
+    /// The geometry hana actually SENT for `win`, from the sync ledger --
+    /// the sole "last thing sent" owner -- or null if nothing was sent.
+    ///
+    /// (28.8) This REPLACES an `expectedPlacementOf` that recomputed the
+    /// placement by calling `tiling.compute` again with the same order, params
+    /// and workarea. That oracle could only ever confirm the engine agreed
+    /// with itself: if `tiling.compute` were wrong, the recomputation would be
+    /// wrong identically and the assertion would pass. It was the worst case
+    /// the item names, and it was load-bearing for the X-gated tile
+    /// assertions.
+    ///
+    /// The ledger is independent of the recomputation in the way that matters:
+    /// it is written from inside reconcile's send path, so comparing it against
+    /// the X server's answer tests the ROUND TRIP (did the request we issued
+    /// actually land?) rather than re-running the decision. Placement
+    /// arithmetic itself is covered headlessly by tiling_test; what is left for
+    /// this layer, and what it now actually checks, is that the bytes we sent
+    /// are the geometry the server has.
+    pub fn sentGeometry(self: *const Fx, win: u32) ?model.Rect {
+        _ = self;
+        return ledger.lastRectFor(win);
     }
 
-    /// Asserts the server geometry equals the engine's placement for `win`,
-    /// with the configured border width (the end-to-end tile check).
+    /// Asserts the X server's geometry for `win` equals the geometry hana
+    /// recorded sending, with the configured border width (the end-to-end
+    /// round-trip check). (28.8)
     pub fn expectTiledGeometry(self: *const Fx, win: u32) !void {
-        const p = self.expectedPlacementOf(win) orelse return error.MissingPlacement;
+        const sent = self.sentGeometry(win) orelse return error.MissingPlacement;
         const g = self.geometry(win) orelse return error.ClosedWindow;
-        try std.testing.expectEqual(p.width, g.width);
-        try std.testing.expectEqual(p.height, g.height);
-        try std.testing.expectEqual(p.x, @as(i32, g.x));
-        try std.testing.expectEqual(p.y, @as(i32, g.y));
+        try std.testing.expectEqual(sent.width, g.width);
+        try std.testing.expectEqual(sent.height, g.height);
+        try std.testing.expectEqual(sent.x, @as(i32, g.x));
+        try std.testing.expectEqual(sent.y, @as(i32, g.y));
         try std.testing.expectEqual(core.borderWidth(), g.border_width);
     }
 

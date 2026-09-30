@@ -3,6 +3,10 @@
 //! The module is pure deadline/offset math driven by an injected monotonic
 //! clock, so every scenario below is deterministic: no sleeps, no rendering.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: seg_carousel
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -143,4 +147,93 @@ test "one call returns the offset, the cycle and the active bit together" {
     // The offset is always inside the cycle it was returned with.
     const third = carousel.offsetFor(1, long_title, 100, 50, true, 200, 9000);
     try testing.expect(third.off >= 0 and third.off < third.cycle);
+}
+
+// --- 24.2: the offset is a pure function of frame time, not of call history ---
+
+test "cadence does not change the position: coarse and fine ticks agree" {
+    // The property the accumulator could not have. Driving the same 1000ms of
+    // scroll in 1 tick, 10 ticks and 100 ticks must land on the same pixel,
+    // because the offset is now mod((now - anchor) * speed, cycle) rather than
+    // a running sum. Under the old `offset_px += speed * dt` this only held
+    // when the frame rate was exactly what the sum assumed.
+    reset();
+    try expectOffset(0, tick(1, 500, 100, 30, 0)); // anchor at the head
+    const coarse = tick(1, 500, 100, 30, 1000);
+
+    reset();
+    try expectOffset(0, tick(1, 500, 100, 30, 0));
+    var fine: f32 = 0;
+    for (1..11) |i| fine = tick(1, 500, 100, 30, @intCast(i * 100)); // ends at 1000ms
+    try expectOffset(coarse, fine);
+}
+
+test "a duplicated draw is a no-op, not a double step" {
+    // A repeated frame at the same timestamp is something the event loop
+    // genuinely does (a wakeup that turns out to have nothing new to redraw).
+    // Worth pinning, but note it is NOT a case the old accumulator got wrong:
+    // its dt was zero for a repeated timestamp, so it already answered the
+    // same. Mutation against a reconstruction of the accumulator confirms this
+    // test does not discriminate -- the defects it actually fixes are the two
+    // below, not this one.
+    reset();
+    _ = tick(1, 500, 100, 30, 0);
+    const first = tick(1, 500, 100, 30, 500);
+    const again = tick(1, 500, 100, 30, 500);
+    try expectOffset(first, again);
+}
+
+test "a late draw shows where the marquee is, not where it was" {
+    // The other half of the same property: skipping frames must not lose the
+    // motion that happened in the gap. A 40ms gap at 30 px/s is 1.2px, and
+    // the offset must be there whether or not anyone asked in between.
+    //
+    // It also fixes the direction: a frame at a time EARLIER than one already
+    // drawn moves the marquee backward, because the position is a function of
+    // the clock and the clock is what is passed in. The old accumulator could
+    // not express that -- its dt went negative and its answer depended on the
+    // order of the calls rather than on the times.
+    reset();
+    _ = tick(1, 500, 100, 30, 0);
+    try expectOffset(1.2, tick(1, 500, 100, 30, 40));
+}
+
+test "pivot continues from the shown offset after a config change" {
+    // pivot() exists so a speed or width change does not teleport the marquee.
+    // With the anchor model that is a re-anchor rather than a suppressed dt, so
+    // it is worth pinning: the position at the pivot instant is unchanged, and
+    // motion then proceeds at the NEW speed.
+    reset();
+    _ = tick(1, 500, 100, 30, 0);
+    const before = tick(1, 500, 100, 30, 1000); // 30px in at 30 px/s
+    try expectOffset(30, before);
+
+    carousel.pivot(); // e.g. a reload changed the speed
+    const at_pivot = tick(1, 500, 100, 60, 1000);
+    try expectOffset(before, at_pivot); // same instant, same pixel
+    // ... and the new speed takes effect from there: 60 px/s for 1s.
+    try expectOffset(90, tick(1, 500, 100, 60, 2000));
+}
+
+test "pivot at speed 0 holds position instead of dividing by zero" {
+    // A reload to carousel speed 0 is reachable. The re-anchor divides by the
+    // speed to recover the anchor time, and there is no inverse at 0; the
+    // offset is 0 for any anchor, so anchoring at `now` is the whole answer.
+    reset();
+    _ = tick(1, 500, 100, 30, 0);
+    _ = tick(1, 500, 100, 30, 1000);
+    carousel.pivot();
+    try expectOffset(0, tick(1, 500, 100, 0, 1000));
+    try expectOffset(0, tick(1, 500, 100, 0, 9000));
+}
+
+test "a zero-width title cannot divide the modulo" {
+    // cycle = text_w + gap, and a marquee needs an overflowing title, so this
+    // is unreachable through offsetFor's own guard -- but @mod by zero is
+    // undefined rather than an error, and this asserts the guard rather than
+    // the invariant it depends on.
+    reset();
+    const s = carousel.offsetFor(1, "", 0, 0, true, 30, 1000);
+    try expectOffset(0, s.off);
+    try testing.expect(std.math.isFinite(s.cycle) or s.cycle == 0);
 }

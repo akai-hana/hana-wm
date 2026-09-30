@@ -10,7 +10,16 @@
 //! three now share.
 
 const std = @import("std");
+const contract = @import("contract");
 const scaffold = @import("scaffold");
+
+/// A mutable cell a module-level `onPainted` can write, so the test can watch
+/// the handback. Zig has no closures over locals, so the segment's sink is a
+/// named function reading a test-owned global.
+var last_reported: ?u16 = null;
+fn reportToCell(w: u16) void {
+    last_reported = w;
+}
 
 test "a never-painted width state reserves the declared probe, not zero" {
     // A unique comptime tag instantiates a FRESH singleton, so `cached` is the
@@ -72,4 +81,31 @@ test "each tag is its own state, so controls cannot overwrite each other" {
     B.store(22);
     try std.testing.expectEqual(@as(u16, 11), A.measured());
     try std.testing.expectEqual(@as(u16, 22), B.measured());
+}
+
+test "the bar's post-draw step hands the width back and reports a paint (21.7)" {
+    // This is the handoff the whole item is about, and it lived inside the
+    // bar's draw loop -- which needs a live DrawContext and an X connection,
+    // so it had no test at all. `scaffold.finishDraw` is that policy as a pure
+    // function over a Segment and a Painted, so both halves are checkable
+    // against a Segment built right here, with no server.
+    //
+    // The two directions of failure are both silent in production: no handback
+    // locks a segment onto its startup width, and a bogus "it painted" answer
+    // advances the row past a slot that is still empty.
+    last_reported = null;
+    const seg: contract.Segment = .{
+        .name = "test_finish_draw",
+        .onPainted = reportToCell,
+    };
+
+    const P = contract.Painted;
+    try std.testing.expect(scaffold.finishDraw(&seg, P.span(100, 160)));
+    try std.testing.expectEqual(@as(?u16, 60), last_reported);
+
+    // A zero-width draw is a SUCCESS that paints nothing: no paint for the
+    // row, but the width is still reported, so the segment's reservation can
+    // collapse to it.
+    try std.testing.expect(!scaffold.finishDraw(&seg, P.nothing(100)));
+    try std.testing.expectEqual(@as(?u16, 0), last_reported);
 }

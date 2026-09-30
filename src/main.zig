@@ -90,13 +90,23 @@ pub fn main(init: std.process.Init) !void {
     // first or Xft.dpi would never be read.
     try atoms.initAtomCache(x.conn);
 
-    core.dpi_info = scale.detectDpi(x.conn, x.screen);
-
     input.setup(x.conn, x.screen);
     try input.initXkb(x.conn);
     defer input.deinitXkb();
 
     const loaded_config = try config.load(alloc);
+
+    // DPI is resolved here, once, because it has two possible sources and the
+    // winner is a config question: detection reads Xft.dpi and falls back to
+    // a physical-size guess, so a nested-X or HiDPI panel the compositor has
+    // not described yields a value that is merely plausible. A configured
+    // [display] dpi overrides it. Resolving after `config.load` is what makes
+    // the override possible; resolving before meant the config could not be
+    // consulted, which is why the override had to live in main anyway.
+    const dpi = if (loaded_config.dpi) |configured|
+        configured
+    else
+        scale.detectDpi(x.conn, x.screen);
 
     // Heap-allocate config so core.State holds a pointer; this allows
     // atomic pointer-swap on reload instead of by-value copy aliasing.
@@ -105,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
 
     // core.init() takes ownership of config_ptr; must run before any
     // core.getState() call.
-    core.init(x.conn, x.screen, x.root, alloc, config_ptr);
+    core.init(x.conn, x.screen, x.root, alloc, config_ptr, dpi);
 
     // Build the key dispatch map now that both the live config and the XKB
     // state exist. Owned by the input layer (see input/keybind.zig); rebuilt

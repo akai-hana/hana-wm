@@ -1111,15 +1111,15 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
 /// spelling. A section header that differs from one of these only by case is
 /// almost certainly a typo that silently drops the whole section.
 const known_sections = std.StaticStringMap(void).initComptime(.{
-    .{ types.section_binds, {} },             .{ types.section_binds_alt, {} },
-    .{ types.section_workspace_rules, {} },   .{ types.section_rules, {} },
-    .{ types.section_drag, {} },              .{ types.section_fullscreen, {} },
-    .{ types.section_tiling, {} },            .{ types.section_workspaces, {} },
-    .{ types.section_bar, {} },               .{ types.section_bar_properties, {} },
-    .{ "bar.layout.left", {} },               .{ "bar.layout.center", {} },
-    .{ "bar.layout.right", {} },              .{ types.section_bar_modules_workspaces, {} },
-    .{ types.section_tiling_aesthetics, {} }, .{ types.section_tiling_layouts_master_stack, {} },
-    .{ "tiling.layouts.master_stack", {} },
+    .{ types.section_binds, {} },                       .{ types.section_binds_alt, {} },
+    .{ types.section_workspace_rules, {} },             .{ types.section_rules, {} },
+    .{ types.section_drag, {} },                        .{ types.section_fullscreen, {} },
+    .{ types.section_display, {} },                     .{ types.section_tiling, {} },
+    .{ types.section_workspaces, {} },                  .{ types.section_bar, {} },
+    .{ types.section_bar_properties, {} },              .{ "bar.layout.left", {} },
+    .{ "bar.layout.center", {} },                       .{ "bar.layout.right", {} },
+    .{ types.section_bar_modules_workspaces, {} },      .{ types.section_tiling_aesthetics, {} },
+    .{ types.section_tiling_layouts_master_stack, {} }, .{ "tiling.layouts.master_stack", {} },
 });
 
 /// Section families whose parent section must exist for their knobs to do
@@ -2322,9 +2322,9 @@ const bar_cmp = [_]struct { field: std.meta.FieldEnum(types.BarConfig), by: BarC
     .{ .field = .selected_indicator_color, .by = .direct },
     .{ .field = .carousel_enabled, .by = .direct },
     .{ .field = .carousel_speed_px_s, .by = .direct },
-    .{ .field = .drun_bg, .by = .direct },
-    .{ .field = .drun_fg, .by = .direct },
-    .{ .field = .drun_prompt_color, .by = .direct },
+    .{ .field = .run_bg, .by = .direct },
+    .{ .field = .run_fg, .by = .direct },
+    .{ .field = .run_prompt_color, .by = .direct },
     .{ .field = .transparency, .by = .direct },
 
     .{ .field = .height, .by = .meta },
@@ -2341,7 +2341,7 @@ const bar_cmp = [_]struct { field: std.meta.FieldEnum(types.BarConfig), by: BarC
     .{ .field = .volume_muted_format, .by = .meta },
     .{ .field = .brightness_format, .by = .meta },
     .{ .field = .brightness_device, .by = .meta },
-    .{ .field = .drun_prompt, .by = .meta },
+    .{ .field = .run_prompt, .by = .meta },
 
     .{ .field = .segment_fg, .by = .{ .string_map = types.Color } },
     .{ .field = .segment_value_fg, .by = .{ .string_map = types.Color } },

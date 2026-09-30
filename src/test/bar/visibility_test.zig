@@ -6,6 +6,10 @@
 //! runs over the shared window fixture and self-skips when no X display is
 //! reachable.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: bar
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -43,7 +47,7 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     const fixture = @import("fixture");
     const pipeline = @import("pipeline");
     const model = @import("model");
-    const fx = fixture.setUp("F03 fullscreen occupancy") orelse return;
+    const fx = try fixture.setUp("F03 fullscreen occupancy");
     defer fx.deinit();
 
     var gate: pipeline.Gate = .{};

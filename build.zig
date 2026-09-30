@@ -271,58 +271,49 @@ pub fn build(b: *std.Build) !void {
     // standalone `zig test <file>` cannot resolve them (module-root escape),
     // which is why tests go through the build system.
     const unit_test_step = b.step("test", "Run unit tests");
+    // (28.6) Feature name -> is-it-built bool. The gate a test declares in its
+    // own source resolves through this, so the two sides can only disagree by
+    // naming a feature that does not exist -- which is a hard error below, not
+    // a silent wrong answer.
+    const feature_flags = [_]FeatureFlag{
+        .{ .name = "tiling", .on = has_tiling },
+        .{ .name = "floating", .on = has_floating },
+        .{ .name = "minimize", .on = has_minimize },
+        .{ .name = "fullscreen", .on = has_fullscreen },
+        .{ .name = "workspaces", .on = has_workspaces },
+        .{ .name = "bar", .on = has_bar },
+        .{ .name = "vim", .on = has_vim },
+        .{ .name = "seg_clock", .on = has_seg_clock },
+        .{ .name = "seg_carousel", .on = has_seg_carousel },
+        .{ .name = "seg_prompt", .on = has_seg_prompt },
+        .{ .name = "seg_systatus", .on = has_seg_systatus },
+        .{ .name = "seg_brightness", .on = has_seg_brightness },
+    };
+
+    // (28.7) Restrict the run to one *_test file. A BUILD-side filter, not
+    // just a pass-through: see the filter_matched check in the loop below.
+    const test_filter = b.option([]const u8, "test-filter", "Run only this *_test file (e.g. model_test)");
     // X-gated integration tests connect to the same $DISPLAY; chain their run
     // steps so server-global input-focus assertions cannot race across the
     // parallel test processes.
     var x_gated_run: ?*std.Build.Step = null;
-    // Tests whose modules only exist when their feature's source file is
-    // present; the gate is the same has_* bool that guards the feature.
-    // x_gated marks the X-dependent integration tests that serialize on the
-    // shared display. Every test root links the full system-library set: with
-    // precise edge wiring a test root no longer reaches the gated feature
-    // roots that used to bleed their linkage into every test exe, so each
-    // root declares its (potentially needed) libc-adjacent libraries itself.
-    const test_gates = [_]struct { name: []const u8, gate: bool, x_gated: bool }{
-        .{ .name = "actions_test", .gate = has_tiling, .x_gated = true },
-        .{ .name = "focus_test", .gate = has_tiling, .x_gated = true },
-        .{ .name = "pipeline_test", .gate = has_tiling, .x_gated = true },
-        .{ .name = "clock_test", .gate = has_seg_clock, .x_gated = false },
-        .{ .name = "systatus_test", .gate = has_seg_systatus, .x_gated = false },
-        .{ .name = "carousel_test", .gate = has_seg_carousel, .x_gated = false },
-        .{ .name = "brightness_test", .gate = has_seg_brightness, .x_gated = false },
-        .{ .name = "commit_test", .gate = true, .x_gated = false },
-        .{ .name = "slider_test", .gate = true, .x_gated = false },
-        .{ .name = "width_state_test", .gate = true, .x_gated = false },
-        .{ .name = "metrics_test", .gate = true, .x_gated = false },
-        .{ .name = "font_probe_test", .gate = true, .x_gated = false },
-        .{ .name = "native_alsa_test", .gate = true, .x_gated = false },
-        .{ .name = "native_pulse_test", .gate = true, .x_gated = false },
-        .{ .name = "model_test", .gate = has_minimize and has_fullscreen and has_floating and has_workspaces, .x_gated = false },
-        .{ .name = "perf_test", .gate = has_minimize and has_fullscreen and has_workspaces, .x_gated = false },
-        .{ .name = "schema_test", .gate = true, .x_gated = false },
-        .{ .name = "tiling_test", .gate = has_tiling, .x_gated = false },
-        .{ .name = "reconcile_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
-        .{ .name = "tracking_test", .gate = has_tiling and has_minimize and has_fullscreen, .x_gated = false },
-        .{ .name = "workspaces_test", .gate = has_workspaces, .x_gated = false },
-        .{ .name = "config_test", .gate = true, .x_gated = false },
-        .{ .name = "parser_test", .gate = true, .x_gated = false },
-        .{ .name = "persist_test", .gate = true, .x_gated = false },
-        .{ .name = "visibility_test", .gate = has_bar, .x_gated = true },
-        .{ .name = "wincache_test", .gate = true, .x_gated = false },
-        .{ .name = "masks_test", .gate = true, .x_gated = false },
-        .{ .name = "sink_test", .gate = true, .x_gated = false },
-        .{ .name = "dpi_math_test", .gate = true, .x_gated = false },
-        .{ .name = "bounded_test", .gate = true, .x_gated = false },
-        .{ .name = "idmap_test", .gate = true, .x_gated = false },
-        .{ .name = "ids_test", .gate = true, .x_gated = false },
-        .{ .name = "timers_test", .gate = true, .x_gated = false },
-        .{ .name = "input_test", .gate = true, .x_gated = false },
-        .{ .name = "keysyms_test", .gate = true, .x_gated = false },
-        .{ .name = "borders_test", .gate = true, .x_gated = true },
-        .{ .name = "borders_pure_test", .gate = true, .x_gated = false },
-        .{ .name = "vim_test", .gate = has_vim and has_seg_prompt, .x_gated = false },
-        .{ .name = "focus_latency_test", .gate = has_tiling, .x_gated = false },
-        .{ .name = "tiling_latency_test", .gate = has_tiling, .x_gated = false },
+    // (28.6) x_gated only. The feature gate used to live here as 34 duplicated
+    // boolean rows that had to be kept in agreement, by hand, with every test
+    // file's own @imports. It now lives in the test file
+    // (`// build-gate: tiling, seg_prompt`) next to the imports that constrain
+    // it, so the two cannot drift without a compile error.
+    //
+    // What STAYS here is X-gating, because that genuinely is a property of the
+    // build, not of the file: these tests share one $DISPLAY, and the runner
+    // must serialize them. That is not expressible in the test's own source.
+    const test_gates = [_]struct { name: []const u8, x_gated: bool, bench: bool = false }{
+        .{ .name = "actions_test", .x_gated = true },
+        .{ .name = "focus_test", .x_gated = true },
+        .{ .name = "pipeline_test", .x_gated = true },
+        .{ .name = "visibility_test", .x_gated = true },
+        .{ .name = "borders_test", .x_gated = true },
+        .{ .name = "focus_latency_test", .x_gated = false, .bench = true },
+        .{ .name = "tiling_latency_test", .x_gated = false, .bench = true },
     };
     {
         // Discovered *_test stems; the table below must match them one-to-one.
@@ -345,36 +336,72 @@ pub fn build(b: *std.Build) !void {
                 return error.StaleTestGate;
             }
         }
-        var test_it = discovery.modules.iterator();
-        test_loop: while (test_it.next()) |entry| {
-            if (!std.mem.endsWith(u8, entry.key_ptr.*, "_test")) continue;
-            // Single table lookup: gate + x_gated together, so the
-            // X-gated branching needs no separate name cascade. A discovered
-            // *_test module missing from the table is a hard error: silently
-            // running it ungated hides a feature dependency and can break the
-            // deletion matrix (or let an X test race the shared display).
-            const spec = for (test_gates) |g| {
-                if (std.mem.eql(u8, entry.key_ptr.*, g.name)) break g;
-            } else {
-                std.debug.print(
-                    "build: test module '{s}' has no test_gates entry; add it so its feature gate and X-serialization are explicit\n",
-                    .{entry.key_ptr.*},
-                );
-                return error.UngatedTestModule;
-            };
-            if (!spec.gate) continue :test_loop;
+        // (28.7) Iterate a SORTED stem list, not the discovery map's iterator.
+        // The map's order was unspecified, so the order test binaries were
+        // created in -- and therefore the order the X-gated chain below is
+        // assembled in -- varied between runs. That was harmless for
+        // correctness (the chain serializes either way) but it made an
+        // intermittently failing integration test impossible to bisect, because
+        // "which X test ran first" was not reproducible.
+        var stems: std.ArrayList([]const u8) = .empty;
+        defer stems.deinit(b.allocator);
+        var discover2 = discovery.modules.iterator();
+        while (discover2.next()) |entry| {
+            if (std.mem.endsWith(u8, entry.key_ptr.*, "_test")) {
+                try stems.append(b.allocator, entry.key_ptr.*);
+            }
+        }
+        std.mem.sort([]const u8, stems.items, {}, struct {
+            fn lt(_: void, a: []const u8, c: []const u8) bool {
+                return std.mem.lessThan(u8, a, c);
+            }
+        }.lt);
+
+        var filter_matched = false;
+        for (stems.items) |stem| {
+            const entry = discovery.modules.getPtr(stem).?;
+            // (28.6) x_gated/bench metadata stays in the build; the FEATURE
+            // gate is read from the test's own source, sitting next to the
+            // imports that make it necessary. Absence from this table is now
+            // normal (it just means "not X-gated, not a bench"); the reverse --
+            // a row naming a test that no longer exists -- is still fatal, and
+            // is checked above.
+            const spec: ?@TypeOf(test_gates[0]) = for (test_gates) |g| {
+                if (std.mem.eql(u8, stem, g.name)) break g;
+            } else null;
+            const rel = discovery.source_paths.get(stem) orelse
+                return error.NoTestSourcePath;
+            const gate = try readTestGate(b, rel, &feature_flags);
+            if (!gate.on) continue;
+            // (28.7) -Dtest-filter=<stem> restricts the run to one file while
+            // developing. filter_matched makes an unmatched name a loud error
+            // rather than a green run of nothing -- a typo would otherwise look
+            // exactly like a passing suite.
+            if (test_filter) |want| {
+                if (!std.mem.eql(u8, stem, want)) continue;
+                filter_matched = true;
+            }
             // Every test root links the same system libraries as the main
             // exe: the modules reached from a test graph may call X11/cairo
             // directly (window, drawing, ...) and no longer inherit linkage
             // second-hand from a blanket cross-wire.
-            SystemLibraries.link(entry.value_ptr.*);
-            const t = b.addTest(.{ .root_module = entry.value_ptr.* });
+            SystemLibraries.link(entry.*);
+            const t = b.addTest(.{ .root_module = entry.* });
             const run = b.addRunArtifact(t);
+            // (28.7) Each run step is individually named, so
+            // `zig build test.<stem>` runs exactly one file.
+            const one_name = std.fmt.allocPrint(b.allocator, "test.{s}", .{stem}) catch @panic("oom");
+            const one_desc = std.fmt.allocPrint(b.allocator, "Run only {s}.zig", .{stem}) catch @panic("oom");
+            b.step(one_name, one_desc).dependOn(&run.step);
             unit_test_step.dependOn(&run.step);
-            if (spec.x_gated) {
+            if (spec != null and spec.?.x_gated) {
                 if (x_gated_run) |prev| run.step.dependOn(prev);
                 x_gated_run = &run.step;
             }
+        }
+        if (test_filter != null and !filter_matched) {
+            std.debug.print("build: -Dtest-filter='{s}' matched no discovered, ungated *_test module", .{test_filter.?});
+            return error.NoSuchTestFilter;
         }
     }
 
@@ -386,6 +413,18 @@ pub fn build(b: *std.Build) !void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
+
+    // 28.2: `zig build bench -Dbench=true` runs the latency/benchmark tests
+    // with their full iteration counts and records the timings.
+    //
+    // The timings go to `.zig-cache/bench/timings.txt` (see helpers.benchLog)
+    // rather than to stderr, because the test protocol treats ANY stderr as a
+    // failed command: printing to stderr is what made the only invocation that
+    // can compile bench mode exit non-zero on a fully passing suite. The step
+    // is a distinct name rather than a flag alias so "run the benches" is a
+    // discoverable thing to type and cannot be mistaken for the plain suite.
+    b.step("bench", "Run latency/benchmark tests (add -Dbench=true for full iterations)").dependOn(unit_test_step);
+
     // Plugin-template compile gate: dev/plugin-template/** is compiled against
     // the real discovered modules (cross-wired like an in-tree module), so the
     // drop-in templates can't drift from current contracts without
@@ -562,6 +601,12 @@ const surfaces_generated_source =
     \\    .updateBarVisibilityForWorkspace = noopU8,
     \\    .hideBarForFullscreen = noopVoid,
     \\    .toggleBarSegmentAnchor = noopVoid,
+    \\    // null, not a no-op function: with no bar there is no
+    \\    // fullscreen-forces-bar-hidden predicate to answer, and the
+    \\    // `Surfaces` value is a compile-time choice anyway. Listed here
+    \\    // for the same reason every other hook is -- a hook added to the
+    \\    // contract cannot be forgotten in the no-bar build.
+    \\    .barForcedHiddenByFullscreen = null,
     \\    .chromeToggleOverlay = noopVoid,
     \\};
 ;
@@ -921,6 +966,32 @@ fn deriveOwnerContracts(
 /// through a generated `<package>_subs` module. `binding` is the decl each
 /// sibling exposes, `array` the generated array name, `contract` the type
 /// each sibling's value binds to (its parent package's open contract).
+/// Packages that get a GENERATED sub-registry (`<package>_subs`), each entry
+/// binding one file-sibling that self-declares `pub const <binding>`.
+///
+/// (23.7) A directory is NOT a family by itself. Only a package listed HERE gets
+/// a sub-registry, and only its self-declaring siblings join it (see
+/// `declaresBinding`); a file beside a listed package without the declaration is
+/// a private implementation file that stays a plain discovered module. That
+/// distinction is invisible on disk, which is exactly the trap: it made
+/// `src/bar/modules/layout/` look like a peer family of systatus/prompt/title/
+/// slider while being nothing of the kind.
+///
+/// `layout/` is deliberately NOT a spec, and this is the decision that item
+/// asked for. `layout.zig` (the active-layout icon) and `variants.zig` (the
+/// active-variant text) are two INDEPENDENT bar segments that happen to share a
+/// subject; they declare no `sub`/`addon` binding, share no array and no
+/// contract, and are each registered as their own segment. Making it a real
+/// family would mean inventing a package core plus an array and a binding for
+/// two peers that never enumerate each other.
+///
+/// Two consequences, both now false fears rather than latent bugs:
+///   - Deleting `layout.zig` does not leave "a silently empty variants slot".
+///     There is no slot and no registry: variants.zig is independently
+///     discovered and independently registered, so deleting its sibling changes
+///     nothing about it.
+///   - Neither file can be silently excluded for missing a binding, because
+///     there is no binding to declare.
 const sub_registry_specs = [_]struct {
     package: []const u8,
     array: []const u8,
@@ -1280,6 +1351,69 @@ fn buildSubsRegistryModule(
 /// compile against the real modules, the import name to expose it under in
 /// the generated wrapper, and whether the current tree provides its
 /// dependencies (a skipped entry is left out of the wrapper entirely).
+/// One feature a test may gate itself on. (28.6)
+const FeatureFlag = struct { name: []const u8, on: bool };
+
+/// A test's self-declared build gate. (28.6)
+///
+/// The gate moves into the test file because the thing that determines whether
+/// a test CAN compile is which modules it imports, and the file that knows
+/// that is the file itself. It used to live in a 34-row build.zig table that
+/// had to be kept in agreement with every test's imports by hand.
+const TestGate = struct {
+    /// False when any named feature is absent. Absent marker means ungated.
+    on: bool = true,
+    /// The marker line as written, for error messages.
+    decl_line: ?[]const u8 = null,
+};
+
+/// Resolves a test's own `// build-gate: a, b` line by reading its source.
+///
+/// A test with no marker is ungated, and that default is safe in the direction
+/// that matters: the gate exists because a gated test @imports a module that
+/// only exists when its feature does, so FORGETTING a marker becomes a compile
+/// error naming the missing import, not a silently skipped test. The old table
+/// could fail the other way -- a stale row pointing at a test that no longer
+/// existed sat silent. An unknown feature NAME, in contrast, is fatal in both
+/// directions, because a typo there would otherwise mean "no gate at all".
+fn readTestGate(b: *std.Build, path: []const u8, flags: []const FeatureFlag) !TestGate {
+    // Bounded read, like every other source scan in this file: a marker line
+    // lives in the first few hundred bytes, and a test file is not a place to
+    // allocate an unbounded read for.
+    const src = try b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        path,
+        b.allocator,
+        .limited(Module.max_scan_source_bytes),
+    );
+    defer b.allocator.free(src);
+    const marker = "// build-gate:";
+    var out: TestGate = .{};
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    while (lines.next()) |line| {
+        const t = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, t, marker)) continue;
+        out.decl_line = t;
+        out.on = true;
+        var names = std.mem.tokenizeAny(u8, t[marker.len..], " ,\t");
+        while (names.next()) |name| {
+            var found = false;
+            for (flags) |f| {
+                if (std.mem.eql(u8, f.name, name)) {
+                    found = true;
+                    if (!f.on) out.on = false;
+                }
+            }
+            if (!found) {
+                std.debug.print("build: {s} declares build-gate feature '{s}', which is not a known feature name", .{ path, name });
+                return error.UnknownBuildGateFeature;
+            }
+        }
+        return out;
+    }
+    return out;
+}
+
 const PluginTemplateSpec = struct {
     path: []const u8,
     import: []const u8,
@@ -1767,7 +1901,7 @@ const Module = struct {
     /// interface, not an import.
     fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
         const shelf = [_][]const u8{
-            "constants", "log",     "ids",  "masks",     "paths",  "bounded",
+            "constants", "log",     "ids",  "masks",     "paths",    "bounded",
             "idmap",     "scaling", "time", "lifecycle", "dpi_math",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;

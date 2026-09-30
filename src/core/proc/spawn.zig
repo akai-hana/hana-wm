@@ -57,9 +57,11 @@ const window = @import("window");
 
 const bounded = @import("bounded");
 const lifecycle = @import("lifecycle");
-/// The one message the spawn pipe can carry. Sent as a leading byte so a
-/// stray or unknown byte is still distinguishable from a clean EOF.
-const tag_failed: u8 = 1;
+/// The one message the spawn pipe can carry, and the only value the wire
+/// format defines. `pub` because it IS the protocol: it is the byte the child
+/// writes, and the tests assert against it so a change to the value cannot
+/// leave them green while exercising something the child never sends.
+pub const tag_failed: u8 = 1;
 
 /// Writes the tag_failed byte to the spawn pipe and exits: the signal that
 /// resolves this spawn as failed. The only post-fork failure path.
@@ -318,22 +320,38 @@ pub fn drainPendingSpawns() void {
     }
 }
 
-/// Classifies a fully-drained spawn-pipe conversation and, on success,
-/// registers the spawn for workspace routing.
+/// Decides whether a fully-drained spawn-pipe conversation means the exec
+/// failed. Pure, so the rule can be tested without forking anything (4.12).
 ///
-/// Both writes are under PIPE_BUF, so neither is torn or interleaved: a
-/// tag_failed byte anywhere is a reliable failure signal in any arrival
-/// order; an empty buffer means the second fork() never ran.
+/// The child's only message is `tag_failed`, written just before it exits when
+/// execvp failed. A SUCCESSFUL exec closes the O_CLOEXEC write end instead, so
+/// the parent sees clean EOF. The rule is therefore: BYTES MEAN FAILURE, NO
+/// BYTES MEAN SUCCESS. There is no byte pattern that can mean success, because
+/// success is the absence of a message, and that asymmetry is the whole reason
+/// the predicate is `len != 0` rather than a comparison against the tag.
+///
+/// Both writes are under PIPE_BUF, so a tag_failed byte is never torn or
+/// interleaved; `buf` is one byte, so at most one arrives.
+///
+/// This predicate was INVERTED, and inverted in the worst available direction.
+/// It read `data.len != 0 and data[0] != tag_failed`, so a genuine
+/// `tag_failed` compared unequal to itself and reported SUCCESS: every command
+/// whose execvp actually failed was registered for workspace routing as if it
+/// had launched, which routes a window focus to a process that does not exist.
+/// Meanwhile the only input that could mark a failure was a byte that was NOT
+/// the tag -- the one thing this protocol never sends. Nothing warned about it
+/// because the comment directly above the old predicate described the correct
+/// rule in detail while the code underneath implemented its negation.
+pub fn conversationFailed(data: []const u8) bool {
+    return data.len != 0;
+}
+
+/// Applies a fully-drained conversation: on success, registers the spawn for
+/// workspace routing; on failure, says which command did not launch.
 fn finishSpawn(entry: *PendingSpawn) void {
     const data = entry.buf[0..entry.len];
 
-    // The only message the child can write is tag_failed; a clean EOF (no
-    // bytes at all) is success, because the O_CLOEXEC copy closed on a
-    // successful exec. Anything else is a protocol violation and treated as
-    // failure rather than silently registering a spawn that may not exist.
-    const failed = data.len != 0 and data[0] != tag_failed;
-
-    if (failed) {
+    if (conversationFailed(data)) {
         // 4.4: a failed spawn used to be completely silent. `entry.cmd` is
         // the truncated command, so this is now actionable: which command,
         // and that execvp is what failed.

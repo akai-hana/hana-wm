@@ -94,6 +94,37 @@ pub fn extPayload(header: []const u8) ?[]const u8 {
     return null;
 }
 
+/// One blob's decoded header: the payload to hand a module, plus WHICH module
+/// the header claims, if any. (9.10)
+///
+/// The three accessors above each re-derive the header length from the same two
+/// bytes, so a caller that wants all of them re-parses the blob up to three
+/// times and has to know they agree. This is the one answer: `claimed` is a
+/// name, an ordinal, or neither, and a foreign or truncated header yields
+/// `payload = blob` -- passed through WHOLE, exactly as an unstamped blob was.
+pub const ExtHeader = struct {
+    /// Bytes after the header. Equals `blob` verbatim when the header is not
+    /// recognized, so the payload is always usable.
+    payload: []const u8,
+    /// Module name from a name-stamped header, or null.
+    claimed_name: ?[]const u8,
+    /// Registry ordinal from a pre-name header, or null.
+    legacy_ordinal: ?usize,
+};
+
+/// Decodes a stored ext blob's header in one pass. (9.10)
+///
+/// `blob` is the raw stored bytes. This is the ONLY place the on-disk header
+/// format is interpreted for the restore path, so a format change is a change
+/// here rather than at every reader.
+pub fn decodeExt(blob: []const u8) ExtHeader {
+    return .{
+        .payload = extPayload(blob) orelse blob,
+        .claimed_name = extClaimantName(blob),
+        .legacy_ordinal = extLegacyOrdinal(blob),
+    };
+}
+
 /// The claimed module's `name`, for a name-stamped blob, or null when the
 /// blob is legacy, foreign, or truncated.
 pub fn extClaimantName(header: []const u8) ?[]const u8 {
