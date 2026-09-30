@@ -181,25 +181,68 @@ fn setupBacktraceHandler() void {
     std.posix.sigaction(std.posix.SIG.USR2, &sa, null);
 }
 
-/// Creates the signal self-pipe and installs handlers for SIGHUP/SIGTERM/SIGINT/SIGCHLD.
+/// The signals that get the self-pipe handler. SIGCHLD is reaped in
+/// dispatchSignal; the rest control the event loop.
+const handled_signals = [_]std.posix.SIG{
+    std.posix.SIG.HUP,
+    std.posix.SIG.TERM,
+    std.posix.SIG.INT,
+    std.posix.SIG.CHLD,
+    std.posix.SIG.USR1,
+};
+
+/// What `setup` installs, as DATA, with no side effects.
+///
+/// The disposition table used to live inline in `setup` as an `inline for` over
+/// an anonymous tuple plus three loose statements, so the only way to ask
+/// "which signals does hana take over, and in what order?" was to read the body
+/// of a function that also opens a pipe and calls sigaction. Naming the policy
+/// as a value separates the question from the effects: `plan` is pure and
+/// testable, `install` is the only thing that touches process state. That is
+/// what lets a test assert the table directly -- installing the real
+/// dispositions from a test binary would clobber the runner's own SIGINT/SIGTERM
+/// handling, so a side-effecting `setup` was untestable by construction.
+pub const Plan = struct {
+    /// Signals that get the self-pipe handler, in install order.
+    handled: []const std.posix.SIG,
+    /// The one signal ignored outright. Kept out of `handled` because its
+    /// disposition is SIG_IGN, not a handler.
+    ignored: std.posix.SIG,
+    /// Whether to install the alternate signal stack. MUST precede any ONSTACK
+    /// handler: the backtrace handler runs on it, and without one it would run
+    /// on the (possibly corrupted) stack it exists to diagnose.
+    altstack: bool,
+    /// Whether to arm the backtrace handler, which requires `altstack` first.
+    backtrace_handler: bool,
+};
+
+/// The disposition policy, as pure data. No signal is touched, no fd opened.
+pub fn plan() Plan {
+    return .{
+        .handled = &handled_signals,
+        .ignored = std.posix.SIG.PIPE,
+        .altstack = true,
+        .backtrace_handler = true,
+    };
+}
+
+/// Creates the signal self-pipe and installs the dispositions `plan` describes.
 pub fn setup() !void {
     signal_pipe = try lifecycle.makePipe();
     lifecycle.setSignalWriteFd(signal_pipe[pipe_write]);
+    try install(plan());
+}
 
+/// Performs the side effects `p` describes: the only function here that mutates
+/// process-wide signal state.
+fn install(p: Plan) !void {
     const sa: std.posix.Sigaction = .{
         .handler = .{ .handler = signalHandler },
         .mask = std.posix.sigemptyset(),
         .flags = std.posix.SA.RESTART,
     };
 
-    // SIGCHLD is reaped in dispatchSignal; the rest control the event loop.
-    inline for (.{
-        std.posix.SIG.HUP,
-        std.posix.SIG.TERM,
-        std.posix.SIG.INT,
-        std.posix.SIG.CHLD,
-        std.posix.SIG.USR1,
-    }) |sig| {
+    for (p.handled) |sig| {
         std.posix.sigaction(sig, &sa, null);
     }
 
@@ -207,7 +250,7 @@ pub fn setup() !void {
     // early-closed pipe end (forkIntermediate's tag_pid handoff); with the
     // default disposition a raced write would SIGPIPE-kill the WM instead of
     // failing the write.
-    std.posix.sigaction(std.posix.SIG.PIPE, &.{
+    std.posix.sigaction(p.ignored, &.{
         .handler = .{ .handler = @ptrFromInt(1) }, // SIG_IGN
         .mask = std.posix.sigemptyset(),
         .flags = 0,
@@ -217,14 +260,16 @@ pub fn setup() !void {
     // ever installed -- without one the handler would run on the (possibly
     // corrupted) interrupted stack it exists to diagnose. Install it before
     // arming any ONSTACK handler.
-    const ss: std.posix.stack_t = .{
-        .sp = &alt_stack_mem,
-        .flags = 0,
-        .size = alt_stack_mem.len,
-    };
-    try std.posix.sigaltstack(&ss, null);
+    if (p.altstack) {
+        const ss: std.posix.stack_t = .{
+            .sp = &alt_stack_mem,
+            .flags = 0,
+            .size = alt_stack_mem.len,
+        };
+        try std.posix.sigaltstack(&ss, null);
+    }
 
-    setupBacktraceHandler();
+    if (p.backtrace_handler) setupBacktraceHandler();
 }
 
 // Closes both ends of the signal pipe.

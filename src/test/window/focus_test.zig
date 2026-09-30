@@ -85,7 +85,7 @@ test "focus: WM_TAKE_FOCUS window (locally_active) still lands input focus" {
     try std.testing.expect(focus.prepareFocus(win, .user_command) == .none);
 }
 
-test "focus: no_input window refuses focus (none transition)" {
+test "focus: no_input window refuses focus (no_input transition)" {
     var fx = try fixture.setUp("focus_test");
     defer fx.deinit();
     const m = pipeline.model();
@@ -94,7 +94,12 @@ test "focus: no_input window refuses focus (none transition)" {
     fx.setNoInput(win); // WM_HINTS input=False
     admitViaMapRequest(win); // real map path seeds the ICCCM focus cache
     const t = focus.prepareFocus(win, .user_command);
-    try std.testing.expect(t == .none);
+    // `.no_input`, NOT `.none`: the two are deliberately distinct so a caller
+    // that mutates the model on its own can tell "this target is focus-less"
+    // from "this was a dedup skip". This test asserted `.none` and so failed
+    // once the split limb landed -- it had never run before, because the
+    // fixture skips without an X display.
+    try std.testing.expect(t == .no_input);
     // A no_input window can never hold X input focus, so it must not take
     // model focus either (model focus is one store with the protocol).
     try std.testing.expect(@as(?u32, null) == m.focused); // model untouched

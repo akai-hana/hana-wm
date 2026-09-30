@@ -88,17 +88,16 @@ pub fn consumeReexec() bool {
     return should_reexec.swap(false, .acq_rel);
 }
 
-/// The resolved path of the running image. Null when re-exec was never armed
-/// (init saw no /proc). The event loop hands this to execNext as argv[0] /
-/// exec path.
-pub fn selfPath() ?[]const u8 {
-    const z = exec_path_z orelse return null;
-    return z[0..z.len];
-}
-
-/// The same path, still sentinel-terminated, for callers that hand it to
-/// `execv`. `execNext` takes this form so the hand-off does not re-duplicate a
-/// string the process is already holding.
+/// The resolved path of the running image, still sentinel-terminated, for
+/// callers that hand it to `execv`. Null when re-exec was never armed (init
+/// saw no /proc). `execNext` takes this form so the hand-off does not
+/// re-duplicate a string the process is already holding.
+///
+/// This USED to be two functions: a `?[]const u8` `selfPath` and this
+/// sentinel form. COREH-14 added the sentinel form because the one-shot
+/// re-exec path was `mustDupeZ`-ing the path to satisfy `execv`, and left
+/// the original behind with no callers. It claimed the event loop handed it
+/// to execNext, which was never true.
 pub fn selfPathZ() ?[:0]const u8 {
     return exec_path_z;
 }

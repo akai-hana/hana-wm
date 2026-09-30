@@ -255,8 +255,15 @@ Planned, not-yet-shipped items:
 # format check, build with layer checks, then the full test suite
 zig fmt --check .
 zig build check
-dev/scripts/xtest.sh zig build test   # runs under Xvfb; headless `zig build test` skips X-gated tests
+dev/scripts/xtest.sh zig build test   # THE test command: Xvfb-backed
 ```
+
+- **Always run the suite through `dev/scripts/xtest.sh`.** It starts its own
+  isolated Xvfb, points `DISPLAY` at it, and sets `HANA_REQUIRE_X=1`. A bare
+  `zig build test` is headless, so every X-gated test becomes a `SkipZigTest`
+  that still counts green — a passing summary covering ~33 fewer tests than it
+  looks like. On a machine with a live hana session, going bare is also how
+  those tests end up on the real `:0`, grabbing focus from your session.
 
 - `dev/scripts/check-layers.sh` (invoked by `zig build check`) enforces the
   subsystem layering described under [Architecture](#architecture).

@@ -172,6 +172,13 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
 
     // 1. A pending HIDE is not confirmed by a non-fullscreen report: the
     //    window must REPORT screen dimensions before the bar moves.
+    //    w1 has to be COVERING for a hide to confirm at all, because the
+    //    decision is MODEL TRUTH (12.7), not the reported numbers -- which is
+    //    exactly what step 2 asserts. This step used to run against a plain
+    //    tiled w1 and so demanded a bump the product correctly refuses; it had
+    //    never run, because the fixture skips without an X display.
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
     fullscreen.armPendingBarHide(w1);
     const before = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
@@ -179,6 +186,9 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     //    The entry survived, so a later matching report still resolves it.
     fullscreen.notifyConfigureIfPending(w1, sw, sh);
     try std.testing.expectEqual(before + 1, core.fullscreen.rev());
+    //    Back to NOT covering, which is the premise step 2 depends on.
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
 
     // 2. MODEL TRUTH gates the hide. Screen-sized dimensions with a model that
     //    says NOT covering must NOT move the bar: that combination is a client
@@ -209,14 +219,26 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     try std.testing.expectEqual(before4 + 1, core.fullscreen.rev());
 
     // 4. A pending SHOW for a window that still covers does not move the bar:
-    //    screen dimensions are the show's confirmation, so use them, and the
-    //    model must agree nothing covers.
+    //    non-fullscreen dimensions are the show's confirmation, and the model
+    //    must also agree nothing covers. w1 has to be IN fullscreen for this
+    //    to mean anything: step 3 toggled it back OUT, so the "still covers"
+    //    premise the comment had always claimed was not actually true, and
+    //    the gate below was therefore never exercised.
+    actions.fullscreenToggleWindow(w1);
+    fx.flush();
     const before5 = core.fullscreen.rev();
     fullscreen.armPendingBarShow(w1);
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
     try std.testing.expectEqual(before5, core.fullscreen.rev()); // w1 still covers
     actions.fullscreenToggleWindow(w1);
     fx.flush();
+    // The exit bumps the fact ITSELF, on purpose (actions.zig: "the deferred
+    // bar-show arm waits for a non-fullscreen ConfigureNotify, which never
+    // arrives when a window's restored anchor IS the screen size"). So the
+    // toggle already published the exit and the still-armed entry republishes
+    // it once more -- a redundant repaint of an identical bar state, which is
+    // why the baseline is re-read here instead of being derived from before5.
+    const after_toggle = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
-    try std.testing.expectEqual(before5 + 1, core.fullscreen.rev());
+    try std.testing.expectEqual(after_toggle + 1, core.fullscreen.rev());
 }

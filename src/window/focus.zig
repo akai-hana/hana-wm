@@ -282,6 +282,24 @@ pub const FocusTransition = union(enum) {
     none: void,
 };
 
+/// Whether this transition actually lands focus and therefore licenses a model
+/// write. Callers MUST ask this rather than comparing against `.none`.
+///
+/// Two call sites did the naive `!= .none` test, and both were wrong: the
+/// `.no_input` limb is not `.none`, so a `no_input` window took model focus
+/// anyway. That is the exact failure the split limb was introduced to prevent
+/// -- its own doc comment says the union exists so "no read can be forgotten
+/// or reordered" -- yet the reads were still shaped like the old single-flag
+/// era. `prepareFocus` returning a no-input verdict is the whole point of the
+/// type; this is the one place that converts it back into a decision, so it
+/// lives next to the union rather than being re-derived at each consumer.
+pub inline fn yieldsModelFocus(t: FocusTransition) bool {
+    return switch (t) {
+        .set, .clear => true,
+        .no_input, .none => false,
+    };
+}
+
 /// The focus ETIQUETTE for one `Reason` (10.7): all three per-reason
 /// policies as DATA, in one row, instead of three separate switches that
 /// each had to be re-read to answer "what does a workspace switch do?".
@@ -558,15 +576,22 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 /// repaint via the per-batch sweep on the commit's focus bump.
 pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) void {
     const ft = prepareFocus(win, reason);
-    if (ft == .none) return;
+    if (!yieldsModelFocus(ft)) return;
     model_mod.setFocus(pipeline.mut(&gate), win);
     if (reason == .mouse_enter) {
         pipeline.focusOnlyCommit(ft);
         return;
     }
-    // The duty runs on the .before leg only; reaching here means this is that
-    // call site, so the handoff must still be pending.
-    std.debug.assert(duty != null);
+    // A null duty is a first-class case, not a contract violation: `grabFocus`
+    // passes one, and `reconcileGrabFocus` guards the call
+    // (`if (self.duty) |d| d();`). The assert that used to stand here claimed
+    // "reaching here means this is that call site", which was false -- a
+    // `.user_command` focus of a window that is NOT already focused prepares a
+    // real transition and lands exactly here, so focusing a floating window
+    // (floating.zig's `grabFocus(win, .user_command)`) tripped it. That
+    // aborted the process in any build with live asserts, including this
+    // project's test builds; ReleaseFast merely stripped it and hid the bug.
+    // The type and the callee were always right; only the assert was wrong.
     pipeline.reconcileGrabFocus(.{}, ft, .before, duty);
 }
 

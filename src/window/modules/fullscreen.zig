@@ -85,6 +85,16 @@ pub const PendingBarTable = struct {
         return null;
     }
 
+    /// Read an entry WITHOUT consuming it, for a decision that may not be
+    /// decidable yet. Consuming an intent that could not be evaluated drops it
+    /// on the floor -- see notifyConfigureIfPending.
+    pub fn peek(self: *const PendingBarTable, win: u32) ?PendingBar {
+        for (self.entries[0..self.len]) |e| {
+            if (e.win == win) return e;
+        }
+        return null;
+    }
+
     pub fn clear(self: *PendingBarTable) void {
         self.len = 0;
     }
@@ -251,7 +261,17 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
 /// non-fullscreen ones (exit). Safe for every ConfigureNotify; no-ops when
 /// nothing is pending or dimensions don't match.
 pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
-    const pending = g_pending_bars.take(win) orelse return;
+    // PEEK, not take. A ConfigureNotify that cannot yet decide the question
+    // must LEAVE the intent armed: a client sends a burst of ConfigureNotify
+    // around a state change, and the first one can land before either side
+    // settled -- non-screen dimensions while the model still says the window
+    // covers, or screen dimensions while the model has not caught up. Taking
+    // the entry on that first report silently dropped the transition, so the
+    // bar never moved and stayed wrong until the next fullscreen toggle.
+    // Taking it only once a decision fires keeps "deferred" meaning deferred.
+    // The entry is per-window and onWindowGone clears it at teardown, so an
+    // intent that never resolves cannot outlive its window.
+    const pending = g_pending_bars.peek(win) orelse return;
 
     const cs = core.getState();
     const screen_w = @as(u16, @intCast(cs.screen.width_in_pixels));
@@ -271,6 +291,7 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
         // Enter: the window must have REPORTED screen dimensions, and the
         // model must agree it is covering.
         if (width == screen_w and height == screen_h and covering) {
+            _ = g_pending_bars.take(win);
             core.fullscreen.bump();
         }
     } else if (width != screen_w or height != screen_h) {
@@ -278,7 +299,10 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
         // when the model agrees nothing here is covering; if a DIFFERENT window
         // still covers, the bar must stay hidden, and that is the model's
         // answer rather than this window's geometry.
-        if (!covering) core.fullscreen.bump();
+        if (!covering) {
+            _ = g_pending_bars.take(win);
+            core.fullscreen.bump();
+        }
     }
 }
 
