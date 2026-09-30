@@ -92,16 +92,6 @@ fn barColorOpt(places: []const Placement, target: []const u8, sibling: []const u
     };
 }
 
-/// Title accent color: copies `sibling` when [bar.properties] is absent.
-fn barTitleColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
-    return barColor(key, target, sibling, true);
-}
-
-/// Drun accent color: stays null when [bar.properties] is absent.
-fn barRunColor(key: []const u8, target: []const u8, sibling: []const u8) Knob {
-    return barColor(key, target, sibling, false);
-}
-
 /// Every scalar knob, exactly once. ORDER MATTERS in two places, and only one
 /// of them is checked: workspaces.count precedes icon-padding (config.zig pads
 /// icons to the count) is a comment-only convention, while the base-bar-colors
@@ -199,12 +189,12 @@ pub const knobs = [_]Knob{
     // title accents additionally COPY their fallback when [bar.properties] is
     // absent (they were unconditionally assigned); the run trio stay null
     // so the read-time fallbacks in BarConfig apply.
-    barTitleColor("title", "bar.title_accent_color", types.palette_primary_color),
-    barTitleColor("title_unfocused", "bar.title_unfocused_accent", types.palette_secondary_color),
-    barTitleColor("title_minimized", "bar.title_minimized_accent", types.palette_alternative_color),
-    barRunColor("run_bg", "bar.run_bg", "bg"),
-    barRunColor("run_fg", "bar.run_fg", "fg"),
-    barRunColor("run_prompt_color", "bar.run_prompt_color", types.palette_primary_color),
+    barColor("title", "bar.title_accent_color", types.palette_primary_color, true),
+    barColor("title_unfocused", "bar.title_unfocused_accent", types.palette_secondary_color, true),
+    barColor("title_minimized", "bar.title_minimized_accent", types.palette_alternative_color, true),
+    barColor("run_bg", "bar.run_bg", "bg", false),
+    barColor("run_fg", "bar.run_fg", "fg", false),
+    barColor("run_prompt_color", "bar.run_prompt_color", types.palette_primary_color, false),
 
     // (27.7) Legacy spellings, kept working. The `drun_*` keys were named for
     // a desktop-file launcher; the segment resolves a `$PATH` executable and
@@ -214,9 +204,9 @@ pub const knobs = [_]Knob{
     // used the old keys keeps working with no edit, which is the whole reason
     // this is a rename-with-alias rather than a rename.
     knob(&.{place(types.section_bar, "drun_prompt")}, "bar.run_prompt", .str),
-    barRunColor("drun_bg", "bar.run_bg", "bg"),
-    barRunColor("drun_fg", "bar.run_fg", "fg"),
-    barRunColor("drun_prompt_color", "bar.run_prompt_color", types.palette_primary_color),
+    barColor("drun_bg", "bar.run_bg", "bg", false),
+    barColor("drun_fg", "bar.run_fg", "fg", false),
+    barColor("drun_prompt_color", "bar.run_prompt_color", types.palette_primary_color, false),
 };
 
 /// Resolves a dotted path from `types.Config` to the FIELD TYPE it names, or
@@ -321,7 +311,7 @@ pub const bespoke_fields = [_][]const u8{
 };
 
 comptime {
-    // ~120 knobs x 4 subtrees x field walks, plus the coverage pass below.
+    // 55 knobs x 4 subtrees x field walks, plus the coverage pass below.
     @setEvalBranchQuota(400_000);
     // Every knob target must name a REAL field. A renamed field, or a typo in
     // a builder's target string, previously produced a knob that parsed,
