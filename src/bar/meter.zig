@@ -40,18 +40,19 @@ pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
 /// -- the same nearest-rounding rule `pctFromRaw` uses for device ranges, and
 /// the reason a 50 % fill lines up with the pointer that set it.
 ///
-/// The result is confined to the slot, which is the one thing the naive form
-/// gets wrong. A zero-width slot has a single pixel, so every level maps to
-/// that pixel: without the clamp, 100 % of a zero-width slot reported
-/// `slot_x + 1`, one pixel OUTSIDE the control. The slot end is computed in
-/// u32 because two u16s can exceed u16, and the return is clamped to u16's
-/// range for the same reason.
+/// A zero-width slot has a single pixel, so every level maps to that pixel --
+/// the arithmetic already does that, because `0 * pct / 100 == 0`. It used to be
+/// clamped against the slot end as well, which was dead: `pct <= 100` makes
+/// `at <= x + w` always true, so the clamp could never bind. (A mutation that
+/// widened `end` by one survived, which is how the deadness was found.)
+/// What DOES need clamping is the u32 -> u16 narrowing: two u16 slot arguments
+/// can sum past u16, and an unchecked @intCast is a panic in a safe build and
+/// a wrap in ReleaseFast.
 pub fn offsetFromPct(slot_x: u16, slot_w: u16, pct: u8) u16 {
     const x: u32 = slot_x;
-    const end: u32 = x + @as(u32, slot_w);
     const clamped: u32 = @min(pct, 100);
     const at = x + (@as(u32, slot_w) * clamped + 50) / 100;
-    return @intCast(@min(@min(at, end), @as(u32, std.math.maxInt(u16))));
+    return @intCast(@min(at, @as(u32, std.math.maxInt(u16))));
 }
 
 test {

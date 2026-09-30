@@ -44,7 +44,7 @@ const SNDRV_CTL_ELEM_TYPE_INTEGER = 2;
 const SNDRV_CTL_ELEM_ACCESS_WRITE: c_uint = 0x0002;
 const SNDRV_CTL_ELEM_ACCESS_INACTIVE: c_uint = 0x0008;
 
-const ElemId = extern struct {
+pub const ElemId = extern struct {
     numid: c_uint,
     iface: c_int,
     device: c_uint,
@@ -58,7 +58,7 @@ const ElemId = extern struct {
     }
 };
 
-const ElemList = extern struct {
+pub const ElemList = extern struct {
     offset: c_uint,
     space: c_uint,
     used: c_uint,
@@ -90,7 +90,7 @@ const InfoUnion = extern union {
     reserved: [128]u8,
 };
 
-const ElemInfo = extern struct {
+pub const ElemInfo = extern struct {
     id: ElemId,
     type: c_int,
     access: c_uint,
@@ -107,7 +107,7 @@ const ValueUnion = extern union {
     bytes: [512]u8,
 };
 
-const ElemValue = extern struct {
+pub const ElemValue = extern struct {
     id: ElemId,
     indirect: c_uint,
     value: ValueUnion,
@@ -128,21 +128,21 @@ fn devctl(fd: c_int, request: c_ulong, ptr: anytype) c_int {
     return c.ioctl(fd, @as(c_int, @bitCast(@as(u32, @truncate(request)))), ptr);
 }
 
-const ELEM_LIST = iowr('U', 0x10, @sizeOf(ElemList));
-const ELEM_INFO = iowr('U', 0x11, @sizeOf(ElemInfo));
-const ELEM_READ = iowr('U', 0x12, @sizeOf(ElemValue));
-const ELEM_WRITE = iowr('U', 0x13, @sizeOf(ElemValue));
+pub const ELEM_LIST = iowr('U', 0x10, @sizeOf(ElemList));
+pub const ELEM_INFO = iowr('U', 0x11, @sizeOf(ElemInfo));
+pub const ELEM_READ = iowr('U', 0x12, @sizeOf(ElemValue));
+pub const ELEM_WRITE = iowr('U', 0x13, @sizeOf(ElemValue));
 
 /// Percentage onto the control's [min..max] scale, nearest-rounding like
 /// `amixer set Master N%` (which maps 50 % of 0..87 to 44). The linear map
 /// is the shared `slider.rawFromPct`.
-fn rawFromPct(pct: u8, min: c_long, max: c_long) c_long {
+pub fn rawFromPct(pct: u8, min: c_long, max: c_long) c_long {
     return slider.rawFromPct(c_long, pct, min, max);
 }
 
 /// Inverse of `rawFromPct`: raw value onto the 0-100 scale (nearest-rounding);
 /// the shared `slider.pctFromRaw`.
-fn pctFromRaw(raw: c_long, min: c_long, max: c_long) u8 {
+pub fn pctFromRaw(raw: c_long, min: c_long, max: c_long) u8 {
     return slider.pctFromRaw(c_long, raw, min, max);
 }
 
@@ -313,46 +313,3 @@ pub fn openMaster() ?Master {
 // Pure, subprocess-and-device-free tests: ABI sizes/encodings and the
 // percent mapping are the only logic not already pinned by the live-device
 // probe (see the module doc).
-const testing = std.testing;
-
-test "UAPI element struct sizes are the pinned ABI" {
-    try testing.expectEqual(@as(usize, 64), @sizeOf(ElemId));
-    try testing.expectEqual(@as(usize, 80), @sizeOf(ElemList));
-    try testing.expectEqual(@as(usize, 272), @sizeOf(ElemInfo));
-    try testing.expectEqual(@as(usize, 1224), @sizeOf(ElemValue));
-}
-
-test "control ioctls encode the UAPI numbers" {
-    try testing.expectEqual(@as(c_ulong, 0xc0505510), ELEM_LIST);
-    try testing.expectEqual(@as(c_ulong, 0xc1105511), ELEM_INFO);
-    try testing.expectEqual(@as(c_ulong, 0xc4c85512), ELEM_READ);
-    try testing.expectEqual(@as(c_ulong, 0xc4c85513), ELEM_WRITE);
-}
-
-test "rawFromPct maps percent linearly onto min..max" {
-    // The exact range amixer reports on the probing card (0..87).
-    try testing.expectEqual(@as(c_long, 44), rawFromPct(50, 0, 87));
-    try testing.expectEqual(@as(c_long, 0), rawFromPct(0, 0, 87));
-    try testing.expectEqual(@as(c_long, 87), rawFromPct(100, 0, 87));
-    try testing.expectEqual(@as(c_long, 5), rawFromPct(1, 0, 500));
-    // Softvol-style 0..65536 range.
-    try testing.expectEqual(@as(c_long, 32768), rawFromPct(50, 0, 65536));
-    try testing.expectEqual(@as(c_long, 65536), rawFromPct(100, 0, 65536));
-}
-
-test "pctFromRaw inverts rawFromPct" {
-    // Nearest-rounding is not lossless at odd spans (like amixer's), so the
-    // round-trip assertions use spans where the midpoint is exact.
-    try testing.expectEqual(@as(u8, 50), pctFromRaw(rawFromPct(50, 0, 65536), 0, 65536));
-    try testing.expectEqual(@as(u8, 100), pctFromRaw(87, 0, 87));
-    try testing.expectEqual(@as(u8, 0), pctFromRaw(0, 0, 87));
-    try testing.expectEqual(@as(u8, 51), pctFromRaw(44, 0, 87));
-    // Out-of-range raw clamps.
-    try testing.expectEqual(@as(u8, 100), pctFromRaw(9999, 0, 87));
-}
-
-test "pctFromRaw handles a zero or inverted range" {
-    try testing.expectEqual(@as(u8, 0), pctFromRaw(50, 0, 0));
-    try testing.expectEqual(@as(u8, 0), pctFromRaw(50, 10, 5));
-    try testing.expectEqual(@as(c_long, 10), rawFromPct(50, 10, 10));
-}

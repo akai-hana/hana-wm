@@ -1,23 +1,35 @@
-//! Reachability anchor for the volume slider sub's inline tests.
+//! Unit tests for the volume slider sub.
 //!
-//! volume.zig's pure re-probe/negative-cache helpers are inline tests, the
-//! convention every other bar module follows. But inline tests only run if the
-//! file is reachable from a test root, and nothing in the test tree imported
-//! volume -- so all of them were dead code. The build compiles volume.zig (a
-//! mutation that broke it produced compile errors), which is exactly how the
-//! gap hid: the file was type-checked and its tests never once executed.
+//! volume.zig's pure helpers (the re-probe / negative-cache decision logic, plus
+//! the pre-existing `parsePercent`/`label` tests) used to be INLINE in
+//! volume.zig, with this file as a mere "reachability anchor" -- the belief
+//! being that importing a module runs its inline tests. IT DOES NOT: the
+//! `zig build test` harness executes test blocks in the test root only, so an
+//! inline test in an imported module is never even analyzed. A canary
+//! `expectEqual(1, 2)` appended to volume.zig does not fail; the same canary
+//! appended here does.
 //!
-//! The helpers themselves are `pub` and tested HERE rather than inline, because
-//! the `zig build test` harness runs tests from the test root only: an inline
-//! test in an imported module is compiled but never executed. (brightness.zig's
-//! five inline tests are dead the same way; a canary `expectEqual(1, 2)` in
-//! either file reports success.) So the file that makes volume.zig reachable
-//! is also the file that has to hold its tests.
+//! The gap hid because the build still type-checks volume.zig, so a mutation
+//! there produced compile errors that read like test kills -- the first
+//! mutation pass in 26.7 reported M36-M48 as KILLED when M46-M48 were
+//! compile-error cascades and no assertion had ever run.
+//!
+//! All the helpers are `pub` and tested HERE. The two recovered `label` tests
+//! were still calling the pre-26.8 by-pointer signature, so they could not have
+//! compiled had they ever run; they are corrected below. `label` reads
+//! module-private display state, set up through the explicit
+//! `setDisplayForTest` seam.
+//
+//! (The same trap held brightness.zig's five tests, native_alsa.zig's five and
+//! native_pulse.zig's seven. All twenty were recovered the same way; a repo-wide
+//! sweep now reports zero dead inline tests.)
 
 // build-gate: seg_brightness
 
 const std = @import("std");
 const volume = @import("volume");
+const slider = @import("slider");
+const types = @import("types");
 
 const Probe = volume.Probe;
 const Rung = volume.Rung;
@@ -32,6 +44,13 @@ const noteLadderResult = volume.noteLadderResult;
 const no = Probe{ .walk = false, .forget_native = false };
 const yes = Probe{ .walk = true, .forget_native = false };
 const flip = Probe{ .walk = true, .forget_native = true };
+
+/// The 25.3 span form: `Label` carries `value_start`/`value_len` rather than a
+/// subslice, so assertions spell the comparison out instead of relying on a
+/// `?[]const u8` field these tests used to have.
+fn valueSpan(l: slider.Label) []const u8 {
+    return l.text[l.value_start..][0..l.value_len];
+}
 
 test "probeDecision: a ladder that never ran is walked immediately" {
     // "Unchanged" is only evidence once there is a previous observation. With
@@ -139,4 +158,43 @@ test "optimisticLevel echoes a committed level, but never invents one" {
     // ...but with no backend, `commitPct` wrote nothing, so there is nothing
     // to show. Echoing 40 here would display a level the sink never accepted.
     try std.testing.expectEqual(@as(?u8, null), optimisticLevel(.unknown, 40));
+}
+
+// ---------------------------------------------------------------------------
+// Recovered dead tests. These lived INLINE in volume.zig and had never once
+// executed: the harness runs tests from the test root, and nothing imported
+// volume.zig. The build still type-checked it, so a mutation there read as a
+// kill. They now run for the first time. `label` reads module-private display
+// state, so they set it through the explicit `setDisplayForTest` seam.
+
+test "parsePercent extracts first N%" {
+    try std.testing.expectEqual(@as(?u8, 42), volume.parsePercent("Volume: 123456 / 42% / 6,56 dB"));
+    try std.testing.expectEqual(@as(?u8, 100), volume.parsePercent("Mono: Playback 65536 [100%] [on]"));
+    try std.testing.expectEqual(@as(?u8, 7), volume.parsePercent("vol 7%"));
+    try std.testing.expectEqual(@as(?u8, null), volume.parsePercent("no percent here"));
+    try std.testing.expectEqual(@as(?u8, null), volume.parsePercent(""));
+}
+
+test "label honors configuration" {
+    var cfg = types.BarConfig{};
+    cfg.volume_format = "Level {pct}";
+    cfg.volume_muted_format = "Silenced {state}";
+    var buf: [128]u8 = undefined;
+    volume.setDisplayForTest(42, false);
+    try std.testing.expectEqualStrings("Level 42", volume.label(cfg, &buf).text);
+    try std.testing.expectEqualStrings("42", valueSpan(volume.label(cfg, &buf)));
+    volume.setDisplayForTest(42, true);
+    try std.testing.expectEqualStrings("Silenced mute", volume.label(cfg, &buf).text);
+    try std.testing.expectEqual(@as(usize, 0), volume.label(cfg, &buf).value_len);
+    volume.setDisplayForTest(42, false);
+}
+
+test "label default formats" {
+    var buf: [128]u8 = undefined;
+    volume.setDisplayForTest(33, false);
+    try std.testing.expectEqualStrings("VOL 33%", volume.label(types.BarConfig{}, &buf).text);
+    try std.testing.expectEqualStrings("33%", valueSpan(volume.label(types.BarConfig{}, &buf)));
+    volume.setDisplayForTest(33, true);
+    try std.testing.expectEqualStrings("MUTE", volume.label(types.BarConfig{}, &buf).text);
+    volume.setDisplayForTest(33, false);
 }

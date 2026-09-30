@@ -441,10 +441,6 @@ fn pctAt(idx: usize, offset: u16) u8 {
     return pctFromSlot(0, reservedWidth(idx), offset);
 }
 
-fn present(idx: usize) bool {
-    return true;
-}
-
 /// A control's presence, from the contract alone. Pure, so a fake `Sub` can
 /// exercise both directions without a backend behind it -- the registry's own
 /// controls are all absent in a headless test, so a test that reads them can
@@ -461,19 +457,12 @@ pub fn subLevel(sub: Sub) ?u8 {
     return l();
 }
 
-/// The control's displayed level for the drag mapping. A control with no level
-/// is never reached by a drag (it is not clickable), so the 0 is only the
-/// fallback for the unreachable case, and it is the same 0 the empty slider
-/// would have drawn.
-/// A control's level, or 0 when it has not answered. The 0 is the level an
-/// empty slider would have drawn, so a control that loses its backend mid-gesture
-/// settles at "nothing" instead of at a stale or arbitrary value.
+/// The control's displayed level for the drag mapping, or 0 when it has not
+/// answered. The 0 is the level an empty slider would have drawn, so a control
+/// that loses its backend mid-gesture settles at "nothing" rather than at a
+/// stale or arbitrary value.
 pub fn subLevelOrZero(sub: Sub) u8 {
     return subLevel(sub) orelse 0;
-}
-
-fn levelOf(idx: usize) u8 {
-    return subLevelOrZero(subs[idx]);
 }
 
 /// Preview the value optimistically and run it through the control's own
@@ -506,7 +495,7 @@ fn onPollWakeupFor(idx: usize) void {
     // Sweep an owed scroll/drag commit whose throttle window has elapsed
     // (the read cadence below stays gated: this wake exists purely to land
     // the newest value the backend hasn't seen yet).
-    g_throttle[idx].flushOwed(levelOf(idx));
+    g_throttle[idx].flushOwed(subLevelOrZero(subs[idx]));
     const inst = &g_inst[idx];
     if (nowMs() < inst.next_read_ms) return;
     inst.next_read_ms = nowMs() + subs[idx].read_interval_ms;
@@ -520,7 +509,7 @@ fn consumeRedrawRequestFor(idx: usize) bool {
 }
 
 fn naturalWidthFor(idx: usize) u16 {
-    if (!present(idx)) return 0;
+    if (!subPresent(subs[idx])) return 0;
     return reservedWidth(idx);
 }
 
@@ -560,7 +549,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     }
     // Absent backend: nothing to show (a zero-width slot, unclickable, never
     // polled past arm); naturalWidth reports 0, so the layout leaves no gap.
-    if (!present(idx)) return contract.Painted.nothing(x);
+    if (!subPresent(subs[idx])) return contract.Painted.nothing(x);
     // While scrubbed the control is a loading bar; the label resumes on the
     // drag-end redraw.
     if (g_drag[idx]) {
@@ -568,7 +557,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
         // reserved width -- reporting it is a no-op against the measured label
         // width it replaces, which is exactly the intent: the label width must
         // survive the scrub so the drag-end redraw re-renders it in place.
-        return contract.Painted.span(x, drawDragBar(dc, x, reservedWidth(idx), levelOf(idx)));
+        return contract.Painted.span(x, drawDragBar(dc, x, reservedWidth(idx), subLevelOrZero(subs[idx])));
     }
     const label = sub.label(dc.config, &inst.scratch);
     const end_x = try drawing.drawPaddedSegmentValue(dc.dc, dc.config, dc.height, x, sub.name, label.text, label.value_start, label.value_len, dc.config.segmentProps(sub.name));
@@ -591,7 +580,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
 fn onClickFor(idx: usize, ctx: *const contract.ClickCtx) bool {
     const sub = subs[idx];
     if (!ctx.is_left and !ctx.is_right) return false;
-    if (!present(idx)) return false;
+    if (!subPresent(subs[idx])) return false;
     // Bound by the SAME width the row reserved, not by the last painted width:
     // a press that arrives before the first draw still maps to a level instead
     // of being dropped.
@@ -616,9 +605,9 @@ fn onClickFor(idx: usize, ctx: *const contract.ClickCtx) bool {
 fn onScrollFor(idx: usize, dir: i8, redraw: *const fn () void) bool {
     const sub = subs[idx];
     if (!g_armed[idx]) return false;
-    if (!present(idx)) return false;
+    if (!subPresent(subs[idx])) return false;
     if (!sub.writable()) return false;
-    const base: u16 = levelOf(idx);
+    const base: u16 = subLevelOrZero(subs[idx]);
     const new_u: u16 = if (dir > 0)
         @min(base + scroll_step, 100)
     else
@@ -627,7 +616,7 @@ fn onScrollFor(idx: usize, dir: i8, redraw: *const fn () void) bool {
     // Boundary: the clamped target equals the current level, so this wheel
     // step changes nothing. Claim it and return without writing or repainting
     // scrolling at 0/100 % is a true no-op, never backend traffic.
-    if (pct == levelOf(idx)) return true;
+    if (pct == subLevelOrZero(subs[idx])) return true;
     // Optimistic display + throttled commit: the label follows immediately
     // while the backend write is coalesced (commitPreview) and the value is
     // reconciled on the read cadence.
@@ -656,7 +645,7 @@ fn onDragMotionFor(idx: usize, offset: u16, redraw: *const fn () void) bool {
 /// Scrub end (button-1 release): force-land any owed commit, re-read the
 /// control so its label shows the truth, and repaint back to text mode.
 fn onDragEndFor(idx: usize, redraw: *const fn () void) void {
-    g_throttle[idx].finish(levelOf(idx));
+    g_throttle[idx].finish(subLevelOrZero(subs[idx]));
     if (g_drag[idx]) {
         g_drag[idx] = false;
         _ = subs[idx].read();
