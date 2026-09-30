@@ -193,7 +193,10 @@ fn focusFallback(m: *model_mod.Model, reason: focus.Reason) focus.FocusTransitio
 /// inside its own server grab.
 fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: focus.Reason) focus.FocusTransition {
     const prep = focus.prepareFocus(win, reason);
-    if (prep != .none) model_mod.setFocus(m, win);
+    // `yieldsModelFocus`, not `!= .none`: `.no_input` is a refusal, not a
+    // dedup, so the old test let a no_input window take model focus and
+    // contradicted the rule written directly above this function.
+    if (focus.yieldsModelFocus(prep)) model_mod.setFocus(m, win);
     return prep;
 }
 

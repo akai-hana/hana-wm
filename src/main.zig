@@ -90,7 +90,6 @@ pub fn main(init: std.process.Init) !void {
     // first or Xft.dpi would never be read.
     try atoms.initAtomCache(x.conn);
 
-    input.setup(x.conn, x.screen);
     try input.initXkb(x.conn);
     defer input.deinitXkb();
 
@@ -116,6 +115,14 @@ pub fn main(init: std.process.Init) !void {
     // core.init() takes ownership of config_ptr; must run before any
     // core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, config_ptr, dpi);
+
+    // Mouse grabs and the cursor theme both read the live config (the bind
+    // table and the theme name), so this cannot run until core.init above has
+    // published the state -- it used to sit next to the X connect, 20 lines
+    // BEFORE core.init, where events.grabMouseButtons() called getState() and
+    // aborted the boot with "core: getState() called before init()". It is here
+    // so the input layer's own order still reads setup-then-buildKeybinds.
+    input.setup(x.conn, x.screen);
 
     // Build the key dispatch map now that both the live config and the XKB
     // state exist. Owned by the input layer (see input/keybind.zig); rebuilt
