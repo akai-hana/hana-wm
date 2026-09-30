@@ -112,14 +112,14 @@ fn readRawValue(base: []const u8, class: Class, dev: []const u8) ?u32 {
 /// Maps a raw level onto the 0-100 scale; null when the device is unusable
 /// (max unknown or zero). The linear map itself is the shared
 /// `slider.pctFromRaw` (nearest-rounding).
-fn pctFromRaw(raw: u32, max: u32) ?u8 {
+pub fn pctFromRaw(raw: u32, max: u32) ?u8 {
     if (max == 0) return null;
     return slider.pctFromRaw(u32, raw, 0, max);
 }
 
 /// Maps a 0-100 percent onto the device's raw scale (the shared
 /// `slider.rawFromPct`, nearest-rounding).
-fn rawFromPct(pct: u8, max: u32) u32 {
+pub fn rawFromPct(pct: u8, max: u32) u32 {
     return slider.rawFromPct(u32, pct, 0, max);
 }
 
@@ -383,7 +383,20 @@ fn cacheConfigPin(config: types.BarConfig) void {
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-fn label(config: types.BarConfig, buf: []u8) slider.Label {
+/// Test-only seam: the display state `label` reads (`g_pct`) is module-private,
+/// and the inline tests that used to live in this file had direct access to it.
+/// They are dead for good reason, not just unused: this harness runs tests from
+/// the test ROOT, so an inline test in an imported module is never even
+/// ANALYZED. The two `label` tests below were still calling the pre-26.8
+/// by-pointer signature, so they could not have compiled had they run. They now
+/// live in `src/test/bar/brightness_test.zig` and need this to set their state.
+/// A plain `pub` on the global would export mutable global state to every
+/// importer; this scopes the write to an obviously test-shaped name.
+pub fn setDisplayForTest(pct: u8) void {
+    g_pct = pct;
+}
+
+pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
     cacheConfigPin(config);
     return renderDisplay(config, g_pct, buf);
 }
@@ -413,44 +426,3 @@ pub const sub: slider.Sub = .{
     .label = label,
     .probeNaturalWidth = 44,
 };
-
-// Tests exercise the pure, sysfs-free geometry, scaling, and formatting
-// helpers. The file-backed read/write round trips live in the dedicated
-// brightness_test module, which fabricates a sysfs tree in a temp dir.
-const testing = std.testing;
-
-test "pctFromRaw maps raw onto the 0-100 scale" {
-    try testing.expectEqual(@as(?u8, 75), pctFromRaw(49151, 65535));
-    try testing.expectEqual(@as(?u8, 0), pctFromRaw(0, 100));
-    try testing.expectEqual(@as(?u8, 100), pctFromRaw(100, 100));
-    try testing.expectEqual(@as(?u8, null), pctFromRaw(50, 0));
-}
-
-test "rawFromPct maps percent back onto the raw scale" {
-    try testing.expectEqual(@as(u32, 65535), rawFromPct(100, 65535));
-    try testing.expectEqual(@as(u32, 0), rawFromPct(0, 65535));
-    try testing.expectEqual(@as(u32, 32768), rawFromPct(50, 65535));
-    try testing.expectEqual(@as(u32, 15), rawFromPct(100, 15));
-    try testing.expectEqual(@as(u32, 0), rawFromPct(1, 15));
-}
-
-test "rawFromPct round-trips through pctFromRaw" {
-    try testing.expectEqual(@as(?u8, 50), pctFromRaw(rawFromPct(50, 255), 255));
-    try testing.expectEqual(@as(?u8, 24), pctFromRaw(rawFromPct(24, 1000), 1000));
-}
-
-test "label honors configuration" {
-    var cfg = types.BarConfig{};
-    cfg.brightness_format = "Level {pct}";
-    var buf: [128]u8 = undefined;
-    g_pct = 42;
-    try testing.expectEqualStrings("Level 42", label(&cfg, &buf).text);
-    try testing.expectEqualStrings("42", label(&cfg, &buf).value.?);
-}
-
-test "label default format" {
-    var buf: [128]u8 = undefined;
-    g_pct = 33;
-    try testing.expectEqualStrings("BRT 33%", label(&(types.BarConfig{}), &buf).text);
-    try testing.expectEqualStrings("33%", label(&(types.BarConfig{}), &buf).value.?);
-}

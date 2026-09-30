@@ -40,7 +40,7 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-const PA_VOLUME_NORM: u32 = 0x10000;
+pub const PA_VOLUME_NORM: u32 = 0x10000;
 const PA_INVALID_INDEX: u32 = 0xFFFFFFFF;
 
 const PA_STATE_READY = 4;
@@ -52,11 +52,11 @@ const PA_STATE_TERMINATED = 6;
 ///   9 bytes), channel_map @33 (u8 + u8[32] = 33 bytes), owner_module u32
 ///   @68, volume pa_cvolume @72 { u8 channels; u32 values[32] } (132 bytes),
 ///   muted int @140, and then the tail that later versions extend.
-const sink_info_index: usize = 8;
+pub const sink_info_index: usize = 8;
 const sink_info_volume: usize = 72;
-const sink_info_channel_bytes: usize = sink_info_volume;
+pub const sink_info_channel_bytes: usize = sink_info_volume;
 const sink_info_volume_values: usize = sink_info_volume + 4;
-const sink_info_muted: usize = 140;
+pub const sink_info_muted: usize = 140;
 
 /// `default_sink_name` in `pa_server_info`: offset 40 pre-16.0, 48 in 16.0+.
 const server_default_sink_offsets = [_]usize{ 48, 40 };
@@ -174,7 +174,7 @@ fn writeLE(comptime T: type, b: []u8, off: usize, v: T) void {
 
 /// A sink name must start with a letter or underscore and contain only
 /// printable ASCII (checked up to a sane limit).
-fn plausibleSinkName(name: []const u8) bool {
+pub fn plausibleSinkName(name: []const u8) bool {
     if (name.len == 0 or name.len > 128) return false;
     const first = name[0];
     if (!((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_')) return false;
@@ -186,7 +186,7 @@ fn plausibleSinkName(name: []const u8) bool {
 
 /// Extracts `default_sink_name` from raw `pa_server_info` bytes, trying the
 /// pre-16.0 offset (40) and the 16.0+ offset (48).
-fn readDefaultSink(info: []const u8) ?[]const u8 {
+pub fn readDefaultSink(info: []const u8) ?[]const u8 {
     for (server_default_sink_offsets) |off| {
         if (off + @sizeOf(usize) > info.len) continue;
         const ptr_val = readLE(usize, info, off);
@@ -200,7 +200,7 @@ fn readDefaultSink(info: []const u8) ?[]const u8 {
 }
 
 /// Parses a raw `pa_sink_info` snapshot into index/channels/muted.
-fn parseSinkInfo(buf: []const u8) ?struct { index: u32, channels: u8, muted: bool } {
+pub fn parseSinkInfo(buf: []const u8) ?struct { index: u32, channels: u8, muted: bool } {
     if (buf.len < sink_info_muted + 4) return null;
     const index = readLE(u32, buf, sink_info_index);
     if (index == PA_INVALID_INDEX) return null;
@@ -211,7 +211,7 @@ fn parseSinkInfo(buf: []const u8) ?struct { index: u32, channels: u8, muted: boo
 }
 
 /// Percentage from the sink's volume snapshot (`pvol` = volume bytes).
-fn volumePct(pvol: []const u8, channels: u8) ?u8 {
+pub fn volumePct(pvol: []const u8, channels: u8) ?u8 {
     const n: usize = if (channels > 32) 32 else @as(usize, channels);
     if (n == 0 or pvol.len < 4 + n * 4) return null;
     var sum: u64 = 0;
@@ -231,7 +231,7 @@ fn volumePct(pvol: []const u8, channels: u8) ?u8 {
 /// into `out` (needs >= 4 + channels*4 bytes). Uses the shared percent<->raw
 /// map, so it agrees with `volumePct` and with `pa_sw_volume_from_percentage`
 /// to the nearest step.
-fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
+pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
     const n: usize = if (channels > 32) 32 else @as(usize, channels);
     if (n == 0) return false;
     if (out.len < 4 + n * 4) return false;
@@ -492,92 +492,3 @@ pub const Backend = struct {
         return .{ .pct = g_sink.pct, .muted = g_sink.muted };
     }
 };
-
-// Tests (pure byte-buffer + mapping logic; no libpulse, no daemon)
-
-const testing = std.testing;
-
-test "buildCvolume builds a channels+values pa_cvolume" {
-    var buf: [132]u8 = undefined;
-    try testing.expect(buildCvolume(50, 2, &buf));
-    try testing.expectEqual(@as(u8, 2), buf[0]);
-    try testing.expectEqual(@as(u32, 32768), std.mem.readInt(u32, buf[4..8], .little));
-    try testing.expectEqual(@as(u32, 32768), std.mem.readInt(u32, buf[8..12], .little));
-    try testing.expect(buildCvolume(0, 1, &buf));
-    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, buf[4..8], .little));
-    try testing.expect(buildCvolume(100, 1, &buf));
-    try testing.expectEqual(PA_VOLUME_NORM, std.mem.readInt(u32, buf[4..8], .little));
-}
-
-test "buildCvolume clamps percent and rejects bad channel counts" {
-    var buf: [132]u8 = undefined;
-    try testing.expect(buildCvolume(150, 2, &buf));
-    try testing.expectEqual(PA_VOLUME_NORM, std.mem.readInt(u32, buf[4..8], .little));
-    try testing.expect(!buildCvolume(50, 0, &buf));
-    try testing.expect(!buildCvolume(50, 64, buf[0..4]));
-}
-
-test "volumePct averages channels onto the 0-100 scale" {
-    var buf: [132]u8 = undefined;
-    try testing.expect(buildCvolume(50, 1, &buf));
-    try testing.expectEqual(@as(?u8, 50), volumePct(buf[0..132], 1));
-    // Stereo average: left 100%, right 0%.
-    std.mem.writeInt(u32, buf[4..8], PA_VOLUME_NORM, .little);
-    std.mem.writeInt(u32, buf[8..12], 0, .little);
-    try testing.expectEqual(@as(?u8, 50), volumePct(buf[0..132], 2));
-}
-
-test "parseSinkInfo extracts index/channels/muted at the pinned offsets" {
-    var buf: [sink_info_muted + 8]u8 = undefined;
-    @memset(&buf, 0);
-    std.mem.writeInt(u32, buf[sink_info_index..][0..4], 42, .little);
-    buf[sink_info_channel_bytes] = 2;
-    std.mem.writeInt(i32, buf[sink_info_muted..][0..4], 1, .little);
-    const snap = parseSinkInfo(&buf) orelse return error.NoSnap;
-    try testing.expectEqual(@as(u32, 42), snap.index);
-    try testing.expectEqual(@as(u8, 2), snap.channels);
-    try testing.expect(snap.muted);
-
-    std.mem.writeInt(i32, buf[sink_info_muted..][0..4], 0, .little);
-    try testing.expectEqual(false, parseSinkInfo(&buf).?.muted);
-}
-
-test "parseSinkInfo rejects invalid or short thumbnails" {
-    var buf: [sink_info_muted + 8]u8 = undefined;
-    @memset(&buf, 0); // index 0 == PA_INVALID clamps to invalid
-    try testing.expect(parseSinkInfo(&buf) == null);
-
-    var short: [40]u8 = undefined;
-    @memset(&short, 0);
-    try testing.expect(parseSinkInfo(&short) == null);
-}
-
-test "readDefaultSink tries both version offsets" {
-    const name = "alsa_output.pci-0000_00_1f.3.analog-stereo";
-    var info: [256]u8 = undefined;
-    @memset(&info, 0);
-    const name_off = 200;
-    @memcpy(info[name_off .. name_off + name.len], name);
-    const ptr_val: usize = @intFromPtr(&info) + name_off;
-
-    // 16.0+ layout: default_sink_name at 48.
-    std.mem.writeInt(usize, info[48..56], ptr_val, .little);
-    try testing.expectEqualStrings(name, readDefaultSink(&info).?);
-
-    // Pre-16.0 layout: fall back to offset 40.
-    std.mem.writeInt(usize, info[40..48], ptr_val, .little);
-    std.mem.writeInt(usize, info[48..56], 0, .little);
-    try testing.expectEqualStrings(name, readDefaultSink(&info).?);
-
-    // Neither: null.
-    std.mem.writeInt(usize, info[40..48], 0, .little);
-    try testing.expect(readDefaultSink(&info) == null);
-}
-
-test "plausibleSinkName accepts real names and rejects garbage" {
-    try testing.expect(plausibleSinkName("alsa_output.pci-0000_00_1f.3.analog-stereo"));
-    try testing.expect(plausibleSinkName("_default"));
-    try testing.expect(!plausibleSinkName(""));
-    try testing.expect(!plausibleSinkName("\x01control"));
-    try testing.expect(!plausibleSinkName("...dots"));
-}

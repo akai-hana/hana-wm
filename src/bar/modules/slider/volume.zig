@@ -196,7 +196,7 @@ const pactl_mute_cmd = "pactl get-sink-mute @DEFAULT_SINK@";
 const amixer_vol_cmd = "amixer get Master";
 
 /// First `N%` in `out`, scanning the digits back from the `%`; 0-100.
-fn parsePercent(out: []const u8) ?u8 {
+pub fn parsePercent(out: []const u8) ?u8 {
     for (out, 0..) |ch, i| {
         if (ch != '%') continue;
         var j = i;
@@ -462,7 +462,21 @@ fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) slider.Label {
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-fn label(config: types.BarConfig, buf: []u8) slider.Label {
+/// Test-only seam: the display state `label` reads (`g_pct`, `g_muted`) is
+/// module-private, and the inline tests that used to live in this file had
+/// direct access to it. They are dead for good reason, not just unused: this
+/// harness runs tests from the test ROOT, so an inline test in an imported
+/// module is never even ANALYZED. The two `label` tests below were still calling
+/// the pre-26.8 by-pointer signature, so they could not have compiled had they
+/// run. They now live in `src/test/bar/volume_test.zig` and need this to set
+/// their state. A plain `pub` on the globals would export mutable global state to
+/// every importer; this scopes the write to an obviously test-shaped name.
+pub fn setDisplayForTest(pct: u8, muted: bool) void {
+    g_pct = pct;
+    g_muted = muted;
+}
+
+pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
     return renderDisplay(config, g_muted, buf);
 }
 
@@ -514,40 +528,3 @@ pub const sub: slider.Sub = .{
     .secondary = toggleMute,
     .probeNaturalWidth = 56,
 };
-
-// Tests exercise the pure, subprocess-free parsing and formatting helpers.
-const testing = std.testing;
-
-test "parsePercent extracts first N%" {
-    try testing.expectEqual(@as(?u8, 42), parsePercent("Volume: 123456 / 42% / 6,56 dB"));
-    try testing.expectEqual(@as(?u8, 100), parsePercent("Mono: Playback 65536 [100%] [on]"));
-    try testing.expectEqual(@as(?u8, 7), parsePercent("vol 7%"));
-    try testing.expectEqual(@as(?u8, null), parsePercent("no percent here"));
-    try testing.expectEqual(@as(?u8, null), parsePercent(""));
-}
-
-test "label honors configuration" {
-    var cfg = types.BarConfig{};
-    cfg.volume_format = "Level {pct}";
-    cfg.volume_muted_format = "Silenced {state}";
-    var buf: [128]u8 = undefined;
-    g_pct = 42;
-    g_muted = false;
-    try testing.expectEqualStrings("Level 42", label(&cfg, &buf).text);
-    try testing.expectEqualStrings("42", label(&cfg, &buf).value.?);
-    g_muted = true;
-    try testing.expectEqualStrings("Silenced mute", label(&cfg, &buf).text);
-    try testing.expect(label(&cfg, &buf).value == null);
-    g_muted = false;
-}
-
-test "label default formats" {
-    var buf: [128]u8 = undefined;
-    g_pct = 33;
-    g_muted = false;
-    try testing.expectEqualStrings("VOL 33%", label(&(types.BarConfig{}), &buf).text);
-    try testing.expectEqualStrings("33%", label(&(types.BarConfig{}), &buf).value.?);
-    g_muted = true;
-    try testing.expectEqualStrings("MUTE", label(&(types.BarConfig{}), &buf).text);
-    g_muted = false;
-}
