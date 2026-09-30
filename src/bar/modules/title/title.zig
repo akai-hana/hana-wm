@@ -189,7 +189,7 @@ fn drawMarqueeCell(
     text_w: u16,
     fg: u32,
     now: i64,
-) !void {
+) void {
     if (scroller) |s| {
         const scroll = advanceScroll(
             s,
@@ -206,7 +206,7 @@ fn drawMarqueeCell(
             // Anchor the scroll at the padded text start (same spot static mode uses),
             // so enabling the carousel continues seamlessly from where the head sat.
             const x0: f64 = @as(f64, @floatFromInt(sg.text_x)) - scroll.off;
-            try ctx.dc.drawTextScrolled(
+            ctx.dc.drawTextScrolled(
                 sg.seg_x,
                 sg.seg_w,
                 baseline_y,
@@ -217,7 +217,7 @@ fn drawMarqueeCell(
             return;
         }
     }
-    try ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, txt, sg.avail_w, fg);
+    ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, txt, sg.avail_w, fg);
 }
 
 /// Accent colour for a title segment: focused wins, then minimized, then the
@@ -266,11 +266,11 @@ fn drawFittedTitle(
         if (scroll_enabled) {
             if (scroller) |s| _ = advanceScroll(s, window, title, text_w, sg.avail_w, false, 0, now);
         }
-        try ctx.dc.drawText(sg.text_x, baseline_y, title, text_fg);
+        ctx.dc.drawText(sg.text_x, baseline_y, title, text_fg);
     } else if (scroll_enabled)
-        try drawMarqueeCell(ctx, baseline_y, sg, window, title, text_w, text_fg, now)
+        drawMarqueeCell(ctx, baseline_y, sg, window, title, text_w, text_fg, now)
     else
-        try ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, title, sg.avail_w, text_fg);
+        ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, title, sg.avail_w, text_fg);
 }
 
 /// Renders one title segment per window in a horizontal split-view layout.
@@ -331,11 +331,16 @@ fn drawSegmentedTitles(
 /// pivot would advance `last_frame_ms` across it and teleport the marquee.
 var overlay_was_active: bool = false;
 
-fn drawHook(ctx: *anyopaque, x: u16) !u16 {
+fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
     const c = segmod.castDraw(ctx);
     if (overlay) |o| if (o.is_active()) {
         overlay_was_active = true;
-        return o.draw(ctx, x);
+        // The overlay returns advanced x, not a width report: it covers the
+        // whole slot, so the span is the reserved width by construction. The
+        // title declares no `onPainted` at all -- its reservation is
+        // `title_min_width`, fixed by construction and never a function of
+        // what painted -- so nothing is forwarded on the title's behalf.
+        return contract.Painted.span(x, try o.draw(ctx, x));
     };
     // Overlay just closed after at least one overlay frame: pivot the
     // scroller's elapsed-time base so motion continues from the last shown
@@ -344,7 +349,7 @@ fn drawHook(ctx: *anyopaque, x: u16) !u16 {
         overlay_was_active = false;
         if (scroller) |s| s.pivot();
     }
-    return renderTitle(c, x);
+    return contract.Painted.span(x, try renderTitle(c, x));
 }
 
 fn onClickHook(ctx: *const contract.ClickCtx) bool {

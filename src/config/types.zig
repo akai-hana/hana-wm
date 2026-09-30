@@ -57,6 +57,7 @@ pub const section_tiling_layouts_master_stack = "tiling.layouts.master-stack";
 pub const section_binds = "binds";
 pub const section_binds_alt = "Keybindings";
 pub const section_drag = "drag";
+pub const section_display = "display";
 pub const section_fullscreen = "fullscreen";
 pub const section_workspaces = "workspaces";
 pub const section_bar_modules_workspaces = "bar.modules.workspaces";
@@ -468,7 +469,7 @@ pub const BarLayout = struct {
 /// Type-level defaults for optional string fields in BarConfig.
 /// When a field is `null`, the corresponding default is used at read time.
 pub const default_clock_format: []const u8 = "%Y-%m-%d %H:%M:%S";
-pub const default_drun_prompt: []const u8 = "run: ";
+pub const default_run_prompt: []const u8 = "run: ";
 pub const default_indicator_focused: []const u8 = "■";
 pub const default_indicator_unfocused: []const u8 = "□";
 
@@ -539,7 +540,7 @@ const bar_owned_str_fields = [_][]const u8{
     "brightness_device",
     "brightness_format",
     "clock_format",
-    "drun_prompt",
+    "run_prompt",
     "indicator_focused",
     "indicator_unfocused",
     "volume_format",
@@ -599,7 +600,7 @@ pub const BarConfig = struct {
     // Palette canon (the former `accent_color` renamed primary). Declared in
     // the theme's palette section; the other three exist so the palette is
     // first-class config even though rendering consumes them through the
-    // title/drun chains below.
+    // title/run chains below.
     primary_color: Color = default_accent,
     secondary_color: Color = default_accent,
     alternative_color: Color = default_accent,
@@ -648,11 +649,11 @@ pub const BarConfig = struct {
     /// Marquee scroll speed in pixels per second.
     carousel_speed_px_s: u16 = 125,
 
-    // drun segment colors and prompt; all nullable, falling back to bar-wide defaults.
-    drun_bg: ?Color = null, // Background; falls back to bg
-    drun_fg: ?Color = null, // Typed text color; falls back to fg
-    drun_prompt_color: ?Color = null, // Prompt text color; falls back to primary_color
-    drun_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
+    // run segment colors and prompt; all nullable, falling back to bar-wide defaults.
+    run_bg: ?Color = null, // Background; falls back to bg
+    run_fg: ?Color = null, // Typed text color; falls back to fg
+    run_prompt_color: ?Color = null, // Prompt text color; falls back to primary_color
+    run_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
 
     /// Per-segment text-color overrides, keyed by bar segment registry name
     /// ("cpu", "ram", "volume", "brightness", ...). Populated from
@@ -696,14 +697,14 @@ pub const BarConfig = struct {
         }
     }
 
-    pub inline fn drunBg(self: *const BarConfig) Color {
-        return self.drun_bg orelse self.bg;
+    pub inline fn runBg(self: *const BarConfig) Color {
+        return self.run_bg orelse self.bg;
     }
-    pub inline fn drunFg(self: *const BarConfig) Color {
-        return self.drun_fg orelse self.fg;
+    pub inline fn runFg(self: *const BarConfig) Color {
+        return self.run_fg orelse self.fg;
     }
-    pub inline fn drunPromptColor(self: *const BarConfig) Color {
-        return self.drun_prompt_color orelse self.primary_color;
+    pub inline fn runPromptColor(self: *const BarConfig) Color {
+        return self.run_prompt_color orelse self.primary_color;
     }
 
     /// Text color for bar segment `name`: its [bar.properties] override, or
@@ -855,6 +856,17 @@ pub const Config = struct {
     /// How close (in px or %) a window edge must be to a monitor/bar boundary
     /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
     snap_distance: ScalableValue = ScalableValue.absolute(8.0),
+
+    /// Overrides detected display DPI. null = detect (Xft.dpi, then geometry).
+    ///
+    /// An override exists because detection is a heuristic: a headless or
+    /// nested-X server can report a screen size in millimetres that is a
+    /// guess, and a HiDPI panel whose physical size the compositor has not
+    /// told X about yields a DPI that is simply wrong. Both produce a bar
+    /// whose text is the wrong size, with nothing in the config to correct it
+    /// by. The value is validated for reasonableness on load, exactly like a
+    /// detected one, so a typo cannot buy a font the size of a billboard.
+    dpi: ?f32 = null,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(allocator);

@@ -86,8 +86,7 @@ test "at-capacity cache drops new entries but keeps overwrites" {
     }
     // The ceiling+1st NEW window is dropped: no entry materializes.
     wincache.cacheSizeHints(max, .{ .min_width = 999 });
-    if (wincache.getOpt()) |c|
-        try testing.expectEqual(max, c.count());
+    try testing.expectEqual(max, wincache.cachedWindowCount());
     try testing.expectEqual(wincache.SizeHints{}, wincache.peekHints(max));
 
     // Overwrites of an already-cached window remain exempt from the ceiling.

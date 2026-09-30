@@ -61,12 +61,13 @@ test "F10: save/load keeps every window record and workspace field" {
     var src = helpers.makeModel();
     try buildFixtureModel(&src);
 
-    const path = try scratch.scratchPath(testing.allocator, "hana-persist-", "roundtrip");
-    defer testing.allocator.free(path);
-    try persist.save(testing.allocator, &src, path);
-    defer scratch.cleanupScratch(path);
+    // (28.5) per-test tmpDir; TmpFile.cleanup removes the file with its dir.
+    var f = try scratch.TmpFile.init("roundtrip.hana-state");
+    defer f.deinit();
+    try f.write("");
+    try persist.save(testing.allocator, &src, f.path());
 
-    try testing.expect(persist.loadToGlobal(page_alloc, path));
+    try testing.expect(persist.loadToGlobal(page_alloc, f.path()));
 
     const recorded = persist.loaded().?;
     // loadToGlobal's own version gate already rejected the wrong-version file;
@@ -105,35 +106,36 @@ test "F10: save/load keeps every window record and workspace field" {
 }
 
 test "F10: loadToGlobal rejects a corrupt file and a bad version" {
-    const bad = try scratch.scratchPath(testing.allocator, "hana-persist-", "corrupt");
-    defer testing.allocator.free(bad);
-    try scratch.writeScratchFile(bad, "not json at all");
-    defer scratch.cleanupScratch(bad);
+    // (28.5) each file gets its own tmpDir.
+    var bad = try scratch.TmpFile.init("corrupt");
+    defer bad.deinit();
+    try bad.write("not json at all");
 
-    try testing.expect(!persist.loadToGlobal(page_alloc, bad));
+    try testing.expect(!persist.loadToGlobal(page_alloc, bad.path()));
 
-    const wrong_version = try scratch.scratchPath(testing.allocator, "hana-persist-", "wrongver");
-    defer testing.allocator.free(wrong_version);
-    try scratch.writeScratchFile(wrong_version, "{ \"version\": 9999, \"current\": 0, \"windows\": [] }");
-    defer scratch.cleanupScratch(wrong_version);
+    var wrong_version = try scratch.TmpFile.init("wrong_version");
+    defer wrong_version.deinit();
+    try wrong_version.write("{ \"version\": 9999, \"current\": 0, \"windows\": [] }");
 
-    try testing.expect(!persist.loadToGlobal(page_alloc, wrong_version));
+    try testing.expect(!persist.loadToGlobal(page_alloc, wrong_version.path()));
 
-    // A missing path is not an error, just a clean "nothing to restore".
-    const missing = try scratch.scratchPath(testing.allocator, "hana-persist-", "missing");
-    defer testing.allocator.free(missing);
-    try testing.expect(!persist.loadToGlobal(page_alloc, missing));
+    // A missing path is not an error, just a clean "nothing to restore". The
+    // path sits inside a real (merely unwritten) temp dir, so "missing" is
+    // exercised as an absent FILE rather than an absent directory.
+    var missing = try scratch.TmpFile.init("missing");
+    defer missing.deinit();
+
+    try testing.expect(!persist.loadToGlobal(page_alloc, missing.path()));
 }
 
 test "F10: applyModelLevel restores focus, ws state and every membership" {
     var src = helpers.makeModel();
     try buildFixtureModel(&src);
 
-    const path = try scratch.scratchPath(testing.allocator, "hana-persist-", "apply");
-    defer testing.allocator.free(path);
-    try persist.save(testing.allocator, &src, path);
-    defer scratch.cleanupScratch(path);
-    try testing.expect(persist.loadToGlobal(page_alloc, path));
+    var f = try scratch.TmpFile.init("apply"); // (28.5)
+    defer f.deinit();
+    try persist.save(testing.allocator, &src, f.path());
+    try testing.expect(persist.loadToGlobal(page_alloc, f.path()));
 
     // The re-exec'd process redisovers its old windows and registers them
     // before the persisted model level is applied back.
@@ -219,4 +221,57 @@ test "ext header: a legacy ordinal-stamped blob still resolves" {
     try testing.expect(persist.extLegacyOrdinal(&modern) == null);
     try testing.expectEqualStrings("minimize", persist.extClaimantName(&modern).?);
     try testing.expectEqualSlices(u8, &[_]u8{0x5A}, persist.extPayload(&modern).?);
+}
+
+// (9.10) decodeExt is the one reader the restore path uses now, so it is pinned
+// as AGREEING with the three accessors it replaced -- the refactor's whole
+// claim is that it parses the same header, once, and cannot disagree with
+// itself the way three independent re-derivations can.
+
+test "decodeExt agrees with the accessors on a name-stamped blob" {
+    const name = "minimize";
+    const body = [_]u8{ 0x5A, 1, 2 };
+    const header_len = comptime persist.extHeaderLen(name.len);
+    var blob: [header_len + body.len]u8 = undefined;
+    blob[0] = persist.ext_format_version;
+    blob[1] = @as(u8, @intCast(name.len));
+    @memcpy(blob[2..header_len], name);
+    @memcpy(blob[header_len..], &body);
+
+    const h = persist.decodeExt(&blob);
+    try testing.expectEqualSlices(u8, persist.extPayload(&blob).?, h.payload);
+    try testing.expectEqualStrings(persist.extClaimantName(&blob).?, h.claimed_name.?);
+    try testing.expectEqual(persist.extLegacyOrdinal(&blob), h.legacy_ordinal);
+}
+
+test "decodeExt agrees with the accessors on a legacy ordinal blob" {
+    var blob: [3]u8 = undefined;
+    blob[0] = persist.ext_format_version_ordinal;
+    blob[1] = 2;
+    blob[2] = 0xAB;
+
+    const h = persist.decodeExt(&blob);
+    try testing.expectEqualSlices(u8, persist.extPayload(&blob).?, h.payload);
+    try testing.expectEqual(persist.extClaimantName(&blob), h.claimed_name);
+    try testing.expectEqual(persist.extLegacyOrdinal(&blob), h.legacy_ordinal);
+    try testing.expectEqual(@as(?usize, 2), h.legacy_ordinal);
+}
+
+test "decodeExt passes an unrecognized blob through whole" {
+    // A foreign/truncated header has no interpretation, so the payload must be
+    // the WHOLE blob -- this is the graceful degrade that lets an unclaimed or
+    // future-format blob still reach the module scan.
+    const future = [_]u8{ 99, 1, 2 };
+    const h = persist.decodeExt(&future);
+    try testing.expectEqualSlices(u8, &future, h.payload);
+    try testing.expectEqual(@as(?[]const u8, null), h.claimed_name);
+    try testing.expectEqual(@as(?usize, null), h.legacy_ordinal);
+
+    const lying = [_]u8{ persist.ext_format_version, 200, 'x' };
+    const h2 = persist.decodeExt(&lying);
+    try testing.expectEqualSlices(u8, &lying, h2.payload);
+    try testing.expectEqual(@as(?[]const u8, null), h2.claimed_name);
+
+    const empty = [_]u8{};
+    try testing.expectEqualSlices(u8, &empty, persist.decodeExt(&empty).payload);
 }

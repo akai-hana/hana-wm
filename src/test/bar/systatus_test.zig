@@ -6,6 +6,10 @@
 //! one would make the suite fail the moment a readout file is added or removed
 //! -- precisely the open-module churn this surface is designed to absorb.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: seg_systatus
+
 const std = @import("std");
 const systatus = @import("systatus");
 
@@ -131,4 +135,84 @@ test "parseCapacity trims, parses and range-checks" {
     try std.testing.expectEqual(@as(?u8, null), batt.parseCapacity("255\n"));
     try std.testing.expectEqual(@as(?u8, null), batt.parseCapacity(""));
     try std.testing.expectEqual(@as(?u8, null), batt.parseCapacity("abc\n"));
+}
+
+test "the bar's painted-width report drives the reservation (21.7)" {
+    // The reservation used to depend on each draw remembering to store its own
+    // width -- a silent omission that shows up as a segment locked onto its
+    // startup width, clipped by its right neighbours. The bar now owns the
+    // handoff, so this exercises it end to end: report a width, read the
+    // reservation back, and check the row now reserves what actually painted.
+    inline for (systatus.subs, 0..) |_, i| {
+        const seg = systatus.segmentFor(i);
+        const report = seg.onPainted orelse return error.TestUnexpectedResult;
+
+        // Nothing painted yet -> the fresh-bar reservation (0).
+        try std.testing.expectEqual(@as(u16, 0), seg.naturalWidth.?(undefined, 999));
+
+        report(57);
+        try std.testing.expectEqual(@as(u16, 57), seg.naturalWidth.?(undefined, 999));
+
+        // An absent readout reports 0, and the reservation collapses with it
+        // rather than staying pinned at the last painted width.
+        report(0);
+        try std.testing.expectEqual(@as(u16, 0), seg.naturalWidth.?(undefined, 999));
+
+        // Leaving the singleton dirty between readouts would leak one
+        // readout's width into the next one's reservation, so reset it.
+        report(0);
+    }
+}
+
+// (25.3) The pure half of a systatus segment. `refresh` used to do the
+// formatting, the value-span bookkeeping, the miss latching and the change
+// detection in one function over module globals, so none of it could be
+// tested. `render` is the formatting half, split out and now reachable.
+
+test "render lays out label, space and value, and reports the value span" {
+    var buf: [64]u8 = undefined;
+    const r = systatus.render("RAM", .{ .text = "42%" }, &buf);
+    try std.testing.expectEqualStrings("RAM 42%", r.text);
+    try std.testing.expectEqualStrings("42%", r.text[r.value_start..][0..r.value_len]);
+    // The span must start right after "RAM ".
+    try std.testing.expectEqual(@as(usize, 4), r.value_start);
+}
+
+test "render does not assume the value is a percentage" {
+    // (25.3) The point of the Sample: the core used to hardcode "{d}%", so a
+    // readout could only ever be a percentage.
+    var buf: [64]u8 = undefined;
+    for ([_][]const u8{ "2.4G", "up", "3 of 7", "", "\xc2\xb5F" }) |value| {
+        const r = systatus.render("DISK", .{ .text = value }, &buf);
+        var want: [64]u8 = undefined;
+        @memcpy(want[0.."DISK ".len], "DISK ");
+        @memcpy(want["DISK ".len..][0..value.len], value);
+        try std.testing.expectEqualStrings(want[0 .. "DISK ".len + value.len], r.text);
+        try std.testing.expectEqualStrings(value, r.text[r.value_start..][0..r.value_len]);
+    }
+}
+
+test "render never reports a span reaching past the text it returns" {
+    // Truncation must shorten the span. If it did not, the painter would
+    // colour bytes that are not in the buffer at all.
+    var buf: [10]u8 = undefined;
+    const r = systatus.render("LONG", .{ .text = "12345678" }, &buf);
+    try std.testing.expect(r.text.len <= buf.len);
+    try std.testing.expect(r.value_start + r.value_len <= r.text.len);
+}
+
+test "render handles an empty value as a zero-length span" {
+    // A readout that reports presence with no number still gets its label, and
+    // the span collapses so nothing is tinted.
+    var buf: [64]u8 = undefined;
+    const r = systatus.render("BAT", .{ .text = "" }, &buf);
+    try std.testing.expectEqualStrings("BAT ", r.text);
+    try std.testing.expectEqual(@as(usize, 0), r.value_len);
+}
+
+test "percentSample formats the percentage readout the existing modules use" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("42%", systatus.percentSample(&buf, 42).text);
+    try std.testing.expectEqualStrings("0%", systatus.percentSample(&buf, 0).text);
+    try std.testing.expectEqualStrings("100%", systatus.percentSample(&buf, 100).text);
 }

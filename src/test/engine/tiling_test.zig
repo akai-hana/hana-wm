@@ -4,6 +4,10 @@
 //! modules' formulas (modules/*.zig), so any drift fails loudly. Fixture:
 //! windows registered on workspace 0 via model.register.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling
+
 const std = @import("std");
 const testing = std.testing;
 

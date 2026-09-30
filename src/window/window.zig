@@ -787,8 +787,9 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
         // decides the outcome, because the payload's own magic bytes do that.
         // Anything unrecognised (a foreign version, a truncated header) is
         // passed through whole, exactly as an unstamped blob was.
-        const payload: []const u8 = persist.extPayload(stored) orelse stored;
-        if (persist.extClaimantName(stored)) |name| {
+        const header = persist.decodeExt(stored);
+        const payload: []const u8 = header.payload;
+        if (header.claimed_name) |name| {
             for (window_mods) |mod| {
                 if (!std.mem.eql(u8, mod.name, name)) continue;
                 if (mod.deserializeWindow) |f| {
@@ -796,7 +797,7 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
                 }
                 break; // named claimant found; the scan below is the fallback
             }
-        } else if (persist.extLegacyOrdinal(stored)) |ordinal| {
+        } else if (header.legacy_ordinal) |ordinal| {
             if (ordinal < window_mods.len) {
                 if (window_mods[ordinal].deserializeWindow) |f| {
                     if (f(win, payload, model)) return;

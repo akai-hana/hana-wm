@@ -4,6 +4,7 @@
 //! (configure requests update the model's floating rect).
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const core = @import("core");
 
@@ -119,6 +120,29 @@ const State = struct {
 };
 
 var g_state: State = .{};
+
+/// Re-arms the process-global drag state. (28.3)
+///
+/// The test fixture calls this for the same reason it calls minimize's and
+/// fullscreen's deinit/init: `g_state` is process-global state that a test can
+/// leave dirty, and unlike a model store there is no fresh-per-test value to
+/// paper over it. `startDrag` returns early while a drag is active, so a
+/// leaked drag does not merely report a stale `isDragging()` -- it makes every
+/// later startDrag a no-op.
+pub fn resetState() void {
+    g_state = .{};
+}
+
+/// Test-only seam: leaves a drag ACTIVE, standing in for a test that never
+/// reached its `stopDrag`. (28.3)
+///
+/// Needed because the real `startDrag` calls `core.getState()`, so the leak
+/// this item is about cannot be reproduced headlessly any other way. Guarded
+/// on `builtin.is_test` so production code cannot reach it.
+pub fn seedLeakedDragForTest(win: model.WindowId) void {
+    if (!builtin.is_test) @panic("floating.seedLeakedDragForTest is test-only");
+    g_state = .{ .drag = .{ .active = true, .window = win } };
+}
 
 /// Begins a move (button 1) or resize (button 3) drag on `win` at (x, y).
 /// No-op if a drag is already active, or for bar/fullscreen windows.

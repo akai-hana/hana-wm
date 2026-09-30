@@ -52,11 +52,25 @@ pub fn deinitXkb() void {
     xkb_state = null;
 }
 
-/// Returns a pointer to the module-owned XkbState, or null only at boot before
-/// initXkb has run and at shutdown after deinitXkb (there is no reload window;
-/// see events.zig's reload path). The pointer is invalidated by deinitXkb and
-/// must not be cached across it.
-pub fn getXkbState() ?*xkbcommon.XkbState {
+/// Returns a read-only view of the module-owned XkbState, or null only at boot
+/// before initXkb has run and at shutdown after deinitXkb (there is no reload
+/// window; see events.zig's reload path). The pointer is invalidated by
+/// deinitXkb and must not be cached across it.
+///
+/// Const, deliberately. Zig has no private fields, so a struct's fields are
+/// reachable by anyone holding a pointer to it -- which made the live
+/// keycode->keysym table and the reverse index a mutation surface: any module
+/// could overwrite a key's keysym or truncate the index, and the dispatch path
+/// would read the damage with no way to tell it from a real mapping. Handing
+/// out `*const` closes every field but one: `rebuild`, which this module calls
+/// through `getXkbStateMut` and which rebuilds both tables as a unit.
+pub fn getXkbState() ?*const xkbcommon.XkbState {
+    return if (xkb_state) |*s| s else null;
+}
+
+/// The one mutable handle on the XKB state, kept inside this module: the
+/// mapping-change path needs to replace the tables, and nothing else does.
+fn getXkbStateMut() ?*xkbcommon.XkbState {
     return if (xkb_state) |*s| s else null;
 }
 
@@ -104,15 +118,26 @@ pub fn deinitKeybinds() void {
 }
 
 /// Rebuilds the keymap/keysym table after the server changes the keyboard
-/// mapping (setxkbmap/xmodmap). Keybinding resolution is keysym-indexed, so
+/// mapping (setxkbmap/xmodmap). `keyboard` is the event's `request` field
+/// narrowed to MappingKeyboard; false for the modifier-map and pointer
+/// mapping events that arrive through the same type, which are ignored. Keybinding resolution is keysym-indexed, so
 /// rebuilding the flat keycode->keysym table keeps existing bindings working
 /// under the new layout. However, the per-binding keycodes the key grabs were
 /// made with were resolved against the old layout and go stale; re-resolve
 /// them from the rebuilt table and re-grab (ungrab existing, then grab new)
 /// so keybindings keep firing after the mapping change.
-pub fn handleMappingNotify() void {
+pub fn handleMappingNotify(keyboard: bool) void {
+    // Only a KEYBOARD mapping change can invalidate the keycode->keysym table
+    // and the key grabs resolved against it. The server also reports
+    // modifier-map and pointer-button remaps through this same event, and
+    // those are common (`xmodmap` touches both): rebuilding for them threw
+    // away working state and made the user pay a full ungrab/regrab storm
+    // over a change that cannot have affected any binding. The modifier map
+    // is not part of this table, and button remapping is the client's own
+    // business.
+    if (!keyboard) return;
     const cs = core.getState();
-    const state = getXkbState() orelse return;
+    const state = getXkbStateMut() orelse return;
     state.rebuild(cs.conn);
 
     // Re-resolve the compiled list from the new table, then atomically re-grab
@@ -121,6 +146,38 @@ pub fn handleMappingNotify() void {
     // reading a list resolved against the old keyboard.
     buildKeybinds(cs.config.keybindings.items);
     events.grabKeybindings();
+}
+
+/// The toggle-bar-position action: re-anchor the bar, then reconcile.
+///
+/// The reconcile lives here rather than in the bar's renderer (20.2). It takes
+/// the X grab and re-derives every window placement from the new usable area,
+/// which is a layout decision about the whole session, not something a
+/// rendering module should be reaching for on its own account. The order
+/// matters and is the reason this is one function: the bar publishes its new
+/// screen claim while it moves, and that claim has to be visible to core
+/// before the reconcile recomputes placements from it.
+fn toggleBarPosition() void {
+    surfaces.toggleBarSegmentAnchor();
+
+    // One token owns grab+ungrab+flush, so the early return below (and any
+    // future one) releases it without having to remember.
+    const grab = pipeline.grabScoped();
+    defer grab.deinit();
+    const current_ws = tracking.getCurrentWorkspace() orelse {
+        window.updateWorkspaceBorders();
+        window.markBordersFlushed();
+        return;
+    };
+    const forced_hidden = if (surfaces.barForcedHiddenByFullscreen) |f|
+        f(pipeline.model(), current_ws)
+    else
+        false;
+    const no_fullscreen = !forced_hidden;
+    if (no_fullscreen) grab.reconcileNow();
+    window.updateFloatingWindowBorders();
+    window.markBordersFlushed();
+    log.info("Bar position toggled to: {s}", .{@tagName(core.getState().config.bar.bar_position)});
 }
 
 // Grab setup
@@ -208,14 +265,14 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
         // level `.info`) compile them out of the hot path; folding them into
         // a summary keeps tracing available without per-key formatting+write.
         log.debug("[KEY] mods=0x{x} keysym=0x{x} action={s}", .{
-            mods, keysym, @tagName(action.*),
+            masks.toMask(mods), keysym, @tagName(action.*),
         });
         if (key_profile.enabled) key_profile.note(time.monotonicNs() - key_t0);
         executeAction(action);
-    } else if (mods != 0 or !masks.isModifierKeysym(keysym)) {
+    } else if (!mods.isEmpty() or !masks.isModifierKeysym(keysym)) {
         // Bare modifier press (Shift/Ctrl/Alt/Super/Hyper L/R) can never
         // match a binding; staying silent keeps logs free of keystroke noise.
-        log.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ mods, keysym });
+        log.debug("[KEY] mods=0x{x} keysym=0x{x} no binding", .{ masks.toMask(mods), keysym });
     }
 }
 
@@ -326,7 +383,7 @@ pub fn classifyMousePress(p: MousePress) MouseIntent {
 /// lookup, drag, and the unbound-Super replay fallback.
 fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) void {
     const cs = core.getState();
-    const mods = masks.normalizeModifiers(event.state);
+    const mods = masks.toMask(masks.normalizeModifiers(event.state));
 
     const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
     const target_managed = clicked_window != cs.root and managed_window != 0;
@@ -498,7 +555,7 @@ fn executeAction(action: *const types.Action) void {
         // no-op without a surface module, so guarding them with `has_bar`
         // repeated a decision the `surfaces` type already encodes.
         .toggle_bar_visibility => surfaces.setBarState(.toggle_bar_visibility),
-        .toggle_bar_position => surfaces.toggleBarSegmentAnchor(),
+        .toggle_bar_position => toggleBarPosition(),
         .toggle_prompt => surfaces.chromeToggleOverlay(),
 
         // Minimize: minimize, unminimize (LIFO/FIFO), and restore all.

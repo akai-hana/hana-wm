@@ -142,7 +142,7 @@ fn tickDeadlineMs() i32 {
 /// here on the main thread. Covers the reserved slot with the active mode's
 /// own probe so a region-scoped repaint (mode cycle) leaves no stale pixels
 /// from the previous wider view.
-fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
+fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(drawing.clockFormat(config), mode);
@@ -171,7 +171,16 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
                 2 * config.scaledSegmentPadding(height),
         );
     }
-    return drawing.drawPaddedSegment(dc, config, height, start_x, "clock", str, measureStringFor(mode), config.segmentProps("clock"));
+    return contract.Painted.span(start_x, try drawing.drawPaddedSegment(
+        dc,
+        config,
+        height,
+        start_x,
+        "clock",
+        str,
+        measureStringFor(mode),
+        config.segmentProps("clock"),
+    ));
 }
 
 /// Reserved row width: the current mode's slot (measured once per mode) once
@@ -248,6 +257,9 @@ pub const module = scaffold.module(
         .secondsElapsed = secondElapsed,
         .measureString = measureString,
         .natural_width = naturalWidthHook,
+        // The clock's reserved width is measured per mode, not observed from
+        // what painted -- see SlotMode.self_measured.
+        .mode = .self_measured,
         .invalidate = invalidateWidth,
         .invalidateReloadCaches = invalidateWidth,
     },

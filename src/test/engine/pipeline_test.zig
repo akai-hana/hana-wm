@@ -4,6 +4,10 @@
 //! logged placements, plus the covering (fullscreen) winner/park branches.
 //! Self-skips without a server so `zig build test` stays green headless.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling
+
 const std = @import("std");
 
 const core = @import("core");
@@ -26,7 +30,7 @@ fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
 }
 
 test "pipeline: reconcile tiles to engine placements and records LastSent" {
-    var fx = fixture.setUp("pipeline_test") orelse return;
+    var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -51,7 +55,7 @@ test "pipeline: reconcile tiles to engine placements and records LastSent" {
 }
 
 test "pipeline: fullscreen winner covers the screen and parks siblings" {
-    var fx = fixture.setUp("pipeline_test") orelse return;
+    var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
     const m = pipeline.model();
     const cs = core.getState();
@@ -75,7 +79,7 @@ test "pipeline: fullscreen winner covers the screen and parks siblings" {
 }
 
 test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
-    var fx = fixture.setUp("pipeline_test") orelse return;
+    var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -111,7 +115,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
 }
 
 test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2" {
-    var fx = fixture.setUp("pipeline_test") orelse return;
+    var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -156,7 +160,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
 // reporting screen dimensions -- even if the model still recorded a covering
 // occupant.
 test "pipeline: deferred bar waits for model truth and keeps per-window entries" {
-    var fx = fixture.setUp("pipeline_test") orelse return;
+    var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
     const cs = core.getState();
     const sw: u16 = @intCast(cs.screen.width_in_pixels);

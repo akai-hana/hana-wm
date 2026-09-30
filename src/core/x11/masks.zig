@@ -121,6 +121,48 @@ pub const EventMasks = struct {
 /// A mask operation, so it lives with the masks it filters: the input layer
 /// is the only caller and needed it from a general-purpose utility module
 /// before the module was dissolved.
-pub inline fn normalizeModifiers(state: u16) u16 {
-    return state & mod_mask_binding;
+/// The four modifiers a binding can be expressed in, as a 4-bit value.
+///
+/// `normalizeModifiers` used to hand back a raw `u16` that callers passed
+/// straight into a binding lookup, which compares it against the configured
+/// masks. That made an un-normalized value a SILENT failure rather than a
+/// mistake: a `u16` still carrying a NumLock or CapsLock bit (or a bare
+/// `event.state` that was never masked at all) can never equal any configured
+/// mask, so the binding simply never fires, with no compiler hint and nothing
+/// in the log to point at. At four bits wide the type cannot represent those
+/// bits, so the mistake becomes a compile error at the call site -- which is
+/// the only place it can be diagnosed, since the symptom is "my binding is
+/// dead" weeks later.
+pub const BindingMods = packed struct(u4) {
+    shift: bool = false,
+    control: bool = false,
+    alt: bool = false,
+    super: bool = false,
+
+    /// True when no binding modifier is held.
+    pub inline fn isEmpty(m: BindingMods) bool {
+        return @as(u4, @bitCast(m)) == 0;
+    }
+};
+
+/// Narrows a raw X modifier state to the four binding modifiers.
+pub inline fn normalizeModifiers(state: u16) BindingMods {
+    return .{
+        .shift = state & mod_shift != 0,
+        .control = state & mod_control != 0,
+        .alt = state & mod_alt != 0,
+        .super = state & mod_super != 0,
+    };
+}
+
+/// Widens back to a `u16` mask, for the paths that compare against a config's
+/// stored masks (mouse binds) or print one. The reverse of `normalizeModifiers`
+/// and lossy in the same way: any bit outside the four is not representable.
+pub inline fn toMask(m: BindingMods) u16 {
+    var mask: u16 = 0;
+    if (m.shift) mask |= mod_shift;
+    if (m.control) mask |= mod_control;
+    if (m.alt) mask |= mod_alt;
+    if (m.super) mask |= mod_super;
+    return mask;
 }

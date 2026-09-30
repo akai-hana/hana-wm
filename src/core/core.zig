@@ -9,6 +9,7 @@ const scaling = @import("scaling");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
 const xcbmod = @import("xcb");
+const log = @import("log");
 pub const xcb = xcbmod.xcb;
 
 /// X11 keysym constants, matching <X11/keysymdef.h>. Cast to xcb_keysym_t with @intFromEnum.
@@ -61,6 +62,11 @@ pub const State = struct {
     screen: Screen,
     root: WindowId,
     alloc: std.mem.Allocator,
+    /// Display DPI, set by `main` once the config is loaded (a config override
+    /// wins over detection) and re-derived on a RandR size change. Default is
+    /// the baseline so a build that somehow never sets it still reads a
+    /// defined value; `main` always sets it before any surface exists.
+    dpi_info: f32 = constants.baseline_dpi,
     config: *types.Config,
     /// Monotonic fact revisions, bumped by the module owning each fact (see
     /// Facts); consumers diff against their last-seen value to decide what
@@ -207,9 +213,77 @@ pub fn init(
     root: WindowId,
     alloc: std.mem.Allocator,
     config: *types.Config,
+    initial_dpi: f32,
 ) void {
-    state = .{ .conn = conn, .screen = screen, .root = root, .alloc = alloc, .config = config };
+    state = .{
+        .conn = conn,
+        .screen = screen,
+        .root = root,
+        .alloc = alloc,
+        .config = config,
+        .dpi_info = initial_dpi,
+    };
     markCoreReady();
+}
+
+/// Flips the bar between the top and bottom edge and returns the new position.
+///
+/// The single writer of `config.bar.bar_position` (20.2). It lived inside the
+/// bar's renderer, which meant a rendering module owned a config field: the
+/// one place that could change the bar's edge was a function whose job was
+/// drawing it, and any other code that wanted to reason about the edge had to
+/// know that. The flip is a config decision, so it is made where the config
+/// lives; the bar is then told to re-anchor, and is not asked to decide.
+pub fn toggleBarScreenPosition() types.BarScreenPosition {
+    const st = getState();
+    st.config.bar.bar_position = switch (st.config.bar.bar_position) {
+        .top => .bottom,
+        .bottom => .top,
+    };
+    return st.config.bar.bar_position;
+}
+
+/// Re-reads the current screen size and writes it into the cached `Screen`,
+/// returning true if it actually changed.
+///
+/// `State.screen` is a pointer into the `xcb_screen_t` the server handed back
+/// at setup time, captured once in `main.zig` before the WM role was claimed.
+/// A RandR mode change -- resolution switch, rotate, a monitor being plugged
+/// in -- changes the screen's real size, and that setup-time struct never
+/// learns about it. Every consumer then reasons from the size the display had
+/// at startup: the work area, percentage bar heights, font scaling, the
+/// surface claim. A resolution change therefore left the whole bar sized for
+/// the old screen with nothing to indicate it, which is why this belongs here
+/// in core, once, rather than patched per consumer.
+///
+/// Only the pixel dimensions are re-read. Root depth, the root visual and the
+/// allowed-depth list are properties of the screen's visual class, not of the
+/// current mode, and the millimetre size is a physical property a mode change
+/// does not alter. The root's origin is pinned at 0,0 by the server, so
+/// re-reading it too would only risk writing a transient mid-resize value.
+///
+/// Deliberately does NOT reconcile. This is called from event dispatch, and a
+/// reconcile takes the X grab; reconciling from inside dispatch is the
+/// re-entrancy this is meant to remove. It reports the change and the caller
+/// lets the existing debounced re-detect path do the rest of the work at a
+/// controlled point in the loop.
+pub fn refreshScreenGeometry(conn: Connection) bool {
+    const st = getState();
+    const cookie = xcb.xcb_get_geometry(conn, st.root);
+    const geom = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return false;
+    defer std.c.free(geom);
+
+    const new_w: u16 = @intCast(geom.*.width);
+    const new_h: u16 = @intCast(geom.*.height);
+    if (new_w == st.screen.width_in_pixels and new_h == st.screen.height_in_pixels) return false;
+
+    log.info(
+        "Screen geometry changed: {d}x{d} -> {d}x{d}",
+        .{ st.screen.width_in_pixels, st.screen.height_in_pixels, new_w, new_h },
+    );
+    st.screen.width_in_pixels = new_w;
+    st.screen.height_in_pixels = new_h;
+    return true;
 }
 
 /// Deinit and free the config box `State` owns, using the allocator `State`
@@ -238,4 +312,23 @@ pub fn replaceOwnedConfig(new_config: *types.Config) void {
 /// Stays outside State: unlike State's fields it has a safe default
 /// (96.0 DPI, no scaling), and is set once during scale detection, never
 /// reassigned afterward.
-pub var dpi_info: f32 = constants.baseline_dpi;
+/// Display DPI in use, as a fact on `State` rather than a bare global.
+///
+/// It was a `pub var` outside `State`, which meant the value that scales every
+/// font metric the bar probes lived somewhere no initialization order
+/// constrained: `State`'s own accessors panic when read before `init`, but
+/// this one quietly answered with a default, so a module that read it early
+/// got `baseline_dpi` and a bar sized for the wrong display, with no signal
+/// that the real value had not arrived yet. As a field it is covered by the
+/// same "uninitialized access panics cleanly" rule as everything else.
+///
+/// `setDpi` is the only writer: the config override and the detected value are
+/// both decisions made once, in `main`, and the RandR path that re-derives it
+/// on a size change.
+pub fn dpi() f32 {
+    return getState().dpi_info;
+}
+
+pub fn setDpi(v: f32) void {
+    getState().dpi_info = v;
+}

@@ -4,13 +4,15 @@
 //! live-device-state `xkbcommon.zig`, avoiding a `config ↔ input` wiring cycle.
 //!
 //! Layer note: xcb-free by construction; importable from the pure layers
-//! (see build.zig's layer-purity assertion).
+//! (see build.zig's layer-purity assertion). The libxkbcommon import is
+//! borrowed from keymap.zig, the single translation-unit owner for that
+//! header, which is itself connection-free.
 
 const std = @import("std");
 
-const xkb = @cImport({
-    @cInclude("xkbcommon/xkbcommon.h");
-});
+// Borrowed from the single @cImport owner rather than translated again here
+// (19.8): this module and xkbcommon.zig were each compiling the same header.
+const xkb = @import("keymap").xkb;
 
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 

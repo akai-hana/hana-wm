@@ -94,6 +94,14 @@ pub const Value = union(enum) {
                 .boolean => |b| b,
                 else => null,
             },
+            // A bare number in TOML arrives as `integer` (`dpi = 144`) or,
+            // when written with a fraction, as `scalable` (`dpi = 144.0`).
+            // Both mean the same knob, so both widen.
+            f32 => switch (scalar) {
+                .integer => |i| @floatFromInt(i),
+                .scalable => |sc| sc.value,
+                else => null,
+            },
             []const u8 => switch (scalar) {
                 .string => |s| s,
                 else => null,

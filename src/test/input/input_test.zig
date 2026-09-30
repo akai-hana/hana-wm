@@ -27,15 +27,18 @@ fn actionTag(a: *const types.Action) std.meta.Tag(types.Action) {
 
 test "normalizeModifiers keeps real modifiers, strips lock and button bits" {
     // Every bit outside the binding mask (lock keys, pointer buttons, odd
-    // high bits X may set) must be masked away so matching is stable.
-    try testing.expectEqual(masks.mod_shift, masks.normalizeModifiers(masks.mod_shift | masks.mod_capslock));
+    // high bits X may set) must be masked away so matching is stable. The
+    // expectations are written as u16 masks because that is what a config
+    // stores and what the mouse-bind path compares against -- not because
+    // that is what normalizeModifiers returns.
+    try testing.expectEqual(masks.mod_shift, masks.toMask(masks.normalizeModifiers(masks.mod_shift | masks.mod_capslock)));
     try testing.expectEqual(
         masks.mod_control | masks.mod_super,
-        masks.normalizeModifiers(masks.mod_control | masks.mod_super | masks.mod_numlock | masks.mod_scrolllock | 0x0100),
+        masks.toMask(masks.normalizeModifiers(masks.mod_control | masks.mod_super | masks.mod_numlock | masks.mod_scrolllock | 0x0100)),
     );
     // All-ones folds to exactly the binding mask, never wider.
-    try testing.expectEqual(masks.mod_mask_binding, masks.normalizeModifiers(0xffff));
-    try testing.expectEqual(@as(u16, 0), masks.normalizeModifiers(masks.mod_capslock | masks.mod_numlock));
+    try testing.expectEqual(masks.mod_mask_binding, masks.toMask(masks.normalizeModifiers(0xffff)));
+    try testing.expectEqual(@as(u16, 0), masks.toMask(masks.normalizeModifiers(masks.mod_capslock | masks.mod_numlock)));
 }
 
 test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {
@@ -49,14 +52,14 @@ test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {
     };
     resolver.rebuildDispatchMap(&binds, testing.allocator, test_gen);
 
-    try testing.expectEqual(types.Action.close_window, actionTag(resolver.lookup(masks.mod_super, 0x0071, test_gen).?));
-    try testing.expectEqual(types.Action.dump_state, actionTag(resolver.lookup(masks.mod_super, 0x0072, test_gen).?));
-    try testing.expectEqual(types.Action.toggle_fullscreen, actionTag(resolver.lookup(masks.mod_super | masks.mod_shift, 0x0071, test_gen).?));
+    try testing.expectEqual(types.Action.close_window, actionTag(resolver.lookup(.{ .super = true }, 0x0071, test_gen).?));
+    try testing.expectEqual(types.Action.dump_state, actionTag(resolver.lookup(.{ .super = true }, 0x0072, test_gen).?));
+    try testing.expectEqual(types.Action.toggle_fullscreen, actionTag(resolver.lookup(.{ .super = true, .shift = true }, 0x0071, test_gen).?));
 
     // Modifiers and keysym are both part of the key: changing either misses.
-    try testing.expect(resolver.lookup(masks.mod_super | masks.mod_control, 0x0071, test_gen) == null);
-    try testing.expect(resolver.lookup(0, 0x0071, test_gen) == null);
-    try testing.expect(resolver.lookup(masks.mod_super, 0x0099, test_gen) == null);
+    try testing.expect(resolver.lookup(.{ .super = true, .control = true }, 0x0071, test_gen) == null);
+    try testing.expect(resolver.lookup(.{}, 0x0071, test_gen) == null);
+    try testing.expect(resolver.lookup(.{ .super = true }, 0x0099, test_gen) == null);
 }
 
 test "KeybindResolver: a later binding on the same key wins" {
@@ -69,7 +72,7 @@ test "KeybindResolver: a later binding on the same key wins" {
     };
     resolver.rebuildDispatchMap(&binds, testing.allocator, test_gen);
 
-    try testing.expectEqual(types.Action.dump_state, actionTag(resolver.lookup(masks.mod_super, 0x0071, test_gen).?));
+    try testing.expectEqual(types.Action.dump_state, actionTag(resolver.lookup(.{ .super = true }, 0x0071, test_gen).?));
 }
 
 test "KeybindResolver: lookup returns a pointer into the live binding slice" {
@@ -81,7 +84,7 @@ test "KeybindResolver: lookup returns a pointer into the live binding slice" {
     };
     resolver.rebuildDispatchMap(&binds, testing.allocator, test_gen);
 
-    const found = resolver.lookup(masks.mod_super, 0x0071, test_gen).?;
+    const found = resolver.lookup(.{ .super = true }, 0x0071, test_gen).?;
     try testing.expect(found == &binds[0].action);
 
     // Rebuilding with a new slice re-points the map at the new actions.
@@ -89,7 +92,7 @@ test "KeybindResolver: lookup returns a pointer into the live binding slice" {
         .{ .modifiers = masks.mod_super, .keysym = 0x0071, .action = .{ .dump_state = {} } },
     };
     resolver.rebuildDispatchMap(&replacement, testing.allocator, test_gen);
-    try testing.expect(resolver.lookup(masks.mod_super, 0x0071, test_gen).? == &replacement[0].action);
+    try testing.expect(resolver.lookup(.{ .super = true }, 0x0071, test_gen).? == &replacement[0].action);
 }
 
 // A `[binds]` mouse entry that the root grab cannot deliver is the config
@@ -203,21 +206,21 @@ test "dispatch map refuses a config generation it was not built against" {
     };
     resolver.rebuildDispatchMap(&binds, testing.allocator, 7);
     // Same generation: resolves.
-    try testing.expect(resolver.lookup(masks.mod_super, 0x0071, 7) != null);
+    try testing.expect(resolver.lookup(.{ .super = true }, 0x0071, 7) != null);
 
     // The config was replaced and freed; the old table is now dangling.
     resolver.rebuildDispatchMap(&binds, testing.allocator, 7);
-    try testing.expect(resolver.lookup(masks.mod_super, 0x0071, 8) == null);
+    try testing.expect(resolver.lookup(.{ .super = true }, 0x0071, 8) == null);
     // Reported once, not per keystroke: the latch survives the first miss.
     try testing.expect(resolver.stale_reported);
-    try testing.expect(resolver.lookup(masks.mod_super, 0x0071, 8) == null);
+    try testing.expect(resolver.lookup(.{ .super = true }, 0x0071, 8) == null);
     try testing.expect(resolver.stale_reported);
 
     // Rebuilding against the new generation restores dispatch and re-arms the
     // latch, so a later regression is reported rather than swallowed.
     resolver.rebuildDispatchMap(&binds, testing.allocator, 8);
     try testing.expect(!resolver.stale_reported);
-    try testing.expect(resolver.lookup(masks.mod_super, 0x0071, 8) != null);
+    try testing.expect(resolver.lookup(.{ .super = true }, 0x0071, 8) != null);
 }
 
 // The scaffold property is declared once, on the action. Half of that

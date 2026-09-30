@@ -1,4 +1,8 @@
 //! Unit tests for the model layer.
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: minimize, fullscreen, floating, tiling
+
 const std = @import("std");
 const testing = std.testing;
 
@@ -45,7 +49,7 @@ const foreign_blob = [_]u8{ 0x00, 1, 2 };
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.setUpModel;
+const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
 
 fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
     try testing.expectEqualSlices(WindowId, expected, m.ws[ws.index].tiled_order.constSlice());
@@ -877,8 +881,9 @@ test "identical operation sequences produce identical models" {
     };
     var a = makeModel();
     try seq.run(&a);
-    // b's fresh stores (setUpModel resets the process-global minimize and
-    // fullscreen state at construction) must be created AFTER a's run: the
+    // b's fresh stores (makeModel resets the process-global minimize,
+    // fullscreen and floating state at construction) must be created AFTER
+    // a's run: the
     // toggle in `seq` flips OFF for a window that still has a fullscreen
     // record, so the replay needs the same clean stores a's run started with.
     var b = makeModel();
@@ -1579,4 +1584,35 @@ test "12.7: deferred bar pending is per-window, not a single slot" {
     t.clear();
     try testing.expectEqual(@as(usize, 0), t.len);
     try testing.expectEqual(@as(?fullscreen.PendingBar, null), t.take(1));
+}
+
+// (28.3) The fixture's reset now re-arms floating's process-global drag state
+// too, and this is the leak that motivated it. `g_state.drag.active` is checked
+// by an early return in startDrag, so a drag left active by an earlier test
+// does not merely make isDragging() lie -- it makes every LATER startDrag a
+// silent no-op, and the failure lands on an unrelated test.
+
+test "fixture: makeModel re-arms floating's leaked drag state" {
+    if (!build_options.has_floating) return error.SkipZigTest;
+    // Dirty the global exactly the way an un-ended drag would.
+    floating.seedLeakedDragForTest(1);
+    try testing.expect(floating.isDragging());
+
+    // A fresh fixture re-arms it, so the next test can start a drag.
+    _ = makeModel();
+    try testing.expect(!floating.isDragging());
+}
+
+test "fixture: makeBareModel deliberately leaves module stores alone" {
+    // The contrast that documents the opt-out: the bench files rely on this
+    // one skipping the reset, so it must be a real behavioural difference, not
+    // a second name for the same thing.
+    if (!build_options.has_floating) return error.SkipZigTest;
+    floating.seedLeakedDragForTest(1);
+
+    _ = helpers.makeBareModel();
+    try testing.expect(floating.isDragging());
+
+    floating.resetState(); // leave the global clean for the next test
+    try testing.expect(!floating.isDragging());
 }

@@ -15,6 +15,7 @@
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
+const model = @import("model");
 
 /// The concrete X key-press event, for the `contract.KeyPressEvent` opaque.
 pub const KeyPressEvent = xcb.xcb_key_press_event_t;
@@ -74,5 +75,10 @@ pub const Surfaces = struct {
     /// ConfigureNotify wait. No-ops when the bar is already hidden.
     hideBarForFullscreen: *const fn () void,
     toggleBarSegmentAnchor: *const fn () void,
+    /// True when fullscreen currently forces the bar hidden. The action layer
+    /// needs this to decide whether a re-anchor's reconcile is meaningful
+    /// (20.2); the predicate is the bar's, so it is reached through the same
+    /// hook table as the re-anchor itself rather than imported directly.
+    barForcedHiddenByFullscreen: ?*const fn (*const model.Model, u8) bool,
     chromeToggleOverlay: *const fn () void,
 };

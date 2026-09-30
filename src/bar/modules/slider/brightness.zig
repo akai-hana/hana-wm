@@ -307,10 +307,10 @@ fn commitCost() slider.CommitCost {
 /// brightnessctl). Scheduled by the slider core's throttle, which owns the
 /// commit clock.
 /// The one clamp every level passes: 0-100 % is all the backend ever
-/// receives. `commitPct` and `previewPct` MUST go through the same function --
-/// they used to clamp independently, and when `previewPct` forgot to, a
-/// scroll/drag motion could display a level the backend then refused.
-fn clampPct(v: u8) u8 {
+/// receives. Every `write` mode MUST go through this -- they used to clamp
+/// independently in three separate functions, and when the preview one forgot,
+/// a scroll/drag motion could display a level the backend then refused.
+pub fn clampPct(v: u8) u8 {
     return @min(v, 100);
 }
 
@@ -342,15 +342,28 @@ fn commitPct(v: u8) void {
 
 /// One-shot apply (press, drag end): commit then re-read so the display
 /// follows the device immediately rather than on the next poll tick.
-fn applyPct(v: u8) void {
-    commitPct(v);
-    _ = readBrightness();
-}
-
-/// Optimistic display update from a scroll/drag motion: the label follows
-/// immediately while the backend write is committed by the core's scheduler.
-fn previewPct(v: u8) void {
-    g_pct = clampPct(v);
+/// The one write entry point (26.8), replacing `previewPct` / `commitPct` /
+/// `applyPct`.
+///
+/// The three were one function each, and the clamp and the display update were
+/// written three times, so they could drift: a preview that forgot to clamp
+/// showed a level the backend then refused, and an apply that forgot to
+/// re-read left the label behind the device. Here the mode names the
+/// difference and there is one copy of each thing that differs.
+fn write(w: slider.Write, v: u8) void {
+    switch (w) {
+        // Scroll/drag motion: the label follows immediately, the backend write
+        // is the core scheduler's business.
+        .preview => g_pct = clampPct(v),
+        // The scheduler's commit: write, and let the next read reconcile.
+        .commit => commitPct(v),
+        // Press set / drag end: write, then re-read so the label follows the
+        // device immediately rather than on the next poll tick.
+        .apply => {
+            commitPct(v);
+            _ = readBrightness();
+        },
+    }
 }
 
 /// Renders the display string into `buf`, substituting every `{pct}`
@@ -376,12 +389,12 @@ fn label(config: types.BarConfig, buf: []u8) slider.Label {
 }
 
 // Current level / presence / write-gate hooks for the core.
-fn currentPct() u8 {
-    return g_pct;
-}
 
-fn hasValue() bool {
-    return g_has_value;
+/// The displayed level, or null while no backlight device has answered. The
+/// absence and the value were a `{bool, u8}` pair latched together; they are
+/// one optional now (26.8).
+fn currentLevel() ?u8 {
+    return if (g_has_value) g_pct else null;
 }
 
 fn writable() bool {
@@ -391,14 +404,12 @@ fn writable() bool {
 pub const sub: slider.Sub = .{
     .name = "brightness",
     .read_interval_ms = 1000,
-    .has_value = hasValue,
+    .level = currentLevel,
     .writable = writable,
     .read = readBrightness,
-    .pct = currentPct,
-    .preview = previewPct,
+    .write = write,
     .commit_cost = commitCost,
-    .commit = commitPct,
-    .apply = applyPct,
+
     .label = label,
     .probeNaturalWidth = 44,
 };

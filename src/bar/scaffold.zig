@@ -104,12 +104,37 @@ pub fn keyedWidthState(comptime tag: []const u8, comptime Key: type) type {
     };
 }
 
-/// Draws one padded segment for `name` and records its drawn width into
-/// `name`'s width state (the shared draw body of the icon-ish modules that
-/// are exactly "padded segment + width store"). Empty `text` draws nothing
-/// and stores a 0-width reservation instead, so segments that may have
-/// nothing to show (variants without an indicator) keep the row layout
-/// honest without a per-module guard.
+/// The bar's post-draw step for one segment, as a pure function: hand the
+/// painted width back to the segment that owns the measurement, and say
+/// whether the row advances by the paint or by the reservation.
+///
+/// It lives here, not inline in the bar's draw loop, because the loop needs a
+/// live `DrawContext` and an X connection -- which is exactly why this policy
+/// went untested for so long. As a function over a `Segment` and a `Painted`,
+/// both halves are reachable from a unit test: a segment that forgets its own
+/// width, or a row that advances on a draw that painted nothing, are both
+/// silent in production and obvious here.
+///
+/// Returns true when the segment painted something. A zero width is a valid
+/// successful outcome (an absent readout) and, like a caught draw error, still
+/// leaves the caller to consume the full reserved width.
+pub fn finishDraw(seg: *const contract.Segment, painted: contract.Painted) bool {
+    if (seg.onPainted) |sink| sink(painted.width);
+    return painted.width != 0;
+}
+
+/// Draws one padded segment for `name` and reports what it painted (the
+/// shared draw body of the icon-ish modules that are exactly "padded segment
+/// plus a measured width").
+///
+/// Empty `text` draws nothing and reports a 0-width reservation instead, so
+/// segments that may have nothing to show (variants without an indicator) keep
+/// the row layout honest without a per-module guard.
+///
+/// It does NOT record the width: the bar feeds the painted width back through
+/// the segment's `onPainted` hook (21.7), so "the reservation must follow the
+/// painted content" is one rule in one place rather than an obligation every
+/// drawing helper has to remember.
 pub fn drawAndStore(
     comptime name: []const u8,
     dc: *drawing.DrawContext,
@@ -117,24 +142,56 @@ pub fn drawAndStore(
     height: u16,
     start_x: u16,
     text: []const u8,
-) !u16 {
+) !contract.Painted {
     var end_x = start_x;
     if (text.len != 0) {
         end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, name, text, null, config.segmentProps(name));
     }
-    widthState(name).store(end_x - start_x);
-    return end_x;
+    // Empty text lands on `span` with end_x == start_x, i.e. Painted.nothing:
+    // a SUCCESSFUL zero-width draw, not a failure.
+    return contract.Painted.span(start_x, end_x);
 }
 
 const NaturalWidth = *const fn (*const contract.Frame, u16) u16;
 const OnClick = *const fn (*const contract.ClickCtx) bool;
 
+/// How one slot's WIDTH behaves over its lifetime -- the shapes a bar segment
+/// can actually have, named (21.8).
+///
+/// This used to be two overlapping descriptions of the same lifecycle: a
+/// `with_collapse` bool that only decided whether a re-layout request was
+/// wired, and (from 21.7) a report option saying where the painted width went.
+/// Two knobs for one axis, so a module could ask for a width report and still
+/// get no re-layout request without anyone noticing that was unusual. The
+/// combinations that actually exist are enumerated instead.
+pub const SlotMode = enum {
+    /// Measured width reported to the width state, and a width change raises a
+    /// re-layout request. For a segment that can change shape DURING a frame:
+    /// variants collapses to zero width on a layout transition and must re-lay
+    /// the row in the SAME batch, before the end-of-batch flush, or the gap it
+    /// left never closes.
+    measured_relayout,
+    /// Measured width reported to the width state, but no re-layout request.
+    /// Right for a segment whose width only changes on a config reload: the
+    /// bar re-lays out for that anyway, so a request would be a duplicate.
+    measured_no_relayout,
+    /// Fixed width, nothing to measure: no report, no request. A segment that
+    /// is the same size every frame (a fixed cell).
+    fixed,
+    /// The module measures its OWN width, on its own cadence, and wants
+    /// neither a report nor a request. The clock: its reservation is a
+    /// deliberate per-mode text measurement, refreshed when the mode changes,
+    /// not the width that happened to paint -- and a painted-width report
+    /// would be measuring the wrong thing.
+    self_measured,
+};
+
 /// Optional bindings for the segment, one field per contract.Segment hook the
 /// icon-ish modules can set. Unset fields keep the builder defaults.
 pub const Opts = struct {
-    /// Wires the collapse/expand redraw-request path (variants collapses to
-    /// zero width on a layout transition and must re-lay the row that batch).
-    with_collapse: bool = false,
+    /// How this slot's width behaves; see SlotMode. Defaults to the safest
+    /// measured shape.
+    mode: SlotMode = .measured_no_relayout,
     self_ticking: bool = false,
     clickable: bool = true,
     pollTimeoutMs: ?*const fn () i32 = null,
@@ -155,9 +212,9 @@ pub const Opts = struct {
 };
 
 /// The width-state naturalWidth/draw/onClick wiring, one adapter per hook.
-fn drawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!u16 {
+fn drawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!contract.Painted {
     return struct {
-        fn f(ctx: *anyopaque, x: u16) !u16 {
+        fn f(ctx: *anyopaque, x: u16) !contract.Painted {
             const c = segmod.castDraw(ctx);
             return draw(c.dc, c.config, c.height, x);
         }
@@ -183,7 +240,7 @@ fn passthroughWidth(_: *const contract.Frame, clock_width: u16) u16 {
 }
 
 /// The Segment binding for an icon-ish module with a cached-width draw +
-/// optional direction-click action. `opts.with_collapse` additionally wires
+/// optional direction-click action. `opts.mode` additionally wiress
 /// the redraw-request path.
 pub fn module(
     comptime name: []const u8,
@@ -200,10 +257,20 @@ pub fn module(
         .secondsElapsed = opts.secondsElapsed,
         .invalidate = opts.invalidate,
         .invalidateReloadCaches = opts.invalidateReloadCaches,
-        .consumeRedrawRequest = if (opts.with_collapse) W.consumeRedrawRequest else null,
+        .consumeRedrawRequest = switch (opts.mode) {
+            .measured_relayout => W.consumeRedrawRequest,
+            else => null,
+        },
         .measureString = opts.measureString,
         .naturalWidth = opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),
         .draw = drawHook(draw),
+        // The bar's post-draw width report lands in this module's own width
+        // state, so the reservation the naturalWidth hook reads back is
+        // written from exactly one call site (21.7).
+        .onPainted = switch (opts.mode) {
+            .measured_relayout, .measured_no_relayout => W.store,
+            .fixed, .self_measured => null,
+        },
         .onClick = opts.on_click orelse clickHook(action),
     };
 }

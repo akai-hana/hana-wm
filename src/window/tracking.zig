@@ -123,8 +123,13 @@ pub fn deinit() void {
 /// tracking query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    if (pipeline.initialized()) return pipeline.model().current.index;
-    return null;
+    // Via modelReady() rather than pipeline.initialized() directly: (11.9)
+    // this file had two spellings of one question -- modelReady() and a bare
+    // pipeline.initialized() -- so "is the model live?" was answered by
+    // reading whichever of the two the author happened to be near. One
+    // spelling, defined by the one place that explains why the gate exists.
+    if (!modelReady()) return null;
+    return pipeline.model().current.index;
 }
 
 pub inline fn getWorkspaceCount() usize {

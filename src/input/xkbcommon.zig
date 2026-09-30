@@ -7,13 +7,14 @@ const constants = @import("constants");
 const log = @import("log");
 const core = @import("core");
 
-const xkb = @cImport({
-    @cInclude("xkbcommon/xkbcommon.h");
-    @cInclude("xkbcommon/xkbcommon-x11.h");
-});
+// Single @cImport owner for libxkbcommon lives in keymap.zig (19.8): the same
+// two headers were translated once here and once in keysyms.zig, giving two
+// translation units to keep in sync for no benefit.
+const keymap = @import("keymap");
+const xkb = keymap.xkb;
 
-const xkb_context = xkb.struct_xkb_context;
-const xkb_keymap = xkb.struct_xkb_keymap;
+const xkb_context = keymap.xkb_context;
+const xkb_keymap = keymap.xkb_keymap;
 
 /// The XKB setup requests are sent once after setup; these retries cover the
 /// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
@@ -71,95 +72,20 @@ fn enableDetectableAutoRepeat(conn: core.Connection) void {
     }
 }
 
-/// Base (level-0) symbol for `kc`, independent of lock state; reads the
-/// keymap's level-0 entry directly. A lock-sensitive resolve (xkb_state's
-/// `get_one_sym`) would apply current locks: a CapsLock held at startup
-/// would pin the table to shifted symbols and break lowercase bindings.
-fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
-    var syms: [*c]const u32 = undefined;
-    const n = xkb.xkb_keymap_key_get_syms_by_level(km, @intCast(kc), 0, 0, &syms);
-    if (n > 0) return syms[0];
-    return xkb.XKB_KEY_NoSymbol;
-}
-
-/// Builds the flat keycode->keysym table from level-0 symbols.
-/// Keycodes below 8 are reserved by X11 and produce no real keysym.
-fn buildKeysymTable(km: *xkb_keymap) [constants.x11_max_keycode]u32 {
-    var table: [constants.x11_max_keycode]u32 = [_]u32{xkb.XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
-        table[kc] = baseSymbol(km, @intCast(kc));
-    }
-    return table;
-}
-
-/// One (keysym, keycode) pair in the reverse index.
-const ReverseEntry = struct { keysym: u32, keycode: u8 };
-
-/// The reverse index: the populated level-0 keysyms, sorted by keysym.
-///
-/// Built from the forward table in one pass and searched by bisection, so
-/// `keysymToKeycode` stops being a 248-entry scan per keybinding. A keymap has
-/// at most one entry per keycode, so this is a small fixed array, not a hash
-/// map: the whole index is 248 * 8 bytes and never needs an allocator.
-///
-/// Ties (two keycodes carrying the same level-0 keysym) keep the LOWEST
-/// keycode, matching the scan this replaces. `len` is the LIVE count, returned
-/// alongside the array so it cannot drift from what was actually written.
-const BuiltReverse = struct { index: [reverse_capacity]ReverseEntry, len: usize };
-
-fn buildReverseIndex(table: [constants.x11_max_keycode]u32) BuiltReverse {
-    var out: [reverse_capacity]ReverseEntry = undefined;
-    var n: usize = 0;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
-        const sym = table[kc];
-        if (sym == xkb.XKB_KEY_NoSymbol) continue;
-        out[n] = .{ .keysym = sym, .keycode = @intCast(kc) };
-        n += 1;
-    }
-    // Insertion sort: n is tiny (one entry per physical key) and this runs
-    // once per keymap, not per keybinding. The `>` (not `>=`) comparison makes
-    // it STABLE, which is what lets the compaction below mean "lowest keycode
-    // wins": equal keysyms keep the ascending-keycode scan order.
-    var i: usize = 1;
-    while (i < n) : (i += 1) {
-        const item = out[i];
-        var j = i;
-        while (j > 0 and out[j - 1].keysym > item.keysym) : (j -= 1) {
-            out[j] = out[j - 1];
-        }
-        out[j] = item;
-    }
-    // Compacting adjacent duplicates AFTER the sort is what makes the
-    // lowest-keycode tie-break real. Doing it during the scan instead
-    // (comparing against the last APPENDED entry) only catches duplicates that
-    // happen to be adjacent in KEYCODE order, and keysyms are not ordered by
-    // keycode: with kc10=X, kc11=Y, kc12=X the scan-side check compares X
-    // against Y, misses the tie, and appends both. After the sort the two X
-    // entries sit next to each other, and the bisection in keysymToKeycode can
-    // land on either one -- so a binding on a keysym carried by two keys could
-    // grab the higher keycode and silently stop responding to the lower one.
-    var w: usize = 0;
-    for (out[0..n]) |e| {
-        if (w > 0 and out[w - 1].keysym == e.keysym) continue;
-        out[w] = e;
-        w += 1;
-    }
-    return .{ .index = out, .len = w };
-}
-
-/// Keycodes in the X11 range, minus the reserved low ones.
-const reverse_capacity = constants.x11_max_keycode - constants.x11_min_keycode;
-
+/// Keycodes in the X11 range, minus the reserved low ones. The index itself,
+/// and the two ordering rules that decide which key a keysym resolves to, now
+/// live in keymap.zig with the rest of the pure transform (19.5).
 pub const XkbState = struct {
     context: *xkb_context,
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
     /// No allocator needed; 256 x 4 bytes = 1 KiB, lives inside XkbState.
     keysym_by_keycode: [constants.x11_max_keycode]u32,
-    /// Reverse index over the same table, sorted by keysym. `reverse_len` is
-    /// how many entries are live; the rest of the array is uninitialized.
-    reverse_index: [reverse_capacity]ReverseEntry,
-    reverse_len: usize,
+    /// Reverse index over the same table, sorted by keysym. Held as one value
+    /// (not a bare array plus a separate count) so the pair can never be
+    /// updated apart -- `len` is how many entries are live, and the rest of
+    /// the array is uninitialized.
+    reverse: keymap.ReverseIndex,
 
     /// Initialises an XKB context and builds the keysym table from the live
     /// X connection. Retries up to max_xkb_retries times to handle early-startup
@@ -183,12 +109,11 @@ pub const XkbState = struct {
         const device_id = try retryDeviceId(xcb_conn);
 
         const table = try tableForDevice(ctx, xcb_conn, device_id);
-        const built = buildReverseIndex(table);
+        const built = keymap.buildReverseIndex(table);
         return XkbState{
             .context = ctx,
             .keysym_by_keycode = table,
-            .reverse_index = built.index,
-            .reverse_len = built.len,
+            .reverse = built,
         };
     }
 
@@ -201,19 +126,29 @@ pub const XkbState = struct {
     /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
     /// from the table, so it must track the new mapping or bindings silently
     /// stop matching; on failure the old mapping is kept.
+    /// Rebuilds the keycode->keysym table after a keyboard mapping change.
+    /// Caller must be on the main thread; it runs inside the event loop and
+    /// makes exactly one keymap attempt (see `keymapForRebuild`).
     pub fn rebuild(self: *XkbState, xcb_conn: core.Connection) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
-        if (device_id == -1) return;
+        if (device_id == -1) {
+            // The core keyboard can be absent (a headless or purely virtual
+            // X server). Returning silently here made a missing device
+            // indistinguishable from a device that simply had nothing to
+            // rebuild, which is exactly the kind of failure that reads as
+            // "my keybinds stopped working after xmodmap".
+            log.warn("XKB: no core keyboard device id; keymap not rebuilt after mapping change", .{});
+            return;
+        }
         // Table swapped only after the new keymap built successfully, so a
         // failed rebuild leaves dispatch fully functional on the old mapping.
-        const table = tableForDevice(self.context, xcb_conn, device_id) catch {
+        const table = keymapForRebuild(self.context, xcb_conn, device_id) orelse {
             log.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
             return;
         };
         self.keysym_by_keycode = table;
-        const built = buildReverseIndex(table);
-        self.reverse_index = built.index;
-        self.reverse_len = built.len;
+        const built = keymap.buildReverseIndex(table);
+        self.reverse = built;
     }
 
     /// Returns the level-0 keysym for `keycode`, unaffected by lock modifiers
@@ -232,10 +167,10 @@ pub const XkbState = struct {
         // Bisect the reverse index. O(log n) instead of the 248-entry scan this
         // replaced, which ran once per keybinding on every resolve.
         var lo: usize = 0;
-        var hi: usize = self.reverse_len;
+        var hi: usize = self.reverse.len;
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            const e = self.reverse_index[mid];
+            const e = self.reverse.index[mid];
             if (e.keysym == keysym) return e.keycode;
             if (e.keysym < keysym) lo = mid + 1 else hi = mid;
         }
@@ -315,29 +250,13 @@ fn retryDeviceId(xcb_conn: core.Connection) !i32 {
 /// as populated. A healthy keymap has 100+; 40 accepts minimal/embedded
 /// keymaps while still rejecting the empty keymap a not-yet-ready XKB returns
 /// at startup.
-const min_keymap_symbols: u32 = 40;
-
-/// Upper bound of the reachable-symbols health-check window (8..128).
-const keymap_health_hi: u8 = 128;
-
-/// Returns true if `km` has at least min_keymap_symbols reachable keysyms in the 8..128 range.
-/// Guards against accepting a partially-initialised keymap on early startup.
-fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
-    var valid_keys: u32 = 0;
-    for (constants.x11_min_keycode..keymap_health_hi) |kc| {
-        if (baseSymbol(km, @intCast(kc)) != xkb.XKB_KEY_NoSymbol)
-            valid_keys += 1;
-    }
-    return valid_keys >= min_keymap_symbols;
-}
-
 /// Builds a fresh keysym table for the connection's current keymap.
 /// Shared by init and rebuild: both acquire a device keymap and convert it to
 /// the flat table, differing only in how a failure is handled.
 fn tableForDevice(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) ![constants.x11_max_keycode]u32 {
     const km = try retryKeymap(ctx, xcb_conn, device_id);
     defer xkb.xkb_keymap_unref(km);
-    return buildKeysymTable(km);
+    return keymap.buildKeysymTable(km);
 }
 
 const keymapOnceArgs = struct {
@@ -353,7 +272,7 @@ fn keymapOnce(args: keymapOnceArgs) ?*xkb_keymap {
         args.device_id,
         xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
     ) orelse return null;
-    if (keymapHasEnoughSymbols(km)) return km;
+    if (keymap.keymapHasEnoughSymbols(km)) return km;
     xkb.xkb_keymap_unref(km);
     return null;
 }
@@ -367,4 +286,21 @@ fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) !*xkb_k
         keymapOnce,
         error.XkbKeymapFailed,
     );
+}
+
+/// Keymap for a mapping change, WITHOUT the retry ladder.
+///
+/// `retryKeymap` exists for one situation: the WM starting before the server
+/// has finished bringing XKB up, where waiting helps. This is the opposite
+/// situation -- the server has just told us the keyboard changed, so the new
+/// keymap is already there, and the only thing the retries can contribute is
+/// `retryDelay`'s sleep. Called from the event loop, that put up to
+/// `max_xkb_retries * xkb_retry_delay_ms` of nanosleep in front of every other
+/// event the batch carried, on a path an `xmodmap` can trigger at any time.
+/// One attempt, and a failure is a logged one-line miss on a table that is
+/// still serving the previous mapping.
+fn keymapForRebuild(ctx: *xkb_context, conn: core.Connection, device_id: i32) ?[constants.x11_max_keycode]u32 {
+    const km = keymapOnce(keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id }) orelse return null;
+    defer xkb.xkb_keymap_unref(km);
+    return keymap.buildKeysymTable(km);
 }

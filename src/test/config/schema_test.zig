@@ -28,20 +28,23 @@ const schema = @import("schema");
 const types = @import("types");
 const scratch = @import("scratch");
 
-fn scratchPath(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
-    const toml = try std.fmt.allocPrint(alloc, "{s}.toml", .{name});
-    defer alloc.free(toml);
-    return scratch.scratchPath(alloc, "hana-schema-", toml);
+/// A per-test temp file named `name.toml`. (28.5) The unique-name PRNG and the
+/// shared process-global scratch dir are gone; `std.testing.tmpDir` gives each
+/// call its own directory and guarantees the isolation the old code argued for.
+fn scratchFile(alloc: std.mem.Allocator, name: []const u8) !scratch.TmpFile {
+    _ = alloc;
+    const toml = try std.fmt.allocPrint(std.testing.allocator, "{s}.toml", .{name});
+    defer std.testing.allocator.free(toml);
+    return scratch.TmpFile.init(toml);
 }
 
 /// Loads a TOML string through the full production pipeline
 /// (parse -> buildConfigFromDoc), like a real config file would be.
 fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !types.Config {
-    const path = try scratchPath(alloc, name);
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, content);
-    defer scratch.cleanupScratch(path);
-    return try config.loadConfig(alloc, path);
+    var f = try scratchFile(alloc, name);
+    defer f.deinit();
+    try f.write(content);
+    return try config.loadConfig(alloc, f.path());
 }
 
 /// Asserts every knob of `cfg` equals its table default. The comparator is
@@ -203,10 +206,10 @@ test "segment_spacing feeds BarConfig.spacing; workspaces count pads icons" {
     try testing.expectEqual(@as(usize, 4), cfg.bar.workspace_icons.items.len);
 }
 
-test "fallback chains: title/drun colors follow their siblings" {
+test "fallback chains: title/run colors follow their siblings" {
     // Regime 1: no [bar.properties] at all. The accent trio was UNCONDITIONALLY
     // assigned its fallback sibling (now the palette canon: primary_color /
-    // secondary_color / alternative_color); the drun trio were left untouched (null),
+    // secondary_color / alternative_color); the run trio were left untouched (null),
     // deferring to BarConfig's read-time fallbacks.
     var no_colors = try loadToml(testing.allocator, "chains-nocolors",
         \\[bar]
@@ -220,12 +223,12 @@ test "fallback chains: title/drun colors follow their siblings" {
     try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x040506), no_colors.bar.title_unfocused_accent);
     try testing.expectEqual(@as(u32, 0x050607), no_colors.bar.title_minimized_accent);
-    try testing.expectEqual(@as(?u32, null), no_colors.bar.drun_bg);
-    try testing.expectEqual(@as(?u32, null), no_colors.bar.drun_prompt_color);
-    try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.drunPromptColor());
+    try testing.expectEqual(@as(?u32, null), no_colors.bar.run_bg);
+    try testing.expectEqual(@as(?u32, null), no_colors.bar.run_prompt_color);
+    try testing.expectEqual(@as(u32, 0x010203), no_colors.bar.runPromptColor());
 
     // Regime 2: [bar.properties] present with only `title`. The accent trio now
-    // reads per-key (absent keys copy their sibling); the drun trio are also
+    // reads per-key (absent keys copy their sibling); the run trio are also
     // assigned -- copying siblings when their own keys are absent, exactly
     // like the old `if (colors)` block.
     var with_title = try loadToml(testing.allocator, "chains-title",
@@ -244,10 +247,10 @@ test "fallback chains: title/drun colors follow their siblings" {
     try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x040506), with_title.bar.title_unfocused_accent);
     try testing.expectEqual(@as(u32, 0x050607), with_title.bar.title_minimized_accent);
-    try testing.expectEqual(@as(?u32, 0x0a0b0c), with_title.bar.drun_bg);
-    try testing.expectEqual(@as(?u32, 0x070809), with_title.bar.drun_fg);
-    try testing.expectEqual(@as(?u32, 0x010203), with_title.bar.drun_prompt_color);
-    try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.drunBg());
+    try testing.expectEqual(@as(?u32, 0x0a0b0c), with_title.bar.run_bg);
+    try testing.expectEqual(@as(?u32, 0x070809), with_title.bar.run_fg);
+    try testing.expectEqual(@as(?u32, 0x010203), with_title.bar.run_prompt_color);
+    try testing.expectEqual(@as(u32, 0x0a0b0c), with_title.bar.runBg());
     try testing.expectEqual(@as(?u32, null), with_title.bar.indicator_color);
 }
 
@@ -503,6 +506,9 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
         \\[drag]
         \\snap_distance = -1
         \\
+        \\[display]
+        \\dpi = 5000
+        \\
         \\[bar.modules.workspaces]
         \\count = 999
         \\
@@ -513,6 +519,9 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     try testing.expectEqual(types.ScalableValue.absolute(10.0), cfg.tiling.gap_width);
     try testing.expectEqual(types.ScalableValue.absolute(8.0), cfg.snap_distance);
     try testing.expectEqual(@as(u8, 9), cfg.workspaces.count);
+    // An absurd dpi warns back to null, i.e. to detection, rather than
+    // scaling the whole UI by a number nobody meant.
+    try testing.expectEqual(@as(?f32, null), cfg.dpi);
 }
 
 test "bar.position is case-insensitive; unknown spellings keep .top" {
@@ -737,4 +746,76 @@ test "color-mix: literal array spelling mixes equally, duplicate palette-name de
     // alternative_color declared twice: later-wins (secondary), not a 50/50
     // average of the two palette references.
     try testing.expectEqual(@as(u32, 0x008800), cfg.bar.title_accent_color);
+}
+
+test "display.dpi: integer and fractional spellings both widen; absent stays null" {
+    // Both spellings reach the same f32 knob: a TOML number with no fraction
+    // parses as an integer, one with a fraction as a scalable. A knob that
+    // read only one of them would accept `dpi = 144` and ignore `dpi = 144.0`.
+    var whole = try loadToml(testing.allocator, "dpi-whole", "[display]\ndpi = 144\n");
+    defer whole.deinit(testing.allocator);
+    try testing.expectEqual(@as(?f32, 144.0), whole.dpi);
+
+    var fraction = try loadToml(testing.allocator, "dpi-frac", "[display]\ndpi = 96.5\n");
+    defer fraction.deinit(testing.allocator);
+    try testing.expectEqual(@as(?f32, 96.5), fraction.dpi);
+
+    // Absent means "auto", which is the difference between this knob being
+    // an override and being a replacement for detection.
+    var absent = try loadToml(testing.allocator, "dpi-absent", "[bar]\nheight = 30\n");
+    defer absent.deinit(testing.allocator);
+    try testing.expectEqual(@as(?f32, null), absent.dpi);
+}
+
+test "legacy drun_* keys still parse after the rename to run_*" {
+    // (27.7) The rename is only safe if an UNEDITED existing config keeps
+    // working, so the alias path is pinned here rather than assumed: these are
+    // the exact key spellings hana shipped, loaded into the renamed fields.
+    var legacy = try loadToml(testing.allocator, "drun-alias",
+        \\[bar]
+        \\primary_color = "#010203"
+        \\bg = "#0a0b0c"
+        \\fg = "#070809"
+        \\drun_prompt = "$ "
+        \\
+        \\[bar.properties]
+        \\drun_bg = "#0a0b0c"
+        \\drun_fg = "#070809"
+        \\drun_prompt_color = "#010203"
+        \\
+    );
+    defer legacy.deinit(testing.allocator);
+    try testing.expectEqualStrings("$ ", legacy.bar.run_prompt.?);
+    try testing.expectEqual(@as(?u32, 0x0a0b0c), legacy.bar.run_bg);
+    try testing.expectEqual(@as(?u32, 0x070809), legacy.bar.run_fg);
+    try testing.expectEqual(@as(?u32, 0x010203), legacy.bar.run_prompt_color);
+    // The read-time fallback chain must see the alias exactly as if the
+    // canonical key had been used.
+    try testing.expectEqual(@as(u32, 0x0a0b0c), legacy.bar.runBg());
+    try testing.expectEqual(@as(u32, 0x070809), legacy.bar.runFg());
+    try testing.expectEqual(@as(u32, 0x010203), legacy.bar.runPromptColor());
+}
+
+test "canonical run_* and legacy drun_* are the same field, not two" {
+    // Both spellings target ONE field, so a config cannot end up with a
+    // half-applied pair. Whichever the parser sees assigns the same storage;
+    // the test pins that the canonical spelling reaches the same values.
+    var canonical = try loadToml(testing.allocator, "run-canonical",
+        \\[bar]
+        \\primary_color = "#010203"
+        \\bg = "#0a0b0c"
+        \\fg = "#070809"
+        \\run_prompt = "$ "
+        \\
+        \\[bar.properties]
+        \\run_bg = "#0a0b0c"
+        \\run_fg = "#070809"
+        \\run_prompt_color = "#010203"
+        \\
+    );
+    defer canonical.deinit(testing.allocator);
+    try testing.expectEqualStrings("$ ", canonical.bar.run_prompt.?);
+    try testing.expectEqual(@as(?u32, 0x0a0b0c), canonical.bar.run_bg);
+    try testing.expectEqual(@as(?u32, 0x070809), canonical.bar.run_fg);
+    try testing.expectEqual(@as(?u32, 0x010203), canonical.bar.run_prompt_color);
 }

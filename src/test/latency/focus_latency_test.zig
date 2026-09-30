@@ -1,3 +1,7 @@
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling
+
 // Timing/instrumentation for the focus-change hot path.
 //
 // Question: when focus moves from window A to window B (Mod+k/Mod+j cycling,
@@ -30,7 +34,7 @@ const bench = build_options.bench;
 
 const nowNs = time.monotonicNs;
 
-const makeModel = helpers.makeModel;
+const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn between iterations
 
 const regCur = helpers.regCur;
 
@@ -60,7 +64,7 @@ test "latency: reconcile cost + request count at focus change" {
         reconcile.run(&m, &probe_ctx, .{});
 
         if (bench)
-            std.debug.print(
+            helpers.benchLog(
                 "[latency] reconcile n={d}: {d:.1} ns/pass, requests/pass={d}\n",
                 .{ n, per_pass_ns, probe.count },
             );
@@ -111,7 +115,7 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     const snap_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters));
 
     if (bench)
-        std.debug.print(
+        helpers.benchLog(
             "[latency] Mod+k n={d}: single folded reconcile={d:.1} ns (a second grab+reconcile would add {d:.1}%)\n",
             .{ n, focus_ns, @as(f64, 100.0) * snap_ns / focus_ns },
         );

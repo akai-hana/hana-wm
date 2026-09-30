@@ -21,11 +21,10 @@ const scratch = @import("scratch");
 const log = @import("log");
 
 fn writeAndRead(alloc: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]u8 {
-    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", name);
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, bytes);
-    defer scratch.cleanupScratch(path);
-    return config.readFileAlloc(alloc, path);
+    var f = try scratch.TmpFile.init(name); // (28.5)
+    defer f.deinit();
+    try f.write(bytes);
+    return config.readFileAlloc(alloc, f.path());
 }
 
 test "readFileAlloc round-trips a >64KiB file exactly" {
@@ -86,11 +85,10 @@ test "readFileAlloc growth path handles stat-less files (/proc)" {
 const types = @import("types");
 
 fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !types.Config {
-    const path = try scratch.scratchPath(alloc, "hana-cfgtest-", name);
-    defer alloc.free(path);
-    try scratch.writeScratchFile(path, content);
-    defer scratch.cleanupScratch(path);
-    return try config.loadConfig(alloc, path);
+    var f = try scratch.TmpFile.init(name); // (28.5)
+    defer f.deinit();
+    try f.write(content);
+    return try config.loadConfig(alloc, f.path());
 }
 
 test "plain {kill} bind substitutes before parseAction" {
@@ -409,22 +407,37 @@ const Sandbox = struct {
     /// Stands in for XDG_RUNTIME_DIR: refreshSnapshot creates `hana-config`
     /// inside it.
     runtime: []u8,
+    /// (28.5) Owns the temp tree `root`/`runtime` live in, so cleanup is a
+    /// single TmpDir drop instead of two recursive deletes that can each
+    /// half-succeed.
+    tmp: std.testing.TmpDir,
 
     fn init(alloc: std.mem.Allocator, name: []const u8) !Sandbox {
-        // Direct children of the shared per-process scratch dir (which already
-        // exists), so no intermediate level has to be created first.
-        const root = try scratch.scratchPath(alloc, "hana-snapsrc-", name);
+        // (28.5) A per-sandbox tmpDir rather than a child of a shared
+        // process-global scratch dir. Two consequences worth naming: the
+        // isolation no longer depends on a PRNG argument, and
+        // TmpDir.cleanup() removes the whole tree on drop, so there is no
+        // separate recursive delete that can half-succeed and leave the rest.
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const base_len = try tmp.dir.realPath(snapio, &buf);
+        const root = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ buf[0..base_len], name });
         errdefer alloc.free(root);
         const runtime = try std.fmt.allocPrint(alloc, "{s}-run", .{root});
         errdefer alloc.free(runtime);
         try std.Io.Dir.createDirAbsolute(snapio, root, .default_dir);
         try std.Io.Dir.createDirAbsolute(snapio, runtime, .default_dir);
-        return .{ .root = root, .runtime = runtime };
+        return .{ .root = root, .runtime = runtime, .tmp = tmp };
     }
 
     fn deinit(self: Sandbox, alloc: std.mem.Allocator) void {
-        deleteTreeAbs(self.root);
-        deleteTreeAbs(self.runtime);
+        // (28.5) tmp.cleanup() removes the whole tree, root and runtime
+        // included. The old deleteTreeAbs pair removed each independently and
+        // ignored failures, so a partially-failed delete silently left files
+        // behind with nothing left to retry with.
+        var tmp = self.tmp; // cleanup takes *TmpDir; deinit() is by-value
+        tmp.cleanup();
         alloc.free(self.root);
         alloc.free(self.runtime);
     }

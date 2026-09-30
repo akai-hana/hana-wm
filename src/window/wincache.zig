@@ -33,7 +33,8 @@ pub const SizeHints = model_mod.SizeHints;
 /// costs `max_window_cache` (512) x this, so a buffer sized to the FETCH
 /// rather than to the DISPLAY would have tripled the cache for bytes no
 /// reader can see.
-const max_title_len = 256;
+/// Hard cap on a cached title, so the inline buffer is a fixed size.
+pub const max_title_len = 256;
 
 const WindowData = struct {
     hints: SizeHints = .{},
@@ -79,8 +80,20 @@ inline fn live() *CacheMap {
 
 /// Safe pre-init query; returns null only during the narrow startup window
 /// before init().
-pub inline fn getOpt() ?*CacheMap {
+inline fn getOpt() ?*CacheMap {
     return if (cache) |*c| c else null;
+}
+
+/// How many windows currently hold a cache entry (0 before init).
+///
+/// (11.9) This replaces the test's `getOpt() |c| c.count()`, which forced
+/// `getOpt` to be `pub` and therefore leaked the module-private `CacheMap`
+/// type out of the file as an unnameable `?*CacheMap` in the API surface. The
+/// test wanted one integer -- the evidence that the ceiling actually dropped
+/// an entry rather than overwriting one -- so the integer is what is exposed.
+pub fn cachedWindowCount() usize {
+    const c = getOpt() orelse return 0;
+    return c.count();
 }
 
 pub fn init(alloc: std.mem.Allocator) void {
@@ -304,6 +317,16 @@ fn setTitle(wd: *WindowData, title: []const u8) void {
 
 /// The bar's read path: the cached title for `win`, or "" when absent.
 /// Pure cache hit -- never touches the wire.
+///
+/// ## BORROW CONTRACT (11.9)
+///
+/// The returned slice ALIASES the cache's own `title_buf` for `win`. It is
+/// valid until the next `storeTitle`/`setTitle` for that SAME window, and the
+/// call is not const-correct about it: nothing in the type says so, which is
+/// why the bar copies instead of retaining (see `focused_title_buf`). A caller
+/// that needs the title to survive a cache write must copy it -- there is no
+/// ownership transfer here and the "" for an unknown window is a static
+/// string, not a per-window one.
 pub fn peekTitle(win: u32) []const u8 {
     const wd = dataFor(win) orelse return "";
     return wd.title();

@@ -560,6 +560,36 @@ pub const KeyPressEvent = opaque {};
 /// unaffected -- and the hook no longer has to be documented as "the caller
 /// promises this is a Frame", which is a promise `*const anyopaque` cannot
 /// check.
+/// What a segment actually painted, returned rather than inferred.
+///
+/// `draw` used to return only the advanced `x`, and the bar decided whether a
+/// segment had drawn anything by comparing it against the `x` it passed in.
+/// That conflates "painted nothing" with "failed", and the two are not the
+/// same: a readout with nothing to show (no battery, unreadable file) is a
+/// SUCCESS that occupies zero width, while a failed draw is a success-shaped
+/// fallback the bar substitutes. Both happen to end up advancing the row by the
+/// reserved width, so the confusion was invisible -- but a segment that meant
+/// to paint an empty cell and keep its slot could not say so, and the bar had
+/// no way to tell that apart from an error it had just caught.
+pub const Painted = struct {
+    /// x just past the painted content.
+    end_x: u16,
+    /// The width really occupied, padding included. 0 means "nothing painted",
+    /// which is a valid outcome and NOT an error.
+    width: u16 = 0,
+
+    /// The common case: painted from `start_x` to `end_x`.
+    pub inline fn span(start_x: u16, end_x: u16) Painted {
+        return .{ .end_x = end_x, .width = end_x -| start_x };
+    }
+
+    /// Painted nothing -- a valid, successful outcome. The row still advances
+    /// by the reservation the layout made.
+    pub inline fn nothing(start_x: u16) Painted {
+        return .{ .end_x = start_x, .width = 0 };
+    }
+};
+
 pub const Frame = struct {
     workspace_count: u32 = 0,
     current_workspace: u8 = 0,
@@ -655,9 +685,19 @@ pub const Segment = struct {
     /// Reserved width in the row. `frame` is a real `*const Frame` (above) and
     /// `clock_width` the measured clock width for segments that need it.
     naturalWidth: ?*const fn (*const Frame, u16) u16 = null,
-    /// Draw at `x`, return advanced `x`. `ctx` is `*segment.DrawCtx`
+    /// Draw at `x`, return what it painted. `ctx` is `*segment.DrawCtx`
     /// (bar-built scratch shared by every segment draw).
-    draw: ?*const fn (*anyopaque, u16) anyerror!u16 = null,
+    draw: ?*const fn (*anyopaque, u16) anyerror!Painted = null,
+    /// The bar reports back the width the segment ACTUALLY painted, after
+    /// every draw, so the reservation can follow the content.
+    ///
+    /// The bar owns the row reservation, so a segment should not have to
+    /// remember to record its own drawn width -- forgetting to is silent and
+    /// shows up as a segment locked onto its startup width, its neighbours
+    /// overlapping it forever. The sink stays a hook because the width belongs
+    /// to the segment: a multi-slot module splits it across its slots, and a
+    /// module with no measured width (the clock, layout) leaves this null.
+    onPainted: ?*const fn (u16) void = null,
     /// Click dispatch for recorded bounds; mirrors the chrome-surface input
     /// routing (state/title_click/redraw are bar-provided fn pointers). All of
     /// it arrives in one named `ClickCtx`.

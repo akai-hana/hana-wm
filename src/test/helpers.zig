@@ -9,10 +9,6 @@ const sinkmod = @import("sink");
 /// and tiling fixtures so no caller threads it through every init.
 pub const std_wa: model.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 
-pub fn makeModel() model.Model {
-    return .{};
-}
-
 /// Deterministically re-arms the process-global module stores (minimize,
 /// fullscreen) that back the model transitions, so a test's first assertions
 /// never depend on which earlier tests left records behind ("pass in any
@@ -28,15 +24,38 @@ pub fn testReset() void {
         @import("fullscreen").deinit();
         @import("fullscreen").init() catch unreachable;
     }
+    // (28.3) floating's drag state was never re-armed. It is a process-global
+    // like the other two, and a left-active drag is not a cosmetic leak:
+    // `startDrag` early-returns while `g_state.drag.active`, so one test that
+    // did not end its drag silently disables dragging for every test after it.
+    if (build_options.has_floating) {
+        @import("floating").resetState();
+    }
 }
 
-/// Fresh model on deterministically reset module stores. The canonical
-/// fixture entry for state-machine tests that touch module-backed transitions
-/// (minimize/fullscreen): frees them from a shared static store seeded by an
-/// unrelated earlier test.
-pub fn setUpModel() model.Model {
+/// The ONE fixture entry: a fresh model on deterministically re-armed
+/// process-global module stores. (28.3)
+///
+/// There used to be two entry points with different guarantees -- `makeModel`
+/// (bare) and `setUpModel` (reset first) -- and nothing in the type system said
+/// which one a given test needed. Worse, `model_test` had locally aliased
+/// `const makeModel = helpers.setUpModel`, so a reader scanning that file saw
+/// `makeModel()` and reasonably assumed no reset happened. Reset is now the
+/// default, so the bare path is the one you must ask for by name.
+pub fn makeModel() model.Model {
     testReset();
-    return makeModel();
+    return .{};
+}
+
+/// A fresh model with the module stores left ALONE. (28.3)
+///
+/// Only for the latency files, and the reason is measurement hygiene rather
+/// than correctness: `testReset` frees and re-allocates the module stores, and
+/// doing that between bench iterations churns the allocator and the cache
+/// lines the next timed region is about to read, which is exactly the noise a
+/// latency benchmark exists to avoid. Correctness tests must use `makeModel`.
+pub fn makeBareModel() model.Model {
+    return .{};
 }
 
 pub fn regCur(m: *model.Model, win: model.WindowId) void {
@@ -102,6 +121,14 @@ pub const TestOp = union(enum) {
     pixel: struct { win: model.WindowId, p: u32 },
     park: model.WindowId,
     stack: struct { win: model.WindowId, s: sinkmod.Stack },
+    /// (28.1) The four ops that used to be silent shims. Recording them is what
+    /// makes the fullscreen EWMH transition assertable at all: fullscreen.zig
+    /// asserts nothing observable about set_state_atom otherwise, because the
+    /// test sink swallowed every call.
+    ewmh_fullscreen: struct { win: model.WindowId, state_atom: u32, atom: u32, add: bool },
+    flush,
+    grab_server,
+    ungrab_and_flush,
 };
 
 pub const SinkMode = enum {
@@ -218,10 +245,47 @@ pub fn TestSink(comptime mode: SinkMode) type {
             }
         }
 
-        fn ewmhShim(_: *anyopaque, _: model.WindowId, _: u32, _: u32, _: bool) void {}
-        fn flushShim(_: *anyopaque) void {}
-        fn grabShim(_: *anyopaque) void {}
-        fn ungrabShim(_: *anyopaque) void {}
+        fn ewmhShim(
+            self_ptr: *anyopaque,
+            win: model.WindowId,
+            state_atom: u32,
+            atom: u32,
+            add: bool,
+        ) void {
+            const self: *Self = @ptrCast(@alignCast(self_ptr));
+            if (mode == .record) {
+                self.ops.append(
+                    std.testing.allocator,
+                    .{ .ewmh_fullscreen = .{
+                        .win = win,
+                        .state_atom = state_atom,
+                        .atom = atom,
+                        .add = add,
+                    } },
+                ) catch @panic("test sink: out of memory recording op");
+            }
+        }
+
+        fn flushShim(self_ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(self_ptr));
+            if (mode == .record) {
+                self.ops.append(std.testing.allocator, .flush) catch @panic("test sink: out of memory recording op");
+            }
+        }
+
+        fn grabShim(self_ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(self_ptr));
+            if (mode == .record) {
+                self.ops.append(std.testing.allocator, .grab_server) catch @panic("test sink: out of memory recording op");
+            }
+        }
+
+        fn ungrabShim(self_ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(self_ptr));
+            if (mode == .record) {
+                self.ops.append(std.testing.allocator, .ungrab_and_flush) catch @panic("test sink: out of memory recording op");
+            }
+        }
 
         pub fn sink(self: *Self) sinkmod.Sink {
             return .{
@@ -356,6 +420,40 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(win, op.map);
         }
 
+        /// Asserts op `i` is a `set_state_atom` fullscreen transition. (28.1)
+        pub fn expectEwmhFullscreen(
+            self: *const Self,
+            i: usize,
+            win: model.WindowId,
+            atom: u32,
+            add: bool,
+        ) !void {
+            comptime if (mode != .record) @compileError("expectEwmhFullscreen requires record mode");
+            const op = self.ops.items[i];
+            try std.testing.expect(op == .ewmh_fullscreen);
+            try std.testing.expectEqual(win, op.ewmh_fullscreen.win);
+            try std.testing.expectEqual(atom, op.ewmh_fullscreen.atom);
+            try std.testing.expectEqual(add, op.ewmh_fullscreen.add);
+        }
+
+        /// Asserts op `i` is a bare `flush`. (28.1)
+        pub fn expectFlush(self: *const Self, i: usize) !void {
+            comptime if (mode != .record) @compileError("expectFlush requires record mode");
+            try std.testing.expect(self.ops.items[i] == .flush);
+        }
+
+        /// Asserts op `i` is a `grab_server`. (28.1)
+        pub fn expectGrab(self: *const Self, i: usize) !void {
+            comptime if (mode != .record) @compileError("expectGrab requires record mode");
+            try std.testing.expect(self.ops.items[i] == .grab_server);
+        }
+
+        /// Asserts op `i` is an `ungrab_and_flush`. (28.1)
+        pub fn expectUngrab(self: *const Self, i: usize) !void {
+            comptime if (mode != .record) @compileError("expectUngrab requires record mode");
+            try std.testing.expect(self.ops.items[i] == .ungrab_and_flush);
+        }
+
         pub fn expectPark(self: *const Self, i: usize, win: model.WindowId) !void {
             comptime if (mode != .record) @compileError("expectPark requires record mode");
             const op = self.ops.items[i];
@@ -363,4 +461,55 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(win, op.park);
         }
     };
+}
+
+// --- 28.2: bench timings go to a FILE, not to stderr ---
+
+/// Appends one bench timing line to `.zig-cache/bench/timings.txt`.
+///
+/// Why a file and not `std.debug.print`: the Zig test protocol treats any
+/// stderr output as a failed command, so the printed numbers made
+/// `zig build test -Dbench=true` -- the only way to compile bench mode -- exit
+/// non-zero on a fully passing suite. The documented invocation was therefore
+/// guaranteed to report failure, and the two bench-only `std.debug.print`
+/// sites had in fact gone stale enough to no longer compile (they read fields
+/// the test sink does not have, and one referenced a `sink` that was not in
+/// scope), which is exactly what happens to a code path nothing can run.
+///
+/// Writing here instead keeps the numbers, keeps the exit green, and makes the
+/// output land somewhere a reader looks for it. Best-effort by design: a
+/// timing that cannot be recorded must not fail a test, so every error here is
+/// swallowed, exactly as the `note`/`flush` instrumentation is.
+/// The one open handle for the timings file, opened on first use.
+///
+/// (28.2) It has to be ONE handle, not one per call: `createFile` has no
+/// append mode, so every fresh handle starts writing at offset 0 and each
+/// record overwrote the head of the last one -- which showed up as timings
+/// truncated to their own tails ("...=130 (configure=50,map=40)" with the
+/// label and the numbers before it gone). Holding the handle for the run makes
+/// the position advance naturally, and the test runner executes a binary's
+/// tests sequentially, so there is no concurrent writer.
+///
+/// The handle is intentionally never closed: this is a short-lived test
+/// process, and a close would need a teardown hook the test protocol does not
+/// offer. One fd at process exit is not worth a shutdown path.
+var bench_file: ?std.Io.File = null;
+
+pub fn benchLog(comptime fmt: []const u8, args: anytype) void {
+    const io = std.testing.io;
+    if (bench_file == null) {
+        const cwd = std.Io.Dir.cwd();
+        cwd.createDirPath(io, ".zig-cache/bench") catch return;
+        bench_file = cwd.createFile(io, ".zig-cache/bench/timings.txt", .{
+            .truncate = false,
+            .permissions = @enumFromInt(0o644),
+        }) catch return;
+    }
+    // Append a newline only if the caller's format does not already end in
+    // one -- the bench formats all do, and adding another left a blank line
+    // between every record.
+    var buf: [512]u8 = undefined;
+    const with_nl = comptime if (std.mem.endsWith(u8, fmt, "\n")) fmt else fmt ++ "\n";
+    const line = std.fmt.bufPrint(&buf, with_nl, args) catch return;
+    bench_file.?.writeStreamingAll(io, line) catch return;
 }

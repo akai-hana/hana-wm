@@ -10,6 +10,7 @@ const constants = @import("constants");
 
 const log = @import("log");
 const config = @import("config");
+const scale = @import("dpi");
 const input = @import("input");
 const window = @import("window");
 const ledger = @import("ledger");
@@ -110,12 +111,12 @@ fn handleDestroyNotify(event: *anyopaque) void {
     window.handleDestroyNotify(e);
 }
 
-// Adapts input.handleMappingNotify to the EventHandler shape. The keymap
-// rebuild it triggers doesn't consult any MappingNotify fields, so the
-// event pointer is discarded.
+// Adapts input.handleMappingNotify to the EventHandler shape. Only the
+// `request` field matters: it says WHICH mapping changed, and only a keyboard
+// mapping change invalidates the keycode->keysym table (19.2).
 fn handleMappingNotify(event: *anyopaque) void {
-    _ = event;
-    input.handleMappingNotify();
+    const e = core.eventCast(*xcb.xcb_mapping_notify_event_t, event);
+    input.handleMappingNotify(e.request == xcb.XCB_MAPPING_KEYBOARD);
 }
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
@@ -183,6 +184,23 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // dropped by the bounds guard below. isRandrEvent already returns false
     // when the bar is absent, pruning the branch (and the `surfaces` calls).
     if (isRandrEvent(event_type)) {
+        // Re-read the screen size BEFORE the surface path runs, and only when
+        // it really changed (6.2). Core's cached `Screen` is the pointer the
+        // server filled in at setup, so without this a resolution change left
+        // the work area, percentage heights and font scaling all sized for
+        // the display as it was at startup. The boolean check is what keeps
+        // this cheap: a mode change arrives as a BURST of RandR events, and
+        // only the first one that moves a dimension pays for the round-trip.
+        //
+        // DPI is re-derived in the same place, because a different screen size
+        // usually means a different physical size too, and every font metric
+        // the bar probes is scaled by it. A DPI refresh is a few X resource
+        // reads -- no grab -- so it is safe here, unlike a reconcile, which
+        // this deliberately does not trigger (see refreshScreenGeometry).
+        if (core.refreshScreenGeometry(core.getState().conn)) {
+            const cs = core.getState();
+            core.setDpi(scale.detectDpi(cs.conn, cs.screen));
+        }
         // Pass the raw event: a CRTC-change payload carries the active mode id,
         // letting the bar resolve the rate from its cached mode table with zero
         // XCB round-trips (see hz.handleRandrNotifyEvent).

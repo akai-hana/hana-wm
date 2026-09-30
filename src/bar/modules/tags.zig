@@ -145,7 +145,7 @@ fn drawCell(
 
     // baselineY returns the same value for every cell; hoist it once outside.
     const text_x = x + (cell_w -| label_w) / 2;
-    try dc.drawTextStyled(text_x, dc.baselineY(height), label, fg, config.workspaceIconProps(is_current));
+    dc.drawTextStyled(text_x, dc.baselineY(height), label, fg, config.workspaceIconProps(is_current));
 
     if (has_windows) {
         const glyph = if (is_current)
@@ -179,8 +179,8 @@ fn drawFrame(
     ws_current: u8,
     ws_has_windows: []const bool,
     ws_all_active: bool,
-) !u16 {
-    if (ws_has_windows.len == 0) return start_x;
+) !contract.Painted {
+    if (ws_has_windows.len == 0) return contract.Painted.nothing(start_x);
     ensureCache(dc, config, height, ws_current, ws_all_active);
     var x = start_x;
 
@@ -197,20 +197,20 @@ fn drawFrame(
             true,
         );
         x += all_view_cell_width;
-        return x;
+        return contract.Painted.span(start_x, x);
     }
 
     for (ws_has_windows, 0..) |has_windows, i| {
         try drawCell(dc, config, height, x, ws_width, getLabel(i, config), label_widths[i], has_windows, i == ws_current);
         x += ws_width;
     }
-    return x;
+    return contract.Painted.span(start_x, x);
 }
 
 /// Draw workspace tags: the per-frame frame state (current workspace,
 /// per-workspace window flags, all-view) lives in the shared DrawCtx the bar
 /// builds every frame, so no separate frame-arg draw signature is needed.
-fn draw(ctx: *segmod.DrawCtx, start_x: u16) !u16 {
+fn draw(ctx: *segmod.DrawCtx, start_x: u16) !contract.Painted {
     const f = ctx.frame;
     return drawFrame(
         ctx.dc,
@@ -261,7 +261,7 @@ fn onClickHook(ctx: *const contract.ClickCtx) bool {
     return true;
 }
 
-fn drawHook(ctx: *anyopaque, x: u16) !u16 {
+fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
     return draw(segmod.castDraw(ctx), x);
 }
 

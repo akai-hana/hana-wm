@@ -10,6 +10,10 @@
 //! reads. The sync sink is the recorder (no live X needed; these are
 //! headless and run in every `zig build test`).
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling, minimize, fullscreen
+
 const std = @import("std");
 const testing = std.testing;
 

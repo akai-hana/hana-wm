@@ -29,13 +29,16 @@ pub fn usedPct(total: u64, avail: u64) ?u8 {
 /// truncation-aware -- too large to trust whole. A meminfo past the buffer
 /// used to look exactly like one with no `MemAvailable`, i.e. "no RAM" instead
 /// of the I/O problem it is.
-fn read() ?u8 {
+var g_num: [16]u8 = undefined;
+
+fn read() ?systatus.Sample {
     var buf: [4096]u8 = undefined;
     const r = systatus.readFileChecked("/proc/meminfo", &buf) orelse return null;
     if (r.truncated) return null;
     const total = parseRamField(r.bytes, "MemTotal:") orelse return null;
     const avail = parseRamField(r.bytes, "MemAvailable:") orelse return null;
-    return usedPct(total, avail);
+    const pct = usedPct(total, avail) orelse return null;
+    return systatus.percentSample(&g_num, pct);
 }
 
 /// This readout's binding to the systatus surface (`systatus.Sub`).

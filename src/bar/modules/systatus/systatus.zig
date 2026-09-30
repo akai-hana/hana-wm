@@ -47,10 +47,34 @@ pub const Sub = struct {
     name: []const u8,
     /// Label prefix rendered before the value ("RAM", "CPU", ...).
     label: []const u8,
-    /// Current readout as a 0-100 percent, or null when unreadable / not
-    /// present this tick (the segment then renders nothing, zero width).
-    read: *const fn () ?u8,
+    /// Current readout, or null when unreadable / not present this tick (the
+    /// segment then renders nothing, zero width).
+    read: *const fn () ?Sample,
 };
+
+/// One reading from a readout, carrying its DISPLAY text. (25.3)
+///
+/// This used to be `?u8` -- a bare 0-100 percent -- and the core hardcoded
+/// "{d}%" when rendering it. That put the readout's presentation in the wrong
+/// place: a module could not report a temperature, a byte count, or "up", and
+/// the only way to express one was to abandon the systatus registry. The sample
+/// now carries the formatted text, so the module owns its own presentation and
+/// the core just paints two spans.
+///
+/// `text` is borrowed from storage the module owns (typically a module-level
+/// buffer); the core COPIES it into the render buffer, so it need not outlive
+/// the call.
+pub const Sample = struct {
+    /// Display form of the value, e.g. "42%". Rendered in the segment's
+    /// value colour.
+    text: []const u8,
+};
+
+/// Builds a percentage `Sample` into `buf`, the common case. Kept so the
+/// existing percentage readouts do not each hand-roll the same format.
+pub fn percentSample(buf: []u8, value: u8) Sample {
+    return .{ .text = std.fmt.bufPrint(buf, "{d}%", .{value}) catch "?" };
+}
 
 /// The readout registry, generated from file presence (build.zig). Each
 /// entry becomes one standalone bar segment named `sub.name`.
@@ -133,6 +157,34 @@ var g_len: [subs.len]usize = @splat(0);
 var g_value_start: [subs.len]usize = @splat(0);
 var g_value_len: [subs.len]usize = @splat(0);
 
+/// A rendered readout: the full segment text plus the span of the value within
+/// it. (25.3) Offsets, not a subslice, so the painter never has to recover a
+/// position from an address.
+pub const Rendered = struct {
+    text: []const u8,
+    value_start: usize,
+    value_len: usize,
+};
+
+/// PURE (25.3): renders "<label> <value>" into `buf` from a sample. No globals,
+/// no I/O, no latching -- the absence and tolerance POLICY stays in `refresh`,
+/// so this half of the segment is directly testable. Before the split, the
+/// formatting, the value-span bookkeeping, the miss latching and the change
+/// detection were one function over module globals, which is why none of it
+/// could be tested at all.
+pub fn render(label: []const u8, sample: Sample, buf: []u8) Rendered {
+    var n = appendText(buf, 0, label);
+    n = appendText(buf, n, " ");
+    const value_start = n;
+    n = appendText(buf, n, sample.text);
+    return .{
+        .text = buf[0..n],
+        .value_start = value_start,
+        // Truncation must shorten the span, or it would point past `text`.
+        .value_len = n - value_start,
+    };
+}
+
 fn appendText(dst: []u8, start: usize, text: []const u8) usize {
     if (start >= dst.len) return start;
     const n = @min(dst.len - start, text.len);
@@ -150,20 +202,17 @@ fn refresh(idx: usize) bool {
     var n: usize = 0;
     var value_start: usize = 0;
     var value_len: usize = 0;
-    if (sub.read()) |value| {
+    if (sub.read()) |sample| {
         g_misses[idx] = 0;
         // Recovering from absence re-fills the rendered text, so the ordinary
         // `changed` check below requests the redraw and the width store
         // re-expands the slot -- nothing extra is needed for the recovery
         // path, only the latch itself has to be cleared.
         g_absent[idx] = false;
-        var num: [16]u8 = undefined;
-        const value_text = std.fmt.bufPrint(&num, "{d}%", .{value}) catch "";
-        n = appendText(&buf, n, sub.label);
-        n = appendText(&buf, n, " ");
-        value_start = n;
-        n = appendText(&buf, n, value_text);
-        value_len = value_text.len;
+        const r = render(sub.label, sample, buf[0..]);
+        n = r.text.len;
+        value_start = r.value_start;
+        value_len = r.value_len;
     } else {
         // Sticky last-good: within the tolerance window KEEP whatever is
         // already in g_last and report no change, so the segment keeps
@@ -219,8 +268,7 @@ fn consumeRedrawRequestFor(comptime idx: usize) bool {
     return p or widthStateFor(idx).consumeRedrawRequest();
 }
 
-fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !u16 {
-    const W = widthStateFor(idx);
+fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     const c = segmod.castDraw(ctx);
     if (!g_armed[idx]) {
         g_armed[idx] = true;
@@ -232,24 +280,23 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !u16 {
     // readout -- no battery, unreadable file -- takes no space. The reserved
     // slot collapses on the next re-layout.
     if (g_len[idx] == 0) {
-        // W.store(0) marks the redraw request itself when the width actually
-        // changed, so the collapse needs no private bookkeeping.
-        W.store(0);
-        return x;
+        // An absent readout paints nothing. Reporting a 0 width is enough:
+        // the bar feeds it back through onPainted, whose store raises the
+        // redraw request on change, so the collapse needs no private
+        // bookkeeping here.
+        return contract.Painted.nothing(x);
     }
 
-    const value = if (g_value_len[idx] != 0)
-        g_last[idx][g_value_start[idx] .. g_value_start[idx] + g_value_len[idx]]
-    else
-        null;
-    const end_x = try drawing.drawPaddedSegmentValue(c.dc, c.config, c.height, x, subs[idx].name, g_last[idx][0..g_len[idx]], value, c.config.segmentProps(subs[idx].name));
+    // (25.3) The stored offsets go straight to the painter; no subslice is
+    // manufactured here just to carry a position.
+    const end_x = try drawing.drawPaddedSegmentValue(c.dc, c.config, c.height, x, subs[idx].name, g_last[idx][0..g_len[idx]], g_value_start[idx], g_value_len[idx], c.config.segmentProps(subs[idx].name));
 
-    // Track the ACTUAL painted width, not the row reservation: the row must
+    // Report the ACTUAL painted width, not the row reservation: the row must
     // follow the text or the segment locks onto the startup probe and paints
-    // over its right neighbors ("RAM 42%" clipped by the next slot). W.store
-    // raises the redraw request on change, so the bar re-lays out.
-    W.store(end_x - x);
-    return end_x;
+    // over its right neighbors ("RAM 42%" clipped by the next slot). The bar
+    // hands that width back through onPainted, whose store raises the redraw
+    // request on change (21.7), so the re-layout is not this module's job.
+    return contract.Painted.span(x, end_x);
 }
 
 /// The bar-module binding for readout `i` (comptime so each instantiation is
@@ -270,8 +317,13 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
         fn naturalWidth(frame: *const contract.Frame, fallback: u16) u16 {
             return widthStateFor(i).naturalWidth(frame, fallback);
         }
-        fn draw(ctx: *anyopaque, x: u16) anyerror!u16 {
+        fn draw(ctx: *anyopaque, x: u16) anyerror!contract.Painted {
             return drawFor(i, ctx, x);
+        }
+        /// Where the bar's painted-width report lands: this readout's own
+        /// width state, which its naturalWidth hook reads back.
+        fn onPainted(width: u16) void {
+            widthStateFor(i).store(width);
         }
     };
     return .{
@@ -282,5 +334,6 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
         .consumeRedrawRequest = Hooks.redraw,
         .naturalWidth = Hooks.naturalWidth,
         .draw = Hooks.draw,
+        .onPainted = Hooks.onPainted,
     };
 }

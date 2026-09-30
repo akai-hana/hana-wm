@@ -5,6 +5,10 @@
 //! invariants these assert are the same ones actions/reconcile maintain in
 //! production; the server-side geometry checks verify the end-to-end tile.
 
+// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// build.zig table that had to be kept in agreement with them by hand.
+// build-gate: tiling
+
 const std = @import("std");
 
 const core = @import("core");
@@ -16,7 +20,7 @@ const fixture = @import("fixture");
 
 const ledger = @import("ledger");
 test "actions: mapRequest admits, maps, and focuses a window" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -36,7 +40,7 @@ test "actions: mapRequest admits, maps, and focuses a window" {
 }
 
 test "actions: mapRequest admits a float-rule window floating at its rect" {
-    var fx = fixture.setUp("actions_float") orelse return;
+    var fx = try fixture.setUp("actions_float");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -63,7 +67,7 @@ test "actions: mapRequest admits a float-rule window floating at its rect" {
 }
 
 test "actions: moveWindowTo transfers membership and parks off-screen" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -84,7 +88,7 @@ test "actions: moveWindowTo transfers membership and parks off-screen" {
 }
 
 test "actions: tag/detag, pin, and all-workspaces view transitions" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
     const ws0: u8 = @intCast(m.current.index);
@@ -129,7 +133,7 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
 }
 
 test "actions: switching to the CURRENT workspace while in all-view exits it" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
     const ws0: u8 = @intCast(m.current.index);
@@ -164,7 +168,7 @@ test "actions: switching to the CURRENT workspace while in all-view exits it" {
 }
 
 test "actions: minimize parks, restore unmaps-and-redraws" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -188,7 +192,7 @@ test "actions: minimize parks, restore unmaps-and-redraws" {
 }
 
 test "actions: toggleFloating round-trips through LastSent geometry" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -219,7 +223,7 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
 }
 
 test "actions: dragging a tiled window out detaches AND reflows the pile (no gap)" {
-    var fx = fixture.setUp("actions_drag") orelse return;
+    var fx = try fixture.setUp("actions_drag");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -267,7 +271,7 @@ test "actions: dragging a tiled window out detaches AND reflows the pile (no gap
 }
 
 test "actions: unmanage drops the window and re-focuses" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
 
@@ -299,7 +303,7 @@ test "actions: unmanage drops the window and re-focuses" {
 }
 
 test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
     const order = &m.ws[m.current.index].tiled_order;
@@ -339,7 +343,7 @@ test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
 }
 
 test "actions: layout parameters adjust within clamps" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
     const p = &m.ws[m.current.index].params;
@@ -361,7 +365,7 @@ test "actions: layout parameters adjust within clamps" {
 }
 
 test "actions: layout kind and variant step through the registry" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
     const m = pipeline.model();
     const p = &m.ws[m.current.index].params;
@@ -412,7 +416,7 @@ test "actions: layout kind and variant step through the registry" {
 // X-gated like the rest of this file: `reconcileGrab` takes a real server
 // grab, so this skips headless.
 test "actions: the plain reconcile alias bumps the window fact" {
-    var fx = fixture.setUp("actions_test") orelse return;
+    var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
 
     const win = fx.createWindow();

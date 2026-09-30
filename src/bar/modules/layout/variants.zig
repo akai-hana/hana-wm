@@ -44,11 +44,11 @@ fn getIndicator() []const u8 {
     );
 }
 
-/// Returns the updated x position after drawing the segment, or the original
-/// start_x when tiling is disabled or no indicator is available (a 0-width
-/// reservation, per drawAndStore's empty-text path).
-fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !u16 {
+/// Paints the variant indicator, or nothing at all when tiling is disabled or
+/// no indicator is available -- a successful zero-width draw, which is not the
+/// same thing as a failed one (see contract.Painted).
+fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
     return scaffold.drawAndStore("variants", dc, config, height, start_x, getIndicator());
 }
 
-pub const module = scaffold.module("variants", draw, actions.stepVariantDir, .{ .with_collapse = true });
+pub const module = scaffold.module("variants", draw, actions.stepVariantDir, .{ .mode = .measured_relayout });

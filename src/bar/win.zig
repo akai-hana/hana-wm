@@ -13,6 +13,7 @@
 const std = @import("std");
 
 const core = @import("core");
+const types = @import("types");
 const xcb = core.xcb;
 
 const drawing = @import("drawing");
@@ -52,10 +53,17 @@ pub fn initAtoms() void {
         @field(atoms, e[0]) = atom.getAtomCached(e[1]) orelse 0;
 }
 
-pub fn calcBarYPos(height: u16) i16 {
-    const cs = core.getState();
-    return if (cs.config.bar.bar_position == .bottom)
-        @intCast(@as(i32, cs.screen.height_in_pixels) - height)
+/// The bar window's top-edge y for a given position, size and screen height.
+///
+/// Takes all three as values instead of reading `core.getState()` (20.4). The
+/// screen height is a u16 and the height a u16, so reading the wrong one
+/// compiles; and this ran during bar creation, where the answer decides where
+/// the bar lands -- a wrong reference is a bar on the wrong edge, or past the
+/// bottom of the screen, with no error to point at it. As a pure function of
+/// its arguments it is checkable without a display.
+pub fn calcBarYPos(position: types.BarScreenPosition, screen_height_px: u16, height: u16) i16 {
+    return if (position == .bottom)
+        @intCast(@as(i32, screen_height_px) - height)
     else
         0;
 }
@@ -117,9 +125,13 @@ pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void 
     freeColormap(conn, colormap);
 }
 
-pub fn createBarWindow(height: u16, y_pos: i16) BarWindowSetup {
+/// Creates the bar window. `want_transparency` is passed in rather than read
+/// from the live config (20.4) so the window's visual, depth and colormap are
+/// all decided by the one value the caller was given, instead of the window
+/// re-deriving "is this bar opaque?" from config state the caller may already
+/// be about to replace.
+pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWindowSetup {
     const cs = core.getState();
-    const want_transparency = cs.config.bar.getAlpha16() < 0xFFFF;
     const visual_id = if (want_transparency)
         drawing.findVisualByDepth(cs.screen, 32)
     else
@@ -179,7 +191,7 @@ pub fn createDrawContext(setup: BarWindowSetup, height: u16, font_size: u16) !*d
         cs.screen.width_in_pixels,
         height,
         setup.visual_id,
-        core.dpi_info,
+        core.dpi(),
         setup.has_argb,
         cs.config.bar.transparency,
     );
