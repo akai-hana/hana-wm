@@ -76,6 +76,45 @@ test "parseCpuLine rejects a per-core line and malformed fields" {
     try std.testing.expectEqual(@as(?cpu.Sample, null), cpu.parseCpuLine(""));
 }
 
+test "parseCpuLine stops at the aggregate line and keeps the per-CPU tail out" {
+    // A kernel reporting only 4 aggregate counters leaves the tokenizer with
+    // fewer tokens than the field array, so it used to walk past the newline
+    // into "cpu0" and fail the whole parse on a non-numeric token -- the
+    // readout vanished rather than reporting a number.
+    const sample = cpu.parseCpuLine("cpu  10 20 30 40\ncpu0 1 1 1 1\ncpu1 1 1 1 1\n").?;
+    try std.testing.expectEqual(@as(u64, 100), sample.total);
+    try std.testing.expectEqual(@as(u64, 40), sample.idle);
+
+    // Same guard with a trailing "\r" (CRLF-ish /proc padding).
+    const crlf = cpu.parseCpuLine("cpu  10 20 30 40\r\ncpu0 1 1 1 1\r\n").?;
+    try std.testing.expectEqual(@as(u64, 100), crlf.total);
+    try std.testing.expectEqual(@as(u64, 40), crlf.idle);
+}
+
+test "parseCpuLine sums a long field line rather than dropping the tail" {
+    // 12 aggregate counters. A fixed 8-slot array dropped guest/guest_nice
+    // here, under-counting `total` and skewing every derived percentage.
+    const sample = cpu.parseCpuLine("cpu  100 20 30 400 50 7 8 9 10 11 12 13\n").?;
+    try std.testing.expectEqual(@as(u64, 670), sample.total);
+    try std.testing.expectEqual(@as(u64, 450), sample.idle);
+}
+
+test "aggregateLineComplete accepts a short read that kept the whole first line" {
+    // The regression this guards: /proc/stat grows one line per logical CPU
+    // (3.1 KiB on 16 cores) so the read buffer is smaller than the file on any
+    // modern box. Rejecting that outright returned null every tick and the
+    // segment rendered nothing but its gap.
+    const head = "cpu  100 20 30 400 50 7 8 9 10 11\ncpu0 5 5 5 5";
+    try std.testing.expect(cpu.aggregateLineComplete(head, true));
+
+    // Full read: always fine, no probe needed.
+    try std.testing.expect(cpu.aggregateLineComplete("cpu  1 2 3 4\n", false));
+
+    // Truncated INSIDE the aggregate line: the total would be a lie.
+    try std.testing.expect(!cpu.aggregateLineComplete("cpu  100 20 30 400 50 7 8 9 1", true));
+    try std.testing.expect(!cpu.aggregateLineComplete("", true));
+}
+
 test "utilBetween reports busy percent over the interval" {
     const a: cpu.Sample = .{ .total = 100, .idle = 60 };
     const b: cpu.Sample = .{ .total = 200, .idle = 80 };

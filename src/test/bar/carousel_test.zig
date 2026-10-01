@@ -131,10 +131,13 @@ test "poll deadline paces to the monitor refresh rate" {
 
 test "one call returns the offset, the cycle and the active bit together" {
     reset();
-    // First frame of a new cell: inactive, offset at rest, but the cycle is
-    // still reported so the caller never has to re-derive it.
+    // First frame of a new OVERFLOWING cell (100 > 50): already active, offset
+    // at rest. The old contract asserted `!first.active` here, which sent the
+    // renderer down its static-ellipsis path -- see "an overflowing cell is
+    // active on its very first frame" for why that was a bug.
+    // The cycle is still reported so the caller never has to re-derive it.
     const first = carousel.offsetFor(1, long_title, 100, 50, true, 30, 1000);
-    try testing.expect(!first.active);
+    try testing.expect(first.active);
     try expectOffset(0, first.off);
     try expectOffset(148, first.cycle); // text_w + inter_title_gap_px
 
@@ -236,4 +239,56 @@ test "a zero-width title cannot divide the modulo" {
     const s = carousel.offsetFor(1, "", 0, 0, true, 30, 1000);
     try expectOffset(0, s.off);
     try testing.expect(std.math.isFinite(s.cycle) or s.cycle == 0);
+}
+
+// --- a long title scrolled immediately, with no static frame in between ---
+
+test "an overflowing cell is active on its very first frame" {
+    reset();
+    // The bug: arriving at an overflowing title from a workspace whose title
+    // FIT reported active=false on the first frame, so the renderer fell
+    // through to drawTextEllipsis and painted a truncated "..." title. Then,
+    // because `continues` only becomes true on the NEXT poll, the marquee took
+    // a second poll to activate. So the switch showed "..." followed by a
+    // visible activation delay. An empty-workspace round trip masked it,
+    // because a bar redraw with no focus set re-armed the cell.
+    //
+    // Same cell, second frame, and it must be a continuation rather than a
+    // restart -- off must have advanced by one frame's worth of motion.
+    const first = carousel.offsetFor(7, long_title, 100, 50, true, 30, 1000);
+    try testing.expect(first.active);
+    try expectOffset(0, first.off);
+
+    const second = carousel.offsetFor(7, long_title, 100, 50, true, 30, 1100);
+    try testing.expect(second.active);
+    // 30 px/s over 100 ms.
+    try expectOffset(3.0, second.off);
+}
+
+test "a static cell reports inactive, and an overflow after it starts live" {
+    reset();
+    // Title fits (60 <= 80): no scroll, so the renderer draws it statically.
+    const fits = carousel.offsetFor(3, "short", 60, 80, true, 30, 1000);
+    try testing.expect(!fits.active);
+    try expectOffset(0, fits.off);
+
+    // Now a long title on the same bar. It must be active on its FIRST frame:
+    // this is exactly the static-workspace -> carousel-workspace switch.
+    const over = carousel.offsetFor(4, long_title, 100, 50, true, 30, 2000);
+    try testing.expect(over.active);
+    try expectOffset(0, over.off);
+}
+
+test "disabled carousel stays inactive even when the text overflows" {
+    reset();
+    // The active bit means "the renderer should scroll this", not "the feature
+    // is on", so a disabled carousel must still report false and fall through
+    // to the static ellipsis. This is the boundary the fix above must not
+    // cross: active tracks whether THIS frame should scroll.
+    const disabled = carousel.offsetFor(5, long_title, 100, 50, false, 30, 1000);
+    try testing.expect(!disabled.active);
+    try expectOffset(0, disabled.off);
+
+    // And it does not poll for frames while disabled.
+    try testing.expectEqual(@as(i32, -1), carousel.pollDeadlineMs(1000, 60.0));
 }
