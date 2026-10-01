@@ -62,6 +62,11 @@ const log = @import("log");
 const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
 const ledger = @import("ledger");
+const xtrace = @import("xtrace");
+
+/// Scratch for the opt-in X trace line; only ever written when tracing is
+/// armed for this window, so the common path never touches it.
+var trace_buf: [96]u8 = undefined;
 const sink = @import("sink");
 
 pub const Ctx = struct {
@@ -295,16 +300,43 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             const need_pixel = !last.has_rect or last.pixel != pixel;
             const need_geom = moved or unpark_transition or raise_winner;
 
-            if (need_map) ctx.sink.map(win);
-            if (need_pixel) ctx.sink.borderPixel(win, pixel);
+            // Opt-in X trace (see core/loop/xtrace.zig). Each line is guarded
+            // by the SAME condition as the send it describes, so the log can
+            // never claim a request that did not happen -- a trace that
+            // over-reports is worse than no trace. Recorded before the send so
+            // the order matches what the server sees. This is the outbound half
+            // of the pairing that makes a trace decisive: it shows whether hana
+            // ever re-asserted a geometry, or stayed silent while the window's
+            // on-screen contents diverged from its state.
+            const tracing = xtrace.enabled() and xtrace.watches(win);
+            if (need_map) {
+                if (tracing) xtrace.outbound(win, "map", "");
+                ctx.sink.map(win);
+            }
+            if (need_pixel) {
+                if (tracing) xtrace.outbound(win, "border_pixel", "");
+                ctx.sink.borderPixel(win, pixel);
+            }
             // One configure carrying everything that changed. Border width and
             // geometry travel together on the common switch/unpark shape, and
             // this can no longer express them as two separate requests.
-            if (need_bw or need_geom) ctx.sink.configure(win, .{
-                .rect = if (need_geom) rect else null,
-                .bw = if (need_bw) bw else null,
-                .stack = if (raise_winner) .above else null,
-            });
+            if (need_bw or need_geom) {
+                if (tracing) xtrace.outbound(win, "configure", switch (need_geom) {
+                    true => std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
+                        rect.width,                         rect.height, rect.x, rect.y, bw,
+                        if (raise_winner) "above" else "-",
+                    }) catch "rect",
+                    false => std.fmt.bufPrint(&trace_buf, "bw={d} stack={s}", .{
+                        bw,
+                        if (raise_winner) "above" else "-",
+                    }) catch "bw",
+                });
+                ctx.sink.configure(win, .{
+                    .rect = if (need_geom) rect else null,
+                    .bw = if (need_bw) bw else null,
+                    .stack = if (raise_winner) .above else null,
+                });
+            }
         }
 
         // Ledger write: record what we actually sent. A park preserves the

@@ -87,6 +87,19 @@ var pivot_next_frame: bool = false;
 /// redraws).
 var marquee_enabled: bool = true;
 
+/// How much a scrolling cell's slot must GROW before that cell is allowed to
+/// stop scrolling. `text_w > avail_w` is a knife-edge comparison re-run every
+/// frame, and the centered title's reserved width is `screen - sum(other
+/// segments' natural widths)` -- so the slot wobbles by a few pixels whenever
+/// the clock or a systatus readout gains or loses a digit, with nothing to do
+/// with this window. Continuation is keyed on `scrolling`, so each of those
+/// frames turned a running marquee into a non-overflowing one and the next
+/// frame restarted it at the head: the marquee teleported back to the start
+/// mid-cycle, or collapsed to a truncated ellipsis. This is one character of
+/// the bar font, the granularity at which those neighbours actually change
+/// width, so it absorbs their jitter while still stopping on a real resize.
+const scroll_exit_slack_px: u16 = 8;
+
 /// Advances the marquee by the time elapsed since the previous call and
 /// returns the SUB-PIXEL pixel offset the text should be drawn at (0 is the
 /// title's head at its resting position, which the title segment anchors at
@@ -109,7 +122,14 @@ pub fn offsetFor(
     const continues = scrolling and win == active_win and hash == active_hash;
 
     marquee_enabled = enabled;
-    const overflows = enabled and text_w > avail_w;
+    // Hysteresis, not a plain overflow test: a cell that was already scrolling
+    // stays scrolling until its slot has grown to fit the title WITH room to
+    // spare. Only a cell that is not scrolling has to beat `text_w` outright,
+    // so entering the marquee is unchanged and jitter cannot leave it.
+    const overflows = if (continues)
+        enabled and text_w > avail_w -| scroll_exit_slack_px
+    else
+        enabled and text_w > avail_w;
     scrolling = overflows;
     active_win = win;
     active_hash = hash;
