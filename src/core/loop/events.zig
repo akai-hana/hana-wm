@@ -9,6 +9,7 @@ const masks = @import("masks");
 const constants = @import("constants");
 
 const log = @import("log");
+const xtrace = @import("xtrace");
 const config = @import("config");
 const scale = @import("dpi");
 const input = @import("input");
@@ -230,7 +231,24 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 /// (stack- or heap-allocated by XCB), so they all funnel through here.
 fn dispatchOwned(event: *anyopaque) void {
     defer std.c.free(event);
-    dispatch(eventType(event), event);
+    // Opt-in per-window X trace (see xtrace): records the dispatch ORDER of
+    // every event for a watched window, which is what a static reading of the
+    // WM cannot recover. One branch when disabled, and `watches` is the only
+    // thing consulted before anything is formatted.
+    const t = eventType(event);
+    if (xtrace.enabled()) xtrace.inbound(t, eventWindow(event));
+    dispatch(t, event);
+}
+
+/// The window an event is about, as the raw first `window` field every
+/// window-carrying event struct shares at a known offset. Reading it generically
+/// keeps the trace from needing a per-event-type switch; it is only ever
+/// reached when tracing is armed, and a misread id simply fails the watch
+/// filter rather than affecting dispatch.
+fn eventWindow(event: *anyopaque) u32 {
+    const raw: [*]const u8 = @ptrCast(event);
+    return @as(u32, raw[4]) | (@as(u32, raw[5]) << 8) |
+        (@as(u32, raw[6]) << 16) | (@as(u32, raw[7]) << 24);
 }
 
 /// The X11 event type byte (response_type) read off a generic event: the

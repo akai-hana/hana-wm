@@ -37,6 +37,41 @@ fn tick(win: u32, text_w: u16, avail_w: u16, speed: u16, now_ms: i64) f32 {
     return tickScroll(win, text_w, avail_w, speed, now_ms).off;
 }
 
+test "a slot that jitters by one pixel does not restart the marquee" {
+    // The centered title's reserved width is `screen - sum(other segments'
+    // natural widths)`, and those neighbours change width on their own
+    // schedule: the clock every second, a systatus readout every
+    // `read_interval_ms`. So `avail_w` wobbles by a few pixels while the
+    // title is scrolling, and `text_w > avail_w` is a knife-edge comparison
+    // run every frame. A title sitting near the threshold therefore flipped
+    // between scrolling and static on an unrelated tick -- and because
+    // continuation is keyed on `scrolling`, each flip back to static
+    // DISCARDED the position. This is the mid-animation jump: the marquee
+    // snapping to the head of the string, or collapsing to a truncated
+    // ellipsis, halfway through its cycle.
+    reset();
+    const text_w: u16 = 200;
+    const speed: u16 = 30;
+    const start: i64 = 1000;
+
+    // Scroll normally: 400ms at 30px/s is 12px in.
+    _ = tick(1, text_w, 199, speed, start);
+    try expectOffset(12, tick(1, text_w, 197, speed, start + 400));
+
+    // The clock loses a digit again, then the systatus readout gains one:
+    // the slot wobbles across `text_w` itself, so `text_w > avail_w` is false
+    // on some frames even though the title never stopped needing to scroll.
+    // Every one of those frames must CONTINUE the marquee, not restart it.
+    try expectOffset(15, tick(1, text_w, 203, speed, start + 500));
+    try expectOffset(18, tick(1, text_w, 200, speed, start + 600));
+    try expectOffset(21, tick(1, text_w, 197, speed, start + 700));
+
+    // A slot that has genuinely grown to fit the title must still stop
+    // scrolling: hysteresis must not pin a cell that now has room.
+    const fits = tickScroll(1, text_w, 260, speed, start + 800);
+    try testing.expect(!fits.active);
+}
+
 test "fitting title stays static and inactive" {
     reset();
     const scroll = carousel.offsetFor(1, short_title, 40, 100, true, 30, 1000);
