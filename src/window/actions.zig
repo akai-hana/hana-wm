@@ -86,35 +86,56 @@ pub const Ctx = struct {
 /// differs (setBarState before the reconcile, armPendingBarHide after,
 /// reconcile-only tails) keep their bespoke tails instead of growing this
 /// helper flags.
+/// The four reconcile shapes a tiling action can ask for, as ONE axis.
+///
+/// This was a four-bool bag (`restack` / `full_redraw` / `with_focus` /
+/// `bump_fullscreen`) resolved by a three-way if-chain, which let a caller name
+/// a combination that meant nothing -- `with_focus` with no focus transition to
+/// apply, or `restack` silently ignored on the plain path -- and made the
+/// dispatch unreadable without re-deriving the truth table. All four reachable
+/// combinations are enumerated here instead, so the compiler rejects the
+/// impossible ones and a reader sees the dispatch without reading the chain.
+const RetileMode = enum {
+    /// reconcileGrab: no focus, no restack.
+    plain,
+    /// reconcileUnderGrabNow: restack a window that is not taking focus.
+    restack,
+    /// reconcileGrabFocus: move focus, geometry only.
+    focus,
+    /// reconcileGrabFocus with force_restack: focus and restack together.
+    focus_restack,
+};
+
+/// The two flags genuinely orthogonal to the reconcile shape: which geometry
+/// fact to bump, and whether the fullscreen fact changes here.
 const RetileOpts = struct {
-    restack: bool = false,
+    mode: RetileMode = .plain,
     full_redraw: bool = false,
-    with_focus: bool = false,
     bump_fullscreen: bool = false,
 };
 
 /// The one fact-bump + reconcile entry for a tiling action.
 ///
-/// Each branch names which facts IT bumps. The plain branch deliberately does
-/// NOT bump the window fact: `pipeline.reconcileGrab` owns that bump now
-/// (10.5), so the eight actions that reconcile through the plain alias get the
-/// invariant without having to remember it, and this one cannot double-bump on
-/// the way there. The focus and restack branches call reconcile variants that
-/// do not bump at all, so those two still bump the window fact here.
+/// Each mode names which facts IT bumps. The plain mode deliberately does NOT
+/// bump the window fact: `pipeline.reconcileGrab` owns that bump now (10.5), so
+/// the eight actions that reconcile through the plain alias get the invariant
+/// without having to remember it, and this one cannot double-bump on the way
+/// there. The other three call reconcile variants that do not bump at all, so
+/// those still bump the window fact here. That is the whole asymmetry, and it
+/// is the one line of the function that looks surprising on purpose.
 fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
-    if (opts.with_focus) {
-        if (opts.full_redraw) core.layout.bump() else core.window.bump();
-        if (opts.bump_fullscreen) core.fullscreen.bump();
+    // `full_redraw` selects WHICH geometry fact to bump; without it the
+    // non-plain modes bump the window fact themselves (their reconcile
+    // variants do not), and plain leaves it entirely to reconcileGrab.
+    if (opts.full_redraw) core.layout.bump() else if (opts.mode != .plain) core.window.bump();
+    if (opts.bump_fullscreen) core.fullscreen.bump();
+
+    switch (opts.mode) {
+        .plain => pipeline.reconcileGrab(),
+        .restack => pipeline.reconcileUnderGrabNow(.{ .force_restack = true }),
         // Focus lands before geometry (focus-before).
-        pipeline.reconcileGrabFocus(if (opts.restack) .{ .force_restack = true } else .{}, ft.?, .before, null);
-    } else if (opts.restack) {
-        if (opts.full_redraw) core.layout.bump() else core.window.bump();
-        if (opts.bump_fullscreen) core.fullscreen.bump();
-        pipeline.reconcileUnderGrabNow(.{ .force_restack = true });
-    } else {
-        if (opts.full_redraw) core.layout.bump();
-        if (opts.bump_fullscreen) core.fullscreen.bump();
-        pipeline.reconcileGrab();
+        .focus => pipeline.reconcileGrabFocus(.{}, ft.?, .before, null),
+        .focus_restack => pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft.?, .before, null),
     }
 }
 
@@ -125,7 +146,7 @@ fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
 /// focus + geometry under one grab.
 fn retileWithFallback(m: *model_mod.Model, fs_current: bool, was_focused: bool) void {
     const ft: focus.FocusTransition = if (was_focused) focusFallback(m, .tiling_operation) else .none;
-    retile(.{ .bump_fullscreen = fs_current, .restack = true, .with_focus = true }, ft);
+    retile(.{ .mode = .focus_restack, .bump_fullscreen = fs_current }, ft);
 }
 
 // hide (window park)
@@ -329,11 +350,20 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
 
     // Deterministic fullscreen-exit reaction: the model no longer has a
     // covering occupant the moment the toggle lands, so bump the fact now.
-    // The deferred bar-show arm waits for a non-fullscreen ConfigureNotify,
-    // which never arrives when a window's restored anchor IS the screen size
-    // (the model just restores it in place) -- the bar would stay hidden
-    // until some unrelated event happened to bubble the fact.
-    if (kind == .exit) core.fullscreen.bump();
+    // The deferred bar-show arm alone is not enough: it waits for a
+    // non-fullscreen ConfigureNotify, which never arrives when a window's
+    // restored anchor IS the screen size (the model just restores it in
+    // place) -- the bar would stay hidden until some unrelated event happened
+    // to bubble the fact.
+    //
+    // Resolving the arm here is what keeps this bump the ONLY one. Because
+    // the toggle answers the question itself, the intent it armed inside the
+    // grab is retired instead of left for a later ConfigureNotify to answer
+    // the same question again and republish an identical bar state.
+    if (kind == .exit) {
+        window.dispatchAll(.resolvePendingBarNow, .{win});
+        core.fullscreen.bump();
+    }
 
     // Completion of the transition is synchronous: run time elapsed
     // already covers the reconcile + immediate bar hide (enter) and the
@@ -370,7 +400,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
     }
-    retile(.{ .with_focus = true }, ft);
+    retile(.{ .mode = .focus }, ft);
 }
 
 /// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag gesture);
@@ -432,7 +462,7 @@ pub fn allViewToggle() void {
     if (!entering and m.focused != null and !model_mod.visibleOn(m, m.focused.?, m.current)) {
         ft = focusFallback(m, .tiling_operation);
     }
-    retile(.{ .restack = true, .with_focus = true }, ft);
+    retile(.{ .mode = .focus_restack }, ft);
 }
 
 // tiling ops / drag
@@ -467,7 +497,7 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
             repairStrandedHome(m, e, win);
         },
     }
-    retile(.{ .restack = true }, null);
+    retile(.{ .mode = .restack }, null);
 }
 
 /// Defense in depth (the stranded-slot bug class): repair a tiled-anchored

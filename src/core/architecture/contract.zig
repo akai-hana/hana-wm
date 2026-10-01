@@ -167,7 +167,7 @@ pub const WindowModule = struct {
         "notifyConfigureIfPending", "onWindowGone",
         "serializeWindow",          "deserializeWindow",
         "setEwmhFullscreenState",   "armPendingBarHide",
-        "armPendingBarShow",
+        "armPendingBarShow",        "resolvePendingBarNow",
     };
 
     /// `WindowModule` fields that are DATA rather than hooks, so they belong
@@ -225,6 +225,10 @@ pub const WindowModule = struct {
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
     armPendingBarHide: ?*const fn (u32) void = null,
     armPendingBarShow: ?*const fn (u32) void = null,
+    /// Retire a window's pending bar intent because the caller already answered
+    /// the question itself (the fullscreen exit bump). Distinct from the arm
+    /// pair: those DEFER a decision, this one CANCELS one.
+    resolvePendingBarNow: ?*const fn (u32) void = null,
     // Hide/restore family (minimize module; model vocabulary)
     /// Hide a window (minimize): parks the model entry and stashes the
     /// tiled slot. At most one module binds this.

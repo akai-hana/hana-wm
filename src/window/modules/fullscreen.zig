@@ -317,6 +317,25 @@ pub fn armPendingBarShow(win: u32) void {
     g_pending_bars.arm(win, false);
 }
 
+/// Resolve `win`'s pending bar intent WITHOUT waiting for its confirmation,
+/// for a caller that has already answered the question itself.
+///
+/// The exit toggle is that caller: the model loses its covering occupant the
+/// moment the toggle lands, so it bumps the fact directly and the deferred
+/// show can only ever re-publish the state that bump just published -- one
+/// redundant repaint of an identical bar, every time fullscreen is left. The
+/// toggle already decided, so it takes the intent here rather than leaving it
+/// armed for a ConfigureNotify to decide the same question a second time.
+///
+/// No bump of its own: the caller is bumping because its own state changed,
+/// and this only retires the intent that would have bumped for it. Taking a
+/// pending HIDE here is equally correct -- a window that left fullscreen can
+/// never still satisfy the hide's confirmation, so the intent was already
+/// unreachable and dropping it is the same answer the hide path would give.
+pub fn resolvePendingBarNow(win: u32) void {
+    _ = g_pending_bars.take(win);
+}
+
 /// Record cleanup on window teardown; the wire layer fires this (events /
 /// unmanage) after removing the store entry. Also clears any pending deferred
 /// bar op so the bar doesn't stay stuck (both show and hide cases).
@@ -340,6 +359,7 @@ pub const module: @import("contract").WindowModule = .{
     .setEwmhFullscreenState = setEwmhFullscreenState,
     .armPendingBarHide = armPendingBarHide,
     .armPendingBarShow = armPendingBarShow,
+    .resolvePendingBarNow = resolvePendingBarNow,
     .toggleCovering = toggleFullscreen,
     .visibleCoveringOnWs = visibleCoveringOnWs,
     .releaseCovering = releaseCovering,
