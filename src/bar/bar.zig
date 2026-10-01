@@ -1864,6 +1864,19 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
     // Optional token: the workspace-switch path (do_reconcile false) must NOT
     // grab, and the conditional used to be two hand-matched sites (grab here,
     // ungrabAndFlush at the bottom) that a new early return could unpair.
+    // Publish the claim BEFORE the grab, because `grabScoped` snapshots the
+    // reconcile ctx and the ctx carries `usable_area.workArea`. Claiming after
+    // the snapshot meant the reconcile that reacted to the claim change
+    // re-derived geometry from the workarea it was about to invalidate: on
+    // fullscreen exit the bar came back and took its pixels while the windows
+    // were re-tiled against the FULL screen -- "the bar is back but the layout
+    // still ignores it" -- and the next workspace switch, which rebuilds the
+    // ctx from scratch, was what finally corrected the geometry.
+    //
+    // `syncScreenClaim` is a pure in-memory write (no wire traffic), so moving
+    // it above the grab costs nothing and does not reorder any X request: the
+    // map/unmap below is still queued before the geometry sends.
+    syncScreenClaim();
     var grab: ?pipeline.ScopedGrab = null;
     if (do_reconcile) grab = pipeline.grabScoped();
     defer if (grab) |g| g.deinit();
@@ -1895,7 +1908,6 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
             requestFullRedraw();
         }
     }
-    syncScreenClaim();
     if (grab) |g| {
         g.reconcileNow();
         if (should_be_visible) raiseBar();

@@ -285,6 +285,25 @@ pub const ScopedGrab = struct {
     /// not bracketed by.
     pub fn reconcileNow(self: ScopedGrab) void {
         std.debug.assert(self.c != null);
+        // Refresh the screen-derived fields from LIVE state immediately before
+        // geometry is emitted, rather than trusting the snapshot taken when
+        // the grab was acquired. A surface can change what it claims of the
+        // screen while the grab is held -- the fullscreen bar does exactly
+        // that, unmapping itself and releasing its claim inside the same grab
+        // that is about to re-tile the windows -- and a ctx snapshotted before
+        // that change would tile into a work area the model had already
+        // invalidated. The visible symptom was leaving fullscreen and finding
+        // the bar back but the layout still sized as though no bar existed,
+        // until an unrelated event (a workspace switch) rebuilt the ctx.
+        //
+        // Only these two fields are refreshed, and deliberately NOT the whole
+        // ctx: rebuilding under a grab would re-run the pre-reconcile duties
+        // after geometry had already been applied (see `ctx`), leaving the
+        // model and the server disagreeing. `.workarea` and `.bar_win` are
+        // pure reads of live screen state, so re-reading them cannot
+        // double-apply anything.
+        self.c.?.workarea = usable_area.workArea(core.getState().screen);
+        self.c.?.bar_win = usable_area.mappedSurfaceWindow();
         reconcile.run(&instance, self.c.?, .{});
     }
 };

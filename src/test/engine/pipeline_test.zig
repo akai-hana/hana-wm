@@ -17,6 +17,7 @@ const actions = @import("actions");
 const fixture = @import("fixture");
 const xcb = core.xcb;
 const ledger = @import("ledger");
+const usable_area = @import("usable_area");
 const fullscreen = if (@import("build_options").has_fullscreen) @import("fullscreen") else struct {};
 
 /// Two mapped windows, the arrangement most pipeline tests seed.
@@ -234,11 +235,64 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     fx.flush();
     // The exit bumps the fact ITSELF, on purpose (actions.zig: "the deferred
     // bar-show arm waits for a non-fullscreen ConfigureNotify, which never
-    // arrives when a window's restored anchor IS the screen size"). So the
-    // toggle already published the exit and the still-armed entry republishes
-    // it once more -- a redundant repaint of an identical bar state, which is
-    // why the baseline is re-read here instead of being derived from before5.
+    // arrives when a window's restored anchor IS the screen size"). Because the
+    // toggle therefore answers the question, it also RETIRES the arm it left
+    // behind, so the ConfigureNotify has nothing left to decide and no second
+    // bump happens. This used to read `after_toggle + 1`: the toggle published
+    // the exit and the still-armed entry republished the identical bar state,
+    // a redundant repaint on every fullscreen exit.
     const after_toggle = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
-    try std.testing.expectEqual(after_toggle + 1, core.fullscreen.rev());
+    try std.testing.expectEqual(after_toggle, core.fullscreen.rev());
+}
+
+// Leaving fullscreen restores the bar, which re-claims screen space, which
+// changes the usable area the windows must tile into. The claim lands while
+// the grab is already held -- the fullscreen path unmaps and re-claims the bar
+// inside the same grab that re-tiles the windows -- so `reconcileNow` has to
+// read the claim LIVE. It used to trust the snapshot `grabScoped` took, which
+// tiled into the pre-claim work area: the bar came back but the layout still
+// sized as though it were not there, until a workspace switch happened to
+// rebuild the ctx and correct it.
+test "pipeline: a claim taken after the grab still moves the tiles" {
+    var fx = try fixture.setUp("pipeline_test");
+    defer fx.deinit();
+
+    const w1, const w2 = seedTwo(fx);
+    try fx.expectTiledGeometry(w1);
+    try fx.expectTiledGeometry(w2);
+
+    // Before: the tiles fill the screen, starting at the layout's own gap.
+    const before = fx.geometry(w1) orelse return error.ClosedWindow;
+
+    // The bar re-claims the top edge INSIDE the grab, which is the ordering
+    // that was broken.
+    const claim_px: u16 = 30;
+    {
+        var g = pipeline.grabScoped();
+        defer g.deinit();
+        usable_area.setClaim(usable_area.bar_id, .top, claim_px);
+        defer usable_area.releaseClaim(usable_area.bar_id);
+        g.reconcileNow();
+    }
+    fx.flush();
+
+    // Every tiled window was pushed down by the claim and shrank to fit the
+    // reduced area. Asserted against the BEFORE geometry as well as the claim,
+    // because "fits inside the work area" alone is satisfied by geometry that
+    // never moved -- which is exactly the bug.
+    for ([_]u32{ w1, w2 }) |win| {
+        const g = fx.geometry(win) orelse return error.ClosedWindow;
+        try std.testing.expectEqual(
+            @as(i32, before.y) + @as(i32, claim_px),
+            @as(i32, g.y),
+        );
+        try std.testing.expect(g.height < before.height);
+        // And the bottom edge respects the claimed work area (not the screen).
+        const wa = usable_area.workArea(fx.scr);
+        try std.testing.expect(
+            @as(i32, g.y) + @as(i32, g.border_width) + @as(i32, g.height) <=
+                @as(i32, wa.y) + @as(i32, wa.height),
+        );
+    }
 }
