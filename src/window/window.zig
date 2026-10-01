@@ -1466,6 +1466,36 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
     // Unhonorable pager requests are dropped silently otherwise; both warns
     // fire once per process so a looping pager cannot flood the log.
+    // `_NET_WM_FULLSCREEN_REQUEST` is a SEPARATE EWMH message from
+    // `_NET_WM_STATE`, and it is the one browsers use for native video
+    // fullscreen. Its layout is: window field = the window, data32[0] = the
+    // intended end state (1 enter, 0 leave). Dropping it -- as the pre-fix
+    // handler did, since the atom appeared nowhere in the tree -- is why F
+    // did nothing in a YouTube player while hana's own Mod+F worked.
+    const net_fs_request = atoms.getAtomOrZero("_NET_WM_FULLSCREEN_REQUEST");
+    if (net_fs_request != 0 and event.type == net_fs_request) {
+        const win = event.window;
+        if (!isValidManagedWindow(win)) {
+            if (!state.?.warned_unmanaged_state) {
+                state.?.warned_unmanaged_state = true;
+                log.warn("Ignoring _NET_WM_FULLSCREEN_REQUEST for unmanaged window 0x{x}", .{win});
+            }
+            return;
+        }
+        // Only 0 and 1 are defined; anything else is dropped rather than
+        // guessed at, since guessing means entering or leaving fullscreen on
+        // a client that asked for neither.
+        const target = switch (event.data.data32[0]) {
+            0 => false,
+            1 => true,
+            else => return,
+        };
+        // PIPELINE: model-path transition; the transition stays on the single
+        // source of truth.
+        actions.fullscreenSetWindow(win, target);
+        return;
+    }
+
     const net_active = atoms.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
         if (!state.?.warned_active_ignore) {

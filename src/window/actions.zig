@@ -302,6 +302,19 @@ pub fn restoreAll() void {
 /// handler works unchanged. The keybind path resolves the focused window at
 /// the dispatch site and lands here too.
 pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
+    fullscreenSetWindow(win, null);
+}
+
+/// The same transition with an explicit target state, for EWMH requests that
+/// are a SET rather than a toggle.
+///
+/// `_NET_WM_FULLSCREEN_REQUEST` carries the intended end state in data32[0]
+/// (1 = enter, 0 = leave). Browsers use it for native video fullscreen, and
+/// feeding it to a toggle inverts the request: pressing F twice in the same
+/// player, or Firefox re-asserting fullscreen on a window that is already
+/// covered, would drop the window OUT of fullscreen. `want` is null for the
+/// keybind and `_NET_WM_STATE` toggle paths, which genuinely mean "flip".
+pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
     // Timing: wall-clock from action entry (keybind/EWMH resolve) to the
     // synchronous completion of the fullscreen transition INCLUDING the bar
     // hide and the ungrabAndFlush of the enclosing grab — i.e. the point at
@@ -320,8 +333,13 @@ pub fn fullscreenToggleWindow(win: model_mod.WindowId) void {
     // scan in one place; both the classification and prev_fs_win need
     // the same result, saving one full store scan.
     const prev_fs_win = currentCoveringOccupant(m);
+    const is_fs = isCoveringOnWs(m, win);
+    // An explicit request that matches the current state is a no-op, not a
+    // toggle: without this guard a redundant `_NET_WM_FULLSCREEN_REQUEST`
+    // would flip the window the wrong way.
+    if (want) |target| if (target == is_fs) return;
     const kind: pipeline.FullscreenKind =
-        if (isCoveringOnWs(m, win)) .exit else if (prev_fs_win != null) .switch_ else .enter;
+        if (is_fs) .exit else if (prev_fs_win != null) .switch_ else .enter;
     const was_focused = m.focused == win;
 
     if (!wm.toggleCovering.?(m, win)) return;

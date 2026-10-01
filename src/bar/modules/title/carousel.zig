@@ -109,19 +109,46 @@ pub fn offsetFor(
     const continues = scrolling and win == active_win and hash == active_hash;
 
     marquee_enabled = enabled;
-    scrolling = enabled and text_w > avail_w;
+    const overflows = enabled and text_w > avail_w;
+    scrolling = overflows;
     active_win = win;
     active_hash = hash;
-    if (!scrolling or !continues) {
-        // Inactive, or the first frame of a cell (focus change, rename,
-        // enable, overflow start): show the head of the title and let
-        // motion begin next frame. Anchoring at `now` is what makes the next
-        // frame read as "one frame's worth of motion from the head".
+
+    // `cycle` is text_w + gap, so it is zero only if both are; a marquee needs
+    // an overflowing title, and `@mod` by zero is undefined rather than an
+    // error, so this is guarded rather than left to that invariant holding.
+    const cycle = cyclePx(text_w);
+
+    if (!overflows) {
+        // The text fits its slot (or the feature is off): no scroll, so the
+        // segment draws statically. Retiring the clock here is what lets a
+        // later overflow start from the head instead of resuming mid-cycle.
         anchor_ms = now_ms;
         shown_off_px = 0;
         last_drawn_ms = now_ms;
         pivot_next_frame = false;
-        return .{ .off = 0, .cycle = cyclePx(text_w), .active = false };
+        return .{ .off = 0, .cycle = cycle, .active = false };
+    }
+
+    if (!continues) {
+        // First frame of an overflowing cell (focus change, rename, enable, or
+        // a workspace switch arriving from a workspace whose title FIT):
+        // anchor at `now` so the next frame reads as one frame's worth of
+        // motion from the head.
+        //
+        // This frame reports `active = true`, not false. `false` made the
+        // renderer fall through to its static ellipsis path, so arriving at an
+        // overflowing workspace from a static-title one painted a frame of
+        // truncated "..." before the marquee appeared -- and because
+        // `continues` only becomes true on the NEXT poll, the marquee itself
+        // took a second poll to activate. `off = 0` puts the head at exactly
+        // the resting position the static path would have used, so claiming
+        // the segment here is seamless rather than a visible change.
+        anchor_ms = now_ms;
+        shown_off_px = 0;
+        last_drawn_ms = now_ms;
+        pivot_next_frame = false;
+        return .{ .off = 0, .cycle = cycle, .active = true };
     }
 
     const speed: f32 = @floatFromInt(speed_px_s);
@@ -131,8 +158,16 @@ pub fn offsetFor(
         // and width change what a cycle even is, so evaluating
         // `mod((now - anchor) * speed, cycle)` now would teleport the marquee
         // to an arbitrary point of the NEW cycle. Re-anchor so the position at
-        // `now` is exactly the one still on screen: a continuation, not a
-        // jump. Speed 0 has no inverse, and at 0 the offset is 0 regardless.
+        // `now` is the one still on screen: a continuation, not a jump.
+        //
+        // Folding `shown_off_px` into the new cycle first was tried and is
+        // NOT an improvement: the rebase already evaluates to
+        // `mod(shown_off_px, cycle)`, because the anchor is derived from
+        // `shown_off_px` and the offset is then `mod`ded by that same cycle.
+        // Folding it in advance changes nothing but hides where the value
+        // comes from.
+        //
+        // Speed 0 has no inverse, and at 0 the offset is 0 regardless.
         pivot_next_frame = false;
         anchor_ms = if (speed > 0)
             now_ms - @as(i64, @intFromFloat(@round(shown_off_px * 1000.0 / speed)))
@@ -140,10 +175,6 @@ pub fn offsetFor(
             now_ms;
     }
 
-    const cycle = cyclePx(text_w);
-    // `cycle` is text_w + gap, so it is zero only if both are; a marquee needs
-    // an overflowing title, and `@mod` by zero is undefined rather than
-    // an error, so this is guarded rather than left to that invariant holding.
     const off: f32 = if (cycle > 0)
         @mod((@as(f32, @floatFromInt(now_ms - anchor_ms))) * speed / 1000.0, cycle)
     else

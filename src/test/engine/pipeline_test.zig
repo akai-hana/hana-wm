@@ -296,3 +296,58 @@ test "pipeline: a claim taken after the grab still moves the tiles" {
         );
     }
 }
+
+test "pipeline: an explicit fullscreen SET is a no-op, not a toggle" {
+    // Guards the `_NET_WM_FULLSCREEN_REQUEST` path. That message carries the
+    // intended END STATE, so feeding it to a toggle inverts it: a browser
+    // re-asserting fullscreen on an already-covered window (or the user
+    // pressing F twice) would kick the window back out.
+    var fx = try fixture.setUp("pipeline_test");
+    defer fx.deinit();
+    const m = pipeline.model();
+    const w1, const w2 = seedTwo(fx);
+
+    // Redundant "enter" on a window that is not covering yet.
+    actions.fullscreenSetWindow(w2, true);
+    fx.flush();
+    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+
+    // The idempotent repeat: the exact case a browser produces.
+    actions.fullscreenSetWindow(w2, true);
+    fx.flush();
+    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(.covering, (m.store.get(w2) orelse return error.UnknownWindow).presence);
+
+    // Redundant "leave" on a window that is not covering.
+    actions.fullscreenSetWindow(w1, false);
+    fx.flush();
+    try std.testing.expect(w1 != (model.coveringOccupantOnWs(m, m.current) orelse w1));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+
+    // A genuine leave still works, and the occupant is cleared.
+    actions.fullscreenSetWindow(w2, false);
+    fx.flush();
+    try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
+    try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
+}
+
+test "pipeline: an explicit fullscreen SET still switches an existing occupant" {
+    // "Set fullscreen on w1" while w2 holds the screen must hand the screen
+    // over rather than no-op: the no-op guard is state equality, and here the
+    // states genuinely differ.
+    var fx = try fixture.setUp("pipeline_test");
+    defer fx.deinit();
+    const m = pipeline.model();
+    const w1, const w2 = seedTwo(fx);
+
+    actions.fullscreenSetWindow(w1, true);
+    fx.flush();
+    try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+
+    actions.fullscreenSetWindow(w2, true);
+    fx.flush();
+    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    // The displaced occupant is moved offscreen, which is the observable form
+    // of "parked" -- the model marks presence itself.
+    try fx.expectParked(w1);
+}
