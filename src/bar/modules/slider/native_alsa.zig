@@ -230,11 +230,6 @@ pub const Master = struct {
     /// `Master Playback Switch` numid; 0 when the card has no such control.
     switch_numid: c_uint,
 
-    pub fn deinit(self: *Master) void {
-        if (self.fd >= 0) _ = c.close(self.fd);
-        self.* = undefined;
-    }
-
     /// Applies a 0-100 level to every channel of the volume control.
     pub fn setVolumePct(self: *const Master, pct: u8) bool {
         const target = rawFromPct(@min(pct, 100), self.min, self.max);
@@ -249,13 +244,6 @@ pub const Master = struct {
         var values: [128]c_long = undefined;
         if (!readElem(self.fd, self.numid, &values)) return null;
         return pctFromRaw(values[0], self.min, self.max);
-    }
-
-    /// Mutes (or unmutes) via the joined switch control.
-    pub fn setMuted(self: *const Master, muted: bool) bool {
-        if (self.switch_numid == 0) return false;
-        const v = [_]c_long{@intFromBool(muted)};
-        return writeElem(self.fd, self.switch_numid, &v);
     }
 
     /// Current mute state; null when no switch control or the read failed.

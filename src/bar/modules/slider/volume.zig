@@ -71,16 +71,6 @@ pub const reprobe_interval_ms: i64 = 15_000;
 /// own reason; with those backends gone the flag had nothing to clear.
 pub const Probe = struct { walk: bool };
 
-const ProbeDecision = enum { skip, retry, recheck };
-
-pub fn verdict(d: ProbeDecision) Probe {
-    return .{ .walk = switch (d) {
-        .skip => false,
-        .retry => true,
-        .recheck => false,
-    } };
-}
-
 /// (26.7) The pure re-probe decision. All the timing policy, with no clock and
 /// no IO, so it is testable: whether a poll may walk the ladder again, and
 /// whether it must first re-ask whether a daemon is reachable.
@@ -112,30 +102,12 @@ pub fn probeDecision(
     return .{ .walk = false };
 }
 
-/// Whether a PulseAudio/PipeWire daemon socket exists. This is the ONLY thing
-/// `native_pulse` still contributed, and it is ten lines of `stat`, so it
-/// lives here rather than in a 363-line module that also did `dlopen`.
-fn pulseReachable() bool {
-    var base_buf: [192]u8 = undefined;
-    const base = if (std.c.getenv("XDG_RUNTIME_DIR")) |env|
-        std.mem.span(env)
-    else blk: {
-        const uid = std.c.getuid();
-        break :blk std.fmt.bufPrint(&base_buf, "/run/user/{d}", .{uid}) catch return false;
-    };
-    var p: [256]u8 = undefined;
-    const path = std.fmt.bufPrint(&p, "{s}/pulse/native", .{base}) catch return false;
-    if (path.len >= p.len) return false;
-    p[path.len] = 0;
-    return std.c.access(p[0..path.len :0], std.c.F_OK) == 0;
-}
-
 /// (26.7) Whether the ladder may be walked now. `probeDecision`'s clock and IO
 /// edge, and the only place that mutates the cache's own bookkeeping.
 fn probeDue() bool {
     const now = slider.nowMs();
     const recheck_window = now >= g_pulse_recheck_at_ms;
-    const reachable = if (recheck_window) pulseReachable() else false;
+    const reachable = if (recheck_window) native_pulse.pulseReachable() else false;
     const probe = probeDecision(
         now,
         g_ladder_failed_at_ms,
