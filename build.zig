@@ -308,6 +308,7 @@ pub fn build(b: *std.Build) !void {
     // must serialize them. That is not expressible in the test's own source.
     const test_gates = [_]struct { name: []const u8, x_gated: bool, bench: bool = false }{
         .{ .name = "actions_test", .x_gated = true },
+        .{ .name = "ewmh_test", .x_gated = true },
         .{ .name = "focus_test", .x_gated = true },
         .{ .name = "pipeline_test", .x_gated = true },
         .{ .name = "visibility_test", .x_gated = true },
