@@ -152,18 +152,16 @@ const dispatch_table = blk: {
 /// output change notifications. Bar render pacing must track monitor
 /// re-configuration, so any of them triggers re-detection.
 ///
-/// The range test uses the RAW type byte, BEFORE the 0x7F mask (both callers
-/// strip send_event afterwards): the synthetic-event bit is only meaningful
-/// for core events, and an extension base can legitimately be >= 0x80 (the
-/// server allocates bases at/after 0x80 precisely to leave bit 7 free for
-/// True for the RandR extension-event window (base and base+1): screen/CRTC/
-/// output change notifications. Bar render pacing must track monitor
-/// re-configuration, so any of them triggers re-detection.
+/// Takes the event's code with the SendEvent bit ALREADY stripped, which
+/// routeFor does before calling. A RandR event that arrived via XSendEvent
+/// carries bit 7, so testing the raw byte here would miss exactly those and
+/// silently disable refresh re-detection.
 ///
-/// Takes the event's code with the SendEvent bit ALREADY stripped (see
-/// dispatch). A RandR event that arrived via XSendEvent carries bit 7, so
-/// comparing the raw byte here would miss exactly those and silently disable
-/// refresh re-detection.
+/// This comment once also claimed the opposite -- that the range test uses the
+/// RAW byte, before the mask -- in a paragraph that had been duplicated and
+/// truncated mid-sentence. It was wrong: the caller masks first, and the mask
+/// cannot alias an extension base onto a RandR code, because a client only
+/// receives the events it selected and hana selects its RandR range by name.
 fn isRandrEvent(code: u8) bool {
     // RandR is a bar feature (render pacing). With no bar compiled in,
     // `randrFirstEvent` is the no-op, which reports 0, and the `r != 0` test
