@@ -21,6 +21,15 @@
 pub const Source = *const fn () ?i32;
 
 /// The loop's registered timer sources, reduced on demand.
+///
+/// This looks like a list abstraction wrapped around the single entry the loop
+/// currently registers (the bar's own deadline), and has been proposed for
+/// deletion as such. It is the opposite of redundant: the list IS the policy.
+/// The reduce -- consult every source even after one answers, because a later
+/// source may want to wake sooner -- is the rule, and a one-entry version could
+/// not express it, so the second source would arrive as a branch at the call
+/// site, which is the shape this module was created to remove. See
+/// timers_test.zig, which exercises the reduce with four sources.
 pub const Timers = struct {
     sources: []const Source,
 
