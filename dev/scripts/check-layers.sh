@@ -180,7 +180,15 @@ grab_allowed() {
 # set_input_focus, all wire-mutating requests that belong behind the sync
 # boundary exactly like configure/map. Widening only makes violations FAIL
 # where they previously passed.
-pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|xcb_xkb_per_client_flags|xcb_get_extension_data|raiseWindow'
+#
+# The CirculateNotify case is why widening still needs care: the catch-all was
+# originally XCB_CIRCULATE_, which also matches XCB_CIRCULATE_NOTIFY -- a
+# read-only event TYPE that carries no request at all. core/loop/events.zig is
+# allowlisted above, but its test is not, so the event-type reference in
+# src/test/core/events_test.zig tripped rule 1 for citing a constant rather than
+# making a call. Spelled XCB_CIRCULATE_WINDOW, which is the request; the
+# lowercase xcb_circulate_window still catches the call itself.
+pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xcb_destroy_window|xcb_circulate_window|XCB_CIRCULATE_WINDOW|xcb_set_input_focus|xcb_change_window_attributes|xcb_change_property|xcb_send_event|xcb_flush|xcb_xkb_per_client_flags|xcb_get_extension_data|raiseWindow'
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue
