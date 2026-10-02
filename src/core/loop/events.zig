@@ -781,74 +781,36 @@ fn handleXcbEvents() void {
     // spawn queue entry.
     spawn.drainPendingSpawns();
 
-    // The post-batch stages are ORDER-SENSITIVE, and the order used to be
-    // expressed only by the order these statements happened to be written in.
-    // As a table the sequence is one list: inserting a stage means inserting a
-    // line, and the reason each one sits where it does stays attached to it.
-    const post_batch_stages = .{
-        // Repaint the bar. Before the focus settle below, because that lift can
-        // generate the EnterNotify this repaint needs to reflect.
-        .{ .name = "bar update", .body = StageFn(postBatchBarUpdate){} },
-        // Must run after the event-draining loop above: any EnterNotify a
-        // tiling reflow generated has to have already been dispatched (and
-        // filtered, since suppression is still active) before this lifts
-        // suppression. See beginTilingOpSettle's doc comment in focus.zig.
-        .{ .name = "focus settle", .body = StageFn(focus.drainTilingOpSettle){} },
-        // The border sweep, only when a border-relevant fact actually changed
-        // this batch; a motion/expose-only batch skips the unconditional O(N)
-        // walk. Wire sends are unchanged either way (the sweep is
-        // CacheMap-dedup'd), so steady-state output is identical. Last, because
-        // it reads the model the two stages above may have moved.
-        .{ .name = "border sweep", .body = PostBatchBorderSweep{ .facts_before = facts_before } },
-    };
-    // inline for: a tuple has no runtime iterator, and each element is a
-    // distinct closure type, so the dispatch must be unrolled.
-    inline for (post_batch_stages) |stage| stage.body.run();
+    // The post-batch stages are ORDER-SENSITIVE. They read as an ordered list
+    // because they are three statements in order, and each one keeps its reason
+    // for sitting where it does. This used to be a tuple of closures plus a
+    // generic `run(self)` adapter, so the sequence was the tuple's element
+    // order and each stage was a type whose `run` dispatched to it. The order
+    // was never data -- nothing reordered or skipped entries, and the `.name`
+    // each entry carried was never read -- so the table only added a dispatch
+    // to express a sequence the statement order already expressed. The one
+    // stage that held state (the border sweep's snapshot) is now just the `if`
+    // it always was, with `facts_before` in scope where it is used.
+
+    // 1. Repaint the bar. Before the focus settle below, because that lift can
+    //    generate the EnterNotify this repaint needs to reflect.
+    surfaces.updateIfDirty();
+
+    // 2. Focus settle. Must run after the event-draining loop above: any
+    //    EnterNotify a tiling reflow generated has to have already been
+    //    dispatched (and filtered, since suppression is still active) before
+    //    this lifts suppression. See beginTilingOpSettle's doc comment in
+    //    focus.zig.
+    focus.drainTilingOpSettle();
+
+    // 3. Border sweep, only when a border-relevant fact actually changed during
+    //    the batch; a motion/expose-only batch skips the unconditional O(N)
+    //    walk. Wire sends are unchanged either way (the sweep is
+    //    CacheMap-dedup'd), so steady-state output is identical. Last, because
+    //    it reads the model the two stages above may have moved.
+    if (!std.meta.eql(facts_before, core.getState().facts)) window.updateWorkspaceBordersIfNeeded();
 
     _ = xcb.xcb_flush(conn);
-}
-
-/// Post-batch stages live in named functions so the table in handleXcbEvents
-/// reads as a list of stages rather than as bodies inline in a struct literal.
-/// Each entry is a value-capturing struct with a `run(self)` method -- the
-/// codebase's closure idiom, same shape as the reconcile bodies in
-/// pipeline.zig -- so a stage can hold THIS batch's state. The table is a
-/// TUPLE, not an array: the stages have different captured types, and an array
-/// would have to erase them behind one uniform `body: anytype` field (which is
-/// not a legal field type anyway).
-///
-/// This used to be a bare `*const fn () void` plus a file-scope
-/// `facts_before` global, which made a batch's snapshot reachable from anywhere
-/// in the file and impossible to hand to a second batch.
-/// The border-sweep stage: skips the unconditional O(N) window walk unless a
-/// border-relevant fact actually changed during the batch. `facts_before` is
-/// the snapshot taken at the top of THIS batch, carried in the stage value
-/// rather than read from a file global. Declared as a type (not a
-/// `-> type` factory) because the snapshot is a runtime value: a function
-/// returning a type is comptime-evaluated, so it cannot take one.
-const PostBatchBorderSweep = struct {
-    facts_before: core.Facts,
-
-    fn run(self: @This()) void {
-        if (std.meta.eql(self.facts_before, core.getState().facts)) return;
-        window.updateWorkspaceBordersIfNeeded();
-    }
-};
-
-/// Post-batch stages live in named functions so the table above reads as a
-/// list of stages rather than as bodies inline in a struct literal.
-fn postBatchBarUpdate() void {
-    surfaces.updateIfDirty();
-}
-
-/// Wraps a stateless `fn () void` in the closure shape the stage table holds.
-/// A no-op adapter rather than a second dispatch mechanism.
-fn StageFn(comptime f: *const fn () void) type {
-    return struct {
-        fn run(_: @This()) void {
-            f();
-        }
-    };
 }
 
 pub fn run() void {
