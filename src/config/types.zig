@@ -528,50 +528,25 @@ pub fn freeSegmentMap(comptime V: type, map: *std.StringHashMapUnmanaged(V), all
     map.* = .empty;
 }
 
-/// Every `?[]const u8` field of `BarConfig`, by name: the set `BarConfig.deinit`
-/// owns and frees. Declared ONCE and checked both ways at comptime, because this
-/// list used to be an inline tuple of field POINTERS with no check at all, which
-/// is the silent-drift shape the sibling `bar_cmp` table (config.zig) had before
-/// it got the same treatment: adding an optional-string field compiled, parsed,
-/// reloaded, and then leaked once per config load, forever, with nothing in the
-/// build to say so. One decl plus this assertion is the whole cost of a new
-/// field.
-const bar_owned_str_fields = [_][]const u8{
-    "brightness_device",
-    "brightness_format",
-    "clock_format",
-    "run_prompt",
-    "indicator_focused",
-    "indicator_unfocused",
-    "volume_format",
-    "volume_muted_format",
-};
-
-comptime {
-    // 45 fields x 8 names, both directions.
-    @setEvalBranchQuota(10_000);
-    // Forward: an owned optional string nobody frees is a leak.
-    for (std.meta.fields(BarConfig)) |f| {
+/// Frees every `?[]const u8` field of `BarConfig`.
+///
+/// This used to be a hand-written list of the eight field NAMES plus a comptime
+/// block that checked the list against the struct in both directions, because
+/// the list had once been an inline tuple of field POINTERS with no check at
+/// all -- the silent-drift shape the sibling `bar_cmp` table in config.zig
+/// also had before it got the same treatment. Adding an optional-string field
+/// compiled, parsed, reloaded, and then leaked once per config load, forever,
+/// with nothing in the build to say so.
+///
+/// Both halves of that are now unnecessary: the TYPE is the whole ownership
+/// rule, so there is no list to fall out of sync with the struct. A new
+/// `?[]const u8` field is freed with no edit here, and a renamed or removed
+/// one cannot produce a confusing "not a field of BarConfig" error, because
+/// no name is written down at all.
+inline fn freeOwnedStrings(self: *BarConfig, allocator: std.mem.Allocator) void {
+    inline for (std.meta.fields(BarConfig)) |f| {
         if (f.type != ?[]const u8) continue;
-        var listed = false;
-        for (bar_owned_str_fields) |name| {
-            if (std.mem.eql(u8, name, f.name)) listed = true;
-        }
-        if (!listed) @compileError(
-            "BarConfig." ++ f.name ++ " is an owned ?[]const u8 but is not in " ++
-                "bar_owned_str_fields; BarConfig.deinit would leak it",
-        );
-    }
-    // Reverse: a renamed or removed field would fail the loop above as an
-    // unknown member, which is a confusing error, so name it here.
-    for (bar_owned_str_fields) |name| {
-        var exists = false;
-        for (std.meta.fields(BarConfig)) |f| {
-            if (std.mem.eql(u8, name, f.name)) exists = true;
-        }
-        if (!exists) @compileError(
-            "bar_owned_str_fields lists '" ++ name ++ "', which is not a field of BarConfig",
-        );
+        if (@field(self, f.name)) |s| allocator.free(s);
     }
 }
 
@@ -692,9 +667,7 @@ pub const BarConfig = struct {
         freeSegmentMap(Color, &self.segment_fg, allocator);
         freeSegmentMap(Color, &self.segment_value_fg, allocator);
         freeSegmentMap(SegmentProps, &self.segment_props, allocator);
-        inline for (bar_owned_str_fields) |name| {
-            if (@field(self, name)) |s| allocator.free(s);
-        }
+        freeOwnedStrings(self, allocator);
     }
 
     pub inline fn runBg(self: *const BarConfig) Color {

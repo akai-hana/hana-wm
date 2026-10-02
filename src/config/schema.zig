@@ -283,31 +283,9 @@ fn isScalarLeaf(comptime t: type) bool {
 /// the fields a bespoke parser owns. Each entry is a contract, not an
 /// exemption -- the reason is why the schema table must not claim it.
 pub const bespoke_fields = [_][]const u8{
-    // Owned containers, filled by the bespoke parsers that own their grammar.
-    "tiling.layouts",
     "tiling.layout",
-    "tiling.variants",
-    "tiling.workspace_layout_overrides",
-    "tiling.workspace_master_count_overrides",
-    "workspaces.rules",
-    "workspaces.count",
-    "bar.layout",
-    "bar.workspace_icons",
-    "bar.fonts",
-    "bar.segment_fg",
-    "bar.segment_value_fg",
-    "bar.segment_props",
-    "bar.height",
-    // Opt-in strings the schema assigns only when the key is present; each
-    // carries its own default at read time (types.default_*).
-    "bar.clock_format",
-    "bar.run_prompt",
     "bar.indicator_focused",
     "bar.indicator_unfocused",
-    "bar.volume_format",
-    "bar.volume_muted_format",
-    "bar.brightness_format",
-    "bar.brightness_device",
 };
 
 comptime {
