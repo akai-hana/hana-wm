@@ -56,20 +56,21 @@ pub const Scroller = struct {
     pivot: *const fn () void,
     pollDeadlineMs: *const fn (now_ms: i64, hz: f64) i32,
 };
+// The seam is a SINGLETON slot, and taking `addons[0]` said nothing about
+// that: a second `Scroller` addon was silently dropped while the registry
+// kept looking like a registry. One decorator composes; two need the seam
+// to become a capability query.
+const subs = @import("title_subs").addons;
 comptime {
-    // The seam is a SINGLETON slot, and taking `addons[0]` said nothing about
-    // that: a second `Scroller` addon was silently dropped while the registry
-    // kept looking like a registry. One decorator composes; two need the seam
-    // to become a capability query.
-    if (@import("title_subs").addons.len > 1) @compileError(
-        "title: at most one Scroller addon is supported; " ++
-            "a second one would be silently dropped by the addons[0] slot",
-    );
+    if (subs.len > 1) @compileError("title: at most one Scroller addon");
 }
-const scroller: ?Scroller = if (@import("title_subs").addons.len != 0)
-    @import("title_subs").addons[0]
-else
-    null;
+const scroller: ?Scroller = if (subs.len != 0) subs[0] else null;
+
+/// The seam's pivot, resolved once with the null check the three call sites
+/// (overlay close, bar shown, reload) would otherwise each have to repeat.
+fn noPivot() void {}
+const pivot: *const fn () void = if (scroller) |s| s.pivot else noPivot;
+
 // The prompt overlays this slot when active: it binds a runtime-overlay
 // value (contract.BarOverlay) on its Segment, which this module finds through
 // the generated bar segment registry -- name-free, like every other registry
@@ -100,45 +101,32 @@ const title_lead_px: u16 = 4;
 
 /// Shared body of all title draw entry points. Titles/geoms are read from the
 /// snapshot (in-process caches populated by the bar); no X11 and no owned
-/// buffers to free here.
+/// buffers to free here. Infallible: every text and rect op on this path is.
 fn drawInner(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
-) !u16 {
+) u16 {
     // No refresh-rate detection here: `bar.init` primes it once at startup, and
     // detection writes global state (the monitor's Hz memo every other segment
     // reads), so calling it from a DRAW made a render mutate the state the next
     // frame's pacing decision depends on. The field it needed is gone with it.
     const window_count = snapshot.current_ws_wins.len;
-    // Empty workspace: fill the background and return the segment's end x.
+    // Empty workspace: fill the background and fall through to the shared end.
     if (window_count == 0) {
         ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
-        return ctx.start_x + ctx.width;
-    }
-
-    if (window_count == 1) {
-        try drawSingleWindow(ctx, snapshot);
+    } else if (window_count == 1) {
+        drawSingleWindow(ctx, snapshot);
     } else {
-        try drawSegmentedTitles(ctx, snapshot);
+        drawSegmentedTitles(ctx, snapshot);
     }
-
     return ctx.start_x + ctx.width;
-}
-
-/// Render the title slot at `x` (its reserved width is in `ctx.width`),
-/// delegating to the active prompt overlay when open.
-fn renderTitle(ctx: *segmod.DrawCtx, x: u16) !u16 {
-    return drawInner(
-        ctx.titleRenderContext(x, ctx.width),
-        ctx.titleSnapshot(),
-    );
 }
 
 /// Draw a window resolved via DrawCtx as the single-window case.
 fn drawSingleWindow(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
-) !void {
+) void {
     const single_win = snapshot.current_ws_wins[0];
     const is_minimized = snapshot.minimized_set.contains(single_win);
     const workspace_has_focus = snapshot.focused_window != null;
@@ -149,15 +137,18 @@ fn drawSingleWindow(
     const baseline_y = ctx.dc.baselineY(ctx.height);
     const text_geom = titleTextGeom(ctx, ctx.start_x, ctx.width);
 
+    // A minimized cell shows its own title and never enters the carousel: the
+    // two branches differ in fg (always `fg`, even on a focused workspace, whose
+    // focus is the model's and not this window's) and in the scroll gate, so
+    // they are not one `if/else` over a chosen title.
     if (is_minimized) {
         if (snapshot.minimized_title.len > 0)
-            try drawFittedTitle(
+            drawFittedTitle(
                 ctx,
                 baseline_y,
                 text_geom,
                 single_win,
                 snapshot.minimized_title,
-                ctx.dc.measureTextWidth(snapshot.minimized_title),
                 ctx.config.fg,
                 false,
             );
@@ -167,57 +158,74 @@ fn drawSingleWindow(
     if (snapshot.focused_title.len == 0) return;
 
     const fg = if (workspace_has_focus) ctx.config.selected_fg else ctx.config.fg;
-    try drawFittedTitle(
+    drawFittedTitle(
         ctx,
         baseline_y,
         text_geom,
         single_win,
         snapshot.focused_title,
-        ctx.dc.measureTextWidth(snapshot.focused_title),
         fg,
         workspace_has_focus,
     );
 }
 
-/// Draws the focused window's overflowing title as a marquee cell.
-fn drawMarqueeCell(
+/// Draws the focused window's title in its cell: live marquee if it overflows
+/// and scrolling is enabled, an ellipsised title if it overflows and is not,
+/// and the plain text if it fits. `text_w` is measured here rather than handed
+/// in, because all three cases want it and no caller could have it cheaper.
+fn drawFittedTitle(
     ctx: segmod.TitleRenderContext,
     baseline_y: u16,
     sg: SegmentGeometry,
-    win: u32,
-    txt: []const u8,
-    text_w: u16,
-    fg: u32,
-    now: i64,
+    window: u32,
+    title: []const u8,
+    text_fg: u32,
+    scroll_enabled: bool,
 ) void {
-    if (scroller) |s| {
-        const scroll = advanceScroll(
-            s,
-            win,
-            txt,
-            text_w,
-            sg.avail_w,
-            ctx.config.carousel_enabled,
-            ctx.config.carousel_speed_px_s,
-            now,
-        );
-        if (scroll.active) {
-            const cycle = scroll.cycle;
-            // Anchor the scroll at the padded text start (same spot static mode uses),
-            // so enabling the carousel continues seamlessly from where the head sat.
-            const x0: f64 = @as(f64, @floatFromInt(sg.text_x)) - scroll.off;
-            ctx.dc.drawTextScrolled(
-                sg.seg_x,
-                sg.seg_w,
-                baseline_y,
-                .{ x0, x0 + cycle },
-                txt,
-                fg,
+    const text_w = ctx.dc.measureTextWidth(title);
+    const now = time.monotonicMs();
+
+    // Unfocused cells never touch the carousel: it tracks exactly one cell per
+    // frame, the focused one. For the focused cell the seam is consulted on
+    // BOTH outcomes -- scrolling when it still overflows, and a retiring call
+    // (enabled = false) when it no longer does, so the state machine and with it
+    // the poll deadline and the needsRepaint query stop asking for frames.
+    if (scroll_enabled) {
+        if (scroller) |s| {
+            const scroll = s.offsetFor(
+                window,
+                title,
+                text_w,
+                sg.avail_w,
+                ctx.config.carousel_enabled and text_w > sg.avail_w,
+                ctx.config.carousel_speed_px_s,
+                now,
             );
-            return;
+            // The seam's one call carries the active bit, so it is recorded here
+            // for the one consumer that is not a draw (needsRepaintHook).
+            scroll_active = scroll.active;
+            if (scroll.active) {
+                // Anchor the scroll at the padded text start (same spot static
+                // mode uses), so enabling the carousel continues seamlessly
+                // from where the head sat.
+                const x0: f64 = @as(f64, @floatFromInt(sg.text_x)) - scroll.off;
+                ctx.dc.drawTextScrolled(
+                    sg.seg_x,
+                    sg.seg_w,
+                    baseline_y,
+                    .{ x0, x0 + scroll.cycle },
+                    title,
+                    text_fg,
+                );
+                return;
+            }
         }
     }
-    ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, txt, sg.avail_w, fg);
+
+    if (text_w <= sg.avail_w)
+        ctx.dc.drawText(sg.text_x, baseline_y, title, text_fg)
+    else
+        ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, title, sg.avail_w, text_fg);
 }
 
 /// Accent colour for a title segment: focused wins, then minimized, then the
@@ -246,48 +254,18 @@ fn titleTextGeom(ctx: segmod.TitleRenderContext, seg_x: u16, seg_w: u16) Segment
     };
 }
 
-fn drawFittedTitle(
-    ctx: segmod.TitleRenderContext,
-    baseline_y: u16,
-    sg: SegmentGeometry,
-    window: u32,
-    title: []const u8,
-    text_w: u16,
-    text_fg: u32,
-    scroll_enabled: bool,
-) !void {
-    const now = time.monotonicMs();
-    if (text_w <= sg.avail_w) {
-        // Focused cell that no longer overflows: retire any active scroll so
-        // the carousel state machine (and with it the poll deadline and the
-        // needsRepaint query) stops requesting frames for a static cell.
-        // Unfocused cells never touch the carousel: it tracks exactly one
-        // cell per frame, the focused one.
-        if (scroll_enabled) {
-            if (scroller) |s| _ = advanceScroll(s, window, title, text_w, sg.avail_w, false, 0, now);
-        }
-        ctx.dc.drawText(sg.text_x, baseline_y, title, text_fg);
-    } else if (scroll_enabled)
-        drawMarqueeCell(ctx, baseline_y, sg, window, title, text_w, text_fg, now)
-    else
-        ctx.dc.drawTextEllipsis(sg.text_x, baseline_y, title, sg.avail_w, text_fg);
-}
-
 /// Renders one title segment per window in a horizontal split-view layout.
-/// The gather (geom.gatherAndSortWindowInfos: build + sort up to max_visible_windows
-/// entries) and the width pass (Pango measureTextWidth per non-focused cell)
-/// are computed fresh each frame.
+/// The gather (geom.GatherScratch.gather: build + sort up to
+/// max_visible_windows entries) and the width pass (Pango measureTextWidth per
+/// non-focused cell) are computed fresh each frame.
 fn drawSegmentedTitles(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
-) !void {
-    const windows = snapshot.current_ws_wins;
-    // The gather clamps to max_visible_windows internally; the snapshot list
-    // is also built into the same bar-wide cap, so the count can never drift.
-    if (windows.len == 0) return;
-
+) void {
+    // No empty-workspace guard here: `drawInner` has already dispatched the
+    // zero case, so the gather cannot see an empty list from this path.
     var scratch: geom.GatherScratch = .{};
-    const sorted = scratch.gather(snapshot, windows) orelse return;
+    const sorted = scratch.gather(snapshot, snapshot.current_ws_wins) orelse return;
 
     const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
@@ -310,13 +288,12 @@ fn drawSegmentedTitles(
         if (info.title.len == 0 or bounds.w <= min_cell_w) continue;
 
         const text_fg = if (is_focused_win) ctx.config.selected_fg else ctx.config.fg;
-        try drawFittedTitle(
+        drawFittedTitle(
             ctx,
             baseline_y,
             titleTextGeom(ctx, segment_x, bounds.w),
             info.window,
             info.title,
-            ctx.dc.measureTextWidth(info.title),
             text_fg,
             is_focused_win,
         );
@@ -332,7 +309,6 @@ fn drawSegmentedTitles(
 var overlay_was_active: bool = false;
 
 fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
-    const c = segmod.castDraw(ctx);
     if (overlay) |o| if (o.is_active()) {
         overlay_was_active = true;
         // The overlay returns advanced x, not a width report: it covers the
@@ -347,16 +323,20 @@ fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
     // offset instead of catching the whole session in one frame.
     if (overlay_was_active) {
         overlay_was_active = false;
-        if (scroller) |s| s.pivot();
+        pivot();
     }
-    return contract.Painted.span(x, try renderTitle(c, x));
+    // Render the title slot at `x` (its reserved width is in `c.width`).
+    const c = segmod.castDraw(ctx);
+    return contract.Painted.span(x, drawInner(c.titleRenderContext(x, c.width), c.titleSnapshot()));
 }
 
 fn onClickHook(ctx: *const contract.ClickCtx) bool {
-    const active = overlayActive();
+    // An open overlay owns the slot: it swallows the click rather than acting
+    // on the window underneath it.
+    if (overlayActive()) return true;
     if (ctx.is_right) {
-        if (!active) if (overlay) |o| o.toggle();
-    } else if (!active) {
+        if (overlay) |o| o.toggle();
+    } else {
         // `state` and `title_click` travel together: the trampoline needs the
         // same bar state this hook was handed.
         ctx.title_click(ctx.state, ctx.offset);
@@ -396,41 +376,9 @@ fn needsRepaintHook() bool {
 /// This is the title's copy of what used to be an out-of-band `scrollingActive`
 /// QUERY on the seam: the value now arrives together with the offset it
 /// describes, and the title remembers it for the one consumer that is not a
-/// draw (needsRepaintHook).
+/// draw (needsRepaintHook). Written by `drawFittedTitle`, the one place the
+/// seam is called from either outcome.
 var scroll_active: bool = false;
-
-/// The single point where the title talks to the scroller, so the active bit
-/// cannot be recorded on the draw path and forgotten on the retire path.
-fn advanceScroll(
-    s: Scroller,
-    win: u32,
-    txt: []const u8,
-    text_w: u16,
-    avail_w: u16,
-    enabled: bool,
-    speed_px_s: u16,
-    now_ms: i64,
-) Scroll {
-    const scroll = s.offsetFor(win, txt, text_w, avail_w, enabled, speed_px_s, now_ms);
-    scroll_active = scroll.active;
-    return scroll;
-}
-
-/// The bar fires this on every show (map). A marquee that was scrolling when
-/// the bar hid must resume from its last shown offset rather than catching
-/// the whole hidden gap in one frame (which would land it mid-cycle).
-fn onBarShownHook() void {
-    if (scroller) |s| s.pivot();
-}
-
-/// Fired by the bar when a reload invalidates every segment cache. Config is
-/// about to change the scroller's own inputs (carousel speed, the bar's
-/// padding, the cell's usable width), so the elapsed-time base is rebased
-/// instead of integrated across the change: without this, a reload mid-scroll
-/// produced one frame whose dt spanned the old and the new geometry at once.
-fn invalidateReloadCachesHook() void {
-    if (scroller) |s| s.pivot();
-}
 
 /// This module's bar-segment contribution (registry binding).
 pub const module: @import("contract").Segment = .{
@@ -442,6 +390,15 @@ pub const module: @import("contract").Segment = .{
     .naturalWidth = naturalWidthHook,
     .draw = drawHook,
     .onClick = onClickHook,
-    .onBarShown = onBarShownHook,
-    .invalidateReloadCaches = invalidateReloadCachesHook,
+    // Both hooks rebase the scroller's elapsed-time clock at `pivot`, for two
+    // different reasons, so the reasons live at `pivot` itself. On show: a
+    // marquee that was scrolling when the bar hid resumes from its last shown
+    // offset rather than catching the whole hidden gap in one frame (which
+    // would land it mid-cycle). On reload: config is about to change the
+    // scroller's own inputs (carousel speed, the bar's padding, the cell's
+    // usable width), so the base is rebased instead of integrated across the
+    // change -- without it a reload mid-scroll produced one frame whose dt
+    // spanned the old and the new geometry at once.
+    .onBarShown = pivot,
+    .invalidateReloadCaches = pivot,
 };

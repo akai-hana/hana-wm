@@ -29,14 +29,10 @@ pub const addon: title_mod.Scroller = .{
     .pollDeadlineMs = pollDeadlineMs,
 };
 
-/// Horizontal gap between the repeating copies of a title, in pixels.
+/// Horizontal gap between the repeating copies of a title, in pixels. Added to
+/// the text width it is the center-to-center distance between copies, i.e. the
+/// wrap period of the marquee cycle.
 const inter_title_gap_px: u16 = 48;
-
-/// Center-to-center distance between the repeating copies of a title (text
-/// width plus the inter-copy gap): the wrap period of the marquee cycle.
-fn cyclePx(text_w: u16) f32 {
-    return @as(f32, @floatFromInt(text_w)) + @as(f32, @floatFromInt(inter_title_gap_px));
-}
 
 /// The motion clock (24.2).
 ///
@@ -72,20 +68,17 @@ var shown_off_px: f32 = 0;
 var last_drawn_ms: i64 = 0;
 var active_win: u32 = 0;
 var active_hash: u64 = 0;
+/// Whether the tracked cell is overflowing RIGHT NOW -- and therefore whether
+/// this frame scrolls. The scroller is GIVEN its `enabled` policy by draw and
+/// never goes looking for it, so this bit carries the policy with it: `scrolling`
+/// is assigned `overflows`, which conjoins `enabled`, and `pollDeadlineMs`
+/// therefore needs no separate policy channel (nor a stale copy of one).
 var scrolling: bool = false;
 /// Set when the bar re-appears after a hide, or when config changed and the
 /// scroller must re-measure (see `pivot`): consumed by the next offsetFor call
 /// so that frame rebases its elapsed-time clock at `now` instead of integrating
 /// across the whole gap.
 var pivot_next_frame: bool = false;
-
-/// The `enabled` policy the last `offsetFor` call was handed. The scroller is
-/// GIVEN its policy by draw and never goes looking for it: `pollDeadlineMs`
-/// reads this instead of the live config, so the bar module stops reading
-/// global config for a value a draw already had. At most one frame stale, and
-/// config cannot change without a draw following (a reload invalidates and
-/// redraws).
-var marquee_enabled: bool = true;
 
 /// How much a scrolling cell's slot must GROW before that cell is allowed to
 /// stop scrolling. `text_w > avail_w` is a knife-edge comparison re-run every
@@ -118,18 +111,24 @@ pub fn offsetFor(
     speed_px_s: u16,
     now_ms: i64,
 ) title_mod.Scroll {
+    // Both of these are consumed on EVERY call -- each of the three exits below
+    // used to repeat them -- so they are stated once, here, rather than at each
+    // exit. `pivot_next_frame` needs a local because the pivot branch below
+    // reads the value it is clearing.
+    last_drawn_ms = now_ms;
+    const pivoting = pivot_next_frame;
+    pivot_next_frame = false;
+
     const hash = std.hash.Wyhash.hash(0, title);
     const continues = scrolling and win == active_win and hash == active_hash;
 
-    marquee_enabled = enabled;
     // Hysteresis, not a plain overflow test: a cell that was already scrolling
     // stays scrolling until its slot has grown to fit the title WITH room to
     // spare. Only a cell that is not scrolling has to beat `text_w` outright,
-    // so entering the marquee is unchanged and jitter cannot leave it.
-    const overflows = if (continues)
-        enabled and text_w > avail_w -| scroll_exit_slack_px
-    else
-        enabled and text_w > avail_w;
+    // so entering the marquee is unchanged and jitter cannot leave it. `-| 0`
+    // is `avail_w`, which is what the non-continuing case wants.
+    const slack: u16 = if (continues) scroll_exit_slack_px else 0;
+    const overflows = enabled and text_w > avail_w -| slack;
     scrolling = overflows;
     active_win = win;
     active_hash = hash;
@@ -137,43 +136,33 @@ pub fn offsetFor(
     // `cycle` is text_w + gap, so it is zero only if both are; a marquee needs
     // an overflowing title, and `@mod` by zero is undefined rather than an
     // error, so this is guarded rather than left to that invariant holding.
-    const cycle = cyclePx(text_w);
+    const cycle: f32 = @as(f32, @floatFromInt(text_w)) + @as(f32, inter_title_gap_px);
 
-    if (!overflows) {
-        // The text fits its slot (or the feature is off): no scroll, so the
-        // segment draws statically. Retiring the clock here is what lets a
-        // later overflow start from the head instead of resuming mid-cycle.
+    // One transition, two reasons: the text fits its slot (or the feature is
+    // off), so the segment draws statically; or this is the FIRST frame of an
+    // overflowing cell (focus change, rename, enable, or a workspace switch
+    // arriving from a workspace whose title FIT). Either way the clock is
+    // re-anchored at `now` and the offset is the head, so motion -- or its
+    // retirement -- begins on the NEXT frame. Retiring the clock here is what
+    // lets a later overflow start from the head instead of resuming mid-cycle.
+    //
+    // The starting-over case reports `active = true`, not false. `false` made
+    // the renderer fall through to its static ellipsis path, so arriving at an
+    // overflowing workspace from a static-title one painted a frame of
+    // truncated "..." before the marquee appeared -- and because `continues`
+    // only becomes true on the NEXT poll, the marquee itself took a second
+    // poll to activate. `off = 0` puts the head at exactly the resting position
+    // the static path would have used, so claiming the segment here is
+    // seamless rather than a visible change.
+    if (!overflows or !continues) {
         anchor_ms = now_ms;
         shown_off_px = 0;
-        last_drawn_ms = now_ms;
-        pivot_next_frame = false;
-        return .{ .off = 0, .cycle = cycle, .active = false };
-    }
-
-    if (!continues) {
-        // First frame of an overflowing cell (focus change, rename, enable, or
-        // a workspace switch arriving from a workspace whose title FIT):
-        // anchor at `now` so the next frame reads as one frame's worth of
-        // motion from the head.
-        //
-        // This frame reports `active = true`, not false. `false` made the
-        // renderer fall through to its static ellipsis path, so arriving at an
-        // overflowing workspace from a static-title one painted a frame of
-        // truncated "..." before the marquee appeared -- and because
-        // `continues` only becomes true on the NEXT poll, the marquee itself
-        // took a second poll to activate. `off = 0` puts the head at exactly
-        // the resting position the static path would have used, so claiming
-        // the segment here is seamless rather than a visible change.
-        anchor_ms = now_ms;
-        shown_off_px = 0;
-        last_drawn_ms = now_ms;
-        pivot_next_frame = false;
-        return .{ .off = 0, .cycle = cycle, .active = true };
+        return .{ .off = 0, .cycle = cycle, .active = overflows };
     }
 
     const speed: f32 = @floatFromInt(speed_px_s);
 
-    if (pivot_next_frame) {
+    if (pivoting) {
         // The bar was hidden between frames, or config changed. The new speed
         // and width change what a cycle even is, so evaluating
         // `mod((now - anchor) * speed, cycle)` now would teleport the marquee
@@ -188,7 +177,6 @@ pub fn offsetFor(
         // comes from.
         //
         // Speed 0 has no inverse, and at 0 the offset is 0 regardless.
-        pivot_next_frame = false;
         anchor_ms = if (speed > 0)
             now_ms - @as(i64, @intFromFloat(@round(shown_off_px * 1000.0 / speed)))
         else
@@ -200,7 +188,6 @@ pub fn offsetFor(
     else
         0;
     shown_off_px = off;
-    last_drawn_ms = now_ms;
     return .{ .off = off, .cycle = cycle, .active = true };
 }
 
@@ -208,8 +195,13 @@ pub fn offsetFor(
 /// minimum: one display period at `hz`, rounded up so wakes never land past
 /// a scanout. Returns -1 when inactive (no wakeup contribution), mirroring
 /// prompt.blinkPollTimeoutMs.
+///
+/// `scrolling` alone answers "is there motion to pace", because it is assigned
+/// `overflows`, which conjoins `enabled`: a disabled draw leaves it false, so a
+/// config reload that turns the carousel off stops the wakeups on the next
+/// frame without a separate policy channel.
 pub fn pollDeadlineMs(now_ms: i64, hz: f64) i32 {
-    if (!marquee_enabled or !scrolling) return -1;
+    if (!scrolling) return -1;
     const period_ms: i64 = @intFromFloat(@ceil(1000.0 / @max(hz, 1.0)));
     const until_next = period_ms - (now_ms - last_drawn_ms);
     return @intCast(@max(1, until_next));
@@ -234,5 +226,4 @@ pub fn resetForTesting() void {
     active_hash = 0;
     scrolling = false;
     pivot_next_frame = false;
-    marquee_enabled = true;
 }

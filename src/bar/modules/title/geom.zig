@@ -30,7 +30,6 @@ const std = @import("std");
 const segmod = @import("segment");
 
 const max_visible_windows = segmod.max_visible_windows;
-const TitleRenderContext = segmod.TitleRenderContext;
 const TitleSnapshot = segmod.TitleSnapshot;
 
 pub const WindowInfo = struct {
@@ -40,35 +39,6 @@ pub const WindowInfo = struct {
     title: []const u8,
     minimized: bool,
 };
-
-/// Builds the sorted WindowInfo list for the split view from the snapshot's
-/// per-window titles/geoms. The bar already resolved both per window id from
-/// in-process caches (WM title cache + sync truth-rect), so nothing here
-/// touches the wire and no positional batch exists to scramble. Windows with
-/// an unknown geometry are dropped, not padded.
-fn gatherAndSortWindowInfos(
-    snapshot: TitleSnapshot,
-    windows: []const u32,
-    out_window_info_buf: *[max_visible_windows]WindowInfo,
-) ?[]WindowInfo {
-    var info_count: usize = 0;
-    const win_count = @min(windows.len, max_visible_windows);
-    for (windows[0..win_count], 0..) |win, i| {
-        const wgeom = snapshot.geoms[i] orelse continue;
-        out_window_info_buf[info_count] = .{
-            .window = win,
-            .x = wgeom.x,
-            .y = wgeom.y,
-            .title = snapshot.titles[i],
-            .minimized = snapshot.minimized_set.contains(win),
-        };
-        info_count += 1;
-    }
-    if (info_count == 0) return null;
-    const window_infos = out_window_info_buf[0..info_count];
-    std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
-    return window_infos;
-}
 
 /// Sort order for the split-view segment layout:
 ///
@@ -86,25 +56,45 @@ fn gatherAndSortWindowInfos(
 /// on focus changes. The focused window is highlighted via accent colour.
 fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     if (a.minimized != b.minimized) return !a.minimized;
-    const a_offscreen = a.x < 0;
-    const b_offscreen = b.x < 0;
-    if (a_offscreen != b_offscreen) return !a_offscreen;
+    if ((a.x < 0) != (b.x < 0)) return a.x >= 0;
     if (a.x != b.x) return a.x < b.x;
     if (a.y != b.y) return a.y < b.y;
     return a.window < b.window;
 }
 
 /// Caller-frame scratch for the gather phase, shared verbatim by hitTest and
-/// the title module's draw.
+/// the title module's draw. The gather is the method rather than a private fn
+/// beside it: it had exactly one caller, and forwarding three arguments just to
+/// reach its own field was a second name for a single step.
 pub const GatherScratch = struct {
     window_infos: [max_visible_windows]WindowInfo = undefined,
 
+    /// Builds the sorted WindowInfo list for the split view from the snapshot's
+    /// per-window titles/geoms. The bar already resolved both per window id from
+    /// in-process caches (WM title cache + sync truth-rect), so nothing here
+    /// touches the wire and no positional batch exists to scramble. Windows with
+    /// an unknown geometry are dropped, not padded.
     pub fn gather(
         self: *GatherScratch,
         snapshot: TitleSnapshot,
         windows: []const u32,
     ) ?[]WindowInfo {
-        return gatherAndSortWindowInfos(snapshot, windows, &self.window_infos);
+        var info_count: usize = 0;
+        for (windows[0..@min(windows.len, max_visible_windows)], 0..) |win, i| {
+            const wgeom = snapshot.geoms[i] orelse continue;
+            self.window_infos[info_count] = .{
+                .window = win,
+                .x = wgeom.x,
+                .y = wgeom.y,
+                .title = snapshot.titles[i],
+                .minimized = snapshot.minimized_set.contains(win),
+            };
+            info_count += 1;
+        }
+        if (info_count == 0) return null;
+        const window_infos = self.window_infos[0..info_count];
+        std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+        return window_infos;
     }
 };
 
@@ -134,30 +124,25 @@ pub fn segmentIndexOfX(total_width: u16, offset_x: u16, count: u32) usize {
 }
 
 /// Resolves which window (if any) is displayed at `offset_x` pixels into the
-/// title segment, relative to the segment's start_x.
+/// title segment, whose reserved width is `width` (the segment's on-screen box).
 /// Pure in-process hit-testing: titles/geoms come from the snapshot's cached
 /// per-window values, so it never touches the wire.
-pub fn hitTest(
-    ctx: TitleRenderContext,
-    snapshot: TitleSnapshot,
-    offset_x: u16,
-) ?ClickTarget {
+///
+/// One window, many windows, and the minimized bit are all resolved once, at
+/// the end: both layouts name a window, and `minimized` is the same
+/// `minimized_set` lookup either way -- in the split view `WindowInfo.minimized`
+/// was set by that very expression during the gather.
+pub fn hitTest(snapshot: TitleSnapshot, width: u16, offset_x: u16) ?ClickTarget {
     const windows = snapshot.current_ws_wins;
     if (windows.len == 0) return null;
 
-    if (windows.len == 1) {
-        const win = windows[0];
-        return .{ .window = win, .minimized = snapshot.minimized_set.contains(win) };
-    }
-
-    if (ctx.width == 0) return null;
-
-    var scratch: GatherScratch = .{};
-    const sorted = scratch.gather(snapshot, windows) orelse
-        return null;
-
-    const n: u32 = @intCast(sorted.len);
-    const idx = segmentIndexOfX(ctx.width, offset_x, n);
-    const info = sorted[idx];
-    return .{ .window = info.window, .minimized = info.minimized };
+    const win = if (windows.len == 1) windows[0] else blk: {
+        // Only the split view needs a width to divide into; a lone window is
+        // the whole slot whatever the reservation measured.
+        if (width == 0) return null;
+        var scratch: GatherScratch = .{};
+        const sorted = scratch.gather(snapshot, windows) orelse return null;
+        break :blk sorted[segmentIndexOfX(width, offset_x, @intCast(sorted.len))].window;
+    };
+    return .{ .window = win, .minimized = snapshot.minimized_set.contains(win) };
 }
