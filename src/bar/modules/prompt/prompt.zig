@@ -186,19 +186,6 @@ fn clearToEnd(es: *EditorState, from: usize) void {
     es.cursor = @min(es.cursor, es.len);
 }
 
-/// Deletes the text from the head of the buffer to the cursor (Ctrl-U),
-/// shifting the remainder left.
-fn clearToStart(es: *EditorState) void {
-    if (es.cursor == 0) return;
-    std.mem.copyForwards(
-        u8,
-        es.buf[0 .. es.len - es.cursor],
-        es.buf[es.cursor..es.len],
-    );
-    es.len -= es.cursor;
-    es.cursor = 0;
-}
-
 fn backspace(es: *EditorState) void {
     if (es.cursor == 0) return;
     std.mem.copyForwards(
@@ -219,7 +206,7 @@ pub fn handleCtrl(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
         'c' => return .deactivate,
         'a' => es.cursor = 0,
         'e' => es.cursor = es.len,
-        'u' => clearToStart(es),
+        'u' => deleteRange(es, 0, es.cursor),
         'k' => clearToEnd(es, es.cursor),
         'w' => deleteWordBack(es),
         'h' => backspace(es),

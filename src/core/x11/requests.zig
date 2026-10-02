@@ -61,14 +61,11 @@ pub inline fn grabServer(conn: Connection) void {
     _ = xcb.xcb_grab_server(conn);
 }
 
-/// Releases the X server grab without flushing pending requests.
-inline fn ungrabServer(conn: Connection) void {
-    _ = xcb.xcb_ungrab_server(conn);
-}
-
-/// Defined here so every module can share one copy.
+/// Releases the X server grab, then flushes. Defined here so every module can
+/// share one copy; the ungrab and the flush are not separable by design, since
+/// flushing a request made while grabbed is exactly what this exists to undo.
 pub inline fn ungrabAndFlush(conn: Connection) void {
-    ungrabServer(conn);
+    _ = xcb.xcb_ungrab_server(conn);
     _ = xcb.xcb_flush(conn);
 }
 
@@ -132,14 +129,14 @@ const supported_atoms = [_][]const u8{
 // subset of the cached fields (RESOURCE_MANAGER & friends are fetched but
 // never advertised, and vice versa is a compile error).
 comptime {
-    @setEvalBranchQuota(100000);
-    const fields = std.meta.fields(atoms.AtomCache);
     for (supported_atoms) |name| {
-        var found = false;
-        for (fields) |f| {
-            if (std.mem.eql(u8, f.name, name)) found = true;
+        // @hasField answers this exactly, which is the question the nested scan
+        // below was reimplementing by hand -- and it is what atoms.zig already
+        // uses to check this same field set. The scan also needed a raised
+        // @setEvalBranchQuota because it was O(fields x atoms).
+        if (!@hasField(atoms.AtomCache, name)) {
+            @compileError("supported_atoms has no AtomCache field: " ++ name);
         }
-        if (!found) @compileError("supported_atoms has no AtomCache field: " ++ name);
     }
 }
 

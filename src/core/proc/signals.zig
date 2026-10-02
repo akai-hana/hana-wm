@@ -208,12 +208,16 @@ pub const Plan = struct {
     /// The one signal ignored outright. Kept out of `handled` because its
     /// disposition is SIG_IGN, not a handler.
     ignored: std.posix.SIG,
-    /// Whether to install the alternate signal stack. MUST precede any ONSTACK
-    /// handler: the backtrace handler runs on it, and without one it would run
-    /// on the (possibly corrupted) stack it exists to diagnose.
-    altstack: bool,
-    /// Whether to arm the backtrace handler, which requires `altstack` first.
-    backtrace_handler: bool,
+    // install always installs the alternate signal stack and always arms the
+    // backtrace handler. These were Plan fields once, but plan() hardcoded both
+    // to true and its only production consumer is install(plan()), so the flags
+    // could never be false -- a test could only assert true against true. The
+    // behaviour is unconditional and stays; only the unexercised knob goes.
+    //
+    // Order matters and is why this is not reordered: the alternate stack MUST
+    // be installed before any ONSTACK handler is armed, because the backtrace
+    // handler runs on it, and without one it would run on the (possibly
+    // corrupted) stack it exists to diagnose.
 };
 
 /// The disposition policy, as pure data. No signal is touched, no fd opened.
@@ -221,8 +225,6 @@ pub fn plan() Plan {
     return .{
         .handled = &handled_signals,
         .ignored = std.posix.SIG.PIPE,
-        .altstack = true,
-        .backtrace_handler = true,
     };
 }
 
@@ -260,16 +262,14 @@ fn install(p: Plan) !void {
     // ever installed -- without one the handler would run on the (possibly
     // corrupted) interrupted stack it exists to diagnose. Install it before
     // arming any ONSTACK handler.
-    if (p.altstack) {
-        const ss: std.posix.stack_t = .{
-            .sp = &alt_stack_mem,
-            .flags = 0,
-            .size = alt_stack_mem.len,
-        };
-        try std.posix.sigaltstack(&ss, null);
-    }
+    const ss: std.posix.stack_t = .{
+        .sp = &alt_stack_mem,
+        .flags = 0,
+        .size = alt_stack_mem.len,
+    };
+    try std.posix.sigaltstack(&ss, null);
 
-    if (p.backtrace_handler) setupBacktraceHandler();
+    setupBacktraceHandler();
 }
 
 // Closes both ends of the signal pipe.

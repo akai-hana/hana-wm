@@ -53,13 +53,15 @@ test "plan: SIGUSR2 is the backtrace signal, so it is not in the handled set" {
     }
 }
 
-test "plan: the alternate stack is installed because a handler needs it" {
+test "plan: SIGHUP is handled and SIGPIPE is ignored" {
     const p = signals.plan();
 
-    // The backtrace handler sets SA.ONSTACK. Running on an ONSTACK handler
-    // with no alternate stack installed means the kernel runs it on the
-    // interrupted stack -- the very stack the handler exists to report as
-    // possibly corrupted. So the two flags are not independent.
-    try std.testing.expect(p.backtrace_handler);
-    try std.testing.expect(p.altstack);
+    // The backtrace handler sets SA.ONSTACK, and install always installs the
+    // alternate signal stack before arming it -- running an ONSTACK handler
+    // with no alternate stack means the kernel runs it on the interrupted
+    // stack, the very stack it exists to report as possibly corrupted. That
+    // was two Plan flags asserting themselves against each other; install now
+    // does both unconditionally, so there is nothing left here to assert.
+    try std.testing.expectEqual(@as(std.posix.SIG, .PIPE), p.ignored);
+    try std.testing.expect(p.handled.len > 0);
 }
