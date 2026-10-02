@@ -1,7 +1,9 @@
 //! Systatus CPU readout.
 //! Computes aggregate core utilization % from the delta of the first
-//! /proc/stat line. The very first read has no delta to report, so it reports
-//! nothing and the arm frame stays collapsed until the second sample.
+//! /proc/stat line. The very first read has no previous sample to subtract, so
+//! it takes one short real measurement of its own (see `boot_priming_ns`) and
+//! reports that: the segment renders on the first frame like RAM/VOL/BRT do,
+//! rather than staying collapsed for a tick.
 //!
 //! Only that first line is read, and it is read into a buffer sized for a line.
 //! That is the whole reason the segment used to be permanently blank:
@@ -56,23 +58,36 @@ pub fn parseCpuLine(s: []const u8) ?Sample {
     return .{ .total = total, .idle = idle };
 }
 
-/// Busy % between two samples, or null when the interval is not usable: no
-/// previous sample, a zero/rewound total (a VM suspend/resume resets the
-/// kernel counters), or no elapsed jiffies at all.
-///
-/// Null -- not the boot-cumulative average -- is the honest answer for "no
-/// interval": since-boot utilization is not the user's CPU load, and painting
-/// it produced a one-frame "CPU 4%" that the very next read replaced with the
-/// real number. The sticky last-good window in systatus.zig is what keeps the
-/// previous reading on screen across such a gap.
-pub fn utilBetween(prev: ?Sample, cur: Sample) ?u8 {
-    const p = prev orelse return null;
-    if (p.total == 0 or cur.total < p.total) return null;
-    const d_total = cur.total - p.total;
+/// Busy % between two samples, or null when the interval is not usable: a
+/// zero/rewound total (a VM suspend/resume resets the kernel counters) or no
+/// elapsed jiffies at all.
+pub fn utilBetween(prev: Sample, cur: Sample) ?u8 {
+    if (prev.total == 0 or cur.total < prev.total) return null;
+    const d_total = cur.total - prev.total;
     if (d_total == 0) return 0;
-    const d_idle = cur.idle -| p.idle;
+    const d_idle = cur.idle -| prev.idle;
     const busy = (d_total - d_idle) * 100 / d_total;
     return @intCast(@min(busy, 100));
+}
+
+/// Busy % over the whole span the kernel has been counting, i.e. since boot.
+/// This is the reading for the very first sample, which by definition has no
+/// predecessor to subtract. Every later sample uses `utilBetween` and is a
+/// real interval reading, so this value lives exactly one frame.
+///
+/// It is a genuine measurement rather than a placeholder: /proc/stat's
+/// counters are cumulative from boot, so this is the true average
+/// utilization over that span. It just answers a different question than every
+/// later frame ("since boot" vs "since the last tick"), which is why it does
+/// not recur. Null only when the kernel has counted nothing yet.
+pub fn bootAverage(cur: Sample) ?u8 {
+    // Computed directly rather than by handing a zeroed predecessor to
+    // `utilBetween`: that helper treats `total == 0` as an unusable baseline
+    // (a rewound counter), and a boot average's baseline legitimately IS zero.
+    // Same arithmetic, one read, no predecessor.
+    if (cur.total == 0) return null;
+    const busy = cur.total -| cur.idle;
+    return @intCast(@min(busy * 100 / cur.total, 100));
 }
 
 var cpu_prev: ?Sample = null;
@@ -99,10 +114,13 @@ fn read() ?systatus.Sample {
     const r = systatus.readFileChecked("/proc/stat", &buf) orelse return null;
     if (!aggregateLineComplete(r.bytes, r.truncated)) return null;
     const cur = parseCpuLine(r.bytes) orelse return null;
-    const prev = cpu_prev;
+
+    const pct = if (cpu_prev) |prev|
+        utilBetween(prev, cur)
+    else
+        bootAverage(cur);
     cpu_prev = cur;
-    const pct = utilBetween(prev, cur) orelse return null;
-    return systatus.percentSample(&g_num, pct);
+    return systatus.percentSample(&g_num, pct orelse return null);
 }
 
 /// This readout's binding to the systatus surface (`systatus.Sub`): the

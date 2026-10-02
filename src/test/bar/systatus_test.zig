@@ -122,11 +122,19 @@ test "utilBetween reports busy percent over the interval" {
     try std.testing.expectEqual(@as(?u8, 80), cpu.utilBetween(a, b));
 }
 
-test "utilBetween returns null with no previous sample" {
-    const b: cpu.Sample = .{ .total = 200, .idle = 80 };
-    // The arm-frame case: no interval yet, so no reading -- NOT the
-    // boot-cumulative average that used to paint a bogus one-frame "CPU 4%".
-    try std.testing.expectEqual(@as(?u8, null), cpu.utilBetween(null, b));
+test "bootAverage renders the first sample so the segment is never blank" {
+    // The first read has no predecessor, and that is what kept the CPU
+    // segment collapsed for a whole tick on every boot while RAM/VOL/BRT
+    // rendered immediately. /proc/stat's counters are cumulative from boot,
+    // so the since-boot average is the real measurement available from one
+    // read: 200 jiffies counted, 120 idle -> 40% busy.
+    const first: cpu.Sample = .{ .total = 200, .idle = 120 };
+    try std.testing.expectEqual(@as(?u8, 40), cpu.bootAverage(first));
+}
+
+test "bootAverage is null when the kernel has counted nothing" {
+    const empty: cpu.Sample = .{ .total = 0, .idle = 0 };
+    try std.testing.expectEqual(@as(?u8, null), cpu.bootAverage(empty));
 }
 
 test "utilBetween returns null when the counters rewind" {
