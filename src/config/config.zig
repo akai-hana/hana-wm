@@ -2295,91 +2295,49 @@ const BarCmp = union(enum) {
     layouts,
 };
 
-/// ONE declared entry per `BarConfig` field. The comparison is generated from
-/// this table rather than hand-written, because the hand-written list was the
-/// silent-drift hazard it looks like: every one of the 43 fields happened to be
-/// listed, so nothing failed, and a 44th field added later would compile, parse
-/// and reload -- and simply never rebuild the bar. The comptime block below
-/// turns that into a compile error.
-const bar_cmp = [_]struct { field: std.meta.FieldEnum(types.BarConfig), by: BarCmp }{
-    .{ .field = .enabled, .by = .direct },
-    .{ .field = .vim_mode, .by = .direct },
-    .{ .field = .bar_position, .by = .direct },
-    .{ .field = .bg, .by = .direct },
-    .{ .field = .fg, .by = .direct },
-    .{ .field = .selected_bg, .by = .direct },
-    .{ .field = .selected_fg, .by = .direct },
-    .{ .field = .primary_color, .by = .direct },
-    .{ .field = .secondary_color, .by = .direct },
-    .{ .field = .alternative_color, .by = .direct },
-    .{ .field = .text_color, .by = .direct },
-    .{ .field = .title_accent_color, .by = .direct },
-    .{ .field = .title_unfocused_accent, .by = .direct },
-    .{ .field = .title_minimized_accent, .by = .direct },
-    .{ .field = .indicator_location, .by = .direct },
-    .{ .field = .indicator_padding, .by = .direct },
-    .{ .field = .indicator_color, .by = .direct },
-    .{ .field = .selected_indicator_color, .by = .direct },
-    .{ .field = .carousel_enabled, .by = .direct },
-    .{ .field = .carousel_speed_px_s, .by = .direct },
-    .{ .field = .run_bg, .by = .direct },
-    .{ .field = .run_fg, .by = .direct },
-    .{ .field = .run_prompt_color, .by = .direct },
-    .{ .field = .transparency, .by = .direct },
+/// The comparison strategy for one `BarConfig` field, DERIVED from its type.
+///
+/// The table below is the hand-written version of this same function. It
+/// existed because the original hand-written comparison was a silent-drift
+/// hazard: every field happened to be covered so nothing failed, and a 44th
+/// field added later compiled, parsed and reloaded -- and simply never rebuilt
+/// the bar. Deriving removes the possibility instead of detecting it. The cost
+/// is that a new field TYPE must be recognized here, so the fallthrough is a
+/// @compileError rather than a default: an unrecognized type fails the build
+/// rather than being compared by the wrong rule.
+fn cmpFor(comptime t: type) BarCmp {
+    // The container types whose contents need a deep compare of their own.
+    // Named explicitly because each carries a different element rule.
+    if (t == std.StringHashMapUnmanaged(types.Color)) return .{ .string_map = types.Color };
+    if (t == std.StringHashMapUnmanaged(types.SegmentProps)) return .{ .string_map = types.SegmentProps };
+    if (t == std.ArrayList(types.BarLayout)) return .layouts;
 
-    .{ .field = .height, .by = .meta },
-    .{ .field = .fonts, .by = .meta },
-    .{ .field = .font_size, .by = .meta },
-    .{ .field = .spacing, .by = .meta },
-    .{ .field = .workspace_icons, .by = .meta },
-    .{ .field = .indicator_size, .by = .meta },
-    .{ .field = .workspace_tag_width, .by = .meta },
-    .{ .field = .indicator_focused, .by = .meta },
-    .{ .field = .indicator_unfocused, .by = .meta },
-    .{ .field = .clock_format, .by = .meta },
-    .{ .field = .volume_format, .by = .meta },
-    .{ .field = .volume_muted_format, .by = .meta },
-    .{ .field = .brightness_format, .by = .meta },
-    .{ .field = .brightness_device, .by = .meta },
-    .{ .field = .run_prompt, .by = .meta },
-
-    .{ .field = .segment_fg, .by = .{ .string_map = types.Color } },
-    .{ .field = .segment_value_fg, .by = .{ .string_map = types.Color } },
-    .{ .field = .segment_props, .by = .{ .string_map = types.SegmentProps } },
-    .{ .field = .layout, .by = .layouts },
-};
-
-comptime {
-    // 43 fields x 43 entries, plus the reverse check.
-    @setEvalBranchQuota(20_000);
-    for (std.meta.fields(types.BarConfig)) |f| {
-        var count: usize = 0;
-        for (bar_cmp) |c| {
-            if (std.mem.eql(u8, @tagName(c.field), f.name)) count += 1;
-        }
-        if (count != 1) @compileError(
-            "BarConfig field '" ++ f.name ++ "' appears " ++
-                std.fmt.comptimePrint("{d}", .{count}) ++
-                " times in bar_cmp; it must appear exactly once, or a bar " ++
-                "config change is silently ignored on reload",
-        );
-    }
-    for (bar_cmp) |c| {
-        if (!@hasField(types.BarConfig, @tagName(c.field))) @compileError(
-            "bar_cmp lists '" ++ @tagName(c.field) ++ "', which is not a BarConfig field",
-        );
-    }
+    return switch (@typeInfo(t)) {
+        // `==` resolves these exactly: scalars, enums, and Color (a u32).
+        .bool, .int, .float, .@"enum" => .direct,
+        // An optional compares as its payload, so `?Color` is `==` while
+        // `?[]const u8` is not.
+        .optional => |o| cmpFor(o.child),
+        // `ScalableValue` (a union), `[]const u8`, and the ArrayList of
+        // strings need meta.eql -- including the ArrayList's capacity, which is
+        // what the table below compares and is kept deliberately.
+        .pointer, .@"struct", .@"union", .array => .meta,
+        else => @compileError("no config compare strategy for " ++ @typeName(t)),
+    };
 }
 
-/// `old` and `new` agree on one field, per the table's declared strategy.
+/// `old` and `new` agree on one field, compared by the strategy `cmpFor`
+/// derives from the field's type.
 fn barFieldEql(
-    comptime field: std.meta.FieldEnum(types.BarConfig),
-    comptime by: BarCmp,
+    comptime name: []const u8,
     old: *const types.BarConfig,
     new: *const types.BarConfig,
 ) bool {
-    const a = @field(old, @tagName(field));
-    const b = @field(new, @tagName(field));
+    const a = @field(old, name);
+    const b = @field(new, name);
+    // comptime: `BarCmp.string_map` carries a `type`, which cannot exist at
+    // runtime, so the strategy must be resolved here rather than stored.
+    const by = comptime cmpFor(@TypeOf(a));
     return switch (by) {
         .direct => a == b,
         .meta => std.meta.eql(a, b),
@@ -2388,13 +2346,13 @@ fn barFieldEql(
     };
 }
 
-/// Bar-subsystem content: every field of BarConfig, compared by the declared
-/// strategy in `bar_cmp` (see the drift note there).
+/// Bar-subsystem content: every field of BarConfig, each compared by the
+/// strategy its type implies (see `cmpFor`). Walking the fields themselves is
+/// what makes the coverage total by construction -- there is no list that a
+/// new field can be left out of.
 fn barChanged(old: *const types.BarConfig, new: *const types.BarConfig) bool {
-    // `inline for`: the strategy union carries a `type` payload, so each
-    // entry is comptime-only and `c` has to be bound at comptime.
-    inline for (bar_cmp) |c| {
-        if (!barFieldEql(c.field, c.by, old, new)) return true;
+    inline for (std.meta.fields(types.BarConfig)) |f| {
+        if (!barFieldEql(f.name, old, new)) return true;
     }
     return false;
 }
