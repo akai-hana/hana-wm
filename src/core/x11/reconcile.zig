@@ -270,12 +270,14 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
         const parked = desire.parked;
         const is_winner = winner == win;
 
+        const tracing = xtrace.enabled() and xtrace.watches(win);
         if (parked) {
             // Re-send on the transition OR when the client moved itself while
             // parked: `last.parked` stays true across the drift, so without
             // the dirty term the recompute above would compute a fresh park
             // and then throw it away.
             if (!last.parked or last.parked_dirty) {
+                if (tracing) xtrace.outbound(win, "park", "unpark-then-park");
                 // Map before park: a fresh window's own map request was
                 // redirected by SubstructureRedirect (never performed by the
                 // server), so the offscreen park would otherwise leave it
@@ -283,6 +285,12 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
                 // winner, cross-workspace spawn) fails with BadMatch.
                 if (!last.has_rect) ctx.sink.map(win);
                 ctx.sink.park(win);
+            } else if (tracing) {
+                // The fast path elided this window entirely: it was already
+                // parked where we put it. Logged because "hana said nothing"
+                // and "hana said nothing BECAUSE it skipped the window" are
+                // different findings, and a trace has to distinguish them.
+                xtrace.outbound(win, "park-elided", "already parked");
             }
         } else {
             // Raise triggers per the ledger contract (header read 2): winner
@@ -308,7 +316,6 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             // of the pairing that makes a trace decisive: it shows whether hana
             // ever re-asserted a geometry, or stayed silent while the window's
             // on-screen contents diverged from its state.
-            const tracing = xtrace.enabled() and xtrace.watches(win);
             if (need_map) {
                 if (tracing) xtrace.outbound(win, "map", "");
                 ctx.sink.map(win);
