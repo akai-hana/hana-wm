@@ -121,6 +121,15 @@ fn handleMappingNotify(event: *anyopaque) void {
 }
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
+//
+// This and eventWindowFor's offset switch below have been proposed for merging
+// into one table. They answer different questions -- "is there a handler?" vs
+// "where in the struct is the window id?" -- and their code sets are NOT the
+// same, in both directions: MAPPING_NOTIFY has a handler and no window field at
+// all, while VISIBILITY_NOTIFY, FOCUS_IN/OUT, REPARENT/CREATE/GRAVITY/
+// CIRCULATE carry a window and have no handler. Merging them would trade two
+// flat lookups for one wider struct over a hot path, to save a handful of
+// lines, and would need a sentinel for the offset-less case.
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** event_dispatch_table;
 

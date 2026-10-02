@@ -185,6 +185,14 @@ pub inline fn dragTick(win: model_mod.WindowId) void {
 /// point, dispatched through the active layout module's preReconcile hook
 /// (the scroll addon registers snap-right-on-growth + clamp; a layout that
 /// provides no hook has no pre-reconcile duty).
+/// Three call sites, three distinct entry points -- not one call duplicated.
+///
+/// Also noted: these have been read as a redundant repeat of the same call.
+/// They are in prepare(), the duty-taking grab helper, and the fullscreen
+/// enter path, and each is a separate way into a server grab, so each has to
+/// settle the pre-reconcile duties first. The consolidation this doc comment
+/// above describes already happened once (four sites, each pairing this with
+/// its own ctx() call); what is left is the minimum.
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
     // Internal choke point: touches the private `instance` directly (not via
@@ -493,6 +501,13 @@ pub inline fn reconcileUnderGrabNowFullscreen(
             // exactly; the loop just makes the dispatch mechanism uniform
             // rather than a merged struct. Ordering and the
             // kind/prev_fs_win/instance.focused logic is unchanged.
+            // Not contract.callAll, despite being a fan-out over window_mods:
+            // callAll passes ONE argument set to every binder, and this needs
+            // two calls with different arguments (clear the previous
+            // fullscreen window, then set this one), plus a per-call-site
+            // condition on kind. Routing it through callAll would mean
+            // flattening that into a single uniform call, which is the bug the
+            // uniformity is meant to prevent.
             for (window_mods) |m| {
                 if (m.setEwmhFullscreenState) |hook| {
                     if (self.kind == .switch_) {
