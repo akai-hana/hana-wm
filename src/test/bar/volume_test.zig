@@ -38,12 +38,11 @@ const probeDecision = volume.probeDecision;
 const latchedRung = volume.latchedRung;
 const optimisticLevel = volume.optimisticLevel;
 const optimisticAfter = volume.optimisticAfter;
-const latchedRungFor = volume.latchedRungFor;
 const noteLadderResult = volume.noteLadderResult;
 
-const no = Probe{ .walk = false, .forget_native = false };
-const yes = Probe{ .walk = true, .forget_native = false };
-const flip = Probe{ .walk = true, .forget_native = true };
+const no = Probe{ .walk = false };
+const yes = Probe{ .walk = true };
+const flip = Probe{ .walk = true };
 
 /// The 25.3 span form: `Label` carries `value_start`/`value_len` rather than a
 /// subslice, so assertions spell the comparison out instead of relying on a
@@ -110,25 +109,14 @@ test "probeDecision: a reachability FLIP is the re-probe trigger" {
 
 test "latchedRung maps a backend to the one read it needs" {
     // A latched backend must read through its OWN rung, never the ladder's
-    // most-native-first order -- the whole point of the latch.
-    try std.testing.expectEqual(Rung.pactl, latchedRungFor(.pulse, false, false));
-    try std.testing.expectEqual(Rung.amixer, latchedRungFor(.alsa, false, false));
-    try std.testing.expectEqual(Rung.none, latchedRungFor(.unknown, false, false));
-    // With the native handle attached, the same latched pulse backend must read
-    // in-process instead of spawning pactl. No unit test can attach a daemon,
-    // so this arm is only reachable by passing the presence in.
-    try std.testing.expectEqual(Rung.native_pulse, latchedRungFor(.pulse, true, false));
-    try std.testing.expectEqual(Rung.native_alsa, latchedRungFor(.alsa, false, true));
-    // Both handles present: each backend still reads its OWN, so an ALSA latch
-    // is never diverted through the pulse handle.
-    try std.testing.expectEqual(Rung.native_alsa, latchedRungFor(.alsa, true, true));
-    try std.testing.expectEqual(Rung.native_pulse, latchedRungFor(.pulse, true, true));
-    // The live wrapper, with no handles attached in a unit test.
+    // search order -- the whole point of the latch. This test used to pass the
+    // native-handle presence in so the native arms were reachable without a
+    // daemon; with those backends gone the mapping is total, so the plain
+    // wrapper covers every arm.
     try std.testing.expectEqual(Rung.pactl, latchedRung(.pulse));
     try std.testing.expectEqual(Rung.amixer, latchedRung(.alsa));
     try std.testing.expectEqual(Rung.none, latchedRung(.unknown));
 }
-
 test "noteLadderResult arms the negative cache, and clears it on success" {
     // Nothing answered: arm at now, so the next poll does not re-walk.
     try std.testing.expectEqual(@as(?i64, 1_000), noteLadderResult(false, 1_000));

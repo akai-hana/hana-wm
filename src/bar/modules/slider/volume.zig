@@ -8,31 +8,26 @@
 //! Backends, most-native first. The resolved backend is LATCHED (26.7): once a
 //! read has identified one, later reads go straight to it instead of re-walking
 //! the ladder, and a ladder that found nothing is negative-cached for a while
-//! so a dead daemon cannot cost a fresh set of subprocesses on every press,
+//! so a dead daemon cannot cost a fresh pair of subprocesses on every press,
 //! right-click and 5 s poll. Both directions are undone by the same trigger --
-//! a `pulseReachable` recheck, plus a slow deadline -- so a daemon that starts
-//! after we gave up on it is still picked up:
-//!   1. native PulseAudio (`native_pulse`): in-process libpulse, no
-//!      subprocess -- the path on PipeWire/PulseAudio machines, including
-//!      ones where no `pactl` binary exists.
-//!   2. `pactl` subprocess (PipeWire/PulseAudio fallback).
-//!   3. native ALSA control (`native_alsa`): direct `/dev/snd/controlC*`
-//!      ioctls -- only when no PulseAudio runtime is present, because with
-//!      PipeWire the system `Master` is a software mixer element and the raw
-//!      card control would write a different volume.
-//!   4. `amixer` subprocess (fallback).
+//! a daemon-reachability recheck, plus a slow deadline -- so a daemon that
+//! starts after we gave up on it is still picked up:
+//!   1. `pactl` subprocess (PipeWire/PulseAudio).
+//!   2. `amixer` subprocess (ALSA fallback).
 //!
-//! `commit_cost` reports whether THIS sub's commits go through an
-//! in-process native call (microseconds, no subprocess): the slider core
-//! throttles only the spawned paths. The 0-100 % clamp in `commit` is the
-//! single guard for every caller's value; scrolling at the boundary computes
-//! the same value it already has and is a zero-cost no-op.
+//! Both are subprocesses on purpose. A pair of in-process backends used to
+//! stand in front of them -- libpulse via `dlopen`, and raw `/dev/snd/controlC*`
+//! ioctls -- for 588 lines. They were removed because they bought nothing a
+//! user could observe, and the honest measurement is the cost: on a machine
+//! with a PulseAudio runtime but no `libpulse.so.0` installed, `pactl` is
+//! absent too, so the pair traded a dependency nobody had for a fork nobody
+//! needed. `commit_cost` is still reported per sub, because the throttle
+//! decision is real even when every rung is a spawn; the 0-100 % clamp in
+//! `commit` is the single guard for every caller's value.
 
 const std = @import("std");
 const types = @import("types");
 const slider = @import("slider");
-const native_pulse = @import("native_pulse");
-const native_alsa = @import("native_alsa");
 
 const default_format = "VOL {pct}%";
 const default_muted_format = "MUTE";
@@ -40,15 +35,6 @@ const default_muted_format = "MUTE";
 const Backend = enum { unknown, pulse, alsa };
 
 var g_backend: Backend = .unknown;
-/// Native in-process PulseAudio backend (libpulse via dlopen), attached once
-/// on pulsing systems. Null until probed (once) or when it cannot attach.
-var g_native_pulse: ?native_pulse.Backend = null;
-var g_native_pulse_probed: bool = false;
-/// Native dependency-free ALSA control backend. Only attached on machines
-/// without a PulseAudio runtime (where the system `Master` is the raw card
-/// control). Null until probed (once).
-var g_native_alsa: ?native_alsa.Master = null;
-var g_native_alsa_probed: bool = false;
 var g_pct: u8 = 0;
 var g_muted: bool = false;
 var g_has_value: bool = false;
@@ -69,23 +55,20 @@ var g_pulse_reachable: ?bool = null;
 pub const reprobe_interval_ms: i64 = 15_000;
 
 /// What the negative cache says about one poll: whether the ladder may be
-/// walked, and separately whether the one-shot native-probe flags must be
-/// cleared so a fresh attach gets a chance. The two are independent -- the
-/// slow deadline re-walks WITHOUT forgetting the native probe, and a
-/// reachability flip forgets it -- so they are two fields, not one enum.
-pub const Probe = struct {
-    walk: bool,
-    forget_native: bool,
-};
+/// walked. One bool, because there is now exactly one thing to forget: the
+/// latched backend. It used to carry a second `forget_native` field for the
+/// native-probe flags, which were a one-shot latch whose clearing needed its
+/// own reason; with those backends gone the flag had nothing to clear.
+pub const Probe = struct { walk: bool };
 
 const ProbeDecision = enum { skip, retry, recheck };
 
 pub fn verdict(d: ProbeDecision) Probe {
-    return switch (d) {
-        .skip => .{ .walk = false, .forget_native = false },
-        .retry => .{ .walk = true, .forget_native = false },
-        .recheck => .{ .walk = false, .forget_native = false },
-    };
+    return .{ .walk = switch (d) {
+        .skip => false,
+        .retry => true,
+        .recheck => false,
+    } };
 }
 
 /// (26.7) The pure re-probe decision. All the timing policy, with no clock and
@@ -108,18 +91,33 @@ pub fn probeDecision(
     // No recorded failure: the ladder has never run to completion, so run it
     // even if the daemon looks exactly as it did last time. "Unchanged" is
     // only evidence once there is a previous observation to be unchanged from.
-    if (failed_at_ms == null) return .{ .walk = true, .forget_native = false };
+    if (failed_at_ms == null) return .{ .walk = true };
     const failed_at = failed_at_ms.?;
-    if (now -| failed_at >= reprobe_interval_ms) {
-        return .{ .walk = true, .forget_native = false };
-    }
+    if (now -| failed_at >= reprobe_interval_ms) return .{ .walk = true };
     if (now >= recheck_at_ms) {
-        // The daemon was asked again. Only a CHANGED answer un-latches, and a
-        // change is also the only thing worth forgetting the native probe for.
-        const changed = last_reachable == null or last_reachable.? != reachable;
-        return .{ .walk = changed, .forget_native = changed };
+        // The daemon was asked again. Only a CHANGED answer un-latches, which
+        // is what finds a daemon that started after we wrote it off.
+        return .{ .walk = last_reachable == null or last_reachable.? != reachable };
     }
-    return .{ .walk = false, .forget_native = false };
+    return .{ .walk = false };
+}
+
+/// Whether a PulseAudio/PipeWire daemon socket exists. This is the ONLY thing
+/// `native_pulse` still contributed, and it is ten lines of `stat`, so it
+/// lives here rather than in a 363-line module that also did `dlopen`.
+fn pulseReachable() bool {
+    var base_buf: [192]u8 = undefined;
+    const base = if (std.c.getenv("XDG_RUNTIME_DIR")) |env|
+        std.mem.span(env)
+    else blk: {
+        const uid = std.c.getuid();
+        break :blk std.fmt.bufPrint(&base_buf, "/run/user/{d}", .{uid}) catch return false;
+    };
+    var p: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&p, "{s}/pulse/native", .{base}) catch return false;
+    if (path.len >= p.len) return false;
+    p[path.len] = 0;
+    return std.c.access(p[0..path.len :0], std.c.F_OK) == 0;
 }
 
 /// (26.7) Whether the ladder may be walked now. `probeDecision`'s clock and IO
@@ -127,7 +125,7 @@ pub fn probeDecision(
 fn probeDue() bool {
     const now = slider.nowMs();
     const recheck_window = now >= g_pulse_recheck_at_ms;
-    const reachable = if (recheck_window) native_pulse.pulseReachable() else false;
+    const reachable = if (recheck_window) pulseReachable() else false;
     const probe = probeDecision(
         now,
         g_ladder_failed_at_ms,
@@ -142,7 +140,6 @@ fn probeDue() bool {
     // A daemon that appeared (or vanished) is worth a fresh native attach: the
     // one-shot probed flag would otherwise write the machine off for the rest
     // of the session. Only the reachability change grants this.
-    if (probe.forget_native) g_native_pulse_probed = false;
     return probe.walk;
 }
 
@@ -150,19 +147,12 @@ fn probeDue() bool {
 /// `readLatched`, so the backend -> rung mapping is checkable without a
 /// daemon: the point of the latch is that this mapping is consulted directly
 /// and never re-derived by re-walking the ladder.
-pub const Rung = enum { native_pulse, pactl, native_alsa, amixer, none };
+pub const Rung = enum { pactl, amixer, none };
 
 pub fn latchedRung(backend: Backend) Rung {
-    return latchedRungFor(backend, g_native_pulse != null, g_native_alsa != null);
-}
-
-/// The mapping itself, with the handle presence passed in rather than read, so
-/// every arm -- including the two native ones, which a headless unit test can
-/// never reach by attaching to a real daemon -- is checkable.
-pub fn latchedRungFor(backend: Backend, has_native_pulse: bool, has_native_alsa: bool) Rung {
     return switch (backend) {
-        .pulse => if (has_native_pulse) .native_pulse else .pactl,
-        .alsa => if (has_native_alsa) .native_alsa else .amixer,
+        .pulse => .pactl,
+        .alsa => .amixer,
         .unknown => .none,
     };
 }
@@ -233,59 +223,26 @@ fn readLatched() ?bool {
     const had_value = g_has_value;
     const old_pct = g_pct;
     const old_muted = g_muted;
+    // One read per rung. `pactl` needs two commands (level, then mute), so the
+    // two rungs share a shape but not a body.
     switch (latchedRung(g_backend)) {
-        .native_pulse => {
-            if (g_native_pulse) |*np| {
-                if (np.readSink()) |snap| {
-                    g_pct = snap.pct;
-                    g_muted = snap.muted;
-                    g_has_value = true;
-                    return changedFrom(had_value, old_pct, old_muted);
-                }
-            } else {
-                var buf: [1024]u8 = undefined;
-                const out = slider.runOut(pactl_vol_cmd, &buf);
-                const p = parsePercent(out) orelse return null;
-                g_pct = p;
-                const out2 = slider.runOut(pactl_mute_cmd, &buf);
-                g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
-                g_has_value = true;
-                return changedFrom(had_value, old_pct, old_muted);
-            }
-        },
         .pactl => {
             var buf: [1024]u8 = undefined;
             const out = slider.runOut(pactl_vol_cmd, &buf);
-            const p = parsePercent(out) orelse return null;
-            g_pct = p;
+            g_pct = parsePercent(out) orelse return null;
             const out2 = slider.runOut(pactl_mute_cmd, &buf);
             g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
-            g_has_value = true;
-            return changedFrom(had_value, old_pct, old_muted);
-        },
-        .native_alsa => {
-            if (g_native_alsa) |na| {
-                const p = na.readVolumePct() orelse return null;
-                g_pct = p;
-                g_muted = na.readMuted() orelse g_muted;
-                g_has_value = true;
-                return changedFrom(had_value, old_pct, old_muted);
-            } else return null;
         },
         .amixer => {
             var buf: [1024]u8 = undefined;
             const out = slider.runOut(amixer_vol_cmd, &buf);
-            const p = parsePercent(out) orelse return null;
-            g_pct = p;
+            g_pct = parsePercent(out) orelse return null;
             g_muted = std.mem.indexOf(u8, out, "[off]") != null;
-            g_has_value = true;
-            return changedFrom(had_value, old_pct, old_muted);
         },
         .none => return null,
     }
-    // A native handle that read but produced nothing is a failure to the
-    // caller too: fall through to the ladder.
-    return null;
+    g_has_value = true;
+    return changedFrom(had_value, old_pct, old_muted);
 }
 
 fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
@@ -302,67 +259,45 @@ fn runLadder() bool {
     const old_muted = g_muted;
     var ok = false;
 
-    if (g_backend != .alsa) {
-        // 1. Native PulseAudio: one in-process libpulse round trip. Probing
-        //    is once-only per session (attach connects + resolves the sink).
-        if (!g_native_pulse_probed) {
-            g_native_pulse_probed = true;
-            g_native_pulse = native_pulse.attach();
-        }
-        if (g_native_pulse) |*np| {
-            if (np.readSink()) |snap| {
-                g_backend = .pulse;
-                g_pct = snap.pct;
-                g_muted = snap.muted;
-                g_has_value = true;
-                ok = true;
-            }
-        }
-        // 2. pactl subprocess (PipeWire/PulseAudio without libpulse, or the
-        //    live daemon disagreed with the native read).
-        if (!ok) {
-            var buf: [1024]u8 = undefined;
-            const out = slider.runOut(pactl_vol_cmd, &buf);
-            if (parsePercent(out)) |p| {
-                g_backend = .pulse;
-                g_pct = p;
-                const out2 = slider.runOut(pactl_mute_cmd, &buf);
-                g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
-                g_has_value = true;
-                ok = true;
-            }
-        }
-    }
-    // 3. Native ALSA: only valid where no PulseAudio runtime exists (with
-    //    PipeWire the system Master is a softvol, not the card control).
-    if (!ok) {
-        if (!g_native_alsa_probed) {
-            g_native_alsa_probed = true;
-            if (!native_pulse.pulseReachable())
-                g_native_alsa = native_alsa.openMaster();
-        }
-        if (g_native_alsa) |na| {
-            if (na.readVolumePct()) |p| {
-                g_backend = .alsa;
-                g_pct = p;
-                g_muted = na.readMuted() orelse g_muted;
-                g_has_value = true;
-                ok = true;
-            }
-        }
-    }
-    // 4. amixer subprocess (fallback).
-    if (!ok) {
+    // The backend is latched: once a rung answers, that rung is the one read
+    // from until it fails, so the common case is two spawns and no search.
+    if (g_backend == .alsa) {
         var buf: [1024]u8 = undefined;
         const out = slider.runOut(amixer_vol_cmd, &buf);
         if (parsePercent(out)) |p| {
-            g_backend = .alsa;
             g_pct = p;
             g_muted = std.mem.indexOf(u8, out, "[off]") != null;
             g_has_value = true;
             ok = true;
         } else {
             g_backend = .unknown;
+        }
+    } else {
+        var buf: [1024]u8 = undefined;
+        const out = slider.runOut(pactl_vol_cmd, &buf);
+        if (parsePercent(out)) |p| {
+            g_backend = .pulse;
+            g_pct = p;
+            const out2 = slider.runOut(pactl_mute_cmd, &buf);
+            g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
+            g_has_value = true;
+            ok = true;
+        } else if (g_backend == .pulse) {
+            // The daemon stopped answering under us: fall through to amixer
+            // rather than latching a rung that can no longer read.
+            g_backend = .unknown;
+        }
+        if (!ok) {
+            const out2 = slider.runOut(amixer_vol_cmd, &buf);
+            if (parsePercent(out2)) |p| {
+                g_backend = .alsa;
+                g_pct = p;
+                g_muted = std.mem.indexOf(u8, out2, "[off]") != null;
+                g_has_value = true;
+                ok = true;
+            } else {
+                g_backend = .unknown;
+            }
         }
     }
 
@@ -371,23 +306,20 @@ fn runLadder() bool {
     return changedFrom(had_value, old_pct, old_muted);
 }
 
-/// The latency class of one commit on the live backend: an in-process libpulse
-/// or ALSA call is cheap and needs no window; an unresolved backend means every
-/// commit is a `pactl`/`amixer` spawn, which does. Named value (see
-/// `slider.CommitCost`) rather than the bare bool this used to be.
+/// The latency class of one commit on the live backend. Every rung is a
+/// subprocess, so this is always `.rate_limited` while a backend is latched
+/// and while none is; it reports `.immediate` only when the backend is known,
+/// which today no rung reaches. Kept as a per-sub query because the slider
+/// core throttles on it and brightness's sysfs path genuinely is immediate --
+/// folding the answer to a constant here would push that distinction into
+/// every caller.
 fn commitCost() slider.CommitCost {
     return switch (g_backend) {
-        .pulse => if (g_native_pulse != null) .immediate else .rate_limited,
-        .alsa => if (g_native_alsa != null) .immediate else .rate_limited,
+        .pulse, .alsa => .rate_limited,
         .unknown => .rate_limited,
     };
 }
 
-/// Applies a level to the backend WITHOUT the follow-up re-read (the commit
-/// half of the throttle path). The clamp is the single guard for every
-/// caller's value (slider, scroll, config): 0-100 % is all the backend ever
-/// receives. Scheduled by the slider core's throttle, which owns the commit
-/// clock.
 /// The one clamp every level passes: 0-100 % is all the backend ever
 /// receives. `commitPct` and every `write` mode MUST go through the same
 /// function -- they used to clamp independently, and when the preview path
@@ -401,24 +333,14 @@ fn commitPct(v: u8) void {
     const pct = clampPct(v);
     switch (g_backend) {
         .pulse => {
-            // Native: an in-process libpulse set (no fork/exec/pipe at all).
-            if (g_native_pulse) |*np| {
-                _ = np.setVolumePct(pct);
-            } else {
-                var buf: [64]u8 = undefined;
-                const cmd = std.fmt.bufPrint(&buf, "pactl set-sink-volume @DEFAULT_SINK@ {d}%", .{pct}) catch return;
-                _ = slider.runOk(cmd);
-            }
+            var buf: [64]u8 = undefined;
+            const cmd = std.fmt.bufPrint(&buf, "pactl set-sink-volume @DEFAULT_SINK@ {d}%", .{pct}) catch return;
+            _ = slider.runOk(cmd);
         },
         .alsa => {
-            // Native: one SNDRV_CTL_IOCTL_ELEM_WRITE ioctl on the card.
-            if (g_native_alsa) |na| {
-                _ = na.setVolumePct(pct);
-            } else {
-                var buf: [64]u8 = undefined;
-                const cmd = std.fmt.bufPrint(&buf, "amixer set Master {d}%", .{pct}) catch return;
-                _ = slider.runOk(cmd);
-            }
+            var buf: [64]u8 = undefined;
+            const cmd = std.fmt.bufPrint(&buf, "amixer set Master {d}%", .{pct}) catch return;
+            _ = slider.runOk(cmd);
         },
         .unknown => return,
     }
@@ -482,22 +404,8 @@ pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
 
 fn toggleMute() void {
     switch (g_backend) {
-        .pulse => {
-            if (g_native_pulse) |*np| {
-                _ = np.setMuted(!g_muted);
-            } else {
-                _ = slider.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle");
-            }
-        },
-        .alsa => {
-            if (g_native_alsa) |na| {
-                if (na.readMuted()) |muted| {
-                    _ = na.setMuted(!muted);
-                }
-            } else {
-                _ = slider.runOk("amixer set Master toggle");
-            }
-        },
+        .pulse => _ = slider.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle"),
+        .alsa => _ = slider.runOk("amixer set Master toggle"),
         .unknown => return,
     }
     _ = readVolume();
