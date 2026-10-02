@@ -1763,7 +1763,7 @@ fn parseTilingStructures(
     // aliases layouts.items[0], freed below, so using it would read freed
     // memory when the key is absent).
     if (section.getAs([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
-        const layout_str = schema.getInRange([]const u8, section, "layout", types.canon_master_layout, null, null);
+        const layout_str = section.getAsOrWarn([]const u8, "layout") orelse types.canon_master_layout;
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, canonicalLayoutName(layout_str)));
     }
     if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];

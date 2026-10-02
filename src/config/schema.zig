@@ -515,7 +515,7 @@ fn reject(
 
 /// Returns `default` when the key is absent, the wrong type, or out of range
 /// (values are warn-and-revert, not clamped).
-pub fn getInRange(
+fn getInRange(
     comptime T: type,
     section: *parser.Section,
     key: []const u8,
@@ -524,7 +524,6 @@ pub fn getInRange(
     comptime max: ?T,
 ) T {
     const val = switch (T) {
-        bool, []const u8 => section.getAsOrWarn(T, key) orelse return default,
         u8, u16 => blk: {
             const i = section.getAsOrWarn(i64, key) orelse return default;
             // A negative int would trap on the @intCast below; warn-and-default
@@ -813,17 +812,12 @@ fn applyBarProperties(
 /// Sets one style flag (`underline`/`bold`/`italic`) on `props`. Returns
 /// true when `name` was a recognized flag.
 fn setStyleFlag(props: *types.SegmentProps, name: []const u8, val: bool) bool {
-    if (std.mem.eql(u8, name, "underline")) {
-        props.underline = val;
-        return true;
-    }
-    if (std.mem.eql(u8, name, "bold")) {
-        props.bold = val;
-        return true;
-    }
-    if (std.mem.eql(u8, name, "italic")) {
-        props.italic = val;
-        return true;
+    inline for (std.meta.fields(types.SegmentProps)) |f| {
+        if (f.type != bool) continue;
+        if (std.mem.eql(u8, name, f.name)) {
+            @field(props, f.name) = val;
+            return true;
+        }
     }
     return false;
 }

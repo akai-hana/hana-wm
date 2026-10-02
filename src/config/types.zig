@@ -40,7 +40,7 @@ pub const SegmentProps = struct {
     italic: bool = false,
 
     pub fn isDefault(self: SegmentProps) bool {
-        return !self.underline and !self.bold and !self.italic;
+        return std.meta.eql(self, .{});
     }
 };
 
@@ -733,9 +733,10 @@ pub const BarConfig = struct {
         var props = self.segmentProps(seg_workspaces);
         if (!is_current) return props;
         const sel = self.segmentProps(seg_workspaces_selected);
-        props.underline = props.underline or sel.underline;
-        props.bold = props.bold or sel.bold;
-        props.italic = props.italic or sel.italic;
+        inline for (std.meta.fields(SegmentProps)) |f| {
+            if (f.type != bool) continue;
+            @field(props, f.name) = @field(props, f.name) or @field(sel, f.name);
+        }
         return props;
     }
 
