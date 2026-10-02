@@ -36,11 +36,6 @@ fn detach(m: *model.Model, win: model.WindowId) void {
     }
 }
 
-test "borderColorOf picks focused vs unfocused pixel" {
-    try std.testing.expectEqual(@as(u32, 0x11223344), borders.borderColorOf(true, 0x11223344, 0x55667788));
-    try std.testing.expectEqual(@as(u32, 0x55667788), borders.borderColorOf(false, 0x11223344, 0x55667788));
-}
-
 test "member of a workspace without a covering occupant keeps its color" {
     var m = try modelWithTiled(ws0);
     try std.testing.expect(!borders.isBehindCoveringWindow(&m, 10, ws0, true));

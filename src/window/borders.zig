@@ -12,16 +12,6 @@ const requests = @import("requests");
 const window = @import("window");
 
 const ledger = @import("ledger");
-/// Pure focused/unfocused pixel pick, for callers that already know whether
-/// `win` is focused. Headless-testable.
-///
-/// The decision itself is `model.focusedBorderColor` (9.6), which the pipeline
-/// also uses; this remains only for the callers that hold a `focused` bool
-/// rather than a model reference.
-pub fn borderColorOf(focused: bool, focused_px: u32, unfocused_px: u32) u32 {
-    return if (focused) focused_px else unfocused_px;
-}
-
 /// Pure covering-occupant borderless rule: true when `win` must render
 /// borderless because a covering (fullscreen) occupant holds the workspace it
 /// actually lives on. `current` is the current workspace for the
