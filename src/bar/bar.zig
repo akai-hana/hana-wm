@@ -2174,11 +2174,7 @@ fn handleTitleClick(s: *State, offset: u16) void {
     if (s.frame.wins_len == 0) return;
     const tb = titleIdBound(s) orelse return;
 
-    const target = title_geom.hitTest(
-        s.frame.last_ctx.titleRenderContext(tb.x, tb.w),
-        s.frame.last_ctx.titleSnapshot(),
-        offset,
-    ) orelse return;
+    const target = title_geom.hitTest(s.frame.last_ctx.titleSnapshot(), tb.w, offset) orelse return;
 
     // `target.minimized` comes from the title snapshot's minimized set, which
     // the title addon synthesizes fresh; bar.zig never names minimize.
