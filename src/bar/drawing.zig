@@ -668,16 +668,6 @@ inline fn createXcbPixmap(conn: core.Connection, depth: u8, drawable: u32, w: u1
     return pixmap;
 }
 
-inline fn createCheckedGC(conn: core.Connection, drawable: u32) !u32 {
-    const gc = core.xcb.xcb_generate_id(conn);
-    const cookie = core.xcb.xcb_create_gc_checked(conn, gc, drawable, 0, null);
-    if (core.xcb.xcb_request_check(conn, cookie)) |err| {
-        std.c.free(err);
-        return error.GCCreationFailed;
-    }
-    return gc;
-}
-
 inline fn showLayoutAtBaseline(
     ctx: *cairo_t,
     layout: *PangoLayout,

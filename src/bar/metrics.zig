@@ -45,13 +45,6 @@ pub const Metrics = struct {
     /// The bar's pixel height. Always resolved -- either the configured height
     /// scaled into the policy's range, or the fonts' own ascent+descent.
     height: u16 = 0,
-
-    /// The size to build a font list at. `override` is for measuring: the
-    /// probe needs a font list at a trial size that is deliberately NOT the
-    /// resolved one.
-    pub fn fontSizeFor(self: Metrics, override: ?u16) u16 {
-        return override orelse self.font_size;
-    }
 };
 
 /// Everything the resolution is derived from. Deliberately a plain value: no

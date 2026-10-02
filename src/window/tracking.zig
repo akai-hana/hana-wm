@@ -52,11 +52,6 @@ pub fn isManaged(win: u32) bool {
     return mm.store.has(win);
 }
 
-pub inline fn windowCount() usize {
-    const mm = m() orelse return 0;
-    return mm.store.count();
-}
-
 /// NOTE: rebuild-per-call is correct for correctness; a dirty flag
 /// would need mutation hooks to track when the model store changes.
 ///

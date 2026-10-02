@@ -169,9 +169,3 @@ test "resolution is a function of its inputs alone" {
     const b = metrics.resolve(in, probeLinear(2));
     try std.testing.expectEqual(a, b);
 }
-
-test "fontSizeFor returns the override only when measuring" {
-    const m: metrics.Metrics = .{ .font_size = 11, .height = 40 };
-    try std.testing.expectEqual(@as(u16, 11), m.fontSizeFor(null));
-    try std.testing.expectEqual(@as(u16, 100), m.fontSizeFor(100));
-}
