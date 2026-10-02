@@ -186,3 +186,32 @@ test "label default formats" {
     try std.testing.expectEqualStrings("MUTE", volume.label(types.BarConfig{}, &buf).text);
     volume.setDisplayForTest(33, false);
 }
+
+// ---------------------------------------------------------------------------
+// The no-backend display contract. With every rung failed there is no sink to
+// have muted anything, so the segment must not claim `VOL 0%`.
+
+test "no backend renders MUTE rather than VOL 0%" {
+    var cfg = types.BarConfig{};
+    cfg.volume_format = "VOL {pct}%";
+    cfg.volume_muted_format = "MUTE";
+    var buf: [128]u8 = undefined;
+
+    // A value is set and then cleared, which is the no-backend start-up
+    // condition: the forced-mute path owns the display.
+    volume.setDisplayForTest(0, false);
+    volume.clearValueForTest();
+    try std.testing.expectEqualStrings("MUTE", volume.label(cfg, &buf).text);
+}
+
+test "a read value un-mutes the display again" {
+    var cfg = types.BarConfig{};
+    cfg.volume_format = "VOL {pct}%";
+    cfg.volume_muted_format = "MUTE";
+    var buf: [128]u8 = undefined;
+
+    // setDisplayForTest also sets the has-value flag (a supplied pct is a
+    // level some rung read), so the un-muted format returns.
+    volume.setDisplayForTest(42, false);
+    try std.testing.expectEqualStrings("VOL 42%", volume.label(cfg, &buf).text);
+}

@@ -26,8 +26,11 @@
 //! `commit` is the single guard for every caller's value.
 
 const std = @import("std");
+const log = @import("log");
 const types = @import("types");
 const slider = @import("slider");
+const native_pulse = @import("native_pulse");
+const native_alsa = @import("native_alsa");
 
 const default_format = "VOL {pct}%";
 const default_muted_format = "MUTE";
@@ -44,6 +47,13 @@ var g_has_value: bool = false;
 /// re-walked all four rungs -- up to three `popen`s, each blocking the WM
 /// loop -- and the poll, every press and every right-click paid it again.
 var g_ladder_failed_at_ms: ?i64 = null;
+
+/// Attached handles for the two in-process rungs. Non-null means the rung won
+/// the ladder walk and is latched. Probed lazily and never given up on: a
+/// `null` here only means "not attached yet", and the reachability recheck in
+/// `probeDue` is what allows a late-appearing daemon to be picked up.
+var g_native_pulse: ?native_pulse.Backend = null;
+var g_native_alsa: ?native_alsa.Master = null;
 /// When the daemon is next re-checked for having come back. Separate from the
 /// negative cache's deadline so the cheap reachability check can trigger a
 /// retry long before the cache expires.
@@ -147,12 +157,12 @@ fn probeDue() bool {
 /// `readLatched`, so the backend -> rung mapping is checkable without a
 /// daemon: the point of the latch is that this mapping is consulted directly
 /// and never re-derived by re-walking the ladder.
-pub const Rung = enum { pactl, amixer, none };
+pub const Rung = enum { native_pulse, pactl, amixer, native_alsa, none };
 
 pub fn latchedRung(backend: Backend) Rung {
     return switch (backend) {
-        .pulse => .pactl,
-        .alsa => .amixer,
+        .pulse => if (g_native_pulse != null) .native_pulse else .pactl,
+        .alsa => if (g_native_alsa != null) .native_alsa else .amixer,
         .unknown => .none,
     };
 }
@@ -198,9 +208,28 @@ pub fn parsePercent(out: []const u8) ?u8 {
     return null;
 }
 
-/// Re-reads level + mute from the live backend, probing most-native first
-/// (native pulse -> pactl -> native ALSA -> amixer). Returns true when this
-/// read changed the displayed state.
+/// Whether the "no sound system at all" reason has already been logged. Armed
+/// once per process: the poll loop would otherwise repeat the same line every
+/// 5 s for the life of the session, and a bar that says the same thing every
+/// five seconds is how a real fault gets ignored.
+var g_reason_logged: bool = false;
+
+/// The one-time diagnostic for a machine where every rung failed. Distinct
+/// from the MUTE display: MUTE is the steady state (the sink may genuinely be
+/// muted), this is the one line saying *why* there is no level to show.
+fn logNoBackend() void {
+    if (g_reason_logged) return;
+    g_reason_logged = true;
+    log.warn(
+        "volume: no usable backend (libpulse.so.0, pactl, amixer and " ++
+            "/dev/snd/controlC* all failed); showing MUTE",
+        .{},
+    );
+}
+
+/// Re-reads level + mute from the live backend, walking the ladder
+/// (libpulse -> pactl -> amixer -> native ALSA). Returns true when this read
+/// changed the displayed state.
 fn readVolume() bool {
     // (26.7) A LATCHED backend is read directly. This is the change that takes
     // the ladder off the hot path: previously every read re-walked the rungs
@@ -226,6 +255,11 @@ fn readLatched() ?bool {
     // One read per rung. `pactl` needs two commands (level, then mute), so the
     // two rungs share a shape but not a body.
     switch (latchedRung(g_backend)) {
+        .native_pulse => {
+            const sink = g_native_pulse.?.readSink() orelse return null;
+            g_pct = sink.pct;
+            g_muted = sink.muted;
+        },
         .pactl => {
             var buf: [1024]u8 = undefined;
             const out = slider.runOut(pactl_vol_cmd, &buf);
@@ -239,9 +273,14 @@ fn readLatched() ?bool {
             g_pct = parsePercent(out) orelse return null;
             g_muted = std.mem.indexOf(u8, out, "[off]") != null;
         },
+        .native_alsa => {
+            g_pct = g_native_alsa.?.readVolumePct() orelse return null;
+            g_muted = g_native_alsa.?.readMuted() orelse false;
+        },
         .none => return null,
     }
     g_has_value = true;
+    g_reason_logged = false;
     return changedFrom(had_value, old_pct, old_muted);
 }
 
@@ -249,61 +288,110 @@ fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
     return !had_value or g_pct != old_pct or g_muted != old_muted;
 }
 
-/// The original four-rung ladder, now reached only when nothing is latched (or
-/// the latch went stale). Its native-attempt flags are cleared only on the slow
-/// re-probe trigger, so a daemon that appears later is retried rather than
-/// written off by a one-shot `*_probed` flag.
+/// The four-rung ladder, reached only when nothing is latched (or the latch
+/// went stale). Order is by protocol family, not by speed:
+///
+///   1. libpulse via dlopen  -- PulseAudio AND every real PipeWire desktop,
+///      because `pipewire-pulse` ships a `libpulse.so.0` ABI. One rung, two
+///      systems, no fork.
+///   2. `pactl`              -- the same family again, for the split-packaging
+///      case where the .so is absent but the CLI is not.
+///   3. `amixer`             -- ALSA, when alsa-utils is installed.
+///   4. `/dev/snd/controlC*` -- the ALSA floor: kernel ioctls, no userspace
+///      tool required at all.
+///
+/// Deliberately NOT "most-native first". Native rung 1 beats `pactl` on latency,
+/// but rung 1 only exists on Pulse-family machines; putting it ahead of `amixer`
+/// would cost a failed dlopen on every pure-ALSA box. Ordering by family keeps
+/// each machine's first probe the one that can actually answer.
+///
+/// Rungs 1 and 4 are the coverage floor: a PulseAudio install without
+/// pulseaudio-utils, or a kernel ALSA box without alsa-utils, has no CLI at all
+/// and is reachable only through them.
 fn runLadder() bool {
     const had_value = g_has_value;
     const old_pct = g_pct;
     const old_muted = g_muted;
     var ok = false;
 
-    // The backend is latched: once a rung answers, that rung is the one read
-    // from until it fails, so the common case is two spawns and no search.
-    if (g_backend == .alsa) {
-        var buf: [1024]u8 = undefined;
-        const out = slider.runOut(amixer_vol_cmd, &buf);
-        if (parsePercent(out)) |p| {
-            g_pct = p;
-            g_muted = std.mem.indexOf(u8, out, "[off]") != null;
-            g_has_value = true;
-            ok = true;
-        } else {
-            g_backend = .unknown;
-        }
+    if (tryRungNativePulse()) {
+        ok = true;
+    } else if (tryRung(.pulse, pactl_vol_cmd, pactl_mute_cmd, "Mute: yes")) |v| {
+        g_pct = v;
+        g_muted = g_pulse_muted;
+        g_backend = .pulse;
+        ok = true;
+    } else if (tryRung(.alsa, amixer_vol_cmd, "", "[off]")) |v| {
+        g_pct = v;
+        g_muted = g_alsa_muted;
+        g_backend = .alsa;
+        ok = true;
+    } else if (tryRungNativeAlsa()) {
+        ok = true;
     } else {
-        var buf: [1024]u8 = undefined;
-        const out = slider.runOut(pactl_vol_cmd, &buf);
-        if (parsePercent(out)) |p| {
-            g_backend = .pulse;
-            g_pct = p;
-            const out2 = slider.runOut(pactl_mute_cmd, &buf);
-            g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
-            g_has_value = true;
-            ok = true;
-        } else if (g_backend == .pulse) {
-            // The daemon stopped answering under us: fall through to amixer
-            // rather than latching a rung that can no longer read.
-            g_backend = .unknown;
-        }
-        if (!ok) {
-            const out2 = slider.runOut(amixer_vol_cmd, &buf);
-            if (parsePercent(out2)) |p| {
-                g_backend = .alsa;
-                g_pct = p;
-                g_muted = std.mem.indexOf(u8, out2, "[off]") != null;
-                g_has_value = true;
-                ok = true;
-            } else {
-                g_backend = .unknown;
-            }
-        }
+        g_backend = .unknown;
     }
 
     g_ladder_failed_at_ms = noteLadderResult(ok, slider.nowMs());
-    if (!g_has_value) return false;
+    if (!ok) {
+        logNoBackend();
+        return false;
+    }
+    g_has_value = true;
+    g_reason_logged = false;
     return changedFrom(had_value, old_pct, old_muted);
+}
+
+/// Mute flag captured alongside the level by `tryRung`. Split out because the
+/// two subprocess rungs differ only in their mute token and command set.
+var g_pulse_muted: bool = false;
+var g_alsa_muted: bool = false;
+
+/// One subprocess rung: run `vol_cmd`, parse a percentage, then derive the mute
+/// state. `mute_cmd` empty means the mute answer is in the volume output
+/// (`amixer` reports both in one line).
+fn tryRung(backend: Backend, vol_cmd: []const u8, mute_cmd: []const u8, on_token: []const u8) ?u8 {
+    var buf: [1024]u8 = undefined;
+    const out = slider.runOut(vol_cmd, &buf);
+    const pct = parsePercent(out) orelse return null;
+    const muted = if (mute_cmd.len == 0)
+        std.mem.indexOf(u8, out, on_token) != null
+    else blk: {
+        const m = slider.runOut(mute_cmd, &buf);
+        break :blk std.mem.indexOf(u8, m, on_token) != null;
+    };
+    switch (backend) {
+        .pulse => g_pulse_muted = muted,
+        .alsa => g_alsa_muted = muted,
+        .unknown => {},
+    }
+    return pct;
+}
+
+fn tryRungNativePulse() bool {
+    if (g_native_pulse == null) g_native_pulse = native_pulse.attach();
+    if (g_native_pulse) |*np| {
+        if (np.readSink()) |sink| {
+            g_backend = .pulse;
+            g_pct = sink.pct;
+            g_muted = sink.muted;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn tryRungNativeAlsa() bool {
+    if (g_native_alsa == null) g_native_alsa = native_alsa.openMaster();
+    if (g_native_alsa) |*na| {
+        if (na.readVolumePct()) |pct| {
+            g_backend = .alsa;
+            g_pct = pct;
+            g_muted = na.readMuted() orelse false;
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The latency class of one commit on the live backend. Every rung is a
@@ -313,10 +401,16 @@ fn runLadder() bool {
 /// core throttles on it and brightness's sysfs path genuinely is immediate --
 /// folding the answer to a constant here would push that distinction into
 /// every caller.
+/// Now genuinely variable, which is why it stays a per-sub query: the two
+/// native rungs are a single ioctl (or an in-process libpulse call) and are
+/// `.immediate`, while the two subprocess rungs fork and are `.rate_limited`.
+/// The slider core throttles on this, so folding it to a constant would either
+/// throttle the native path needlessly or let the subprocess rungs commit on
+/// every scroll event.
 fn commitCost() slider.CommitCost {
-    return switch (g_backend) {
-        .pulse, .alsa => .rate_limited,
-        .unknown => .rate_limited,
+    return switch (latchedRung(g_backend)) {
+        .native_pulse, .native_alsa => .immediate,
+        .pactl, .amixer, .none => .rate_limited,
     };
 }
 
@@ -331,18 +425,24 @@ pub fn clampPct(v: u8) u8 {
 
 fn commitPct(v: u8) void {
     const pct = clampPct(v);
-    switch (g_backend) {
-        .pulse => {
+    switch (latchedRung(g_backend)) {
+        .native_pulse => {
+            _ = g_native_pulse.?.setVolumePct(pct);
+        },
+        .pactl => {
             var buf: [64]u8 = undefined;
             const cmd = std.fmt.bufPrint(&buf, "pactl set-sink-volume @DEFAULT_SINK@ {d}%", .{pct}) catch return;
             _ = slider.runOk(cmd);
         },
-        .alsa => {
+        .amixer => {
             var buf: [64]u8 = undefined;
             const cmd = std.fmt.bufPrint(&buf, "amixer set Master {d}%", .{pct}) catch return;
             _ = slider.runOk(cmd);
         },
-        .unknown => return,
+        .native_alsa => {
+            _ = g_native_alsa.?.setVolumePct(pct);
+        },
+        .none => return,
     }
 }
 
@@ -374,12 +474,18 @@ fn write(w: slider.Write, v: u8) void {
 /// Renders the display string into `buf`, substituting every `{pct}` and
 /// `{state}` placeholder, and returns the text (plus the numeric region); a
 /// truncated tail is still a complete, scan-safe string.
+/// With no backend at all, `muted` is forced true so the segment renders MUTE
+/// rather than `VOL 0%`. `VOL 0%` would be a lie -- it claims a level was read
+/// from a sink when no sink was ever reached -- and it is also the one string
+/// that reads as "muted" to a user while inviting a pointless volume-up scroll.
+/// MUTE is the honest terminal state and matches what the user asked for.
 fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) slider.Label {
-    const fmt = if (muted)
+    const effective_mute = muted or !g_has_value;
+    const fmt = if (effective_mute)
         (config.volume_muted_format orelse default_muted_format)
     else
         (config.volume_format orelse default_format);
-    const state: []const u8 = if (muted) "mute" else "unmute";
+    const state: []const u8 = if (effective_mute) "mute" else "unmute";
     return slider.renderLineValue(fmt, g_pct, state, buf);
 }
 
@@ -396,6 +502,18 @@ fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) slider.Label {
 pub fn setDisplayForTest(pct: u8, muted: bool) void {
     g_pct = pct;
     g_muted = muted;
+    // A supplied pct is by definition a level some rung read, so the seam sets
+    // the has-value flag with it. Without this the forced-MUTE path in
+    // `renderDisplay` would swallow every level these tests are checking.
+    g_has_value = true;
+}
+
+/// Paired with `setDisplayForTest` to reach the one state that seam cannot
+/// express: set, then cleared, is "a level is on screen but no rung ever read
+/// one", which is exactly the no-backend start-up condition the forced-MUTE
+/// path exists for.
+pub fn clearValueForTest() void {
+    g_has_value = false;
 }
 
 pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
