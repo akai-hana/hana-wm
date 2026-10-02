@@ -74,8 +74,12 @@ pub fn watches(win: u32) bool {
 
 /// The X11 event name for a response type byte, so the log is readable
 /// without keeping an xev session open alongside.
+/// Event name for the raw type byte. Bit 7 (XCB's SendEvent flag) is stripped
+/// first: an EWMH _NET_WM_STATE request arrives as 33 | 0x80, and naming the
+/// raw byte printed "Other" for every one of them, which is why a trace aimed
+/// at browser fullscreen requests appeared to see no ClientMessage at all.
 fn name(t: u8) []const u8 {
-    return switch (t) {
+    return switch (t & 0x7f) {
         2 => "KeyPress",
         3 => "KeyRelease",
         4 => "ButtonPress",

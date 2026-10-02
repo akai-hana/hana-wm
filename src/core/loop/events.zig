@@ -156,17 +156,53 @@ const dispatch_table = blk: {
 /// strip send_event afterwards): the synthetic-event bit is only meaningful
 /// for core events, and an extension base can legitimately be >= 0x80 (the
 /// server allocates bases at/after 0x80 precisely to leave bit 7 free for
-/// SendEvent on core codes). Masking first would alias such a base onto a low
-/// core code (e.g. 0x85 -> 0x85 & 0x7f == 5) and break the test, silently
-/// disabling refresh re-detection, misrouting the event in dispatch, and
-/// reclassifying a RandR event as a coalesceable motion in isMotion.
-fn isRandrEvent(t: u8) bool {
+/// True for the RandR extension-event window (base and base+1): screen/CRTC/
+/// output change notifications. Bar render pacing must track monitor
+/// re-configuration, so any of them triggers re-detection.
+///
+/// Takes the event's code with the SendEvent bit ALREADY stripped (see
+/// dispatch). A RandR event that arrived via XSendEvent carries bit 7, so
+/// comparing the raw byte here would miss exactly those and silently disable
+/// refresh re-detection.
+fn isRandrEvent(code: u8) bool {
     // RandR is a bar feature (render pacing). With no bar compiled in,
     // `randrFirstEvent` is the no-op, which reports 0, and the `r != 0` test
     // below is what makes this false -- so there is no build flag to consult
     // here, and adding a hook to the contract cannot leave this unguarded.
     const r = surfaces.randrFirstEvent();
-    return (r != 0 and t >= r and t <= r + 1);
+    return (r != 0 and code >= r and code <= r + 1);
+}
+
+/// Where a raw event byte routes. Split out of dispatch so the SendEvent-bit
+/// rule is testable without an X connection: dispatch needs live core state,
+/// but the routing decision that was wrong here was pure.
+pub const Route = enum { core, randr, ignore };
+
+/// Routes a RAW event byte. Bit 7 is XCB's SendEvent flag, and it is stripped
+/// FIRST, before anything is decided from the code.
+///
+/// This previously read `if (event_type >= 0x80) return;`, on the reasoning
+/// that an EXTENSION event (server-allocated bases at/above 0x80) would
+/// otherwise alias onto a core code when masked. The reasoning was sound but
+/// the test was not: bit 7 is set by the server on EVERY event delivered via
+/// XSendEvent, and core codes never use bit 7. EWMH _NET_WM_STATE is the case
+/// that matters -- GDK sends it with XSendEvent and propagate=True precisely
+/// so the WM sees the request before the client acts on it, so a browser
+/// native-fullscreen request arrives as 33 | 0x80 == 0xA1. That is >= 0x80,
+/// so every browser/GTK fullscreen request was discarded here and never
+/// reached handleClientMessage: Mod+F worked (hana's own binding calls its
+/// fullscreen code directly, with no event involved) while native fullscreen
+/// silently did nothing.
+///
+/// Masking is safe against the aliasing worry because an X client only ever
+/// RECEIVES the events it selected. hana selects core events plus its RandR
+/// range, so no extension base can arrive to be aliased onto a core code --
+/// RandR is matched explicitly, on the masked code.
+pub fn routeFor(event_type: u8) Route {
+    const code = event_type & masks.core_event_code_mask;
+    if (isRandrEvent(code)) return .randr;
+    if (code >= dispatch_table.len) return .ignore;
+    return if (dispatch_table[code] != null) .core else .ignore;
 }
 
 fn dispatch(event_type: u8, event: *anyopaque) void {
@@ -180,50 +216,37 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
         return;
     }
 
-    // RandR extension events (base and base+1) trigger refresh re-detection
-    // here; they sit above the fixed dispatch table and would otherwise be
-    // dropped by the bounds guard below. isRandrEvent already returns false
-    // when the bar is absent, pruning the branch (and the `surfaces` calls).
-    if (isRandrEvent(event_type)) {
-        // Re-read the screen size BEFORE the surface path runs, and only when
-        // it really changed (6.2). Core's cached `Screen` is the pointer the
-        // server filled in at setup, so without this a resolution change left
-        // the work area, percentage heights and font scaling all sized for
-        // the display as it was at startup. The boolean check is what keeps
-        // this cheap: a mode change arrives as a BURST of RandR events, and
-        // only the first one that moves a dimension pays for the round-trip.
-        //
-        // DPI is re-derived in the same place, because a different screen size
-        // usually means a different physical size too, and every font metric
-        // the bar probes is scaled by it. A DPI refresh is a few X resource
-        // reads -- no grab -- so it is safe here, unlike a reconcile, which
-        // this deliberately does not trigger (see refreshScreenGeometry).
-        if (core.refreshScreenGeometry(core.getState().conn)) {
-            const cs = core.getState();
-            core.setDpi(scale.detectDpi(cs.conn, cs.screen));
-        }
-        // Pass the raw event: a CRTC-change payload carries the active mode id,
-        // letting the bar resolve the rate from its cached mode table with zero
-        // XCB round-trips (see hz.handleRandrNotifyEvent).
-        surfaces.handleRandrEvent(event);
-        return;
+    switch (routeFor(event_type)) {
+        .ignore => {},
+        // RandR extension events (base and base+1) trigger refresh
+        // re-detection here; they sit above the fixed dispatch table.
+        .randr => {
+            // Re-read the screen size BEFORE the surface path runs, and only
+            // when it really changed (6.2). Core's cached `Screen` is the
+            // pointer the server filled in at setup, so without this a
+            // resolution change left the work area, percentage heights and
+            // font scaling all sized for the display as it was at startup. The
+            // boolean check is what keeps this cheap: a mode change arrives as
+            // a BURST of RandR events, and only the first one that moves a
+            // dimension pays for the round-trip.
+            //
+            // DPI is re-derived in the same place, because a different screen
+            // size usually means a different physical size too, and every font
+            // metric the bar probes is scaled by it. A DPI refresh is a few X
+            // resource reads -- no grab -- so it is safe here, unlike a
+            // reconcile, which this deliberately does not trigger (see
+            // refreshScreenGeometry).
+            if (core.refreshScreenGeometry(core.getState().conn)) {
+                const cs = core.getState();
+                core.setDpi(scale.detectDpi(cs.conn, cs.screen));
+            }
+            // Pass the raw event: a CRTC-change payload carries the active
+            // mode id, letting the bar resolve the rate from its cached mode
+            // table with zero XCB round-trips (see hz.handleRandrNotifyEvent).
+            surfaces.handleRandrEvent(event);
+        },
+        .core => dispatch_table[event_type & masks.core_event_code_mask].?(event),
     }
-
-    // `event_type` is the RAW byte. Bit 7 is XCB's SendEvent flag, so masking
-    // it off is how a synthetic event recovers its real core code -- but the
-    // same mask turns an EXTENSION event (bases at/above 0x80) into its low
-    // seven bits, aliasing it onto some unrelated core event. RandR is handled
-    // above; anything else in the extension range must be dropped here rather
-    // than aliased, which is why this test precedes the mask instead of relying
-    // on the bounds check after it.
-    if (event_type >= 0x80) return;
-
-    const idx = event_type & masks.core_event_code_mask; // strip XCB synthetic-event bit
-
-    // Bounds guard, belt to the 0x80 suspenders: hana only selects core events
-    // today, so nothing valid can reach here out of range.
-    if (idx >= dispatch_table.len) return;
-    if (dispatch_table[idx]) |handler| handler(event);
 }
 
 /// Dispatches an owned event: frees the heap-allocated XCB event after the
@@ -240,16 +263,86 @@ fn dispatchOwned(event: *anyopaque) void {
     dispatch(t, event);
 }
 
-/// The window an event is about, as the raw first `window` field every
-/// window-carrying event struct shares at a known offset. Reading it generically
-/// keeps the trace from needing a per-event-type switch; it is only ever
-/// reached when tracing is armed, and a misread id simply fails the watch
-/// filter rather than affecting dispatch.
+/// The window an event is about, for the trace's watch filter.
+///
+/// There is deliberately NO shared offset. This function used to read bytes
+/// 4..7 unconditionally, on the claim that every window-carrying event puts
+/// `window` at the same place. Compiling against xcb/xcb.h shows two groups:
+///
+///     window@4  ClientMessage, PropertyNotify, Expose, VisibilityNotify
+///     window@8  ConfigureNotify, ConfigureRequest, MapRequest, UnmapNotify,
+///               DestroyNotify, ReparentNotify, CreateNotify, GravityNotify,
+///               CirculateNotify
+///
+/// so the old read was right only for the first group, and silently returned a
+/// misread id for the second. Input events are a third shape again: they carry
+/// `event`, not `window`, at offset 12 (offset 4 for FocusIn/FocusOut).
+///
+/// That misread was not a cosmetic trace bug. The stale-pixel and fullscreen
+/// investigations both hinge on watching a real browser window, and the events
+/// that carry its geometry -- ConfigureNotify at offset 8 -- were the ones
+/// being filtered out, which is why a trace aimed at exactly those events
+/// recorded nothing. Hence the per-type table. Offsets are asserted against
+/// xcb/xcb.h in test "eventWindow: offsets match the real xcb structs".
 fn eventWindow(event: *anyopaque) u32 {
-    const raw: [*]const u8 = @ptrCast(event);
-    return @as(u32, raw[4]) | (@as(u32, raw[5]) << 8) |
-        (@as(u32, raw[6]) << 16) | (@as(u32, raw[7]) << 24);
+    return eventWindowFor(eventType(event), event);
 }
+
+/// The pure half of `eventWindow`: event type + raw bytes in, window id out.
+/// Split out so the offset table is testable without a live X connection.
+pub fn eventWindowFor(t: u8, event: *anyopaque) u32 {
+    const raw: [*]const u8 = @ptrCast(event);
+    // Strip the SendEvent bit first: an EWMH _NET_WM_STATE request arrives as
+    // 33 | 0x80, and without this every such event read as an unknown type
+    // (and reported no_window), which is why a trace aimed at exactly these
+    // events showed nothing.
+    const code = t & masks.core_event_code_mask;
+    // Three shapes, and MappingNotify is a fourth: it has NO window field at
+    // all, so it must never match a watch.
+    const base: usize = switch (code) {
+        // window-carrying, `window` at offset 4
+        xcb.XCB_CLIENT_MESSAGE,
+        xcb.XCB_PROPERTY_NOTIFY,
+        xcb.XCB_EXPOSE,
+        xcb.XCB_VISIBILITY_NOTIFY,
+        // input, `event` at offset 4 (FocusIn/FocusOut are the odd ones out)
+        xcb.XCB_FOCUS_IN,
+        xcb.XCB_FOCUS_OUT,
+        => 4,
+        // input, `event` at offset 12
+        xcb.XCB_KEY_PRESS,
+        xcb.XCB_KEY_RELEASE,
+        xcb.XCB_BUTTON_PRESS,
+        xcb.XCB_BUTTON_RELEASE,
+        xcb.XCB_MOTION_NOTIFY,
+        xcb.XCB_ENTER_NOTIFY,
+        xcb.XCB_LEAVE_NOTIFY,
+        => 12,
+        // window-carrying, `window` at offset 8
+        xcb.XCB_CONFIGURE_NOTIFY,
+        xcb.XCB_CONFIGURE_REQUEST,
+        xcb.XCB_MAP_REQUEST,
+        xcb.XCB_UNMAP_NOTIFY,
+        xcb.XCB_DESTROY_NOTIFY,
+        xcb.XCB_REPARENT_NOTIFY,
+        xcb.XCB_CREATE_NOTIFY,
+        xcb.XCB_GRAVITY_NOTIFY,
+        xcb.XCB_CIRCULATE_NOTIFY,
+        => 8,
+        // MappingNotify carries only the keyboard mapping, and errors carry a
+        // bad resource id. Neither is about a window, so return a value no
+        // watch can hold rather than reading whatever bytes happen to be there.
+        else => return no_window,
+    };
+    return @as(u32, raw[base]) | (@as(u32, raw[base + 1]) << 8) |
+        (@as(u32, raw[base + 2]) << 16) | (@as(u32, raw[base + 3]) << 24);
+}
+
+/// The window id reported for an event that is not about any window
+/// (MappingNotify, X errors). `xcb::NONE` so it can never collide with a real
+/// id a caller asked to watch -- X window ids are never 0 in practice, and the
+/// server hands out no window with id 0.
+pub const no_window: u32 = 0;
 
 /// The X11 event type byte (response_type) read off a generic event: the
 /// first byte of every XCB event. Shared by the dispatcher (dispatchOwned) and
@@ -576,11 +669,10 @@ fn drainEvents(
 }
 
 fn isMotion(e: *xcb.xcb_generic_event_t) bool {
-    const t = eventType(e);
-    // Exclude the RandR window before stripping the send_event bit; see
-    // isRandrEvent for the raw-compare-before-mask rationale.
-    if (isRandrEvent(t)) return false;
-    return (t & masks.core_event_code_mask) == xcb.XCB_MOTION_NOTIFY;
+    const code = eventType(e) & masks.core_event_code_mask;
+    // RandR on the masked code; see isRandrEvent.
+    if (isRandrEvent(code)) return false;
+    return code == xcb.XCB_MOTION_NOTIFY;
 }
 
 /// Shared motion-run collapse used by both the batch loop and the queued
