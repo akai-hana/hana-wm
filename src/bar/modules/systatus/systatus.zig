@@ -106,11 +106,6 @@ pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
 /// stanza behind every readout's /proc or /sys probe. Callers that can be
 /// hurt by a short read (a /proc file that grows past the buffer) should use
 /// `readFileChecked` and treat `truncated` as a failed read.
-pub fn readSmallFile(path: []const u8, buf: []u8) ?[]const u8 {
-    const r = readFileChecked(path, buf) orelse return null;
-    return r.bytes;
-}
-
 /// Consecutive failed reads tolerated before a readout collapses. One
 /// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must not
 /// blank the segment: collapsing the row on a single failure caused a visible

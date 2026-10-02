@@ -293,9 +293,6 @@ fn issueSinkList(ctx: *anyopaque) ?*anyopaque {
 fn issueSetVolume(ctx: *anyopaque) ?*anyopaque {
     return g_oplib.?.set_sink_volume(ctx, g_op_index, @ptrCast(&g_op_vol), successCb, null);
 }
-fn issueSetMute(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.set_sink_mute(ctx, g_op_index, g_op_mute, successCb, null);
-}
 
 fn signalDone(done: *bool) void {
     done.* = true;
@@ -468,17 +465,6 @@ pub const Backend = struct {
         g_op_index = self.index;
         g_sink = .{};
         _ = runOp(issueSetVolume, &g_sink.done, 100);
-        return g_sink.done;
-    }
-
-    /// In-process mute commit (uses the snapshot cached by the last read so
-    /// an external change between polls doesn't invert).
-    pub fn setMuted(self: *Backend, muted: bool) bool {
-        g_op_index = self.index;
-        g_op_mute = @intFromBool(muted);
-        g_sink = .{};
-        _ = runOp(issueSetMute, &g_sink.done, 100);
-        if (g_sink.done) self.muted = muted;
         return g_sink.done;
     }
 
