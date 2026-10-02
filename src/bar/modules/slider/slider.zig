@@ -285,8 +285,8 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
 //     registry (see build.zig's `buildSubsRegistryModule`).
 //
 //   - The OPEN MODULES are the siblings that bind `pub const sub: Sub`.
-//     Siblings WITHOUT the binding (the native_alsa / native_pulse backends)
-//     are private implementation files: importable by stem, never bound.
+//     Siblings WITHOUT the binding are private implementation files:
+//     importable by stem, never bound.
 //     Membership in `subs` -- and therefore a bar segment named after the
 //     control -- comes from FILE PRESENCE plus self-declared role, so adding
 //     a control is drop a file; deleting one is delete the file.
