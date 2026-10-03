@@ -206,7 +206,6 @@ pub fn reportUndeliverableMouseBinds() void {
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
     };
-    var reported: usize = 0;
     for (binds, 0..) |mb, i| {
         const reason = keybind.undeliverableMouseBindReason(mb, grab) orelse continue;
         var dup = false;
@@ -214,7 +213,6 @@ pub fn reportUndeliverableMouseBinds() void {
             if (earlier.button == mb.button and earlier.modifiers == mb.modifiers) dup = true;
         }
         if (dup) continue;
-        reported += 1;
         log.warn(
             "Mouse binding #{} (mods=0x{x:0>4} button={}) can never fire: {s}",
             .{ i + 1, mb.modifiers, mb.button, reason },
@@ -283,15 +281,6 @@ pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
     focus.setLastEventTime(event.time);
 }
 
-/// True when the press/release/motion target is the bar window (bar path);
-/// always false in a bar-less build, where `surfaces` compiles to the null
-/// plugin type and the shape is pruned at comptime.
-inline fn onBarWindow(win: u32) bool {
-    // Same reasoning as above: `isBarWindow` answers false with no surface
-    // module, so the `has_bar` half of the `and` was dead.
-    return surfaces.isBarWindow(win);
-}
-
 /// Dispatches a priority-ordered button-press event, splitting the two named
 /// paths: a plain click on the bar window routes to the bar; every other
 /// press goes through the managed-window mouse machinery.
@@ -299,21 +288,18 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     focus.setLastEventTime(event.time);
     const super_held = (event.state & masks.mod_super) != 0;
     const clicked_window = if (event.child != 0) event.child else event.event;
-    if (handleBarButtonPress(event, super_held, clicked_window)) return;
+    // The bar path: a plain (non-Super) click whose target is the bar window.
+    // The bar selects BUTTON_PRESS directly rather than through the
+    // Super+Button grab, so a plain click arrives ungrabbed; route it to the bar
+    // and skip the managed-window/replay-pointer machinery built for the
+    // synchronous grab a client-window click goes through. Super-held clicks
+    // fall through to the normal mouse-binding/drag path. Previously two
+    // wrappers stood between this and the surfaces hook, for one call site.
+    if (!super_held and surfaces.isBarWindow(clicked_window)) {
+        surfaces.handleButtonPress(event);
+        return;
+    }
     handleWindowButtonPress(event, super_held, clicked_window);
-}
-
-/// The bar path: a plain (non-Super) click whose target is the bar window.
-/// The bar selects BUTTON_PRESS directly (not via the Super+Button grab), so
-/// a plain click arrives ungrabbed; route it to the bar and skip the
-/// managed-window/replay-pointer machinery built for the synchronous grab a
-/// client-window click goes through. Super-held clicks fall through to the
-/// normal mouse-binding/drag path. Returns true when the event was consumed.
-fn handleBarButtonPress(event: *const xcb.xcb_button_press_event_t, super_held: bool, clicked_window: u32) bool {
-    if (super_held) return false;
-    if (!onBarWindow(clicked_window)) return false;
-    surfaces.handleButtonPress(event);
-    return true;
 }
 
 /// The facts a button press is routed on, taken as FIELDS so the routing rule
@@ -430,7 +416,7 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
     // Releases on the bar window terminate a segment scrub (the bar clears
     // its drag anchor). Routed before the managed-window path, as clicks are.
-    if (onBarWindow(event.event)) {
+    if (surfaces.isBarWindow(event.event)) {
         surfaces.handleButtonRelease(event);
         return;
     }
@@ -446,7 +432,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     // Press-hold motion on the bar window feeds the scrub-drag path: it is
     // routed before the managed-window drag engine, which targets a client
     // window grab, never the bar.
-    if (onBarWindow(event.event)) {
+    if (surfaces.isBarWindow(event.event)) {
         surfaces.handleButtonMotion(event);
         return;
     }

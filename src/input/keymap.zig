@@ -56,23 +56,34 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 
 /// Builds the flat keycode->keysym table from level-0 symbols.
 /// Keycodes below 8 are reserved by X11 and produce no real keysym.
-pub fn buildKeysymTable(km: *xkb_keymap) [constants.x11_max_keycode]u32 {
-    var table: [constants.x11_max_keycode]u32 = [_]u32{XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
-        table[kc] = baseSymbol(km, @intCast(kc));
-    }
-    return table;
-}
+/// A device keymap flattened to the level-0 keysym per keycode, plus whether
+/// it passed the health check.
+pub const BuiltTable = struct {
+    table: [constants.x11_max_keycode]u32,
+    /// True if the keymap has at least min_keymap_symbols reachable keysyms in
+    /// the 8..128 range.
+    healthy: bool,
+};
 
-/// Returns true if `km` has at least min_keymap_symbols reachable keysyms in
-/// the 8..128 range.
-pub fn keymapHasEnoughSymbols(km: *xkb_keymap) bool {
+/// Flatten `km`, reporting health from the SAME walk.
+///
+/// These used to be two functions, `buildKeysymTable` and
+/// `keymapHasEnoughSymbols`, and every caller ran both: the retry ladder asked
+/// for health, and the caller of the ladder then asked for the table. Two
+/// `xkb_keymap_key_get_syms_by_level` sweeps over the same keymap to produce
+/// one table. Counting during the flatten is free, and the two answer questions
+/// about disjoint keycode ranges -- health stops at keymap_health_hi, the table
+/// runs to x11_max_keycode -- so the `kc < keymap_health_hi` guard below is
+/// what preserves the original count exactly.
+pub fn buildKeysymTable(km: *xkb_keymap) BuiltTable {
+    var table: [constants.x11_max_keycode]u32 = [_]u32{XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
     var valid_keys: u32 = 0;
-    for (constants.x11_min_keycode..keymap_health_hi) |kc| {
-        if (baseSymbol(km, @intCast(kc)) != XKB_KEY_NoSymbol)
-            valid_keys += 1;
+    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
+        const sym = baseSymbol(km, @intCast(kc));
+        table[kc] = sym;
+        if (sym != XKB_KEY_NoSymbol and kc < keymap_health_hi) valid_keys += 1;
     }
-    return valid_keys >= min_keymap_symbols;
+    return .{ .table = table, .healthy = valid_keys >= min_keymap_symbols };
 }
 
 /// One (keysym, keycode) pair in the reverse index.
@@ -88,6 +99,26 @@ pub const ReverseIndex = struct {
     /// Sorted by keysym. `len` is the LIVE count; the rest is uninitialized.
     index: [reverse_capacity]ReverseEntry,
     len: usize,
+
+    /// Keycode for `keysym`, or null. Bisection over the sorted index: O(log n)
+    /// rather than the 248-entry scan this replaced, which ran once per
+    /// keybinding on every resolve.
+    ///
+    /// This lives here rather than at the call site because the keymap test
+    /// used to carry its own copy of the loop, so the tests that were supposed
+    /// to pin the ordering rules could not catch a change to the lookup that
+    /// used them.
+    pub fn find(self: *const ReverseIndex, keysym: u32) ?u8 {
+        var lo: usize = 0;
+        var hi: usize = self.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const e = self.index[mid];
+            if (e.keysym == keysym) return e.keycode;
+            if (e.keysym < keysym) lo = mid + 1 else hi = mid;
+        }
+        return null;
+    }
 };
 
 /// The table -> reverse-index transform, including its two ordering rules.

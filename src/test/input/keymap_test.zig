@@ -22,18 +22,10 @@ fn tableOf(pairs: []const Pair) [constants.x11_max_keycode]u32 {
     return t;
 }
 
-/// A bisection over the built index, mirroring the production lookup exactly.
-fn lookup(idx: keymap.ReverseIndex, keysym: u32) ?u8 {
-    var lo: usize = 0;
-    var hi: usize = idx.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        const e = idx.index[mid];
-        if (e.keysym == keysym) return e.keycode;
-        if (e.keysym < keysym) lo = mid + 1 else hi = mid;
-    }
-    return null;
-}
+/// The production lookup. This used to be a hand-copied duplicate of the
+/// bisection in xkbcommon.keysymToKeycode, so the tests below that pin the
+/// ordering rules were really pinning the copy rather than the code path.
+const lookup = keymap.ReverseIndex.find;
 
 test "keymap: the reverse index is sorted by keysym and holds only real symbols" {
     const t = tableOf(&.{
@@ -48,12 +40,12 @@ test "keymap: the reverse index is sorted by keysym and holds only real symbols"
     while (i < idx.len) : (i += 1) {
         try std.testing.expect(idx.index[i - 1].keysym < idx.index[i].keysym);
     }
-    try std.testing.expectEqual(@as(u8, 24), lookup(idx, 0x0071).?);
-    try std.testing.expectEqual(@as(u8, 65), lookup(idx, 0x0072).?);
-    try std.testing.expectEqual(@as(u8, 38), lookup(idx, 0x0061).?);
+    try std.testing.expectEqual(@as(u8, 24), lookup(&idx, 0x0071).?);
+    try std.testing.expectEqual(@as(u8, 65), lookup(&idx, 0x0072).?);
+    try std.testing.expectEqual(@as(u8, 38), lookup(&idx, 0x0061).?);
     // An absent keysym is null, not a neighbouring entry.
-    try std.testing.expectEqual(@as(?u8, null), lookup(idx, 0x0078));
-    try std.testing.expectEqual(@as(?u8, null), lookup(idx, NoSymbol));
+    try std.testing.expectEqual(@as(?u8, null), lookup(&idx, 0x0078));
+    try std.testing.expectEqual(@as(?u8, null), lookup(&idx, NoSymbol));
 }
 
 test "keymap: two keys carrying one keysym resolve to the LOWEST keycode" {
@@ -71,8 +63,8 @@ test "keymap: two keys carrying one keysym resolve to the LOWEST keycode" {
 
     // Both X entries collapsed into one, and the survivor is the lower keycode.
     try std.testing.expectEqual(@as(usize, 2), idx.len);
-    try std.testing.expectEqual(@as(u8, 10), lookup(idx, 0x0058).?);
-    try std.testing.expectEqual(@as(u8, 11), lookup(idx, 0x0059).?);
+    try std.testing.expectEqual(@as(u8, 10), lookup(&idx, 0x0058).?);
+    try std.testing.expectEqual(@as(u8, 11), lookup(&idx, 0x0059).?);
 }
 
 test "keymap: a run of duplicates of one keysym collapses to the lowest" {
@@ -91,9 +83,9 @@ test "keymap: a run of duplicates of one keysym collapses to the lowest" {
     // 0x41 sits on keycodes 90, 150, 200 and 201 -- so the survivor is 90,
     // not the first pair in the array and not the lowest keycode overall.
     try std.testing.expectEqual(@as(usize, 3), idx.len);
-    try std.testing.expectEqual(@as(u8, 90), lookup(idx, 0x0041).?);
-    try std.testing.expectEqual(@as(u8, 30), lookup(idx, 0x0042).?);
-    try std.testing.expectEqual(@as(u8, 44), lookup(idx, 0x0043).?);
+    try std.testing.expectEqual(@as(u8, 90), lookup(&idx, 0x0041).?);
+    try std.testing.expectEqual(@as(u8, 30), lookup(&idx, 0x0042).?);
+    try std.testing.expectEqual(@as(u8, 44), lookup(&idx, 0x0043).?);
 }
 
 test "keymap: an empty table yields an empty index, not a garbage one" {
@@ -102,7 +94,7 @@ test "keymap: an empty table yields an empty index, not a garbage one" {
     const t: [constants.x11_max_keycode]u32 = [_]u32{NoSymbol} ** constants.x11_max_keycode;
     const idx = keymap.buildReverseIndex(t);
     try std.testing.expectEqual(@as(usize, 0), idx.len);
-    try std.testing.expectEqual(@as(?u8, null), lookup(idx, 0x0061));
+    try std.testing.expectEqual(@as(?u8, null), lookup(&idx, 0x0061));
 }
 
 test "keymap: keycodes below the X11 floor are never indexed" {
@@ -115,8 +107,8 @@ test "keymap: keycodes below the X11 floor are never indexed" {
     const idx = keymap.buildReverseIndex(t);
 
     try std.testing.expectEqual(@as(usize, 1), idx.len);
-    try std.testing.expectEqual(@as(u8, 8), lookup(idx, 0x0062).?);
-    try std.testing.expectEqual(@as(?u8, null), lookup(idx, 0x0061));
+    try std.testing.expectEqual(@as(u8, 8), lookup(&idx, 0x0062).?);
+    try std.testing.expectEqual(@as(?u8, null), lookup(&idx, 0x0061));
 }
 
 test "keymap: reverse_capacity matches the keycode range the index covers" {
