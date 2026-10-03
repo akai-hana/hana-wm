@@ -164,17 +164,7 @@ pub const XkbState = struct {
     /// resolve to null; callers should warn, since such a binding cannot be
     /// grabbed. Returns only the first keycode when several map to the keysym.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
-        // Bisect the reverse index. O(log n) instead of the 248-entry scan this
-        // replaced, which ran once per keybinding on every resolve.
-        var lo: usize = 0;
-        var hi: usize = self.reverse.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const e = self.reverse.index[mid];
-            if (e.keysym == keysym) return e.keycode;
-            if (e.keysym < keysym) lo = mid + 1 else hi = mid;
-        }
-        return null;
+        return self.reverse.find(keysym);
     }
 };
 
@@ -254,9 +244,7 @@ fn retryDeviceId(xcb_conn: core.Connection) !i32 {
 /// Shared by init and rebuild: both acquire a device keymap and convert it to
 /// the flat table, differing only in how a failure is handled.
 fn tableForDevice(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) ![constants.x11_max_keycode]u32 {
-    const km = try retryKeymap(ctx, xcb_conn, device_id);
-    defer xkb.xkb_keymap_unref(km);
-    return keymap.buildKeysymTable(km);
+    return (try retryKeymap(ctx, xcb_conn, device_id)).table;
 }
 
 const keymapOnceArgs = struct {
@@ -265,23 +253,23 @@ const keymapOnceArgs = struct {
     device_id: i32,
 };
 
-fn keymapOnce(args: keymapOnceArgs) ?*xkb_keymap {
+fn keymapOnce(args: keymapOnceArgs) ?keymap.BuiltTable {
     const km = xkb.xkb_x11_keymap_new_from_device(
         args.ctx,
         @ptrCast(args.conn),
         args.device_id,
         xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
     ) orelse return null;
-    if (keymap.keymapHasEnoughSymbols(km)) return km;
-    xkb.xkb_keymap_unref(km);
-    return null;
+    defer xkb.xkb_keymap_unref(km);
+    const built = keymap.buildKeysymTable(km);
+    return if (built.healthy) built else null;
 }
 
 /// Retries keymap creation up to max_xkb_retries times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
-fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) !*xkb_keymap {
+fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) !keymap.BuiltTable {
     return withRetries(
-        *xkb_keymap,
+        keymap.BuiltTable,
         keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id },
         keymapOnce,
         error.XkbKeymapFailed,
@@ -300,7 +288,6 @@ fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) !*xkb_k
 /// One attempt, and a failure is a logged one-line miss on a table that is
 /// still serving the previous mapping.
 fn keymapForRebuild(ctx: *xkb_context, conn: core.Connection, device_id: i32) ?[constants.x11_max_keycode]u32 {
-    const km = keymapOnce(keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id }) orelse return null;
-    defer xkb.xkb_keymap_unref(km);
-    return keymap.buildKeysymTable(km);
+    const built = keymapOnce(keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id }) orelse return null;
+    return built.table;
 }

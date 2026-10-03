@@ -26,6 +26,16 @@ fn entryLessThan(_: void, a: DispatchEntry, b: DispatchEntry) bool {
     return a.key < b.key;
 }
 
+/// Field comparator for the lookup, where what is ordered is each entry's `key`
+/// FIELD rather than the entry. `find` was hand-rolled for years on the
+/// grounds that binarySearch only searches whole elements; std.sort.binarySearch
+/// has taken a per-element Order-returning fn since 0.16, so that reason is
+/// gone. entryLessThan is not reusable here: std.sort.heap wants a
+/// lessFn(context, a, b) bool, binarySearch wants an Order fn.
+fn byKey(key: u64, e: DispatchEntry) std.math.Order {
+    return std.math.order(key, e.key);
+}
+
 /// One-line report for a binding that can never fire because an earlier one
 /// already claims the same (modifiers, trigger). Shared by the keyboard and
 /// mouse tables so the two paths cannot drift: the keyboard path reported
@@ -85,19 +95,9 @@ pub const KeybindResolver = struct {
         return (@as(u64, modifiers) << 32) | keysym;
     }
 
-    /// Index of `key` in the sorted table, or null. Hand-rolled because
-    /// `std.sort.binarySearch` searches whole elements, and what is ordered
-    /// here is the `key` FIELD of each entry, not the entry itself.
+    /// Index of `key` in the sorted table, or null.
     fn find(self: *const KeybindResolver, key: u64) ?usize {
-        var lo: usize = 0;
-        var hi: usize = self.entries.items.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const k = self.entries.items[mid].key;
-            if (k == key) return mid;
-            if (k < key) lo = mid + 1 else hi = mid;
-        }
-        return null;
+        return std.sort.binarySearch(DispatchEntry, self.entries.items, key, byKey);
     }
 
     /// Rebuilds the dispatch table from scratch, warning when two bindings
@@ -213,17 +213,21 @@ pub fn resolveKeycodes(
     state: *const xkbcommon.XkbState,
     out: []ResolvedBind,
 ) []ResolvedBind {
-    var n: usize = 0;
-    for (keybindings) |kb| {
-        if (n == out.len) break; // caller sized the buffer from the binding count
-        out[n] = .{
+    // The caller sizes `out` from the binding count (input.zig reallocs to
+    // keybindings.len one line earlier and returns early if that fails), so the
+    // old `if (n == out.len) break` could never fire: at iteration i the
+    // counter was i, and i never reaches keybindings.len. Zipping the two
+    // ranges states the precondition instead of re-deriving it -- and unlike
+    // the break, a mismatch panics loudly rather than silently returning a
+    // short list.
+    for (keybindings, out) |kb, *dst| {
+        dst.* = .{
             .modifiers = kb.modifiers,
             .keysym = kb.keysym,
             .keycode = state.keysymToKeycode(kb.keysym),
         };
-        n += 1;
     }
-    return out[0..n];
+    return out[0..keybindings.len];
 }
 
 /// Log the bindings that resolved to nothing, ONCE per resolve rather than once
@@ -255,11 +259,9 @@ pub const MouseGrabSpec = struct {
 /// the bind loads, the config looks valid, the key does nothing -- so it is
 /// reported rather than left to be discovered by pressing the combo.
 pub fn undeliverableMouseBindReason(mb: types.MouseBind, grab: MouseGrabSpec) ?[]const u8 {
-    var button_grabbed = false;
-    for (grab.buttons) |b| {
-        if (b == mb.button) button_grabbed = true;
+    if (std.mem.indexOfScalar(u8, grab.buttons, mb.button) == null) {
+        return "the root grab covers Button1-5 only";
     }
-    if (!button_grabbed) return "the root grab covers Button1-5 only";
     if (mb.modifiers & ~grab.lock_bits & ~grab.modifiers != 0)
         return "the root grab is taken with Super+Button only, with no other modifier";
     if (mb.modifiers & grab.modifiers == 0)
