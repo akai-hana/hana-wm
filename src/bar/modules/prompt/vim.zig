@@ -115,7 +115,7 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
         'x', 'X', 'D', 'C', 's' => execDirectSym(vs, @truncate(sym), cnt),
 
         'p', 'P' => if (yank_len > 0) for (0..cnt) |_| {
-            if (sym == 'p') pasteAfter(vs) else pasteBefore(vs);
+            if (sym == 'p' or sym == 'P') paste(vs, sym == 'p');
         },
 
         '~' => for (0..cnt) |_| toggleCaseOnce(vs),
@@ -285,14 +285,12 @@ fn clearAndYankAll(vs: *EditorState) void {
     vs.cursor = 0;
 }
 
-fn pasteAfter(vs: *EditorState) void {
+/// `p` pastes after the cursor, `P` before it: the same insert, differing only
+/// in whether the cursor advances first. At end-of-buffer there is no "after"
+/// position, so `p` leaves the cursor where it is and the two coincide.
+fn paste(vs: *EditorState, after: bool) void {
     if (yank_len == 0) return;
-    if (vs.cursor < vs.len) vs.cursor += 1;
-    prompt.insertSlice(vs, yank_buf[0..yank_len]);
-}
-
-fn pasteBefore(vs: *EditorState) void {
-    if (yank_len == 0) return;
+    if (after and vs.cursor < vs.len) vs.cursor += 1;
     prompt.insertSlice(vs, yank_buf[0..yank_len]);
 }
 

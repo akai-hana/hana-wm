@@ -799,20 +799,6 @@ pub fn applyRestoredLevel() void {
 /// last-wins lookup rules on TilingConfig). The one labeled bundle driving
 /// per-workspace param seeding here (the separate workspaces override store
 /// was dead and is gone, C12).
-const SeedOverrides = struct {
-    /// Override index into `cfg.workspace_layout_overrides` per ws, or null.
-    layout: [constants.max_workspaces]?usize,
-    /// Master-count override per ws, or null (global default applies).
-    master_count: [constants.max_workspaces]?u8,
-};
-
-fn seedLookups(cfg: *const types.TilingConfig) SeedOverrides {
-    return .{
-        .layout = cfg.workspaceLayoutLookup(),
-        .master_count = cfg.masterCountLookup(),
-    };
-}
-
 /// Seeds every workspace's model params from the CURRENT config. Shared by
 /// boot-time initialization (without this the config's tiling
 /// params/workspace overrides stay inert until the first explicit reload)
@@ -832,7 +818,6 @@ pub fn seedParamsFromConfig() void {
     // Config layout names resolve to registry ids here, once per seed;
     // unresolvable names fall back loudly to the neutral default.
     const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, contract.default_kind);
-    const lookups = seedLookups(cfg);
 
     const m = pipeline.mut(&gate);
     // Global default template, stamped across every workspace by
@@ -848,7 +833,7 @@ pub fn seedParamsFromConfig() void {
 
     for (&m.ws, 0..) |*s, i| {
         const id: u8 = @intCast(i);
-        if (lookups.layout[id]) |oi| {
+        if (cfg.workspaceLayoutLookup()[id]) |oi| {
             const o = cfg.workspace_layout_overrides.items[oi];
             const kind = if (o.layout_idx < cfg.layouts.items.len)
                 tiling.layoutKindFallingBack(
@@ -863,7 +848,7 @@ pub fn seedParamsFromConfig() void {
             // string still applies to the active kind).
             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        if (lookups.master_count[id]) |mc| s.params.primary_count = mc;
+        if (cfg.masterCountLookup()[id]) |mc| s.params.primary_count = mc;
     }
 }
 
