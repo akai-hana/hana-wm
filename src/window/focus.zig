@@ -1,5 +1,10 @@
-//! Focus management module.
-//! Manages setting, clearing, and tracking the currently focused window.
+//! X11 focus protocol for the WM: applying, clearing, and tracking which
+//! window owns input focus, plus the button-grab and EnterNotify-suppression
+//! bookkeeping that must stay in sync with it.
+//!
+//! Focus truth lives in `model.focused`; the `last_applied` field in `state`
+//! is only a protocol-side cache of the focus this module actually pushed to
+//! X. Callers read focus through `getFocused()`.
 
 const std = @import("std");
 

@@ -1,8 +1,7 @@
-//! Pure libxkbcommon keysym-name parsing; needs no X connection, `xkb_state`,
-//! or XKB extension setup. Living in its own module keeps the pure config
-//! layer (which resolves binding names at load time) from importing the
-//! live-device-state `xkbcommon.zig`, avoiding a `config ↔ input` wiring cycle.
-//!
+//! Pure keysym-name parsing (libxkbcommon), no X connection, xkb_state, or XKB
+//! extension setup. Isolated to keep the pure config layer (resolves binding
+//! names at load time) from importing live-device-state input modules, avoiding
+//! a config↔input wiring cycle.
 //! Layer note: xcb-free by construction; importable from the pure layers
 //! (see build.zig's layer-purity assertion). The libxkbcommon import is
 //! borrowed from keymap.zig, the single translation-unit owner for that

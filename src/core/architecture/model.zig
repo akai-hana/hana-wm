@@ -1,18 +1,7 @@
-//! The domain model: the WM's management state, plus the operations on it.
-//!
-//! "Model" is the model-view-controller sense -- state + operations, with no
-//! I/O. Not "the model of a window": this file is the whole window manager's
-//! state, of which windows are one part. `Model` holds the per-window `store`
-//! *and* the per-workspace array, the current workspace, the focused id, and
-//! the all-view toggle; the vocabulary (`Entry`, `WsState`, `LayoutParams`,
-//! `BaseMode`, `Presence`, `Mask`, and the `Rect`/`Margins` value objects) is
-//! the shared language every other layer is written against. Note the
-//! distinction from `src/window/`, which is a *directory* naming the
-//! client-lifecycle subsystem (create / destroy / configure, ICCCM, focus,
-//! borders, drag) -- a slice of feature code, not a layer of the DAG. The two
-//! are orthogonal: nothing here is owned by `window/`, and `tiling/`, `bar/`,
-//! `config/`, `input/`, and `window/` all depend on this file rather than the
-//! reverse.
+//! Domain model (MVC): WM state + operations, no I/O. Holds per-window store,
+//! per-workspace arrays, current workspace, focused id, and all-view toggle.
+//! Vocabulary (Entry, WsState, LayoutParams, BaseMode, Presence, Mask, Rect,
+//! Margins) is shared language across layers; distinct from src/window/ directory.
 //!
 //! Geometry lives here rather than in a `geom` module because it is not a
 //! utility: `Rect`/`Margins` are value objects the state holds (`BaseMode.

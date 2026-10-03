@@ -1,7 +1,10 @@
-//! Floating window subsystem.
-//! A self-contained plugin over the model: placement, dragging, and
-//! per-corner resizing of floating windows, plus floating geometry honoring
-//! (configure requests update the model's floating rect).
+//! Floating window interaction and geometry management.
+//! Handles drag-to-move and per-corner drag-to-resize for floating windows,
+//! including work-area snapping, size-hint and minimum-dimension constraints,
+//! and display refresh-rate throttled geometry commits. Tiled windows detach
+//! to floating on first motion. Also updates floating rects on the model and
+//! honors configure requests for floating windows, exposing operations via
+//! the floating window module contract.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -11,6 +14,9 @@ const core = @import("core");
 const window = @import("window");
 const focus = @import("focus");
 const tracking = @import("tracking");
+
+const hz = @import("core").hz;
+const time = @import("time");
 
 const pipeline = @import("pipeline");
 const actions = @import("actions");
@@ -52,6 +58,12 @@ const DragState = struct {
     /// drag, so re-resolving them on every motion event would be wasted work.
     snap_px: i32 = 0,
     workarea: WaEdges = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+    /// Throttle geometry commits to display refresh rate to cut redundant
+    /// configures on high-poll mice. We still compute the latest rect from
+    /// every motion event (preserving responsiveness), but only push to X
+    /// when at least one display period has elapsed since the last commit.
+    last_commit_ns: u64 = 0,
+    pending_rect: ?model.Rect = null,
 };
 
 /// Snap distance from config, resolved to pixels (0 = disabled).
@@ -338,13 +350,37 @@ pub fn updateDrag(x: i16, y: i16) void {
         .resize => computeResizeRect(drag.*, dx, dy, wa),
     };
     drag.last_rect = rect;
-    actions.dragRect(drag.window, rect);
+    drag.pending_rect = rect;
+
+    // Throttle commits to display refresh rate; still track latest position
+    // for responsiveness. If a mode switch happens mid-drag, we adapt live.
+    const rate = hz.detectedHz();
+    const now = time.monotonicNs();
+    const min_period_ns: u64 = 1_000_000_000 / 1000; // cap at 1000Hz max commit rate
+    const period_ns: u64 = if (rate <= 0.0) min_period_ns else blk: {
+        const p = @as(f64, 1_000_000_000.0) / rate;
+        break :blk @max(@as(u64, @intFromFloat(@ceil(p))), min_period_ns);
+    };
+    if (now - drag.last_commit_ns >= period_ns) {
+        drag.last_commit_ns = now;
+        if (drag.pending_rect) |r| {
+            actions.dragRect(drag.window, r);
+            drag.pending_rect = null;
+        }
+    }
 }
 
-/// Ends the active drag. The model floating rect already holds the final
-/// position (actions.dragRect ran on every tick); nothing else to record;
-/// the sync ledger is the wire truth.
+/// Ends the active drag. Flush any pending commit so the final position is
+/// applied before releasing the drag state.
 pub fn stopDrag() void {
+    if (g_state.drag.active) {
+        const drag = &g_state.drag;
+        if (drag.pending_rect) |r| {
+            actions.dragRect(drag.window, r);
+            drag.pending_rect = null;
+            drag.last_rect = r;
+        }
+    }
     g_state = .{};
 }
 

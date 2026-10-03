@@ -7,10 +7,10 @@
 
 const std = @import("std");
 
-const core = @import("core");
+const core = @import("./core.zig");
 const xcb = core.xcb;
 const log = @import("log");
-const time = @import("time");
+const time = @import("pure/time.zig");
 
 /// Fallback used when RandR is unavailable or returns an invalid value.
 const default_hz: f64 = 60.0;

@@ -1,19 +1,10 @@
-//! Complete fullscreen feature: state transitions + read helpers + protocol hooks.
-//! A self-contained plugin over the model: fullscreen state lives ENTIRELY in
-//! the model (`covering_ws` is the core capture intent this module drives;
-//! `presence` and `anchor` stand as recorded). There is no module-owned record
-//! store — the model entry IS the record, so toggling, the workspace-caption
-//! choice, the ghost state, and the read helpers collapse onto ONE authority
-//! and can never drift out of lockstep. The module owns the transitions (the
-//! toggle + the EWMH `_NET_WM_STATE_FULLSCREEN` advertisement) and the
-//! deferred bar hide/show. Persistence needs no module blob: `anchor` and
-//! `covering_ws` are carried verbatim by `persist.WindowRecord`. The core
-//! never names fullscreen.
+//! Fullscreen (covering) window management.
 //!
-//! A fullscreen window is a *ghost* while minimized: minimize parks the model
-//! entry (`presence == .parked`) but leaves `covering_ws` set, so
-//! `model.coveringWsOf` still reports the ws and restore re-claims the screen
-//! (minimize.restore reposts `.covering`).
+//! Owns fullscreen transitions and protocol: toggles a window between present
+//! and covering using `model.covering_ws` as the single source of truth,
+//! advertises `_NET_WM_STATE_FULLSCREEN` via EWMH, and coordinates deferred bar
+//! hide/show on ConfigureNotify. A minimized covering window remains a ghost
+//! (retains `covering_ws`) so restore reclaims the screen.
 
 const core = @import("core");
 const xcb = core.xcb;

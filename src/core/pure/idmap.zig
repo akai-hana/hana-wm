@@ -1,18 +1,6 @@
 //! Fixed-capacity, allocation-free open-addressed map keyed by u32 window ID.
-//!
-//! Why a hash map: the ICCCM focus-property cache is probed on every focus
-//! change over a table sized for the worst case (`max_window_cache`), so a
-//! linear `indexOfById` scan is O(n) on the hot path. This keeps the same
-//! allocation-free, fixed-capacity contract as `BoundedList` but makes lookups
-//! O(1) with a small constant.
-//!
-//! Deletion uses tombstones (reclaimed by an in-place rehash once the table
-//! first fills); entries are never moved, so a `get` result is stable across
-//! unrelated inserts/removes. `capacity` bounds live entries; the slot array is
-//! a power of two strictly larger than `capacity`, so linear probing always
-//! terminates at an empty slot.
-//!
-//! Layer note: xcb-free by construction, safe for model/tiling to import.
+//! O(1) expected lookup/insert under fixed capacity; uses tombstones with in-place
+//! rehash on fill, entries never moved (pointers remain stable). XCB-free.
 
 const std = @import("std");
 

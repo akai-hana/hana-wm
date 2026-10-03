@@ -1,5 +1,7 @@
 //! Main entry point for hana.
-//! Sets up all subsystems and hands off to the event loop.
+//! Boots the window manager: either validates config via `--check-config`
+//! (no X11), or connects to X, claims the WM role, initializes subsystems,
+//! and enters the event loop.
 
 const std = @import("std");
 

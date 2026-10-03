@@ -1,12 +1,15 @@
-//! Window tracking queries over the model (the single source of truth for
-//! windows/workspaces): counts, per-window predicates, sweep snapshots and
-//! the workspace labels. A few boot/config-driven lifecycle bits (workspace
-//! count, the init flag) are kept locally here.
+//! Read-only query facade over the model singleton (the single source of truth
+//! for windows and workspaces): is a window managed/tiled/on the current
+//! workspace, is the all-view active, plus a caller-owned snapshot of the
+//! registry for callers that sweep it and the comptime workspace label table
+//! the bar renders.
 //!
-//! PENDING (no simplification action): border sweeps call
-//! model.coveringOccupantOnWs per window (an O(N) store scan each); measured
-//! (~480 ns/call) and deliberately uncached (IMPROVEMENTS §II) -- an
-//! optimization question, not a simplification.
+//! Writes are deliberately confined here: init/deinit latch the workspace
+//! count from config (clamped to max_workspaces, 1 when workspaces are off)
+//! and clear the per-workspace focus MRU, both through a file-private gate.
+//! Every other model mutation belongs to its transition owner (actions/window/
+//! focus); no shared writable token escapes this read facade. All model reads
+//! go through modelReady(), so boot order never touches an undefined instance.
 
 const std = @import("std");
 
