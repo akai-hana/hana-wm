@@ -27,8 +27,8 @@ const StackBoost = struct {
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     const n = windows.len;
-    const m = v.env.margins;
     const ctx = tiling.LayoutCtx.init(v, out);
+    const m = ctx.m;
 
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
@@ -333,8 +333,5 @@ const variants = [_]tiling.Variant{
     .{ .name = "lifo", .indicator = "[N]" },
     .{ .name = "fifo", .indicator = "=N=", .fifo = true },
 };
-
-/// Ordinal of the fifo variant, read from the table above.
-pub const fifo_variant: u8 = tiling.variantIndex(&variants, "fifo");
 
 pub const module = tiling.layoutModule("master", "[]=", compute, &variants, .{});

@@ -221,15 +221,6 @@ pub inline fn emitHidden(out: *List, win: model.WindowId) void {
     appendPlacement(out, win, parked_rect, false);
 }
 
-/// Emit every window in `windows` parked except `top` (raised by the caller):
-/// the monocle "show one, hide the rest" and fibonacci overflow-share shapes.
-pub inline fn showOneHideRest(out: *List, windows: []const model.WindowId, top: model.WindowId) void {
-    for (windows) |w| {
-        if (w == top) continue;
-        emitHidden(out, w);
-    }
-}
-
 /// Region too small to subdivide (overflow share): place the focused window —
 /// falling back to the list head — on-screen inset by the doubled border, park
 /// every other window in `windows`. Shared by fibonacci and leaf, whose
@@ -241,7 +232,13 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
     if (windows.len == 0) return;
     const top = focusedElse(ctx.v, windows, windows[0]);
     emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, model.doubledBorder(ctx.m), ctx.min_dim));
-    showOneHideRest(ctx.out, windows, top);
+    // The "show one, hide the rest" fan-out, inline. It was a named helper, but
+    // this is its only caller and its doc claimed the monocle shape uses it --
+    // monocle cannot, because it must land emitView for its top window at that
+    // window's own position in v.order, while this appends unconditionally.
+    for (windows) |w| {
+        if (w != top) emitHidden(ctx.out, w);
+    }
 }
 
 /// Dispatch registry (build-generated, alphabetical stems). The active layout
@@ -250,15 +247,11 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
 /// conditional-import definition).
 const tiling_mods = contract.tiling_mods;
 
-/// The layout used when none is configured, and the fallback when a name
-/// fails to resolve. Named so "a typo here silently becomes some layout" is
-/// greppable rather than a bare 0 at each use.
-pub const default_kind: u8 = 0;
-
 comptime {
     // The kind is a u8 index and the config list is sized max_layouts, so a
-    // registry that outgrows either would truncate or overrun at runtime.
-    std.debug.assert(tiling_mods.len <= model.max_layouts);
+    // registry that outgrows either would truncate or overrun at runtime. The
+    // u8 bound is the stronger of the two (255 < max_layouts), so asserting it
+    // alone still implies the other.
     std.debug.assert(tiling_mods.len <= std.math.maxInt(u8));
 }
 
@@ -417,11 +410,16 @@ fn emitInOrder(v: *const View, scratch: *const List, out: *List) void {
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of
 /// the first exact-case match in `names`, or null when unmatched. Shared by
 /// every layout module that exposes named variants.
-pub fn variantParse(comptime names: []const []const u8) fn ([]const u8) ?u8 {
+pub fn variantParse(comptime variants: []const Variant) fn ([]const u8) ?u8 {
     return struct {
         fn parse(str: []const u8) ?u8 {
-            for (names, 0..) |name, i| {
-                if (std.mem.eql(u8, str, name)) return @intCast(i);
+            // Reads the name column off the table itself rather than a
+            // pre-extracted []const []const u8: the extractor's only caller was
+            // this, and names[i] is defined as variants[i].name, so the
+            // candidate set and its order are the same either way -- including
+            // for an empty table, where both fall through to the same null.
+            for (variants, 0..) |v, i| {
+                if (std.mem.eql(u8, str, v.name)) return @intCast(i);
             }
             return null;
         }
@@ -439,16 +437,6 @@ pub const Variant = struct {
     fifo: bool = false,
 };
 
-/// The names column of a variant table, as the slice `variantParse` takes.
-fn variantNames(comptime variants: []const Variant) []const []const u8 {
-    const arr: [variants.len][]const u8 = blk: {
-        var a: [variants.len][]const u8 = undefined;
-        for (variants, 0..) |v, i| a[i] = v.name;
-        break :blk a;
-    };
-    return &arr;
-}
-
 /// The indicator column of a variant table, as `Layout.indicators`.
 fn variantIndicators(comptime variants: []const Variant) []const []const u8 {
     const arr: [variants.len][]const u8 = blk: {
@@ -461,7 +449,8 @@ fn variantIndicators(comptime variants: []const Variant) []const []const u8 {
 
 /// The ordinal of the `fifo` variant, or null when the table marks none.
 fn variantFifo(comptime variants: []const Variant) ?u8 {
-    if (variants.len == 0) return null;
+    // No len == 0 guard: iterating an empty slice falls through to the same
+    // return null below it.
     for (variants, 0..) |v, i| {
         if (v.fifo) return @intCast(i);
     }
@@ -505,7 +494,7 @@ pub fn layoutModule(
     m.compute = f;
     m.variant_count = @intCast(variants.len);
     m.fifo_variant = variantFifo(variants);
-    m.variant_parse = if (variants.len == 0) null else variantParse(variantNames(variants));
+    m.variant_parse = if (variants.len == 0) null else variantParse(variants);
     m.indicators = if (variants.len == 0) null else variantIndicators(variants);
     // The four derived fields are assigned AFTER `extra` is copied in, so a
     // stale value in an `extra` literal is overwritten rather than honored --

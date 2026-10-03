@@ -39,7 +39,11 @@ const SpiralDirection = enum(u2) {
 /// halves the remaining dimension with one gap at the seam. Drawn by pointer;
 /// helpers take the pointer to avoid copies in the recursion.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
-    const m = v.env.margins;
+    // LayoutCtx.init copies v.env.margins and v.env.min_dim precisely so
+    // modules read them from ctx rather than re-deriving from v.env, which is
+    // how the same fact ends up with two homes. Hoisted above first use.
+    const ctx = tiling.LayoutCtx.init(v, out);
+    const m = ctx.m;
     const border2 = model.doubledBorder(m);
     const min_region = m.gap *| 2 +| border2;
 
@@ -48,7 +52,6 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     var dir: SpiralDirection = .right;
 
     const windows = v.order;
-    const ctx = tiling.LayoutCtx.init(v, out);
     for (windows, 0..) |win, i| {
         const last = i == windows.len - 1;
         // Too small for another split: the seam would leave no room for a
