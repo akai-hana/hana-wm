@@ -59,10 +59,6 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 
         /// Returns the index of the first item whose `.id` field equals `id`,
         /// or null. For element types keyed by a single `id` field.
-        pub fn indexOfById(self: *const Self, id: u32) ?usize {
-            return self.indexOfByIdField(.id, id);
-        }
-
         /// Returns the index of the first item whose field named `field_name`
         /// equals `id`, or null. Generic over the key field name.
         pub fn indexOfByIdField(

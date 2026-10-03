@@ -137,15 +137,14 @@ pub fn releaseClaim(comptime id: u8) void {
 /// Sum of every ACTIVE claim per edge. Pure over the claim table, so the
 /// arithmetic the usable-area depends on is testable without an X connection.
 fn claimInsets() [4]u32 {
-    var insets = [4]u32{ 0, 0, 0, 0 }; // top, bottom, left, right
+    // Index by @intFromEnum so the reading order below and the field order of
+    // the Edge enum have one definition between them. Writing the four
+    // cases out spelled out the mapping twice, and the two copies could
+    // disagree: a case reordering the enum would still have compiled.
+    var insets = [4]u32{ 0, 0, 0, 0 };
     for (claims) |c| {
         if (!c.active) continue;
-        switch (c.edge) {
-            .top => insets[0] += c.px,
-            .bottom => insets[1] += c.px,
-            .left => insets[2] += c.px,
-            .right => insets[3] += c.px,
-        }
+        insets[@intFromEnum(c.edge)] += c.px;
     }
     return insets;
 }
