@@ -68,7 +68,9 @@ Mod+Shift+B = "toggle_bar_position"    # Top / bottom
 # never touching the config files. Chained on one key, the two give a full
 # reload: the config is applied + validated in-process, then the binary swaps.
 Mod+Shift+Escape = ["reload_hana", "reload_config"]
-# Mod+Shift+R = "reload_config" # Hot-reload config only (no binary swap)
+
+# Exit hana
+Mod+Shift+Return = "{kill} hana"
 
 # -- Personal program binds --
 
