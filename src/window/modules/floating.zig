@@ -15,7 +15,7 @@ const window = @import("window");
 const focus = @import("focus");
 const tracking = @import("tracking");
 
-const hz = @import("core").hz;
+const hz = @import("hz");
 const time = @import("time");
 
 const pipeline = @import("pipeline");

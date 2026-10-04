@@ -1,7 +1,5 @@
-//! XCB modifier masks and event masks.
-//!
-//! Separated from the core constants to keep the model layer (which imports
-//! constants) free of transitive XCB dependencies.
+//! XCB modifier and event masks; separated from core constants to keep model
+//! XCB-free.
 
 const xcb = @import("xcb").xcb;
 

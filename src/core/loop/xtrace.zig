@@ -1,24 +1,6 @@
-//! Opt-in per-window X11 event tracing.
-//!
-//! WHY: some client-visible symptoms have no static cause. A window whose
-//! on-screen pixels stop following its own contents while its input,
-//! hit-testing and own popup windows all stay live is exactly that shape: the
-//! only way to find the initiating event is to see the actual event order for
-//! that window. Guessing at a WM theory for it is how a wrong fix ships.
-//!
-//! So this records the SEQUENCE instead. Every X event hana dispatches is
-//! logged for a watched window, interleaved with the requests hana sends it,
-//! which is the only pairing that distinguishes "the server never told the
-//! client to repaint" from "the client was told and did not".
-//!
-//! COST: one global branch per event when disabled (the overwhelmingly common
-//! case). Nothing is formatted, nothing is allocated, and no X request is made
-//! unless the window is watched. Arm it with:
-//!
-//!     HANA_XTRACE=0x600001,0x600002 hana
-//!
-//! or `HANA_XTRACE=*` to watch every window. Find the id with `xwininfo` or
-//! `xdotool search --name firefox`. Stop with SIGUSR2 or just kill the log.
+//! Opt-in per-window X11 event tracing: logs event order for watched windows
+//! (interleaved with WM requests) to diagnose client/WM protocol issues.
+//! Enabled via `HANA_XTRACE=...` or `HANA_XTRACE=*`; zero cost when disabled.
 
 const std = @import("std");
 const log = @import("log");

@@ -36,13 +36,24 @@ wire_allowed() {
         # create/destroy of the bar window + colormap (same lifecycle, split
         # into its own file). Sync only raises bar_win via the force_restack
         # hook; bar self-management stays local to avoid a bar<->sync cycle.
-        src/bar/bar.zig|src/bar/drawing.zig|src/bar/win.zig) ;;
+        # visibility_glue.zig carries the same bar self-management, split out
+        # of bar.zig with the apply* visibility family (map/unmap on
+        # visibility change, raise-above-others, screen-claim publish).
+        src/bar/bar.zig|src/bar/visibility_glue.zig|src/bar/drawing.zig|src/bar/win.zig) ;;
 
         # ConfigureRequest compliance: client-requested
         # geometry is honored for floating windows and BW recorded for tiled
         # -- protocol duty that answers the CLIENT, not layout.
         # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
         src/window/window.zig|src/window/wincache.zig) ;;
+
+        # Admission preamble: claimManagedEventMask sets the management
+        # event mask (PropertyNotify / StructureNotify / FocusChange
+        # delivery) on MapRequest and boot-time adoption -- protocol
+        # setup for the windows this module admits, split out of
+        # window.zig with the admission policy (rules map, spawn queue,
+        # five-cookie pipeline).
+        src/window/admission.zig) ;;
 
         # Click-raise and focus-flag restack requests tied to the X11 focus
         # protocol (kept in window.*). focus.zig rides the
@@ -83,11 +94,17 @@ wire_allowed() {
 
         # Root-window keygrab installation at startup and click-focus
         # stack-mode: startup is pre-WM-loop; the restack routes through
-        # sync force_restack in a later cleanup. main no longer appears here:
-        # its root-event-mask claim and flush moved into
-        # core/x11/requests.zig (claimWindowManagerRole / flush), so the
+        # sync force_restack in a later cleanup. main no longer appears
+        # here: its root-event-mask claim and flush moved into
+        # core/x11/requests.zig (claimWindowManagerRole + flush), so the
         # composition root no longer names xcb.
-        src/input/input.zig) ;;
+        #
+        # input.zig carried this entry until the action dispatcher
+        # (executeAction/grafted/closeWindow/toggleBarPosition/dirSign)
+        # moved to input/dispatch.zig (review 05-input round 2); the
+        # wire traffic moved with it and is allowlisted there, so
+        # input.zig itself no longer sends any.
+        src/input/dispatch.zig) ;;
 
         # Wire PRIMITIVES: core/x11/requests.zig hosts configureWindow /
         # raiseWindow / setBorderPixel / grabServer, and core/x11/atoms.zig
@@ -111,18 +128,18 @@ wire_allowed() {
         # (icccm.zig hands focus to windows that advertise the protocol),
         # the synthetic ConfigureNotify (window.zig reports back the geometry
         # it actually applied after honoring a ConfigureRequest), and
-        # WM_DELETE_WINDOW (input.zig closes a client gracefully, ICCCM
+        # WM_DELETE_WINDOW (dispatch.zig closes a client gracefully, ICCCM
         # §4.1.2.7). These are client protocol text, not sync-bound wire
-        # mutations. window.zig/input.zig were already allowlisted above;
+        # mutations. window.zig was already allowlisted above;
         # icccm.zig joins them here for this family.
         src/window/icccm.zig) ;;
 
-        # src/test/window/fixture.zig is a TEST DOUBLE: it drives a real X
+        # src/test/x11/fixture.zig is a TEST DOUBLE: it drives a real X
         # connection owned by the X-gated harness to destroy leftover windows
         # during reset, flush, and write WM_PROTOCOLS / WM_HINTS properties on
         # synthetic override-redirect windows (setWmTakeFocus/setNoInput). Test
         # setup is not WM wire traffic and never routes through sync.
-        src/test/window/fixture.zig) ;;
+        src/test/x11/fixture.zig) ;;
 
         # src/test/window/focus_test.zig is a TEST DOUBLE: its liveness
         # ordering test destroys the clicked window through the X-gated
@@ -141,10 +158,16 @@ wire_allowed() {
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
         # buffer after others' queued requests). events.zig is the core
-        # event-loop flush; hz.zig is the RandR (bar-side) detection
-        # flush; prompt.zig is the bar's keyboard grab-drop flush. These are
-        # documented non-mutations, not Rule-1 sends.
-        src/core/loop/events.zig|src/bar/hz.zig|src/bar/modules/prompt/prompt.zig) ;;
+        # event-loop flush; display/hz.zig is the RandR refresh-rate detection
+        # flush (it subscribes to RandR notify on the root); prompt.zig is the
+        # bar's keyboard grab-drop flush; input/mouse.zig is the Super+click
+        # grab-unwind flush (finishGrab pushes the buffer after the two
+        # xcb_allow_events replay/async calls -- no mutation of its own);
+        # core/loop/grabs.zig is the grab-installation flush
+        # (grabMouseButtons/grabKeybindings push the buffer after firing
+        # all grab cookies -- the grabs themselves are not Rule-1 mutations).
+        # These are documented non-mutations, not Rule-1 sends.
+        src/core/loop/events.zig|src/core/display/hz.zig|src/bar/modules/prompt/prompt.zig|src/input/mouse.zig|src/core/loop/grabs.zig) ;;
 
         *) return 1 ;;
     esac

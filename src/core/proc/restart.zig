@@ -1,26 +1,6 @@
-//! Unified WM reload coordinator.
-//!
-//! Owns the *process hand-off* (in-place exec of the current binary) and the
-//! event-loop trigger flag. xcb-free and model-free: it never touches the X
-//! connection or the model. The event loop performs the actual re-exec
-//! sequence (save state, close the X connection, then execNext) so this
-//! module stays a pure flag surface, mirroring how lifecycle.zig owns the reload
-//! flag but events.zig consumes it.
-//!
-//! The reload is UNCONDITIONAL: every request re-execs whatever image is at
-//! the resolved exec path right now (the freshly built binary). There is no
-//! binary-change check -- comparing the running image against the file is
-//! pointless when the intent is "run the current file", and a stale
-//! comparison could silently keep the old code running.
-//!
-//! Binary-only by construction: the re-exec hand-off pins HANA_CONFIG_DIR to
-//! the frozen last-good config snapshot (config.refreshSnapshot), so the
-//! successor never re-reads the user's config files. Config changes land
-//! exclusively through the `reload_config` action / SIGHUP.
-//!
-//! This is the *re-exec* coordinator only. Config-only reloads (the
-//! `reload_config` keybind, SIGHUP) stay in lifecycle.zig's flag surface and never
-//! re-exec the process.
+//! In-place exec coordinator: binary reload (re-exec argv[0]) via event-loop
+//! flag; xcb-free and model-free. Config reloads (SIGHUP/reload_config) are
+//! separate from re-exec.
 
 const std = @import("std");
 

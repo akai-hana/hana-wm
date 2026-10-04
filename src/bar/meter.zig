@@ -54,7 +54,3 @@ pub fn offsetFromPct(slot_x: u16, slot_w: u16, pct: u8) u16 {
     const at = x + (@as(u32, slot_w) * clamped + 50) / 100;
     return @intCast(@min(at, @as(u32, std.math.maxInt(u16))));
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}

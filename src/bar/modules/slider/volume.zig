@@ -12,18 +12,20 @@
 //! right-click and 5 s poll. Both directions are undone by the same trigger --
 //! a daemon-reachability recheck, plus a slow deadline -- so a daemon that
 //! starts after we gave up on it is still picked up:
-//!   1. `pactl` subprocess (PipeWire/PulseAudio).
-//!   2. `amixer` subprocess (ALSA fallback).
+//!   1. `libpulse` via dlopen (`native_pulse.zig`) -- PulseAudio AND every
+//!      real PipeWire desktop (`pipewire-pulse` ships the `libpulse.so.0`
+//!      ABI). In-process, one socket round trip per commit.
+//!   2. `pactl` subprocess -- the split-packaging case: the .so absent
+//!      but the CLI present.
+//!   3. `amixer` subprocess -- ALSA, when alsa-utils is installed.
+//!   4. `/dev/snd/controlC*` ioctls (`native_alsa.zig`) -- the ALSA
+//!      floor: kernel ioctls, no userspace tool required at all.
 //!
-//! Both are subprocesses on purpose. A pair of in-process backends used to
-//! stand in front of them -- libpulse via `dlopen`, and raw `/dev/snd/controlC*`
-//! ioctls -- for 588 lines. They were removed because they bought nothing a
-//! user could observe, and the honest measurement is the cost: on a machine
-//! with a PulseAudio runtime but no `libpulse.so.0` installed, `pactl` is
-//! absent too, so the pair traded a dependency nobody had for a fork nobody
-//! needed. `commit_cost` is still reported per sub, because the throttle
-//! decision is real even when every rung is a spawn; the 0-100 % clamp in
-//! `commit` is the single guard for every caller's value.
+//! The two native rungs are why `commit_cost` is a per-sub query: they are
+//! single in-process round trips (`.immediate`), while the two subprocess
+//! rungs fork (`.rate_limited`), and the slider core throttles on the
+//! difference. The 0-100 % clamp in `commit` is the single guard for every
+//! caller's value.
 
 const std = @import("std");
 const log = @import("log");
@@ -66,9 +68,9 @@ pub const reprobe_interval_ms: i64 = 15_000;
 
 /// What the negative cache says about one poll: whether the ladder may be
 /// walked. One bool, because there is now exactly one thing to forget: the
-/// latched backend. It used to carry a second `forget_native` field for the
-/// native-probe flags, which were a one-shot latch whose clearing needed its
-/// own reason; with those backends gone the flag had nothing to clear.
+/// latched backend. (The native rungs' one-shot attach is un-latched by a
+/// daemon-reachability CHANGE instead -- see `probeDue` -- which is what
+/// finds a daemon that started after this cache wrote the machine off.)
 pub const Probe = struct { walk: bool };
 
 /// (26.7) The pure re-probe decision. All the timing policy, with no clock and
@@ -492,11 +494,24 @@ pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
     return renderDisplay(config, g_muted, buf);
 }
 
+/// Right-click: flip the sink's mute state. Routed through the LATCHED
+/// rung like every other commit (`commitPct`), so the native backends --
+/// whose protocol takes an ABSOLUTE mute state, not a toggle -- set the
+/// inverted observed state directly instead of spawning a `pactl`/`amixer`
+/// that would talk to a different mixer than the latched backend reads.
+/// Returns through the same follow-up read, so the display reflects what
+/// the sink actually did.
 fn toggleMute() void {
-    switch (g_backend) {
-        .pulse => _ = slider.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle"),
-        .alsa => _ = slider.runOk("amixer set Master toggle"),
-        .unknown => return,
+    switch (latchedRung(g_backend)) {
+        .native_pulse => {
+            if (g_native_pulse) |*np| _ = np.setMuted(!g_muted);
+        },
+        .native_alsa => {
+            if (g_native_alsa) |*na| _ = na.setMuted(!g_muted);
+        },
+        .pactl => _ = slider.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle"),
+        .amixer => _ = slider.runOk("amixer set Master toggle"),
+        .none => return,
     }
     _ = readVolume();
 }

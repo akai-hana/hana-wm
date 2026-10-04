@@ -8,9 +8,10 @@
 //!      including the non-scalar seed data (layouts, icons, bar columns).
 //!   3. Every alias spelling resolves identically ([tiling] flat names vs
 //!      [tiling.layouts.master-stack]; [workspaces] vs
-//!      [bar.modules.workspaces]; segment_spacing -> spacing; aesthetics).
-//!   4. Warn-and-revert range semantics and the getRatio bare-`1`
-//!      ambiguity rule behave as before.
+//!      [bar.modules.workspaces]; per_segment_padding -> spacing).
+//!   4. Warn-and-revert range semantics and both getRatio policies
+//!      (legacy bare-integer percentages for indicator_padding; the
+//!      strict no-bare-integers rule for transparency).
 //!
 //! Scratch files are created by src/test/config/scratch.zig in a per-process
 //! uniquely-named directory under the system temp area; each test cleans up
@@ -131,7 +132,7 @@ test "master trio: flat [tiling] names match dedicated section" {
     try testing.expectEqual(types.ScalableValue.percentage(60.0), dedicated.tiling.master_width);
 }
 
-test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
+test "[tiling] gap/border quartet reads" {
     var flat = try loadToml(testing.allocator, "aesthetics-flat",
         \\[tiling]
         \\gap_width = 7
@@ -141,27 +142,15 @@ test "[tiling.aesthetics] and flat [tiling] gap/border reads agree" {
         \\
     );
     defer flat.deinit(testing.allocator);
-    // [tiling.aesthetics] alone is inert (parseTiling's historical early
-    // return); the marker section opens the family.
-    var sub = try loadToml(testing.allocator, "aesthetics-sub",
-        \\[tiling]
-        \\[tiling.aesthetics]
-        \\gap_width = 7
-        \\border_width = 3
-        \\border_focused = "#112233"
-        \\border_unfocused = 0x445566
-        \\
-    );
-    defer sub.deinit(testing.allocator);
-    try expectConfigsEqual(&flat, &sub);
-    try testing.expectEqual(types.ScalableValue.absolute(7.0), sub.tiling.gap_width);
-    try testing.expectEqual(@as(u32, 0x112233), sub.tiling.border_focused);
+    try testing.expectEqual(types.ScalableValue.absolute(7.0), flat.tiling.gap_width);
+    try testing.expectEqual(types.ScalableValue.absolute(3.0), flat.tiling.border_width);
+    try testing.expectEqual(@as(u32, 0x112233), flat.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0x445566), flat.tiling.border_unfocused);
 
-    // A lone [tiling.aesthetics] (no [tiling] functional marker) still feeds
-    // the quartet: the values are visual, so a theme-only file applies them --
-    // this is exactly the shape akai.toml ships today.
+    // A lone [tiling] (no functional keys at all) still feeds the
+    // quartet -- this is exactly the shape akai.toml ships today.
     var lone = try loadToml(testing.allocator, "aesthetics-lone",
-        \\[tiling.aesthetics]
+        \\[tiling]
         \\gap_width = 7
         \\
     );
@@ -189,10 +178,10 @@ test "[bar.modules.workspaces] and [workspaces] agree on count/enabled" {
     try testing.expect(!nested.workspaces.enabled);
 }
 
-test "segment_spacing feeds BarConfig.spacing; workspaces count pads icons" {
+test "per_segment_padding feeds BarConfig.spacing; workspaces count pads icons" {
     var cfg = try loadToml(testing.allocator, "spacing-icons",
         \\[bar]
-        \\segment_spacing = 20
+        \\per_segment_padding = 20
         \\icons = ["x"]
         \\
         \\[bar.modules.workspaces]
@@ -348,7 +337,6 @@ test "palette references resolve by full name cross-section" {
     // the whole color set.
     var refs = try loadToml(testing.allocator, "palette-refs",
         \\[tiling]
-        \\[tiling.aesthetics]
         \\border_focused   = primary_color
         \\border_unfocused = secondary_color
         \\
@@ -500,7 +488,6 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
         \\font_size = -10%
         \\
         \\[tiling]
-        \\[tiling.aesthetics]
         \\gap_width = -50
         \\
         \\[drag]
@@ -591,16 +578,62 @@ test "config/fallback.toml loads cleanly through the real pipeline" {
     try testing.expectEqual(types.BarScreenPosition.bottom, cfg.bar.bar_position);
 }
 
-test "getRatio: bare 1 means 1 percent (ambiguity rule)" {
-    var cfg = try loadToml(testing.allocator, "ratio-one",
+test "getRatio: bare integers are percentages (indicator_padding)" {
+    var cfg = try loadToml(testing.allocator, "ratio-ints",
         \\[bar]
-        \\transparency = 1
-        \\indicator_padding = 40%
+        \\indicator_padding = 1
         \\
     );
     defer cfg.deinit(testing.allocator);
-    try testing.expectEqual(@as(f32, 0.01), cfg.bar.transparency);
-    try testing.expectEqual(@as(f32, 0.4), cfg.bar.indicator_padding);
+    // The legacy bare-`1` ambiguity rule: `1` means 1%, warned.
+    try testing.expectEqual(@as(f32, 0.01), cfg.bar.indicator_padding);
+
+    var pct = try loadToml(testing.allocator, "ratio-pct",
+        \\[bar]
+        \\indicator_padding = 40%
+        \\
+    );
+    defer pct.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 0.4), pct.bar.indicator_padding);
+}
+
+test "getRatio strict: transparency rejects bare integers" {
+    // `= 1` was the trap: 1% here, but `= 1.0` means 100%. Bare
+    // integers are no longer supported at all -- they warn and
+    // revert to the default (fully opaque), so only a decimal ratio
+    // or a percentage can set transparency.
+    var bare = try loadToml(testing.allocator, "transparency-bare",
+        \\[bar]
+        \\transparency = 1
+        \\
+    );
+    defer bare.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 1.0), bare.bar.transparency);
+
+    var hundred = try loadToml(testing.allocator, "transparency-hundred",
+        \\[bar]
+        \\transparency = 100
+        \\
+    );
+    defer hundred.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 1.0), hundred.bar.transparency);
+
+    // Decimal ratios and percentages still parse.
+    var dec = try loadToml(testing.allocator, "transparency-dec",
+        \\[bar]
+        \\transparency = 0.25
+        \\
+    );
+    defer dec.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 0.25), dec.bar.transparency);
+
+    var pct = try loadToml(testing.allocator, "transparency-pct",
+        \\[bar]
+        \\transparency = 50%
+        \\
+    );
+    defer pct.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 0.5), pct.bar.transparency);
 }
 
 test "validate accepts pixel master_width above the ratio ceiling" {
@@ -664,7 +697,6 @@ test "color-mix: + mixes resolve end-to-end through knobs, segments, and palette
     // Every expectation below is the exact round-half-up channel average.
     var cfg = try loadToml(testing.allocator, "mix-e2e",
         \\[tiling]
-        \\[tiling.aesthetics]
         \\border_focused   = primary_color +(weight:25%) secondary_color
         \\border_unfocused = secondary_color + primary_color
         \\
@@ -704,7 +736,6 @@ test "color-mix: over-budget and head weights revert to the default" {
     // mixes, so each knob warn-and-reverts to its default color.
     var cfg = try loadToml(testing.allocator, "mix-bad-weight",
         \\[tiling]
-        \\[tiling.aesthetics]
         \\border_focused   = primary_color +(weight:150%) secondary_color
         \\border_unfocused = (weight:60%)primary_color + secondary_color
         \\
@@ -725,7 +756,6 @@ test "color-mix: literal array spelling mixes equally, duplicate palette-name de
     // (they are NOT a mix to be averaged).
     var cfg = try loadToml(testing.allocator, "c16-literal-vs-dup",
         \\[tiling]
-        \\[tiling.aesthetics]
         \\border_focused   = [0xaa0000, 0x008800]
         \\
         \\[bar]

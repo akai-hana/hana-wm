@@ -70,7 +70,7 @@ pub fn evictCache(win: u32) void {
 }
 
 /// Shared admission drain: the MapRequest and boot-adoption routes fire their
-/// admission cookies up-front and land here (via window.drainAdmissionCookies)
+/// admission cookies up-front and land here (via admission.drainAdmissionCookies)
 /// to consume the focus-relevant pair. The WM_PROTOCOLS reply is drained
 /// through the same protocolPropsFromReply path as the live query, so the
 /// pipelined verdict is byte-identical; both halves are cached (mask-first map

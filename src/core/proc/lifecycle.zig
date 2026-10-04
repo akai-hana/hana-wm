@@ -1,8 +1,5 @@
-//! Process lifecycle signals + fd plumbing. xcb-free.
-//!
-//! Module-level atomics, not WM struct fields; this is process control
-//! state, not window-manager state. Signal handlers and keybind actions
-//! write here; the main event loop reads here.
+//! Process lifecycle flags and fd plumbing; xcb-free, module-level atomics
+//! shared between signal handlers, actions, and the event loop.
 
 const std = @import("std");
 
