@@ -1060,7 +1060,12 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
 /// Called on config reload.
 pub fn reloadBorders() void {
+    // One store pass for the whole sweep: resolveBorderColorWith consumes the
+    // precomputed table, so this is O(store) + O(windows) instead of apply's
+    // per-window resolveBorderColor that rebuilt the table each time.
+    var occupants: [constants.max_workspaces]?model_mod.WindowId = @splat(null);
+    borders.coveringOccupants(pipeline.model(), &occupants);
     for (tracking.allWindowsInto(&state.?.snapshot)) |entry| {
-        borders.apply(core.getState().conn, entry.win);
+        borders.applyWith(core.getState().conn, entry.win, &occupants);
     }
 }
