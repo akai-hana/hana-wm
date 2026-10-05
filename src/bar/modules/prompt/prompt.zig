@@ -103,10 +103,6 @@ fn invalidateReloadCaches() void {
     render.invalidateReloadCaches();
 }
 
-fn vimModeEnabled() bool {
-    return core.getState().config.bar.vim_mode;
-}
-
 /// Returns true when the prompt is currently active and accepting key input.
 fn isActive() bool {
     return g.is_active;
@@ -397,7 +393,12 @@ fn activate() void {
 
 fn deactivate() void {
     g.is_active = false;
-    if (vimModeEnabled()) editor.handlers.on_deactivate(&g.vim_state);
+    // on_deactivate must be called in exactly the situations dispatch routed
+    // key input through the vim/normal handlers -- which is gated on
+    // editor.addon_active, not the vim_mode config key. With the editor
+    // addon registered but the key off, gating on vimModeEnabled() left a
+    // pending operator/count prefix in g.vim_state across sessions.
+    if (editor.addon_active) editor.handlers.on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);

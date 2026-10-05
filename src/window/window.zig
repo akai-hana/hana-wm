@@ -503,7 +503,16 @@ pub fn adoptRootWindows() !usize {
         // pre-restart anchor); record-less windows still honor a class float
         // rule, matching the MapRequest admission policy.
         const float = if (entry.record == null) admission.resolveClassFloat(entry.cookies.c_wm_class) else false;
-        admission.drainAdmissionCookies(conn, win, entry.cookies, true);
+        // resolveClassFloat already consumed the WM_CLASS reply, so draining it
+        // again via discardAdmissionCookies(cookies, true) would double-dispose
+        // the same XCB reply (a freed sequence wedged at the 16-bit wrap, plus
+        // a leaked discard entry per adopted window). Null it out in the drain
+        // copy: the spawn-queue cookie is still discarded below, and when a
+        // restore record supplied the anchor resolveClassFloat never ran, so
+        // c_wm_class stays live and is discarded here as before.
+        var drain_cookies = entry.cookies;
+        if (entry.record == null) drain_cookies.c_wm_class = null;
+        admission.drainAdmissionCookies(conn, win, drain_cookies, true);
 
         // Register on the restored-or-current workspace. on_current=false so
         // actions.mapRequest does NOT reconcile per-window (the caller owns

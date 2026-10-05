@@ -55,6 +55,15 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
         // Moving the current workspace's covering window away changes the
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
+    } else if (!was_fs_current and actions.isCoveringOnWs(m, win)) {
+        // A covering window moved ONTO the current workspace: current gained
+        // a screen-claiming occupant, so bump the core fullscreen fact and
+        // re-apply the bar's visibility for the new occupant. Without this, a
+        // tag-move of a fullscreen window onto the active workspace left the
+        // bar mapped over the new cover (switchTo did handle arrival; this
+        // move path did not).
+        surfaces.updateBarVisibilityForWorkspace(ws_idx);
+        core.fullscreen.bump();
     }
     actions.retile(.{ .mode = .focus }, ft);
 }

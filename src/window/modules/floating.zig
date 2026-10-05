@@ -81,12 +81,11 @@ fn snapDistance() i32 {
 /// keep the outer border flush with the screen edge.
 fn workarea() WaEdges {
     const cs = core.getState();
-    const sw: i32 = cs.screen.width_in_pixels;
     const bw2: i32 = @as(i32, core.borderWidth()) * 2;
     const work = usable_area.workArea(cs.screen);
     return .{
-        .left = 0,
-        .right = sw - bw2,
+        .left = work.x,
+        .right = work.x + @as(i32, work.width) - bw2,
         .top = work.y,
         .bottom = work.y + @as(i32, work.height) - bw2,
     };
@@ -164,6 +163,13 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (g_state.drag.active) return;
     if (usable_area.isSurfaceWindow(win)) return;
     if (window.isCoveringMode(pipeline.model(), win)) return;
+
+    // Reject unmanaged/foreign windows: a drag on a window the WM does not own
+    // would no-op every setFloatingRect/dragRect (store.getPtr fails) while
+    // g_state.drag.active stays latched, blocking all future drags. The
+    // getGeometry fallback below is only for managed-but-never-placed windows,
+    // so require store membership before it.
+    if (pipeline.model().store.get(win) == null) return;
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
@@ -333,7 +339,13 @@ pub fn updateDrag(x: i16, y: i16) void {
     const was_pending_float = g_state.pending_float;
     if (g_state.pending_float) {
         g_state.pending_float = false;
-        actions.detachToFloating(drag.window);
+        // Abort the drag when the detach fails: the window is still tiled, so
+        // every setFloatingRect/dragRect would no-op and g_state.drag.active
+        // would latch a dead drag that blocks future drags. Clear it instead.
+        if (!actions.detachToFloating(drag.window)) {
+            drag.active = false;
+            return;
+        }
     }
 
     // Widen BEFORE subtracting: start_x/start_y and x/y are i16, and a drag
@@ -428,8 +440,31 @@ pub fn honorConfigureRequest(
         .floating => |*r| {
             if (req.x) |v| r.x = v;
             if (req.y) |v| r.y = v;
-            if (req.width) |v| r.width = v;
-            if (req.height) |v| r.height = v;
+            // A configure request is untrusted client input: clamp its extent
+            // to the same floor/ceiling the drag resize path enforces. The
+            // client's PMin/PMax live on the model entry, so the core part of
+            // the floor (global min_window_dim, borderWidth) applies only when
+            // core is ready; a headless model test exercises the PMin/PMax
+            // half without a core.
+            const entry = m.store.get(win) orelse return .ignored;
+            const hints = entry.size_hints;
+            var floor_w: i32 = @as(i32, hints.min_width);
+            var floor_h: i32 = @as(i32, hints.min_height);
+            var max_w: i32 = if (hints.max_width == 0) @as(i32, std.math.maxInt(u16)) else @as(i32, hints.max_width);
+            var max_h: i32 = if (hints.max_height == 0) @as(i32, std.math.maxInt(u16)) else @as(i32, hints.max_height);
+            var min_dim: i32 = 0;
+            if (core.isReady()) {
+                const bw2: i32 = @as(i32, core.borderWidth()) * 2;
+                min_dim = core.getState().config.tiling.min_window_dim;
+                if (hints.min_width != 0) floor_w += bw2;
+                if (hints.min_height != 0) floor_h += bw2;
+                if (hints.max_width != 0) max_w += bw2;
+                if (hints.max_height != 0) max_h += bw2;
+            }
+            floor_w = @max(floor_w, min_dim);
+            floor_h = @max(floor_h, min_dim);
+            if (req.width) |v| r.width = @intCast(std.math.clamp(@as(i32, v), floor_w, @max(floor_w, max_w)));
+            if (req.height) |v| r.height = @intCast(std.math.clamp(@as(i32, v), floor_h, @max(floor_h, max_h)));
             // NOTE: a requested border_width is not stored here (the
             // floating rect has no bw field); the entry point sends and
             // caches it alongside the geometry it applies.

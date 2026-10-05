@@ -242,7 +242,15 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
         for (window_mods, 0..) |mod, idx| {
             if (mod.serializeWindow) |f| {
                 if (f(m, item.key, allocator)) |body| {
-                    defer allocator.free(body);
+                    // own_body tracks whether the arms of this scope are still
+                    // responsible for freeing `body`. The over-long-name branch
+                    // transfers that ownership into `blob` (the snapshot owns
+                    // it from there); the normal branch copies body into
+                    // `wrapped` and so still frees it on scope exit. Without
+                    // the transfer flag, the over-long branch's deferred free
+                    // fired on break and left snap.windows[].ext dangling.
+                    var own_body = true;
+                    defer if (own_body) allocator.free(body);
                     const mod_name = mod.name;
                     if (mod_name.len == 0) {
                         // Cannot happen: the generated window registry rejects
@@ -264,6 +272,7 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
                             .{ mod_name, mod_name.len, max_stamped_name_len },
                         );
                         blob = body;
+                        own_body = false;
                         break;
                     }
                     const header_len = extHeaderLen(mod_name.len);

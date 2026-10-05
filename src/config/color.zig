@@ -32,13 +32,16 @@ pub fn colorFromValue(val: Value) ?u32 {
     if (val.asScalar(u32)) |c| return c;
     if (val.asScalar(i64)) |i| {
         if (i < 0) return null;
-        // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB, 8
-        // digits = #RRGGBBAA (e.g. `112233` -> 0x112233). Any other bare
-        // integral value in a color context is INVALID (no silent decimal
-        // coerce); spell a value-color via 0xRRGGBB instead.
+        // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB. Any
+        // other bare integral value in a color context is INVALID (no silent
+        // decimal coerce); spell a value-color via 0xRRGGBB instead. An
+        // 8-digit spelling is deliberately rejected, matching parser.parseColor
+        // (which caps at 24 bits): parsing it raw returned 0xRRGGBBAA, whose
+        // alpha byte sits in the low byte and red shifted into the top byte --
+        // i.e. an invalid packed Color flowing into XCB pixel fields.
         var buf: [20]u8 = undefined;
         const digits = std.fmt.bufPrint(&buf, "{d}", .{@as(u64, @intCast(i))}) catch return null;
-        if (digits.len == 6 or digits.len == 8) return std.fmt.parseInt(u32, digits, 16) catch null;
+        if (digits.len == 6) return std.fmt.parseInt(u32, digits, 16) catch null;
         return null;
     }
     if (val.asScalar([]const u8)) |s| {
@@ -294,14 +297,37 @@ fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
 /// after the fixpoint is cyclic or references an unknown operand: warned and
 /// skipped (referencing knobs fall back to their own defaults). Call once per
 /// merged Document, before knobs are applied.
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
 pub fn collectPalette(doc: *parser.Document) void {
     // Last declaration per palette variable, in reserved-name order.
     var last: [parser.palette_var_names.len]?Value = undefined;
+    // Deterministic precedence: StringHashMap iteration order is unrelated to
+    // the merge order, so a palette variable declared in two sections used to
+    // resolve to whichever the hasher yielded last -- non-reproducible across
+    // builds. Scan sections in sorted-name order, then root as a peer, so the
+    // "last hit wins, like every other knob" rule is stable: a var declared
+    // in both a section and the root takes the root's value (root is scanned
+    // last), and a var declared in two sections takes the alphabetically
+    // later section. The common case -- a palette var declared exactly once --
+    // yields that same value under any scan order.
+    var names: [64][]const u8 = undefined;
+    var n_names: usize = 0;
+    var iter = doc.sections.iterator();
+    while (iter.next()) |entry| {
+        if (n_names == names.len) break; // pathological; scan is still stable
+        names[n_names] = entry.key_ptr.*;
+        n_names += 1;
+    }
+    std.mem.sort([]const u8, names[0..n_names], {}, lessThanStr);
     for (parser.palette_var_names, 0..) |name, i| {
         var best: ?Value = null;
-        var iter = doc.sections.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.get(name)) |val| best = val;
+        for (names[0..n_names]) |sec_name| {
+            if (doc.sections.getPtr(sec_name)) |sec| {
+                if (sec.get(name)) |val| best = val;
+            }
         }
         if (doc.root.get(name)) |val| best = val;
         // Keep the full accumulated declaration: an array-spelling `+` mix

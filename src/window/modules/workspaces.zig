@@ -31,8 +31,13 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     e.mask = model.bit(ws);
     if (e.home_ws) |old_h| {
         if (to_new_ws) {
-            model.removeValue(&m.ws[old_h.index].tiled_order, win);
-            _ = m.ws[ws.index].tiled_order.append(win);
+            // Only a tiled-anchor window lives in a tiled_order. A floating-
+            // anchored window can carry a stale home_ws (register seeds it),
+            // but appending it there would make a layout seat it cannot fill.
+            if (e.anchor == .tiled) {
+                model.removeValue(&m.ws[old_h.index].tiled_order, win);
+                _ = m.ws[ws.index].tiled_order.append(win);
+            }
             e.home_ws = ws;
         }
     }
@@ -84,11 +89,31 @@ fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId
 pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
+    if (!model.taggedOn(e.*, ws)) return false; // tag wasn't set: true no-op
     e.mask &= ~model.bit(ws);
     // 12.4: model query (see transferFullscreenOnMove).
     if (model.isCoveringOn(m, win, ws)) {
         const dest = model.lowestBit(e.mask) orelse unreachable;
         retargetOrDropFullscreen(m, win, dest);
+    }
+    // Removing the home tag must not strand the seat: the window can no
+    // longer be placed on its old home workspace, so its tiled_order entry
+    // and home cache have to move to a surviving tag (or the seat drops and
+    // reconcile parks the unplaced window). Leaving it would inflate the old
+    // list's len and feed capacity refusals while the window itself never
+    // returns to a layout.
+    if (e.home_ws) |hw| {
+        if (hw.eql(ws)) {
+            model.removeValue(&m.ws[hw.index].tiled_order, win);
+            e.home_ws = null;
+            if (e.anchor == .tiled) {
+                if (model.lowestBit(e.mask)) |h| {
+                    if (m.ws[h.index].tiled_order.append(win)) {
+                        e.home_ws = h;
+                    }
+                }
+            }
+        }
     }
     return true;
 }

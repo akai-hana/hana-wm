@@ -590,20 +590,15 @@ pub fn run() void {
     const signal_fd: std.posix.fd_t = signals.readFd();
 
     // Fixed slots first (x_fd, signal_fd) so the fd_xcb/fd_signal indices stay
-    // valid, then one slot per in-flight spawn pipe. The spawn count changes as
-    // commands come and go, so the set is a slice rebuilt each round rather
-    // than a fixed array: this is the "dynamic fd count" the item warns about,
-    // and it is bounded by spawn.max_read_fds.
+    // valid, then one slot per in-flight spawn pipe. The two fixed entries are
+    // set once; the spawn slots are rebuilt each round from spawn.readFds,
+    // because the set of in-flight spawn pipes changes as commands come and go
+    // (a fixed set built at boot never saw post-boot pipes, and the
+    // spawn_ready branch below could never fire for them).
     var poll_buf: [2 + spawn.max_read_fds]std.posix.pollfd = undefined;
     var spawn_fds: [spawn.max_read_fds]std.posix.fd_t = undefined;
     poll_buf[fd_xcb] = .{ .fd = x_fd, .events = std.posix.POLL.IN, .revents = 0 };
     poll_buf[fd_signal] = .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 };
-    const n_spawn: usize = blk: {
-        const rds = spawn.readFds(&spawn_fds);
-        for (rds, 2..) |fd, i| poll_buf[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
-        break :blk rds.len;
-    };
-    const fds: []std.posix.pollfd = poll_buf[0 .. 2 + n_spawn];
 
     // Core owns the timer list; the surfaces hook is one entry in it (see
     // timers.Timers). Built once, outside the loop, because the source set
@@ -616,6 +611,11 @@ pub fn run() void {
     const loop_timers: timers.Timers = .{ .sources = source_buf[0..n_sources] };
 
     while (lifecycle.running.load(.acquire)) {
+        // Rebuild the poll set each round so post-boot spawn pipes join it.
+        const rds = spawn.readFds(&spawn_fds);
+        for (rds, 2..) |fd, i| poll_buf[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+        const fds: []std.posix.pollfd = poll_buf[0 .. 2 + rds.len];
+
         // No built-in deadline: with no timer sources the loop blocks until
         // an X event or signal arrives. Timer sources today are exclusively a
         // bar concern (clock segment, prompt cursor blink, carousel marquee),

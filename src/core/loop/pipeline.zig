@@ -180,14 +180,12 @@ pub inline fn dragTick(win: model_mod.WindowId) void {
 /// point, dispatched through the active layout module's preReconcile hook
 /// (the scroll addon registers snap-right-on-growth + clamp; a layout that
 /// provides no hook has no pre-reconcile duty).
-/// Three call sites, three distinct entry points -- not one call duplicated.
-///
-/// Also noted: these have been read as a redundant repeat of the same call.
-/// They are in prepare(), the duty-taking grab helper, and the fullscreen
-/// enter path, and each is a separate way into a server grab, so each has to
-/// settle the pre-reconcile duties first. The consolidation this doc comment
-/// above describes already happened once (four sites, each pairing this with
-/// its own ctx() call); what is left is the minimum.
+/// Single choke point for the pre-reconcile duties. It used to live in three
+/// places at once (prepare(), withServerGrab's grabScoped, and the fullscreen-
+/// enter path's explicit call), and the fullscreen enter path therefore ran it
+/// TWICE per op: once explicitly and once again via withServerGrab->grabScoped
+/// ->prepare. The duties now live in exactly one place -- prepare() -- and every
+/// entry point reaches it through that one call.
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
     // Internal choke point: touches the private `instance` directly (not via
@@ -424,7 +422,6 @@ pub inline fn reconcileGrabFocus(
 ) void {
     // The duty is only ever invoked on the `.before` leg (see `call` below).
     std.debug.assert(!(order == .after and duty != null));
-    preReconcileDuties();
     withServerGrab(struct {
         o: reconcile.Opts,
         t: focus.FocusTransition,
@@ -445,12 +442,13 @@ pub inline fn reconcileGrabFocus(
 /// focus-only changes where geometry/stacking cannot differ (hover focus).
 /// Borders repaint via the per-batch sweep on the commit's focus bump.
 pub inline fn focusOnlyCommit(t: focus.FocusTransition) void {
-    withServerGrab(struct {
-        t: focus.FocusTransition,
-        fn call(self: @This(), _: *reconcile.Ctx) void {
-            focus.applyPendingFocus(self.t);
-        }
-    }{ .t = t });
+    // grabOnly, not grabScoped/withServerGrab: this path never reconciles, so
+    // building a ctx (and running the model-mutating preReconcileDuties) would
+    // leave the model and the server disagreeing -- the exact hazard
+    // ScopedGrab.reconcileNow exists to prevent.
+    const g = grabOnly();
+    defer g.deinit();
+    focus.applyPendingFocus(t);
 }
 
 /// Fullscreen transition classification for the atomic grab path (the fn
@@ -478,7 +476,6 @@ pub inline fn reconcileUnderGrabNowFullscreen(
     prev_fs_win: ?model_mod.WindowId,
     kind: FullscreenKind,
 ) void {
-    preReconcileDuties();
     withServerGrab(struct {
         o: reconcile.Opts,
         t: focus.FocusTransition,

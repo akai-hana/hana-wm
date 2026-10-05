@@ -33,15 +33,18 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
         }
 
         /// Slot holding `id`, or null when absent. Stops at the first empty
-        /// slot (tombstones are stepped over).
+        /// slot (tombstones are stepped over). Bounded by `slots` probes so it
+        /// total-returns even if the always-one-empty-slot invariant is lost.
         fn find(self: *const Self, id: u32) ?usize {
             var i = home(id);
-            while (true) {
+            var probes: usize = 0;
+            while (probes < slots) : (probes += 1) {
                 const k = self.keys[i];
                 if (k == empty) return null;
                 if (k == id) return i;
                 i = (i + 1) & slot_mask;
             }
+            return null;
         }
 
         pub fn get(self: *const Self, id: u32) ?V {
@@ -69,7 +72,8 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
 
             var i = home(id);
             var first_tomb: ?usize = null;
-            while (true) {
+            var probes: usize = 0;
+            while (probes < slots) : (probes += 1) {
                 const k = self.keys[i];
                 if (k == empty) {
                     const slot = first_tomb orelse i;
@@ -77,11 +81,21 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
                     self.keys[slot] = id;
                     self.vals[slot] = value;
                     self.len += 1;
+                    // The insert may have consumed the last empty slot while a
+                    // tombstone survived: then every slot is live-or-tomb and
+                    // the next find/put spins forever. Rehash to drop the
+                    // tombstones and guarantee an empty slot remains.
+                    if (self.len + self.tombstones == slots) self.rehash();
                     return true;
                 }
                 if (k == tomb and first_tomb == null) first_tomb = i;
                 i = (i + 1) & slot_mask;
             }
+            // Defensive: the always-one-empty-slot invariant (restored by the
+            // pre-insert rehash and the post-insert rehash above) guarantees
+            // the probe hits an open slot, so this is unreachable in a kept-
+            // invariant table. Report full rather than spin.
+            return false;
         }
 
         pub fn remove(self: *Self, id: u32) bool {
@@ -152,7 +166,8 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
             for (old_keys, old_vals) |k, v| {
                 if (k == empty or k == tomb) continue;
                 var i = home(k);
-                while (self.keys[i] != empty) i = (i + 1) & slot_mask;
+                var probes: usize = 0;
+                while (self.keys[i] != empty and probes < slots) : (probes += 1) i = (i + 1) & slot_mask;
                 self.keys[i] = k;
                 self.vals[i] = v;
                 self.len += 1;

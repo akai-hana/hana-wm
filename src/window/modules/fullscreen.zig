@@ -180,7 +180,14 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
 /// the entry that cannot turn a demote into a fullscreen entry.
 pub fn releaseCovering(m: *model.Model, win: model.WindowId) void {
     const e = m.store.getPtr(win) orelse return;
-    e.presence = .present;
+    // Preserve a parked ghost's presence: a minimized covering window holds its
+    // covering intent while `.parked` (the ghost semantics), and clearing that
+    // intent must NOT resurrect it to `.present` -- minimize's record table
+    // still claims it, so a `.present` ghost is an orphaned window that
+    // reconcile keeps parked but nothing else bookkeeping matches. Demoting a
+    // `.covering` (present) window drops it to `.present`; a minimized ghost
+    // stays `.parked` with only its intent released.
+    e.presence = if (e.presence == .parked) .parked else .present;
     e.covering_ws = null; // release the core covering intent
 }
 

@@ -251,7 +251,11 @@ pub const Master = struct {
         if (self.switch_numid == 0) return null;
         var values: [128]c_long = undefined;
         if (!readElem(self.fd, self.switch_numid, &values)) return null;
-        return values[0] != 0;
+        // ALSA Playback Switch: 1 = on (unmuted), 0 = off (muted). The
+        // amixer rung treats "[off]" as muted on the same hardware, so a
+        // 0 element must report MUTED -- the previous `values[0] != 0` had
+        // the semantics inverted (a right-click unmuted a muted sink).
+        return values[0] == 0;
     }
 
     /// Applies a mute state to the switch control. False when the card
@@ -260,7 +264,7 @@ pub const Master = struct {
     /// the native rungs can only set). One `ELEM_WRITE` ioctl.
     pub fn setMuted(self: *const Master, muted: bool) bool {
         if (self.switch_numid == 0) return false;
-        const v: c_long = if (muted) 1 else 0;
+        const v: c_long = if (muted) 0 else 1;
         return writeElem(self.fd, self.switch_numid, &[_]c_long{v});
     }
 };
