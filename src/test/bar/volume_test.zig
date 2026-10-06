@@ -24,7 +24,7 @@
 //! native_pulse.zig's seven. All twenty were recovered the same way; a repo-wide
 //! sweep now reports zero dead inline tests.)
 
-// build-gate: seg_brightness
+// build-gate: volume
 
 const std = @import("std");
 const volume = @import("volume");
@@ -109,10 +109,10 @@ test "probeDecision: a reachability FLIP is the re-probe trigger" {
 
 test "latchedRung maps a backend to the one read it needs" {
     // A latched backend must read through its OWN rung, never the ladder's
-    // search order -- the whole point of the latch. This test used to pass the
-    // native-handle presence in so the native arms were reachable without a
-    // daemon; with those backends gone the mapping is total, so the plain
-    // wrapper covers every arm.
+    // search order -- the whole point of the latch. Latch/unlatch state is
+    // module-private and used by latchedRung, so the test's assertion only
+    // holds after clearing the (process-global) native backends via the seam.
+    volume.clearNativeBackendForTest();
     try std.testing.expectEqual(Rung.pactl, latchedRung(.pulse));
     try std.testing.expectEqual(Rung.amixer, latchedRung(.alsa));
     try std.testing.expectEqual(Rung.none, latchedRung(.unknown));

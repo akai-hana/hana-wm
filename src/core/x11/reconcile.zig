@@ -31,8 +31,9 @@
 //! replaying what the server already has.
 //!
 //! The SENT LEDGER is a WRITE-ONLY record of what was actually sent
-//! ({rect, has_rect, parked, bw, pixel} per window; a park flips `parked` and
-//! preserves rect/has_rect). Exactly four reads of it are behavioral contract:
+//! ({rect, has_rect, parked, parked_dirty, bw, pixel} per window; a park
+//! flips `parked` and preserves rect/has_rect). Exactly five reads of it are
+//! behavioral contract:
 //!   0. OFF-WORKSPACE FAST PATH: reads `parked` to elide windows provably
 //!      already parked (no recompute, no park resend, never a fallback
 //!      winner) -- skipped otherwise by the full path below.
@@ -42,9 +43,13 @@
 //!   2. Winner-raise derivation: rides .above ONLY when geometry moved,
 //!      when it unparked, or under force_restack, derived by comparing the
 //!      new rect against the ledger and reading its parked flag.
-//!   3. Floating-detach / title prefetch (actions.lastRectFor,
-//!      ledger.truthRect): the live rect as the new floating base, null while
-//!      parked.
+//!   3. Floating-detach / title prefetch (ledger.lastRectFor,
+//!      reconcile.truthRect): the live rect as the new floating base, null
+//!      while parked.
+//!   4. Parked drift: `parked_dirty` (set when the client moved a parked
+//!      window behind our back) forces a recompute/re-park instead of the
+//!      elision -- two reads, the fast-path `continue` and the park send.
+//!
 
 const std = @import("std");
 const build_options = @import("build_options");

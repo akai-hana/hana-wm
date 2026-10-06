@@ -287,8 +287,9 @@ pub fn readFd() std.posix.fd_t {
     return signal_pipe[pipe_read];
 }
 
-// Dispatches a single pending signal (a byte value from the pipe, one per
-// set bit in the pending-signals bitmap).
+// Dispatches one signal from the pending-signals bitmap. The self-pipe byte
+// is only a wake token; the signal number comes from the bitmap, not the
+// byte.
 fn dispatchSignal(pending_sig: u8) void {
     switch (@as(std.posix.SIG, @enumFromInt(pending_sig))) {
         .HUP => lifecycle.reload(),

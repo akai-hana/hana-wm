@@ -12,20 +12,21 @@ const testing = std.testing;
 const masks = @import("masks");
 
 test "binding mask is exactly the four non-lock modifiers" {
-    // mod_mask_binding must strip CapsLock/NumLock/ScrollLock (they are wired
-    // up separately via lock_modifiers grabs) while keeping every real
-    // modifier key.
+    // normalizeModifiers is the live producer of the binding mask (the u16
+    // `mod_mask_binding` const it replaced is gone); it must keep every real
+    // modifier key and drop CapsLock/NumLock/ScrollLock, which are wired up
+    // separately via lock_modifiers grabs.
+    const binding = masks.toMask(masks.normalizeModifiers(0xffff));
     try testing.expect(masks.mod_shift != 0);
     try testing.expect(masks.mod_control != 0);
     try testing.expect(masks.mod_alt != 0);
     try testing.expect(masks.mod_super != 0);
+    // The equality already excludes every lock bit: the right side is the four
+    // binding modifiers only.
     try testing.expectEqual(
         masks.mod_shift | masks.mod_control | masks.mod_alt | masks.mod_super,
-        masks.mod_mask_binding,
+        binding,
     );
-    try testing.expect(masks.mod_mask_binding & masks.mod_capslock == 0);
-    try testing.expect(masks.mod_mask_binding & masks.mod_numlock == 0);
-    try testing.expect(masks.mod_mask_binding & masks.mod_scrolllock == 0);
 }
 
 test "lock modifiers: all 8 subsets, folded in 0/singles/pairs/triple order" {

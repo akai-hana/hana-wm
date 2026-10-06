@@ -48,10 +48,15 @@ fn pipelineModel() *model.Model {
     // markModelReady is allowed from .uninit here precisely because the test
     // stands in for the whole boot sequence; the point is that the fixture and
     // production now read the SAME readiness answer.
+    //
+    // pipeline.init() itself is deliberately NOT called here: it expects a
+    // live X connection and these tests are headless; the tracking facade only
+    // reads the MODEL, never the X sink g_sink, so the undefined `var
+    // instance` is never observed -- the very next line overwrites it through
+    // the same mutation gate.
     core.markModelReady();
     const m = pipeline.mut(&gate);
-    m.* = helpers.makeModel();
-    helpers.testReset();
+    m.* = helpers.makeModel(); // makeModel already re-arms the module stores
     ledger.init();
     tracking.init();
     return m;

@@ -285,8 +285,15 @@ fn cardName(fd: c_int) ?[]const u8 {
     var info: CardInfo = std.mem.zeroes(CardInfo);
     if (devctl(fd, CARD_INFO, &info) != 0) return null;
     const name = info.name[0..];
-    const end = std.mem.indexOfScalar(u8, name, 0) orelse name.len;
-    return name[0..end];
+    return clipToFirstNul(name);
+}
+
+/// Clips at the first NUL byte; returns the whole buffer when there is no
+/// terminator, so a full field degrades to its own length rather than
+/// reading past it.
+pub fn clipToFirstNul(buf: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+    return buf[0..end];
 }
 
 fn cardIsShim(fd: c_int) bool {

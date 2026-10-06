@@ -611,7 +611,21 @@ fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
 // min_dim floors and clamps actually engage instead of being no-ops).
 test "14.9: every layout satisfies the placement invariants at every size" {
     if (!build_options.has_tiling) return error.SkipZigTest;
-    const areas = [_]model.Rect{ helpers.std_wa, .{ .x = 0, .y = 0, .width = 120, .height = 120 } };
+    // The workarea injections for the invariant sweep, extended beyond the
+    // origin case: a side-claimed origin (`x=40, y=50`) catches the missing
+    // wa.x placements, and the 120x120 hostile keep the clamps turning on.
+    const areas = [_]model.Rect{
+        helpers.std_wa,
+        .{ .x = 0, .y = 0, .width = 120, .height = 120 },
+        .{ .x = 40, .y = 50, .width = 800, .height = 600 },
+    };
+    // The two environments the layout modules have to survive: the standard
+    // gap-heavy one, and a border-dominated one (5px border > 2px gap) that
+    // exercises the fibonacci fence at 2*border >= gap.
+    const envs = [_]tiling.Env{
+        helpers.std_env,
+        .{ .margins = .{ .gap = 2, .border = 5 }, .min_dim = 50 },
+    };
     var kinds: usize = 0;
     for (contract.tiling_mods, 0..) |lm, kind| {
         if (lm.compute == null) continue;
@@ -623,32 +637,38 @@ test "14.9: every layout satisfies the placement invariants at every size" {
                 for (wins[0..n], 0..) |*w, i| w.* = @intCast(100 + i);
                 var fx: Fixture = undefined;
                 for (areas) |wa| {
-                    fx.initAt(wins[0..n], wa) catch |err| return err;
-                    // The variant lives in the model (View.params is a const
-                    // handle to it), so seed it before building the View.
-                    fx.m.ws[0].params.variant_idx = @intCast(vi);
-                    var v = fx.view();
-                    v.env = helpers.std_env;
-                    const out = computeOf(@intCast(kind), v);
-                    assertInvariants(&out, v, wa) catch |err| {
-                        // Dump both sequences: an order mismatch is only
-                        // actionable next to the two lists that disagree.
-                        std.debug.print("14.9 FAIL {s} variant={d} n={d} wa={d}x{d}: {s}\n", .{
-                            lm.name, vi, n, wa.width, wa.height, @errorName(err),
-                        });
-                        std.debug.print("  order   :", .{});
-                        for (v.order) |w| std.debug.print(" {d}", .{w});
-                        std.debug.print("\n  emitted :", .{});
-                        for (out.constSlice()) |p| std.debug.print(" {d}", .{p.win});
-                        std.debug.print("\n  rects   :", .{});
-                        for (out.constSlice()) |p|
-                            std.debug.print(" ({d},{d} {d}x{d}{s})", .{
-                                p.rect.x,                         p.rect.y, p.rect.width, p.rect.height,
-                                if (p.visible) "" else " hidden",
+                    for (envs) |env| {
+                        fx.initAt(wins[0..n], wa) catch |err| return err;
+                        // The variant lives in the model (View.params is a const
+                        // handle to it), so seed it before building the View.
+                        fx.m.ws[0].params.variant_idx = @intCast(vi);
+                        // A primary_count that can exceed the master pane's fit
+                        // at the sweep sizes, so the master-column cap actually
+                        // fires (n up to 12).
+                        fx.m.ws[0].params.primary_count = 12;
+                        var v = fx.view();
+                        v.env = env;
+                        const out = computeOf(@intCast(kind), v);
+                        assertInvariants(&out, v, wa) catch |err| {
+                            // Dump both sequences: an order mismatch is only
+                            // actionable next to the two lists that disagree.
+                            std.debug.print("14.9 FAIL {s} variant={d} n={d} wa=({d},{d}) {d}x{d} env=(gap={d},border={d},min={d}): {s}\n", .{
+                                lm.name, vi, n, wa.x, wa.y, wa.width, wa.height, env.margins.gap, env.margins.border, env.min_dim, @errorName(err),
                             });
-                        std.debug.print("\n", .{});
-                        return err;
-                    };
+                            std.debug.print("  order   :", .{});
+                            for (v.order) |w| std.debug.print(" {d}", .{w});
+                            std.debug.print("\n  emitted :", .{});
+                            for (out.constSlice()) |p| std.debug.print(" {d}", .{p.win});
+                            std.debug.print("\n  rects   :", .{});
+                            for (out.constSlice()) |p|
+                                std.debug.print(" ({d},{d} {d}x{d}{s})", .{
+                                    p.rect.x,                         p.rect.y, p.rect.width, p.rect.height,
+                                    if (p.visible) "" else " hidden",
+                                });
+                            std.debug.print("\n", .{});
+                            return err;
+                        };
+                    }
                 }
             }
         }

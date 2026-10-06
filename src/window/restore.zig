@@ -8,7 +8,6 @@
 //! and focus against each other. Pure subsystem ordering; no X requests, config,
 //! or dispatch of its own.
 
-const std = @import("std");
 const core = @import("core");
 const log = @import("log");
 const persist = @import("persist");

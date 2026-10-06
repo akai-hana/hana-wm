@@ -11,8 +11,6 @@
 //! Delegates to keybind.zig for resolution, surfaces for chrome routing,
 //! dispatch/actions for tiling/floating work.
 
-const std = @import("std");
-
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
@@ -114,8 +112,12 @@ pub fn buildKeybinds(keybindings: []types.Keybind) void {
     // keyboard, and `grabKeybindings` needs it on every regrab (including
     // reloads that did not change the bindings). Rebuilt here so a keyboard
     // change and a binding change take the same path.
-    resolved_binds = alloc.realloc(resolved_binds, keybindings.len) catch {
-        resolved_binds = &.{};
+    resolved_binds = alloc.realloc(resolved_binds, keybindings.len) catch |err| {
+        // Do NOT clobber resolved_binds on failure: the old allocation is now
+        // the only copy, and overwriting it here leaked it and silently
+        // emptied the compiled list -> the next keypress grabbed nothing until
+        // a keymap event. Keep the old set and tell the user.
+        log.warn("buildKeybinds: realloc for {} bindings failed ({}); keeping the old set", .{ keybindings.len, err });
         return;
     };
     resolved_binds = keybind.resolveKeycodes(keybindings, state, resolved_binds);

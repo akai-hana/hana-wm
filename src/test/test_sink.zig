@@ -50,6 +50,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
         park: usize = 0,
         configure: usize = 0,
         pixel: usize = 0,
+        stack: usize = 0,
         total: usize = 0,
         ops: std.ArrayList(TestOp) = .empty,
 
@@ -91,9 +92,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
 
         fn stackShim(self_ptr: *anyopaque, win: model.WindowId, s: sinkmod.Stack) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            if (mode == .record) {
-                self.ops.append(std.testing.allocator, .{ .stack = .{ .win = win, .s = s } }) catch unreachable;
-            }
+            self.bump(.stack, .{ .stack = .{ .win = win, .s = s } });
         }
 
         fn ewmhShim(
@@ -269,6 +268,18 @@ pub fn TestSink(comptime mode: SinkMode) type {
             const op = self.ops.items[i];
             try std.testing.expect(op == .map);
             try std.testing.expectEqual(win, op.map);
+        }
+
+        /// Asserts op `i` is a bare restack (`stack_only`) carrying `s`. The
+        /// other fixtures previously reasoned about restack through
+        /// `configure.stack`; this is the direct assertion on the op that
+        /// `reconcile/pipeline.zig` route around 14.8.
+        pub fn expectStackOp(self: *const Self, i: usize, win: model.WindowId, s: sinkmod.Stack) !void {
+            comptime if (mode != .record) @compileError("expectStackOp requires record mode");
+            const op = self.ops.items[i];
+            try std.testing.expect(op == .stack);
+            try std.testing.expectEqual(win, op.stack.win);
+            try std.testing.expectEqual(s, op.stack.s);
         }
 
         /// Asserts op `i` is a `set_state_atom` fullscreen transition. (28.1)

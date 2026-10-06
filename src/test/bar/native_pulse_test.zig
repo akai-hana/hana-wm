@@ -13,11 +13,6 @@
 const std = @import("std");
 const native_pulse = @import("native_pulse");
 
-test {
-    _ = native_pulse;
-    _ = std;
-}
-
 // ---------------------------------------------------------------------------
 // Recovered dead tests, formerly INLINE in native_pulse.zig. A canary
 // `expectEqual(1, 2)` appended to that file does not fail, so the import in

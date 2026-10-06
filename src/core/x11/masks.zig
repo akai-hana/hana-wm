@@ -13,11 +13,6 @@ pub const mod_numlock: u16 = xcb.XCB_MOD_MASK_2;
 pub const mod_scrolllock: u16 = xcb.XCB_MOD_MASK_3;
 pub const mod_super: u16 = xcb.XCB_MOD_MASK_4;
 
-// Mask applied before comparing a received modifier state against a keybinding.
-// Excludes CapsLock and NumLock so bindings fire regardless of lock-key state;
-// those are handled separately via lock_modifiers grabs.
-pub const mod_mask_binding: u16 = mod_shift | mod_control | mod_alt | mod_super;
-
 // Modifier keysym band. X11 reserves XK_Shift_L..XK_Hyper_R (0xFFE1..0xFFEE)
 // for modifier keys; the check widens that band by one key on each side (none
 // of which are valid editing/navigation keys) so bare modifier presses can be
@@ -113,12 +108,6 @@ pub const EventMasks = struct {
         xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY; // DWM: StructureNotifyMask
 };
 
-/// Strips lock-key and pointer-button bits from a raw event modifier state,
-/// leaving only the modifier bits the WM uses for keybinding matching.
-///
-/// A mask operation, so it lives with the masks it filters: the input layer
-/// is the only caller and needed it from a general-purpose utility module
-/// before the module was dissolved.
 /// The four modifiers a binding can be expressed in, as a 4-bit value.
 ///
 /// `normalizeModifiers` used to hand back a raw `u16` that callers passed
@@ -143,7 +132,12 @@ pub const BindingMods = packed struct(u4) {
     }
 };
 
-/// Narrows a raw X modifier state to the four binding modifiers.
+/// Strips lock-key and pointer-button bits from a raw event modifier state,
+/// leaving only the modifier bits the WM uses for keybinding matching.
+///
+/// A mask operation, so it lives with the masks it filters: the input layer
+/// is the only caller and needed it from a general-purpose utility module
+/// before the module was dissolved.
 pub inline fn normalizeModifiers(state: u16) BindingMods {
     return .{
         .shift = state & mod_shift != 0,

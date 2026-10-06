@@ -41,9 +41,13 @@ test "WorkspaceId.isValid agrees with the free function" {
     try testing.expectEqual(!ids.isValidWorkspaceIndex(oob.index), !oob.isValid());
 }
 
-test "fromIndexChecked is the loud constructor for internal callers" {
+test "fromIndexChecked returns the index on the in-range path" {
     try testing.expectEqual(
         @as(u8, 5),
         ids.WorkspaceId.fromIndexChecked(5).index,
     );
+    // Its OTHER behavior -- panicking on an out-of-range index -- is
+    // std.debug.assert and has no in-process pin (std.testing has no
+    // expectPanic in 0.16; an out-of-range call would abort the test
+    // binary). Panic-only contract: verified by construction, not assertion.
 }

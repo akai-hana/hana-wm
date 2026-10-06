@@ -11,7 +11,7 @@ command -v git >/dev/null || { echo "Refusing: git is not installed." >&2; exit 
 command -v git-rewrite-commits >/dev/null || { echo "Refusing: git-rewrite-commits is not on PATH." >&2; exit 1; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Refusing: not inside a git repository." >&2; exit 1; }
 
-[ "$1" = "--yes-i-know" ] || { echo "Refusing: pass --yes-i-know to run this destructive force-push loop." >&2; exit 1; }
+[ "${1:-}" = "--yes-i-know" ] || { echo "Refusing: pass --yes-i-know to run this destructive force-push loop." >&2; exit 1; }
 
 # Run one rewrite pass and report ONLY the tool's exit status. `yes` is left
 # feeding the pipe so the tool can prompt as long as it likes; when the tool
@@ -19,10 +19,19 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Refusing: not ins
 # that would mask a genuine failure, so the pipeline's status is discarded
 # and ${PIPESTATUS[1]} (the tool's own exit code) is returned instead.
 run_rewrite() {
+    local rc
+    # Turn off -e/-pipefail just for the pipeline: `yes` dies via SIGPIPE once
+    # the tool stops reading (expected), and pipefail would blame the whole
+    # pipeline on that SIGPIPE rather than the tool's own exit. Capture the
+    # tool's code from THIS pipeline's PIPESTATUS before any other simple
+    # command can reset it.
+    set +e +o pipefail
     yes y | git-rewrite-commits --provider ollama --model hf.co/noctrex/Qwopus3.5-9B-Coder-MTP \
         --template "feat\(scope\): message" \
-        --max-commits "$1" || true
-    return "${PIPESTATUS[1]}"
+        --max-commits "$1"
+    rc="${PIPESTATUS[1]}"
+    set -e -o pipefail
+    return "$rc"
 }
 
 max=250

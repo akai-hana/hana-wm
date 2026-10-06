@@ -68,18 +68,34 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         // over its neighbor; floor at 1 so a degenerate slot stays positive.
         const content_w: u16 = @intCast(@max(avail, 1));
 
-        const right: i32 = x + avail + border2;
+        // The visibility cutoff uses the EMITTED width, not the stale slot
+        // width: a boundary slot is parked using exactly what would be on
+        // screen, so a slot that clipped to empty is caught off-viewport here
+        // instead of mapping a sliver of window past the edge.
+        const right = x + @as(i32, content_w);
 
         // Slots entirely off-viewport are parked by the algorithm itself
-        // (visibility modeled; sync owns the actual parking geometry).
-        // The computed x can exceed i16 range, hence this check BEFORE casting.
+        // (visibility modeled; sync owns the actual parking geometry). The
+        // computed x can exceed i16 range, hence this check BEFORE casting.
         if (x >= sw_i32 or right <= 0) {
             tiling.emitHidden(out, win);
             continue;
         }
-        // slot_left (and so x) is relative to the workarea's left edge: emit at
-        // the workarea's position, not the screen's left edge.
-        tiling.emitRect(v, out, win, x + v.workarea.x, win_y, content_w, content_h);
+        // Clip the emitted rect against the screen (workarea-relative) bounds:
+        // a slot straddling an edge emits only its visible slice rather than a
+        // straddling rect whose one side maps an offscreen sliver.
+        var clipped_x = x;
+        var clipped_w: i32 = @intCast(content_w);
+        if (clipped_x < 0) {
+            clipped_w += clipped_x; // the off-left part was off-window
+            clipped_x = 0;
+        }
+        if (clipped_x + clipped_w > sw_i32) clipped_w = sw_i32 - clipped_x;
+        if (clipped_w <= 0) {
+            tiling.emitHidden(out, win);
+            continue;
+        }
+        tiling.emitRect(v, out, win, clipped_x + v.workarea.x, win_y, @intCast(clipped_w), content_h);
     }
 }
 

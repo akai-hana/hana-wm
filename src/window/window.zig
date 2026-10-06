@@ -35,7 +35,6 @@ const contract = @import("contract");
 const model_mod = @import("model");
 
 const atoms = @import("atoms");
-const bounded = @import("bounded");
 const idmap = @import("idmap");
 const requests = @import("requests");
 const time = @import("time");

@@ -43,9 +43,9 @@ test "a multi-byte tail never reads as success" {
 }
 
 test "the fixtures above use the real wire tag" {
-    // Guards the byte-level cases against a silent protocol change: the child
-    // writes `tag_failed`, so the "real tag_failed byte" case must use that
-    // same constant rather than a hand-typed 1 that a tag change would
-    // decouple while leaving every assertion green.
-    try testing.expect(spawn.conversationFailed(&[_]u8{spawn.tag_failed}));
+    // Guards the byte-level cases above against a silent protocol change: the
+    // child writes `tag_failed`, and the hand-typed `1` in them is only failure
+    // BECAUSE that is the tag byte. Pin the value itself -- the predicate call
+    // was byte-identical to the case above and proved nothing new.
+    try testing.expectEqual(@as(u8, 1), spawn.tag_failed);
 }

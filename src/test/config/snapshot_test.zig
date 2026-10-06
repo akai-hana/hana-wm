@@ -44,6 +44,12 @@ pub const Sandbox = struct {
     /// single TmpDir drop instead of two recursive deletes that can each
     /// half-succeed.
     tmp: std.testing.TmpDir,
+    /// The env values displaced by redirectEnv, restored at deinit: a sandbox
+    /// that leaked its XDG overrides into the next test would have every later
+    /// env-sensitive path (configHome, discovery) run against a deleted stack.
+    /// null = variable was unset before redirectEnv (restored as: unset).
+    prior_cfg_home: ?[:0]u8 = null,
+    prior_runtime_dir: ?[:0]u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, name: []const u8) !Sandbox {
         // (28.5) A per-sandbox tmpDir rather than a child of a shared
@@ -64,7 +70,29 @@ pub const Sandbox = struct {
         return .{ .root = root, .runtime = runtime, .tmp = tmp };
     }
 
-    pub fn deinit(self: Sandbox, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Sandbox, alloc: std.mem.Allocator) void {
+        // Restore the environment that redirectEnv displaced, before dropping
+        // the tree: the next test (or a later X-gated one in the same binary)
+        // would otherwise read the sandbox's stacked-redirected XDG paths
+        // rather than the real ones.
+        if (self.prior_cfg_home) |v| {
+            if (v.len > 0) {
+                setEnv("XDG_CONFIG_HOME", v);
+                alloc.free(v);
+            } else {
+                _ = libc.unsetenv("XDG_CONFIG_HOME".ptr);
+                alloc.free(v);
+            }
+        }
+        if (self.prior_runtime_dir) |v| {
+            if (v.len > 0) {
+                setEnv("XDG_RUNTIME_DIR", v);
+                alloc.free(v);
+            } else {
+                _ = libc.unsetenv("XDG_RUNTIME_DIR".ptr);
+                alloc.free(v);
+            }
+        }
         // (28.5) tmp.cleanup() removes the whole tree, root and runtime
         // included. The old deleteTreeAbs pair removed each independently and
         // ignored failures, so a partially-failed delete silently left files
@@ -76,11 +104,23 @@ pub const Sandbox = struct {
     }
 
     /// Points XDG_CONFIG_HOME and XDG_RUNTIME_DIR at this sandbox. The
-    /// returned slices are the caller's to free.
-    pub fn redirectEnv(self: Sandbox, alloc: std.mem.Allocator) !struct { [:0]u8, [:0]u8 } {
+    /// returned slices are the caller's to free. The caller's prior env
+    /// values are remembered on the receiver for `deinit` to restore.
+    pub fn redirectEnv(self: *Sandbox, alloc: std.mem.Allocator) !struct { [:0]u8, [:0]u8 } {
+        // Snapshot the current env values before overwriting them: an empty
+        // slice records "variable was unset before", so deinit can unsetenv.
+        self.prior_cfg_home = if (std.c.getenv("XDG_CONFIG_HOME")) |v|
+            try alloc.dupeZ(u8, std.mem.span(v))
+        else
+            try alloc.dupeZ(u8, "");
+        self.prior_runtime_dir = if (std.c.getenv("XDG_RUNTIME_DIR")) |v|
+            try alloc.dupeZ(u8, std.mem.span(v))
+        else
+            try alloc.dupeZ(u8, "");
         const cfg_home = try alloc.dupeZ(u8, self.root);
         errdefer alloc.free(cfg_home);
         const runtime = try alloc.dupeZ(u8, self.runtime);
+        errdefer alloc.free(runtime);
         setEnv("XDG_CONFIG_HOME", cfg_home);
         setEnv("XDG_RUNTIME_DIR", runtime);
         return .{ cfg_home, runtime };
@@ -140,7 +180,7 @@ fn freeTree(alloc: std.mem.Allocator, files: [][]u8) void {
 
 test "refreshSnapshot freezes only the config files the load consumed" {
     const alloc = testing.allocator;
-    const box = try Sandbox.init(alloc, "only");
+    var box = try Sandbox.init(alloc, "only");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);
@@ -203,7 +243,7 @@ test "refreshSnapshot freezes only the config files the load consumed" {
 
 test "an unchanged reload rewrites nothing, and an edit is picked up" {
     const alloc = testing.allocator;
-    const box = try Sandbox.init(alloc, "unchanged");
+    var box = try Sandbox.init(alloc, "unchanged");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);
@@ -263,7 +303,7 @@ test "an unchanged reload rewrites nothing, and an edit is picked up" {
 
 test "a renamed config file is not left behind in the snapshot" {
     const alloc = testing.allocator;
-    const box = try Sandbox.init(alloc, "renamed");
+    var box = try Sandbox.init(alloc, "renamed");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);
@@ -299,7 +339,7 @@ test "a renamed config file is not left behind in the snapshot" {
 
 test "a single-file config source still snapshots as config.toml" {
     const alloc = testing.allocator;
-    const box = try Sandbox.init(alloc, "single");
+    var box = try Sandbox.init(alloc, "single");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);
