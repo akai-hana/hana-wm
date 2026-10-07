@@ -189,18 +189,17 @@ pub fn viewportStep(dir: i32) void {
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
 /// window's slot is fully on-usable area. Pure model/param mutation (no grab, no
-/// reconcile); returns whether the offset or tiled count actually changed.
-/// When the focused window is already fully on-screen (the common case during
-/// focus cycling) both are unchanged and the caller can skip all geometry
-/// work. The focus-cycle path runs this as a duty INSIDE the focus transition's
-/// grab, so a Mod+k/Mod+j that scrolls the viewport still lands focus + geometry
-/// in one grab+reconcile rather than two.
-fn snapViewportParamsToFocused() bool {
-    const vp = activeViewport() orelse return false;
+/// reconcile). When the focused window is already fully on-screen (the common
+/// case during focus cycling) nothing changes. The focus-cycle path runs this
+/// as a duty INSIDE the focus transition's grab, so a Mod+k/Mod+j that scrolls
+/// the viewport still lands focus + geometry in one grab+reconcile rather than
+/// two.
+fn snapViewportParamsToFocused() void {
+    const vp = activeViewport() orelse return;
     const m = vp.m;
     const p = vp.p;
     const sc = vp.sc;
-    const win = m.focused orelse return false;
+    const win = m.focused orelse return;
 
     var idx: ?usize = null;
     var n: usize = 0;
@@ -210,30 +209,25 @@ fn snapViewportParamsToFocused() bool {
         if (w == win) idx = n;
         n += 1;
     }
-    const i = idx orelse return false;
+    const i = idx orelse return;
 
     const wa = usable_area.workArea(core.getState().screen);
     const i64_slot_w: i64 = sc.slot_w;
     const slot_left = @as(i64, @intCast(i)) * i64_slot_w - p.viewport_offset;
     const slot_right = slot_left + i64_slot_w;
-    const old_offset = p.viewport_offset;
     const snapped = if (slot_left < 0)
         @as(i64, @intCast(i)) * i64_slot_w
     else if (slot_right > wa.width)
         @as(i64, @intCast(i)) * i64_slot_w + i64_slot_w - @as(i64, wa.width)
     else
         p.viewport_offset;
-    const old_count = p.viewport_prev_count;
     commitViewport(p, sc, snapped, n);
-    return p.viewport_offset != old_offset or p.viewport_prev_count != old_count;
 }
 
 /// Focus-cycle duty (see focus.grabFocusWithDuty): recompute the viewport for
 /// the freshly focused window and let the enclosing reconcile pick it up.
-/// Signature is void to match the pipeline duty pointer; the change signal is
-/// not needed because the transition's reconcile always runs.
 pub fn snapViewportFocusedDuty() void {
-    _ = snapViewportParamsToFocused();
+    snapViewportParamsToFocused();
 }
 
 const ViewportContext = struct {

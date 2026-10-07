@@ -135,12 +135,3 @@ pub fn inbound(t: u8, win: u32) void {
 pub fn outbound(win: u32, what: []const u8, arg: []const u8) void {
     log.info("[xtrace] -> {s} win=0x{x} {s}", .{ what, win, arg });
 }
-
-/// One-shot banner so a trace run is identifiable in a mixed log.
-pub fn announce() void {
-    if (watch == null) resolve();
-    if (watch == null) return;
-    log.info("[xtrace] armed: {s}", .{
-        if (watch.?.len == 0) "*" else "explicit id list",
-    });
-}

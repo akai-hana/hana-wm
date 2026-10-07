@@ -42,7 +42,7 @@ const types = @import("types");
 /// A parsed value.
 ///
 /// Deliberately carries NO source span (16.1/16.3): the section already records
-/// the source line of every key it inserted (`Entry.line` / `lineOfKey`),
+/// the source line of every key it inserted (`Entry.line`),
 /// and that is the line a user needs -- a knob error is reported against a KEY
 /// PATH inside a section, and every diagnostic in this file reaches the section
 /// that owns the key. Putting a line/column on each of the six union variants
@@ -135,6 +135,8 @@ pub const Section = struct {
     /// below costs a comparison or two where the hashmap cost a hash -- and
     /// iteration is document order for free (the hashmap's was per-process
     /// random, which is why `orderedIterator` existed at all).
+    /// Nothing to allocate up front: the array grows as keys are inserted,
+    /// and a section is never read before parsing has finished.
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     // The section header this Section belongs to ("" for the root pairs that
     // have no header). Filled by parse() when a section is created; merged
@@ -172,18 +174,6 @@ pub const Section = struct {
             if (std.mem.eql(u8, e.key, key)) return i;
         }
         return null;
-    }
-
-    /// Nothing to allocate up front: the array grows as keys are inserted,
-    /// and a section is never read before parsing has finished.
-    pub fn init() Section {
-        return .{};
-    }
-
-    // Returns the source line `key` was first declared on in this section.
-    pub fn lineOfKey(self: *const Section, key: []const u8) ?usize {
-        const i = self.indexOf(key) orelse return null;
-        return self.entries.items[i].line;
     }
 
     // Iterates pairs in document (insertion) order; deterministic, unlike
@@ -236,7 +226,7 @@ pub const Section = struct {
         const e = &self.entries.items[i];
         if (e.value != .array) return;
         if (!e.duplicated or e.scalar_dup_warned) return;
-        const exempt = std.mem.eql(u8, self.name, "binds") or
+        const exempt = std.mem.eql(u8, self.name, types.section_binds) or
             std.mem.eql(u8, self.name, types.section_workspace_rules) or
             std.mem.eql(u8, self.name, types.section_rules) or
             (self.name.len == 0 and std.mem.eql(u8, e.key, "include")) or
@@ -304,8 +294,10 @@ fn expectedForm(err: ParseError) []const u8 {
 fn typeLabel(comptime T: type) []const u8 {
     return switch (T) {
         i64 => "a number",
+        f32 => "a number",
         bool => "a boolean",
         []const u8 => "a string",
+        []const Value => "an array",
         types.ScalableValue => "a size or percentage",
         else => "a different type",
     };
@@ -323,7 +315,7 @@ fn valueTypeLabel(val: Value) []const u8 {
 }
 
 // Iterates a section's pairs in document (insertion) order. Values are
-// looked up live from `pairs` so accumulated duplicates are seen in full.
+// read from the live entry, so accumulated duplicates are seen in full.
 // Marks each key consumed as it hands it over (see orderedIterator).
 pub const OrderedIterator = struct {
     section: *Section,
@@ -360,7 +352,7 @@ pub const Document = struct {
         sections.ensureTotalCapacity(document_sections_reserve) catch |err| log.warnOnErr(err, "document section map reserve");
         var palette = std.StringHashMap(u32).init(allocator);
         palette.ensureTotalCapacity(palette_var_names.len) catch |err| log.warnOnErr(err, "document palette reserve");
-        return .{ .sections = sections, .root = Section.init(), .palette = palette };
+        return .{ .sections = sections, .root = .{}, .palette = palette };
     }
 
     pub fn getSection(self: *Document, name: []const u8) ?*Section {
@@ -484,7 +476,7 @@ fn insertOrAccumulate(
     section: *Section,
     key: []const u8,
     value: Value,
-    line: ?usize,
+    line: usize,
 ) !void {
     if (section.indexOf(key)) |i| {
         // The entry's value is where a duplicate accumulates, so the array a
@@ -494,7 +486,7 @@ fn insertOrAccumulate(
         try accumulate(allocator, &e.value, value);
         e.duplicated = true;
     } else {
-        try section.entries.append(allocator, .{ .key = key, .value = value, .line = line orelse 0 });
+        try section.entries.append(allocator, .{ .key = key, .value = value, .line = line });
     }
 }
 
@@ -578,9 +570,6 @@ const Parser = struct {
     // report a column (`pos - line_start`). Reset whenever a newline is
     // consumed by any scanner.
     line_start: usize = 0,
-    /// Last key parsed by parseKeyValuePair, named in line-level diagnostics
-    // when a pair fails mid-parse.
-    last_key: []const u8 = "",
     /// Owning Document's had_errors flag; set whenever a line is warn-and-
     // skipped so the load can fail on broken configs.
     had_errors: *bool,
@@ -907,39 +896,36 @@ const Parser = struct {
         }
     }
 
-    // Parses one `key = value` pair, or a bare `key` (treated as `key = true`).
-    // Workspace rule entries like `Navigator` rely on the bare-key shorthand.
-    fn parseKeyValuePair(self: *Parser) ParseError!struct { []const u8, Value } {
-        self.last_key = "";
-        const key = try self.parseKey();
-        self.last_key = key;
-        self.skipWhitespace();
-
-        if (self.peek() == '=') {
-            _ = self.consume();
-            const value = try self.parseValue(false);
-            return .{ key, value };
-        }
-        return .{ key, Value{ .boolean = true } };
+    // Reports one malformed pair: warn against `key` when it parsed (so a
+    // user sees WHICH key has the bad value), warn generically when even the
+    // key failed, then skip to the next line so the document loop continues.
+    fn pairFailed(self: *Parser, err: ParseError, key: []const u8) void {
+        self.had_errors.* = true;
+        if (key.len > 0)
+            self.warnLine("invalid value for key '{s}': {s} (got {s})", .{ key, expectedForm(err), @errorName(err) })
+        else
+            self.warnLine("invalid value: {s} (got {s})", .{ expectedForm(err), @errorName(err) });
+        self.skipToNewline();
     }
 
-    // Parses `key = value` pairs (and bare `key` flags) until a blank line,
-    // comment, `;` terminator, or end of content. Duplicate keys accumulate
-    // into arrays so a repeated keybind or include runs all declarations.
     // Parses one `key = value` pair (or bare `key` flag), inserts it, and
     // consumes the trailing syntax. The document loop in `parse` re-invokes
     // this for each further pair on the following line; a malformed pair is
     // warned-and-skipped to the next line so recovery returns to that loop.
     fn parsePairs(self: *Parser, section: *Section) ParseError!void {
-        const kv = self.parseKeyValuePair() catch |err| {
-            self.had_errors.* = true;
-            if (self.last_key.len > 0)
-                self.warnLine("invalid value for key '{s}': {s} (got {s})", .{ self.last_key, expectedForm(err), @errorName(err) })
-            else
-                self.warnLine("invalid value: {s} (got {s})", .{ expectedForm(err), @errorName(err) });
-            self.skipToNewline();
+        const key = self.parseKey() catch |err| {
+            self.pairFailed(err, "");
             return;
         };
+        self.skipWhitespace();
+        var value: Value = .{ .boolean = true }; // bare `key` shorthand: `key = true`
+        if (self.peek() == '=') {
+            _ = self.consume();
+            value = self.parseValue(false) catch |err| {
+                self.pairFailed(err, key);
+                return;
+            };
+        }
 
         // Duplicate key: accumulate both values into an array rather
         // than overwriting, so a keybind can bind multiple actions:
@@ -949,21 +935,22 @@ const Parser = struct {
         //
         // parseKeybindings treats array values as sequences; scalar
         // reads of a repeated key resolve to the last declaration.
-        try insertOrAccumulate(self.allocator, section, kv[0], kv[1], self.line);
+        try insertOrAccumulate(self.allocator, section, key, value, self.line);
 
         self.skipWhitespace();
-        self.advanceAfterPair();
+        self.advanceAfterPair(key);
     }
 
     // Advances past the end of one pair: an optional ';' terminator, trailing
-    // whitespace, and any line-end comment or newline.
-    fn advanceAfterPair(self: *Parser) void {
+    // whitespace, and any line-end comment or newline. `key` names the pair
+    // for the unexpected-character diagnostic.
+    fn advanceAfterPair(self: *Parser, key: []const u8) void {
         const next = self.peek();
         if (next == ';') _ = self.consume();
         self.skipWhitespace();
         const trail = self.peek();
         if (trail != '\n' and trail != '#' and trail != null) {
-            self.skipBadLine("unexpected character after pair (key '{s}')", .{self.last_key});
+            self.skipBadLine("unexpected character after pair (key '{s}')", .{key});
             return;
         }
         self.skipLineEnd(trail);
@@ -1013,7 +1000,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []c
                 // section, consistent with the cross-file merge path.
                 current_section = existing;
             } else {
-                try doc.sections.put(section_name, Section.init());
+                try doc.sections.put(section_name, .{});
                 current_section = doc.sections.getPtr(section_name).?;
                 current_section.name = section_name;
             }

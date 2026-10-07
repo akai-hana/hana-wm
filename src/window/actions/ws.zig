@@ -9,7 +9,6 @@
 //! for core<->window).
 
 const core = @import("core");
-const constants = @import("constants");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
@@ -37,7 +36,7 @@ fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 /// call; the reconcile's diff parks/repairs geometry globally.
 pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
     const wm = providerOf(.sendToWs) orelse return;
-    if (ws_idx >= constants.max_workspaces) return;
+    if (!core.isValidWorkspaceIndex(ws_idx)) return;
 
     const m = pipeline.mut();
     const was_focused = m.focused == win;
@@ -75,7 +74,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     const add_prov = providerOf(.addToWs);
     const rem_prov = providerOf(.removeFromWs);
     if (add_prov == null and rem_prov == null) return;
-    if (ws_idx >= constants.max_workspaces) return;
+    if (!core.isValidWorkspaceIndex(ws_idx)) return;
 
     const m = pipeline.mut();
     if (!canTagChange(m, win)) return;
@@ -145,7 +144,7 @@ pub fn allViewToggle() void {
 /// produced a BadMatch that left X focus on the old workspace's window.
 pub fn switchTo(ws_idx: u8) void {
     const m = pipeline.mut();
-    if (ws_idx >= constants.max_workspaces) return;
+    if (!core.isValidWorkspaceIndex(ws_idx)) return;
     // No-op only when the view is already exactly this workspace (no all-view
     // to exit). In all-view the current index may already equal the target:
     // hitting the tag must still exit the all-view flag, returning the view to

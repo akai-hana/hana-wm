@@ -324,8 +324,6 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "pipeline_test", .x_gated = true },
         .{ .name = "visibility_test", .x_gated = true },
         .{ .name = "borders_test", .x_gated = true },
-        .{ .name = "focus_latency_test", .x_gated = false },
-        .{ .name = "tiling_latency_test", .x_gated = false },
     };
     {
         // Discovered *_test stems; the table below must match them one-to-one.

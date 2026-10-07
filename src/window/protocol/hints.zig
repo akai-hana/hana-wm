@@ -4,10 +4,10 @@
 //! up to 17 fields (through base_size/win_gravity). This file owns the
 //! flags -> field-offset -> model.SizeHints derivation and nothing else:
 //! no X round trips, no cache writes. The caller owns where the result
-//! lands -- the model entry once the window is registered, the wincache
-//! staging copy before that (actions.mapRequest bridges it into the
-//! freshly created model entry). Pure by construction, so the derivation
-//! is unit-testable without a connection (hints_test.zig).
+//! lands -- the model entry, threaded as a parameter at admission time
+//! (see manage.mapRequest; no model entry exists when the reply drains).
+//! Pure by construction, so the derivation is unit-testable without a
+//! connection (hints_test.zig).
 
 const model = @import("model");
 const scaling = @import("scaling");

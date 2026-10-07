@@ -12,7 +12,7 @@ const std = @import("std");
 /// Directories probed BEFORE the general $PATH walk: the handful of
 /// well-known install locations checked first, in probe order. A dir
 /// appearing both here and in $PATH is probed exactly once (see `probe_set`).
-pub const probe_order = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
+const probe_order = [_][]const u8{ "/usr/bin", "/usr/local/bin", "/bin" };
 
 /// Membership set derived from `probe_order` so the two stay in sync: $PATH
 /// segments equal to one of these are skipped during the general walk because
@@ -31,7 +31,7 @@ pub fn dirIterator(env_val: []const u8) DirIterator {
     return .{ .env = env_val };
 }
 
-pub const DirIterator = struct {
+const DirIterator = struct {
     env: []const u8,
     common_idx: usize = 0,
     path_it: ?std.mem.SplitIterator(u8, .scalar) = null,

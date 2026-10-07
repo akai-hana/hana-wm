@@ -300,12 +300,6 @@ fn commitCost() slider.CommitCost {
     return if (g_backend == .sysfs) .immediate else .rate_limited;
 }
 
-/// Applies a level to whatever backend can write: a direct sysfs write when
-/// that backend is live (one tiny file write, un-throttled -- the common case
-/// with a write policy), otherwise a `brightnessctl` spawn. `g_read_only` is
-/// set only when every path fails (sysfs denied and no working
-/// brightnessctl). Scheduled by the slider core's throttle, which owns the
-/// commit clock.
 /// The one clamp every level passes: 0-100 % is all the backend ever
 /// receives. Every `write` mode MUST go through this -- they used to clamp
 /// independently in three separate functions, and when the preview one forgot,
@@ -314,6 +308,12 @@ pub fn clampPct(v: u8) u8 {
     return @min(v, 100);
 }
 
+/// Applies a level to whatever backend can write: a direct sysfs write when
+/// that backend is live (one tiny file write, un-throttled -- the common case
+/// with a write policy), otherwise a `brightnessctl` spawn. `g_read_only` is
+/// set only when every path fails (sysfs denied and no working
+/// brightnessctl). Scheduled by the slider core's throttle, which owns the
+/// commit clock.
 fn commitPct(v: u8) void {
     const pct = clampPct(v);
     const direct = g_backend == .sysfs;

@@ -3,7 +3,6 @@
 
 const tiling = @import("tiling");
 
-// Variant index of the "gaps" variant; must match variantParse order below.
 /// The ONE variant table for this layout.
 const variants = [_]tiling.Variant{
     .{ .name = "gapless", .indicator = "<->" },

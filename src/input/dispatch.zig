@@ -57,8 +57,7 @@ fn toggleBarPosition() void {
         f(pipeline.model(), current_ws)
     else
         false;
-    const no_fullscreen = !forced_hidden;
-    if (no_fullscreen) grab.reconcileNow(.{});
+    if (!forced_hidden) grab.reconcileNow(.{});
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     log.info("Bar position toggled to: {s}", .{@tagName(core.getState().config.bar.bar_position)});

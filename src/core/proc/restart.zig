@@ -79,7 +79,7 @@ pub fn consumeReexec() bool {
 /// re-exec path was `mustDupeZ`-ing the path to satisfy `execv`, and left
 /// the original behind with no callers. It claimed the event loop handed it
 /// to execNext, which was never true.
-pub fn selfPathZ() ?[:0]const u8 {
+fn selfPathZ() ?[:0]const u8 {
     return exec_path_z;
 }
 
@@ -126,7 +126,7 @@ pub fn restorePathFromEnv() ?[*:0]const u8 {
     return std.c.getenv(restore_env);
 }
 
-pub const Handoff = struct {
+const Handoff = struct {
     /// Sentinel-terminated (`selfPathZ()`); this process's own image.
     self_path: [:0]const u8,
     /// The session state file. Not sentinel-terminated: the only copy is made

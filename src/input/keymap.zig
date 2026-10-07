@@ -2,8 +2,8 @@
 //! table and a reverse index. Pure functions of the compiled keymap; no X
 //! connection or `xkb_state`. Home to the keymap readiness heuristic and keycode
 //! tie-break policy (headless-testable). Single `@cImport` owner for libxkbcommon;
-//! xkbcommon.zig and keysyms.zig borrow it from here.
-//! translated once instead of once per importer.
+//! xkbcommon.zig and keysyms.zig borrow it from here, translated once instead
+//! of once per importer.
 //!
 //! Layer note: connection-free, so it is importable from the pure layers.
 
@@ -15,7 +15,7 @@ pub const xkb = @cImport({
 });
 
 pub const xkb_context = xkb.struct_xkb_context;
-pub const xkb_keymap = xkb.struct_xkb_keymap;
+const xkb_keymap = xkb.struct_xkb_keymap;
 
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 
@@ -29,6 +29,8 @@ const keymap_health_hi: u8 = 128;
 
 /// A keymap with fewer than this many reachable keysyms is treated as not
 /// ready, and its caller retries rather than building a table full of holes.
+/// A healthy keymap has 100+; 40 accepts minimal/embedded keymaps while still
+/// rejecting the empty keymap a not-yet-ready XKB returns at startup.
 const min_keymap_symbols: u32 = 40;
 
 /// Base (level-0) symbol for `kc`, independent of lock state; reads the
@@ -42,8 +44,6 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
     return XKB_KEY_NoSymbol;
 }
 
-/// Builds the flat keycode->keysym table from level-0 symbols.
-/// Keycodes below 8 are reserved by X11 and produce no real keysym.
 /// A device keymap flattened to the level-0 keysym per keycode, plus whether
 /// it passed the health check.
 pub const BuiltTable = struct {
@@ -53,16 +53,11 @@ pub const BuiltTable = struct {
     healthy: bool,
 };
 
-/// Flatten `km`, reporting health from the SAME walk.
-///
-/// These used to be two functions, `buildKeysymTable` and
-/// `keymapHasEnoughSymbols`, and every caller ran both: the retry ladder asked
-/// for health, and the caller of the ladder then asked for the table. Two
-/// `xkb_keymap_key_get_syms_by_level` sweeps over the same keymap to produce
-/// one table. Counting during the flatten is free, and the two answer questions
-/// about disjoint keycode ranges -- health stops at keymap_health_hi, the table
-/// runs to x11_max_keycode -- so the `kc < keymap_health_hi` guard below is
-/// what preserves the original count exactly.
+/// Builds the flat keycode->keysym table from level-0 symbols, reporting
+/// health from the SAME walk (one sweep, not two: counting during the flatten
+/// is free). Keycodes below 8 are reserved by X11 and produce no real keysym.
+/// The `kc < keymap_health_hi` guard keeps the health count to the low-end
+/// window while the table runs to x11_max_keycode.
 pub fn buildKeysymTable(km: *xkb_keymap) BuiltTable {
     var table: [constants.x11_max_keycode]u32 = [_]u32{XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
     var valid_keys: u32 = 0;

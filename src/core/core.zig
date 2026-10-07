@@ -45,6 +45,10 @@ pub const WindowId = @import("ids").WindowId;
 /// header for the single-definition rationale.
 pub const WorkspaceId = @import("ids").WorkspaceId;
 
+/// The single workspace-index range check (`ids.zig`); re-exported here so
+/// callers outside core speak the same predicate as `WorkspaceId.isValid`.
+pub const isValidWorkspaceIndex = @import("ids").isValidWorkspaceIndex;
+
 /// Why keyboard focus is temporarily withheld from a window.
 pub const FocusSuppressReason = enum {
     none,
@@ -139,14 +143,9 @@ pub inline fn borderWidth() u16 {
 var state: ?State = null;
 
 /// How far boot has progressed. ONE answer to "is it safe to touch the model
-/// yet?", replacing the two independent latches this used to have: `state !=
-/// null` here and `pipeline.initialized` there. Two latches meant the
-/// pipeline could be initialized while core was not, or vice versa, and every
-/// consumer had to pick one and hope -- a test harness that set
-/// `pipeline.initialized = true` by hand was in a state the real boot sequence
-/// could never produce. Phase is monotone: init() advances it, and every
-/// consumer reads this one.
-pub const Phase = enum {
+/// yet?". Phase is monotone: init() advances it, and every consumer reads
+/// this one.
+const Phase = enum {
     /// Nothing initialized: getState() would panic, no model exists.
     uninit,
     /// core.init() has run: State is live, so config/conn/screen are safe to
@@ -159,23 +158,17 @@ pub const Phase = enum {
 
 var phase: Phase = .uninit;
 
-/// The current boot phase. Single source of truth for readiness.
-pub inline fn currentPhase() Phase {
-    return phase;
-}
-
 /// Records that core.init() has run, i.e. State is live. Asserts boot starts
 /// clean: a second core.init() would silently orphan the first State and the
 /// config box it owns.
-pub inline fn markCoreReady() void {
+inline fn markCoreReady() void {
     std.debug.assert(phase == .uninit);
     phase = .core_ready;
 }
 
 /// Records that the model pipeline is live. Deliberately does NOT require
 /// .core_ready first: a headless unit-test fixture has no X connection and so
-/// can never establish State, yet still needs a model (the old
-/// `pipeline.initialized = true` latch did exactly that). In production the
+/// can never establish State, yet still needs a model. In production the
 /// order is core.init() then pipeline.init(), fixed by main's call sequence.
 pub inline fn markModelReady() void {
     phase = .model_ready;
@@ -190,8 +183,7 @@ pub inline fn isReady() bool {
     return state != null;
 }
 
-/// True once the model exists and model()/mut() are safe. This is the single
-/// replacement for the old `pipeline.initialized` latch, and the one answer
+/// True once the model exists and model()/mut() are safe. The one answer
 /// every model consumer reads.
 pub inline fn isModelReady() bool {
     return phase == .model_ready;

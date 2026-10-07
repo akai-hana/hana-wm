@@ -232,8 +232,8 @@ comptime {
         if (s == m) @compileError(
             "WindowModule hook '" ++ f.name ++ "' must be listed in EXACTLY one of " ++
                 "single_binder_hooks / multi_binder_hooks (single=" ++
-                if (s) "yes" else "no" ++ ", multi=" ++ if (m) "yes" else "no" ++
-                    "); it is the dispatch cardinality, not a detail",
+                (if (s) "yes" else "no") ++ ", multi=" ++ (if (m) "yes" else "no") ++
+                "); it is the dispatch cardinality, not a detail",
         );
     }
     assertListedFields(WindowModule, "single_binder_hooks", &WindowModule.single_binder_hooks);

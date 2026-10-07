@@ -142,8 +142,6 @@ pub inline fn isAllViewActive() bool {
     return mm.all_view_active;
 }
 
-// Workspace bitmask helpers
-
 // Comptime workspace label table
 
 /// Comptime number strings "1".."64" for workspace display labels.

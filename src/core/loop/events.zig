@@ -27,9 +27,9 @@ const spawn = @import("spawn");
 const timers = @import("timers");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
-const lifecycle = @import("lifecycle");
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
+const lifecycle = @import("lifecycle");
 // Config reload (the SIGHUP / reload_config transition) lives in
 // reload.zig (review 05-input round 2): a lifecycle concern, not
 // per-event path work.
@@ -49,7 +49,7 @@ const max_queued_drain: usize = 256;
 /// Dispatch table size. Must index every XCB core event code hana dispatches;
 /// the highest is MappingNotify (34), so 36 leaves headroom. The table lookup
 /// is guarded by this bound (dispatch()).
-const event_dispatch_table = 36;
+const dispatch_table_len = 36;
 
 const EventHandler = *const fn (event: *anyopaque) void;
 
@@ -136,7 +136,7 @@ fn handleMappingNotify(event: *anyopaque) void {
 // flat lookups for one wider struct over a hot path, to save a handful of
 // lines, and would need a sentinel for the offset-less case.
 const dispatch_table = blk: {
-    var table = [_]?EventHandler{null} ** event_dispatch_table;
+    var table = [_]?EventHandler{null} ** dispatch_table_len;
 
     table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
@@ -170,12 +170,6 @@ const dispatch_table = blk: {
 /// routeFor does before calling. A RandR event that arrived via XSendEvent
 /// carries bit 7, so testing the raw byte here would miss exactly those and
 /// silently disable refresh re-detection.
-///
-/// This comment once also claimed the opposite -- that the range test uses the
-/// RAW byte, before the mask -- in a paragraph that had been duplicated and
-/// truncated mid-sentence. It was wrong: the caller masks first, and the mask
-/// cannot alias an extension base onto a RandR code, because a client only
-/// receives the events it selected and hana selects its RandR range by name.
 fn isRandrEvent(code: u8) bool {
     // RandR detection is a display feature, compiled into every tree
     // and armed once at boot; `randrFirstEvent` reports 0 until then,
@@ -271,37 +265,19 @@ fn dispatchOwned(event: *anyopaque) void {
     // WM cannot recover. One branch when disabled, and `watches` is the only
     // thing consulted before anything is formatted.
     const t = eventType(event);
-    if (xtrace.enabled() and xtrace.watches(eventWindow(event))) xtrace.inbound(t, eventWindow(event));
+    if (xtrace.enabled()) {
+        const win = eventWindowFor(t, event);
+        if (xtrace.watches(win)) xtrace.inbound(t, win);
+    }
     dispatch(t, event);
 }
 
-/// The window an event is about, for the trace's watch filter.
-///
-/// There is deliberately NO shared offset. This function used to read bytes
-/// 4..7 unconditionally, on the claim that every window-carrying event puts
-/// `window` at the same place. Compiling against xcb/xcb.h shows two groups:
-///
-///     window@4  ClientMessage, PropertyNotify, Expose, VisibilityNotify
-///     window@8  ConfigureNotify, ConfigureRequest, MapRequest, UnmapNotify,
-///               DestroyNotify, ReparentNotify, CreateNotify, GravityNotify,
-///               CirculateNotify
-///
-/// so the old read was right only for the first group, and silently returned a
-/// misread id for the second. Input events are a third shape again: they carry
-/// `event`, not `window`, at offset 12 (offset 4 for FocusIn/FocusOut).
-///
-/// That misread was not a cosmetic trace bug. The stale-pixel and fullscreen
-/// investigations both hinge on watching a real browser window, and the events
-/// that carry its geometry -- ConfigureNotify at offset 8 -- were the ones
-/// being filtered out, which is why a trace aimed at exactly those events
-/// recorded nothing. Hence the per-type table. Offsets are asserted against
-/// xcb/xcb.h in test "eventWindow: offsets match the real xcb structs".
-fn eventWindow(event: *anyopaque) u32 {
-    return eventWindowFor(eventType(event), event);
-}
-
-/// The pure half of `eventWindow`: event type + raw bytes in, window id out.
-/// Split out so the offset table is testable without a live X connection.
+/// The window an event is about, for the trace's watch filter: event type +
+/// raw bytes in, window id out, so the offset table is testable without a
+/// live X connection. There is deliberately NO shared offset across event
+/// shapes (the switch below spells each group out). Offsets are asserted
+/// against xcb/xcb.h in test "eventWindow: offsets match the real xcb
+/// structs".
 pub fn eventWindowFor(t: u8, event: *anyopaque) u32 {
     const raw: [*]const u8 = @ptrCast(event);
     // Strip the SendEvent bit first: an EWMH _NET_WM_STATE request arrives as
@@ -400,8 +376,7 @@ fn handleReexec() !void {
 /// following iteration, preserving order across batches. The terminating
 /// non-motion of a motion run is stashed the same way; when the drain stops
 /// on it (cap hit), the caller dispatches the leftover `pending` itself.
-/// One stash policy everywhere -- the former `with_tail` axis (charge +
-/// deliver in place vs. stash) is gone; both call sites read identically.
+/// One stash policy everywhere: both call sites read identically.
 fn drainEvents(
     pending: *?*xcb.xcb_generic_event_t,
     conn: core.Connection,
@@ -445,8 +420,7 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
 /// stashed to `pause` UNDELIVERED and UNCHARGED -- the drain loop re-pulls it
 /// from `pending` and charges it there (or, at the cap, the caller dispatches
 /// it as the leftover tail), so `newest`-before-`pause` ordering holds
-/// either way. This was the second `with_tail` charge site; with the axis
-/// removed there is exactly one charge policy: pull-when-re-pulled.
+/// either way. Exactly one charge policy: pull-when-re-pulled.
 fn collapseMotionRun(
     newest: anytype,
     pause: *?*xcb.xcb_generic_event_t,
@@ -534,9 +508,7 @@ fn handleXcbEvents() void {
 
     // Leftover tail of the queued drain: a terminating non-motion stashed
     // against its cap is delivered here, before post-batch housekeeping --
-    // the same tail rule as the batch drain's `pending` dispatch above
-    // (same policy, second site; the axis that used to inline-deliver it is
-    // gone).
+    // the same tail rule as the batch drain's `pending` dispatch above.
     if (queued_pending) |p| dispatchOwned(p);
 
     // Drain any spawn pipes that became readable during this event batch.
@@ -548,14 +520,7 @@ fn handleXcbEvents() void {
 
     // The post-batch stages are ORDER-SENSITIVE. They read as an ordered list
     // because they are three statements in order, and each one keeps its reason
-    // for sitting where it does. This used to be a tuple of closures plus a
-    // generic `run(self)` adapter, so the sequence was the tuple's element
-    // order and each stage was a type whose `run` dispatched to it. The order
-    // was never data -- nothing reordered or skipped entries, and the `.name`
-    // each entry carried was never read -- so the table only added a dispatch
-    // to express a sequence the statement order already expressed. The one
-    // stage that held state (the border sweep's snapshot) is now just the `if`
-    // it always was, with `facts_before` in scope where it is used.
+    // for sitting where it does.
 
     // 1. Repaint the bar. Before the focus settle below, because that lift can
     //    generate the EnterNotify this repaint needs to reflect.

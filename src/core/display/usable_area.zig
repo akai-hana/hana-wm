@@ -39,16 +39,6 @@ const model = @import("model");
 pub const Edge = enum { top, bottom, left, right };
 
 const Claim = struct {
-    /// Which monitor the claim is held on.
-    ///
-    /// A claim is a statement about a SCREEN, not about the process, so it
-    /// has to name its screen: on a multi-monitor setup a claim must not
-    /// shrink another monitor's usable area. Today there is exactly one
-    /// screen and exactly one claim (see `claim`), so the default is the only
-    /// correct answer and nothing reads the field -- but the alternative was
-    /// a claim whose subject was implicit, which is precisely the assumption
-    /// that breaks the moment a second monitor appears.
-    monitor: u8 = 0,
     edge: Edge = .top,
     px: u16 = 0,
 };
@@ -122,19 +112,12 @@ pub fn releaseClaim() void {
     claim = null;
 }
 
-/// Pixels the active claim takes from each edge (indexed by
-/// @intFromEnum(Edge)); zeroed edges when nothing claims. Pure over the one
-/// slot, so the arithmetic the usable-area depends on is testable without an
-/// X connection. `+=` keeps the sum reading (a second slot lands here as
-/// another addend without touching the math).
-fn claimInsets() [4]u32 {
-    // Index by @intFromEnum so the reading order below and the field order of
-    // the Edge enum have one definition between them. Writing the four
-    // cases out spelled out the mapping twice, and the two copies could
-    // disagree: a case reordering the enum would still have compiled.
-    var insets = [4]u32{ 0, 0, 0, 0 };
-    if (claim) |c| insets[@intFromEnum(c.edge)] += c.px;
-    return insets;
+/// Pixels the active claim takes from `edge`; zero when nothing claims it.
+/// Pure over the one slot, so the arithmetic the usable-area depends on is
+/// testable without an X connection.
+fn inset(edge: Edge) u32 {
+    if (claim) |c| if (c.edge == edge) return c.px;
+    return 0;
 }
 
 /// The usable-area arithmetic, with no global state and no X handle.
@@ -153,12 +136,15 @@ fn claimInsets() [4]u32 {
 /// honest answer, rather than as a signal about fullscreen. Reachable
 /// non-degenerately: no claims at all, which yields the full screen.
 pub fn workAreaFrom(screen_w: u32, screen_h: u32) model.Rect {
-    const insets = claimInsets();
+    const top = inset(.top);
+    const bottom = inset(.bottom);
+    const left = inset(.left);
+    const right = inset(.right);
     return .{
-        .x = @intCast(insets[2]),
-        .y = @intCast(insets[0]),
-        .width = @intCast(screen_w -| insets[2] -| insets[3]),
-        .height = @intCast(screen_h -| insets[0] -| insets[1]),
+        .x = @intCast(left),
+        .y = @intCast(top),
+        .width = @intCast(screen_w -| left -| right),
+        .height = @intCast(screen_h -| top -| bottom),
     };
 }
 

@@ -26,14 +26,10 @@ const surfaces = @import("surfaces").Surfaces;
 ///   2. The swap precedes subsystem reloads (reloadBorders / reloadConfig /
 ///      surfaces.onReload) so they rebuild from the NEW config, and precedes
 ///      buildKeybinds so the resolver stamps the post-swap config_rev.
-///      (The old ordering kept stale settings, then freed string slices the
-///      new bar had shallow-copied; a use-after-free on the next draw.)
 ///   3. buildKeybinds runs POST-swap: its KeybindResolver stamps
 ///      core.config_rev() as the rev the dispatch map matches, and that rev is
-///      only bumped BY the swap. Stamping pre-swap left the resolver one rev
-///      behind on every reload, so KeybindResolver.lookup failed closed and
-///      every keyboard keybind silently stopped dispatching until an unrelated
-///      MappingNotify re-stamped it.
+///      only bumped BY the swap; stamping before the swap would leave the
+///      resolver a rev behind, so lookup fails closed (no keybind dispatch).
 ///   4. grabKeybindings() runs post-swap because fillGrabCookies() reads the
 ///      live config.
 ///   5. errdefer frees the heap-allocated new config if anything fails pre-swap.

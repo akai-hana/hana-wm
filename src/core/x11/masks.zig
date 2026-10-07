@@ -52,9 +52,7 @@ pub const lock_modifiers: [8]u16 = .{
 /// Strips the XCB synthetic-event bit (bit 7) from a raw event `response_type`
 /// to recover the core event code. Core event codes are 0..0x7F; the top bit
 /// marks events delivered via SendEvent. Core events keep their low-7 bits
-/// under a SendEvent, so masking recovers the true code; extension bases can
-/// legitimately sit at/above 0x80, so extension-range tests compare the RAW
-/// type byte before any mask (see isRandrEvent).
+/// under a SendEvent, so masking recovers the true code.
 pub const core_event_code_mask: u8 = 0x7f;
 
 pub const EventMasks = struct {
@@ -69,9 +67,9 @@ pub const EventMasks = struct {
     //    the old POINTER_MOTION_HINT + per-tick QueryPointer re-arm).
     //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer +
     //    XMaskEvent loop, so root never needs it. Ours are async; the
-    //    Super+Button grab from input.setupGrabs stays engaged for the whole
-    //    gesture (AsyncPointer; see keepDragGrab in input.zig), so this bit is
-    //    what lets the release reach input.handleButtonRelease and clear
+    //    Super+Button grab from grabs.grabMouseButtons stays engaged for the
+    //    whole gesture (AsyncPointer; see keepDragGrab in mouse.zig), so this
+    //    bit is what lets the release reach input.handleButtonRelease and clear
     //    drag.active. Without it, drag.active sticks true and handleEnterNotify
     //    drops every hover-focus EnterNotify until the WM restarts.
     //  - KEY_RELEASE: the release half of every binding press. Key RELEASE

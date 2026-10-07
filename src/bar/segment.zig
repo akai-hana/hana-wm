@@ -36,10 +36,9 @@ pub const BarHandlers = struct {
     isBarWindow: *const fn (u32) bool,
 };
 
-/// Live workspace state for one bar frame, collected fresh by bar.zig every
-/// draw. The only segment-visible slice of WM state (besides what a segment
-/// reads directly from core).
-/// The bar's per-frame workspace facts. The DEFINITION lives in
+/// The bar's per-frame workspace facts, collected fresh by bar.zig every
+/// draw -- the only segment-visible slice of WM state (besides what a segment
+/// reads directly from core). The DEFINITION lives in
 /// architecture/contract.zig so the `naturalWidth` hook can type its first
 /// parameter as a real `*const Frame`; this alias keeps `segmod.Frame` as the
 /// name every reader already uses.
@@ -187,16 +186,16 @@ pub const TitleSnapshot = struct {
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
 };
 
-/// Which core fact-revision to mark-dirty with. Mirrors the `DirtySources`
-/// packed bitmask over bar segments; the bar calls `markDirtySource(src)` and
-/// every module whose `dirty_sources` declares that bit gets repainted.
-pub const DirtySourcesSource = enum { focus, frame };
+/// Which core fact-revision to mark-dirty with: the field names of
+/// `contract.DirtySources` itself, so a rename there cannot drift from this
+/// enum. The bar calls `markDirtySource(src)` and every module whose
+/// `dirty_sources` declares that bit gets repainted.
+pub const DirtySourcesSource = std.meta.FieldEnum(contract.DirtySources);
 
 /// True when `sources` has the `source` bit set.
 pub fn hasSource(sources: contract.DirtySources, source: DirtySourcesSource) bool {
     return switch (source) {
-        .focus => sources.focus,
-        .frame => sources.frame,
+        inline else => |s| @field(sources, @tagName(s)),
     };
 }
 

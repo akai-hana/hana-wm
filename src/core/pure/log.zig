@@ -18,7 +18,7 @@ inline fn moduleFromSrc(src: std.builtin.SourceLocation) []const u8 {
 // apply.
 /// One captured diagnostic. `module` and `message` are owned by the
 /// `Collector`.
-pub const Diagnostic = struct {
+const Diagnostic = struct {
     level: std.log.Level,
     module: []const u8,
     message: []const u8,
