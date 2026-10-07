@@ -117,18 +117,43 @@ const miss_tolerance: u8 = 3;
 /// absent readout is silent (no slot reserved) but not abandoned.
 const absent_reprobe_ms: i64 = 30_000;
 
-/// Per-segment state, indexed by registry position (segment i == subs[i]).
-var g_armed: [subs.len]bool = @splat(false);
-/// Consecutive failed reads for readout `idx`; reset on every successful read.
-/// Drives the sticky last-good window (see `miss_tolerance`).
-var g_misses: [subs.len]u8 = @splat(0);
-/// True once readout `idx` exhausted its miss tolerance and collapsed: its
-/// segment reserves nothing, and its poll slows to `absent_reprobe_ms` instead
-/// of hammering an answer that is not coming. Cleared by the first success.
-var g_absent: [subs.len]bool = @splat(false);
-var g_pending_redraw: [subs.len]bool = @splat(false);
-var g_next_read_ms: [subs.len]i64 = @splat(0);
-/// The last drawn width of a readout is NOT tracked here any more: it is the
+/// One readout's mutable state, indexed by registry position (segment i ==
+/// subs[i]). This is the AoS slot for what used to be nine parallel g_*
+/// arrays (armed, misses, absent, pending_redraw, next_read_ms, last, len,
+/// value_start, value_len): the arrays shared only an index, so a readout's
+/// lifecycle was spread across nine declarations to keep in lockstep, and a
+/// new field meant a tenth. One struct says which fields belong to the same
+/// readout, and `&g_readouts[idx]` hands the whole lifecycle to a helper at
+/// once.
+const Readout = struct {
+    /// Set by the first draw (when the bar actually renders the segment), so
+    /// an unconfigured readout never wakes the loop.
+    armed: bool = false,
+    /// Consecutive failed reads; reset on every successful read. Drives the
+    /// sticky last-good window (see `miss_tolerance`).
+    misses: u8 = 0,
+    /// True once `misses` exhausted its tolerance and the readout collapsed:
+    /// its segment reserves nothing, and its poll slows to
+    /// `absent_reprobe_ms` instead of hammering an answer that is not coming.
+    /// Cleared by the first success.
+    absent: bool = false,
+    /// A text-change redraw is owed (see `consumeRedrawRequestFor`).
+    pending_redraw: bool = false,
+    next_read_ms: i64 = 0,
+    /// The last rendered text ("<label> <value>"), owned here so the sticky
+    /// last-good window (see `refresh`) can keep it without a second buffer.
+    last: [render_buf_len]u8 = undefined,
+    len: usize = 0,
+    /// Byte range of the numeric readout ("42%") inside `last`; `value_len ==
+    /// 0` when there is no value this tick. The number is painted with the
+    /// segment's `_value` color while the label keeps its own (see
+    /// drawing.drawPaddedSegmentValue).
+    value_start: usize = 0,
+    value_len: usize = 0,
+};
+var g_readouts: [subs.len]Readout = @splat(.{});
+
+/// The last drawn width of a readout is NOT tracked in `Readout`: it is the
 /// shared `scaffold.widthState` singleton for that readout's name, which owns
 /// the store / consume / naturalWidth triple. The bar-private copy of that
 /// triple (a `g_slot_width` array plus an inline "did the width change? mark
@@ -138,14 +163,6 @@ var g_next_read_ms: [subs.len]i64 = @splat(0);
 fn widthStateFor(comptime idx: usize) type {
     return scaffold.widthState(subs[idx].name);
 }
-var g_last: [subs.len][render_buf_len]u8 = undefined;
-var g_len: [subs.len]usize = @splat(0);
-/// Byte range of the numeric readout ("42%") inside `g_last`; `g_value_len ==
-/// 0` when there is no value this tick. The number is painted with the
-/// segment's `_value` color while the label keeps its own (see
-/// drawing.drawPaddedSegmentValue).
-var g_value_start: [subs.len]usize = @splat(0);
-var g_value_len: [subs.len]usize = @splat(0);
 
 /// A rendered readout: the full segment text plus the span of the value within
 /// it. (25.3) Offsets, not a subslice, so the painter never has to recover a
@@ -182,44 +199,45 @@ fn appendText(dst: []u8, start: usize, text: []const u8) usize {
     return start + n;
 }
 
-/// Re-reads readout `idx` and renders "<label> <pct>%" into its slot in
-/// `g_last`; a failed read renders nothing (the segment goes zero-width).
-/// Returns true when the rendered text changed.
+/// Re-reads readout `idx` and renders "<label> <pct>%" into its `last` slot;
+/// a failed read renders nothing (the segment goes zero-width). Returns true
+/// when the rendered text changed.
 fn refresh(idx: usize) bool {
     const sub = subs[idx];
+    const st = &g_readouts[idx];
 
     var buf: [render_buf_len]u8 = undefined;
     var n: usize = 0;
     var value_start: usize = 0;
     var value_len: usize = 0;
     if (sub.read()) |sample| {
-        g_misses[idx] = 0;
+        st.misses = 0;
         // Recovering from absence re-fills the rendered text, so the ordinary
         // `changed` check below requests the redraw and the width store
         // re-expands the slot -- nothing extra is needed for the recovery
         // path, only the latch itself has to be cleared.
-        g_absent[idx] = false;
+        st.absent = false;
         const r = render(sub.label, sample, buf[0..]);
         n = r.text.len;
         value_start = r.value_start;
         value_len = r.value_len;
     } else {
         // Sticky last-good: within the tolerance window KEEP whatever is
-        // already in g_last and report no change, so the segment keeps
+        // already in `st.last` and report no change, so the segment keeps
         // painting the last known-good reading. Once the window is exhausted
         // fall through with n == 0, which is the real collapse.
-        if (g_misses[idx] < miss_tolerance) g_misses[idx] += 1;
-        if (g_misses[idx] < miss_tolerance) return false;
+        if (st.misses < miss_tolerance) st.misses += 1;
+        if (st.misses < miss_tolerance) return false;
         // Tolerated window exhausted: genuinely absent, so latch it and let
         // the poll back off to the slow re-probe cadence.
-        g_absent[idx] = true;
+        st.absent = true;
     }
 
-    const changed = g_len[idx] != n or !std.mem.eql(u8, g_last[idx][0..n], buf[0..n]);
-    @memcpy(g_last[idx][0..n], buf[0..n]);
-    g_len[idx] = n;
-    g_value_start[idx] = value_start;
-    g_value_len[idx] = value_len;
+    const changed = st.len != n or !std.mem.eql(u8, st.last[0..n], buf[0..n]);
+    @memcpy(st.last[0..n], buf[0..n]);
+    st.len = n;
+    st.value_start = value_start;
+    st.value_len = value_len;
     return changed;
 }
 
@@ -228,24 +246,26 @@ fn refresh(idx: usize) bool {
 /// never wakes the loop. Returns -1 while unarmed, ms until the next read
 /// otherwise (0 = due now).
 fn pollDeadlineMsFor(comptime idx: usize) i32 {
-    if (!g_armed[idx]) return -1;
+    const st = &g_readouts[idx];
+    if (!st.armed) return -1;
     // An absent readout still contributes a wakeup, but only on the slow
     // re-probe cadence: stopping entirely would make a hot-swapped battery or
     // a since-boot /sysfs file invisible forever.
-    const interval: i64 = if (g_absent[idx]) absent_reprobe_ms else read_interval_ms;
-    const left = g_next_read_ms[idx] - time.realtimeMs();
+    const interval: i64 = if (st.absent) absent_reprobe_ms else read_interval_ms;
+    const left = st.next_read_ms - time.realtimeMs();
     if (left <= 0) return 0;
     return @intCast(@min(left, interval));
 }
 
 fn onPollWakeupFor(comptime idx: usize) void {
-    if (!g_armed[idx]) return;
-    if (time.realtimeMs() < g_next_read_ms[idx]) return;
+    const st = &g_readouts[idx];
+    if (!st.armed) return;
+    if (time.realtimeMs() < st.next_read_ms) return;
     // The next deadline is set from the same absent/present decision the poll
     // itself makes, so the backing-off and the wakeup cannot disagree.
-    g_next_read_ms[idx] = time.realtimeMs() +
-        (if (g_absent[idx]) absent_reprobe_ms else read_interval_ms);
-    if (refresh(idx)) g_pending_redraw[idx] = true;
+    st.next_read_ms = time.realtimeMs() +
+        (if (st.absent) absent_reprobe_ms else read_interval_ms);
+    if (refresh(idx)) st.pending_redraw = true;
 }
 
 /// A redraw is owed for either reason the segment can change shape: the
@@ -253,23 +273,25 @@ fn onPollWakeupFor(comptime idx: usize) void {
 /// consumed here, so the caller sees one answer and neither source can leak a
 /// stale request.
 fn consumeRedrawRequestFor(comptime idx: usize) bool {
-    const p = g_pending_redraw[idx];
-    g_pending_redraw[idx] = false;
+    const st = &g_readouts[idx];
+    const p = st.pending_redraw;
+    st.pending_redraw = false;
     return p or widthStateFor(idx).consumeRedrawRequest();
 }
 
 fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     const c = segmod.castDraw(ctx);
-    if (!g_armed[idx]) {
-        g_armed[idx] = true;
-        g_next_read_ms[idx] = time.realtimeMs() + read_interval_ms;
+    const st = &g_readouts[idx];
+    if (!st.armed) {
+        st.armed = true;
+        st.next_read_ms = time.realtimeMs() + read_interval_ms;
         _ = refresh(idx); // prime the text so the first draw isn't empty
     }
 
     // Nothing to show this tick: render nothing (zero width) so an absent
     // readout -- no battery, unreadable file -- takes no space. The reserved
     // slot collapses on the next re-layout.
-    if (g_len[idx] == 0) {
+    if (st.len == 0) {
         // An absent readout paints nothing. Reporting a 0 width is enough:
         // the bar feeds it back through onPainted, whose store raises the
         // redraw request on change, so the collapse needs no private
@@ -279,7 +301,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
 
     // (25.3) The stored offsets go straight to the painter; no subslice is
     // manufactured here just to carry a position.
-    const end_x = try drawing.drawPaddedSegmentValue(c.dc, c.config, c.height, x, subs[idx].name, g_last[idx][0..g_len[idx]], g_value_start[idx], g_value_len[idx], c.config.segmentProps(subs[idx].name));
+    const end_x = try drawing.drawPaddedSegmentValue(c.dc, c.config, c.height, x, subs[idx].name, st.last[0..st.len], st.value_start, st.value_len, c.config.segmentProps(subs[idx].name));
 
     // Report the ACTUAL painted width, not the row reservation: the row must
     // follow the text or the segment locks onto the startup probe and paints

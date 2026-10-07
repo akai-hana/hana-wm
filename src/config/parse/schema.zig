@@ -191,7 +191,7 @@ pub const knobs = [_]Knob{
     barColor("run_fg", "bar.run_fg", "fg", false),
     barColor("run_prompt_color", "bar.run_prompt_color", types.palette_primary_color, false),
 
-    // (27.7) Legacy spellings, kept working. The `drun_*` keys were named for
+    // Legacy spellings, kept working. The `drun_*` keys were named for
     // a desktop-file launcher; the segment resolves a `$PATH` executable and
     // runs it, so `run_*` is the honest name. These are ALIASES, not a second
     // set of fields: each maps onto the same target as its canonical knob, so
@@ -235,25 +235,23 @@ fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
     }
 }
 
-/// The config subtrees a knob target may address, as prefix + type. A target is
-/// written relative to its subtree (`gap_width`, `bar.bg`) EXCEPT for the
-/// handful of top-level Config knobs (`snap_distance`, `fullscreen_enabled`),
-/// which carry no prefix -- hence the empty-prefix entry.
-const target_roots = [_]struct { prefix: []const u8, ty: type }{
+/// The config subtrees the coverage pass enumerates, as prefix + type. Knob
+/// targets themselves always resolve from `types.Config` (whose nested fields
+/// ARE these subtrees), so the prefixes exist to spell the full path of a
+/// subtree field in the coverage report -- a target is written relative to its
+/// subtree (`gap_width`, `bar.bg`) EXCEPT for the handful of top-level Config
+/// knobs (`snap_distance`, `fullscreen_enabled`), which carry no prefix.
+const coverage_subtrees = [_]struct { prefix: []const u8, ty: type }{
     .{ .prefix = "", .ty = types.Config },
     .{ .prefix = "tiling.", .ty = types.TilingConfig },
     .{ .prefix = "bar.", .ty = types.BarConfig },
     .{ .prefix = "workspaces.", .ty = types.WorkspaceConfig },
 };
 
-/// Resolves a knob target against the subtrees above, returning the field type.
+/// Resolves a knob target (a dotted path from `types.Config`) to its field
+/// type, or null when any step is missing.
 fn resolveTarget(comptime target: []const u8) ?type {
-    inline for (target_roots) |r| {
-        if (std.mem.startsWith(u8, target, r.prefix)) {
-            return fieldTypeAt(r.ty, target[r.prefix.len..]);
-        }
-    }
-    return null;
+    return fieldTypeAt(types.Config, target);
 }
 
 /// True when `path` names a field whose value is a plain scalar the schema
@@ -284,7 +282,7 @@ pub const bespoke_fields = [_][]const u8{
 };
 
 comptime {
-    // 55 knobs x 4 subtrees x field walks, plus the coverage pass below.
+    // 55 knobs x dotted-path field walks, plus the coverage pass below.
     @setEvalBranchQuota(400_000);
     // Every knob target must name a REAL field. A renamed field, or a typo in
     // a builder's target string, previously produced a knob that parsed,
@@ -292,12 +290,11 @@ comptime {
     // value went nowhere, and no build failed.
     for (knobs) |k| {
         if (resolveTarget(k.target) == null) @compileError(
-            "schema.knobs: target '" ++ k.target ++ "' does not name a field of Config, " ++
-                "TilingConfig, BarConfig or WorkspacesConfig",
+            "schema.knobs: target '" ++ k.target ++ "' does not name a field of Config",
         );
     }
 
-    // The reverse: a scalar field of the four config structs that no knob
+    // The reverse: a scalar field of Config or one of its subtrees that no knob
     // targets and that `bespoke_fields` does not claim is a DEAD FIELD -- it
     // compiles, it parses, and it is always at its initializer. Reported as
     // ONE error listing all of them, so a big addition is a single fix list.
@@ -308,7 +305,7 @@ comptime {
     // error only once a dead field actually makes the line reachable.
     var unclaimed: []const u8 = "";
     var unclaimed_n: usize = 0;
-    for (target_roots) |r| {
+    for (coverage_subtrees) |r| {
         for (std.meta.fields(r.ty)) |f| {
             if (!isScalarLeaf(f.type)) continue;
             const path = r.prefix ++ f.name;
@@ -334,8 +331,7 @@ comptime {
     // quietly let a future rename escape the check above.
     for (bespoke_fields) |b| {
         if (resolveTarget(b) == null) @compileError(
-            "schema.bespoke_fields: '" ++ b ++ "' does not name a field of Config, " ++
-                "TilingConfig, BarConfig or WorkspacesConfig",
+            "schema.bespoke_fields: '" ++ b ++ "' does not name a field of Config",
         );
     }
 }
@@ -378,6 +374,12 @@ pub const EnumRead = struct {
 };
 
 /// What kind of value a knob accepts, and which reader enforces it.
+///
+/// Flat on purpose: each variant is ONE read-and-warn policy, dispatched in
+/// one arm of applyOne's switch. Folding the near-neighbours together (the
+/// three color variants, `ratio`/`ratio_strict`, `scalable`/`scalable_free`)
+/// would trade those arms for a flag apiece and push the branching back
+/// inside them -- more to read at the call site, not less.
 pub const Kind = union(enum) {
     /// Plain boolean flag.
     b,
@@ -440,44 +442,59 @@ pub const Knob = struct {
     needs: []const []const u8 = &.{},
 };
 
-// Type-level access into Config by dotted path.
+// Value-level access into Config by dotted path.
+//
+// `fieldTypeAt` is the one TYPE walk; these walk the VALUE the same way, one
+// segment per recursion step, so a path of any depth resolves identically on
+// both sides. (The previous pair of accessors hard-coded "groups are exactly
+// one level deep" and re-implemented the split -- a second algorithm that had
+// to be kept in agreement with the first.)
 
-/// Splits a dotted "group.leaf" target path at its first '.'. With no dot the
-/// whole path is the `leaf` and `group` is empty (a top-level Config field).
-/// Shared by every dotted-path accessor so their splitting cannot drift.
-const PathParts = struct { group: []const u8, leaf: []const u8 };
-inline fn splitPath(comptime path: []const u8) PathParts {
-    @setEvalBranchQuota(2000);
-    if (std.mem.indexOfScalar(u8, path, '.')) |dot| {
-        return .{ .group = path[0..dot], .leaf = path[dot + 1 ..] };
+/// The field type at the dotted `path`, or a build failure when it names
+/// nothing: the mirror of `fieldTypeAt` for a path whose validity the knob
+/// table already established at declaration time.
+fn FieldType(comptime T: type, comptime path: []const u8) type {
+    comptime {
+        // One instantiation per distinct knob target (55+), each walking the
+        // struct fields per segment: the shared comptime budget has to cover
+        // them all, so this is a ceiling on work, not on depth.
+        @setEvalBranchQuota(50_000);
+        return fieldTypeAt(T, path) orelse @compileError(
+            "schema: '" ++ path ++ "' does not name a field of " ++ @typeName(T),
+        );
     }
-    return .{ .group = "", .leaf = path };
 }
 
-/// Resolves a dotted "group.leaf" (or bare root-level) target path to its
-/// field type. Groups are exactly one level deep on types.Config.
-fn PathType(comptime path: []const u8) type {
-    @setEvalBranchQuota(2000);
-    const parts = comptime splitPath(path);
-    if (parts.group.len == 0) return @TypeOf(@field(@as(types.Config, undefined), path));
-    const Group = @TypeOf(@field(@as(types.Config, undefined), parts.group));
-    return @TypeOf(@field(@as(Group, undefined), parts.leaf));
+/// Mutable pointer to `base`'s field at the dotted `path`.
+inline fn walkPtr(comptime T: type, base: *T, comptime path: []const u8) *FieldType(T, path) {
+    const dot = comptime std.mem.indexOfScalar(u8, path, '.');
+    if (dot) |d| {
+        const head = path[0..d];
+        const H = @TypeOf(@field(@as(T, undefined), head));
+        return walkPtr(H, &@field(base, head), path[d + 1 ..]);
+    }
+    return &@field(base, path);
+}
+
+/// Read-only view of `base`'s field at the dotted `path`.
+inline fn walkVal(comptime T: type, base: *const T, comptime path: []const u8) FieldType(T, path) {
+    const dot = comptime std.mem.indexOfScalar(u8, path, '.');
+    if (dot) |d| {
+        const head = path[0..d];
+        const H = @TypeOf(@field(@as(T, undefined), head));
+        return walkVal(H, &@field(base, head), path[d + 1 ..]);
+    }
+    return @field(base, path);
 }
 
 /// Mutable pointer to a knob's target field.
-fn ptr(cfg: *types.Config, comptime path: []const u8) *PathType(path) {
-    @setEvalBranchQuota(2000);
-    const parts = comptime splitPath(path);
-    if (parts.group.len == 0) return &@field(cfg, path);
-    return &@field(@field(cfg, parts.group), parts.leaf);
+fn ptr(cfg: *types.Config, comptime path: []const u8) *FieldType(types.Config, path) {
+    return walkPtr(types.Config, cfg, path);
 }
 
 /// Read-only view of a knob's target field.
-pub fn value(cfg: *const types.Config, comptime path: []const u8) PathType(path) {
-    @setEvalBranchQuota(2000);
-    const parts = comptime splitPath(path);
-    if (parts.group.len == 0) return @field(cfg, path);
-    return @field(@field(cfg, parts.group), parts.leaf);
+pub fn value(cfg: *const types.Config, comptime path: []const u8) FieldType(types.Config, path) {
+    return walkVal(types.Config, cfg, path);
 }
 
 // Generic readers.

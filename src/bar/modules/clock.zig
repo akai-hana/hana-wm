@@ -62,12 +62,6 @@ const date_format: []const u8 = "%Y-%m-%d";
 /// Current on-screen clock mode. Plain var -- only the main thread touches it.
 var mode: DisplayMode = .date_time;
 
-/// Reserved slot width for the current display mode (probe width + padding),
-/// stable within a mode; zero until the clock has drawn once. The mode key
-/// makes a stored width stale (re-measures) when a mode cycle or reload
-/// changes the probe -- see keyedWidthState.
-const W = scaffold.keyedWidthState("clock", DisplayMode);
-
 /// The format `m` maps `base` (the configured format) to: the config format
 /// unchanged in date_time mode, a fixed built-in otherwise. Pure, so tests can
 /// pin each mode's format.
@@ -90,34 +84,81 @@ pub fn cycledMode(m: DisplayMode, forward: bool) DisplayMode {
     };
 }
 
-/// What is currently on screen: the epoch second last rendered and the
-/// format string used for it. Plain vars -- only the main thread touches
-/// them. Comparing the format pointer catches config reloads that change
-/// the format mid-second (a spurious extra reformat on equal content is
-/// harmless); comparing the second catches the passage of time.
+/// What is currently on screen: the epoch second last rendered, the display
+/// mode rendered under, and an OWNED copy of the effective format (a fixed
+/// buffer, never a slice into config memory -- see recordRendered). Plain
+/// vars -- only the main thread touches them. Comparing the second catches
+/// the passage of time; the format's BYTES catch config reloads; the mode
+/// catches display-mode cycles whose effective format happens to be
+/// byte-identical (date_time configured as the built-in time format), where
+/// the bytes alone would read "unchanged" even though the mode's width probe
+/// -- the reservation -- moved.
+pub const fmt_limit: usize = 128;
 var rendered_sec: i64 = -1;
-var rendered_fmt: []const u8 = "";
+var rendered_mode: DisplayMode = .date_time;
+var rendered_fmt_buf: [fmt_limit]u8 = undefined;
+var rendered_fmt_len: usize = 0;
+
+/// The record's clip: the store and the compare both truncate `fmt` here, so
+/// they always see the same byte span. formatTime's own stack copy (fmt_z) is
+/// this same length, so every format that CAN render compares exactly; one
+/// that cannot (>= fmt_limit, rejected by formatTime) compares on its clip --
+/// it paints nothing either way, and the record stays stable instead of
+/// re-reading as changed forever (which would retry the doomed render every
+/// event batch rather than once per second).
+fn clip(fmt: []const u8) []const u8 {
+    return fmt[0..@min(fmt.len, fmt_limit)];
+}
 
 /// The staleness predicate, pure so a test can drive it without a live wall
 /// clock. Keyed on the format's BYTES, not on its pointer: a reload frees the
 /// old config arena, so a re-parse can land a different format at a recycled
 /// address, and a pointer compare would call that "unchanged" (or, worse,
-/// "changed" for a format that did not move).
-pub fn stalenessFor(sec: i64, rendered_sec_val: i64, fmt: []const u8, rendered_fmt_val: []const u8) bool {
-    return sec != rendered_sec_val or !std.mem.eql(u8, fmt, rendered_fmt_val);
+/// "changed" for a format that did not move). The mode compare is what drives
+/// the post-cycle width re-derivation (bar.updateClock): a cycle between two
+/// modes whose effective bytes are identical still moves the width probe, so
+/// it must read stale.
+pub fn stalenessFor(
+    sec: i64,
+    rendered_sec_val: i64,
+    m: DisplayMode,
+    rendered_mode_val: DisplayMode,
+    fmt: []const u8,
+    rendered_fmt_val: []const u8,
+) bool {
+    if (sec != rendered_sec_val) return true;
+    if (m != rendered_mode_val) return true;
+    const want = clip(fmt);
+    if (want.len != rendered_fmt_val.len) return true;
+    return !std.mem.eql(u8, want, rendered_fmt_val);
 }
 
-/// True when the segment on screen no longer matches (sec, fmt).
+/// True when the segment on screen no longer matches (sec, mode, fmt).
 /// Callers pass the base configured format so reloads invalidate without a
 /// separate flag; the segment folds its own display-mode format in on top of
-/// it (the effective format), so a mode cycle changes the compared bytes and
-/// the next bar.updateClock repaints the clock. Drawing clears staleness
-/// as a side effect of rendering; a failed draw leaves it stale so the next
-/// boundary retries.
+/// it (the effective format) and compares the mode itself, so a mode cycle
+/// invalidates whether or not the two modes' formats agree byte-for-byte.
+/// Drawing clears staleness as a side effect of rendering; a failed draw
+/// leaves it stale so the next boundary retries.
 fn secondElapsed(base_fmt: []const u8) bool {
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(base_fmt, mode);
-    return stalenessFor(sec, rendered_sec, fmt, rendered_fmt);
+    return stalenessFor(sec, rendered_sec, mode, rendered_mode, fmt, rendered_fmt_buf[0..rendered_fmt_len]);
+}
+
+/// Records (sec, mode, format) as the on-screen state, copying the format
+/// into this module's buffer. The copy is a correctness fix, not an
+/// optimization: a config reload frees the old config, and a slice left
+/// pointing at the old `clock_format` would compare against freed memory on
+/// the next same-second staleness check. Called BEFORE the fallible
+/// formatTime (the storm guard documented there), so a render failure still
+/// records the attempt.
+fn recordRendered(sec: i64, m: DisplayMode, fmt: []const u8) void {
+    rendered_sec = sec;
+    rendered_mode = m;
+    const src = clip(fmt);
+    rendered_fmt_len = src.len;
+    @memcpy(rendered_fmt_buf[0..src.len], src);
 }
 
 /// Deadline arithmetic, factored out pure so tests can drive the clock.
@@ -156,21 +197,11 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     // the stack buffer could never be large enough.) A genuine transient miss
     // simply shows the previous second for up to one extra second, exactly as
     // the cadence design intends.
-    rendered_sec = sec;
-    rendered_fmt = fmt;
+    recordRendered(sec, mode, fmt);
     // Propagation is fine: the record above is already written, so a failure
     // still leaves the next retry one boundary away rather than one event
     // batch away.
     const str = try formatTime(&buf, sec, fmt);
-    // Refresh the mode's reserved width once per mode; the probe is stable, so
-    // per-second text-width drift never re-lays the row.
-    if (!W.matches(mode)) {
-        W.store(
-            mode,
-            dc.measureTextWidthStyled(measureStringFor(mode), config.segmentProps("clock")) +
-                2 * config.scaledSegmentPadding(height),
-        );
-    }
     return contract.Painted.span(start_x, try drawing.drawPaddedSegment(
         dc,
         config,
@@ -181,29 +212,6 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
         measureStringFor(mode),
         config.segmentProps("clock"),
     ));
-}
-
-/// Reserved row width: the current mode's slot (measured once per mode) once
-/// the clock has drawn, else the bar's freshly computed probe width for the
-/// initial layout. Also drives the bar's reflow check in updateClock, which
-/// compares this against the laid-out reservation after a clock-only repaint.
-/// A mode cycle that has NOT drawn yet reports the bar's fresh probe instead
-/// of the outgoing mode's cached slot, so a reflow pass reserves the incoming
-/// mode's span instead of the one being left behind.
-fn naturalWidthHook(_: *const contract.Frame, fallback: u16) u16 {
-    // The clock reads nothing from the frame, so it passes an undefined
-    // pointer straight through rather than materializing one. Now that the
-    // parameter is a real `*const Frame` this stays honest: the W-level hook
-    // ignores it, and the type says so at every hop.
-    return W.naturalWidth(mode, @as(*const contract.Frame, undefined), fallback);
-}
-
-/// Resets the mode width reservation so the next draw re-measures the active
-/// mode's probe under the current config (a reload may change the font or
-/// padding). Until then the bar's freshly computed probe width (the natural
-/// width fallback) applies, so the reservation never collapses to zero.
-fn invalidateWidth() void {
-    W.invalidate();
 }
 
 fn currentEpochSeconds() i64 {
@@ -221,8 +229,8 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
         c.gmtime_r(&raw_sec, &tm_buf);
     if (tm_ptr == null) return error.TimeFailed;
 
-    var fmt_z: [128]u8 = undefined;
-    if (fmt.len >= fmt_z.len) return error.FormatTooLong;
+    var fmt_z: [fmt_limit]u8 = undefined;
+    if (fmt.len >= fmt_limit) return error.FormatTooLong;
     @memcpy(fmt_z[0..fmt.len], fmt);
     fmt_z[fmt.len] = 0;
 
@@ -233,19 +241,28 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
 
 /// Cycles the clock's display mode: left-click advances date-time -> time ->
 /// date -> date-time, right-click cycles the opposite way. The repaint rides
-/// the existing staleness path: the mode change alters the effective format
-/// pointer, so the bar's end-of-batch updateClock runs this same batch. That
-/// path re-lays the row for the new mode's slot width (a narrower mode's text
-/// cannot be blitted into the outgoing mode's wider reservation), which is why
-/// this hook neither redraws nor measures anything itself.
+/// the existing staleness path: the mode change makes the next secondElapsed
+/// report stale (the record's mode no longer matches), so the bar's
+/// end-of-batch updateClock runs this same batch. That path re-derives the
+/// clock budget and re-lays the row for the new mode's slot width (a narrower
+/// mode's text cannot be blitted into the outgoing mode's wider reservation),
+/// which is why this hook neither redraws nor measures anything itself.
 fn onClickHook(ctx: *const contract.ClickCtx) bool {
     mode = cycledMode(mode, ctx.is_left);
     return true;
 }
 
-/// This module's bar-segment contribution (registry binding). Natural width is
-/// the current mode's measured slot (auto-sized to the active view via the
-/// naturalWidth hook; the passthrough measureString default sizes a fresh bar).
+/// This module's bar-segment contribution (registry binding). Reserved width
+/// is the bar's merged clock budget (State.Clock.width), passed in as the
+/// `naturalWidth` argument and returned unmodified -- the scaffold's
+/// measure-string passthrough. There is deliberately no clock-local width
+/// store: the budget is re-derived at State.init, on the mode-aware staleness
+/// path (bar.updateClock -> adoptFreshClockWidth), and within one second of
+/// any config change on a surviving bar (the ordinary tick), always from the
+/// same live probe the draw measures. The clock-local store that used to
+/// mirror it (keyedWidthState) held the same value for the same inputs, so it
+/// needed this module's invalidate hooks purely to stay in sync on reload --
+/// store and hooks went away together.
 pub const module = scaffold.module(
     "clock",
     draw,
@@ -256,11 +273,8 @@ pub const module = scaffold.module(
         .pollTimeoutMs = tickDeadlineMs,
         .secondsElapsed = secondElapsed,
         .measureString = measureString,
-        .natural_width = naturalWidthHook,
         // The clock's reserved width is measured per mode, not observed from
         // what painted -- see SlotMode.self_measured.
         .mode = .self_measured,
-        .invalidate = invalidateWidth,
-        .invalidateReloadCaches = invalidateWidth,
     },
 );

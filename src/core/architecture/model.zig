@@ -115,7 +115,10 @@ pub inline fn maskedOn(mask: Mask, ws: WSId) bool {
 
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
-/// Single canonical size-hints record. Do NOT import layouts from here (layer rule).
+/// Single canonical size-hints record AND the only store: admission threads
+/// the parsed WM_NORMAL_HINTS to mapRequest as a parameter (there is no
+/// staging copy anywhere -- wincache used to hold a pre-registration bridge,
+/// deleted as double bookkeeping). Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
     /// PMinSize / PBaseSize floor. Policy: TILING deliberately ignores
     /// declared minimums -- the layout engine owns tiled dimensions, and
@@ -353,7 +356,7 @@ pub fn isCoveringOn(m: *const Model, win: WindowId, ws: WSId) bool {
 /// union. Pure core computation, so sync/bar resolve the screen owner without
 /// enumerating optional subsystems. At most one occupant per ws by the
 /// reconciler. (fullscreen's occupant hook is a stricter AND scan: covering +
-/// anchored + visible — see fullscreen.fullscreenOccupantOnWs.)
+/// anchored + visible — see fullscreen.visibleCoveringOnWs.)
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -362,6 +365,34 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
         if (anchored or visibleEntry(m, row.val, ws)) return row.key;
     }
     return null;
+}
+
+/// Fills `buf` (one slot per workspace, indexed by `WSId.index`) with that
+/// workspace's covering occupant, in ONE store pass.
+///
+/// Batch form of `coveringOccupantOnWs`, which answers the same question
+/// for a single workspace: that is the right shape for a one-off query and
+/// the wrong one for a sweep (the border sweep asks it once per window, so a
+/// full sweep was O(N^2) store scans). This fills the whole table up front.
+///
+/// Ties resolve to the FIRST occupant in store order, matching
+/// `coveringOccupantOnWs` exactly (the `== null` guard is what preserves that;
+/// a later covering entry must not displace an earlier one).
+pub fn coveringOccupants(m: *const Model, buf: []?WindowId) void {
+    for (buf) |*slot| slot.* = null;
+    var it = m.store.iterator();
+    while (it.next()) |row| {
+        if (row.val.presence != .covering) continue;
+        if (row.val.covering_ws) |cws| {
+            if (cws.index < buf.len and buf[cws.index] == null) buf[cws.index] = row.key;
+            continue;
+        }
+        // Unanchored covering window: it owns every workspace it is visible on.
+        for (buf, 0..) |*slot, i| {
+            if (slot.* != null) continue;
+            if (visibleEntry(m, row.val, WSId.fromIndex(i))) slot.* = row.key;
+        }
+    }
 }
 
 // Shared vocabulary types (folded in from the former feature module files).

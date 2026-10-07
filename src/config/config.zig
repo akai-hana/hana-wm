@@ -17,14 +17,13 @@ const sections = @import("sections");
 const rules = @import("rules");
 
 // Re-exports: `config` stays the single import surface for callers
-// (main.zig, events.zig, persist.zig, the tests); the seams below
+// (main.zig, events.zig, handoff.zig, the tests); the seams below
 // are where the code now lives.
 pub const validate = validate_mod.validate;
 pub const canonicalLayoutName = layout_names.canonicalLayoutName;
 pub const isLayoutName = layout_names.isLayoutName;
 pub const layout_name_grammar = layout_names.layout_name_grammar;
 pub const detectChanges = diff.detectChanges;
-pub const ConfigChanges = diff.ConfigChanges;
 pub const DefaultSource = snapshot_mod.DefaultSource;
 pub const deinitGoodSource = snapshot_mod.deinitGoodSource;
 pub const reexecSnapshotPathZ = snapshot_mod.reexecSnapshotPathZ;
@@ -34,19 +33,14 @@ pub const max_file_bytes = discover.max_file_bytes;
 pub const max_config_files = discover.max_config_files;
 
 // Internal names the orchestrator still uses unqualified.
-const normalizeLayoutName = layout_names.normalizeLayoutName;
-const max_layout_name = layout_names.max_layout_name;
 const rememberGoodSource = snapshot_mod.rememberGoodSource;
 const publishReadFiles = snapshot_mod.publishReadFiles;
 const ReadSet = discover.ReadSet;
 const parseTomlFile = discover.parseTomlFile;
-const ParsedToml = discover.ParsedToml;
 const mergeIncludes = discover.mergeIncludes;
 const searchPaths = discover.searchPaths;
-const SearchPaths = discover.SearchPaths;
 const search_order = discover.search_order;
 const SearchAttempt = discover.SearchAttempt;
-const SearchLoc = discover.SearchLoc;
 const silent_missing = discover.silent_missing;
 const tryLoadOrWarn = discover.tryLoadOrWarn;
 const discoverDirNames = discover.discoverDirNames;
@@ -260,9 +254,6 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     // the load so reload keeps the live config. Boot falls through to
     // the embedded fallback via loadConfigDefault's warn-and-skip.
     if (doc.had_errors) return error.ConfigParseFailed;
-    // Mis-cased KNOWN section headers ([Bar], [TILING], ...) are otherwise
-    // silently dropped; call them out once each.
-    warnMisCasedSections(doc);
     var cfg = try getDefaultConfig(allocator);
     // If any parse step below errors (OOM), free the partial Config so the
     // half-applied section doesn't leak. Only armed after getDefaultConfig
@@ -275,16 +266,26 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     // in one table-driven pass; must precede parseBar so icon padding sees
     // the freshly parsed workspaces.count.
     try schema.applyAll(doc, allocator, &cfg);
-    // A `tiling.*`/`bar.properties` family without its parent section is
-    // inert (applyAll and the parse functions both gate on it); warn once.
-    warnInertSectionFamilies(doc);
     try parseBar(allocator, doc, &cfg);
     try parseRules(allocator, doc, &cfg);
+    lintDocument(doc);
+    return cfg;
+}
+
+/// The load's diagnostics tail: every read-only observation about the finished
+/// document, in reading order -- mis-cased known section headers (a case-only
+/// miss silently drops the section), section families whose parent is missing
+/// (their knobs parse but do nothing), then every key no parse function claimed
+/// (almost always a typo, named with its source line). None of the three
+/// depends on parse results, so they run together here instead of being
+/// sprinkled across the parse steps.
+fn lintDocument(doc: *parser.Document) void {
+    warnMisCasedSections(doc);
+    warnInertSectionFamilies(doc);
     doc.root.warnUnconsumed("<root>");
     var iter = doc.sections.iterator();
     while (iter.next()) |entry|
         entry.value_ptr.warnUnconsumed(entry.key_ptr.*);
-    return cfg;
 }
 
 /// Known section names hana recognizes (case-sensitively) at their exact

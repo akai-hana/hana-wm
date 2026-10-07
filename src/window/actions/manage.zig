@@ -24,7 +24,15 @@ const time = @import("time");
 const log = @import("log");
 
 const actions = @import("actions");
-const gate = actions.gate;
+const surfaces = @import("surfaces").Surfaces;
+const window_mods = @import("window_modules").modules;
+
+/// Fullscreen transition classification for the atomic grab path: a named
+/// kind instead of a bool-pair so enter/exit/switch_ can't be passed
+/// inconsistently. Drives the EWMH state writes and the bar hide/show
+/// arming inside the grab (this file owns the fullscreen orchestration,
+/// so the classification lives with it).
+const FullscreenKind = enum { enter, exit, switch_ };
 
 /// Registry lookup for the hook `field` (see `contract.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
@@ -70,7 +78,7 @@ pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
     const fs_t0: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
     const wm = providerOf(.toggleCovering) orelse return;
     if (!core.getState().config.fullscreen_enabled) return;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     // Never cover a window off the viewed workspace: the covering
     // record binds the current ws and would claim it while hidden.
     if (!model_mod.visibleOn(m, win, m.current)) return;
@@ -84,7 +92,7 @@ pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
     // toggle: without this guard a redundant `_NET_WM_FULLSCREEN_REQUEST`
     // would flip the window the wrong way.
     if (want) |target| if (target == is_fs) return;
-    const kind: pipeline.FullscreenKind =
+    const kind: FullscreenKind =
         if (is_fs) .exit else if (prev_fs_win != null) .switch_ else .enter;
     const was_focused = m.focused == win;
 
@@ -102,15 +110,63 @@ pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
     var ft: focus.FocusTransition = .none;
     if (kind != .exit and !was_focused) ft = actions.prepareAndSetFocus(m, win, .user_command);
 
-    // EWMH writes + bar arming land inside the same grab as geometry -- all
-    // fire-and-forget or pure state.
-    pipeline.reconcileUnderGrabNowFullscreen(
-        .{ .force_restack = true },
-        ft,
-        win,
-        prev_fs_win,
-        kind,
-    );
+    // Atomic fullscreen transition: reconcile, focus handoff, EWMH writes and
+    // bar hide/show all land inside the same server grab (grouped atomicity),
+    // so geometry, stacking, input focus and the bar's claim can never be
+    // observed half-applied. The enter path unmaps the bar immediately rather
+    // than deferring to ConfigureNotify. `t` (ft) is the optional focus
+    // transition to the covering entrant (`.none` for an exit or an
+    // already-focused entrant): applied AFTER the reconcile so the entrant is
+    // mapped+raised before xcb_set_input_focus targets it (the mapRequest
+    // ordering rule); a parked/unparked entrant is re-mapped inside this grab.
+    {
+        const g = pipeline.grabScoped();
+        defer g.deinit();
+        g.reconcileNow(.{ .force_restack = true });
+        focus.applyPendingFocus(ft);
+        // EWMH advertisement inside the grab: clear for whoever left
+        // fullscreen, set for entrant. All fire-and-forget
+        // (xcb_change_property). Uniform loop over the sub-system set:
+        // each module that provides the hook runs it. In practice only
+        // fullscreen does, preserving the old gated single hook call
+        // exactly; the loop just makes the dispatch mechanism uniform
+        // rather than a merged struct. Ordering and the
+        // kind/prev_fs_win/m.focused logic is unchanged.
+        // Not contract.callAll, despite being a fan-out over window_mods:
+        // callAll passes ONE argument set to every binder, and this needs
+        // two calls with different arguments (clear the previous
+        // fullscreen window, then set this one), plus a per-call-site
+        // condition on kind. Routing it through callAll would mean
+        // flattening that into a single uniform call, which is the bug the
+        // uniformity is meant to prevent.
+        for (window_mods) |wm_mod| {
+            if (wm_mod.setEwmhFullscreenState) |hook| {
+                if (kind == .switch_) {
+                    if (prev_fs_win) |old| hook(old, false);
+                }
+                hook(win, kind != .exit);
+            }
+        }
+        // Bar hide/show inside the grab: no separate grab/reconcile cycle.
+        //
+        // ENTER: immediately unmap the bar via the surfaces seam. The
+        // fullscreen client is already mapped+raised+screen-sized by the
+        // reconcile, so it covers the bar before the unmap reaches the
+        // server. Cancel any stale pending bar show from a previous exit
+        // (a new enter supersedes it).
+        //
+        // EXIT: arm the deferred show. The bar reappears after the
+        // client's ConfigureNotify confirms non-fullscreen dimensions.
+        if (kind != .exit) {
+            // Immediate bar unmap when fullscreen claims the usable area.
+            surfaces.hideBarForFullscreen();
+        } else {
+            // Exit: deferred bar show (unchanged path).
+            if (m.focused) |w| {
+                contract.callAll(contract.WindowModule, window_mods[0..], .armPendingBarShow, .{w});
+            }
+        }
+    }
 
     // Deterministic fullscreen-exit reaction: the model no longer has a
     // covering occupant the moment the toggle lands, so bump the fact now.
@@ -142,8 +198,8 @@ pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
 
 // spawn/map lifecycle
 
-/// MapRequest tail. The caller's front-end (event masks, property
-/// queries, size-hints cache) has already run; this registers the window in
+/// MapRequest tail. The caller's front-end (event masks, property queries)
+/// has already run; this registers the window in
 /// the model and lets ONE reconcile do map+pixel+bw+geom(+ABOVE winner) for
 /// on-current spawns. Off-current spawns park by construction; sync sends
 /// their border width at first show instead of immediately (invisible either
@@ -154,8 +210,19 @@ pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
 /// given rect with no home-list membership, mirroring detachTiledToFloating's
 /// anchor/home_ws state. The reconcile tail then sizes it floating in one
 /// reconcile, so a float-rule spawn never flashes a tiled slot.
-pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, float_rect: ?model_mod.Rect) void {
-    const m = pipeline.mut(&gate);
+///
+/// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
+/// through as a parameter because no model entry exists when the reply
+/// drains. The model entry is the single store for size hints; the former
+/// wincache staging bridge (cacheSizeHints/peekHints) was deleted with it.
+pub fn mapRequest(
+    win: model_mod.WindowId,
+    target_ws: u8,
+    on_current: bool,
+    float_rect: ?model_mod.Rect,
+    size_hints: ?model_mod.SizeHints,
+) void {
+    const m = pipeline.mut();
     if (tracking.isManaged(win)) return; // double-manage guard, see tracking.isManaged
 
     // A defined refusal (store or home-list full) leaves the window
@@ -168,9 +235,12 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
         wincache.removeWindow(win);
         return;
     };
-    // Bridge the cached WM_NORMAL_HINTS into the model entry at registration.
+    // Install the admission drain's WM_NORMAL_HINTS on the fresh entry (no
+    // entry existed when the reply drains, hence the parameter above).
     const e = m.store.getPtr(win);
-    if (e) |ep| ep.size_hints = wincache.peekHints(win);
+    if (e) |ep| {
+        if (size_hints) |h| ep.size_hints = h;
+    }
 
     // Float-rule admission: detach the entry from its tiled slot before the
     // fifo placement runs (which assumes a home slot, nonsensical for a
@@ -233,10 +303,10 @@ pub fn mapRequest(win: model_mod.WindowId, target_ws: u8, on_current: bool, floa
 /// bug that only shows up after a re-exec.
 pub fn focusAfterGeometry() void {
     if (pipeline.model().focused) |focused| {
-        const ft = actions.prepareAndSetFocus(pipeline.mut(&gate), focused, .window_spawn);
+        const ft = actions.prepareAndSetFocus(pipeline.mut(), focused, .window_spawn);
         pipeline.reconcileGrabFocus(.{}, ft, .after, null);
     } else {
-        pipeline.reconcileGrab();
+        pipeline.reconcileGrab(.{});
     }
 }
 
@@ -245,13 +315,12 @@ pub fn focusAfterGeometry() void {
 /// run; this drops the model entry and re-focuses. Inactive-workspace
 /// geometry repairs ride the same global LastSent diff.
 pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
-    const m = pipeline.mut(&gate);
-    // Covering and focus truth arrive via ctx: the sole caller (window.
-    // unmanageWindow) removes the model entry (the workspace layer's
-    // removeWindow -> unregister) BEFORE this action runs, so reading the
-    // store here could never see either; closing the covering occupant never
-    // restored the bar, and the withdrawn window's focus ownership was
-    // unknowable.
+    const m = pipeline.mut();
+    // Covering and focus truth arrive via ctx because THIS action drops the
+    // model entry (unregister below): window.unmanageWindow captures both
+    // facts before calling in, so closing the covering occupant still
+    // restores the bar and the withdrawn window's focus ownership is known
+    // rather than unreadable from a store that no longer holds the window.
     const was_fs_current = if (ctx.withdrawn_fullscreen_ws) |ws_id| ws_id.eql(m.current) else false;
     const was_focused = ctx.withdrawn_was_focused;
 

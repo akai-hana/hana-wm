@@ -30,9 +30,9 @@ const MAX_WS = constants.max_workspaces;
 /// (`ext_format_version`), because changing it does not change the durable
 /// record shape: a v5 file stamped with a v1 (ordinal) blob header is still a
 /// v5 file and is still read, so this constant did NOT move.
-const persist_version: u32 = 5;
+const handoff_version: u32 = 5;
 
-/// The per-window feature blob header format. Every blob persist stores is
+/// The per-window feature blob header format. Every blob this module stores is
 /// wrapped as `[ext_format_version][name length][claiming module name][payload]`
 /// -- the name is the module's stable `contract.WindowModule.name`, not its
 /// position in the build-generated `window_modules` registry. Adoption
@@ -158,7 +158,7 @@ pub const WsRecord = struct {
 
 /// Top-level serialized state file.
 pub const StateFile = struct {
-    version: u32 = persist_version,
+    version: u32 = handoff_version,
     current: u8,
     focused: ?u32,
     all_view_active: bool,
@@ -180,6 +180,32 @@ pub fn defaultStatePath(alloc: std.mem.Allocator) ![]u8 {
         return std.fmt.allocPrint(alloc, "{s}/hana-restore.json", .{std.mem.span(dir)});
     }
     return std.fmt.allocPrint(alloc, "/tmp/hana-restore-{d}.json", .{std.os.linux.getuid()});
+}
+
+/// Cold-boot housekeeping for the file this module owns. Adoption is gated on
+/// `restart.restore_env` (set only by `execNext`, only alongside a file it
+/// just wrote), so when that gate is absent a restore file at the default path
+/// is a leftover of a session that crashed before its graceful-exit delete.
+/// Whether its XIDs still name the same windows is unknowable here (the X
+/// server may have restarted since and recycled them), so no boot ever adopts
+/// it -- discard rather than let a dead session's record linger (and report
+/// the leftover exactly once, rather than on every subsequent boot).
+pub fn discardOrphan(alloc: std.mem.Allocator) void {
+    const path = defaultStatePath(alloc) catch |err| {
+        log.warn("handoff: no restore path ({s}); skipping orphan cleanup", .{@errorName(err)});
+        return;
+    };
+    defer alloc.free(path);
+    std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, path) catch |err| switch (err) {
+        // The normal cold-boot outcome: this session never re-exec'd, so
+        // there is no record to discard and nothing to report.
+        error.FileNotFound => return,
+        else => {
+            log.warn("handoff: could not remove leftover restore file ({s}): {s}", .{ path, @errorName(err) });
+            return;
+        },
+    };
+    log.info("handoff: discarded restore file left by a session that did not exit cleanly ({s})", .{path});
 }
 
 /// Serializes the live model to `path`. Writes through a temp file + rename
@@ -259,7 +285,7 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
                         // stamped with nothing degrades to the magic-byte scan
                         // and is still correct -- just slower.
                         log.warn(
-                            "persist: module #{} serializes windows but has no " ++
+                            "handoff: module #{} serializes windows but has no " ++
                                 "name; stamping an unnamed header (adoption will " ++
                                 "fall back to the magic-byte scan)",
                             .{idx},
@@ -267,7 +293,7 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
                     }
                     if (mod_name.len > max_stamped_name_len) {
                         log.warn(
-                            "persist: module name '{s}' is {} bytes, over the " ++
+                            "handoff: module name '{s}' is {} bytes, over the " ++
                                 "{} byte stamp limit; not stamping this window",
                             .{ mod_name, mod_name.len, max_stamped_name_len },
                         );
@@ -314,25 +340,6 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
     // can only fail, never break early, so a short fill is a bug -- say so.
     std.debug.assert(snap.ws_filled == MAX_WS);
     return snap;
-}
-
-/// Renders the snapshot to JSON bytes (model-level scalars read live from
-/// `m`; the durable window/workspace records come from the snapshot).
-fn stringifySnapshot(allocator: std.mem.Allocator, m: *const model.Model, snap: *const Snapshot) !std.ArrayList(u8) {
-    const state = StateFile{
-        .version = persist_version,
-        .current = @intCast(m.current.index),
-        .focused = m.focused,
-        .all_view_active = m.all_view_active,
-        .workspaces = snap.workspaces,
-        .windows = snap.windows,
-    };
-
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    try std.json.Stringify.value(state, .{ .whitespace = .indent_2 }, &aw.writer);
-    try aw.writer.flush();
-    return aw.toArrayList();
 }
 
 /// Writes `bytes` to `path` atomically. Writes through a temp sibling + rename
@@ -385,9 +392,26 @@ fn createExclusive(io: std.Io, path: []const u8) !std.Io.File {
 pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u8) !void {
     var snap = try saveSnapshot(allocator, m);
     defer snap.deinit();
-    var al = try stringifySnapshot(allocator, m, &snap);
-    defer al.deinit(allocator);
-    try atomicWrite(allocator, path, al.items);
+    // Model-level scalars read live from `m`; the durable records come from
+    // the snapshot. The two shapes stay two types on purpose (the judgment
+    // behind this seam's collapse): `Snapshot` OWNS the duped records + blobs
+    // (allocator, partial-fill deinit), `StateFile` is the pure wire value --
+    // merging them would hang an Allocator off the JSON type or hand the
+    // parsed value an ownership-ful deinit that would free arena memory.
+    // `stringifySnapshot` (single caller) folded here with that in mind.
+    const state = StateFile{
+        .version = handoff_version,
+        .current = @intCast(m.current.index),
+        .focused = m.focused,
+        .all_view_active = m.all_view_active,
+        .workspaces = snap.workspaces,
+        .windows = snap.windows,
+    };
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try std.json.Stringify.value(state, .{ .whitespace = .indent_2 }, &aw.writer);
+    try aw.writer.flush();
+    try atomicWrite(allocator, path, aw.written());
 }
 
 /// Parses the restore file into the module-global `loaded`. Returns false
@@ -400,26 +424,26 @@ pub fn loadToGlobal(allocator: std.mem.Allocator, path: []const u8) bool {
         allocator,
         std.Io.Limit.limited(max_restore_bytes),
     ) catch |err| {
-        log.warn("persist: no usable restore file ({s}); booting fresh", .{@errorName(err)});
+        log.warn("handoff: no usable restore file ({s}); booting fresh", .{@errorName(err)});
         return false;
     };
     defer allocator.free(raw);
 
     var parsed = std.json.parseFromSlice(StateFile, allocator, raw, .{}) catch {
-        log.warn("persist: restore file unparseable; booting fresh", .{});
+        log.warn("handoff: restore file unparseable; booting fresh", .{});
         return false;
     };
-    if (parsed.value.version != persist_version) {
+    if (parsed.value.version != handoff_version) {
         const ver = parsed.value.version;
         parsed.deinit();
-        log.warn("persist: unsupported restore version {}; booting fresh", .{ver});
+        log.warn("handoff: unsupported restore version {}; booting fresh", .{ver});
         return false;
     }
 
     if (loaded_parsed) |old| old.deinit();
     const p = parsed.value;
     loaded_parsed = parsed;
-    log.info("persist: loaded session state ({} windows, {d} workspaces)", .{
+    log.info("handoff: loaded session state ({} windows, {d} workspaces)", .{
         p.windows.len,
         p.workspaces.len,
     });
@@ -499,7 +523,7 @@ pub fn applyModelLevel(m: *model.Model) void {
             const vc = l.variant_count;
             if (s.params.variant_idx >= vc) {
                 log.warn(
-                    "persist: clamping restored variant_idx {} to {} (layout " ++
+                    "handoff: clamping restored variant_idx {} to {} (layout " ++
                         "'{}' exposes {} variant(s))",
                     .{ s.params.variant_idx, vc -| 1, s.params.kind, vc },
                 );
@@ -509,7 +533,7 @@ pub fn applyModelLevel(m: *model.Model) void {
         if (@import("contract").moduleOf(s.params.kind) == null and tiling_mods.len > 0) {
             const fallback = resumableDefaultKind();
             log.warn(
-                "persist: restoring persisted layout kind {} which no " ++
+                "handoff: restoring persisted layout kind {} which no " ++
                     "longer resolves ({} registered); using default kind {}",
                 .{ s.params.kind, tiling_mods.len, fallback },
             );

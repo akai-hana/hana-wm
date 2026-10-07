@@ -19,7 +19,6 @@ const time = @import("time");
 const log = @import("log");
 
 const actions = @import("actions");
-const gate = actions.gate;
 
 /// Registry lookup for the hook `field` (see `contract.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
@@ -40,7 +39,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
     const wm = providerOf(.sendToWs) orelse return;
     if (ws_idx >= constants.max_workspaces) return;
 
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const was_focused = m.focused == win;
     const was_fs_current = actions.isCoveringOnWs(m, win);
 
@@ -78,7 +77,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     if (add_prov == null and rem_prov == null) return;
     if (ws_idx >= constants.max_workspaces) return;
 
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     if (!canTagChange(m, win)) return;
     const e = m.store.get(win).?;
 
@@ -111,7 +110,7 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
 /// move_to_all_workspaces / toggle_tag_all: pinned <-> current-only.
 pub fn pinToggle(win: model_mod.WindowId) void {
     const wm = providerOf(.togglePin) orelse return;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     if (!canTagChange(m, win)) return;
     wm.togglePin.?(m, win);
     actions.retile(.{}, null);
@@ -121,7 +120,7 @@ pub fn pinToggle(win: model_mod.WindowId) void {
 /// parks them again on exit through the ordinary diff.
 pub fn allViewToggle() void {
     const wm = providerOf(.toggleAllView) orelse return;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const entering = wm.toggleAllView.?(m);
     var ft: focus.FocusTransition = .none;
     if (!entering and m.focused != null and !model_mod.visibleOn(m, m.focused.?, m.current)) {
@@ -145,7 +144,7 @@ pub fn allViewToggle() void {
 /// off-current and never mapped, so an earlier focus-before-reconcile ordering
 /// produced a BadMatch that left X focus on the old workspace's window.
 pub fn switchTo(ws_idx: u8) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     if (ws_idx >= constants.max_workspaces) return;
     // No-op only when the view is already exactly this workspace (no all-view
     // to exit). In all-view the current index may already equal the target:
@@ -189,7 +188,7 @@ pub fn switchTo(ws_idx: u8) void {
 
     const t1: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
-    // The server grab (pipeline.withServerGrab, not a local bracket) wraps
+    // The server grab (pipeline's grabScoped token, not a local bracket) wraps
     // pure fire-and-forget XCB (focus transition + reconcile), so no blocking
     // wait ever freezes input while the grab is held. All decision work —
     // focus-candidate selection and the FocusTransition prep — runs here,

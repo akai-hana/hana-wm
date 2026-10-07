@@ -211,10 +211,13 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     };
     focus.grabFocus(win, .user_command);
     // Raise the dragged window immediately outside any server grab (grabFocus
-    // has already ungrabAndFlush'd); routed through sync's sanctioned stack
-    // primitive + flush so wire stays in sync. Drag ticks keep going flushless
-    // via the targeted dragTick (1 configure, no grab).
-    pipeline.raiseWindowNow(win);
+    // has already ungrabAndFlush'd); routed through the shared sink's
+    // sanctioned stack primitive + flush so wire stays in sync. Drag ticks
+    // keep going flushless via geometry.dragRect's targeted reconcile
+    // (1 configure, no grab).
+    const s = pipeline.syncSink();
+    s.stackOnly(win, .above);
+    s.flush();
 }
 
 fn computeMoveRect(
@@ -248,29 +251,43 @@ fn computeMoveRect(
     };
 }
 
-/// Min/max outer size for `win` (the drag-resize envelope).
+/// Min/max outer size envelope for `win` (the drag-resize / configure-request
+/// clamp bounds).
 const HintLimits = struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 };
 
-/// Computes `win`'s HintLimits from its PMinSize/PBaseSize and PMaxSize hints.
-/// An X11 configured width/height excludes the frame, so the outer bound is
-/// the client-declared value plus both border widths. A zero hint means no
-/// constraint: min yields 0 and max yields the u16 wire-width ceiling.
-fn sizeHintLimits(win: u32) HintLimits {
-    const bw2: i32 = @as(i32, core.borderWidth()) * 2;
+/// The ONE PMin/PMax clamp policy, shared by the drag-resize path and the
+/// ConfigureRequest path so the two cannot drift (they already had: the
+/// request path was free to disagree about borders or the global floor).
+///
+/// Units are OUTER: an X11 configured width/height excludes the frame, so each
+/// non-zero hint grows by both border widths (`bw2`). `min_dim` is the global
+/// `min_window_dim` floor, passed as 0 by headless model tests, which have no
+/// core to read it from. A zero hint means no constraint (floor 0, ceiling the
+/// u16 wire limit), and the `@max(floor, ...)` ceiling keeps a client whose
+/// declared max is below its min from inverting the clamp range.
+fn sizeEnvelope(hints: model.SizeHints, bw2: i32, min_dim: i32) HintLimits {
     const unbounded: i32 = @as(i32, std.math.maxInt(u16));
-    // Window may withdraw mid-drag; treat it as hint-less (no constraint).
-    const hints = (pipeline.model().store.get(win) orelse return .{
-        .min_w = 0,
-        .min_h = 0,
-        .max_w = unbounded,
-        .max_h = unbounded,
-    }).size_hints;
     return .{
-        .min_w = if (hints.min_width == 0) 0 else @as(i32, hints.min_width) + bw2,
-        .min_h = if (hints.min_height == 0) 0 else @as(i32, hints.min_height) + bw2,
+        .min_w = @max(min_dim, if (hints.min_width == 0) 0 else @as(i32, hints.min_width) + bw2),
+        .min_h = @max(min_dim, if (hints.min_height == 0) 0 else @as(i32, hints.min_height) + bw2),
         .max_w = if (hints.max_width == 0) unbounded else @as(i32, hints.max_width) + bw2,
         .max_h = if (hints.max_height == 0) unbounded else @as(i32, hints.max_height) + bw2,
     };
+}
+
+/// `sizeEnvelope` for the live-core drag path: border width and the global
+/// minimum are always available there.
+fn sizeHintLimits(win: u32) HintLimits {
+    const bw2: i32 = @as(i32, core.borderWidth()) * 2;
+    const min_dim: i32 = core.getState().config.tiling.min_window_dim;
+    // Window may withdraw mid-drag; treat it as hint-less (no constraint).
+    const hints = (pipeline.model().store.get(win) orelse return .{
+        .min_w = min_dim,
+        .min_h = min_dim,
+        .max_w = @as(i32, std.math.maxInt(u16)),
+        .max_h = @as(i32, std.math.maxInt(u16)),
+    }).size_hints;
+    return sizeEnvelope(hints, bw2, min_dim);
 }
 
 fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) model.Rect {
@@ -311,15 +328,12 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) model.Rect 
     const new_bottom: i32 = @max(anchor_y, moving_y);
 
     // Clamp size first, then re-pin position off the anchor so the anchor edge
-    // never drifts when a bound is hit. The floor is the larger of the global
-    // minimum and the window's declared PMinSize/PBaseSize (a client's own
-    // minimum wins); the `@max(floor, ...)` ceiling expression keeps a client
-    // whose declared max is below its min from inverting the clamp range.
-    const min_dim: i32 = core.getState().config.tiling.min_window_dim;
-    const floor_w: i32 = @max(min_dim, limits.min_w);
-    const floor_h: i32 = @max(min_dim, limits.min_h);
-    const clamped_w: i32 = std.math.clamp(new_right - new_left, floor_w, @max(floor_w, limits.max_w));
-    const clamped_h: i32 = std.math.clamp(new_bottom - new_top, floor_h, @max(floor_h, limits.max_h));
+    // never drifts when a bound is hit. `limits` already carries the global
+    // floor plus the PMin/PMax + border envelope (sizeEnvelope), and the
+    // `@max(floor, ...)` ceiling keeps a client whose declared max is below its
+    // min from inverting the clamp range.
+    const clamped_w: i32 = std.math.clamp(new_right - new_left, limits.min_w, @max(limits.min_w, limits.max_w));
+    const clamped_h: i32 = std.math.clamp(new_bottom - new_top, limits.min_h, @max(limits.min_h, limits.max_h));
     const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
@@ -441,30 +455,21 @@ pub fn honorConfigureRequest(
             if (req.x) |v| r.x = v;
             if (req.y) |v| r.y = v;
             // A configure request is untrusted client input: clamp its extent
-            // to the same floor/ceiling the drag resize path enforces. The
-            // client's PMin/PMax live on the model entry, so the core part of
-            // the floor (global min_window_dim, borderWidth) applies only when
-            // core is ready; a headless model test exercises the PMin/PMax
-            // half without a core.
-            const entry = m.store.get(win) orelse return .ignored;
-            const hints = entry.size_hints;
-            var floor_w: i32 = @as(i32, hints.min_width);
-            var floor_h: i32 = @as(i32, hints.min_height);
-            var max_w: i32 = if (hints.max_width == 0) @as(i32, std.math.maxInt(u16)) else @as(i32, hints.max_width);
-            var max_h: i32 = if (hints.max_height == 0) @as(i32, std.math.maxInt(u16)) else @as(i32, hints.max_height);
+            // with the same envelope the drag path uses (sizeEnvelope). The
+            // core half (border width, global min) only exists once core is
+            // up; a headless model test exercises the PMin/PMax half without
+            // one, so both pass 0 there.
+            var bw2: i32 = 0;
             var min_dim: i32 = 0;
             if (core.isReady()) {
-                const bw2: i32 = @as(i32, core.borderWidth()) * 2;
+                bw2 = @as(i32, core.borderWidth()) * 2;
                 min_dim = core.getState().config.tiling.min_window_dim;
-                if (hints.min_width != 0) floor_w += bw2;
-                if (hints.min_height != 0) floor_h += bw2;
-                if (hints.max_width != 0) max_w += bw2;
-                if (hints.max_height != 0) max_h += bw2;
             }
-            floor_w = @max(floor_w, min_dim);
-            floor_h = @max(floor_h, min_dim);
-            if (req.width) |v| r.width = @intCast(std.math.clamp(@as(i32, v), floor_w, @max(floor_w, max_w)));
-            if (req.height) |v| r.height = @intCast(std.math.clamp(@as(i32, v), floor_h, @max(floor_h, max_h)));
+            const limits = sizeEnvelope(e.size_hints, bw2, min_dim);
+            if (req.width) |v|
+                r.width = @intCast(std.math.clamp(@as(i32, v), limits.min_w, @max(limits.min_w, limits.max_w)));
+            if (req.height) |v|
+                r.height = @intCast(std.math.clamp(@as(i32, v), limits.min_h, @max(limits.min_h, limits.max_h)));
             // NOTE: a requested border_width is not stored here (the
             // floating rect has no bw field); the entry point sends and
             // caches it alongside the geometry it applies.

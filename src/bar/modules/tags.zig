@@ -240,6 +240,18 @@ fn draw(ctx: *segmod.DrawCtx, start_x: u16) !contract.Painted {
     );
 }
 
+/// The per-workspace cell width: the hot cache from the last draw; else
+/// re-derived from the config captured at that draw (covers the
+/// one-frame-after-config-change window, and the first frame where
+/// ensureCache has not run yet); else 0 when nothing has ever been drawn --
+/// the reservation and the click hit-test must agree on that 0, so they both
+/// ask here instead of restating the ladder.
+fn cellWidth() u16 {
+    if (ws_width > 0) return ws_width;
+    if (last_geom_valid) return last_config.scaledWorkspaceWidth(last_height);
+    return 0;
+}
+
 /// This module's bar-segment contribution (registry binding).
 fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
     // Without the workspaces module the bar never fills workspace_count (the
@@ -254,13 +266,11 @@ fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
             if (last_geom_valid) return @max(last_config.scaledWorkspaceWidth(last_height), all_view_label_width);
             return fallback_width;
         }
-        // Hot cache wins; otherwise re-derive from the config captured at the
-        // last draw (covers the one-frame-after-config-change window, and the
-        // first frame where ensureCache has not run yet). If nothing has
+        // Hot cache / last-config re-derivation (cellWidth); if nothing has
         // ever been drawn, reserve the same honest fallback the empty case
         // uses rather than workspace_count * 0, which showed a visible
         // zero-width tags slot on the very first layout.
-        const cell_w = if (ws_width > 0) ws_width else if (last_geom_valid) last_config.scaledWorkspaceWidth(last_height) else 0;
+        const cell_w = cellWidth();
         if (cell_w > 0) return @intCast(f.workspace_count * cell_w);
         return fallback_width;
     }
@@ -271,7 +281,7 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
     // In all-view the single "花" cell represents every workspace at once; a
     // click cannot map onto one workspace, so it is a no-op.
     if (tracking.isAllViewActive()) return null;
-    const cell_w = if (ws_width > 0) ws_width else (if (last_geom_valid) last_config.scaledWorkspaceWidth(last_height) else 0);
+    const cell_w = cellWidth();
     if (cell_w == 0) return null;
     if (!build_options.has_workspaces) return null;
     const idx: usize = @intCast(offset / cell_w);

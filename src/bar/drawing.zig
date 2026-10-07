@@ -851,7 +851,7 @@ pub fn drawPaddedSegment(
         padding,
         config.bg,
         config.segmentFg(segment_name),
-        if (cover_text) |ct| dc.measureTextWidth(ct) else null,
+        if (cover_text) |ct| dc.measureTextWidthStyled(ct, props) else null,
         props,
     );
 }

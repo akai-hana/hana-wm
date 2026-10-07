@@ -74,7 +74,7 @@ test "bench: findHome scan (100 wins, 10 ws)" {
     }
 }
 
-test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
+test "bench: visibleCoveringOnWs store scan (50 wins)" {
     var m = makeModel();
     for (0..50) |i| {
         regCur(&m, @intCast(i + 1));
@@ -88,7 +88,7 @@ test "bench: fullscreenOccupantOnWs store scan (50 wins)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) helpers.benchLog("[bench] fullscreenOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench) helpers.benchLog("[bench] visibleCoveringOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
 }
 
 test "bench: coveringOccupantOnWs store scan (50 wins)" {
@@ -231,7 +231,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     const elapsed2 = nowNs() - t2;
     const per_tick_ns = @as(f64, @floatFromInt(elapsed2)) / @as(f64, @floatFromInt(iterations));
 
-    // BEFORE: full reconcile (what reconcileNow did on every drag tick)
+    // BEFORE: full reconcile per drag tick (the pre-targeted-drag-tick behavior)
     const t1 = nowNs();
     for (0..iterations) |_| {
         const e1 = m.store.getPtr(dragged).?;

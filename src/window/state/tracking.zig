@@ -9,7 +9,8 @@
 //! and clear the per-workspace focus MRU, both through a file-private gate.
 //! Every other model mutation belongs to its transition owner (actions/window/
 //! focus); no shared writable token escapes this read facade. All model reads
-//! go through modelReady(), so boot order never touches an undefined instance.
+//! go through core.isModelReady() (the one spelling), so boot order never
+//! touches an undefined instance.
 
 const std = @import("std");
 
@@ -18,22 +19,8 @@ const constants = @import("constants");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
 
-// Transition-layer gate for THIS facade's own model writes only. The single
-// entry-drop transition (removeWindow) and the focus-MRU clear in
-// init/deinit go through it. It is deliberately NOT pub: external model
-// mutation is the job of the transition owners (actions/window/focus), and
-// each of those declares its OWN private gate instead of aliasing this one,
-// so no shared writable token leaks through the read facade.
-const gate: pipeline.Gate = .{};
-
-/// True once pipeline.init ran; every model access is gated on this so boot
-/// order never touches the undefined global instance.
-fn modelReady() bool {
-    return pipeline.initialized();
-}
-
 fn m() ?*const model_mod.Model {
-    if (!modelReady()) return null;
+    if (!core.isModelReady()) return null;
     return pipeline.model();
 }
 
@@ -89,8 +76,8 @@ pub fn allWindowsInto(buf: []Entry) []const Entry {
 // model.fallbackFocusCandidate.
 
 fn clearFocusMru() void {
-    if (!modelReady()) return;
-    const mm = pipeline.mut(&gate);
+    if (!core.isModelReady()) return;
+    const mm = pipeline.mut();
     for (&mm.ws) |*s| s.focus_mru.clear();
 }
 
@@ -133,12 +120,13 @@ pub fn deinit() void {
 /// tracking query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    // Via modelReady() rather than pipeline.initialized() directly: (11.9)
-    // this file had two spellings of one question -- modelReady() and a bare
-    // pipeline.initialized() -- so "is the model live?" was answered by
-    // reading whichever of the two the author happened to be near. One
-    // spelling, defined by the one place that explains why the gate exists.
-    if (!modelReady()) return null;
+    // core.isModelReady() and nothing else: this file used to answer "is
+    // the model live?" through its own modelReady() facade over
+    // pipeline.initialized() -- three spellings of one question tree-wide
+    // (the 11.9 fix collapsed this file's two; the KISS audit folded the
+    // remaining facade pair by deleting both). One spelling, defined by the
+    // one place whose doc explains why the gate exists.
+    if (!core.isModelReady()) return null;
     return pipeline.model().current.index;
 }
 

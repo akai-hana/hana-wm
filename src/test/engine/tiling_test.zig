@@ -85,7 +85,7 @@ const Fixture = struct {
             self.hint_buf[i] = if (self.m.store.get(w)) |e| e.size_hints else .{};
         }
         const n = s0.tiled_order.len;
-        self.hv = .{ .order = s0.tiled_order.constSlice(), .hints = self.hint_buf[0..n] };
+        self.hv = self.hint_buf[0..n];
     }
 
     fn view(self: *Fixture) tiling.View {

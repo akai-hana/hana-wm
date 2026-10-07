@@ -42,14 +42,13 @@ const types = @import("types");
 /// A parsed value.
 ///
 /// Deliberately carries NO source span (16.1/16.3): the section already records
-/// the source line of every key it inserted (`lines_in_order` / `lineOfKey`),
+/// the source line of every key it inserted (`Entry.line` / `lineOfKey`),
 /// and that is the line a user needs -- a knob error is reported against a KEY
 /// PATH inside a section, and every diagnostic in this file reaches the section
 /// that owns the key. Putting a line/column on each of the six union variants
 /// instead would mean 30 construction sites carrying it, plus every method that
 /// synthesizes or returns a `Value` (lastScalar/asScalar/accumulate), all to
-/// report a number already available one level up. See the 16.1 note in the
-/// ledger for the full argument.
+/// report a number already available one level up.
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
@@ -127,110 +126,102 @@ pub const Value = union(enum) {
 };
 
 pub const Section = struct {
-    pairs: std.StringHashMap(Value),
-    // Keys examined via get()/getAs()/markConsumed() during config
-    // interpretation. Populated (best-effort, alloc failures are swallowed)
-    // so config.zig can warn about keys no parse function recognises.
-    consumed: std.StringHashMap(void),
-    // Document-order key list (insertion order); `pairs` is a hashmap, so
-    // direct iteration is nondeterministic (per-process random seed).
-    // `orderedIterator` gives deterministic, first-in-file-wins resolution
-    // for `[binds]`, `[workspace.rules]`, etc. Holds `pairs`' allocations.
-    keys_in_order: std.ArrayListUnmanaged([]const u8) = .empty,
-    // Per-key source line, kept in parallel with `keys_in_order` for the
-    // unrecognized-key / duplicate-key diagnostics. Best-effort.
-    lines_in_order: std.ArrayListUnmanaged(usize) = .empty,
-    // Keys that were declared more than once in this section (across the
-    // duplicate / cross-file merge paths). Distinct from a single literal
-    // array value like `layouts = [...]`: only genuine duplicate declarations
-    // accumulate, and only those warn when read as a scalar.
-    duplicated_keys: std.StringHashMap(void),
-    // Keys already warned about for scalar-duplicate reads, so each
-    // section+key pair warns at most once.
-    scalar_dup_warned: std.StringHashMap(void),
+    /// One entry per declared key, in document order. This array IS the
+    /// section: it replaces a `pairs` hashmap plus five parallel structures
+    /// (`keys_in_order`, `lines_in_order`, `consumed`, `duplicated_keys`,
+    /// `scalar_dup_warned`), each answering a question about the same keys
+    /// whose agreement was an invariant nothing could see. A section holds
+    /// tens of keys and is read only during a config load, so the linear scan
+    /// below costs a comparison or two where the hashmap cost a hash -- and
+    /// iteration is document order for free (the hashmap's was per-process
+    /// random, which is why `orderedIterator` existed at all).
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
     // The section header this Section belongs to ("" for the root pairs that
     // have no header). Filled by parse() when a section is created; merged
     // sections carry their source name through the shared-value merge.
     name: []const u8 = "",
 
-    /// Reserves 4 slots in a string map, warning with `label` on OOM
-    /// (best-effort: losing the reserve just means an extra rehash).
-    fn reserve(allocator: std.mem.Allocator, comptime V: type, comptime label: []const u8) std.StringHashMap(V) {
-        var map = std.StringHashMap(V).init(allocator);
-        map.ensureTotalCapacity(section_keys_reserve) catch |err| log.warnOnErr(err, label);
-        return map;
-    }
+    /// What the parser knows about one declared key.
+    pub const Entry = struct {
+        key: []const u8,
+        /// The live value: duplicate declarations accumulate INTO this field
+        /// (see insertOrAccumulate), so it is the one place a key's value
+        /// lives -- there is no second copy in a map to keep in step.
+        value: Value,
+        /// Source line of the FIRST declaration; feeds the unrecognized-key
+        /// and duplicate-key diagnostics (best-effort).
+        line: usize = 0,
+        /// Read by get()/getAs()/markConsumed, or visited by
+        /// orderedIterator(). A key no reader examined is reported by
+        /// warnUnconsumed (almost always a typo in the key name).
+        consumed: bool = false,
+        /// Declared more than once across the duplicate / cross-file merge
+        /// paths. Distinct from a single literal array value like
+        /// `layouts = [...]`: only genuine duplicate declarations accumulate,
+        /// and only those warn when read as a scalar.
+        duplicated: bool = false,
+        /// Already warned about for a scalar-duplicate read, so each
+        /// section+key pair warns at most once.
+        scalar_dup_warned: bool = false,
+    };
 
-    pub fn init(allocator: std.mem.Allocator) Section {
-        return .{
-            .pairs = reserve(allocator, Value, "section pair map reserve"),
-            .consumed = reserve(allocator, void, "section consumed-set reserve"),
-            .duplicated_keys = reserve(allocator, void, "section duplicate tracking reserve"),
-            .scalar_dup_warned = reserve(allocator, void, "section duplicate-diagnostic reserve"),
-        };
-    }
-
-    // Records `key` as the newest document-order key together with the source
-    // line it was declared on. Best-effort on both halves: an OOM just loses
-    // deterministic ordering for this section, never data.
-    fn recordLine(self: *Section, allocator: std.mem.Allocator, key: []const u8, line: usize) void {
-        self.keys_in_order.append(allocator, key) catch {};
-        self.lines_in_order.append(allocator, line) catch {};
-    }
-
-    // Returns the source line `key` was first declared on in this section.
-    pub fn lineOfKey(self: *const Section, key: []const u8) ?usize {
-        for (self.keys_in_order.items, 0..) |k, i| {
-            if (std.mem.eql(u8, k, key)) {
-                if (i < self.lines_in_order.items.len) return self.lines_in_order.items[i];
-                return null;
-            }
+    /// Index of `key`'s entry, or null. The one lookup every method below is
+    /// built on.
+    fn indexOf(self: *const Section, key: []const u8) ?usize {
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.key, key)) return i;
         }
         return null;
     }
 
-    // Records `key` as declared more than once (calling `accumulate` path);
-    // these are the only keys that can trigger the scalar-duplicate warn.
-    fn markDuplicated(self: *Section, key: []const u8) void {
-        self.duplicated_keys.put(key, {}) catch {};
+    /// Nothing to allocate up front: the array grows as keys are inserted,
+    /// and a section is never read before parsing has finished.
+    pub fn init() Section {
+        return .{};
+    }
+
+    // Returns the source line `key` was first declared on in this section.
+    pub fn lineOfKey(self: *const Section, key: []const u8) ?usize {
+        const i = self.indexOf(key) orelse return null;
+        return self.entries.items[i].line;
     }
 
     // Iterates pairs in document (insertion) order; deterministic, unlike
     // `pairs.iterator()`. Values are the live (possibly accumulated) values.
-    pub fn orderedIterator(self: *const Section) OrderedIterator {
+    // Every key the walk visits is marked consumed, so a section read this way
+    // needs no separate markConsumed prologue: the walk itself is the read.
+    pub fn orderedIterator(self: *Section) OrderedIterator {
         return .{ .section = self, .idx = 0 };
     }
 
     // Records `key` as recognised so it won't be reported by warnUnconsumed.
-    // Needed for keys read via direct `pairs` iteration (e.g. `[binds]`,
-    // `[workspace.rules]`, `[tiling.layouts.master-stack.counts]`) rather
-    // than the typed getters.
+    // Called by `get()`/`getAs()` (typed readers) and by OrderedIterator.next()
+    // (the document-order readers); nothing else needs to call it.
     pub fn markConsumed(self: *Section, key: []const u8) void {
-        self.consumed.put(key, {}) catch |err| log.warnOnErr(err, "marking key consumed");
+        const i = self.indexOf(key) orelse return;
+        self.entries.items[i].consumed = true;
     }
 
     // Warns about every key in the section that was never examined via
     // get()/getAs()/markConsumed(); typically a typo in the key name, since
     // the parser otherwise accepts it silently. Names the source line so a
-    // large config's typos are findable. Iterates in document order
-    // (keys_in_order, filled together with lines_in_order by
-    // insertOrAccumulate) so warnings are deterministic and O(n).
+    // large config's typos are findable. Iterates `entries`, which IS
+    // document order, so warnings are deterministic and O(n).
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
-        for (self.keys_in_order.items, 0..) |key, i| {
-            if (!self.consumed.contains(key)) {
-                log.warn(
-                    "Unrecognized key '{s}' in section [{s}] (line {d}); ignoring",
-                    .{ key, section_name, if (i < self.lines_in_order.items.len) self.lines_in_order.items[i] else 0 },
-                );
-            }
+        for (self.entries.items) |e| {
+            if (e.consumed) continue;
+            log.warn(
+                "Unrecognized key '{s}' in section [{s}] (line {d}); ignoring",
+                .{ e.key, section_name, e.line },
+            );
         }
     }
 
     pub fn get(self: *Section, key: []const u8) ?Value {
-        self.markConsumed(key);
-        const val = self.pairs.get(key);
-        if (val) |v| self.warnScalarDuplicate(key, v);
-        return val;
+        const i = self.indexOf(key) orelse return null;
+        self.entries.items[i].consumed = true;
+        self.warnScalarDuplicate(i);
+        return self.entries.items[i].value;
     }
 
     // A key that accumulated duplicate declarations reads as an array,
@@ -239,23 +230,24 @@ pub const Section = struct {
     // sections where accumulated arrays ARE the point: [binds], rule tables
     // ([workspace.rules]/[rules]), the root `include` key, and the [tiling]
     // `layouts` list.
-    fn warnScalarDuplicate(self: *Section, key: []const u8, val: Value) void {
-        if (val != .array) return;
-        if (!self.duplicated_keys.contains(key)) return;
-        if (self.scalar_dup_warned.contains(key)) return;
+    /// Takes the entry's index rather than its key: the caller has just
+    /// located it, and a second scan for the same key would be pure waste.
+    fn warnScalarDuplicate(self: *Section, i: usize) void {
+        const e = &self.entries.items[i];
+        if (e.value != .array) return;
+        if (!e.duplicated or e.scalar_dup_warned) return;
         const exempt = std.mem.eql(u8, self.name, "binds") or
             std.mem.eql(u8, self.name, types.section_workspace_rules) or
             std.mem.eql(u8, self.name, types.section_rules) or
-            (self.name.len == 0 and std.mem.eql(u8, key, "include")) or
-            (std.mem.eql(u8, self.name, types.section_tiling) and std.mem.eql(u8, key, "layouts"));
+            (self.name.len == 0 and std.mem.eql(u8, e.key, "include")) or
+            (std.mem.eql(u8, self.name, types.section_tiling) and std.mem.eql(u8, e.key, "layouts"));
         if (exempt) return;
-        self.scalar_dup_warned.put(key, {}) catch {};
+        e.scalar_dup_warned = true;
         // Root pairs (no section header) warn under a "[root]" label so one
         // format serves both cases.
-        const decls: usize = val.array.list.items.len;
         log.warn(
             "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations, first at line {d}); scalar reads use the last value",
-            .{ key, if (self.name.len == 0) "root" else self.name, decls, self.lineOfKey(key) orelse 0 },
+            .{ e.key, if (self.name.len == 0) "root" else self.name, e.value.array.list.items.len, e.line },
         );
     }
 
@@ -278,10 +270,11 @@ pub const Section = struct {
     pub fn getAsOrWarn(self: *Section, comptime T: type, key: []const u8) ?T {
         const out = self.getAs(T, key);
         if (out == null) {
-            if (self.pairs.get(key)) |v| {
+            if (self.indexOf(key)) |i| {
+                const e = self.entries.items[i];
                 log.warn(
                     "Key '{s}' in section [{s}] expects {s}, got {s} (line {d}); ignoring (keeping default)",
-                    .{ key, self.name, typeLabel(T), valueTypeLabel(v), self.lineOfKey(key) orelse 0 },
+                    .{ key, self.name, typeLabel(T), valueTypeLabel(e.value), e.line },
                 );
             }
         }
@@ -331,15 +324,17 @@ fn valueTypeLabel(val: Value) []const u8 {
 
 // Iterates a section's pairs in document (insertion) order. Values are
 // looked up live from `pairs` so accumulated duplicates are seen in full.
+// Marks each key consumed as it hands it over (see orderedIterator).
 pub const OrderedIterator = struct {
-    section: *const Section,
+    section: *Section,
     idx: usize,
 
     pub fn next(self: *OrderedIterator) ?struct { key: []const u8, value: Value } {
-        if (self.idx >= self.section.keys_in_order.items.len) return null;
-        const key = self.section.keys_in_order.items[self.idx];
+        if (self.idx >= self.section.entries.items.len) return null;
+        const e = &self.section.entries.items[self.idx];
         self.idx += 1;
-        return .{ .key = key, .value = self.section.pairs.get(key).? };
+        e.consumed = true;
+        return .{ .key = e.key, .value = e.value };
     }
 };
 
@@ -365,7 +360,7 @@ pub const Document = struct {
         sections.ensureTotalCapacity(document_sections_reserve) catch |err| log.warnOnErr(err, "document section map reserve");
         var palette = std.StringHashMap(u32).init(allocator);
         palette.ensureTotalCapacity(palette_var_names.len) catch |err| log.warnOnErr(err, "document palette reserve");
-        return .{ .sections = sections, .root = Section.init(allocator), .palette = palette };
+        return .{ .sections = sections, .root = Section.init(), .palette = palette };
     }
 
     pub fn getSection(self: *Document, name: []const u8) ?*Section {
@@ -387,11 +382,9 @@ pub const palette_var_names = [_][]const u8{
     types.palette_text_color,
 };
 
-/// Pre-reserve capacities for the two string-keyed maps so a typical
-/// document builds without rehashing: 8 sections in the document map
-/// (theme + 7 core sections), 4 keys per section.
+/// Pre-reserve the document's section map so a typical document (theme + 7
+/// core sections) builds without rehashing.
 const document_sections_reserve: usize = 8;
-const section_keys_reserve: usize = 4;
 
 /// Core parser for a `(weight:DIGITS[%])` prefix at the head of `s`, where `s`
 /// is the token with any leading `+` already stripped. Returns the weight and
@@ -493,12 +486,15 @@ fn insertOrAccumulate(
     value: Value,
     line: ?usize,
 ) !void {
-    if (section.pairs.getPtr(key)) |old| {
-        try accumulate(allocator, old, value);
-        section.markDuplicated(key);
+    if (section.indexOf(key)) |i| {
+        // The entry's value is where a duplicate accumulates, so the array a
+        // scalar read later resolves to is built in place -- there is no
+        // second map to update alongside it.
+        const e = &section.entries.items[i];
+        try accumulate(allocator, &e.value, value);
+        e.duplicated = true;
     } else {
-        try section.pairs.put(key, value);
-        section.recordLine(allocator, key, line orelse 0);
+        try section.entries.append(allocator, .{ .key = key, .value = value, .line = line orelse 0 });
     }
 }
 
@@ -508,9 +504,12 @@ fn insertOrAccumulate(
 // reads see the full accumulation; `src` is unmodified. Keys and values are
 // shared (arena), so nothing is copied or freed.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
-    var iter = src.orderedIterator();
-    while (iter.next()) |entry| {
-        try insertOrAccumulate(allocator, dst, entry.key, entry.value, src.lineOfKey(entry.key));
+    // Raw entry iteration on purpose, NOT orderedIterator(): walking with the
+    // iterator marks keys consumed on `src`, and a section dst does not have
+    // yet is copied over WITH its entries and their flags -- which would
+    // silence warnUnconsumed for every key an include file contributes.
+    for (src.entries.items) |e| {
+        try insertOrAccumulate(allocator, dst, e.key, e.value, e.line);
     }
 }
 
@@ -1014,7 +1013,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []c
                 // section, consistent with the cross-file merge path.
                 current_section = existing;
             } else {
-                try doc.sections.put(section_name, Section.init(allocator));
+                try doc.sections.put(section_name, Section.init());
                 current_section = doc.sections.getPtr(section_name).?;
                 current_section.name = section_name;
             }

@@ -24,8 +24,8 @@ const fullscreen = if (@import("build_options").has_fullscreen) @import("fullscr
 fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null);
-    actions.mapRequest(w2, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
+    actions.mapRequest(w2, 0, true, null, null);
     fx.flush();
     return .{ w1, w2 };
 }
@@ -128,7 +128,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     _ = xcb.xcb_map_window(fx.conn, w1);
     _ = xcb.xcb_map_window(fx.conn, w2);
     fx.flush();
-    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expectEqual(w1, fx.inputFocus());
@@ -141,7 +141,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 
     // 2. Open w2 while w1 is still fullscreened.
-    actions.mapRequest(w2, 0, true, null);
+    actions.mapRequest(w2, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
     try std.testing.expectEqual(w2, fx.inputFocus());
@@ -271,9 +271,9 @@ test "pipeline: a claim taken after the grab still moves the tiles" {
     {
         var g = pipeline.grabScoped();
         defer g.deinit();
-        usable_area.setClaim(usable_area.bar_id, .top, claim_px);
-        defer usable_area.releaseClaim(usable_area.bar_id);
-        g.reconcileNow();
+        usable_area.setClaim(.top, claim_px);
+        defer usable_area.releaseClaim();
+        g.reconcileNow(.{});
     }
     fx.flush();
 

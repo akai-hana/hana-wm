@@ -5,11 +5,11 @@
 //! These are state-free so they run against the real registry without
 //! touching state; the subprocess-free paths avoid touching devices.
 
-// build-gate: seg_slider, meter
+// build-gate: seg_slider, level
 
 const std = @import("std");
 const slider = @import("slider");
-const meter = @import("meter");
+const level = @import("level");
 const types = @import("types");
 const drawing = @import("drawing");
 const testing = std.testing;
@@ -245,9 +245,9 @@ test "a control with no level hook is always present at 0" {
     try std.testing.expectEqual(@as(u8, 0), slider.subLevelOrZero(always));
 }
 
-test "the slider re-export of the meter mapping is the same function" {
-    // slider.pctFromSlot is now an alias for meter.pctFromSlot. A test of the
-    // meter alone would not notice if the core's alias pointed somewhere else,
+test "the slider re-export of the level mapping is the same function" {
+    // slider.pctFromSlot is now an alias for level.pctFromSlot. A test of the
+    // level alone would not notice if the core's alias pointed somewhere else,
     // so check the alias against the real thing across both edge cases.
     const cases = [_][3]u16{
         .{ 10, 100, 10 }, .{ 10, 100, 60 }, .{ 10, 100, 110 },
@@ -256,7 +256,7 @@ test "the slider re-export of the meter mapping is the same function" {
     };
     for (cases) |c| {
         try std.testing.expectEqual(
-            meter.pctFromSlot(c[0], c[1], c[2]),
+            level.pctFromSlot(c[0], c[1], c[2]),
             slider.pctFromSlot(c[0], c[1], c[2]),
         );
     }

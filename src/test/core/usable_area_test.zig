@@ -25,8 +25,8 @@ test "a top claim insets only the top edge" {
     // A bar at the top with a 30px claim: height shrinks by exactly 30, and
     // the other three edges are untouched. The asymmetry is the point -- a
     // top claim that also moved x/y would be a second, invisible claim.
-    usable_area.setClaim(usable_area.bar_id, .top, 30);
-    defer usable_area.releaseClaim(usable_area.bar_id);
+    usable_area.setClaim(.top, 30);
+    defer usable_area.releaseClaim();
     const wa = usable_area.workAreaFrom(1920, 1080);
     try testing.expectEqual(@as(i16, 0), wa.x);
     try testing.expectEqual(@as(i16, 30), wa.y);
@@ -35,8 +35,8 @@ test "a top claim insets only the top edge" {
 }
 
 test "bottom claim insets the bottom edge and leaves y at zero" {
-    usable_area.setClaim(usable_area.bar_id, .bottom, 30);
-    defer usable_area.releaseClaim(usable_area.bar_id);
+    usable_area.setClaim(.bottom, 30);
+    defer usable_area.releaseClaim();
     const wa = usable_area.workAreaFrom(1920, 1080);
     try testing.expectEqual(@as(i16, 0), wa.y);
     try testing.expectEqual(@as(u16, 1050), wa.height);
@@ -49,8 +49,8 @@ test "a claim larger than the screen saturates to zero, never wraps" {
     // to a huge rect". The second is the bug this pins: it hands layouts a
     // rect whose far edge is off the end of the display, and every subsequent
     // geometry add silently moves windows somewhere no one can reach.
-    usable_area.setClaim(usable_area.bar_id, .top, 2000);
-    defer usable_area.releaseClaim(usable_area.bar_id);
+    usable_area.setClaim(.top, 2000);
+    defer usable_area.releaseClaim();
     const wa = usable_area.workAreaFrom(1920, 1080);
     try testing.expectEqual(@as(u16, 0), wa.height);
     try testing.expectEqual(@as(u16, 1920), wa.width);
@@ -59,8 +59,8 @@ test "a claim larger than the screen saturates to zero, never wraps" {
 test "a claim exactly the screen height is zero, not negative-and-wrapped" {
     // The boundary case. `-|` saturates at 0, so this lands on the same
     // zero-sized answer as an oversized claim rather than underflowing.
-    usable_area.setClaim(usable_area.bar_id, .top, 1080);
-    defer usable_area.releaseClaim(usable_area.bar_id);
+    usable_area.setClaim(.top, 1080);
+    defer usable_area.releaseClaim();
     const wa = usable_area.workAreaFrom(1920, 1080);
     try testing.expectEqual(@as(u16, 0), wa.height);
 }
@@ -70,8 +70,8 @@ test "zero-px claim is a no-op, distinct from no claim at all" {
     // area whole, which is also what a released claim leaves -- the two are
     // indistinguishable in the area, and that is intended: a surface that
     // occupies no pixels constrains nothing.
-    usable_area.setClaim(usable_area.bar_id, .top, 0);
-    defer usable_area.releaseClaim(usable_area.bar_id);
+    usable_area.setClaim(.top, 0);
+    defer usable_area.releaseClaim();
     const wa = usable_area.workAreaFrom(1920, 1080);
     try testing.expectEqual(@as(u16, 1080), wa.height);
 }
@@ -82,8 +82,8 @@ test "releasing the claim restores the full screen" {
     // this test needed a fullscreen fact to pass, occupancy would have two
     // encodings -- which is exactly what (6.10) ruled out.
     {
-        usable_area.setClaim(usable_area.bar_id, .top, 30);
-        defer usable_area.releaseClaim(usable_area.bar_id);
+        usable_area.setClaim(.top, 30);
+        defer usable_area.releaseClaim();
         try testing.expectEqual(@as(u16, 1050), usable_area.workAreaFrom(1920, 1080).height);
     }
     try testing.expectEqual(@as(u16, 1080), usable_area.workAreaFrom(1920, 1080).height);

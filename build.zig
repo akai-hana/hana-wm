@@ -134,10 +134,10 @@ pub fn build(b: *std.Build) !void {
     const has_seg_brightness = discovery.modules.contains("brightness");
     const has_seg_slider = discovery.modules.contains("slider");
     const has_seg_title = discovery.modules.contains("title");
-    // Segment-less bundle pixels (meter + volume) are module-published too:
+    // Segment-less bundle pixels (level + volume) are module-published too:
     // tests swapped WHICH segment was present as the gating condition,sneed a
     // flag of their own rather than gating on seg_brightness.
-    const has_meter = discovery.modules.contains("meter");
+    const has_level = discovery.modules.contains("level");
     const has_volume = discovery.modules.contains("volume");
 
     // The vim-modal prompt engine: its presence gates the engine test; the
@@ -297,7 +297,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "seg_brightness", .on = has_seg_brightness },
         .{ .name = "seg_slider", .on = has_seg_slider },
         .{ .name = "seg_title", .on = has_seg_title },
-        .{ .name = "meter", .on = has_meter },
+        .{ .name = "level", .on = has_level },
         .{ .name = "volume", .on = has_volume },
     };
 
@@ -1925,7 +1925,7 @@ const Module = struct {
         // by the pure tiling layer, which is why the coordinate helpers cannot
         // live on the x11 side. The shelf siblings in src/core/pure/ are
         // xcb-free by construction. architecture/contract.zig moved its xcb
-        // event TYPES and the Surfaces hook set out to contract_x11.zig, but
+        // event TYPES and the Surfaces hook set out to seams.zig, but
         // its own import edges (`types`, `build_options`, the generated
         // `tiling_modules`) are only admitted by this layering via config/
         // tiling allowances -- so it is NOT covered by the import-edge scan

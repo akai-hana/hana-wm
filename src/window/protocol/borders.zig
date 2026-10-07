@@ -20,8 +20,9 @@ const ledger = @import("ledger");
 /// actually lives on. `current` is the current workspace for the
 /// unresolvable-workspace fallback; `has_fullscreen` (comptime) gates the
 /// covering-mode reads for fullscreen-absent builds.
-/// (Occupant query family: pure-scan `model.coveringOccupantOnWs`, module's
-/// record-backed `fullscreen.fullscreenOccupantOnWs`, actions' routed hook
+/// (Occupant query family: pure-scan `model.coveringOccupantOnWs`, its
+/// batch form `model.coveringOccupants`, module's record-backed
+/// `fullscreen.visibleCoveringOnWs`, actions' routed hook
 /// `currentCoveringOccupant`.)
 pub fn isBehindCoveringWindow(
     m: *const model.Model,
@@ -33,34 +34,6 @@ pub fn isBehindCoveringWindow(
     if (!m.store.has(win)) return false;
     if (model.findHome(m, win)) |w| return model.coveringOccupantOnWs(m, w) != null;
     return has_fullscreen and model.coveringOccupantOnWs(m, current) != null;
-}
-
-/// Fills `buf` (one slot per workspace, indexed by `WSId.index`) with that
-/// workspace's covering occupant, in ONE store pass.
-///
-/// `coveringOccupantOnWs` answers the same question for a single workspace,
-/// which is the right shape for a one-off query and the wrong one for a sweep:
-/// the border sweep asks it once per window, so a full sweep was O(N^2) store
-/// scans. This fills the whole table up front instead.
-///
-/// Ties resolve to the FIRST occupant in store order, matching
-/// `coveringOccupantOnWs` exactly (the `== null` guard is what preserves that;
-/// a later covering entry must not displace an earlier one).
-pub fn coveringOccupants(m: *const model.Model, buf: []?model.WindowId) void {
-    for (buf) |*slot| slot.* = null;
-    var it = m.store.iterator();
-    while (it.next()) |row| {
-        if (row.val.presence != .covering) continue;
-        if (row.val.covering_ws) |cws| {
-            if (cws.index < buf.len and buf[cws.index] == null) buf[cws.index] = row.key;
-            continue;
-        }
-        // Unanchored covering window: it owns every workspace it is visible on.
-        for (buf, 0..) |*slot, i| {
-            if (slot.* != null) continue;
-            if (model.visibleEntry(m, row.val, model.WSId.fromIndex(i))) slot.* = row.key;
-        }
-    }
 }
 
 /// `isBehindCoveringWindow` against a precomputed occupant table.
@@ -83,12 +56,12 @@ pub fn isBehindCoveringWindowWith(
 pub fn resolveBorderColor(win: u32) u32 {
     const m = pipeline.model();
     var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
-    coveringOccupants(m, &occupants);
+    model.coveringOccupants(m, &occupants);
     return resolveBorderColorWith(win, &occupants);
 }
 
 /// The border-color decision against a PRECOMPUTED occupant table, for callers
-/// sweeping many windows (see coveringOccupants). Identical policy to
+/// sweeping many windows (see `model.coveringOccupants`). Identical policy to
 /// resolveBorderColor, which now delegates here with a one-shot table.
 pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 {
     // Covering windows render borderless via the bw=0/pixel=0 policy in
@@ -122,23 +95,17 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
     if (build_options.has_tiling) ledger.markSentBorderWidth(win, w);
 }
 
-/// Applies both border width and color to `win`. The color dedup lives in the
-/// SENT LEDGER (11.4), beside the width record and the reconcile's own
-/// `need_pixel` check, so the sweep and the reconcile derive "has this pixel
-/// already gone out" from one record. Deriving it from the wincache entry
-/// instead is what let a pixel sent by the reconcile go unrecorded for the
-/// sweep (and vice versa), which is the stale-skip class of bug the old
-/// comment here described as prevented.
-pub fn apply(conn: core.Connection, win: u32) void {
-    applyWidth(conn, win);
-    const c = resolveBorderColor(win);
-    if (ledger.markSentBorderPixelIfChanged(win, c)) requests.setBorderPixel(conn, win, c);
-}
-
-/// apply() against a PRECOMPUTED occupant table, for the reload sweep:
-/// resolveBorderColor would rebuild the table per window, making the reload
-/// O(windows * store). One build (coveringOccupants) + applyWidth +
-/// resolveBorderColorWith keeps that sweep at O(store) total.
+/// Applies border width + color to `win` against a PRECOMPUTED occupant table,
+/// for callers sweeping many windows (the reload sweep): resolving the color
+/// per window would rebuild the table each time, making the sweep
+/// O(windows * store). One build (model.coveringOccupants) + applyWidth +
+/// resolveBorderColorWith keeps it at O(store) total.
+///
+/// The color dedup lives in the SENT LEDGER (11.4), beside the width record and
+/// the reconcile's own `need_pixel` check, so the sweep and the reconcile derive
+/// "has this pixel already gone out" from one record. Deriving it from the
+/// wincache entry instead is what let a pixel sent by the reconcile go
+/// unrecorded for the sweep (and vice versa).
 pub fn applyWith(conn: core.Connection, win: u32, occupants: []const ?model.WindowId) void {
     applyWidth(conn, win);
     const c = resolveBorderColorWith(win, occupants);

@@ -189,7 +189,7 @@ fn bestSeq(
             // `isCoveringMode` is null otherwise, so this scan silently kept
             // picking screen-covering windows as restore candidates in a build
             // without that module. `covering_ws` is the model-side truth,
-            // written on capture, cleared on release, and PERSISTED (persist
+            // written on capture, cleared on release, and PERSISTED (handoff
             // restores it), so it is also the right answer during a session
             // restore, before the covering module has rebuilt its own state.
             const covering = if (m.store.get(rec.win)) |e| e.covering_ws != null else false;
@@ -244,7 +244,7 @@ pub fn isMinimized(m: *const model.Model, win: model.WindowId) bool {
 }
 
 /// Number of concurrently minimized windows (the module's own count).
-/// Test-only; the production bar and persist paths read the model directly.
+/// Test-only; the production bar and handoff paths read the model directly.
 pub fn count() u32 {
     return @intCast(g_recs.len);
 }
@@ -270,7 +270,7 @@ pub fn collectHiddenSet(
 /// loop self-identify (minimize claims only parked windows). Returns null
 /// when the window has no minimized record OR the model presence is not
 /// parked (a covering window is fullscreen's blob). The returned slice is
-/// allocator-owned; persist frees it after writing.
+/// allocator-owned; handoff frees it after writing.
 fn serializePreamble(m: *const model.Model, win: u32) ?Rec {
     const idx = g_recs.indexOfByIdField(.win, win) orelse return null;
     const e = m.store.get(win) orelse return null;
@@ -305,7 +305,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
         log.warn("minimize: record list full; window 0x{x} not restored minimized", .{win});
         return true;
     }
-    // Slice the payload back out via a byte-aligned copy (persist buffers are
+    // Slice the payload back out via a byte-aligned copy (handoff buffers are
     // byte-aligned; the extern struct's align(1) u32s load unaligned safely).
     const raw = std.mem.bytesToValue(PackedMinimize, bytes[0..@sizeOf(PackedMinimize)]);
     const slot: ?usize = if (raw.slot == std.math.maxInt(u32)) null else raw.slot;

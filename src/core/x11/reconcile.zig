@@ -30,10 +30,9 @@
 //! full desired state on change is still drift-proofing; we only avoid
 //! replaying what the server already has.
 //!
-//! The SENT LEDGER is a WRITE-ONLY record of what was actually sent
-//! ({rect, has_rect, parked, parked_dirty, bw, pixel} per window; a park
-//! flips `parked` and preserves rect/has_rect). Exactly five reads of it are
-//! behavioral contract:
+//! The SENT LEDGER is a write-only record of what was actually sent (field
+//! semantics: `ledger.SentEntry`). Exactly five reads of it are behavioral
+//! contract:
 //!   0. OFF-WORKSPACE FAST PATH: reads `parked` to elide windows provably
 //!      already parked (no recompute, no park resend, never a fallback
 //!      winner) -- skipped otherwise by the full path below.
@@ -126,29 +125,59 @@ pub fn reconcileDragTick(m: *const model.Model, snk: sink.Sink, win: model.Windo
     ledger.markSentVisible(gop, rect, gop.bw, gop.pixel);
 }
 
+/// The layout half of a reconcile: the coverage winner (which window owns
+/// the current workspace's screen this tick) plus the placements a layout
+/// module produced and the per-slot lookup that resolves them in O(1).
+/// Fixed-capacity stack scratch, no allocation: the plan lives in `run`'s
+/// frame and is read by the winner seed and the fused send loop.
+const Plan = struct {
+    /// The core model helper resolves which covering window owns the current
+    /// workspace's screen. OR semantics (anchor-or-visible over the store),
+    /// deliberately distinct from the fullscreen module's AND scan (rec +
+    /// present + recorded on ws); sync must not enumerate optional modules,
+    /// so it reads model truth.
+    fs_win: ?model.WindowId = null,
+    placements: contract.List = .{},
+    /// Per-window placement lookup: `pl_of_slot[i]` is the index into
+    /// `placements` of the placement for store slot `i`, or null when that
+    /// window has no placement this reconcile. Built alongside the layout
+    /// compute (one write per ordered window); the fused store loop in
+    /// `sendAll` already knows each window's slot via m.store.at(i) and so
+    /// resolves its placement in O(1) instead of an O(N) scan per window.
+    /// Stack scratch, no allocation, matching the file's fixed-capacity style.
+    pl_of_slot: [model.store_capacity]?usize = [_]?usize{null} ** model.store_capacity,
+};
+
+/// One full reconcile: plan (work area + coverage winner + layout compute),
+/// seed the raise winner, fuse-compute-and-send every stored window, then the
+/// force_restack bar raise. Split into phases for readability; the fused
+/// per-window loop stays whole because that fusion IS the algorithm.
 pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
-    // Work-area (screen minus bar) and coverage winner: the core model helper
-    // resolves which covering window owns the current workspace's screen.
-    // OR semantics (anchor-or-visible over the store), deliberately distinct
-    // from the fullscreen module's AND scan (rec + present + recorded on ws);
-    // sync must not enumerate optional modules, so it reads model truth.
+    var plan: Plan = .{};
+    computeLayout(m, ctx, &plan);
+    var winner = seedWinner(m, &plan);
+    sendAll(m, ctx, opts, &plan, &winner);
+
+    // force_restack additionally raises bar/top.
+    if (opts.force_restack) {
+        if (ctx.bar_win) |bar| ctx.sink.stackOnly(bar, .above);
+    }
+
+    // DO NOT FLUSH HERE. Caller owns flushing.
+}
+
+/// Phase 1: coverage winner plus the layout compute over the shown workspace
+/// (skipped when a covering window owns the screen, or when the tiling
+/// subsystem is absent). `plan.placements`/`plan.pl_of_slot` start from the
+/// struct defaults (empty / all-null), so nothing needs re-clearing here.
+fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
+    // Work-area (screen minus bar) and coverage winner: see `Plan`.
     const wa = ctx.workarea;
 
-    const fs_win: ?model.WindowId = model.coveringOccupantOnWs(m, m.current);
+    plan.fs_win = model.coveringOccupantOnWs(m, m.current);
 
-    // Layout compute over the shown workspace (skipped when a covering window
-    // owns the screen, or when the tiling subsystem is absent).
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
-    var placements: contract.List = .{};
-    // Per-window placement lookup: `pl_of_slot[i]` is the index into
-    // `placements` of the placement for store slot `i`, or null when that
-    // window has no placement this reconcile. Built alongside the layout compute
-    // below (one write per ordered window), then the fused store loop below
-    // which already knows each window's slot via m.store.at(i) resolves
-    // its placement in O(1) instead of an O(N) scan per window. Stack scratch,
-    // no allocation, matching the file's fixed-capacity style.
-    var pl_of_slot: [model.store_capacity]?usize = [_]?usize{null} ** model.store_capacity;
     // 13.6: ONE activation gate, and it also SUPPLIES the geometry. This used
     // to be `build_options.has_tiling` (a COMPILE-time fact) while the bar
     // reported the active layout from `contract.activeLayoutKind` (enabled AND
@@ -157,7 +186,7 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
     // the resolved kind also subsumes the no-tiling build (an empty registry
     // resolves to null).
     const params = &m.ws[m.current.index].params;
-    if (fs_win == null) {
+    if (plan.fs_win == null) {
         var n: usize = 0;
         const tiled = &m.ws[m.current.index].tiled_order;
         for (tiled.constSlice()) |w| {
@@ -169,7 +198,7 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             // First write wins, mirroring the removed findPlacement's
             // first-match semantics; the store holds each id once so this is
             // just defensive.
-            if (pl_of_slot[slot] == null) pl_of_slot[slot] = n;
+            if (plan.pl_of_slot[slot] == null) plan.pl_of_slot[slot] = n;
             order_buf[n] = w;
             hints_buf[n] = e.size_hints;
             n += 1;
@@ -190,43 +219,59 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
                 // same fallback is what a no-tiling build gets, so "no layout
                 // modules" and "layout disabled" have ONE answer.
                 for (order_buf[0..n]) |w| {
-                    _ = placements.append(.{ .win = w, .rect = wa, .visible = true });
+                    _ = plan.placements.append(.{ .win = w, .rect = wa, .visible = true });
                 }
             } else {
-                const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = .{ .order = order_buf[0..n], .hints = hints_buf[0..n] }, .focused = m.focused, .env = ctx.env };
-                tiling.compute(params.kind, &view, &placements);
+                const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = hints_buf[0..n], .focused = m.focused, .env = ctx.env };
+                tiling.compute(params.kind, &view, &plan.placements);
             }
         }
     }
+}
 
-    // Winner seed: fullscreen winner outright; else the focused window when
-    // its desire will be non-parked (checked here so no earlier store entry
-    // can shadow it); else the reconcile elects the first non-parked desire.
-    var winner: ?model.WindowId = fs_win;
-    // Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
-    // with has_kept_rect = false: the ledger is unknowable pre-reconcile, so a
-    // placement-less visible orphan is left to the first-desire fallback).
-    // The fast-path visibility is derived here exactly once (shared with
-    // the fused loop below; the seed spans only this focused-window test).
+/// Phase 2: winner seed: fullscreen winner outright; else the focused window
+/// when its desire will be non-parked (checked here so no earlier store entry
+/// can shadow it); else the fused loop elects the first non-parked desire.
+/// Mirrors computeDesire's ownership of parked-ness (desireIsNonParked,
+/// with has_kept_rect = false: the ledger is unknowable pre-reconcile, so a
+/// placement-less visible orphan is left to the first-desire fallback).
+/// The fast-path visibility is derived here exactly once (shared with
+/// the fused loop below; the seed spans only this focused-window test).
+fn seedWinner(m: *const model.Model, plan: *const Plan) ?model.WindowId {
+    var winner: ?model.WindowId = plan.fs_win;
     if (winner == null) if (m.focused) |f| blk: {
         const slot = m.store.indexOf(f) orelse break :blk;
         const fe = m.store.at(slot).val.*;
-        if (fe.presence == .present and desireIsNonParked(fe, fs_win, placementOfSlot(&placements, &pl_of_slot, slot), false, model.visibleEntry(m, &fe, m.current))) winner = f;
+        if (fe.presence == .present and desireIsNonParked(fe, plan.fs_win, placementOfSlot(&plan.placements, &plan.pl_of_slot, slot), false, model.visibleEntry(m, &fe, m.current))) winner = f;
     };
+    return winner;
+}
 
-    // One fused loop over the store: compute a window's desire, then SEND it
-    // immediately. Ordering is via the Sink adapter below (a widening PR
-    // proved the contract survives reordering), honoring two invariants here:
-    // map precedes geometry so a first-show/unparking client exposes at its
-    // final rect, and border width is merged into the geometry configure when
-    // both change (parked windows emit ONE merged park request instead:
-    // offscreen X + BELOW).
-    //
-    // The ledger reads below are contract, not optimization (header): the
-    // orphan branch keeps the last real geometry (read 1), raise triggers
-    // derive from rect/parked comparisons (read 2), and everything written
-    // here feeds lastRectFor/truthRect (read 3). Sends never consult the
-    // ledger to SKIP anything.
+/// Phase 3: one fused loop over the store: compute a window's desire, then
+/// SEND it immediately. Ordering is via the Sink adapter (a widening PR
+/// proved the contract survives reordering), honoring two invariants here:
+/// map precedes geometry so a first-show/unparking client exposes at its
+/// final rect, and border width is merged into the geometry configure when
+/// both change (parked windows emit ONE merged park request instead:
+/// offscreen X + BELOW).
+///
+/// The ledger reads inside are contract, not optimization (file header): the
+/// orphan branch keeps the last real geometry (read 1), raise triggers derive
+/// from rect/parked comparisons (read 2), and everything written here feeds
+/// lastRectFor/truthRect (read 3). Sends never consult the ledger to SKIP
+/// anything. `winner` arrives seeded and is still mutable here: the first
+/// non-parked desire in store order elects itself (fallback election).
+fn sendAll(
+    m: *const model.Model,
+    ctx: *Ctx,
+    opts: Opts,
+    plan: *const Plan,
+    winner: *?model.WindowId,
+) void {
+    const fs_win = plan.fs_win;
+    const placements = &plan.placements;
+    const pl_of_slot = &plan.pl_of_slot;
+
     const count = m.store.count();
     // One warn per reconcile when any window's record couldn't be written, not one
     // per window: the condition is structural (ledger at store_capacity), so
@@ -265,15 +310,15 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
         // Resolve this tiled window's placement in O(1): the lookup table is
         // indexed by store slot, which this store iteration already provides.
         const placement = if (e.anchor == .tiled)
-            placementOfSlot(&placements, &pl_of_slot, i)
+            placementOfSlot(placements, pl_of_slot, i)
         else
             null;
-        const desire = computeDesire(m, ctx, e, win, fs_win, placement, &winner, last, on_current);
+        const desire = computeDesire(m, ctx, e, win, fs_win, placement, winner, last, on_current);
         const rect = desire.rect;
         const bw = desire.bw;
         const pixel = desire.pixel;
         const parked = desire.parked;
-        const is_winner = winner == win;
+        const is_winner = winner.* == win;
 
         const tracing = xtrace.enabled() and xtrace.watches(win);
         if (parked) {
@@ -298,7 +343,7 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
                 xtrace.outbound(win, "park-elided", "already parked");
             }
         } else {
-            // Raise triggers per the ledger contract (header read 2): winner
+            // Raise triggers per the ledger contract (file header read 2): winner
             // .above on geometry motion, unpark, or restack pressure only.
             const first_send = !last.has_rect;
             // Geometry only: `border_width` is owned by the separate `need_bw`
@@ -360,14 +405,7 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
             g.parked_dirty = false;
         } else ledger_overflow = true;
     }
-    if (ledger_overflow) log.err("reconcile.run: ledger full; some sends applied, records lost", .{});
-
-    // force_restack additionally raises bar/top.
-    if (opts.force_restack) {
-        if (ctx.bar_win) |bar| ctx.sink.stackOnly(bar, .above);
-    }
-
-    // DO NOT FLUSH HERE. Caller owns flushing.
+    if (ledger_overflow) log.err("reconcile: ledger full; some sends applied, records lost", .{});
 }
 
 /// Best known live geometry for `win` without a server round trip:

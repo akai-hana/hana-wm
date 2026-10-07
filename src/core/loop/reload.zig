@@ -131,7 +131,7 @@ pub fn handleConfigReload() !void {
         actions.applyConfigReload();
         // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
         // and sweeping first would send every border twice -- once here, once
-        // again deduped against fresh state. Sweeping last lets borders.apply
+        // again deduped against fresh state. Sweeping last lets the sweep
         // dedup against entries the reconcile just wrote.
         window.reloadBorders();
         // Rebuild after the swap so borrowed key slices point into the new config's memory.

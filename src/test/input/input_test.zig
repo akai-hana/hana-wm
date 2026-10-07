@@ -227,13 +227,13 @@ test "dispatch map refuses a config generation it was not built against" {
 }
 
 // The scaffold property is declared once, on the action. Half of that
-// contract is enforced by `input.grafted`'s comptime gate (grafting an
+// contract is enforced by `dispatch.grafted`'s comptime gate (grafting an
 // undeclared tag does not compile). The other half cannot be: a tag declared
 // as needing the scaffold, dispatched through a plain arm, is invisible from
 // the helper. This pins the declaration against the dispatcher's grafted set
 // so the two cannot drift.
 test "tiling scaffold table matches the dispatcher's grafted set" {
-    // The tags whose arms route through `input.grafted`, spelled out. If a
+    // The tags whose arms route through `dispatch.grafted`, spelled out. If a
     // tag is added to `types.needsTilingFocusScaffold` this list is where it
     // gets named, and the assertion below is what makes the naming mandatory.
     const grafted_tags = [_]std.meta.Tag(types.Action){

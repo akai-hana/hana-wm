@@ -3,7 +3,7 @@
 //! retileWithFallback, focusFallback,
 //! prepareAndSetFocus), the registry seams, and the
 //! re-export surface. The five action groups
-//! (modulate/geometry/layout_params/ws/wm) live in
+//! (parked/geometry/layout_params/ws/manage) live in
 //! their own files; `actions.*` stays the single
 //! import surface for keybind/events, so those
 //! importers are untouched by the split. Each group
@@ -18,16 +18,11 @@ const pipeline = @import("pipeline");
 const focus = @import("focus");
 const window = @import("window");
 
-const modulate = @import("modulate");
+const parked = @import("parked");
 const layout_params = @import("layout_params");
 const ws = @import("ws");
-const wm = @import("wm");
+const manage = @import("manage");
 const geometry = @import("geometry");
-
-// Private transition-layer gate for mutable model access: this module owns
-// model transitions, so it declares its own capability token (see
-// tracking.gate).
-pub const gate: pipeline.Gate = .{};
 
 /// Registry lookup for the hook `field` (see `contract.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
@@ -55,14 +50,14 @@ pub fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
     return model_mod.isCoveringOn(m, win, m.current); // 12.4: model query
 }
 
-/// Withdrawal facts for actions.unmanage. The sole caller (window.
-/// unmanageWindow) removes the model entry BEFORE the action runs, so both
-/// fields are captured up front and ride the context in; every other entry
-/// point reads live model truth and needs no context at all.
+/// Withdrawal facts for actions.unmanage. The model entry is dropped INSIDE
+/// the action (manage.unmanage unregisters), so the sole caller
+/// (window.unmanageWindow) captures both fields before invoking it; every
+/// other entry point reads live model truth and needs no context at all.
 pub const Ctx = struct {
     /// Fullscreen workspace record of the window being withdrawn, captured
-    /// by unmanageWindow BEFORE the workspace layer's removeWindow drops the
-    /// model entry (after which no store query could recover it).
+    /// by unmanageWindow BEFORE actions.unmanage drops the model entry
+    /// (after which no store query could recover it).
     withdrawn_fullscreen_ws: ?model_mod.WSId = null,
     /// Whether the withdrawn window held MODEL focus at withdrawal time,
     /// captured BEFORE removal clears m.focused. Drives the close
@@ -72,13 +67,13 @@ pub const Ctx = struct {
 };
 
 // Re-exports: the five action groups live in their own files
-// (modulate/geometry/layout_params/ws/wm); `actions.*` stays the
+// (parked/geometry/layout_params/ws/manage); `actions.*` stays the
 // single import surface for keybind/events, so those importers
 // are untouched by the split.
-pub const minimize = modulate.minimize;
-pub const restore = modulate.restore;
-pub const restoreOrdered = modulate.restoreOrdered;
-pub const restoreAll = modulate.restoreAll;
+pub const minimize = parked.minimize;
+pub const restore = parked.restore;
+pub const restoreOrdered = parked.restoreOrdered;
+pub const restoreAll = parked.restoreAll;
 pub const cycleLayoutKind = layout_params.cycleLayoutKind;
 pub const stepVariantDir = layout_params.stepVariantDir;
 pub const adjustPrimaryWidthAction = layout_params.adjustPrimaryWidthAction;
@@ -93,11 +88,11 @@ pub const tagToggle = ws.tagToggle;
 pub const pinToggle = ws.pinToggle;
 pub const allViewToggle = ws.allViewToggle;
 pub const switchTo = ws.switchTo;
-pub const fullscreenToggleWindow = wm.fullscreenToggleWindow;
-pub const fullscreenSetWindow = wm.fullscreenSetWindow;
-pub const mapRequest = wm.mapRequest;
-pub const focusAfterGeometry = wm.focusAfterGeometry;
-pub const unmanage = wm.unmanage;
+pub const fullscreenToggleWindow = manage.fullscreenToggleWindow;
+pub const fullscreenSetWindow = manage.fullscreenSetWindow;
+pub const mapRequest = manage.mapRequest;
+pub const focusAfterGeometry = manage.focusAfterGeometry;
+pub const unmanage = manage.unmanage;
 pub const toggleFloating = geometry.toggleFloating;
 pub const dragRect = geometry.dragRect;
 pub const detachToFloating = geometry.detachToFloating;
@@ -112,14 +107,6 @@ pub const moveFocused = geometry.moveFocused;
 pub const viewportStep = geometry.viewportStep;
 pub const snapViewportFocusedDuty = geometry.snapViewportFocusedDuty;
 
-/// Shared tail of the trivial flip-actions (C): bump the relevant core fact
-/// and push ONE reconcile through the grab (viewport snap/clamp duties run
-/// inside the pipeline choke point). Bumping a fact revision is a pure
-/// counter increment with zero X traffic, so doing it before the reconcile is
-/// wire-identical to doing it after. Actions whose pinned side-effect ORDER
-/// differs (setBarState before the reconcile, armPendingBarHide after,
-/// reconcile-only tails) keep their bespoke tails instead of growing this
-/// helper flags.
 /// The four reconcile shapes a tiling action can ask for, as ONE axis.
 ///
 /// This was a four-bool bag (`restack` / `full_redraw` / `with_focus` /
@@ -132,7 +119,7 @@ pub const snapViewportFocusedDuty = geometry.snapViewportFocusedDuty;
 const RetileMode = enum {
     /// reconcileGrab: no focus, no restack.
     plain,
-    /// reconcileUnderGrabNow: restack a window that is not taking focus.
+    /// reconcileGrab with force_restack: restack a window that is not taking focus.
     restack,
     /// reconcileGrabFocus: move focus, geometry only.
     focus,
@@ -150,23 +137,28 @@ const RetileOpts = struct {
 
 /// The one fact-bump + reconcile entry for a tiling action.
 ///
-/// Each mode names which facts IT bumps. The plain mode deliberately does NOT
-/// bump the window fact: `pipeline.reconcileGrab` owns that bump now (10.5), so
-/// the eight actions that reconcile through the plain alias get the invariant
-/// without having to remember it, and this one cannot double-bump on the way
-/// there. The other three call reconcile variants that do not bump at all, so
-/// those still bump the window fact here. That is the whole asymmetry, and it
-/// is the one line of the function that looks surprising on purpose.
+/// Each mode names which facts IT bumps. The plain and restack modes
+/// deliberately do NOT bump the window fact here: both reconcile through
+/// `pipeline.reconcileGrab`, which owns that bump (10.5), so the actions
+/// that route through them get the invariant without having to remember
+/// it, and this one cannot double-bump on the way there. The focus variants
+/// reconcile through `pipeline.reconcileGrabFocus`, which does not bump, so
+/// those still bump the window fact here. That is the whole asymmetry, and
+/// it is the one line of the function that looks surprising on purpose.
+///
+/// A fact bump is a counter increment with no X traffic, so doing it before
+/// the reconcile is wire-identical to doing it after; actions with a pinned
+/// side-effect ORDER keep their own tails instead of routing through here.
 pub fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
-    // `full_redraw` selects WHICH geometry fact to bump; without it the
-    // non-plain modes bump the window fact themselves (their reconcile
-    // variants do not), and plain leaves it entirely to reconcileGrab.
-    if (opts.full_redraw) core.layout.bump() else if (opts.mode != .plain) core.window.bump();
+    // `full_redraw` selects WHICH geometry fact to bump; without it only the
+    // focus modes still bump the window fact themselves (their reconcile
+    // entry does not), and plain/restack leave it entirely to reconcileGrab.
+    if (opts.full_redraw) core.layout.bump() else if (opts.mode == .focus or opts.mode == .focus_restack) core.window.bump();
     if (opts.bump_fullscreen) core.fullscreen.bump();
 
     switch (opts.mode) {
-        .plain => pipeline.reconcileGrab(),
-        .restack => pipeline.reconcileUnderGrabNow(.{ .force_restack = true }),
+        .plain => pipeline.reconcileGrab(.{}),
+        .restack => pipeline.reconcileGrab(.{ .force_restack = true }),
         // Focus lands before geometry (focus-before). A null transition for a
         // focus mode used to @panic via ft.?; treat it as the no-op transition
         // instead, so a caller that forgets the FocusTransition degrades to a

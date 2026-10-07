@@ -33,6 +33,21 @@ test "IdMap: put/get/overwrite/remove round-trip" {
     try testing.expect(!m.remove(999));
 }
 
+test "IdMap: getPtr points at the live slot (in-place update, no copy)" {
+    var m = IdMap(u32, 8){};
+    try testing.expect(m.getPtr(5) == null);
+    try testing.expect(m.put(5, 50));
+    const p = m.getPtr(5).?;
+    p.* = 51; // writers update through the pointer
+    try testing.expectEqual(@as(?u32, 51), m.get(5));
+    // An overwrite of the same key writes the SAME slot, so a held pointer
+    // observes it (the borrow contract title readers rely on).
+    try testing.expect(m.put(5, 60));
+    try testing.expectEqual(@as(u32, 60), p.*);
+    try testing.expect(m.remove(5));
+    try testing.expect(m.getPtr(5) == null);
+}
+
 test "IdMap: distinct keys never collide into one another" {
     var m = IdMap(u32, 64){};
     var id: u32 = 1;

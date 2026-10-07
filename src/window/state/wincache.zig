@@ -1,5 +1,5 @@
 //! Per-window cache for window metadata.
-//! Caches WM_NORMAL_HINTS (SizeHints) and the window title as the single source
+//! Caches the window title as the single source
 //! of truth. Title reads use cache-only peeks (no X11 on the draw path), with
 //! pipelined batch admission (_NET_WM_NAME preferred over WM_NAME) and a
 //! single-window refresh on rename. Geometry remains in the model/sync ledger.
@@ -15,14 +15,9 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
-const model_mod = @import("model");
-
 const atoms = @import("atoms");
 const requests = @import("requests");
-/// Single logical type: the model's SizeHints. The former layouts.SizeHints
-/// copy (with its comptime shape guard) is gone -- caching stores model
-/// entries directly, so the actions.mapRequest bridge needs no conversion.
-pub const SizeHints = model_mod.SizeHints;
+const idmap = @import("idmap");
 
 /// Cached-title capacity, in bytes. A title longer than this is truncated at
 /// store time.
@@ -37,7 +32,6 @@ pub const SizeHints = model_mod.SizeHints;
 pub const max_title_len = 256;
 
 const WindowData = struct {
-    hints: SizeHints = .{},
     /// Cached _NET_WM_NAME / WM_NAME in a fixed inline buffer (11.5).
     ///
     /// This was heap-duped into a module allocator, which made the title the
@@ -57,112 +51,51 @@ const WindowData = struct {
     }
 };
 
-const CacheMap = std.AutoHashMap(u32, WindowData);
-
-/// Hard upper bound on cached windows.  A normal desktop never exceeds a
-/// few dozen managed windows; 512 is a generous ceiling that prevents
-/// unbounded heap growth from a runaway client without impacting
-/// legitimate use. Shared with icccm's focus-property cache.
+/// Hard upper bound on cached windows: the store is a fixed-capacity
+/// `IdMap`, so this ceiling bounds memory outright — no heap, no growth
+/// path. A normal desktop never exceeds a few dozen managed windows; 512
+/// is a generous ceiling that prevents a runaway client from costing
+/// unbounded memory. Shared with icccm's focus-property cache.
+///
+/// The ceiling is deliberately ABOVE the model's store_capacity, not equal
+/// to it: an unmapped or never-admitted client can still deliver property
+/// notifications and earn a cache entry, so sizing the cache AT the model
+/// bound would let transient clients evict live entries and make the cache
+/// the binding constraint where the model is meant to be.
 const max_entries = constants.max_window_cache;
 
-// Module-level singleton
-
-// Null before init(), non-null for the rest of the process lifetime.
-var cache: ?CacheMap = null;
-
-/// Allocator titles are duped into; set by init alongside the map's.
-/// Returns a pointer to the live cache. Panics in all build modes when
-/// called before init(); never silent UB.
-inline fn live() *CacheMap {
-    if (cache) |*c| return c;
-    @panic("wincache: accessed before init()");
-}
-
-/// Safe pre-init query; returns null only during the narrow startup window
-/// before init().
-inline fn getOpt() ?*CacheMap {
-    return if (cache) |*c| c else null;
-}
+// Module-level singleton: always-valid and allocation-free. Before init()
+// (and after deinit()) it is simply empty — peeks miss and writes land —
+// so there is no lifecycle guard to get wrong; init()/deinit() reset the
+// table only, matching every other module's restart discipline.
+var cache: idmap.IdMap(WindowData, max_entries) = .{};
 
 /// How many windows currently hold a cache entry (0 before init).
 ///
 /// (11.9) This replaces the test's `getOpt() |c| c.count()`, which forced
-/// `getOpt` to be `pub` and therefore leaked the module-private `CacheMap`
-/// type out of the file as an unnameable `?*CacheMap` in the API surface. The
-/// test wanted one integer -- the evidence that the ceiling actually dropped
-/// an entry rather than overwriting one -- so the integer is what is exposed.
+/// the map type out of the file as an unnameable pointer in the API surface.
+/// The test wanted one integer -- the evidence that the ceiling actually
+/// dropped an entry rather than overwriting one -- so the integer is what
+/// is exposed.
 pub fn cachedWindowCount() usize {
-    const c = getOpt() orelse return 0;
-    return c.count();
+    return cache.count();
 }
 
-pub fn init(alloc: std.mem.Allocator) void {
-    cache = CacheMap.init(alloc);
+/// Allocation-free store: nothing to release, so init/deinit only reset
+/// the table (a deinit()+init() cycle — session restart, test harness —
+/// must not carry stale titles over). The ignored allocator keeps the
+/// standard module-lifecycle signature window.init calls.
+pub fn init(_: std.mem.Allocator) void {
+    cache.clear();
 }
 
 pub fn deinit() void {
-    if (cache) |*c| c.deinit();
-    cache = null;
+    cache.clear();
 }
 
-/// Centralizes the get-or-put-with-default pattern for writers that don't
-/// distinguish "existing" from "new".  Returns `error.CacheFull` when the
-/// cache has reached `max_entries`.
-///
-/// THE AT-CAPACITY POLICY (11.6), in one place, because it used to be
-/// re-decided per writer: a cache that is at capacity SKIPS the update and
-/// carries on. Caching is an optimization -- every reader has a correct
-/// fall-through -- so dropping an entry costs a slower path, never a wrong
-/// answer. The two rules that follow from that, both enforced by callers:
-///
-///  * a writer holding a freshly allocated value frees it before returning
-///    (storeTitle), and
-///  * a writer whose value MUST reach the server does not go through here at
-///    all. That was the third, divergent behavior: the border-pixel dedup
-///    used to catch `error.CacheFull` and send unconditionally, because a
-///    skipped dedup must not become a skipped send. It now asks the sent
-///    ledger instead (ledger.markSentBorderPixelIfChanged), which owns that
-///    "send anyway" rule on its own.
-///
-/// The ceiling is deliberately ABOVE the model's store_capacity, not equal to
-/// it: an unmapped or never-admitted client can still deliver property
-/// notifications and earn a cache entry, so sizing the cache AT the model
-/// bound would let transient clients evict live entries and make the cache the
-/// binding constraint where the model is meant to be.
-fn getOrPutDefault(win: u32) !*WindowData {
-    const c = live();
-    if (c.count() >= max_entries) return error.CacheFull;
-    const gop = try c.getOrPut(win);
-    if (!gop.found_existing) gop.value_ptr.* = .{};
-    return gop.value_ptr;
-}
-
-/// No-op if every field is zero (nothing declared).
-pub fn cacheSizeHints(win: u32, hints: SizeHints) void {
-    if (hints.isEmpty()) return;
-    const wd = getOrPutDefault(win) catch return; // at capacity: skip (see getOrPutDefault)
-    wd.hints = hints;
-}
-
-/// Read-only pointer to a live cache entry, or null when the cache is
-/// unavailable or the window is uncached. Shared by the peek* accessors.
-fn dataFor(win: u32) ?*const WindowData {
-    if (getOpt()) |c| return c.getPtr(win);
-    return null;
-}
-
-/// PIPELINE bridge: read-back accessor so actions can copy cached hints into
-/// the model entry at registration time. Defaults when absent.
-pub fn peekHints(win: u32) SizeHints {
-    const wd = dataFor(win) orelse return .{};
-    return wd.hints;
-}
-
-/// Evict a window's entire cache entry: border dedup data, the embedded
-/// WM_NORMAL_HINTS and the cached title in one operation. No-op when never
-/// cached.
+/// Evict a window's entire cache entry. No-op when never cached.
 pub fn removeWindow(window_id: u32) void {
-    _ = live().remove(window_id);
+    _ = cache.remove(window_id);
 }
 
 // Window-title cache
@@ -290,20 +223,27 @@ fn takePropertyReply(
 }
 
 /// Caches `title` for `win` by copying it into the entry's inline buffer
-/// (POD storage, no heap, no free). A full cache drops a NEW window's title
-/// rather than evicting an existing one (overwrites of already-cached
-/// windows still work). Public because it is the cache's write side (the
-/// pipelined admission path reaches it through `collectTitleCookies`), which
-/// the headless `wincache_test` exercises for the overwrite/cap lifecycle.
+/// (POD storage, no heap, no free). Public because it is the cache's write
+/// side (the pipelined admission path reaches it through
+/// `collectTitleCookies`), which the headless `wincache_test` exercises for
+/// the overwrite/cap lifecycle.
+///
+/// THE AT-CAPACITY POLICY (11.6), in one place: a full store drops a NEW
+/// window's title rather than evicting an existing one — overwrites of
+/// already-cached windows hit `getPtr` first and are exempt from the
+/// ceiling. Caching is an optimization and every reader has a correct
+/// fall-through, so a dropped entry costs a slower path, never a wrong
+/// answer. A writer whose value MUST reach the server never goes through
+/// here at all: border-pixel/width dedup asks the sent ledger instead
+/// (`ledger.markSentBorderPixelIfChanged` owns the "send anyway" rule).
 pub fn storeTitle(win: u32, title: []const u8) void {
-    const c = live();
-    if (c.getPtr(win)) |wd| {
-        setTitle(wd, title);
-        return;
-    }
-    // New entry: the shared getOrPutDefault path enforces the at-capacity
-    // drop; overwrites above stay exempt from the ceiling.
-    const wd = getOrPutDefault(win) catch return;
+    const wd = cache.getPtr(win) orelse blk: {
+        // New entry: `put` inserts a default when the table has room and
+        // reports full (false) when it does not — the drop above; overwrites
+        // never reach this path.
+        if (!cache.put(win, .{})) return;
+        break :blk cache.getPtr(win).?;
+    };
     setTitle(wd, title);
 }
 
@@ -328,6 +268,6 @@ fn setTitle(wd: *WindowData, title: []const u8) void {
 /// ownership transfer here and the "" for an unknown window is a static
 /// string, not a per-window one.
 pub fn peekTitle(win: u32) []const u8 {
-    const wd = dataFor(win) orelse return "";
+    const wd = cache.getPtr(win) orelse return "";
     return wd.title();
 }

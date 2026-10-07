@@ -9,8 +9,6 @@
 
 const std = @import("std");
 const clock = @import("clock");
-const scaffold = @import("scaffold");
-const contract = @import("contract");
 
 test "deadlineFromMs returns ms to next whole-second boundary" {
     // Exactly on a boundary: a full second to the next one.
@@ -74,42 +72,75 @@ test "each mode reserves its own stable width probe" {
     ));
 }
 
-test "a width stored for one mode is not reserved for the next" {
-    // The clock's row reservation comes from the width it measured for the
-    // ACTIVE mode. A stored width belonging to the mode being left behind is
-    // already too wide for the incoming one, so the hook must fall back to the
-    // bar's fresh probe for that mode. Reporting the stale slot is what left
-    // the row laid out at the previous mode's length after a click.
-    const W = scaffold.keyedWidthState("clock_test", clock.DisplayMode);
-    const ctx: *const contract.Frame = undefined; // the clock hook reads nothing from it
-    const wide: u16 = 190; // date_time
-    const narrow: u16 = 80; // time
-
-    // Before any store the fresh probe width applies (a fresh bar).
-    W.invalidate();
-    try std.testing.expectEqual(wide, W.naturalWidth(.date_time, ctx, wide));
-
-    W.store(.date_time, wide);
-    try std.testing.expectEqual(wide, W.naturalWidth(.date_time, ctx, wide));
-    // The cycle itself: stale under the new key, so the narrow probe wins.
-    try std.testing.expectEqual(narrow, W.naturalWidth(.time, ctx, narrow));
-    // And it does not come back to the old slot for a mode it was never
-    // measured for either.
-    try std.testing.expectEqual(narrow, W.naturalWidth(.date, ctx, narrow));
-    W.invalidate();
+test "a mode cycle is stale even when the effective format bytes do not move" {
+    // The mode, not just the format, carries the reservation change: date_time
+    // configured as the built-in time format and time mode render identical
+    // bytes, but their width probes (and therefore the row reservation)
+    // differ. The predicate must go stale on the mode itself -- that staleness
+    // is what drives the budget re-derivation the deleted mode-keyed width
+    // cache used to own.
+    const base = "%H:%M:%S";
+    try std.testing.expectEqualStrings(
+        clock.effectiveFormatFor(base, .date_time),
+        clock.effectiveFormatFor(base, .time),
+    );
+    try std.testing.expect(clock.stalenessFor(7, 7, .date_time, .time, base, base));
+    // Same mode, same bytes: not stale.
+    try std.testing.expect(!clock.stalenessFor(7, 7, .time, .time, base, base));
 }
 
 test "staleness keys on the format's bytes, not its address" {
     // Same second, same bytes, different slices: NOT stale.
-    try std.testing.expect(!clock.stalenessFor(7, 7, "%H:%M", "%H:%M"));
+    try std.testing.expect(!clock.stalenessFor(7, 7, .date_time, .date_time, "%H:%M", "%H:%M"));
     // Same second, same address, different bytes: stale (the pointer compare
     // this replaced would have called this unchanged).
     var buf: [5]u8 = "%H:%M".*;
-    try std.testing.expect(clock.stalenessFor(7, 7, "%H:%M:%S", &buf));
+    try std.testing.expect(clock.stalenessFor(7, 7, .date_time, .date_time, "%H:%M:%S", &buf));
     // Different second: stale regardless of format.
-    try std.testing.expect(clock.stalenessFor(8, 7, "%H:%M", "%H:%M"));
+    try std.testing.expect(clock.stalenessFor(8, 7, .date_time, .date_time, "%H:%M", "%H:%M"));
     // Format change of equal length: stale.
-    try std.testing.expect(clock.stalenessFor(7, 7, "%I:%M", "%H:%M"));
+    try std.testing.expect(clock.stalenessFor(7, 7, .date_time, .date_time, "%I:%M", "%H:%M"));
     // Prefix relationship: stale.
-    try std.testing.expect(clock.stalenessFor(7, 7, "%H:%M:%S", "%H:%M"));
+    try std.testing.expect(clock.stalenessFor(7, 7, .date_time, .date_time, "%H:%M:%S", "%H:%M"));
+    // Same second, same bytes, different mode: stale.
+    try std.testing.expect(clock.stalenessFor(7, 7, .date_time, .time, "%H:%M", "%H:%M"));
+}
+
+test "unrenderable formats compare on their clipped prefix" {
+    // formatTime rejects a format of fmt_limit bytes or more, so such a
+    // format never paints; the record keeps only its clip. Two of them
+    // agreeing on the clip are equally unpaintable and must NOT read as
+    // stale, or a permanently failing clock_format would retry its doomed
+    // render every event batch instead of once per second boundary.
+    var long_fmt: [clock.fmt_limit + 2]u8 = undefined;
+    @memset(&long_fmt, 'a');
+    var record: [clock.fmt_limit]u8 = undefined;
+    @memcpy(&record, long_fmt[0..clock.fmt_limit]);
+    try std.testing.expect(!clock.stalenessFor(
+        7,
+        7,
+        .date_time,
+        .date_time,
+        &long_fmt,
+        &record,
+    ));
+    // A change inside the clip is stale, even past the render limit.
+    long_fmt[5] = 'b';
+    try std.testing.expect(clock.stalenessFor(
+        7,
+        7,
+        .date_time,
+        .date_time,
+        &long_fmt,
+        &record,
+    ));
+    // Returning to a renderable format is stale too (the clip lengths differ).
+    try std.testing.expect(clock.stalenessFor(
+        7,
+        7,
+        .date_time,
+        .date_time,
+        "%H:%M",
+        &record,
+    ));
 }

@@ -131,6 +131,15 @@ fn tileColumn(
     }
 }
 
+/// Per-window state for the water-fill: the snapshot `max_height` and the
+/// pinned (capped) flag. The AoS slot for the two parallel arrays this
+/// replaces -- both were indexed only by position in the column and consulted
+/// together on every pinning pass.
+const FillSlot = struct {
+    max_h: u16 = 0,
+    capped: bool = false,
+};
+
 /// Water-filling: pins windows whose max_height is at or below their fair
 /// share and redistributes their pixels, then distributes heights to the rest.
 /// Zero boost uses an even split. Returns the total pixel height used.
@@ -138,13 +147,15 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     const n: u16 = @intCast(windows.len);
     const zero_boost = boost.isZero();
 
-    var capped: [constants.max_tiled_windows]bool = undefined;
-    @memset(capped[0..windows.len], false);
-    // Snapshot each window's max_height ONCE: the water-fill below re-reads
-    // the hint inside its pinning passes, and hoisting it keeps those passes
-    // O(n) plain u16 compares instead of re-resolving the hint each time.
-    var max_h: [constants.max_tiled_windows]u16 = undefined;
-    for (windows, 0..) |win, i| max_h[i] = ctx.v.hints.forWin(win).max_height;
+    // Per-window fill state as one AoS slot: the snapshot max_height AND the
+    // pinned (capped) flag, replacing two parallel arrays indexed only by
+    // window position. Snapshot each window's max_height ONCE: the water-fill
+    // below re-reads the hint inside its pinning passes, and hoisting it keeps
+    // those passes O(n) plain u16 compares instead of re-resolving the hint
+    // each time.
+    var slots_buf: [constants.max_tiled_windows]FillSlot = @splat(.{});
+    const slots = slots_buf[0..windows.len];
+    for (windows, 0..) |win, i| slots[i].max_h = ctx.v.hintsFor(win).max_height;
     var rem_avail = avail;
     var rem_weight: f32 = @as(f32, @floatFromInt(n)) + boost.top + boost.bottom;
     var rem_count = n;
@@ -153,14 +164,14 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     while (pinned and rem_count > 0) {
         pinned = false;
         for (windows, 0..) |_, i| {
-            if (capped[i]) continue;
+            if (slots[i].capped) continue;
             const w_i: f32 = windowWeight(@intCast(i), n, boost);
             // rem_weight ≥ rem_count here (windowWeight ≥ 1.0, boost ≥ 0), so
             // the division never divides by zero — no `else 0` arm needed.
             const fair: u16 = @intFromFloat(@as(f32, @floatFromInt(rem_avail)) * w_i / rem_weight);
-            if (max_h[i] > 0 and max_h[i] <= fair) {
-                out[i] = @max(ctx.min_dim, max_h[i]);
-                capped[i] = true;
+            if (slots[i].max_h > 0 and slots[i].max_h <= fair) {
+                out[i] = @max(ctx.min_dim, slots[i].max_h);
+                slots[i].capped = true;
                 rem_avail -|= out[i];
                 rem_weight -= w_i;
                 rem_count -= 1;
@@ -179,7 +190,7 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     var prev_px: f32 = 0;
     var seen: u16 = 0;
     for (windows, 0..) |_, i| {
-        if (capped[i]) continue;
+        if (slots[i].capped) continue;
         if (zero_boost) {
             out[i] = windowHeight(seen, rem_count, rem_avail, ctx.min_dim);
             seen += 1;
@@ -222,7 +233,7 @@ fn minStackWidth(
 ) u16 {
     var widest_bounded: u16 = 0;
     for (windows) |win| {
-        const max_w = ctx.v.hints.forWin(win).max_width;
+        const max_w = ctx.v.hintsFor(win).max_width;
         if (max_w == 0) continue;
         widest_bounded = @max(widest_bounded, @max(ctx.min_dim, max_w));
     }

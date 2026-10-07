@@ -101,10 +101,8 @@ pub const DrawCtx = struct {
     focused_window: ?u32 = null,
     focused_title: []const u8 = "",
     minimized_title: []const u8 = "",
-    current_ws_wins: []const u32 = &.{},
+    current_ws_entries: []const TitleEntry = &.{},
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void) = &.{},
-    titles: []const []const u8 = &.{},
-    geoms: []const ?model.Rect = &.{},
 
     /// The title renderer's stable per-frame context (dc/config/height/
     /// start_x/width/conn). The start_x/width are the segment's on-screen box.
@@ -124,10 +122,8 @@ pub const DrawCtx = struct {
             .focused_window = self.focused_window,
             .focused_title = self.focused_title,
             .minimized_title = self.minimized_title,
-            .current_ws_wins = self.current_ws_wins,
+            .entries = self.current_ws_entries,
             .minimized_set = self.minimized_set,
-            .titles = self.titles,
-            .geoms = self.geoms,
         };
     }
 };
@@ -167,16 +163,28 @@ pub const TitleRenderContext = struct {
     width: u16,
 };
 
+/// One current-workspace window as the title segment sees it: id, borrowed
+/// title, and the sync truth-rect for the frame. The AoS replacement for the
+/// three parallel arrays (`frame.wins` / `titles_buf` / `geoms_buf`, exposed
+/// as `current_ws_wins`/`titles`/`geoms`) that shared only an index -- a
+/// window's whole record now travels as one value, so the snapshot cannot
+/// hand the draw one array's length and another's contents.
+pub const TitleEntry = struct {
+    window: u32,
+    /// Borrowed from the WM-owned title cache (wincache.peekTitle); the bar
+    /// refreshes every entry each frame before the draw.
+    title: []const u8,
+    geom: ?model.Rect,
+};
+
 /// Per-frame volatile snapshot captured before drawing.
 pub const TitleSnapshot = struct {
     focused_window: ?u32,
     focused_title: []const u8,
     minimized_title: []const u8,
-    current_ws_wins: []const u32,
+    /// The current workspace's windows in frame order (see TitleEntry).
+    entries: []const TitleEntry,
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
-
-    titles: []const []const u8 = &.{},
-    geoms: []const ?model.Rect = &.{},
 };
 
 /// Which core fact-revision to mark-dirty with. Mirrors the `DirtySources`

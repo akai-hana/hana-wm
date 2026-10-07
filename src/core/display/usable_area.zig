@@ -2,10 +2,11 @@
 //!
 //! Core owns "how much of the screen is left for window placement after all
 //! surfaces that occupy screen space are accounted for." Any such surface (a
-//! bar, a dock, a future taskbar) contributes a "claim": an edge plus how
+//! bar, a dock, a future taskbar) contributes "the claim": an edge plus how
 //! many pixels it takes from that edge, released when it stops occupying
-//! space. Core computes `workArea()` from the set of active claims and the
-//! physical screen dimensions.
+//! space. One slot today (see `claim`); the ledger grows slots only when a
+//! second claimant exists. Core computes `workArea()` from the active claim
+//! and the physical screen dimensions.
 //!
 //! Surfaces push claims and read nothing back beyond `workArea()`. They never
 //! hand core a final number; the subtraction math is core's, so the fact
@@ -32,7 +33,6 @@
 //! zero-sized rect, never a wrapped one. See `workAreaFrom`.
 
 const core = @import("core");
-const build_options = @import("build_options");
 const model = @import("model");
 
 /// Which screen edge a claim occupies.
@@ -42,33 +42,27 @@ const Claim = struct {
     /// Which monitor the claim is held on.
     ///
     /// A claim is a statement about a SCREEN, not about the process, so it
-    /// has to name its screen: on a multi-monitor setup two surfaces can hold
-    /// claims simultaneously on different monitors, and the usable area of
-    /// monitor 0 must not be shrunk by monitor 1's bar. Today there is exactly
-    /// one screen, so the default is the only correct answer and nothing
-    /// reads the field -- but the alternative was a claim whose subject was
-    /// implicit in the table it happened to sit in, which is precisely the
-    /// assumption that breaks the moment a second monitor appears.
+    /// has to name its screen: on a multi-monitor setup a claim must not
+    /// shrink another monitor's usable area. Today there is exactly one
+    /// screen and exactly one claim (see `claim`), so the default is the only
+    /// correct answer and nothing reads the field -- but the alternative was
+    /// a claim whose subject was implicit, which is precisely the assumption
+    /// that breaks the moment a second monitor appears.
     monitor: u8 = 0,
     edge: Edge = .top,
     px: u16 = 0,
-    active: bool = false,
 };
 
-// Compile-time number of claim slots. Each surface that exists in a given
-// build owns one slot, addressed by a comptime id. Today only the bar claims
-// screen space; a future surface adds its own slot here (and its own id
-// constant), keeping the ledger fully comptime-sized (no allocation, no
-// runtime registration).
-const max_claims = if (build_options.has_bar) 1 else 0;
-
-// The bar is surface id 0 (present only when has_bar). With no bar compiled
-// in there are no claim ids at all, so the constant must not exist: a caller
-// that reads it is already broken and should fail at compile time rather than
-// index a zero-length array.
-pub const bar_id: u8 = if (build_options.has_bar) 0 else unreachable;
-
-var claims: [max_claims]Claim = [_]Claim{.{}} ** max_claims;
+/// The one active claim, absent when nothing occupies screen space.
+///
+/// A single optional, not a table: today exactly one surface (the bar) claims
+/// screen space, so the `[max_claims]`-slots-plus-comptime-ids ledger was a
+/// table of exactly 1 (the KISS audit's ?Claim collapse). A second claimant
+/// reintroduces slots AND per-claimant keying then -- `mappedSurfaceWindow`
+/// must key off its OWN claimant's claim, never "any claim", the day two
+/// coexist. `px == 0` is encoded as absence (null), not an inactive entry:
+/// every reader (insets, mapped-surface) skips both encodings identically.
+var claim: ?Claim = null;
 
 /// The X window id of the chrome surface (the bar), registered by that
 /// surface at init/deinit. Lets core recognize "this window is chrome" (to
@@ -101,51 +95,45 @@ pub fn isSurfaceWindow(win: core.WindowId) bool {
 /// The chrome surface's window id when IT currently occupies screen space;
 /// null otherwise. Used for raise-above stacking.
 ///
-/// Keyed off the bar's own claim, not "any active claim". Those coincide only
-/// because `max_claims` is 1: the loop it replaced returned `surface_win` --
-/// unconditionally the BAR's window -- as soon as ANY claim was active, so
-/// the day a dock or taskbar adds the second slot, a dock alone claiming
-/// screen space would have the caller stack-raise a bar that is not on screen.
-/// The coincidence is now written down instead of relied on.
+/// "The claimant holds the claim" == "the surface window is claimed" only
+/// while there is ONE slot: the optional IS the bar's claim today. The day a
+/// second slot exists, key this off that surface's OWN claim, never "any
+/// claim is active" -- a dock alone claiming screen space must not make the
+/// caller stack-raise a bar that is not on screen (the note the [max_claims]
+/// table used to carry here).
 pub fn mappedSurfaceWindow() ?core.WindowId {
-    if (!build_options.has_bar) return null;
-    if (!claims[bar_id].active) return null;
+    if (claim == null) return null;
     return surface_win;
 }
 
-/// Sets (or re-sets) surface `id`'s claim. Calling this with a changed edge
-/// or pixel count replaces the previous claim; the caller is responsible for
-/// triggering any reconcile that new geometry requires.
-pub fn setClaim(comptime id: u8, edge: Edge, px: u16) void {
-    // The bounds check is the indexing itself: `id` is comptime and `claims`
-    // has a comptime length, so a bad id is a compile error, in every build
-    // mode -- "cannot index into empty array" when has_bar is off, "index out
-    // of bounds" past `max_claims` otherwise. It is deliberately NOT a
-    // `std.debug.assert`: that is a no-op in ReleaseFast, which is the mode
-    // this ships in, so it would have read as a guarantee while checking
-    // nothing in every build that matters.
-    claims[id] = .{ .edge = edge, .px = px, .active = px != 0 };
+/// Sets (or re-sets) the claim. `px == 0` releases it (null), the same
+/// observable state the old inactive table entry had. Calling this with a
+/// changed edge or pixel count replaces the previous claim; the caller is
+/// responsible for triggering any reconcile that new geometry requires.
+/// No id parameter: with one slot there is nothing to address (the old
+/// comptime-id bounds check was the table-of-1's scaffolding -- a no-op
+/// ReleaseFast assert could never be its replacement).
+pub fn setClaim(edge: Edge, px: u16) void {
+    claim = if (px == 0) null else .{ .edge = edge, .px = px };
 }
 
-/// Releases surface `id`'s claim, returning usable area to full screen.
-pub fn releaseClaim(comptime id: u8) void {
-    setClaim(id, .top, 0);
+/// Releases the claim, returning usable area to full screen.
+pub fn releaseClaim() void {
+    claim = null;
 }
 
-/// The usable rectangular area: physical screen minus the pixels that active
-/// claims take from their edges. With no active claims this is the full screen.
-/// Sum of every ACTIVE claim per edge. Pure over the claim table, so the
-/// arithmetic the usable-area depends on is testable without an X connection.
+/// Pixels the active claim takes from each edge (indexed by
+/// @intFromEnum(Edge)); zeroed edges when nothing claims. Pure over the one
+/// slot, so the arithmetic the usable-area depends on is testable without an
+/// X connection. `+=` keeps the sum reading (a second slot lands here as
+/// another addend without touching the math).
 fn claimInsets() [4]u32 {
     // Index by @intFromEnum so the reading order below and the field order of
     // the Edge enum have one definition between them. Writing the four
     // cases out spelled out the mapping twice, and the two copies could
     // disagree: a case reordering the enum would still have compiled.
     var insets = [4]u32{ 0, 0, 0, 0 };
-    for (claims) |c| {
-        if (!c.active) continue;
-        insets[@intFromEnum(c.edge)] += c.px;
-    }
+    if (claim) |c| insets[@intFromEnum(c.edge)] += c.px;
     return insets;
 }
 

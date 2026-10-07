@@ -18,7 +18,7 @@ const actions = @import("actions");
 const window = @import("window");
 
 fn admit(win: u32) !void {
-    actions.mapRequest(win, 0, true, null); // takes its own mutable model via pipeline.mut
+    actions.mapRequest(win, 0, true, null, null); // takes its own mutable model via pipeline.mut
 }
 
 /// Admits `win` through handleMapRequest so the spawn-cursor snapshot runs
@@ -159,7 +159,7 @@ test "focus: switch to a workspace with a never-shown window lands input focus" 
     // w2 is admitted on ws 1 while ws 0 is current: it is parked off-current
     // and never mapped (the spawn register path sends no map).
     const w2 = fx.createWindow();
-    actions.mapRequest(w2, 1, false, null);
+    actions.mapRequest(w2, 1, false, null, null);
     fx.flush();
     try std.testing.expect(!fx.isViewable(w2));
 
@@ -190,7 +190,7 @@ test "focus: switch lands xcb_set_input_focus on globally_active window" {
     const w2 = fx.createWindow();
     fx.setWmTakeFocus(w2);
     fx.setNoInput(w2);
-    actions.mapRequest(w2, 1, false, null);
+    actions.mapRequest(w2, 1, false, null, null);
     fx.flush();
 
     actions.switchTo(1);
@@ -300,8 +300,8 @@ test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel s
 // 10.6: the destroyed-window guard applies to `.user_command` too.
 //
 // The guard used to be `if (reason == .mouse_click and !isWindowMapped(...))`,
-// with `.user_command` excluded because the bar's collectVisibleWindows
-// callers had already confirmed visibility. floating.zig reaches
+// with `.user_command` excluded because the focus-cycle callers had already
+// confirmed visibility. floating.zig reaches
 // grabFocus(win, .user_command) directly, so that reasoning did not hold
 // there: a window destroyed between admission and the toggle could be focused
 // and raised. The new model-side `store.has` check closes it with no round
@@ -317,7 +317,7 @@ test "focus: a destroyed window cannot take focus via user_command" {
     fx.flush();
 
     const m = pipeline.model();
-    const m2 = pipeline.mut(&.{});
+    const m2 = pipeline.mut();
 
     // Destroy the window behind the model's back: the entry leaves the store
     // (what a DestroyNotify would do) but no event is delivered, so this is

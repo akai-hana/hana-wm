@@ -1,4 +1,4 @@
-//! The shared linear meter mapping: a pointer position along a horizontal slot
+//! The shared linear mapping: a pointer position along a horizontal slot
 //! <-> a 0-100 level.
 //!
 //! It lives here, not in the slider core, because it is not a slider concept.

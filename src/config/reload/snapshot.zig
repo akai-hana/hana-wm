@@ -39,12 +39,23 @@ const GoodSource = struct {
     /// location that also holds plenty hana never reads (a vendored
     /// `.opencode` tree, a `node_modules`, VCS metadata), and freezing all of
     /// it turned a three-file config into a thousands-of-files tmpfs copy on
-    /// every boot.
-    files: [][]u8,
-    /// Size and mtime of each entry in `files` as of the last successful
-    /// refresh, or null when the snapshot is not known to mirror the source.
-    /// An unchanged reload compares these and writes nothing at all.
-    stamps: ?[]FileStamp,
+    /// every boot. Each entry carries its own size/mtime stamp (null when the
+    /// snapshot is not known to mirror the source): the stamp rides beside
+    /// the path it describes instead of living in a second slice that had to
+    /// stay index-for-index in step, which also removed the special case of
+    /// transferring ownership of that slice across a no-op reload.
+    files: []SourceFile,
+};
+
+/// One resolved config file: its identity (path, owned) plus the size/mtime
+/// captured at the last successful refresh, or null when the snapshot is not
+/// known to mirror the source. An unchanged reload compares these and writes
+/// nothing at all. Stamps are set together -- a fresh record starts null and
+/// `refreshSnapshot` stamps every entry after a successful freeze -- so the
+/// per-entry optional never carries a partial state in practice.
+const SourceFile = struct {
+    path: []u8,
+    stamp: ?FileStamp = null,
 };
 
 /// One resolved config file's identity, captured when it is snapshotted.
@@ -81,23 +92,26 @@ pub fn publishReadFiles(items: []const []const u8) !void {
     load_read_files = out.items;
 }
 
-/// Dupe `items` into a freshly allocated list owned by `allocator`; released
-/// with `freeFileList`. An empty input yields a zero-length slice, which
-/// `freeFileList` releases as a no-op.
-fn dupeFileList(allocator: std.mem.Allocator, items: []const []const u8) ![][]u8 {
-    const out = try allocator.alloc([]u8, items.len);
+/// Dupe `items` into a freshly allocated `SourceFile` list owned by
+/// `allocator`; released with `freeSourceFiles`. An empty input yields a
+/// zero-length slice, which `freeSourceFiles` releases as a no-op. Stamps
+/// start null: a fresh record is not known to mirror any prior snapshot.
+fn dupeSourceFiles(allocator: std.mem.Allocator, items: []const []const u8) ![]SourceFile {
+    const out = try allocator.alloc(SourceFile, items.len);
     errdefer allocator.free(out);
     for (items, 0..) |item, i| {
-        out[i] = allocator.dupe(u8, item) catch |err| {
-            for (out[0..i]) |done| allocator.free(done);
-            return err;
+        out[i] = .{
+            .path = allocator.dupe(u8, item) catch |err| {
+                for (out[0..i]) |done| allocator.free(done.path);
+                return err;
+            },
         };
     }
     return out;
 }
 
-fn freeFileList(allocator: std.mem.Allocator, files: [][]u8) void {
-    for (files) |f| allocator.free(f);
+fn freeSourceFiles(allocator: std.mem.Allocator, files: []SourceFile) void {
+    for (files) |f| allocator.free(f.path);
     allocator.free(files);
 }
 
@@ -109,10 +123,10 @@ var last_good_source: ?GoodSource = null;
 
 /// True when two resolved file lists name the same files in the same order.
 /// The lists are merge-ordered, so a positional compare is exact.
-fn sameFileList(a: []const []u8, b: []const []u8) bool {
+fn sameSourceList(a: []const SourceFile, b: []const SourceFile) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
-        if (!std.mem.eql(u8, x, y)) return false;
+        if (!std.mem.eql(u8, x.path, y.path)) return false;
     }
     return true;
 }
@@ -120,29 +134,26 @@ fn sameFileList(a: []const []u8, b: []const []u8) bool {
 pub fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir: bool) void {
     // OOM is silent: the snapshot just keeps the previous good source.
     const duped = allocator.dupe(u8, path) catch return;
-    const files = dupeFileList(allocator, load_read_files) catch {
+    const files = dupeSourceFiles(allocator, load_read_files) catch {
         allocator.free(duped);
         return;
     };
-    var kept_stamps: ?[]FileStamp = null;
     if (last_good_source) |g| {
         // Carry the stamps over when this load resolved the very same source
         // to the very same files. That is what lets a no-op reload take the
         // "nothing changed" fast path instead of re-freezing the snapshot on
-        // every SIGHUP. The stamps are parallel to `files`, so reusing them
-        // against an identical list is index-for-index correct.
-        const same = g.is_dir == is_dir and std.mem.eql(u8, g.path, path) and sameFileList(g.files, files);
-        if (same) kept_stamps = g.stamps;
-        // The freshly duped path/files supersede the old pair either way, so
-        // the old ones are always released here; the stamps are the only state
-        // that can survive into the new record.
-        allocator.free(g.path);
-        freeFileList(allocator, g.files);
-        if (!same) {
-            if (g.stamps) |s| allocator.free(s);
+        // every SIGHUP. The stamps live ON each new entry, so carrying them
+        // is a per-entry copy against an identical list -- index-for-index
+        // correct by construction, with no second slice to own.
+        const same = g.is_dir == is_dir and std.mem.eql(u8, g.path, path) and sameSourceList(g.files, files);
+        if (same) {
+            for (files, g.files) |*nf, of| nf.stamp = of.stamp;
         }
+        // The freshly duped path/files supersede the old record either way.
+        allocator.free(g.path);
+        freeSourceFiles(allocator, g.files);
     }
-    last_good_source = .{ .path = duped, .is_dir = is_dir, .files = files, .stamps = kept_stamps };
+    last_good_source = .{ .path = duped, .is_dir = is_dir, .files = files };
 }
 
 /// Releases the good-source state. In a running hana this lives for the whole
@@ -151,15 +162,14 @@ pub fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir
 pub fn deinitGoodSource(allocator: std.mem.Allocator) void {
     if (last_good_source) |g| {
         allocator.free(g.path);
-        freeFileList(allocator, g.files);
-        if (g.stamps) |s| allocator.free(s);
+        freeSourceFiles(allocator, g.files);
     }
     last_good_source = null;
 }
 
 /// Snapshot dir a re-exec boots from. XDG_RUNTIME_DIR is already per-user, so
 /// no uid suffix is needed there; the /tmp fallback carries the uid, mirroring
-/// persist.zig. Caller owns the returned slice.
+/// handoff.zig. Caller owns the returned slice.
 fn snapshotDirPath(allocator: std.mem.Allocator) ![]u8 {
     if (std.c.getenv("XDG_RUNTIME_DIR")) |dir| {
         return std.fmt.allocPrint(allocator, "{s}/hana-config", .{std.mem.span(dir)});
@@ -194,8 +204,12 @@ fn deleteTreeAbsolute(io: std.Io, abs_path: []const u8) void {
     d.deleteTree(io, base) catch {};
 }
 
-/// One resolved config file paired with the path it takes inside the snapshot.
-const SnapFile = struct { rel: []const u8 };
+/// One resolved config file paired with the path it takes inside the snapshot
+/// and the stat taken when the freeze reached it. The AoS record for the
+/// separate `files`/`stamps` parallel arrays this replaces: both were built
+/// over the same list in the same loop order, so the stamp now travels with
+/// the entry it describes.
+const SnapFile = struct { rel: []const u8, stamp: FileStamp };
 
 /// `path` relative to `root`, or null when it does not live under it. An
 /// `include` may point outside the config dir (`../shared.toml`), and such a
@@ -221,13 +235,13 @@ fn snapshotCurrent(
     allocator: std.mem.Allocator,
     snap: []const u8,
     files: []const SnapFile,
-    prev: ?[]const FileStamp,
-    now: []const FileStamp,
+    prev: []const SourceFile,
 ) bool {
-    const old = prev orelse return false;
-    if (old.len != now.len or files.len != now.len) return false;
-    for (old, now) |a, b| {
-        if (a.size != b.size or a.mtime != b.mtime) return false;
+    if (prev.len != files.len) return false;
+    for (prev, files) |p, f| {
+        // Null stamp: the snapshot is not known to mirror this record.
+        const a = p.stamp orelse return false;
+        if (a.size != f.stamp.size or a.mtime != f.stamp.mtime) return false;
     }
     var d = std.Io.Dir.openDirAbsolute(io, snap, .{ .iterate = true }) catch return false;
     defer d.close(io);
@@ -280,24 +294,22 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
     const root = if (g.is_dir) g.path else (std.fs.path.dirname(g.path) orelse ".");
     var files: std.ArrayList(SnapFile) = .empty;
     for (g.files) |f| {
-        const rel = (relativeTo(sa, root, f) catch return) orelse {
-            log.warn("Snapshot: '{s}' is outside '{s}'; not freezing it", .{ f, root });
+        const rel = (relativeTo(sa, root, f.path) catch return) orelse {
+            log.warn("Snapshot: '{s}' is outside '{s}'; not freezing it", .{ f.path, root });
             continue;
         };
-        files.append(sa, .{ .rel = rel }) catch return;
+        files.append(sa, .{ .rel = rel, .stamp = undefined }) catch return;
     }
     if (files.items.len == 0) return;
 
     const src = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return;
     defer src.close(io);
 
-    const stamps = allocator.alloc(FileStamp, files.items.len) catch return;
-    defer allocator.free(stamps);
-    for (files.items, 0..) |f, i| {
+    for (files.items) |*f| {
         const st = src.statFile(io, f.rel, .{}) catch return;
-        stamps[i] = .{ .size = st.size, .mtime = st.mtime.nanoseconds };
+        f.stamp = .{ .size = st.size, .mtime = st.mtime.nanoseconds };
     }
-    if (snapshotCurrent(io, sa, snap, files.items, g.stamps, stamps)) return;
+    if (snapshotCurrent(io, sa, snap, files.items, g.files)) return;
 
     const staging = std.fmt.allocPrint(sa, "{s}.new", .{snap}) catch return;
     deleteTreeAbsolute(io, staging);
@@ -311,12 +323,11 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
         return;
     };
 
-    // Remember what was frozen so the next unchanged reload can skip all of it.
-    const kept = allocator.dupe(FileStamp, stamps) catch return;
-    if (last_good_source) |cur| {
-        if (cur.stamps) |old| allocator.free(old);
-    }
-    last_good_source.?.stamps = kept;
+    // Remember what was frozen so the next unchanged reload can skip all of
+    // it. `g.files` shares its backing with `last_good_source`, so stamping
+    // through it records the freeze without a second allocation (the old
+    // dupe-and-replace of a parallel stamps slice is gone with the slice).
+    for (g.files, files.items) |*sf, f| sf.stamp = f.stamp;
 }
 
 /// Assembles the complete snapshot under `staging`. Returns false (leaving

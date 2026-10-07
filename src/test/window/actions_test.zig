@@ -27,8 +27,8 @@ test "actions: mapRequest admits, maps, and focuses a window" {
     const win = fx.createWindow();
     try std.testing.expect(!m.store.has(win));
 
-    actions.mapRequest(win, 0, true, null);
-    actions.mapRequest(win, 0, true, null); // double-manage guard: no-op
+    actions.mapRequest(win, 0, true, null, null);
+    actions.mapRequest(win, 0, true, null, null); // double-manage guard: no-op
     fx.flush();
 
     try std.testing.expect(m.store.has(win));
@@ -46,7 +46,7 @@ test "actions: mapRequest admits a float-rule window floating at its rect" {
 
     const win = fx.createWindow();
     const rect = model.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
-    actions.mapRequest(win, 0, true, rect);
+    actions.mapRequest(win, 0, true, rect, null);
     fx.flush();
 
     const e = m.store.get(win) orelse return error.ExpectedManaged;
@@ -72,7 +72,7 @@ test "actions: moveWindowTo transfers membership and parks off-screen" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null);
+    actions.mapRequest(win, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
 
@@ -94,7 +94,7 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     const ws0: u8 = @intCast(m.current.index);
 
     const w1 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
     fx.flush();
 
     // Multi-tag: add tag 2, protecting the current tag.
@@ -139,12 +139,12 @@ test "actions: switching to the CURRENT workspace while in all-view exits it" {
     const ws0: u8 = @intCast(m.current.index);
 
     const w1 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
     fx.flush();
 
     // w2 lives on a neighbor workspace, hidden from the current one.
     const w2 = fx.createWindow();
-    actions.mapRequest(w2, 0, true, null);
+    actions.mapRequest(w2, 0, true, null, null);
     actions.moveWindowTo(w2, 2);
     fx.flush();
     try std.testing.expect(model.visibleOn(m, w2, m.current) == false);
@@ -173,7 +173,7 @@ test "actions: minimize parks, restore unmaps-and-redraws" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null);
+    actions.mapRequest(win, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
 
@@ -197,7 +197,7 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     const m = pipeline.model();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null);
+    actions.mapRequest(win, 0, true, null, null);
     fx.flush();
     const before = fx.geometry(win) orelse return error.ClosedWindow;
 
@@ -230,9 +230,9 @@ test "actions: dragging a tiled window out detaches AND reflows the pile (no gap
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
     const w3 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null);
-    actions.mapRequest(w2, 0, true, null);
-    actions.mapRequest(w3, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
+    actions.mapRequest(w2, 0, true, null, null);
+    actions.mapRequest(w3, 0, true, null, null);
     fx.flush();
 
     // Baseline: three tiled windows (the fixture's default layout kind).
@@ -277,8 +277,8 @@ test "actions: unmanage drops the window and re-focuses" {
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null);
-    actions.mapRequest(w2, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
+    actions.mapRequest(w2, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
 
@@ -311,9 +311,9 @@ test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
     const w3 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null);
-    actions.mapRequest(w2, 0, true, null);
-    actions.mapRequest(w3, 0, true, null);
+    actions.mapRequest(w1, 0, true, null, null);
+    actions.mapRequest(w2, 0, true, null, null);
+    actions.mapRequest(w3, 0, true, null, null);
     fx.flush();
     try std.testing.expect(order.len == 3);
     try std.testing.expectEqual(w3, m.focused.?);
@@ -407,20 +407,20 @@ test "actions: layout kind and variant step through the registry" {
 
 // 10.5: the fact-bump invariant, pinned at the entry that owns it.
 //
-// Eight actions reconcile through the plain `pipeline.reconcileGrab` alias.
-// The bump used to be the caller's job and those eight did not do it, so
-// nothing but this assertion kept the invariant true. The bump is now inside
-// the alias; the `retile` paths are covered by the geometry assertions above,
-// which all route through it.
+// Eight actions reconcile through `pipeline.reconcileGrab(.{})`. The bump
+// used to be the caller's job and those eight did not do it, so nothing but
+// this assertion kept the invariant true. The bump is now inside the entry;
+// the `retile` paths are covered by the geometry assertions above, which
+// all route through it.
 //
 // X-gated like the rest of this file: `reconcileGrab` takes a real server
 // grab, so this skips headless.
-test "actions: the plain reconcile alias bumps the window fact" {
+test "actions: the default reconcile entry bumps the window fact" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null);
+    actions.mapRequest(win, 0, true, null, null);
     fx.flush();
 
     // A tiling op that reconciles through the plain alias: toggleFloating

@@ -9,20 +9,15 @@
 //! to consult from anywhere else, which is why the writes live here and the
 //! reconciler is the only writer.
 //!
-//! `reconcile`'s header documents the four behavioural reads of this ledger.
+//! `reconcile`'s header owns the behavioural reads of this ledger; the field
+//! semantics live on `SentEntry` below.
 
 const model = @import("model");
 const contract = @import("contract");
 
-/// What we last sent per window; WRITE-ONLY bookkeeping whose four contract
-/// reads are documented in reconcile.zig's header:
-///   - has_rect: whether a visible geometry was EVER sent (an explicit flag,
-///     not a sentinel rect: a legitimately placed zero-size window at the
-///     origin would collide with a "never sent" marker value);
-///   - rect: the last VISIBLE geometry sent (survives parks);
-///   - parked: whether the latest reconcile parked it;
-///   - bw: the last border width sent (0 if never sent);
-///   - pixel: the last border pixel sent (0 if never sent).
+/// What we last sent per window; WRITE-ONLY bookkeeping (the file header owns
+/// why it is wrong-by-design to consult from anywhere else). Field semantics
+/// are documented HERE; reconcile.zig's header owns the behavioural reads.
 ///
 /// bw/pixel deliberately SURVIVE a park. The park write flips only `parked`;
 /// zeroing them would make the unpark transition see a changed border and
@@ -36,9 +31,15 @@ pub const SentEntry = struct {
     /// weight that reads like a load-bearing marker. 5.1's claim that bw/pixel
     /// survive a park is about THESE two fields, not `rect`.
     rect: model.Rect,
+    /// Whether a visible geometry was EVER sent (an explicit flag, not a
+    /// sentinel rect: a legitimately placed zero-size window at the origin
+    /// would collide with a "never sent" marker value).
     has_rect: bool = false,
+    /// Whether the latest reconcile parked it.
     parked: bool = false,
+    /// The last border width sent (0 if never sent).
     bw: u16 = 0,
+    /// The last border pixel sent (0 if never sent).
     pixel: u32 = 0,
 
     /// Set when a ConfigureNotify says this window changed its own geometry
