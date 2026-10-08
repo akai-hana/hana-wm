@@ -259,10 +259,7 @@ fn onClickHook(ctx: *const contract.ClickCtx) bool {
 /// store: the budget is re-derived at State.init, on the mode-aware staleness
 /// path (bar.updateClock -> adoptFreshClockWidth), and within one second of
 /// any config change on a surviving bar (the ordinary tick), always from the
-/// same live probe the draw measures. The clock-local store that used to
-/// mirror it (keyedWidthState) held the same value for the same inputs, so it
-/// needed this module's invalidate hooks purely to stay in sync on reload --
-/// store and hooks went away together.
+/// same live probe the draw measures.
 pub const module = scaffold.module(
     "clock",
     draw,

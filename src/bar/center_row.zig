@@ -13,23 +13,6 @@ const segmod = @import("segment");
 
 const bar_mods = @import("bar_modules").modules;
 
-/// Registry capability sets (comptime, from the generated registry):
-/// the center-slot segments that share the center-row budget, and the
-/// self-ticking segments whose merged display width IS that budget's
-/// clock reservation.
-const center_slot_ids: []const usize = segmod.findAllByCapability(&bar_mods, .center_slot);
-const self_ticking_ids: []const usize = segmod.findAllByCapability(&bar_mods, .self_ticking);
-
-/// True when the registry id `id` is in the center-slot capability
-/// set (a name that does not resolve is in nothing).
-fn isCenterSlot(id: ?usize) bool {
-    const i = id orelse return false;
-    inline for (center_slot_ids) |cid| {
-        if (i == cid) return true;
-    }
-    return false;
-}
-
 /// Even split of `remaining` among `count` center slots, distributed
 /// left to right in config order: every slot gets `remaining / count`,
 /// and the leading `remaining % count` slots (the leftmost) carry one
@@ -39,17 +22,6 @@ pub fn centerShare(remaining: u16, count: u16, idx: u16) u16 {
     const base = @divFloor(remaining, count);
     const extra: u16 = @intCast(@rem(remaining, count));
     return if (idx < extra) base + 1 else base;
-}
-
-/// A segment's natural (reserved) width via its uniform naturalWidth
-/// hook, or 0 for an unknown/removed segment name. The hook takes a
-/// real `*const contract.Frame` (`segmod.Frame` is an alias for
-/// exactly that), so the frame passes through with no cast.
-fn naturalWidthOf(id: ?usize, frame: *const segmod.Frame, clock_width: u16) u16 {
-    if (comptime !segmod.hasRegisteredSegments()) return 0;
-    const i = id orelse return 0;
-    if (bar_mods[i].naturalWidth) |nw| return nw(frame, clock_width);
-    return 0;
 }
 
 /// Center-row budget derivation: reserves a center layout's own
@@ -83,11 +55,11 @@ pub fn centerRowBudget(
     for (lay.segments.items) |s| {
         // One name -> id resolution per segment for the whole budget pass.
         const id = segmod.segId(s);
-        if (isCenterSlot(id)) {
+        if (segmod.isRole(id, segmod.center_slot_ids)) {
             center_count += 1;
             continue;
         }
-        claim +|= naturalWidthOf(id, frame, clock_width);
+        claim +|= segmod.naturalWidthOf(id, frame, clock_width);
         claim +|= scaled_spacing;
     }
     remaining = clamped -| claim;
@@ -119,6 +91,7 @@ pub fn mergedClockWidth(
     // Comptime guard: with no self-ticking segment compiled in the
     // loop below is dropped whole, so its registry index is never
     // analyzed against the empty registry.
+    const self_ticking_ids = segmod.self_ticking_ids;
     if (comptime self_ticking_ids.len == 0) return width;
     for (self_ticking_ids) |cid| {
         if (bar_mods[cid].measureString) |ms|

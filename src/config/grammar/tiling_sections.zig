@@ -1,12 +1,11 @@
-//! Non-scalar config structures: the tiling layouts/variants/counts
-//! tables and the bar fonts/indicators/workspace-icons/columns
-//! that the comptime schema walk (schema.applyAll) does not
-//! cover. The workspace-rules family lives in rules.zig; the two
-//! bar-adjacent families share the BarAnchorInfo table below so
-//! the anchor set can never drift. Every parser here is gated on
-//! its parent section existing, exactly as the scalar knobs are,
-//! and every owned string it stores is duped off the parsed
-//! document so it outlives the load-scoped arena.
+//! Tiling's non-scalar config structures: the layouts array (cycle order +
+//! per-workspace overrides), per-layout variant preferences, and master-
+//! stack counts -- the tables the comptime schema walk (schema.applyAll)
+//! does not cover. The workspace-rules family lives in rules.zig; the bar
+//! family lives in bar_sections.zig. Every parser here is gated on its
+//! parent section existing, exactly as the scalar knobs are, and every
+//! owned string it stores is duped off the parsed document so it outlives
+//! the load-scoped arena.
 
 const std = @import("std");
 const constants = @import("constants");
@@ -14,7 +13,6 @@ const ids = @import("ids");
 const log = @import("log");
 const model = @import("model");
 const parser = @import("parser");
-const schema = @import("schema");
 const types = @import("types");
 const layout_names = @import("layout_names");
 
@@ -27,37 +25,17 @@ fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: 
         log.warn(fmt, args);
         return null;
     };
-    if (ws_1based < 1 or
-        ws_1based > constants.max_workspace_number_1based or
-        ws_1based > max)
-    {
+    if (!types.workspaceInRange(ws_1based, max)) {
         log.warn(fmt, args);
         return null;
     }
     return ws_1based;
 }
 
-/// One row of the bar-anchor table driving both the default bar layout
-/// (initDefaultBarLayout) and the per-anchor `[bar.layout.<name>]` sections
-/// (parseBarLayout), so the anchor set can never drift.
-const BarAnchorInfo = struct {
-    name: []const u8,
-    position: types.BarSegmentAnchor,
-    default_seg: []const u8,
-};
-
-const bar_anchors = [_]BarAnchorInfo{
-    .{ .name = "left", .position = .left, .default_seg = "workspaces" },
-    .{ .name = "center", .position = .center, .default_seg = "title" },
-    .{ .name = "right", .position = .right, .default_seg = "clock" },
-};
-
-pub fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *types.Config) !void {
-    for (bar_anchors) |a| {
-        var layout = types.BarLayout{ .position = a.position, .segments = .empty };
-        try layout.segments.append(allocator, try allocator.dupe(u8, a.default_seg));
-        try cfg.bar.layout.append(allocator, layout);
-    }
+/// Appends one layout name (duped) to the tiling layout cycle -- the seed
+/// both the default config and the single-layout parse path use.
+pub fn seedDefaultLayout(allocator: std.mem.Allocator, cfg: *types.Config, name: []const u8) !void {
+    try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, name));
 }
 
 /// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
@@ -77,15 +55,10 @@ pub fn parseTilingStructures(
     types.freeStrings(&cfg.tiling.layouts, allocator, types.keep_capacity);
     cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
     types.freeStringMap(&cfg.tiling.variants, allocator, types.keep_capacity);
-    // Single-layout path clears the getDefaultConfig default; the "layout"
-    // fallback is (types.TilingConfig{}).layout, NOT cfg.tiling.layout (which
-    // aliases layouts.items[0], freed below), so using it would read freed
-    // memory when the key is absent.
     if (section.getAsOrWarn([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
         const layout_str = section.getAsOrWarn([]const u8, "layout") orelse types.canon_master_layout;
-        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_names.canonicalLayoutName(layout_str)));
+        try seedDefaultLayout(allocator, cfg, layout_names.canonicalLayoutName(layout_str));
     }
-    if (cfg.tiling.layouts.items.len > 0) cfg.tiling.layout = cfg.tiling.layouts.items[0];
     try parseTilingLayoutSubtables(allocator, doc, cfg);
 }
 
@@ -302,108 +275,4 @@ fn parseLayoutsArray(
             }
         }
     }
-}
-
-/// `appendDupedStrings`'s comptime `warn` argument meanings: the bar segment
-/// list warns on a stray non-string entry (a typo should be called out), the
-/// fonts list silently ignores it.
-const warn_bad_segment_entries = true;
-const ignore_bad_font_entries = false;
-
-/// Dupe-appends every string element of `items` into `dst`. Non-string
-/// entries are skipped; with `warn` set they also surface a warning (the bar
-/// segment list, where a typo should be called out, vs. the fonts list, where
-/// a stray non-string is simply ignored).
-fn appendDupedStrings(
-    comptime warn: bool,
-    allocator: std.mem.Allocator,
-    items: []const parser.Value,
-    dst: *std.ArrayList([]const u8),
-) !void {
-    for (items) |item| {
-        if (item.asScalar([]const u8)) |s| {
-            try dst.append(allocator, try allocator.dupe(u8, s));
-        } else if (warn) {
-            log.warn("Non-string entry in bar segment list, skipping", .{});
-        }
-    }
-}
-
-/// Bar's NON-scalar structures: fonts, indicator glyph mirroring, workspace
-/// icons, and the bar columns. Every bar SCALAR (flags, scalables, height,
-/// colors incl. the [bar.properties] fallback chains, strings, enums, ratios)
-/// is driven by schema.applyAll; like parseBar always did, everything here
-/// stays gated on the [bar] section existing.
-pub fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    const section = doc.getSection(types.section_bar) orelse return;
-    if (section.getAsOrWarn([]const parser.Value, "fonts")) |arr| {
-        types.freeStrings(&cfg.bar.fonts, allocator, types.keep_capacity);
-        try appendDupedStrings(ignore_bad_font_entries, allocator, arr, &cfg.bar.fonts);
-        log.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
-    }
-    // indicator_focused/unfocused: if only one is set, the other mirrors it.
-    // A pair interaction, so it stays bespoke rather than joining the table.
-    const raw_focused = section.getAs([]const u8, "indicator_focused");
-    const raw_unfocused = section.getAs([]const u8, "indicator_unfocused");
-    const focused_val = raw_focused orelse raw_unfocused;
-    const unfocused_val = raw_unfocused orelse raw_focused;
-    if (focused_val) |v| try schema.assignStr(allocator, &cfg.bar.indicator_focused, v);
-    if (unfocused_val) |v| try schema.assignStr(allocator, &cfg.bar.indicator_unfocused, v);
-    try parseWorkspaceIcons(allocator, section, cfg);
-    try parseBarLayout(allocator, doc, cfg);
-}
-
-pub fn padWorkspaceIcons(allocator: std.mem.Allocator, cfg: *types.Config) !void {
-    while (cfg.bar.workspace_icons.items.len < cfg.workspaces.count) {
-        try cfg.bar.workspace_icons.append(allocator, try dupeNum(allocator, cfg.bar.workspace_icons.items.len + 1));
-    }
-}
-
-/// Formats integer `n` as decimal and dupes it to a string, the "int ->
-/// string icon" step shared by parseWorkspaceIcons and padWorkspaceIcons.
-fn dupeNum(allocator: std.mem.Allocator, n: anytype) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{}", .{n});
-}
-
-fn parseWorkspaceIcons(
-    allocator: std.mem.Allocator,
-    section: *parser.Section,
-    cfg: *types.Config,
-) !void {
-    types.freeStrings(&cfg.bar.workspace_icons, allocator, types.keep_capacity);
-    if (section.getAs([]const parser.Value, "icons")) |arr| {
-        for (arr) |item| {
-            if (item.asScalar([]const u8)) |s|
-                try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, s));
-            if (item.asScalar(i64)) |n|
-                try cfg.bar.workspace_icons.append(allocator, try dupeNum(allocator, n));
-        }
-    } else if (section.getAsOrWarn([]const u8, "icons")) |str| {
-        var ch_buf: [1]u8 = undefined;
-        for (str) |ch| {
-            ch_buf[0] = ch;
-            try cfg.bar.workspace_icons.append(allocator, try allocator.dupe(u8, &ch_buf));
-        }
-    }
-
-    try padWorkspaceIcons(allocator, cfg);
-}
-
-fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    types.freeBarLayouts(&cfg.bar.layout, allocator, types.keep_capacity);
-    const max_anchor_name_len = comptime blk: {
-        var longest: usize = 0;
-        for (bar_anchors) |a| longest = @max(longest, a.name.len);
-        break :blk longest;
-    };
-    var section_buf: [types.section_prefix_bar_layout.len + max_anchor_name_len]u8 = undefined;
-    for (bar_anchors) |a| {
-        const layout_section = doc.getSection(std.fmt.bufPrint(&section_buf, "{s}{s}", .{ types.section_prefix_bar_layout, a.name }) catch unreachable) orelse continue;
-        var bar_layout = types.BarLayout{ .position = a.position, .segments = .empty };
-        if (layout_section.getAs([]const parser.Value, "segments")) |seg_arr|
-            try appendDupedStrings(warn_bad_segment_entries, allocator, seg_arr, &bar_layout.segments);
-        if (bar_layout.segments.items.len > 0) try cfg.bar.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
-    }
-
-    if (cfg.bar.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
 }

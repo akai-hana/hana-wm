@@ -33,19 +33,9 @@ const unknown_win: WindowId = 999;
 /// what records an earlier test left behind.
 const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
 
-fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
-    try testing.expectEqualSlices(WindowId, expected, m.ws[ws.index].tiled_order.constSlice());
-}
-
 const regCur = helpers.regCur;
-
-/// Floating-anchor window, the shape most store.put fixtures use.
-fn addFloating(m: *Model, win: WindowId, r: model.Rect) !void {
-    _ = try m.store.put(win, .{
-        .mask = model.bit(model.WSId.fromIndex(0)),
-        .anchor = .{ .floating = r },
-    });
-}
+const expectOrder = helpers.expectOrder;
+const addFloating = helpers.addFloating;
 
 /// Every window whose anchor is tiled AND present appears in EXACTLY ONE ws
 /// list; every listed id exists in the store (single-membership invariant).

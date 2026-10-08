@@ -47,8 +47,11 @@ pub const collect_hidden_set = window.providerOf(.collectHiddenSet);
 // one documented facade exception.
 const bar_mods = @import("bar_modules").modules;
 
-pub const self_ticking_ids: []const usize = segmod.findAllByCapability(&bar_mods, .self_ticking);
-pub const center_slot_ids: []const usize = segmod.findAllByCapability(&bar_mods, .center_slot);
+// The capability sets live in segment.zig (their one home); these aliases
+// keep state's internal readers (`title_id`, `selfTickerIndex`) unqualified.
+// `self_ticking_ids` stays pub for repaint.zig and bar.zig.
+pub const self_ticking_ids = segmod.self_ticking_ids;
+const center_slot_ids = segmod.center_slot_ids;
 
 /// Primary center-slot segment: the FIRST center-slot binder in registry
 /// order (config order within a center layout). Title-centric bar behaviors
@@ -73,28 +76,10 @@ pub inline fn segDirty(self: *const State, id: ?usize) bool {
     return self.dirty.segments[i];
 }
 
-/// Index of the registry id `id` within the role set `comptime ids` (the
-/// self-ticking and center-slot capability sets today), or null when it is
-/// not a member. Name-free: membership is by declared capability, and the set
-/// is resolved from the generated registry. A name that does not resolve
-/// (null) is a member of nothing.
-pub fn roleIndexOf(id: ?usize, comptime ids: []const usize) ?usize {
-    const i = id orelse return null;
-    inline for (ids, 0..) |rid, j| {
-        if (i == rid) return j;
-    }
-    return null;
-}
-
-/// True when the registry id `id` is in the registry role set `ids`.
-pub fn isRole(id: ?usize, comptime ids: []const usize) bool {
-    return roleIndexOf(id, ids) != null;
-}
-
 /// Position of `id` within `self_ticking_ids` (the key into
 /// `Clock.segs`), or null when it is not a self-ticking segment.
 pub fn selfTickerIndex(id: ?usize) ?usize {
-    return roleIndexOf(id, self_ticking_ids);
+    return segmod.roleIndexOf(id, self_ticking_ids);
 }
 
 pub fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
@@ -137,11 +122,9 @@ pub const WindowCtx = struct {
     }
 };
 
-/// The live bar configuration. The render state used to hold its own
-/// `types.BarConfig` copy and needed a `refreshConfig()` re-point on every
-/// reload path -- a second source of truth that silently borrowed slices from
-/// a config the caller frees a few lines later. One accessor, reading core,
-/// means there is nothing to re-point and nothing to forget.
+/// The live bar configuration, read straight from core rather than copied:
+/// a copy would borrow slices from a config the caller frees, and need a
+/// re-point on every reload path -- nothing to re-point, nothing to forget.
 pub inline fn renderBar() types.BarConfig {
     return core.getState().config.bar;
 }
@@ -371,14 +354,6 @@ pub const Clock = struct {
     /// surviving a failed reload, where the new config's font/padding never
     /// reached this State -- on the next second tick, which is also the
     /// cadence that picks up any other live-probe drift.
-    ///
-    /// The clock module used to keep a SECOND copy of this measurement
-    /// (keyedWidthState, keyed on the display mode) and bind invalidate hooks
-    /// to reset it on reload. Both copies derived from the same probe, config
-    /// and height, so they held identical values for identical inputs; the mode
-    /// key bought only the staleness this field's re-derivation now performs,
-    /// via the mode added to the segment's staleness predicate. Duplicate
-    /// store and its reset hooks were deleted rather than kept in sync.
     width: u16 = 0,
     /// Per self-ticking segment last-bound scratch, keyed by position in
     /// `self_ticking_ids`. Only `valid` entries are ever read.
@@ -690,12 +665,7 @@ pub const State = struct {
     /// Measures a segment's natural (reserved) width via its uniform
     /// naturalWidth hook, or 0 for an unknown/removed segment name (null id).
     fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, id: ?usize) u16 {
-        const i = id orelse return 0;
-        // The hook takes a real `*const contract.Frame` (21.1), and
-        // `segmod.Frame` is an alias for exactly that, so this passes the
-        // frame through with no cast and no promise-in-a-comment.
-        if (segAt(i).naturalWidth) |nw| return nw(frame, self.clock.width);
-        return 0;
+        return segmod.naturalWidthOf(id, frame, self.clock.width);
     }
 
     /// Records the last layout-pass bound of a self-ticking segment so its
@@ -994,7 +964,7 @@ pub const State = struct {
                         // One name -> id resolution per segment per frame;
                         // everything below (and in paint) reads the id.
                         const id = segmod.segId(seg);
-                        const is_center = (lay.position == .center) and isRole(id, center_slot_ids);
+                        const is_center = (lay.position == .center) and segmod.isRole(id, center_slot_ids);
                         // Center slots split the whole remaining budget evenly,
                         // left-to-right in config order, and stay contiguous
                         // (no gap) so duplicates cannot reach the right cluster.
@@ -1011,7 +981,7 @@ pub const State = struct {
                             .omit_gap = is_center,
                             .center_idx = center_idx,
                             .repaintable = self.isSegmentRepaintable(id),
-                            .self_ticking = isRole(id, self_ticking_ids),
+                            .self_ticking = segmod.isRole(id, self_ticking_ids),
                         });
                         if (is_center) center_idx += 1;
                     }
@@ -1044,7 +1014,7 @@ pub const State = struct {
                             .w = seg_w,
                             .x = cur_x,
                             .repaintable = self.isSegmentRepaintable(id),
-                            .self_ticking = isRole(id, self_ticking_ids),
+                            .self_ticking = segmod.isRole(id, self_ticking_ids),
                             .is_right = true,
                             // Reverse order means the LAST index pushed is the
                             // leftmost, i.e. the one that starts the layout.

@@ -30,7 +30,7 @@ const scroll_algo = if (build_options.has_layout_scroll) @import("scroll") else 
 };
 
 const List = tiling.List;
-const Placement = tiling.Placement;
+const Placement = contract.Placement;
 
 /// Registry indices for each layout, resolved by name (instead of a closed
 /// enum) so the tests stay robust to registry ordering. Computed at
@@ -63,7 +63,7 @@ const MONOCLE_GAP_VARIANT: u8 = variantOrdinal(K_MONOCLE, "gaps");
 
 const Fixture = struct {
     m: model.Model,
-    hv: tiling.HintsView,
+    hv: contract.HintsView,
     hint_buf: [model.store_capacity]model.SizeHints = undefined,
     wa: model.Rect,
 
@@ -257,8 +257,8 @@ test "fibonacci overflow fallback" {
             visible_count += 1;
             if (p.win == 75) raised = p;
         } else {
-            try testing.expectEqual(tiling.parked_rect.x, p.rect.x);
-            try testing.expectEqual(tiling.parked_rect.width, p.rect.width);
+            try testing.expectEqual(contract.parked_rect.x, p.rect.x);
+            try testing.expectEqual(contract.parked_rect.width, p.rect.width);
         }
     }
     try testing.expectEqual(@as(usize, 6), visible_count);
@@ -622,7 +622,7 @@ test "14.9: every layout satisfies the placement invariants at every size" {
     // The two environments the layout modules have to survive: the standard
     // gap-heavy one, and a border-dominated one (5px border > 2px gap) that
     // exercises the fibonacci fence at 2*border >= gap.
-    const envs = [_]tiling.Env{
+    const envs = [_]contract.Env{
         helpers.std_env,
         .{ .margins = .{ .gap = 2, .border = 5 }, .min_dim = 50 },
     };

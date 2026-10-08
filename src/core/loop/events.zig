@@ -122,7 +122,7 @@ fn handleDestroyNotify(event: *anyopaque) void {
 fn handleMappingNotify(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_mapping_notify_event_t, event);
     if (input.handleMappingNotify(e.request == xcb.XCB_MAPPING_KEYBOARD))
-        grabs.grabKeybindings();
+        grabs.grabKeybindings(input.resolvedKeybinds());
 }
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
@@ -538,7 +538,7 @@ fn handleXcbEvents() void {
     //    walk. Wire sends are unchanged either way (the sweep is
     //    ledger-dedup'd), so steady-state output is identical. Last, because
     //    it reads the model the two stages above may have moved.
-    if (!std.meta.eql(facts_before, core.getState().facts)) window.updateWorkspaceBordersIfNeeded();
+    if (!std.meta.eql(facts_before, core.getState().facts)) window.updateWorkspaceBorders();
 
     _ = xcb.xcb_flush(conn);
 }

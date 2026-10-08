@@ -16,6 +16,7 @@ const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const keybind = @import("keybind");
+const grabs = @import("grabs");
 const actions = @import("actions");
 const surfaces = @import("surfaces").Surfaces;
 // The action dispatcher and its scaffold graft live in
@@ -214,13 +215,13 @@ pub fn reportUndeliverableMouseBinds() void {
     // The grab as `grabs.grabMouseButtons` actually makes it, handed to the
     // pure rule so that rule needs no knowledge of the X layer and stays
     // unit-testable.
-    const grab: keybind.MouseGrabSpec = .{
-        .buttons = &keybind.mouse_grab_buttons,
+    const grab: grabs.MouseGrabSpec = .{
+        .buttons = &grabs.mouse_grab_buttons,
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
     };
     for (binds, 0..) |mb, i| {
-        const reason = keybind.undeliverableMouseBindReason(mb, grab) orelse continue;
+        const reason = grabs.undeliverableMouseBindReason(mb, grab) orelse continue;
         var dup = false;
         for (binds[0..i]) |earlier| {
             if (earlier.button == mb.button and earlier.modifiers == mb.modifiers) dup = true;

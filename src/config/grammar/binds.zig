@@ -210,16 +210,20 @@ fn parallelSepAt(cmd: []const u8, i: usize) bool {
 }
 
 /// Splits `cmd` on parallel separators, appending the trimmed, non-empty
-/// fragments to `out`. Slices alias `cmd` (no copies).
-fn splitParallel(allocator: std.mem.Allocator, cmd: []const u8, out: *std.ArrayList([]const u8)) !void {
+/// fragments to `out`. Slices alias `cmd` (no copies). Returns the number of
+/// separators found: 0 means no split, so the caller keeps `cmd` verbatim.
+fn splitParallel(allocator: std.mem.Allocator, cmd: []const u8, out: *std.ArrayList([]const u8)) !usize {
     var start: usize = 0;
+    var n_sep: usize = 0;
     for (cmd, 0..) |c, i| if (c == '+' and parallelSepAt(cmd, i)) {
+        n_sep += 1;
         const frag = std.mem.trim(u8, cmd[start..i], " \t");
         if (frag.len > 0) try out.append(allocator, frag);
         start = i + 1;
     };
     const tail = std.mem.trim(u8, cmd[start..], " \t");
     if (tail.len > 0) try out.append(allocator, tail);
+    return n_sep;
 }
 
 /// Resolves one config-list element (or a lone string value) into its Action.
@@ -231,16 +235,10 @@ fn resolveElement(
     ws_idx: u16,
     kill: ?[]const u8,
 ) !types.Action {
-    var has_sep = false;
-    for (cmd, 0..) |c, i| if (c == '+' and parallelSepAt(cmd, i)) {
-        has_sep = true;
-        break;
-    };
-    if (!has_sep) return resolveAndParseAction(allocator, cmd, ws_idx, kill);
-
     var frags: std.ArrayList([]const u8) = .empty;
     defer frags.deinit(allocator);
-    try splitParallel(allocator, cmd, &frags);
+    const n_sep = try splitParallel(allocator, cmd, &frags);
+    if (n_sep == 0) return resolveAndParseAction(allocator, cmd, ws_idx, kill);
     if (frags.items.len <= 1)
         return resolveAndParseAction(allocator, if (frags.items.len == 1) frags.items[0] else cmd, ws_idx, kill);
 

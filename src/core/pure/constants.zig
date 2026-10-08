@@ -1,5 +1,5 @@
-//! Core constants shared across modules; XCB-free. Modifier/mask/event values
-//! that depend on XCB live in core/x11/masks.zig.
+//! Core constants shared across modules; XCB-free. Modifier/mask/event
+//! values live in the sibling masks.zig (also xcb-free: protocol literals).
 
 // Window constraints
 pub const min_window_dim: u16 = 50;

@@ -102,7 +102,7 @@ pub fn deinitXkb() void {
 /// would read the damage with no way to tell it from a real mapping. Handing
 /// out `*const` closes every field but one: `rebuild`, which this module calls
 /// through `getXkbStateMut` and which rebuilds both tables as a unit.
-pub fn getXkbState() ?*const xkbcommon.XkbState {
+fn getXkbState() ?*const xkbcommon.XkbState {
     return if (xkb_state) |*s| s else null;
 }
 
@@ -194,10 +194,9 @@ pub fn handleMappingNotify(keyboard: bool) bool {
 
 /// Applies the user's cursor theme and reports mouse binds that can never
 /// fire. The root mouse grab itself is installed by the caller (main.zig
-/// calls `grabs.grabMouseButtons` next), because grabs reads this module's
-/// resolved keybind list and an import back the other way would be a cycle.
-/// The report is pure analysis of the config against `keybind.mouse_grab_buttons`,
-/// so it needs no grab to exist yet.
+/// calls `grabs.grabMouseButtons` next). The report is pure analysis of the
+/// config against `grabs.mouse_grab_buttons`, so it needs no grab to exist
+/// yet.
 pub fn setup(conn: core.Connection, screen: core.Screen) void {
     cursor.setupRoot(conn, screen);
     mouse.reportUndeliverableMouseBinds();

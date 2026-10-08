@@ -276,7 +276,6 @@ fn isScalarLeaf(comptime t: type) bool {
 /// the fields a bespoke parser owns. Each entry is a contract, not an
 /// exemption -- the reason is why the schema table must not claim it.
 const bespoke_fields = [_][]const u8{
-    "tiling.layout",
     "bar.indicator_focused",
     "bar.indicator_unfocused",
 };
@@ -582,8 +581,10 @@ fn getRatio(comptime ints_are_percent: bool, section: *parser.Section, key: []co
     const val = section.get(key) orelse return default;
     if (val.asScalar(i64)) |i| {
         if (comptime ints_are_percent) {
-            if (i == 0) return 0.0;
-            if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
+            if (i < 0 or i > 100) {
+                log.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
+                return default;
+            }
             if (i == 1) {
                 // `= 1` is ambiguous (1% or 1.0); per the "bare integers are
                 // percentages" rule it resolves to 1%, but we warn so a user who
@@ -592,8 +593,7 @@ fn getRatio(comptime ints_are_percent: bool, section: *parser.Section, key: []co
                     "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
                 return 0.01;
             }
-            log.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
-            return default;
+            return @as(f32, @floatFromInt(i)) / 100.0;
         }
         log.warn(
             "{s} value {d} is a bare integer; write a ratio (0.0-1.0) or a percentage (0-100%), using default",

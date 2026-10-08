@@ -28,7 +28,6 @@ pub const wm_hints_long_length: u32 = 9; // flags + 8 fields
 // map ordering guarantees PropertyNotify before any post-seed change can stale.
 
 var cache_slots: idmap.IdMap(CachedProps, max_window_cache) = .{};
-var cache_ready: bool = false;
 
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
@@ -54,13 +53,14 @@ const CachedProps = struct {
 // live X11 path.
 pub const max_window_cache: usize = constants.max_window_cache;
 
-/// Enables (window init) or disables (window deinit) the cache and drops all
-/// entries. Callers must not touch the cache outside the active window.
-/// deinit runs before focus/tracking teardown, whose managed-window sweeps
-/// must not encounter a partially-valid cache.
-pub fn setCacheArmed(active: bool) void {
+/// Drops every cache entry, at the window init/deinit boundary (init starts
+/// from an empty map; deinit clears before focus/tracking teardown, whose
+/// managed-window sweeps must not encounter a partially-valid cache). No
+/// armed flag: an empty map already reads as "not yet seen" for every window,
+/// so reset IS the disabled state, and nothing runs between the boundary's
+/// clear and the next event-loop turn to repopulate it.
+pub fn reset() void {
     cache_slots.clear();
-    cache_ready = active;
 }
 
 /// Removes a window's cache entry on unmanage so a reused XID can't borrow a
@@ -140,7 +140,6 @@ fn extractWMHintsInput(
 /// Silently drops the entry when the cache is full;
 /// the live-query fallback is always correct.
 fn putCachedProps(win: u32, props: CachedProps) void {
-    if (!cache_ready) return;
     // No warn on failure: a capacity miss only degrades that window to the
     // live-query fallback, which the doc above already says is correct; a
     // log line on the property-notify hot path would be noise the reader has
@@ -150,11 +149,10 @@ fn putCachedProps(win: u32, props: CachedProps) void {
 
 /// Returns cached props without triggering a live query, or null on a miss.
 /// The null case means the window's WM_HINTS/WM_PROTOCOLS have not been seen
-/// since the cache seeded (or the cache is full/not ready); callers fall back
-/// to a live query or a pre-fired cookie.
+/// since the cache seeded (or the cache is full); callers fall back to a
+/// live query or a pre-fired cookie.
 fn peekCachedProps(win: u32) ?CachedProps {
-    if (cache_ready) return cache_slots.get(win);
-    return null;
+    return cache_slots.get(win);
 }
 
 /// Returns cached props if available, otherwise queries, caches the result,

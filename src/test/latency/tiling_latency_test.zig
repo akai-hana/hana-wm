@@ -67,6 +67,35 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         reconcile.run(&m, &move_ctx, .{});
         const move_ns: f64 = @floatFromInt(nowNs() - t1);
 
+        // A layout flip's only wire effect is geometry: warm already mapped
+        // and pixelled every window, focus is untouched (no pixel), and all
+        // windows stay visible on this workspace (no park). So every request
+        // this pass sends -- including none, when the new layout happens to
+        // produce identical rects (e.g. n=1) -- is a configure.
+        // The flip's wire delta decomposes exactly, with NO golden window
+        // count (layout-dependent: master hides overflow windows, monocle
+        // reveals them): geometry for every window whose rect changed; a
+        // map+pixel PAIR for each window the flip unparks (park zeros
+        // bw/pixel, so unpark restores both -- first show replays both, the
+        // invariant reconcile_test's golden pins); and nothing else. park is
+        // presence/workspace membership (untouched by a layout flip), stack
+        // only raises floating/covering winners, flush is the caller's, and
+        // no fullscreen transition runs.
+        try std.testing.expectEqual(@as(usize, 0), move.park);
+        try std.testing.expectEqual(@as(usize, 0), move.stack);
+        try std.testing.expectEqual(@as(usize, 0), move.flush);
+        try std.testing.expectEqual(@as(usize, 0), move.ewmh_fullscreen);
+        try std.testing.expectEqual(move.map, move.pixel);
+        try std.testing.expectEqual(move.configure + move.map + move.pixel, move.total);
+
+        // Follow-up pass: the changed reconcile left true steady state, so a
+        // fresh one sends NOTHING. A regression to full-state re-send (the
+        // pre-14.9 cost center this file exists to quantify) fails here.
+        var steady = CountingSink{};
+        var steady_ctx = makeCtx(steady.sink(), colorOfFocused, helpers.std_wa);
+        reconcile.run(&m, &steady_ctx, .{});
+        try std.testing.expectEqual(@as(usize, 0), steady.total);
+
         if (bench)
             helpers.benchLog(
                 "[tiling] n={d} (1ws): steady reconcile={d:.1} ns/pass, layout-change reconcile={d:.1} ns, requests on change={d} (configure={d},map={d})\n",
@@ -100,6 +129,15 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
 
         // Warm, then measure one steady-state reconcile.
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
+
+        // Off-workspace windows are in the ledger too: the warm pass walked
+        // every window on every workspace, so a fresh reconcile must send
+        // nothing ANYWHERE -- parked windows included, which is the claim
+        // that off-ws windows cost compute but no wire.
+        var probe = CountingSink{};
+        var probe_ctx = makeCtx(probe.sink(), colorOfFocused, helpers.std_wa);
+        reconcile.run(&m, &probe_ctx, .{});
+        try std.testing.expectEqual(@as(usize, 0), probe.total);
 
         if (bench)
             helpers.benchLog(
@@ -149,6 +187,11 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     }
     const compute_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iterations));
 
+    // One placement per window, in View.order order -- the same invariant
+    // compute's own std.debug.assert checks, made live here because the unit
+    // tests build ReleaseFast, where that assert compiles out.
+    try std.testing.expectEqual(nn, placements.len);
+
     // Warm, then measure the full reconcile-walk.
     const reconcile_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
 
@@ -181,6 +224,28 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         ctx.sink.grabServer();
         reconcile.run(&m, &ctx, .{});
         ctx.sink.ungrabAndFlush();
+
+        // Same exact decomposition as the unbracketed flip test, plus the
+        // grab bracket the grab-bracketed path pays: one grab, one
+        // ungrab+flush, geometry for changed rects, map+pixel pairs for
+        // windows the flip unparks, and nothing else anywhere.
+        try std.testing.expectEqual(@as(usize, 1), counting.grab_server);
+        try std.testing.expectEqual(@as(usize, 1), counting.ungrab_and_flush);
+        try std.testing.expectEqual(@as(usize, 0), counting.park);
+        try std.testing.expectEqual(@as(usize, 0), counting.stack);
+        try std.testing.expectEqual(@as(usize, 0), counting.flush);
+        try std.testing.expectEqual(@as(usize, 0), counting.ewmh_fullscreen);
+        try std.testing.expectEqual(counting.map, counting.pixel);
+        try std.testing.expectEqual(
+            counting.configure + counting.map + counting.pixel + counting.grab_server + counting.ungrab_and_flush,
+            counting.total,
+        );
+
+        // Steady after the bracketed change: nothing left to send.
+        var steady = CountingSink{};
+        var steady_ctx = makeCtx(steady.sink(), colorOfFocused, helpers.std_wa);
+        reconcile.run(&m, &steady_ctx, .{});
+        try std.testing.expectEqual(@as(usize, 0), steady.total);
 
         if (bench)
             helpers.benchLog(

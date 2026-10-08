@@ -1,8 +1,10 @@
 //! Config reload: load, validate, and atomically swap in a new
-//! config, then tear down and rebuild only the subsystems whose
-//! settings changed, split out of events.zig (review 05-input
-//! round 2). A transition concern -- driven by the reload flag
-//! the event loop consumes -- not per-event path work.
+//! config, then rebuild the subsystems that read it. Keybindings
+//! regrab only when the key PAIR layout changed; bar and tiling
+//! rebuild unconditionally (see reload/diff.zig). Split out of
+//! events.zig (review 05-input round 2). A transition concern --
+//! driven by the reload flag the event loop consumes -- not
+//! per-event path work.
 
 const core = @import("core");
 const log = @import("log");
@@ -14,7 +16,7 @@ const actions = @import("actions");
 const grabs = @import("grabs");
 const tracking = @import("tracking");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
-// when absent), so the `if (changes.bar)` call below compiles away.
+// when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
 
 /// Loads and validates a new config, then applies it atomically via pointer
@@ -30,8 +32,9 @@ const surfaces = @import("surfaces").Surfaces;
 ///      core.config_rev() as the rev the dispatch map matches, and that rev is
 ///      only bumped BY the swap; stamping before the swap would leave the
 ///      resolver a rev behind, so lookup fails closed (no keybind dispatch).
-///   4. grabKeybindings() runs post-swap because fillGrabCookies() reads the
-///      live config.
+///   4. grabKeybindings() runs post-swap because the caller hands it
+///      input.resolvedKeybinds(), which the buildKeybinds step above just
+///      rebuilt from the new config's bindings.
 ///   5. errdefer frees the heap-allocated new config if anything fails pre-swap.
 ///      Post-swap all calls are infallible, so no errdefer is needed.
 pub fn handleConfigReload() !void {
@@ -85,13 +88,12 @@ pub fn handleConfigReload() !void {
 
     try config.validate(new_ptr);
 
-    // Per-subsystem change detection, BEFORE the swap: it reads both boxes, and
-    // the swap below releases the old one. Detecting first is what lets the
+    // Keys change detection, BEFORE the swap: it reads both boxes, and the
+    // swap below releases the old one. Detecting first is what lets the
     // hand-off be a single core call instead of a pointer swap that leaves two
-    // sites reasoning about who frees what. Only tear down and rebuild the
-    // subsystems whose config actually changed -- e.g. a bar color tweak should
-    // not regrab keybindings, and a keybinding change should not rebuild the
-    // bar.
+    // sites reasoning about who frees what. Only the regrab is skipped for an
+    // unchanged pair layout; bar and tiling rebuild unconditionally so no
+    // borrowed state outlives the box the swap releases (see diff.zig).
     const changes = config.detectChanges(cs.config, new_ptr);
 
     // Ownership moves to the new box and the displaced one is released in the
@@ -122,19 +124,17 @@ pub fn handleConfigReload() !void {
     //
     // No `has_bar` guard: `surfaces.onReload` is the no-op hook when no
     // surface module is compiled in, so the gate is already inside the type.
-    if (changes.bar) surfaces.onReload();
-    if (changes.tiling) {
-        actions.applyConfigReload();
-        // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
-        // and sweeping first would send every border twice -- once here, once
-        // again deduped against fresh state. Sweeping last lets the sweep
-        // dedup against entries the reconcile just wrote.
-        window.reloadBorders();
-        // Rebuild after the swap so borrowed key slices point into the new config's memory.
-        admission.buildRulesMap();
-    }
+    surfaces.onReload();
+    actions.applyConfigReload();
+    // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
+    // and sweeping first would send every border twice -- once here, once
+    // again deduped against fresh state. Sweeping last lets the sweep
+    // dedup against entries the reconcile just wrote.
+    window.reloadBorders();
+    // Rebuild after the swap so borrowed key slices point into the new config's memory.
+    admission.buildRulesMap();
 
-    if (changes.keys) grabs.grabKeybindings();
+    if (changes.keys) grabs.grabKeybindings(input.resolvedKeybinds());
 
-    log.info("Reload complete (bar={} tiling={} keys={})", .{ changes.bar, changes.tiling, changes.keys });
+    log.info("Reload complete (keys={})", .{changes.keys});
 }

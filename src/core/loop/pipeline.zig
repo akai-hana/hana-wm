@@ -38,11 +38,7 @@ pub inline fn model() *const model_mod.Model {
     return &instance;
 }
 
-/// MUTABLE access to the WM model. This used to demand a `Gate` value that
-/// each transition module declared privately -- and was deleted as ceremony:
-/// `Gate` was an empty struct that any file could declare in one line, so the
-/// token stopped nothing and cost a declaration per module plus `&gate` at
-/// every call site. The enforcement that remains is the type split itself:
+/// MUTABLE access to the WM model. The enforcement is the type split itself:
 /// readers take `*const` from `model()`, writers explicitly opt into `mut()`.
 /// Zero-cost.
 ///
@@ -66,7 +62,7 @@ pub inline fn mut() *model_mod.Model {
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
     if (core.isModelReady()) return model().ws[model().current.index].params.kind;
-    return defaultIndexForLayoutName(core.getState().config.tiling.layout);
+    return defaultIndexForLayoutName(core.getState().config.tiling.defaultLayout());
 }
 
 /// Returns the current workspace's active tiling variant index (see
@@ -171,12 +167,6 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
 /// point, dispatched through the active layout module's preReconcile hook
 /// (the scroll addon registers snap-right-on-growth + clamp; a layout that
 /// provides no hook has no pre-reconcile duty).
-/// Single choke point for the pre-reconcile duties. It used to live in three
-/// places at once (each entry point pairing it with its own ctx() call), and
-/// the fullscreen enter path therefore ran it TWICE per op: once explicitly
-/// and once again via the grab wrapper's ctx build. The duties now live in
-/// exactly one place -- prepare() -- and every entry point reaches them
-/// through that one call (grabScoped -> prepare).
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
     // Internal choke point: touches the private `instance` directly (not via

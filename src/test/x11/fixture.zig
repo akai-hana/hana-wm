@@ -1,6 +1,6 @@
 //! Shared X11-backed integration fixture for the window/pipeline layer tests
 //! (src/test/window/actions_test.zig, src/test/window/focus_test.zig,
-//! src/test/engine/pipeline_test.zig).
+//! src/test/core/pipeline_test.zig).
 //!
 //! Each test process connects to the running X server ($DISPLAY). When no
 //! server is reachable, or when a live window manager owns the display,

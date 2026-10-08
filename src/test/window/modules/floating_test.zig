@@ -32,14 +32,7 @@ const unknown_win: WindowId = 999;
 const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
 
 const regCur = helpers.regCur;
-
-/// Floating-anchor window, the shape most store.put fixtures use.
-fn addFloating(m: *Model, win: WindowId, r: model.Rect) !void {
-    _ = try m.store.put(win, .{
-        .mask = model.bit(model.WSId.fromIndex(0)),
-        .anchor = .{ .floating = r },
-    });
-}
+const addFloating = helpers.addFloating;
 
 // Floating-base fullscreen round trip stays home-free.
 test "floating-base fullscreen minimize/restore never joins a list" {

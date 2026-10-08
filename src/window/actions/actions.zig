@@ -50,22 +50,6 @@ pub fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
     return model_mod.isCoveringOn(m, win, m.current); // 12.4: model query
 }
 
-/// Withdrawal facts for actions.unmanage. The model entry is dropped INSIDE
-/// the action (manage.unmanage unregisters), so the sole caller
-/// (window.unmanageWindow) captures both fields before invoking it; every
-/// other entry point reads live model truth and needs no context at all.
-pub const Ctx = struct {
-    /// Fullscreen workspace record of the window being withdrawn, captured
-    /// by unmanageWindow BEFORE actions.unmanage drops the model entry
-    /// (after which no store query could recover it).
-    withdrawn_fullscreen_ws: ?model_mod.WSId = null,
-    /// Whether the withdrawn window held MODEL focus at withdrawal time,
-    /// captured BEFORE removal clears m.focused. Drives the close
-    /// fallback (parity with the hide path): the previous focus owner must hand
-    /// over, otherwise the workspace stays unfocused until a pointer event.
-    withdrawn_was_focused: bool = false,
-};
-
 // Re-exports: the five action groups live in their own files
 // (parked/geometry/layout_params/ws/manage); `actions.*` stays the
 // single import surface for keybind/events, so those importers
@@ -80,7 +64,6 @@ pub const adjustPrimaryWidthAction = layout_params.adjustPrimaryWidthAction;
 pub const adjustPrimaryCount = layout_params.adjustPrimaryCount;
 pub const adjustSecondaryBalance = layout_params.adjustSecondaryBalance;
 pub const swapPrimaryAction = layout_params.swapPrimaryAction;
-pub const applyRestoredLevel = layout_params.applyRestoredLevel;
 pub const seedParamsFromConfig = layout_params.seedParamsFromConfig;
 pub const applyConfigReload = layout_params.applyConfigReload;
 pub const moveWindowTo = ws.moveWindowTo;

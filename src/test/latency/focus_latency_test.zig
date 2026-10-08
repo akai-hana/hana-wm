@@ -42,7 +42,7 @@ const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn 
 
 const regCur = helpers.regCur;
 
-const CountingSink = test_sink.TestSink(.count);
+const CountingSink = test_sink.TestSink(.category);
 
 const colorOfFocused = helpers.colorOfFocused;
 
@@ -67,10 +67,18 @@ test "latency: reconcile cost + request count at focus change" {
         var probe_ctx = makeCtx(probe.sink(), colorOfFocused, helpers.std_wa);
         reconcile.run(&m, &probe_ctx, .{});
 
+        // Steady state after the warm pass must send NOTHING: the warm
+        // reconcile seeded last-sent for every window, nothing in the model
+        // changed since, and reconcile never flushes or grabs itself
+        // ("DO NOT FLUSH HERE. Caller owns flushing"). This is the
+        // delta-elision invariant asserted at every scale -- a full-state
+        // re-send (the pre-14.9 cost center) fails here at each n.
+        try std.testing.expectEqual(@as(usize, 0), probe.total);
+
         if (bench)
             helpers.benchLog(
                 "[latency] reconcile n={d}: {d:.1} ns/pass, requests/pass={d}\n",
-                .{ n, per_pass_ns, probe.count },
+                .{ n, per_pass_ns, probe.total },
             );
     }
 }
@@ -109,6 +117,13 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     }
     const focus_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iters));
 
+    // The focus transition's ONLY wire delta is border color: focus was null
+    // before setFocus(2), so exactly window 2's pixel flips 0->1. Geometry
+    // comes from layout (untouched), stacking only applies to floating
+    // windows (none here), and every window was already mapped by warm.
+    try std.testing.expectEqual(@as(usize, 1), s1.total);
+    try std.testing.expectEqual(@as(usize, 1), s1.pixel);
+
     // Phase 2: a second reconcile, kept as the cost reference the folded
     // path would pay IF it regressed to two grabs per Mod+k. The folded path
     // never runs this: it reconciles once, with the snap already applied.
@@ -117,6 +132,12 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     const t1 = nowNs();
     for (0..iters) |_| reconcile.run(&m, &c2, .{});
     const snap_ns = @as(f64, @floatFromInt(nowNs() - t1)) / @as(f64, @floatFromInt(iters));
+
+    // The reference second reconcile must be a pure no-op. It is what the
+    // folded Mod+k would pay if it regressed to two grabs, and the folded
+    // path's premise is that the state is already steady after phase 1 --
+    // if this ever sends anything, steady state is broken.
+    try std.testing.expectEqual(@as(usize, 0), s2.total);
 
     if (bench)
         helpers.benchLog(

@@ -89,8 +89,7 @@ pub fn isSurfaceWindow(win: core.WindowId) bool {
 /// while there is ONE slot: the optional IS the bar's claim today. The day a
 /// second slot exists, key this off that surface's OWN claim, never "any
 /// claim is active" -- a dock alone claiming screen space must not make the
-/// caller stack-raise a bar that is not on screen (the note the [max_claims]
-/// table used to carry here).
+/// caller stack-raise a bar that is not on screen.
 pub fn mappedSurfaceWindow() ?core.WindowId {
     if (claim == null) return null;
     return surface_win;

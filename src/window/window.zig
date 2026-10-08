@@ -148,11 +148,6 @@ const State = struct {
     /// append silently dropped so the walk repeated forever. Keyed storage
     /// makes the hit O(1) with no capacity cliff.
     child_cache: idmap.IdMap(u32, child_cache_capacity) = .{},
-
-    // True when a grab-flush path already swept floating borders this batch,
-    // so the event loop can skip the redundant second sweep. Reset at the
-    // end of each batch.
-    borders_flushed_this_batch: bool = false,
 };
 
 var state: ?State = null;
@@ -171,10 +166,6 @@ fn warnOnce(latch: *bool, comptime fmt: []const u8, args: anytype) void {
 // Live geometry is read straight off the wire via getGeometry(). The
 // last-sent geometry for X-side state (workspace-switch replay, minimize/
 // restore) lives in the sync ledger and the model, not here.
-
-pub fn markBordersFlushed() void {
-    state.?.borders_flushed_this_batch = true;
-}
 
 /// Returns null if the window does not exist or is not yet mapped.
 pub fn getGeometry(conn: core.Connection, win: u32) ?model_mod.Rect {
@@ -273,7 +264,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // only user; contract's two dispatch primitives are providerOf +
     // callAll, per the 6->2 collapse).
     for (window_mods) |wm| if (wm.init) |f| try f();
-    icccm.setCacheArmed(true);
+    icccm.reset();
     // Admission sub-state (spawn queue, rules maps, spawn-cursor
     // snapshot): reset and rules-map rebuild live with the admission
     // policy in admission.zig.
@@ -289,9 +280,9 @@ pub fn deinit() void {
     // rules maps) before its reset wipes the struct.
     admission.deinit();
     // Clear the focus-property cache before focus/tracking deinit,
-    // whose
-    // managed-window sweeps must not encounter a partially-valid cache.
-    icccm.setCacheArmed(false);
+    // whose managed-window sweeps must not encounter a partially-valid
+    // cache.
+    icccm.reset();
     focus.deinit();
     tracking.deinit();
     // Set to null so any accidental post-deinit access null-derefs
@@ -345,9 +336,9 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     if (tracking.isManaged(win)) return; // double-manage guard, see tracking.isManaged
 
     // Snapshot the pointer position now so the crossing the map generates can
-    // be matched against it (see admission.snapshotSpawnCursor /
+    // be matched against it (see focus.snapshotSpawnCursor /
     // suppressSpawnCrossing).
-    admission.snapshotSpawnCursor(conn);
+    focus.snapshotSpawnCursor(conn);
 
     // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
     // by the u8 return type, so no further clamping is needed.
@@ -405,22 +396,6 @@ fn unmanageWindow(win: u32) void {
     // with its input model queried BEFORE the grab.
     wincache.removeWindow(win);
 
-    // Capture the covering record and focus ownership BEFORE anything drops
-    // the model entry: afterwards, actions.unmanage could never know that the
-    // closed window held focus (m.focused is already cleared), so closing a
-    // window left the workspace unfocused until a pointer event re-focused it.
-    // Both facts ride ctx into actions.unmanage, which runs the same close
-    // fallback as the hide path -- and which is also the sole unregistrar
-    // (unregister below), so this function does not also drop the entry.
-    const model = if (core.isModelReady()) pipeline.model() else null;
-    const fs_ws: ?model_mod.WSId = if (model) |m|
-        model_mod.coveringWsOf(m, win) // 12.4: model query, not a peer dispatch
-    else
-        null;
-    var actx: actions.Ctx = .{
-        .withdrawn_fullscreen_ws = fs_ws,
-        .withdrawn_was_focused = if (model) |m| m.focused == win else false,
-    };
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
     // per-window bookkeeping (e.g. the hide module's parked record) is
@@ -435,13 +410,8 @@ fn unmanageWindow(win: u32) void {
     // via unmap+destroy runs this once per event; unregister/fallback no-op
     // on the second invocation.
     //
-    // actions.unmanage owns the unregister. This used to ALSO call
-    // tracking.removeWindow (itself just a facade over model.unregister)
-    // behind a `has_workspaces` condition: two unregisters for one withdrawal,
-    // and the build-flag gate meant a no-workspaces build never dropped the
-    // entry here at all, leaving the second call doing different work than the
-    // one it was written to mirror.
-    actions.unmanage(&actx, win);
+    // actions.unmanage owns the unregister.
+    actions.unmanage(win);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
@@ -640,7 +610,7 @@ fn sendRequestedConfigure(
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     if (focus.getSuppressReason() != .window_spawn) return false;
-    // The spawn snapshot (admission.spawnCursor()) is taken by
+    // The spawn snapshot (focus.spawnCursor()) is taken by
     // handleMapRequest
     // when the spawn's MapRequest arrives. Mapping a new window under the
     // stationary cursor produces a PAIR of synthetic crossings, both carrying
@@ -655,7 +625,7 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // clear it. A cursor parked where it was when the app launched can't hover
     // a different window at that same pixel until it moves, which is the
     // acceptable price for not stealing focus during the spawn's layout.
-    const cursor = admission.spawnCursor();
+    const cursor = focus.spawnCursor();
     if (root_x == cursor.x and root_y == cursor.y) return true;
     focus.setSuppressReason(.none);
     return false;
@@ -779,14 +749,21 @@ pub fn parseSizeHints(
 /// - `skip_tiled` false (updateWorkspaceBorders): dedup via the sent ledger
 ///   (markSentBorderPixelIfChanged), so the steady-state focused-window
 ///   sweep generates zero XCB traffic.
+/// Fill `buf` with the per-workspace covering-occupant table in ONE store
+/// pass. Every per-window color decision asks "does this window's workspace
+/// have a covering occupant"; asking per window made the sweep O(N^2) in
+/// store scans, so both sweep variants (and reloadBorders) build it once
+/// up-front.
+fn occupantsInto(buf: *[constants.max_workspaces]?model_mod.WindowId) void {
+    buf.* = @splat(null);
+    model_mod.coveringOccupants(pipeline.model(), buf);
+}
+
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = tracking.getCurrentWorkspace() orelse return;
     const cur_ws = model_mod.WSId.fromIndex(cur);
-    // One store pass for the whole sweep: each per-window color decision needs
-    // "does this window's workspace have a covering occupant", and asking that
-    // per window made the sweep O(N^2) in store scans.
-    var occupants: [constants.max_workspaces]?model_mod.WindowId = @splat(null);
-    model_mod.coveringOccupants(pipeline.model(), &occupants);
+    var occupants: [constants.max_workspaces]?model_mod.WindowId = undefined;
+    occupantsInto(&occupants);
     for (tracking.allWindowsInto(&state.?.snapshot)) |entry| {
         const win = entry.win;
         if (!model_mod.maskedOn(entry.mask, cur_ws)) continue;
@@ -813,18 +790,6 @@ pub fn updateWorkspaceBorders() void {
 
 pub fn updateFloatingWindowBorders() void {
     sweepWorkspaceBorders(true);
-}
-
-/// Event-loop entry point for the per-batch border sweep. Sweeps only when no
-/// grab-flush path (markBordersFlushed) already did so, then resets the flag
-/// for the next batch.
-///
-/// CALLING CONTRACT: must be called exactly once per event batch, at its end.
-/// Multiple calls per batch cause redundant sweeps, the flag resets
-/// unconditionally, so a second call sees it false and sweeps again.
-pub fn updateWorkspaceBordersIfNeeded() void {
-    if (!state.?.borders_flushed_this_batch) updateWorkspaceBorders();
-    state.?.borders_flushed_this_batch = false;
 }
 
 // ClientMessage: EWMH fullscreen requests from applications
@@ -917,11 +882,8 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
 
 /// Called on config reload.
 pub fn reloadBorders() void {
-    // One store pass for the whole sweep: resolveBorderColorWith consumes the
-    // precomputed table, so this is O(store) + O(windows) instead of one
-    // occupant-table build per window.
-    var occupants: [constants.max_workspaces]?model_mod.WindowId = @splat(null);
-    model_mod.coveringOccupants(pipeline.model(), &occupants);
+    var occupants: [constants.max_workspaces]?model_mod.WindowId = undefined;
+    occupantsInto(&occupants);
     for (tracking.allWindowsInto(&state.?.snapshot)) |entry| {
         borders.applyWith(core.getState().conn, entry.win, &occupants);
     }

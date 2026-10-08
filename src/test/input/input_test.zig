@@ -12,6 +12,7 @@ const testing = std.testing;
 
 const types = @import("types");
 const keybind = @import("keybind");
+const grabs = @import("grabs");
 const masks = @import("masks");
 const log = @import("log");
 const constants = @import("constants");
@@ -103,7 +104,7 @@ test "KeybindResolver: lookup returns a pointer into the live binding slice" {
 // and the key simply does nothing. The rule is pure and takes the grab as
 // data, so every unreachable shape is pinned here without an X server.
 test "mouse binds the root grab cannot deliver are identifiable" {
-    const grab: keybind.MouseGrabSpec = .{
+    const grab: grabs.MouseGrabSpec = .{
         .buttons = &[_]u8{ 1, 2, 3, 4, 5 },
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
@@ -119,7 +120,7 @@ test "mouse binds the root grab cannot deliver are identifiable" {
     };
     for (never_delivered) |u| {
         const mb: types.MouseBind = .{ .modifiers = u.mods, .button = u.button, .action = .{ .close_window = {} } };
-        if (keybind.undeliverableMouseBindReason(mb, grab) == null) {
+        if (grabs.undeliverableMouseBindReason(mb, grab) == null) {
             std.debug.print("mods=0x{x} button={} was reported reachable\n", .{ u.mods, u.button });
             return error.UnreachableBindNotDetected;
         }
@@ -135,7 +136,7 @@ test "mouse binds the root grab cannot deliver are identifiable" {
     };
     for (reachable) |r| {
         const mb: types.MouseBind = .{ .modifiers = r.mods, .button = r.button, .action = .{ .close_window = {} } };
-        if (keybind.undeliverableMouseBindReason(mb, grab)) |why| {
+        if (grabs.undeliverableMouseBindReason(mb, grab)) |why| {
             std.debug.print("mods=0x{x} button={} wrongly rejected: {s}\n", .{ r.mods, r.button, why });
             return error.ReachableBindRejected;
         }

@@ -45,7 +45,6 @@ fn toggleBarPosition() void {
     defer grab.deinit();
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
-        window.markBordersFlushed();
         // The bar re-anchor already changed the usable-area claim; re-derive
         // placements from it even when there is no current workspace to
         // report: a bare early return left the bar-anchored claim unread and
@@ -59,7 +58,6 @@ fn toggleBarPosition() void {
         false;
     if (!forced_hidden) grab.reconcileNow(.{});
     window.updateFloatingWindowBorders();
-    window.markBordersFlushed();
     log.info("Bar position toggled to: {s}", .{@tagName(core.getState().config.bar.bar_position)});
 }
 

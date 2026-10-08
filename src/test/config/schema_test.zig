@@ -28,24 +28,7 @@ const schema = @import("schema");
 const types = @import("types");
 const scratch = @import("scratch");
 
-/// A per-test temp file named `name.toml`. (28.5) The unique-name PRNG and the
-/// shared process-global scratch dir are gone; `std.testing.tmpDir` gives each
-/// call its own directory and guarantees the isolation the old code argued for.
-fn scratchFile(alloc: std.mem.Allocator, name: []const u8) !scratch.TmpFile {
-    _ = alloc;
-    const toml = try std.fmt.allocPrint(std.testing.allocator, "{s}.toml", .{name});
-    defer std.testing.allocator.free(toml);
-    return scratch.TmpFile.init(toml);
-}
-
-/// Loads a TOML string through the full production pipeline
-/// (parse -> buildConfigFromDoc), like a real config file would be.
-fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !types.Config {
-    var f = try scratchFile(alloc, name);
-    defer f.deinit();
-    try f.write(content);
-    return try config.loadConfig(alloc, f.path());
-}
+const loadToml = scratch.loadToml;
 
 /// Asserts every knob of `cfg` equals its table default. The comparator is
 /// itself driven by the knob table, so a new schema entry is covered the
@@ -80,7 +63,7 @@ test "key-less config file loads pure table defaults end-to-end" {
     // Non-scalar seed data from getDefaultConfig.
     try testing.expectEqual(@as(usize, 1), cfg.tiling.layouts.items.len);
     try testing.expectEqualStrings("master", cfg.tiling.layouts.items[0]);
-    try testing.expectEqualStrings("master", cfg.tiling.layout);
+    try testing.expectEqualStrings("master", cfg.tiling.defaultLayout());
     try testing.expectEqual(@as(usize, 9), cfg.bar.workspace_icons.items.len);
     try testing.expectEqualStrings("9", cfg.bar.workspace_icons.items[8]);
     try testing.expectEqual(@as(usize, 3), cfg.bar.layout.items.len);
@@ -369,6 +352,27 @@ test "palette references resolve by full name cross-section" {
     try testing.expectEqual(@as(u32, 0xAA0000), refs.bar.title_accent_color);
     try testing.expectEqual(@as(u32, 0x00BB00), refs.bar.title_unfocused_accent);
     try testing.expectEqual(@as(u32, 0x0000CC), refs.bar.title_minimized_accent);
+}
+
+test "palette: same var in two sections takes the alphabetically later section" {
+    // collectPalette picks by section NAME, not by hash-iteration order, so
+    // the winner is reproducible: `tiling` sorts after `bar`.
+    var cfg = try loadToml(testing.allocator, "palette-two-sections",
+        \\[bar]
+        \\primary_color = "#aa0000"
+        \\
+        \\[tiling]
+        \\primary_color   = "#00bb00"
+        \\border_focused  = primary_color
+        \\
+        \\[bar.properties]
+        \\title = primary_color
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0x00BB00), cfg.tiling.border_focused);
+    try testing.expectEqual(@as(u32, 0x00BB00), cfg.bar.title_accent_color);
 }
 
 test "per-segment text colors: bar.properties keys override segment fg" {

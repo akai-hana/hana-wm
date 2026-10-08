@@ -145,7 +145,7 @@ pub fn latchedRung(backend: Backend) Rung {
 /// nothing new": with no backend, `commitPct` wrote nothing, so echoing the
 /// value back would display a level the sink never accepted.
 pub fn optimisticLevel(backend: Backend, v: u8) ?u8 {
-    return if (backend == .unknown) null else clampPct(v);
+    return if (backend == .unknown) null else slider.clampPct(v);
 }
 
 /// The display level after a press. Value in, value out, so the "with no
@@ -385,17 +385,8 @@ fn commitCost() slider.CommitCost {
     };
 }
 
-/// The one clamp every level passes: 0-100 % is all the backend ever
-/// receives. `commitPct` and every `write` mode MUST go through the same
-/// function -- they used to clamp independently, and when the preview path
-/// forgot to, a scroll/drag motion could display a level the backend then
-/// refused.
-pub fn clampPct(v: u8) u8 {
-    return @min(v, 100);
-}
-
 fn commitPct(v: u8) void {
-    const pct = clampPct(v);
+    const pct = slider.clampPct(v);
     switch (latchedRung(g_backend)) {
         .native_pulse => {
             _ = g_native_pulse.?.setVolumePct(pct);

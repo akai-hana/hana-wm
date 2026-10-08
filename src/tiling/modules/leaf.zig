@@ -6,7 +6,9 @@ const tiling = @import("tiling");
 const Region = tiling.Region;
 
 /// Compute BSP layout: recursive bisection of the longer axis 50/50 with one
-/// gap at each seam; border subtracted at leaf nodes only.
+/// gap at each seam; border subtracted at leaf nodes only. Requires the
+/// engine contract's non-empty `v.order` (recursion halves never produce an
+/// empty sub-slice for n >= 2).
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
 
@@ -25,7 +27,6 @@ fn tileRegion(
 ) void {
     const n = windows.len;
 
-    if (n == 0) return;
     // Splitting a gap-less pane yields overlapping children that the parent
     // then re-splits forever: an Env with min_dim==0 and gap==0 passed the
     // min-dim gate and never terminated (zero-Env default was a live hazard).

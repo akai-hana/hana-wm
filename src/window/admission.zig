@@ -2,8 +2,8 @@
 //! how it is registered.
 //!
 //! Owns the admission slice of the window manager: the workspace
-//! rules map and float-rules map (rebuilt from
-//! `config.workspaces.rules` at init and on every reload), the spawn
+//! rules map (one map, rebuilt from `config.workspaces.rules` at
+//! init and on every reload), the spawn
 //! queue (pending (workspace, pid) assignments consumed at the next
 //! MapRequest), the five-cookie admission pipeline (fire every
 //! property query up-front so the X server processes them in
@@ -40,6 +40,7 @@ const handoff = @import("handoff");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
+const types = @import("types");
 const usable_area_mod = @import("usable_area");
 const window = @import("window");
 const window_mods = @import("window_modules").modules;
@@ -57,13 +58,6 @@ const SpawnEntry = struct {
 // Bounds pending spawns awaiting their first map, not the tiled-window pool.
 const spawn_queue_capacity: usize = 64;
 
-/// Pointer root position snapshot at spawn-admission time. The first
-/// crossing event armed by a `.window_spawn` suppress compares against
-/// this to tell a synthetic crossing (the new window mapping under a
-/// parked cursor) apart from a real hover that must refocus. Recorded
-/// in handleMapRequest; consumed by suppressSpawnCrossing.
-const SpawnCursor = struct { x: i16 = 0, y: i16 = 0 };
-
 // Admission-side state is grouped into a single State struct (mirroring
 // the pattern focus.zig uses) so init()/deinit() each reset everything
 // in one assignment, and a deinit()+init() cycle can't leave a stale
@@ -75,29 +69,19 @@ const State = struct {
 
     spawn_queue: std.ArrayListUnmanaged(SpawnEntry) = .empty,
 
-    // Workspace-rule fast-lookup map: WM_CLASS name -> target workspace,
-    // rebuilt from config.workspaces.rules at init and on every reload.
-    // Keys borrow slices from the config, valid until the next rebuild.
-    rules_map: std.StringHashMapUnmanaged(u8) = .{},
-
-    // Float-rule fast-lookup map: WM_CLASS name -> float, rebuilt from the
-    // same config rules (entries whose `float` bit is set). First rule wins;
-    // a name lives in exactly one of the two maps. Keys borrow slices from the
-    // config, valid until the next rebuild.
-    float_rules: std.StringHashMapUnmanaged(void) = .{},
-
-    /// Pointer root position snapshot at spawn-admission time (see
-    /// SpawnCursor). Recorded in handleMapRequest; consumed by the
-    /// window module's spawn-crossing suppression.
-    spawn_cursor: SpawnCursor = .{},
+    // The single class-rule fast-lookup map: WM_CLASS name -> outcome
+    // (null = float rule, u8 = target workspace), rebuilt from
+    // config.workspaces.rules at init and on every reload. First rule wins;
+    // a name lives at most once. Keys borrow slices from the config, valid
+    // until the next rebuild.
+    rules_map: std.StringHashMapUnmanaged(?u8) = .{},
 };
 
 var state: ?State = null;
 
 /// Admission-side lifecycle: resets the admission state (spawn queue,
-/// rules maps, spawn-cursor snapshot) and rebuilds the rules maps from
-/// the current config. Called from window.init, after the window
-/// module's own sub-systems are up.
+/// rules map) and rebuilds the map from the current config. Called from
+/// window.init, after the window module's own sub-systems are up.
 pub fn init(alloc: std.mem.Allocator) void {
     // Reset every field to its zero value so that a deinit() + init()
     // cycle (session restart, test harness) starts from a clean slate
@@ -122,7 +106,6 @@ pub fn deinit() void {
     if (state.?.alloc) |a| {
         state.?.spawn_queue.deinit(a);
         state.?.rules_map.deinit(a);
-        state.?.float_rules.deinit(a);
     }
     // Set to null so any accidental post-deinit access null-derefs instead
     // of silently reading freed state. init() restores it to .{}
@@ -130,38 +113,31 @@ pub fn deinit() void {
     state = null;
 }
 
-/// Pointer root position snapshot (see State.spawn_cursor). Read by the
-/// window module's spawn-crossing suppression.
-pub fn spawnCursor() SpawnCursor {
-    return state.?.spawn_cursor;
+/// Rebuilds `rules` from a config's rule list (the pure half of
+/// buildRulesMap, so the first-wins merge is testable without a server).
+/// A float rule stores null, a workspace rule its target; a name lives at
+/// most once and the first rule for it wins, matching a plain linear scan
+/// through the rule list (getOrPut: an existing key keeps its value, so a
+/// later rule of either kind never overwrites it). Keys are borrowed slices
+/// into the config's allocations, valid until the next rebuild. On OOM the
+/// entry is silently dropped, the window behaves as if unruled.
+pub fn buildRulesMapFrom(
+    rules: *std.StringHashMapUnmanaged(?u8),
+    alloc: std.mem.Allocator,
+    config_rules: []const types.Rule,
+) void {
+    rules.clearRetainingCapacity();
+    for (config_rules) |rule| {
+        const value: ?u8 = if (rule.float) null else rule.workspace;
+        const gop = rules.getOrPut(alloc, rule.class_name) catch continue;
+        if (!gop.found_existing) gop.value_ptr.* = value;
+    }
 }
 
-/// Keys are borrowed slices into the config's allocations, valid until the
-/// next rebuild. If a class name appears in multiple rules, the first rule
-/// wins, matching a plain linear scan through the rule list. Float rules land
-/// in `float_rules` (workspace rules in `rules_map`); a name can only ever be
-/// one or the other, never both.
+/// Rebuilds the live map from the current config (see buildRulesMapFrom).
 pub fn buildRulesMap() void {
     const alloc = state.?.alloc orelse return;
-    state.?.rules_map.clearRetainingCapacity();
-    state.?.float_rules.clearRetainingCapacity();
-    for (core.getState().config.workspaces.rules.items) |rule| {
-        if (rule.float) {
-            // A workspace rule for this name already won; never promote it to
-            // floating after the fact.
-            if (state.?.rules_map.contains(rule.class_name)) continue;
-            // getOrPut: first occurrence wins. On OOM the entry is silently
-            // dropped, the window behaves as if unruled.
-            _ = state.?.float_rules.getOrPut(alloc, rule.class_name) catch {};
-        } else {
-            // A float rule for this name already won; never tile it after the
-            // fact.
-            if (state.?.float_rules.contains(rule.class_name)) continue;
-            // putNoClobber: first occurrence wins. On OOM the entry is silently
-            // dropped, the window is routed to the current workspace instead.
-            state.?.rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
-        }
-    }
+    buildRulesMapFrom(&state.?.rules_map, alloc, core.getState().config.workspaces.rules.items);
 }
 
 pub inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core.WorkspaceId {
@@ -180,9 +156,10 @@ const AdmissionRule = struct {
 };
 
 /// Resolves a pre-fired WM_CLASS property cookie against workspace and float
-/// rules. Parses the WM_CLASS reply inline (no allocation), then does two O(1)
-/// hash lookups per map (class, then instance). The maps are built at init()
-/// and after every config reload, so no linear rule scan runs at spawn time.
+/// rules. Parses the WM_CLASS reply inline (no allocation), then does one
+/// O(1) hash lookup per candidate key (class, then instance). The map is
+/// built at init() and after every config reload, so no linear rule scan
+/// runs at spawn time.
 fn findAdmissionRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?AdmissionRule {
     const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return null;
     defer std.c.free(reply);
@@ -192,21 +169,23 @@ fn findAdmissionRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?AdmissionRul
     const data = raw[0..reply.*.value_len];
 
     const wc = identity.parseWmClass(data) orelse return null;
-    return matchRule(wc.instance, wc.class);
+    return matchRule(&state.?.rules_map, wc.instance, wc.class);
 }
 
 /// The WM_CLASS rule match, split from the XCB property read above so the
-/// POLICY is testable without a server: two O(1) hash lookups, class first
-/// (when non-empty) then instance, float rules winning over workspace rules at
-/// each step. Reading a property is not part of this decision.
-fn matchRule(instance: []const u8, class: []const u8) ?AdmissionRule {
+/// POLICY is testable without a server: one O(1) hash lookup per candidate
+/// key, class first (when non-empty) then instance; a null map value marks a
+/// float rule. Reading a property is not part of this decision.
+pub fn matchRule(
+    rules: *const std.StringHashMapUnmanaged(?u8),
+    instance: []const u8,
+    class: []const u8,
+) ?AdmissionRule {
     if (class.len > 0) {
-        if (state.?.float_rules.contains(class)) return .{ .workspace = null, .float = true };
-        if (state.?.rules_map.get(class)) |ws| return .{ .workspace = ws, .float = false };
+        if (rules.get(class)) |ws| return .{ .workspace = ws, .float = ws == null };
     }
     if (instance.len > 0) {
-        if (state.?.float_rules.contains(instance)) return .{ .workspace = null, .float = true };
-        if (state.?.rules_map.get(instance)) |ws| return .{ .workspace = ws, .float = false };
+        if (rules.get(instance)) |ws| return .{ .workspace = ws, .float = ws == null };
     }
     return null;
 }
@@ -398,7 +377,7 @@ pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: Admission
 /// unmapped-and-unparked) must still consume its own batch to keep the XCB
 /// reply stream from accumulating unconsumed results. Firing order is preserved
 /// so replies are read back in request order alongside the drain path.
-pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) void {
+fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) void {
     icccm.discardProtocolCookie(conn, cookies.c_wm_class);
     icccm.discardProtocolCookie(conn, cookies.c_net_wm_pid);
     wincache.discardTitleCookies(conn, cookies.title_cookies);
@@ -407,24 +386,6 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
         cookies.protocols_cookie,
         cookies.hints_cookie,
     }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
-}
-
-/// Snapshot the pointer's root position for spawn-crossing suppression.
-///
-/// Runs once per MapRequest, synchronously, right when the spawn's window is
-/// admitted. The pointer cannot have moved relative to the keypress that
-/// triggered the spawn between here and the reconcile's map (both happen in
-/// the same event-loop batch), so this position is exactly what the synthetic
-/// crossing the map generates will carry; a real hover from a moved pointer
-/// yields different coordinates and is never masked. On a failed query the
-/// record stays untouched (defaults to {0,0} at init) rather than poisoning
-/// an established spawn's suppression.
-pub fn snapshotSpawnCursor(conn: core.Connection) void {
-    const reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, core.getState().root), null);
-    defer if (reply) |r| std.c.free(r);
-    if (reply) |r| {
-        state.?.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
-    }
 }
 
 /// Admission policy shared by the MapRequest path (handleMapRequest) and the
@@ -443,7 +404,7 @@ pub fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool, size_
 /// Linear scan for a window's restore record. Restore files are small
 /// (bounded by the model's store_capacity), so a flat scan is cache-local and
 /// avoids allocating a lookup map just for adoption.
-pub fn findWindowRecord(windows: []const handoff.WindowRecord, win: u32) ?*const handoff.WindowRecord {
+fn findWindowRecord(windows: []const handoff.WindowRecord, win: u32) ?*const handoff.WindowRecord {
     for (windows) |*r| {
         if (r.win == win) return r;
     }
@@ -453,7 +414,7 @@ pub fn findWindowRecord(windows: []const handoff.WindowRecord, win: u32) ?*const
 /// Resolves only the float bit of a class rule (adoption never relocates a
 /// pre-existing window's workspace, so a workspace match is deliberately
 /// ignored here). Drains the WM_CLASS reply.
-pub fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
+fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
     const c = cookie orelse return false;
     const rule = findAdmissionRuleByClass(c) orelse return false;
     return rule.float;
@@ -463,7 +424,7 @@ pub fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
 /// workspace (lowest set bit of its mask) when present, else the currently
 /// active workspace. Deliberately NOT the spawn-queue/rules resolution, which
 /// describes brand-new spawns rather than pre-existing windows.
-pub fn restoredOrCurrent(record: ?*const handoff.WindowRecord) u8 {
+fn restoredOrCurrent(record: ?*const handoff.WindowRecord) u8 {
     if (record) |r| {
         if (r.mask != 0) return @intCast((model_mod.lowestBit(r.mask) orelse unreachable).index);
     }
@@ -477,7 +438,7 @@ pub fn restoredOrCurrent(record: ?*const handoff.WindowRecord) u8 {
 /// the re-exec so the caller's reconcile can place it exactly as before.
 /// Presence bookkeeping that would otherwise drift is routed through the owning
 /// window module's deserialize hook rather than patched by hand.
-pub fn applyRestoredRecord(win: u32, record: *const handoff.WindowRecord) void {
+fn applyRestoredRecord(win: u32, record: *const handoff.WindowRecord) void {
     const model = pipeline.mut();
     const e = model.store.getPtr(win) orelse return;
 

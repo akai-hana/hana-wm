@@ -256,3 +256,42 @@ pub fn findAllByCapability(
     }
     return result;
 }
+
+/// Registry capability sets (comptime, from the generated registry): the
+/// center-slot segments that share the center-row budget, and the
+/// self-ticking segments whose merged display width IS that budget's clock
+/// reservation. The single home of the sets -- state.zig and center_row.zig
+/// each used to resolve their own copy.
+pub const center_slot_ids: []const usize = findAllByCapability(&bar_mods, .center_slot);
+pub const self_ticking_ids: []const usize = findAllByCapability(&bar_mods, .self_ticking);
+
+/// Index of the registry id `id` within the role set `comptime ids` (the
+/// self-ticking and center-slot capability sets today), or null when it is
+/// not a member. Name-free: membership is by declared capability, and the set
+/// is resolved from the generated registry. A name that does not resolve
+/// (null) is a member of nothing.
+pub fn roleIndexOf(id: ?usize, comptime ids: []const usize) ?usize {
+    const i = id orelse return null;
+    inline for (ids, 0..) |rid, j| {
+        if (i == rid) return j;
+    }
+    return null;
+}
+
+/// True when the registry id `id` is in the registry role set `ids`.
+pub fn isRole(id: ?usize, comptime ids: []const usize) bool {
+    return roleIndexOf(id, ids) != null;
+}
+
+/// A segment's natural (reserved) width via its uniform naturalWidth hook,
+/// or 0 for an unknown/removed segment name (null id, or an empty registry).
+/// `clock_width` is the merged clock width the hook receives as its fallback
+/// reservation; the hook takes a real `*const contract.Frame`
+/// (`segmod.Frame` is an alias for exactly that), so the frame passes
+/// through with no cast.
+pub fn naturalWidthOf(id: ?usize, frame: *const Frame, clock_width: u16) u16 {
+    if (comptime !hasRegisteredSegments()) return 0;
+    const i = id orelse return 0;
+    if (bar_mods[i].naturalWidth) |nw| return nw(frame, clock_width);
+    return 0;
+}

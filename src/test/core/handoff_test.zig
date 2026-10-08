@@ -181,10 +181,15 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 // header, and that an old ordinal-stamped blob is still read rather than
 // silently dropped.
 
+// (9.10) decodeExt is the ONE reader the header format has now -- the three
+// separate accessors it replaced are gone -- so every header fact is pinned
+// through it directly: claimant, payload offset, and legacy ordinal all come
+// from one parse and are asserted together.
+
 test "ext header: a name-stamped blob round-trips claimant and payload" {
     const name = "minimize";
     const body = [_]u8{ 0x5A, 1, 2, 3, 4 };
-    const header_len = comptime handoff.extHeaderLen(name.len);
+    const header_len = 2 + name.len;
     // The exact shape the save path writes.
     var blob: [header_len + body.len]u8 = undefined;
     blob[0] = handoff.ext_format_version;
@@ -192,78 +197,51 @@ test "ext header: a name-stamped blob round-trips claimant and payload" {
     @memcpy(blob[2..header_len], name);
     @memcpy(blob[header_len..], &body);
 
-    try testing.expectEqualStrings(name, handoff.extClaimantName(&blob).?);
+    const h = handoff.decodeExt(&blob);
+    try testing.expectEqualStrings(name, h.claimed_name.?);
     // The payload starts right after the name: an off-by-one here would hand a
     // module a blob whose magic byte is the name's first byte, which is
     // exactly the silent non-claim the stamp was meant to avoid.
-    try testing.expectEqualSlices(u8, &body, handoff.extPayload(&blob).?);
-    try testing.expect(handoff.extLegacyOrdinal(&blob) == null);
+    try testing.expectEqualSlices(u8, &body, h.payload);
+    try testing.expect(h.legacy_ordinal == null);
 }
 
 test "ext header: truncated, foreign, and unstamped blobs never slice out of bounds" {
     // Claims a 200-byte name in a 3-byte header.
     const lying = [_]u8{ handoff.ext_format_version, 200, 'x' };
-    try testing.expect(handoff.extClaimantName(&lying) == null);
-    try testing.expect(handoff.extPayload(&lying) == null);
+    const h_lying = handoff.decodeExt(&lying);
+    try testing.expectEqual(@as(?[]const u8, null), h_lying.claimed_name);
+    try testing.expectEqualSlices(u8, &lying, h_lying.payload);
     // Too short to hold a version byte at all.
-    try testing.expect(handoff.extPayload(&[_]u8{}) == null);
-    try testing.expect(handoff.extPayload(&[_]u8{handoff.ext_format_version}) == null);
+    const one = [_]u8{handoff.ext_format_version};
+    try testing.expectEqualSlices(u8, &one, handoff.decodeExt(&one).payload);
+    try testing.expectEqualSlices(u8, &[_]u8{}, handoff.decodeExt(&[_]u8{}).payload);
     // A future format we do not know: no header interpretation, and the
     // caller falls back to passing the bytes through whole.
     const future = [_]u8{ 99, 1, 2 };
-    try testing.expect(handoff.extPayload(&future) == null);
-    try testing.expect(handoff.extClaimantName(&future) == null);
-    try testing.expect(handoff.extLegacyOrdinal(&future) == null);
+    const h_fut = handoff.decodeExt(&future);
+    try testing.expectEqualSlices(u8, &future, h_fut.payload);
+    try testing.expectEqual(@as(?[]const u8, null), h_fut.claimed_name);
+    try testing.expectEqual(@as(?usize, null), h_fut.legacy_ordinal);
 }
 
 test "ext header: a legacy ordinal-stamped blob still resolves" {
     // What the previous format wrote: [version=1][ordinal][payload].
     const legacy = [_]u8{ handoff.ext_format_version_ordinal, 2, 0x5A, 0xFF };
-    try testing.expectEqual(@as(usize, 2), handoff.extLegacyOrdinal(&legacy).?);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x5A, 0xFF }, handoff.extPayload(&legacy).?);
+    const h_legacy = handoff.decodeExt(&legacy);
+    try testing.expectEqual(@as(?usize, 2), h_legacy.legacy_ordinal);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x5A, 0xFF }, h_legacy.payload);
+    try testing.expectEqual(@as(?[]const u8, null), h_legacy.claimed_name);
     // A name-stamped blob must NOT be read as a legacy ordinal: byte 1 is the
     // name LENGTH there, so conflating the two would send "minimize" to
     // registry slot 8. (An earlier draft of this test wrote 7 for a name that
     // is 8 bytes long, and the reader correctly returned "minimiz" -- the
     // length byte is authoritative, which is the property worth pinning.)
     const modern = [_]u8{ handoff.ext_format_version, 8, 'm', 'i', 'n', 'i', 'm', 'i', 'z', 'e', 0x5A };
-    try testing.expect(handoff.extLegacyOrdinal(&modern) == null);
-    try testing.expectEqualStrings("minimize", handoff.extClaimantName(&modern).?);
-    try testing.expectEqualSlices(u8, &[_]u8{0x5A}, handoff.extPayload(&modern).?);
-}
-
-// (9.10) decodeExt is the one reader the restore path uses now, so it is pinned
-// as AGREEING with the three accessors it replaced -- the refactor's whole
-// claim is that it parses the same header, once, and cannot disagree with
-// itself the way three independent re-derivations can.
-
-test "decodeExt agrees with the accessors on a name-stamped blob" {
-    const name = "minimize";
-    const body = [_]u8{ 0x5A, 1, 2 };
-    const header_len = comptime handoff.extHeaderLen(name.len);
-    var blob: [header_len + body.len]u8 = undefined;
-    blob[0] = handoff.ext_format_version;
-    blob[1] = @as(u8, @intCast(name.len));
-    @memcpy(blob[2..header_len], name);
-    @memcpy(blob[header_len..], &body);
-
-    const h = handoff.decodeExt(&blob);
-    try testing.expectEqualSlices(u8, handoff.extPayload(&blob).?, h.payload);
-    try testing.expectEqualStrings(handoff.extClaimantName(&blob).?, h.claimed_name.?);
-    try testing.expectEqual(handoff.extLegacyOrdinal(&blob), h.legacy_ordinal);
-}
-
-test "decodeExt agrees with the accessors on a legacy ordinal blob" {
-    var blob: [3]u8 = undefined;
-    blob[0] = handoff.ext_format_version_ordinal;
-    blob[1] = 2;
-    blob[2] = 0xAB;
-
-    const h = handoff.decodeExt(&blob);
-    try testing.expectEqualSlices(u8, handoff.extPayload(&blob).?, h.payload);
-    try testing.expectEqual(handoff.extClaimantName(&blob), h.claimed_name);
-    try testing.expectEqual(handoff.extLegacyOrdinal(&blob), h.legacy_ordinal);
-    try testing.expectEqual(@as(?usize, 2), h.legacy_ordinal);
+    const h_modern = handoff.decodeExt(&modern);
+    try testing.expect(h_modern.legacy_ordinal == null);
+    try testing.expectEqualStrings("minimize", h_modern.claimed_name.?);
+    try testing.expectEqualSlices(u8, &[_]u8{0x5A}, h_modern.payload);
 }
 
 test "decodeExt passes an unrecognized blob through whole" {

@@ -76,3 +76,16 @@ pub const TmpFile = struct {
         self.tmp.cleanup();
     }
 };
+
+/// Loads a TOML string through the full production pipeline
+/// (parse -> buildConfigFromDoc), like a real config file would be. The one
+/// home of the scratch-config suffix policy: every file gets a `.toml`
+/// extension, so a test path reads like the config it stands in for.
+pub fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !@import("types").Config {
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const with_ext = std.fmt.bufPrint(&name_buf, "{s}.toml", .{name}) catch return error.NameTooLong;
+    var f = try TmpFile.init(with_ext);
+    defer f.deinit();
+    try f.write(content);
+    return try @import("config").loadConfig(alloc, f.path());
+}
