@@ -26,9 +26,9 @@ const contract = @import("contract");
 /// told, not what is currently on screen.
 pub const SentEntry = struct {
     /// Last VISIBLE geometry sent. Undefined until `has_rect` says a geometry
-    /// was sent -- there is deliberately NO sentinel default (5.8): `has_rect`
+    /// was sent -- there is deliberately NO sentinel default: `has_rect`
     /// is the explicit "never sent" flag, so a sentinel rect would be dead
-    /// weight that reads like a load-bearing marker. 5.1's claim that bw/pixel
+    /// weight that reads like a load-bearing marker. The claim that bw/pixel
     /// survive a park is about THESE two fields, not `rect`.
     rect: model.Rect,
     /// Whether a visible geometry was EVER sent (an explicit flag, not a
@@ -55,7 +55,7 @@ pub const SentEntry = struct {
     /// A record for a window nothing has been sent to yet. `has_rect` is
     /// false, which is the ONLY thing that makes this a valid blank -- `rect`
     /// holds a meaningless zero and every reader must gate on `has_rect`
-    /// first (`visibleSent` does). 5.8 removed `rect`'s struct-literal default
+    /// first (`visibleSent` does). `rect` has no struct-literal default,
     /// so the sentinel could not be mistaken for a real marker; construction
     /// is explicit here instead of implicit at every use site.
     pub fn blank() SentEntry {
@@ -122,7 +122,7 @@ pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
 }
 
 /// Record a border-pixel send unless that exact pixel is already recorded, and
-/// report whether the caller must actually send (11.4).
+/// report whether the caller must actually send.
 ///
 /// This is the ONE border-pixel dedup. It was in `wincache` (`border_color`)
 /// while the reconcile's own dedup read THIS record's `pixel` field, so the

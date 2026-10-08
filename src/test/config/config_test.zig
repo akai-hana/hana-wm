@@ -25,7 +25,7 @@ const log = @import("log");
 const snapshot_test = @import("snapshot_test");
 
 fn writeAndRead(alloc: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]u8 {
-    var f = try scratch.TmpFile.init(name); // (28.5)
+    var f = try scratch.TmpFile.init(name);
     defer f.deinit();
     try f.write(bytes);
     return config.readFileAlloc(alloc, f.path());
@@ -378,10 +378,10 @@ test "theme quartet: a [tiling] theme merges over a functional [tiling] config" 
     try testing.expectEqual(@as(u32, 0x52263E), cfg.tiling.border_unfocused);
 }
 // ---------------------------------------------------------------------------
-// 15.1 / 15.6 / 15.12: boot degradation, search policy, load ceilings
+// Boot degradation, search policy, load ceilings
 // ---------------------------------------------------------------------------
 
-test "15.1: a config that parses but fails validate falls back at BOOT" {
+test "A config that parses but fails validate falls back at BOOT" {
     const alloc = testing.allocator;
     var box = try snapshot_test.Sandbox.init(alloc, "invalid-boot");
     defer box.deinit(alloc);
@@ -391,7 +391,7 @@ test "15.1: a config that parses but fails validate falls back at BOOT" {
     defer config.deinitGoodSource(alloc);
 
     // Valid TOML, semantically impossible: 500% is far outside the
-    // [min_master_width, max_master_width] band. Before 15.1 this was the
+    // [min_master_width, max_master_width] band. Before the boot fallback existed, this was the
     // config that took the WM down at boot while a typo'd key did not.
     // The `%` matters: a bare number parses as an ABSOLUTE pixel value, which
     // validation accepts (the screen width is not known here), so `500` would
@@ -417,7 +417,7 @@ test "15.1: a config that parses but fails validate falls back at BOOT" {
     try testing.expect(scaling.asRatio(booted.tiling.master_width) <= constants.max_master_width);
 }
 
-test "15.6: an EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
+test "An EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     // The regression: getenv returned a non-null empty string, so the old code
@@ -440,7 +440,7 @@ test "15.6: an EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
     try testing.expect(std.fs.path.isAbsolute(from_home));
 }
 
-test "15.12: a config tree over the file ceiling is refused, not partially loaded" {
+test "A config tree over the file ceiling is refused, not partially loaded" {
     const alloc = testing.allocator;
     var box = try snapshot_test.Sandbox.init(alloc, "toomany");
     defer box.deinit(alloc);

@@ -4,7 +4,7 @@
 //! logged placements, plus the covering (fullscreen) winner/park branches.
 //! Self-skips without a server so `zig build test` stays green headless.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: tiling, fullscreen
 
@@ -154,7 +154,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 }
 
-// 12.7: the deferred bar transition is resolved from MODEL TRUTH, and the
+// The deferred bar transition is resolved from MODEL TRUTH, and the
 // pending entry is per-window. The two properties the single-slot,
 // dimensions-only version got wrong: it dropped a second window's pending
 // intent, and it re-showed the bar whenever a window's ConfigureNotify stopped
@@ -174,7 +174,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     // 1. A pending HIDE is not confirmed by a non-fullscreen report: the
     //    window must REPORT screen dimensions before the bar moves.
     //    w1 has to be COVERING for a hide to confirm at all, because the
-    //    decision is MODEL TRUTH (12.7), not the reported numbers -- which is
+    //    decision is MODEL TRUTH, not the reported numbers -- which is
     //    exactly what step 2 asserts. This step used to run against a plain
     //    tiled w1 and so demanded a bump the product correctly refuses; it had
     //    never run, because the fixture skips without an X display.

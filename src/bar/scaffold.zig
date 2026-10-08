@@ -87,7 +87,7 @@ pub fn finishDraw(seg: *const contract.Segment, painted: contract.Painted) bool 
 /// the row layout honest without a per-module guard.
 ///
 /// It does NOT record the width: the bar feeds the painted width back through
-/// the segment's `onPainted` hook (21.7), so "the reservation must follow the
+/// the segment's `onPainted` hook, so "the reservation must follow the
 /// painted content" is one rule in one place rather than an obligation every
 /// drawing helper has to remember.
 pub fn drawAndStore(
@@ -111,8 +111,8 @@ const NaturalWidth = *const fn (*const contract.Frame, u16) u16;
 const OnClick = *const fn (*const contract.ClickCtx) bool;
 
 /// How one slot's WIDTH behaves over its lifetime -- the shapes a bar segment
-/// can actually have, named (21.8).
-pub const SlotMode = enum {
+/// can actually have, named by the SlotMode enum below.
+const SlotMode = enum {
     /// Measured width reported to the width state, and a width change raises a
     /// re-layout request. For a segment that can change shape DURING a frame:
     /// variants collapses to zero width on a layout transition and must re-lay
@@ -133,7 +133,7 @@ pub const SlotMode = enum {
 
 /// Optional bindings for the segment, one field per contract.Segment hook the
 /// icon-ish modules can set. Unset fields keep the builder defaults.
-pub const Opts = struct {
+const Opts = struct {
     /// How this slot's width behaves; see SlotMode. Defaults to the safest
     /// measured shape.
     mode: SlotMode = .measured_no_relayout,
@@ -215,7 +215,7 @@ pub fn module(
         .draw = drawHook(draw),
         // The bar's post-draw width report lands in this module's own width
         // state, so the reservation the naturalWidth hook reads back is
-        // written from exactly one call site (21.7).
+        // written from exactly one call site.
         .onPainted = switch (opts.mode) {
             .measured_relayout, .measured_no_relayout => W.store,
             .self_measured => null,

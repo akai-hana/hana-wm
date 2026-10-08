@@ -53,7 +53,7 @@ pub fn initAtoms() void {
 
 /// The bar window's top-edge y for a given position, size and screen height.
 ///
-/// Takes all three as values instead of reading `core.getState()` (20.4). The
+/// Takes all three as values instead of reading `core.getState()`. The
 /// screen height is a u16 and the height a u16, so reading the wrong one
 /// compiles; and this ran during bar creation, where the answer decides where
 /// the bar lands -- a wrong reference is a bar on the wrong edge, or past the
@@ -114,7 +114,7 @@ pub fn setWindowProperties(win_id: u32, height: u16) void {
 
 /// Frees the bar's colormap (identity on the non-transparent 0 case). Shared
 /// by the window teardown and the bar orchestrator's WindowCtx teardown.
-pub fn freeColormap(conn: core.Connection, colormap: u32) void {
+fn freeColormap(conn: core.Connection, colormap: u32) void {
     if (colormap != 0) _ = xcb.xcb_free_colormap(conn, colormap);
 }
 
@@ -124,7 +124,7 @@ pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void 
 }
 
 /// Creates the bar window. `want_transparency` is passed in rather than read
-/// from the live config (20.4) so the window's visual, depth and colormap are
+/// from the live config so the window's visual, depth and colormap are
 /// all decided by the one value the caller was given, instead of the window
 /// re-deriving "is this bar opaque?" from config state the caller may already
 /// be about to replace.
@@ -179,7 +179,7 @@ pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWind
 
 /// `font_size` is the bar's resolved point size, passed in rather than read
 /// from bar state: the draw context is built from values the caller already
-/// resolved, so it does not have to be re-derived here (21.5).
+/// resolved, so it does not have to be re-derived here.
 pub fn createDrawContext(setup: BarWindowSetup, height: u16, font_size: u16) !*drawing.DrawContext {
     const cs = core.getState();
     const dc = try drawing.DrawContext.initWithVisual(

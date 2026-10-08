@@ -103,7 +103,7 @@ pub fn dispatchFirstTrue(
     return false;
 }
 
-/// True when `win` holds covering intent (12.4: a model query -- see
+/// True when `win` holds covering intent (a model query -- see
 /// contract.WindowModule for why the covering-mode hook is gone).
 pub fn isCoveringMode(m: *const model_mod.Model, win: u32) bool {
     return model_mod.isCovering(m, win);
@@ -140,7 +140,7 @@ const State = struct {
     warned_unmanaged_state: bool = false,
 
     // Child XID -> managed toplevel XID (see "Child window resolution").
-    /// child XID -> managed toplevel (9.7: IdMap, not a BoundedList).
+    /// child XID -> managed toplevel (IdMap, not a BoundedList).
     ///
     /// A BoundedList needed a linear scan per lookup, and the lookup sits on
     /// the slow path of a BLOCKING xcb_query_tree round trip -- a list miss
@@ -776,7 +776,7 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         const color = borders.resolveBorderColorWith(win, &occupants);
         // Same ledger dedup in both sweep variants: a window whose color is
         // unchanged (per the ledger's record) skips the XCB call outright.
-        // 11.4: one record has to answer this for both the sweep and the
+        // One record has to answer this for both the sweep and the
         // reconcile -- see borders.applyWith.
         if (ledger.markSentBorderPixelIfChanged(win, color))
             requests.setBorderPixel(core.getState().conn, win, color);

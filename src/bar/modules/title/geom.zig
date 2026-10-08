@@ -6,7 +6,7 @@
 //! the vocabulary every segment imports, the title's window list and its
 //! pixel-perfect tiling, and the registry helpers. None of this needs
 //! `DrawCtx`, `BarHandlers` or any X connection -- it is geometry over a
-//! snapshot -- so it is split out (21.6) and owned by the title module, which
+//! snapshot -- so it is split out and owned by the title module, which
 //! is the only thing that renders it.
 //!
 //! `segmentBounds` and its inverse are the load-bearing pair: the draw and the
@@ -32,7 +32,7 @@ const segmod = @import("segment");
 const max_visible_windows = segmod.max_visible_windows;
 const TitleSnapshot = segmod.TitleSnapshot;
 
-pub const WindowInfo = struct {
+const WindowInfo = struct {
     window: u32,
     x: i16,
     y: i16,
@@ -99,7 +99,7 @@ pub const GatherScratch = struct {
 };
 
 /// A window resolved from a click inside the title segment.
-pub const ClickTarget = struct {
+const ClickTarget = struct {
     window: u32,
     minimized: bool,
 };
@@ -113,13 +113,17 @@ pub fn segmentBounds(total_width: u16, i: usize, count: u32) struct { x: u16, w:
     return .{ .x = x0, .w = x1 - x0 };
 }
 
-/// Inverse of segmentBounds: the index of the tile containing `offset_x`,
-/// i.e. `floor(offset_x * count / total_width)`, clamped to `count-1`.
+/// Inverse of segmentBounds: the index of the tile containing `offset_x`.
+/// The unique `i` whose `[x, x+w)` span covers `offset_x` — not
+/// `floor(offset_x * count / total_width)`, which at a tile boundary (any row
+/// width not divisible into the count) rounds down into the LEFT neighbour
+/// even though the draw already placed the next tile there. Clicking the
+/// first pixel of a tile must select that tile's window, or a click selects
+/// a neighbour. An `offset_x` past the right edge clamps to `count-1`.
 pub fn segmentIndexOfX(total_width: u16, offset_x: u16, count: u32) usize {
-    return @intCast(@min(
-        count - 1,
-        @divFloor(@as(u32, offset_x) * count, @as(u32, total_width)),
-    ));
+    // ceil((offset_x + 1) * count / total_width) - 1, in integer math.
+    const num = (@as(u32, offset_x) + 1) * count + total_width - 1;
+    return @intCast(@min(count - 1, @divFloor(num, total_width) - 1));
 }
 
 /// Resolves which window (if any) is displayed at `offset_x` pixels into the

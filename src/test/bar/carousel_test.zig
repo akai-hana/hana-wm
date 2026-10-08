@@ -3,7 +3,7 @@
 //! The module is pure deadline/offset math driven by an injected monotonic
 //! clock, so every scenario below is deterministic: no sleeps, no rendering.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: seg_carousel
 
@@ -187,7 +187,7 @@ test "one call returns the offset, the cycle and the active bit together" {
     try testing.expect(third.off >= 0 and third.off < third.cycle);
 }
 
-// --- 24.2: the offset is a pure function of frame time, not of call history ---
+// --- the offset is a pure function of frame time, not of call history ---
 
 test "cadence does not change the position: coarse and fine ticks agree" {
     // The property the accumulator could not have. Driving the same 1000ms of

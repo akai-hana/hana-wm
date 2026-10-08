@@ -121,7 +121,7 @@ const spawn_msg_max: usize = 1;
 const cmd_report_max: usize = 96;
 
 /// How long a pending entry may stay unresolved before it is dropped as stuck
-/// (4.8). The whole conversation is a few bytes between two forks of the same
+/// The whole conversation is a few bytes between two forks of the same
 /// parent, so anything still open after this has already lost the outcome; a
 /// table of 16 such entries is a permanent wedge on `exec` (every later spawn
 /// refused with SpawnQueueFull).
@@ -139,7 +139,7 @@ const PendingSpawn = struct {
     /// say WHICH command they are talking about.
     cmd: [cmd_report_max]u8 = undefined,
     cmd_len: u8 = 0,
-    /// Monotonic start of this entry, for the stuck-entry deadline (4.8).
+    /// Monotonic start of this entry, for the stuck-entry deadline.
     started_ms: i64 = 0,
 
     fn command(self: *const PendingSpawn) []const u8 {
@@ -270,7 +270,7 @@ pub fn drainPendingSpawns() void {
             }
         }
 
-        // 4.8: the pipe closing is not a deadline. A stuck entry (pipe open,
+        // The pipe closing is not a deadline. A stuck entry (pipe open,
         // or closed with the child never reaped) is dropped once it is older
         // than spawn_timeout_ms, so 16 stuck entries can no longer wedge
         // `exec` forever behind SpawnQueueFull.
@@ -299,7 +299,7 @@ pub fn drainPendingSpawns() void {
         // until SIGCHLD is next delivered. Same WNOHANG/WNOHANG-only policy
         // as reapPendingChildren: never blocks the event loop.
         //
-        // 4.2: `drained_pid` captures the real pid before any clearing --
+        // `drained_pid` captures the real pid before any clearing --
         // finishSpawn passes it to registerSpawn, where a -1 would @intCast
         // into a huge u32. `pid` is cleared only when waitpid actually reaped
         // it: a WNOHANG that returns 0 (the child closed its fd but has not
@@ -315,7 +315,7 @@ pub fn drainPendingSpawns() void {
 }
 
 /// Decides whether a fully-drained spawn-pipe conversation means the exec
-/// failed. Pure, so the rule can be tested without forking anything (4.12).
+/// failed. Pure, so the rule can be tested without forking anything.
 ///
 /// The child's only message is `tag_failed`, written just before it exits when
 /// execvp failed. A SUCCESSFUL exec closes the O_CLOEXEC write end instead, so
@@ -346,7 +346,7 @@ fn finishSpawn(entry: *PendingSpawn, pid: i32) void {
     const data = entry.buf[0..entry.len];
 
     if (conversationFailed(data)) {
-        // 4.4: a failed spawn used to be completely silent. `entry.cmd` is
+        // A failed spawn used to be completely silent. `entry.cmd` is
         // the truncated command, so this is now actionable: which command,
         // and that execvp is what failed.
         log.warn("spawn failed: '{s}' (exec did not succeed)", .{entry.command()});
@@ -361,7 +361,7 @@ fn finishSpawn(entry: *PendingSpawn, pid: i32) void {
 /// SIGCHLD handler; the spawn-pipe drain stays in signals.zig so it doesn't
 /// run twice per SIGCHLD.
 pub fn reapPendingChildren() void {
-    // 4.2: ONE reaper path. The per-pid loop alone was not enough -- a SIGCHLD
+    // ONE reaper path. The per-pid loop alone was not enough -- a SIGCHLD
     // that arrived for a pid hana no longer had a pending entry for (the
     // entry was removed on pipe-close, and an early version cleared `pid`
     // before the child was actually reaped) was a zombie nothing would ever

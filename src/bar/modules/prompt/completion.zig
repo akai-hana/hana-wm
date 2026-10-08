@@ -176,7 +176,7 @@ inline fn setGhost(suffix: []const u8) void {
 /// The word under the cursor: the buffer up to the cursor, back to the last
 /// space, as {token, byte offset of the token's first byte}.
 ///
-/// (27.3) The old code took the first space in the WHOLE buffer and bailed if
+/// The old code took the first space in the WHOLE buffer and bailed if
 /// one existed, so nothing past the first argument could ever be completed --
 /// "git ch" got no ghost even when "checkout" was in the table. Word-at-cursor
 /// is what the completion sources actually need: they match a token, not a
@@ -184,7 +184,7 @@ inline fn setGhost(suffix: []const u8) void {
 ///
 /// `cursor` is passed rather than read so the split is a pure function of
 /// (buffer, cursor) and testable without the module's global state.
-pub const WordAtCursor = struct {
+const WordAtCursor = struct {
     token: []const u8,
     /// Byte offset of `token` within the buffer it came from.
     start: usize,
@@ -196,7 +196,7 @@ pub fn wordAtCursor(buf: []const u8, cursor: usize) WordAtCursor {
     return .{ .token = upto[start..], .start = start };
 }
 
-/// Where a candidate match comes from. (27.3)
+/// Where a candidate match comes from.
 ///
 /// The two sources need genuinely different lookups -- one walks a ring newest
 /// first, the other binary-searches a sorted table -- but they are the same
@@ -237,7 +237,7 @@ fn completeFromHistory(token: []const u8) ?[]const u8 {
         // max_history entries and nearly all fail here.
         if (entry[0] != token[0]) continue;
         // Match the token under the CURSOR, not the entry's first word. This is
-        // the second half of (27.3): a multi-word history line completes its
+        // the second half: a multi-word history line completes its
         // last-word continuation, so "git ch" can complete from "git checkout".
         const target = wordAtCursor(entry, entry.len).token;
         if (target.len <= token.len) continue;
@@ -277,7 +277,7 @@ pub fn updateGhost(vim_state: *const editor.EditorState) void {
     if (vim_state.mode != .insert or vim_state.len == 0 or
         vim_state.cursor != vim_state.len) return;
 
-    // The token under the cursor, so an ARGUMENT completes (27.3). The old
+    // The token under the cursor, so an ARGUMENT completes. The old
     // shape bailed on any space in the buffer, which made every second word
     // un-completable; the cost of the scan is nil because the buffer is at most
     // `max_input` (256) bytes and every candidate lookup below reads it anyway.

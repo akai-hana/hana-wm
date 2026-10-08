@@ -302,7 +302,7 @@ pub const View = struct {
     order: []const model.WindowId,
     params: *const model.LayoutParams,
     workarea: model.Rect,
-    /// BY VALUE (13.5), not a pointer to a caller's stack local. The pointer
+    /// BY VALUE, not a pointer to a caller's stack local. The pointer
     /// form was the tree's only intra-frame dangling-pointer hazard: the
     /// `HintsView` outlived the frame that owned it for as long as any layout
     /// module kept the `View`, and nothing in the type said so. A value cannot

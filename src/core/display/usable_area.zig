@@ -13,7 +13,7 @@
 //! lives here, not in any particular surface. With no active claims, the
 //! usable area is the full screen (the natural state when the bar is absent).
 //!
-//! ## "Fullscreen means no work area" is NOT this module's rule (6.10)
+//! ## "Fullscreen means no work area" is NOT this module's rule
 //!
 //! The tempting encoding -- core reads `fullscreen_rev` and hands placement a
 //! zero area while something is fullscreen -- is deliberately absent, and this

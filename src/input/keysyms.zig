@@ -10,7 +10,7 @@
 const std = @import("std");
 
 // Borrowed from the single @cImport owner rather than translated again here
-// (19.8): this module and xkbcommon.zig were each compiling the same header.
+// This module and xkbcommon.zig were each compiling the same header.
 const xkb = @import("keymap").xkb;
 
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;

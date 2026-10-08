@@ -5,7 +5,7 @@
 //! slider core owns the shared render shell, interaction, poll, and commit
 //! clock.
 //!
-//! Backends, most-native first. The resolved backend is LATCHED (26.7): once a
+//! Backends, most-native first. The resolved backend is LATCHED: once a
 //! read has identified one, later reads go straight to it instead of re-walking
 //! the ladder, and a ladder that found nothing is negative-cached for a while
 //! so a dead daemon cannot cost a fresh pair of subprocesses on every press,
@@ -44,7 +44,7 @@ var g_pct: u8 = 0;
 var g_muted: bool = false;
 var g_has_value: bool = false;
 
-/// (26.7) Negative cache for a ladder that found no working backend. Null
+/// Negative cache for a ladder that found no working backend. Null
 /// until the first total failure. Without it every read against a dead daemon
 /// re-walked all four rungs -- up to three `popen`s, each blocking the WM
 /// loop -- and the poll, every press and every right-click paid it again.
@@ -73,7 +73,7 @@ pub const reprobe_interval_ms: i64 = 15_000;
 /// finds a daemon that started after this cache wrote the machine off.)
 pub const Probe = struct { walk: bool };
 
-/// (26.7) The pure re-probe decision. All the timing policy, with no clock and
+/// The pure re-probe decision. All the timing policy, with no clock and
 /// no IO, so it is testable: whether a poll may walk the ladder again, and
 /// whether it must first re-ask whether a daemon is reachable.
 ///
@@ -104,7 +104,7 @@ pub fn probeDecision(
     return .{ .walk = false };
 }
 
-/// (26.7) Whether the ladder may be walked now. `probeDecision`'s clock and IO
+/// Whether the ladder may be walked now. `probeDecision`'s clock and IO
 /// edge, and the only place that mutates the cache's own bookkeeping.
 fn probeDue() bool {
     const now = slider.nowMs();
@@ -141,7 +141,7 @@ pub fn latchedRung(backend: Backend) Rung {
     };
 }
 
-/// (26.7) The level a press should show without re-reading. Null means "show
+/// The level a press should show without re-reading. Null means "show
 /// nothing new": with no backend, `commitPct` wrote nothing, so echoing the
 /// value back would display a level the sink never accepted.
 pub fn optimisticLevel(backend: Backend, v: u8) ?u8 {
@@ -205,7 +205,7 @@ fn logNoBackend() void {
 /// (libpulse -> pactl -> amixer -> native ALSA). Returns true when this read
 /// changed the displayed state.
 fn readVolume() bool {
-    // (26.7) A LATCHED backend is read directly. This is the change that takes
+    // A LATCHED backend is read directly. This is the change that takes
     // the ladder off the hot path: previously every read re-walked the rungs
     // from the top, re-attempting a native attach and, when the daemon was
     // dead, spawning pactl/amixer on every poll, press and right-click.
@@ -405,7 +405,7 @@ fn commitPct(v: u8) void {
     }
 }
 
-/// The one write entry point (26.8), replacing `previewPct` / `commitPct` /
+/// The one write entry point, replacing `previewPct` / `commitPct` /
 /// `applyPct`. See brightness.zig's for why the three were one function with a
 /// mode: the clamp and the display update existed three times each, and a
 /// preview that skipped the clamp showed a level the sink would refuse.
@@ -415,7 +415,7 @@ fn write(w: slider.Write, v: u8) void {
         // write is the core scheduler's business.
         .preview => g_pct = optimisticAfter(g_backend, v, g_pct),
         .commit => commitPct(v),
-        // Press set / drag end. (26.7) The follow-up read is gone: it forced a
+        // Press set / drag end. The follow-up read is gone: it forced a
         // full re-probe -- and with an unresolved backend, up to three
         // subprocess spawns blocking the WM loop -- on every press and every
         // right-click. The value just committed IS the display value, so it is
@@ -510,7 +510,7 @@ fn toggleMute() void {
 /// The displayed level, or null while the backend has never answered, which is
 /// what makes an audio-less machine reserve no slot and take no clicks. The
 /// absence and the value used to be a `{bool, u8}` pair latched together
-/// (26.8); one optional cannot hold half of them.
+/// One optional cannot hold half of them.
 fn currentLevel() ?u8 {
     return if (g_has_value) g_pct else null;
 }

@@ -10,7 +10,7 @@
 //! indices distinct from unrelated u8 values (counts, layout indices, etc.).
 //! Range is a SEPARATE question from representation: `fromIndex` is lenient
 //! (config/recovery paths), `fromIndexChecked` asserts (internal paths), and
-//! `isValid` is the single definition every fixed-size consumer asks (7.6/7.7).
+//! `isValid` is the single definition every fixed-size consumer asks.
 //! Lives in core/pure (the xcb-free vocabulary) because both the hub and the
 //! model need it and model must stay xcb-free (it never imports core); this
 //! file imports nothing but std.
@@ -24,7 +24,7 @@ const constants = @import("constants");
 /// conversion.
 pub const WindowId = u32;
 
-/// The ONE validity notion for a workspace index (7.6). Everything that has
+/// The ONE validity notion for a workspace index. Everything that has
 /// to decide "is this index in range" -- the mask shift, the model's fixed-size
 /// `ws` array, the config lookup tables -- asks here, so a raise of
 /// `max_workspaces` cannot leave one of them answering a different question.

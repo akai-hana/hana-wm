@@ -155,7 +155,7 @@ const CardInfo = extern struct {
 /// `SNDRV_CTL_IOCTL_CARD_INFO` -- note the request number is 0x01, not 0x80
 /// (0x80 is the *element* ioctl family) and the size is the 376-byte struct
 /// above, both of which the kernel validates.
-pub const CARD_INFO = ior('U', 0x01, @sizeOf(CardInfo));
+const CARD_INFO = ior('U', 0x01, @sizeOf(CardInfo));
 
 /// PipeWire's and PulseAudio's ALSA exposure (`libpipewire-module-alsa`, the
 /// old `module-alsa-sink`) register *userspace* control cards that mimic a

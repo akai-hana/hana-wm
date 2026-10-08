@@ -7,7 +7,6 @@
 const core = @import("core");
 const xcb = core.xcb;
 const model = @import("model");
-const constants = @import("constants");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const wincache = @import("wincache");
@@ -19,24 +18,12 @@ const ledger = @import("ledger");
 /// borderless because a covering (fullscreen) occupant holds the workspace it
 /// actually lives on. `current` is the current workspace for the
 /// unresolvable-workspace fallback; `has_fullscreen` (comptime) gates the
-/// covering-mode reads for fullscreen-absent builds.
+/// covering-mode reads for fullscreen-absent builds; `occupants` is the
+/// precomputed per-workspace table (see `model.coveringOccupants`).
 /// (Occupant query family: pure-scan `model.coveringOccupantOnWs`, its
 /// batch form `model.coveringOccupants`, module's record-backed
 /// `fullscreen.visibleCoveringOnWs`, actions' routed hook
 /// `currentCoveringOccupant`.)
-pub fn isBehindCoveringWindow(
-    m: *const model.Model,
-    win: u32,
-    current: model.WSId,
-    comptime has_fullscreen: bool,
-) bool {
-    // Only windows present in the store take part in the rule.
-    if (!m.store.has(win)) return false;
-    if (model.findHome(m, win)) |w| return model.coveringOccupantOnWs(m, w) != null;
-    return has_fullscreen and model.coveringOccupantOnWs(m, current) != null;
-}
-
-/// `isBehindCoveringWindow` against a precomputed occupant table.
 pub fn isBehindCoveringWindowWith(
     m: *const model.Model,
     win: u32,
@@ -51,18 +38,10 @@ pub fn isBehindCoveringWindowWith(
     return has_fullscreen and current.index < occupants.len and occupants[current.index] != null;
 }
 
-/// Returns the border color for `win`: 0 for screen-covering windows,
-/// focused or unfocused color otherwise.
-pub fn resolveBorderColor(win: u32) u32 {
-    const m = pipeline.model();
-    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
-    model.coveringOccupants(m, &occupants);
-    return resolveBorderColorWith(win, &occupants);
-}
-
-/// The border-color decision against a PRECOMPUTED occupant table, for callers
-/// sweeping many windows (see `model.coveringOccupants`). Identical policy to
-/// resolveBorderColor, which now delegates here with a one-shot table.
+/// The border-color decision for `win`: 0 for screen-covering windows,
+/// focused or unfocused color otherwise, resolved against a PRECOMPUTED
+/// occupant table (see `model.coveringOccupants` — every caller sweeps
+/// windows, so the table is built once per sweep, never per window).
 pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 {
     // Covering windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
@@ -76,7 +55,7 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
     // unfindable window falls back to whether the CURRENT workspace has a
     // covering occupant.
     if (isBehindCoveringWindowWith(m, win, m.current, build_options.has_fullscreen, occupants)) return 0;
-    // 9.6: the model is the focus source, so this cannot drift from the
+    // The model is the focus source, so this cannot drift from the
     // pipeline's own pick (which used to be a second copy of this ternary).
     return model.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
@@ -101,7 +80,7 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
 /// O(windows * store). One build (model.coveringOccupants) + applyWidth +
 /// resolveBorderColorWith keeps it at O(store) total.
 ///
-/// The color dedup lives in the SENT LEDGER (11.4), beside the width record and
+/// The color dedup lives in the SENT LEDGER, beside the width record and
 /// the reconcile's own `need_pixel` check, so the sweep and the reconcile derive
 /// "has this pixel already gone out" from one record. Deriving it from the
 /// wincache entry instead is what let a pixel sent by the reconcile go

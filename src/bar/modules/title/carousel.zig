@@ -34,7 +34,7 @@ pub const addon: title_mod.Scroller = .{
 /// wrap period of the marquee cycle.
 const inter_title_gap_px: u16 = 48;
 
-/// The motion clock (24.2).
+/// The motion clock.
 ///
 /// This USED to be an accumulator: `offset_px += speed * dt/1000` once per
 /// frame, with `last_frame_ms` remembered so the next frame could measure the

@@ -1,4 +1,4 @@
-//! The bar's metric resolution rules (bar/metrics.zig, 21.5).
+//! The bar's metric resolution rules (bar/metrics.zig).
 //!
 //! These rules used to be a module-level `var` in bar.zig that writing the
 //! height and then overwriting the font size in two steps, reachable only

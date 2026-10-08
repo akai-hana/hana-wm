@@ -108,7 +108,7 @@ pub const Throttle = struct {
     interval_ms: i64,
     /// Where a landed commit goes. The scheduler is per control, so the control
     /// it writes to belongs here rather than being threaded through `apply` /
-    /// `flushOwed` / `finish` as an argument (26.8). It was an argument because
+    /// `flushOwed` / `finish` as an argument. It was an argument because
     /// the target used to be a bare `commit` hook; it is now the `.commit` mode
     /// of one `write`, and passing it three times only to bind a mode was the
     /// shape of the thing being folded away.
@@ -234,7 +234,7 @@ pub fn runOk(cmd: []const u8) bool {
 /// the segment color.
 pub const Label = struct {
     text: []const u8,
-    /// (25.3) The numeric value's span as EXPLICIT offsets, with `value_len ==
+    /// The numeric value's span as EXPLICIT offsets, with `value_len ==
     /// 0` meaning "no value".
     value_start: usize = 0,
     value_len: usize = 0,
@@ -309,7 +309,7 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
 // To add a control: drop `foo.zig` here exporting `pub const sub: Sub`.
 
 /// What the caller wants a `write` to do. Named, and folded into ONE hook from
-/// the three it replaces (`preview` / `commit` / `apply`, 26.8).
+/// the three it replaces (`preview` / `commit` / `apply`).
 ///
 /// They were never three operations. A module that differed in only one of them
 /// -- brightness writes a file, volume writes a sink, and both clamp the same
@@ -341,7 +341,7 @@ pub const Sub = struct {
     /// then renders nothing: zero-width slot, unclickable). Null HOOK = always
     /// present.
     ///
-    /// This is one hook, not the `{bool, u8}` pair it replaced (26.8). The two
+    /// This is one hook, not the `{bool, u8}` pair it replaced. The two
     /// were always written and always latched together, and a module that
     /// latched one and forgot the other produced a control that reported a
     /// level nobody had or hid a level everybody could see. The absence is now
@@ -414,7 +414,7 @@ fn applyCommitWindow(idx: usize) void {
     if (subs[idx].commit_window_ms) |w| g_state[idx].throttle.interval_ms = w;
 }
 
-/// Linear slider mapping across a slot. Lifted to `bar/level.zig` (26.8): it
+/// Linear slider mapping across a slot. Lifted to `bar/level.zig`: it
 /// is not a slider concept -- every horizontal meter needs it -- and the
 /// zero-width-slot rule and the far-edge saturation had to be right in
 /// whichever module happened to need them first. This re-export keeps the
@@ -431,12 +431,12 @@ pub const pctFromSlot = level.pctFromSlot;
 /// segment's first draw completed, `onClickFor` rejected every click while it
 /// was 0 (so the very first press on a freshly laid-out slider did nothing at
 /// all), and the drag denominator and the row reservation fell back to
-/// DIFFERENT values. `widthState.resolved` is now that one rule (21.4), shared
+/// DIFFERENT values. `widthState.resolved` is now that one rule, shared
 /// with systatus, so the hit-test, the drag range and the reservation cannot
 /// disagree about what "not measured yet" means.
 /// The shared `scaffold.widthState` singleton for this control's name, which
 /// owns the store / consumeRedrawRequest / resolved triple. The hand-rolled
-/// `slot_w` field plus its inline "did the width change? mark dirty" (21.4)
+/// `slot_w` field plus its inline "did the width change? mark dirty"
 /// was a second implementation of code systatus already used, and this module
 /// is comptime-indexed by `subs`, so one instantiation per name is exactly
 /// the state each control needs.
@@ -591,7 +591,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     // path).
     //
     // The store itself is NOT here. The bar hands the width back through
-    // onPainted (21.7), which owns the "changed -> owes a re-layout" rule;
+    // onPainted, which owns the "changed -> owes a re-layout" rule;
     // the module's own pending flag is left to mean the OTHER reason a slider
     // repaints (its value committed). Both are consumed together, so neither
     // can leak a request.

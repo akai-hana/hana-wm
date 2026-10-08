@@ -28,7 +28,7 @@ const idmap = @import("idmap");
 pub const max_title_len = 256;
 
 const WindowData = struct {
-    /// Cached _NET_WM_NAME / WM_NAME in a fixed inline buffer (11.5): POD
+    /// Cached _NET_WM_NAME / WM_NAME in a fixed inline buffer: POD
     /// storage, no allocator, no free paths -- `removeWindow`/`deinit` are
     /// plain map operations and no title rewrite can leak.
     title_buf: [max_title_len]u8 = @splat(0),
@@ -60,7 +60,7 @@ var cache: idmap.IdMap(WindowData, max_entries) = .{};
 
 /// How many windows currently hold a cache entry (0 before init).
 ///
-/// (11.9) This replaces the test's `getOpt() |c| c.count()`, which forced
+/// This replaces the test's `getOpt() |c| c.count()`, which forced
 /// the map type out of the file as an unnameable pointer in the API surface.
 /// The test wanted one integer -- the evidence that the ceiling actually
 /// dropped an entry rather than overwriting one -- so the integer is what
@@ -212,7 +212,7 @@ fn takePropertyReply(
 /// `collectTitleCookies`), which the headless `wincache_test` exercises for
 /// the overwrite/cap lifecycle.
 ///
-/// THE AT-CAPACITY POLICY (11.6), in one place: a full store drops a NEW
+/// THE AT-CAPACITY POLICY, in one place: a full store drops a NEW
 /// window's title rather than evicting an existing one — overwrites of
 /// already-cached windows hit `getPtr` first and are exempt from the
 /// ceiling. Caching is an optimization and every reader has a correct
@@ -242,7 +242,7 @@ fn setTitle(wd: *WindowData, title: []const u8) void {
 /// The bar's read path: the cached title for `win`, or "" when absent.
 /// Pure cache hit -- never touches the wire.
 ///
-/// ## BORROW CONTRACT (11.9)
+/// ## BORROW CONTRACT
 ///
 /// The returned slice ALIASES the cache's own `title_buf` for `win`. It is
 /// valid until the next `storeTitle`/`setTitle` for that SAME window, and the

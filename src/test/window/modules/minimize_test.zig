@@ -40,7 +40,7 @@ const foreign_blob = [_]u8{ 0x00, 1, 2 };
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
 
 const regCur = helpers.regCur;
 const expectOrder = helpers.expectOrder;
@@ -65,7 +65,7 @@ fn assertSingleMembership(m: *const Model) !void {
             }
         }
         try testing.expectEqual(@as(usize, 1), homes);
-        // 8.4: the cached home_ws must name the workspace that ACTUALLY holds
+        // The cached home_ws must name the workspace that ACTUALLY holds
         // the window. The single-membership count above only proves exactly
         // one list mentions it; a stale home_ws pointing elsewhere is the
         // "stranded home" bug, and the count check cannot see it.

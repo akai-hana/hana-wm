@@ -35,7 +35,7 @@ const contract = @import("contract");
 /// The hide-family provider bound to the generated window registry, resolved
 /// once at file scope: the hidden-set synthesis and its collect dispatch
 /// share one lookup (no module is ever named by the bar).
-pub const collect_hidden_set = window.providerOf(.collectHiddenSet);
+const collect_hidden_set = window.providerOf(.collectHiddenSet);
 
 // Registry-resolved segment identity (comptime): the bar locates modules by
 // name through the generated registry instead of importing them directly.
@@ -69,7 +69,7 @@ pub inline fn segAt(id: usize) *const contract.Segment {
 /// Dirty-bit read for a registry id (null: a name that does not resolve is
 /// never dirty). The null check precedes the comptime guard so an
 /// empty-registry build never reaches `unreachable`.
-pub inline fn segDirty(self: *const State, id: ?usize) bool {
+inline fn segDirty(self: *const State, id: ?usize) bool {
     const i = id orelse return false;
     if (comptime !segmod.hasRegisteredSegments()) unreachable;
     return self.dirty.segments[i];
@@ -77,7 +77,7 @@ pub inline fn segDirty(self: *const State, id: ?usize) bool {
 
 /// Position of `id` within `self_ticking_ids` (the key into
 /// `Clock.segs`), or null when it is not a self-ticking segment.
-pub fn selfTickerIndex(id: ?usize) ?usize {
+fn selfTickerIndex(id: ?usize) ?usize {
     return segmod.roleIndexOf(id, self_ticking_ids);
 }
 
@@ -103,13 +103,13 @@ pub const Bar = struct {
 
 pub var gBar: Bar = .{};
 /// X11 connection and window handle; stable for the bar's lifetime.
-pub const WindowCtx = struct {
+const WindowCtx = struct {
     conn: core.Connection,
     win_id: u32,
     colormap: u32,
 
     /// Destroys the window AND frees its colormap, in that order, through
-    /// win.zig's single teardown (20.4). This used to free only the colormap,
+    /// win.zig's single teardown. This used to free only the colormap,
     /// so both real teardown paths -- shutdown and the reload-time recreate --
     /// had to remember to call `xcb_destroy_window` themselves, and did, in
     /// two places. The one that forgot would leak the window and keep the bar
@@ -128,7 +128,7 @@ pub inline fn renderBar() types.BarConfig {
     return core.getState().config.bar;
 }
 
-pub const RenderCtx = struct {
+const RenderCtx = struct {
     dc: *drawing.DrawContext,
     width: u16,
     height: u16,
@@ -137,18 +137,18 @@ pub const RenderCtx = struct {
 
 /// Per-frame window-count bound for the title scratch buffers; shares the
 /// single bar-wide cap in segment.zig.
-pub const max_frame_windows: usize = segmod.max_visible_windows;
+const max_frame_windows: usize = segmod.max_visible_windows;
 
 /// Upper bound on recorded click bounds: one slot per clickable segment in
 /// the configured layout. Configs with more clickable segments than this
 /// simply lose clickability on the extras (rendering is unaffected).
-pub const max_click_bounds: usize = bar_mods.len;
+const max_click_bounds: usize = bar_mods.len;
 
 /// Scratch bound for the per-draw right-cluster segment widths. Right segments
 /// are measured once into this buffer and reused for both the total-width
 /// calculation and the draw; a config with more than this many right segments
 /// falls back to re-measuring at draw time (layout math identical, no win).
-pub const max_right_segments: usize = 16;
+const max_right_segments: usize = 16;
 
 /// Cap on solved row slots in one frame.
 ///
@@ -159,7 +159,7 @@ pub const max_right_segments: usize = 16;
 /// alternative, a cap that silently dropped slots, would drop click bounds and
 /// paints with no trace, and `plan.slots[0..len]` past the end is a panic in
 /// Debug and out-of-bounds reads in ReleaseFast.
-pub const max_row_slots: usize = 64;
+const max_row_slots: usize = 64;
 
 /// Cap on updateIfDirty's re-request redraw loop: a module that keeps
 /// re-requesting a full redraw past this many iterations is treated as a
@@ -171,7 +171,7 @@ pub const max_batched_redraws: u8 = 4;
 /// (which left/center placement shrinks around) and the per-segment widths
 /// the draw consumes. Falls back to measure-at-draw when the segment count
 /// overflows `max_right_segments`.
-pub const RightCluster = struct {
+const RightCluster = struct {
     /// Measured widths by position in the right cluster (concatenated right
     /// layouts, in order). Only the first `max_right_segments` are recorded.
     widths: [max_right_segments]u16 = undefined,
@@ -192,13 +192,13 @@ pub const RightCluster = struct {
 };
 
 /// One solved row slot: the geometry and the flags the paint pass needs,
-/// with no draw call anywhere near it. (20.1)
+/// with no draw call anywhere near it.
 ///
 /// The split exists because geometry, hit-testing and painting were one unit
 /// of change in drawAllInner: adding a segment meant editing a loop that
 /// measured it, recorded its click bound, scoped its ticker, cleared its
 /// region and drew it, all interleaved. Solve produces these; paint walks them.
-pub const RowSlot = struct {
+const RowSlot = struct {
     /// Registry id, resolved ONCE when the slot is pushed (the layout stores
     /// names; every downstream consumer -- measure, paint, click bound, dirty
     /// clear -- works on the id, so a name is never resolved twice in one
@@ -237,7 +237,7 @@ pub const RowSlot = struct {
 /// into paint order here rather than at draw time. That reversal is the
 /// fiddly part the item warned about, and doing it once in solve is what lets
 /// paint be a single flat loop with no backward cursor.
-pub const RowPlan = struct {
+const RowPlan = struct {
     slots: [max_row_slots]RowSlot = undefined,
     len: usize = 0,
     /// The right cluster's reserved width, subtracted from left/center budgets.
@@ -285,7 +285,7 @@ pub const SegBound = struct {
     }
 };
 
-pub const Visibility = struct {
+const Visibility = struct {
     /// Whether the bar window is currently mapped (the wire state). Written
     /// only by the paths that actually issue map/unmap: the visibility glue's
     /// decision apply, the prompt present/dismiss pair, and the reload swap
@@ -314,7 +314,7 @@ pub const Visibility = struct {
 /// the CONJUNCTION for exactly that reason: a partial wake must still
 /// region-scope its repaint. This pair already absorbed the older
 /// `gBar.force` flag (BARCR-09); re-collapsing it would re-open that ruling.
-pub const Dirty = struct {
+const Dirty = struct {
     /// Whole-bar redraw requested (a fact revision or forced draw).
     flag: bool = false,
     /// Per-segment dirty flags, one per entry in the generated bar_modules
@@ -333,7 +333,7 @@ pub const Dirty = struct {
 
 /// Region scratch for one self-ticking segment, indexed by position in
 /// `self_ticking_ids` (the registry order the capability set was built in).
-pub const SelfTickerScope = struct {
+const SelfTickerScope = struct {
     /// Left edge of the segment's reserved slot from the last layout pass.
     x: u16 = 0,
     /// Reserved width from the same layout (its natural width at that frame's
@@ -359,7 +359,7 @@ pub const Clock = struct {
     segs: [self_ticking_ids.len]SelfTickerScope = @splat(.{}),
 };
 
-pub const Clicks = struct {
+const Clicks = struct {
     /// Click bounds recorded by the last layout pass, in record order.
     bounds: [max_click_bounds]SegBound = undefined,
     len: usize = 0,
@@ -369,7 +369,7 @@ pub const Clicks = struct {
 /// the shared `segmod.Frame` directly (workspace_count/current_workspace/
 /// is_all_view_active) plus the bar-local backing array it slices, so the
 /// segment-visible struct stays the single source instead of a mirror.
-pub const FrameState = struct {
+const FrameState = struct {
     frame: segmod.Frame = .{},
     /// Backing array for `frame.workspace_has_windows` (the shared struct
     /// only holds the slice).
@@ -397,13 +397,13 @@ pub const FrameState = struct {
 /// fillDrawCtx from the WM-owned title cache (wincache.peekTitle) and the
 /// sync truth-rect -- never the wire, so no async fetch, no positional slot,
 /// no X11 in the draw path.
-pub const TitleScratch = struct {
+const TitleScratch = struct {
     minimized: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Title addon's minimized-state service, cached from the DrawCtx after
     /// the first draw so scanLiveFrame can synthesize the set each frame
     /// without bar.zig naming the minimize addon.
     minimized_api: segmod.MinimizedApi = .{},
-    /// Storage for the focused window's title. (11.9) The per-window titles
+    /// Storage for the focused window's title. The per-window titles
     /// on `frame.entries` borrow straight from the wincache (they are
     /// refreshed every frame before the draw); the focused title used to be
     /// a slice straight into the wincache's per-window `title_buf`, so the
@@ -421,7 +421,7 @@ pub const TitleScratch = struct {
 /// live core fact in updateIfDirty; a mismatch marks segments dirty (cheap)
 /// or forces a full redraw. Initialized to the sentinel so the first update
 /// draws.
-pub const Facts = struct {
+const Facts = struct {
     /// Last focus_rev we diffed. A change marks the title segment dirty.
     focus_rev: u32 = std.math.maxInt(u32),
     /// Last window_rev we diffed. A change marks all segments dirty (the
@@ -717,7 +717,7 @@ pub const State = struct {
         if (entries.len > 0 and self.title_data.minimized.contains(entries[0].window))
             minimized_title = entries[0].title;
         ctx.focused_window = focus.getFocused();
-        // Copy, do not borrow (11.9): `peekTitle` returns a slice of the
+        // Copy, do not borrow: `peekTitle` returns a slice of the
         // cache's own storage, and this ctx outlives the draw through
         // `frame.last_ctx`. See focused_title_buf.
         if (ctx.focused_window) |fw| {
@@ -816,7 +816,7 @@ pub const State = struct {
     /// back to the segment.
     ///
     /// The width handback and the painted/nothing decision live in
-    /// `scaffold.finishDraw` (21.7) rather than inline here: they are the
+    /// `scaffold.finishDraw` rather than inline here: they are the
     /// bar's post-draw policy, but testing them through this loop would need a
     /// live DrawContext and an X connection, so in practice they would go
     /// untested -- and a segment that forgets to record its own drawn width
@@ -891,7 +891,7 @@ pub const State = struct {
     /// otherwise only the dirty segments' regions are repainted, leaving
     /// unchanged pixels from the previous frame untouched.
     /// Solves the frame's row geometry and paints it. The two halves talk
-    /// through one `RowPlan` (20.1): solve measures and pins every slot, paint
+    /// through one `RowPlan`: solve measures and pins every slot, paint
     /// walks the plan in paint order. Nothing in solve draws, and nothing in
     /// paint measures.
     pub fn drawAllInner(self: *State, ctx: *segmod.DrawCtx) void {
@@ -1116,7 +1116,7 @@ pub const State = struct {
 };
 /// Full hidden-set synthesis forwarded to the hide-family provider
 /// (DrawCtx api signature).
-pub fn minimizedCollect(
+fn minimizedCollect(
     m: *const anyopaque,
     set: *std.AutoHashMapUnmanaged(u32, void),
     allocator: std.mem.Allocator,

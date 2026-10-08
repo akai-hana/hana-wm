@@ -26,7 +26,7 @@ pub fn applyHints(rect: model.Rect, h: model.SizeHints) model.Rect {
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
     // convention); cross-multiplied to avoid FP division per retile.
     //
-    // BOTH OR NEITHER (13.8): one bound alone is not a weaker constraint here,
+    // BOTH OR NEITHER: one bound alone is not a weaker constraint here,
     // it is a DIFFERENT one, and applying it alone is a trap worth naming. A
     // max bound alone clamps the offending DIMENSION, so a 200x50 window under
     // `max_aspect = 4` would become 200x50 still (200/50 = 4, at the limit) but
@@ -167,11 +167,9 @@ pub inline fn outerArea(wa: model.Rect, gap: u16) Region {
     return .{
         // Both edges take the work area's own origin plus the gap, not the gap
         // alone: a work area that does not start at x=0 (a side claim) was
-        // silently placed back at the screen's left edge. x gets the same
-        // >=0 floor the y take has (negative-origin workareas are latent, but
-        // one sign flip of a future claim bug must not produce negative-x
-        // placements).
-        .x = @max(0, wa.x) +| @as(i32, gap),
+        // silently placed back at the screen's left edge. The origins take
+        // the shared non-negative floors (waX for x, clampYToU16 for y).
+        .x = waX(wa) +| @as(i32, gap),
         .y = clampYToU16(wa.y) +| gap,
         .w = wa.width -| gap *| 2,
         .h = wa.height -| gap *| 2,
@@ -192,6 +190,15 @@ pub inline fn bisectRegion(dim: u16, gap: u16) struct { first: u16, second: u16 
 /// Work-area origin y clamped to >= 0, as u16.
 pub inline fn waY(v: *const View) u16 {
     return clampYToU16(v.workarea.y);
+}
+
+/// Work-area origin x clamped to >= 0, as i32 — the one home for the x
+/// floor. outerArea's inset and every layout module's origin offset take it,
+/// so a negative-origin workarea (latent; one sign flip of a future claim
+/// bug must not produce negative-x placements) can never place a window off
+/// the screen's left edge. The y floor lives in clampYToU16 (via waY).
+pub inline fn waX(wa: model.Rect) i32 {
+    return @max(0, wa.x);
 }
 
 /// Position of cell `i` along an axis of `cell`-sized cells separated by
@@ -348,7 +355,7 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     const f = m.compute.?;
     {
         // The layout writes into SCRATCH and the engine emits into `out` in
-        // `v.order` position (14.9). The order is a property of the SINK
+        // `v.order` position. The order is a property of the SINK
         // (it consumes `out` positionally against a per-slot table built from
         // `order`), not something each layout can be trusted to reproduce:
         // master's overflow grid is column-major, so it emitted `100 101 110
@@ -370,7 +377,7 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     //
     // Note these asserts are only live in Debug/ReleaseSafe. The unit tests
     // build ReleaseFast by default (build.zig resolveOptimize), where they
-    // compile out -- which is why the 14.9 invariant sweep exists as an
+    // compile out -- which is why the placement-invariant sweep exists as an
     // ordinary test rather than only as asserts.
     std.debug.assert(out.len == v.order.len);
     for (out.constSlice(), v.order) |p, win| std.debug.assert(p.win == win);

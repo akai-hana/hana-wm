@@ -211,7 +211,7 @@ pub fn init(
 
 /// Flips the bar between the top and bottom edge and returns the new position.
 ///
-/// The single writer of `config.bar.bar_position` (20.2). It lived inside the
+/// The single writer of `config.bar.bar_position`. It lived inside the
 /// bar's renderer, which meant a rendering module owned a config field: the
 /// one place that could change the bar's edge was a function whose job was
 /// drawing it, and any other code that wanted to reason about the edge had to

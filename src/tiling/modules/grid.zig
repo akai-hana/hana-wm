@@ -60,7 +60,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
             v,
             out,
             win,
-            @as(i32, @intCast(m.gap +| tiling.cellStride(spacing_w, m.gap, col))) + v.workarea.x,
+            @as(i32, @intCast(m.gap +| tiling.cellStride(spacing_w, m.gap, col))) + tiling.waX(v.workarea),
             @intCast(wa_y +| m.gap +| tiling.cellStride(cell_h, m.gap, row)),
             if (is_partial_row) partial_win_w else win_w,
             win_h,

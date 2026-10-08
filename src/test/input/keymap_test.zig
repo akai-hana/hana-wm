@@ -4,7 +4,7 @@
 //! and stay untested here, but the REVERSE INDEX is a pure function of a
 //! 256-entry table of literals, and it is where the two rules that decide
 //! which physical key a binding actually grabs live. Both were unreachable
-//! from a test before the transform moved out of xkbcommon.zig (19.5), so
+//! from a test before the transform moved out of xkbcommon.zig, so
 //! they are checked here for the first time.
 
 const std = @import("std");

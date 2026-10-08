@@ -62,7 +62,7 @@ test "F10: save/load keeps every window record and workspace field" {
     var src = helpers.makeModel();
     try buildFixtureModel(&src);
 
-    // (28.5) per-test tmpDir; TmpFile.cleanup removes the file with its dir.
+    // Per-test tmpDir; TmpFile.cleanup removes the file with its dir.
     var f = try scratch.TmpFile.init("roundtrip.hana-state");
     defer f.deinit();
     try f.write("");
@@ -107,7 +107,7 @@ test "F10: save/load keeps every window record and workspace field" {
 }
 
 test "F10: loadToGlobal rejects a corrupt file and a bad version" {
-    // (28.5) each file gets its own tmpDir.
+    // Each file gets its own tmpDir.
     var bad = try scratch.TmpFile.init("corrupt");
     defer bad.deinit();
     try bad.write("not json at all");
@@ -142,7 +142,7 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
     var src = helpers.makeModel();
     try buildFixtureModel(&src);
 
-    var f = try scratch.TmpFile.init("apply"); // (28.5)
+    var f = try scratch.TmpFile.init("apply");
     defer f.deinit();
     try handoff.save(testing.allocator, &src, f.path());
     try testing.expect(handoff.loadToGlobal(page_alloc, f.path()));
@@ -182,7 +182,7 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 // header, and that an old ordinal-stamped blob is still read rather than
 // silently dropped.
 
-// (9.10) decodeExt is the ONE reader the header format has now -- the three
+// DecodeExt is the ONE reader the header format has now -- the three
 // separate accessors it replaced are gone -- so every header fact is pinned
 // through it directly: claimant, payload offset, and legacy ordinal all come
 // from one parse and are asserted together.

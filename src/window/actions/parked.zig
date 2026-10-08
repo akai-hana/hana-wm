@@ -39,7 +39,7 @@ pub fn minimize(focused: ?model_mod.WindowId) void {
     const m = pipeline.mut();
     const was_focused = m.focused == win;
     const fs_ws_before =
-        model_mod.coveringWsOf(m, win); // 12.4: model query
+        model_mod.coveringWsOf(m, win); // Model query
 
     wm.hideWindow.?(m, win) catch return; // Pre-refusal (CapacityFull)
 
