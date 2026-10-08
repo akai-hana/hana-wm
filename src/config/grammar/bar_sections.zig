@@ -55,18 +55,22 @@ fn appendDupedStrings(
     items: []const parser.Value,
     dst: *std.ArrayList([]const u8),
 ) !void {
+    var skipped = false;
     for (items) |item| {
         if (item.asScalar([]const u8)) |s| {
             try dst.append(allocator, try allocator.dupe(u8, s));
-        } else if (comptime ints_as_numbers) {
-            if (item.asScalar(i64)) |n|
-                try dst.append(allocator, try dupeNum(allocator, n))
-            else if (warn)
-                log.warn("Non-string entry in bar segment list, skipping", .{});
-        } else if (warn) {
-            log.warn("Non-string entry in bar segment list, skipping", .{});
+            continue;
         }
+        if (comptime ints_as_numbers) {
+            if (item.asScalar(i64)) |n| {
+                try dst.append(allocator, try dupeNum(allocator, n));
+                continue;
+            }
+        }
+        skipped = true;
     }
+    if (warn and skipped)
+        log.warn("Non-string entry in bar segment list, skipping", .{});
 }
 
 /// Bar's NON-scalar structures: fonts, indicator glyph mirroring, workspace

@@ -175,10 +175,6 @@ pub fn discardOrphan(alloc: std.mem.Allocator) void {
     log.info("handoff: discarded restore file left by a session that did not exit cleanly ({s})", .{path});
 }
 
-/// Serializes the live model to `path`. Writes through a temp file + rename
-/// so a crash mid-save never leaves a truncated restore file behind (the
-/// boot loader tolerates a missing file but warns on a corrupt one). Any
-/// error returns to the caller, which ABORTS the re-exec and keeps running.
 /// One save session's flat records. The owner allocations (dup'ed membership
 /// lists and feature blobs) live here so a single deinit releases everything
 /// on success and on partial-built error paths alike.
@@ -426,7 +422,7 @@ pub fn loaded() ?*const StateFile {
 /// The degraded-restore fallback layout kind: the active config's default
 /// layout name (canonical at parse time, re-canonicalized here for defense),
 /// resolved against the registry by name, else index 0 -- the same neutral
-/// last resort as tiling.defaultKind. Runs only on the removed-layout path
+/// last resort as contract.default_kind. Runs only on the removed-layout path
 /// (applyModelLevel) where core is already initialized and config is live.
 fn resumableDefaultKind() u8 {
     const layout_name = core.getState().config.tiling.defaultLayout();
@@ -486,7 +482,8 @@ pub fn applyModelLevel(m: *model.Model) void {
         // (a module trimmed its variant list between runs) would otherwise
         // index past the end of the module's own table. Clamp to the reported
         // count and say so, rather than reading out of bounds.
-        if (@import("contract").moduleOf(s.params.kind)) |l| {
+        const restored = @import("contract").moduleOf(s.params.kind);
+        if (restored) |l| {
             const vc = l.variant_count;
             if (s.params.variant_idx >= vc) {
                 log.warn(
@@ -497,7 +494,7 @@ pub fn applyModelLevel(m: *model.Model) void {
                 s.params.variant_idx = vc -| 1;
             }
         }
-        if (@import("contract").moduleOf(s.params.kind) == null and tiling_mods.len > 0) {
+        if (restored == null and tiling_mods.len > 0) {
             const fallback = resumableDefaultKind();
             log.warn(
                 "handoff: restoring persisted layout kind {} which no " ++

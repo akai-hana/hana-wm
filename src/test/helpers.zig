@@ -16,7 +16,7 @@ pub const std_wa: model.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 /// order"). Both modules' init()/deinit() are idempotent resets (they
 /// only clear their static stores), so calling this redundantly is harmless.
 /// No-ops for modules absent from this build.
-pub fn testReset() void {
+fn testReset() void {
     if (build_options.has_minimize) {
         @import("minimize").deinit();
         @import("minimize").init() catch unreachable;
@@ -146,47 +146,6 @@ pub const std_env: @FieldType(reconcile.Ctx, "env") = .{
 /// fixtures. Single source of truth so the test layouts list can't drift from
 /// the config's accepted set (src/config/config.zig canonical layout names).
 pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci", "leaf", "scroll" };
-
-/// Golden master-layout rects on the standard 800x600 fixture (gap 8 /
-/// border 2, default 50/50 split), derived from the shared constants instead
-/// of magic literals: any resize of std_wa/std_env propagates to every golden
-/// assertion. Formulas mirror tiling/modules/master.zig (totalInset,
-/// stackSeamMargin) and the sync/tiling tests rely on exactly this geometry.
-pub const std_golden = struct {
-    const gap: u16 = std_env.margins.gap; // 8
-    const border: u16 = std_env.margins.border; // 2
-    /// Outer gap both sides + both borders (master.zig totalInset).
-    const total_inset: u16 = gap *| 2 +| border *| 2; // 20
-    /// Half-gap toward the stack + row pitch (master.zig stackSeamMargin).
-    const seam: u16 = gap / 2 +| (gap +| border *| 2); // 16
-    const inner_h: u16 = std_wa.height -| total_inset; // 580
-    const split_w: u16 = std_wa.width / 2; // round(800 * 0.5) = 400
-
-    /// Single window filling the master pane.
-    pub const single = model.Rect{
-        .x = @intCast(gap),
-        .y = @intCast(gap),
-        .width = std_wa.width -| total_inset,
-        .height = inner_h,
-    };
-    /// Master pane of a two-window 50/50 split.
-    pub const master = model.Rect{
-        .x = @intCast(gap),
-        .y = @intCast(gap),
-        .width = split_w -| seam,
-        .height = inner_h,
-    };
-    /// Stack pane of a two-window 50/50 split: origin = master_w, then a
-    /// half-gap step; the stack column shrinks by the same seam.
-    pub const stack = model.Rect{
-        .x = @intCast(split_w +| gap / 2),
-        .y = @intCast(gap),
-        .width = split_w -| seam,
-        .height = inner_h,
-    };
-    /// Fullscreen rect: the entire work area.
-    pub const fullscreen = std_wa;
-};
 
 // --- 28.2: bench timings go to a FILE, not to stderr ---
 

@@ -48,19 +48,19 @@ var cached_ind_x_off: u16 = 0;
 // Cached vertical top position of the indicator glyph; constant for all cells.
 var cached_ind_y: u16 = 0;
 
-// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
+/// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
 inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
     if (i < tracking.workspace_labels.len) return tracking.workspace_labels[i];
     return "?";
 }
 
-// Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
+/// Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
 fn invalidate() void {
     cache_valid = false;
 }
 
-// Rebuilds the label-width and geometry cache if stale.
+/// Rebuilds the label-width and geometry cache if stale.
 fn ensureCache(
     dc: *drawing.DrawContext,
     config: types.BarConfig,
@@ -106,7 +106,7 @@ fn ensureCache(
     cached_ind_y = pos.y;
 }
 
-// Computes the top-left pixel position of an indicator item within a workspace cell.
+/// Computes the top-left pixel position of an indicator item within a workspace cell.
 fn indicatorPos(
     cell_w: u16,
     bar_height: u16,
@@ -141,9 +141,9 @@ fn indicatorPos(
     return .{ .x = ix, .y = iy };
 }
 
-// Draws one workspace tag cell: background, centered label, and the window
-// indicator glyph when `has_windows`. Shared by the regular per-workspace tags
-// and the single all-view collapse cell.
+/// Draws one workspace tag cell: background, centered label, and the window
+/// indicator glyph when `has_windows`. Shared by the regular per-workspace tags
+/// and the single all-view collapse cell.
 fn drawCell(
     dc: *drawing.DrawContext,
     config: types.BarConfig,
@@ -175,19 +175,19 @@ fn drawCell(
     }
 }
 
-// Whether any workspace carries at least one window (drives the indicator
-// glyph on the all-view collapse cell).
+/// Whether any workspace carries at least one window (drives the indicator
+/// glyph on the all-view collapse cell).
 fn anyWorkspaceHasWindows(ws_has_windows: []const bool) bool {
     for (ws_has_windows) |hw| if (hw) return true;
     return false;
 }
 
-// Draw workspace tags.
-//
-// `ws_current`: index of the currently active workspace. `ws_has_windows`:
-// one bool per workspace; true when it has at least one window (drives the
-// indicator glyph). While `ws_all_active` (the all_workspaces / Mod+5 view)
-// the 8+ tags collapse into a single "花" tag rendered as current.
+/// Draw workspace tags.
+///
+/// `ws_current`: index of the currently active workspace. `ws_has_windows`:
+/// one bool per workspace; true when it has at least one window (drives the
+/// indicator glyph). While `ws_all_active` (the all_workspaces / Mod+5 view)
+/// the 8+ tags collapse into a single "花" tag rendered as current.
 fn drawFrame(
     dc: *drawing.DrawContext,
     config: types.BarConfig,

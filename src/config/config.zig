@@ -42,7 +42,7 @@ const max_section_name_bytes = 64;
 /// subdirectories only via explicit `include`).  Later files win on scalar conflicts;
 /// arrays accumulate (enforced by the parser's Value getters: scalar reads resolve to
 /// the last declaration, array reads see every one).
-pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.Config {
+fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.Config {
     var names = try discover.discoverDirNames(allocator, dir_path);
     defer {
         for (names.items) |n| allocator.free(n);

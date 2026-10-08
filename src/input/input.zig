@@ -4,7 +4,7 @@
 //! reload or keyboard-mapping change). Mouse intake -- the button/motion
 //! handlers, press classification, and drag routing -- lives in mouse.zig and
 //! is re-exported below; key dispatch stays here (the Super+click grab itself
-//! is installed by `grabs.grabMouseButtons`, see `setup` below).
+//! is installed by `grabs.grabMouseButtons`, sequenced by main after `setup`).
 //! The action dispatcher itself (executeAction) lives in dispatch.zig,
 //! re-exported below: mouse.zig dispatches config mouse binds
 //! through dispatch.zig directly, so neither mouse nor dispatch needs to import

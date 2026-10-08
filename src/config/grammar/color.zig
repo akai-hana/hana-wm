@@ -4,8 +4,8 @@
 //! (`getColorFromValue`) and the document-global palette collection
 //! (`collectPalette`).
 //!
-//! Split out of parser.zig (round-2 review): the value-level color
-//! grammar is a self-contained sub-language. The TOKEN-level
+//! The value-level color grammar, extracted from parser.zig: it is a
+//! self-contained sub-language. The TOKEN-level
 //! spellings stay in parser -- `parseColor` (a hex string to a
 //! u32) and the weight markers (`parseWeightPrefix`/`isWeightToken`/
 //! `weightFromToken`/`splitWeightPrefix`), which the bare-token
@@ -13,8 +13,8 @@
 //! schema: it reads parser's `Value` and token grammar, and schema
 //! (and bar_properties) read this file's decoders. The seam is
 //! one-directional -- parser never imports color -- so it cannot
-//! cycle, which is what lets bar_properties split off schema next
-//! without a schema<->bar_properties loop.
+//! cycle, which is how bar_properties sits beside schema without
+//! a schema<->bar_properties loop.
 
 const std = @import("std");
 const log = @import("log");

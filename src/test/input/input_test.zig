@@ -105,7 +105,7 @@ test "KeybindResolver: lookup returns a pointer into the live binding slice" {
 // data, so every unreachable shape is pinned here without an X server.
 test "mouse binds the root grab cannot deliver are identifiable" {
     const grab: grabs.MouseGrabSpec = .{
-        .buttons = &[_]u8{ 1, 2, 3, 4, 5 },
+        .buttons = &grabs.mouse_grab_buttons,
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
     };

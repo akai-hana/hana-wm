@@ -14,10 +14,9 @@
 > You may see statements on this README that are still a WiP. Once I do finish though, you'll see this message disappear.
 
 > [!TIP]  
-> hana contains three layers of documentation:
+> hana contains two layers of documentation:
 > 1. [#introduction](#introduction) for a users' surface overview
 > 2. [#body](#body) for a curious users' more in-depth view of any particular topic
-> 3. Individual markdown files for developers, highlighting technical/implementation details, one for each sub-system's directory.
 > 
 > The code itself is also extensibly commented. And there's also templates to create new modules/plugins for every particular sub-system, also for the sake of the QoL of developers' who want to extend hana.
 
@@ -160,7 +159,7 @@ Finally, I wanted foundational source code **cleanness** and **flexibility**, bo
 - **On cleanness**, sub-systems and modules should not only be handled properly as detachables, but hana's source code should also NOT reference the removed module in any way. \
 
   This means that modules interact with closed cores that introduce their own contract-based interfaces. \
-  Concretely: hana's core never imports an optional sub-system by name: it only knows the open contracts declared in `src/core/architecture/contract.zig` (`Surfaces`, `WindowModule`, `Segment`, `Layout`), and iterates the modules that are actually compiled in through build-GENERATED registries (`window_modules`, `tiling_modules`, `bar_modules`), populated from the files found on the codebase.
+  Concretely: hana's core never imports an optional sub-system by name: it only knows the open contracts declared in `src/core/architecture/` (`Surfaces` in `seams.zig`; `WindowModule`, `Segment`, `Layout` in `contract.zig`), and iterates the modules that are actually compiled in through build-GENERATED registries (`window_modules`, `tiling_modules`, `bar_modules`), populated from the files found on the codebase.
   
 - **On flexibility**, the ability for users to extend hana by their own modules should be the bestest possible. \
   The general interfaces that keep cores closed to modules _also_ allow new modules to be created under those same interfaces.
@@ -261,7 +260,7 @@ dev/scripts/xtest.sh zig build test   # THE test command: Xvfb-backed
 - **Always run the suite through `dev/scripts/xtest.sh`.** It starts its own
   isolated Xvfb, points `DISPLAY` at it, and sets `HANA_REQUIRE_X=1`. A bare
   `zig build test` is headless, so every X-gated test becomes a `SkipZigTest`
-  that still counts green — a passing summary covering ~33 fewer tests than it
+  that still counts green — a passing summary covering ~44 fewer tests than it
   looks like. On a machine with a live hana session, going bare is also how
   those tests end up on the real `:0`, grabbing focus from your session.
 
@@ -269,10 +268,12 @@ dev/scripts/xtest.sh zig build test   # THE test command: Xvfb-backed
   subsystem layering described under [Architecture](#architecture).
 - `zig build check-all` additionally runs the modularity matrix
   (`dev/scripts/check-modularity.sh`: builds each module in isolation) — kept
-  separate from `check` because it cold-builds ~25 configurations.
-- Latency benchmarks are opt-in: `zig build test -Dbench` runs the
-  `focus_latency_test`/`tiling_latency_test` full loops and prints timings
-  (off by default, so the normal suite stays fast and silent). `zig build
+  separate from `check` because it cold-builds ~31 configurations.
+- Latency benchmarks are opt-in: `zig build test -Dbench` (or the
+  `zig build bench` step) runs the `perf_test`/`focus_latency_test`/
+  `tiling_latency_test` full loops and appends the timings to
+  `.zig-cache/bench/timings.txt` (off by default, so the normal suite stays
+  fast and silent). `zig build
   -Dprofile-key` instruments the key-dispatch path (receive → action latency).
 - End-to-end X scenarios live in `dev/harness/`. `dev/harness/run-scenario.sh
   --golden S01-spawn-tiled …` records a baseline, and `--compare` diffs a run

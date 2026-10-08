@@ -21,9 +21,9 @@ pub fn parseCapacity(contents: []const u8) ?u8 {
     return v;
 }
 
-/// Charge % of the first present battery under /sys/class/power_supply.
 var g_num: [16]u8 = undefined;
 
+/// Charge % of the first present battery under /sys/class/power_supply.
 fn read() ?systatus.Sample {
     for (0..battery_probe_slots) |i| {
         var path_buf: [64]u8 = undefined;

@@ -374,10 +374,7 @@ fn tryRungNativeAlsa() bool {
 /// `.rate_limited`. Kept as a per-sub query because the slider core throttles
 /// on it and brightness's sysfs path genuinely is immediate -- folding the
 /// answer to a constant here would push that distinction into every
-/// caller.
-/// The slider core throttles on this, so folding it to a constant would either
-/// throttle the native path needlessly or let the subprocess rungs commit on
-/// every scroll event.
+/// caller (and let the subprocess rungs commit on every scroll event).
 fn commitCost() slider.CommitCost {
     return switch (latchedRung(g_backend)) {
         .native_pulse, .native_alsa => .immediate,
@@ -453,13 +450,10 @@ fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) slider.Label {
 
 /// Idle label hook: the slider core renders this during the segment's draw.
 /// Test-only seam: the display state `label` reads (`g_pct`, `g_muted`) is
-/// module-private, and the inline tests that used to live in this file had
-/// direct access to it. They are dead for good reason, not just unused: this
-/// harness runs tests from the test ROOT, so an inline test in an imported
-/// module is never even ANALYZED. The two `label` tests below were still calling
-/// the pre-26.8 by-pointer signature, so they could not have compiled had they
-/// run. They now live in `src/test/bar/volume_test.zig` and need this to set
-/// their state. A plain `pub` on the globals would export mutable global state to
+/// module-private, and its tests live in `src/test/bar/volume_test.zig`,
+/// which needs this to set their state: this harness runs tests from the test
+/// ROOT, so an inline test in an imported module is never even ANALYZED. A
+/// plain `pub` on the globals would export mutable global state to
 /// every importer; this scopes the write to an obviously test-shaped name.
 pub fn setDisplayForTest(pct: u8, muted: bool) void {
     g_pct = pct;

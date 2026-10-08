@@ -1,20 +1,9 @@
-//! Per-test temp files, built on `std.testing.tmpDir`. (28.5)
+//! Per-test temp files, built on `std.testing.tmpDir`.
 //!
-//! This replaces a hand-rolled scratch directory that had three separate
-//! problems, all of which the standard helper already handles:
-//!
-//!   - Uniqueness was argued from a PRNG seeded by the realtime clock and the
-//!     pid. `std.testing.tmpDir` is per-CALL and Zig guarantees each gets its
-//!     own directory, so the clock argument was load-bearing for no reason.
-//!   - Paths were formatted through `std.heap.page_allocator` while the test
-//!     ran on `std.testing.allocator`. Everything page-allocated is invisible to
-//!     the leak checker, so a genuine leak in the surrounding test could not be
-//!     reported -- the file under test was hiding the failure it was written to
-//!     catch.
-//!   - `cleanupScratch` set `scratch_dir = null` whether or not
-//!     `deleteDirAbsolute` succeeded. On failure the next call re-created a NEW
-//!     directory and the old one was orphaned on disk, still holding its files.
-//!     `TmpDir.cleanup` has no such branch to get wrong.
+//! One temp dir plus one file per `TmpFile`, owned by the test holding it:
+//! uniqueness comes from `tmpDir` itself (per call), every path buffer lives
+//! on the test's allocator so the leak checker sees it, and cleanup goes
+//! through `TmpDir.cleanup`, which cannot orphan a directory on failure.
 
 const std = @import("std");
 

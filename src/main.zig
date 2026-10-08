@@ -126,11 +126,10 @@ pub fn main(init: std.process.Init) !void {
     hz.ensureRefreshRateDetected(x.conn);
 
     // Mouse grabs and the cursor theme both read the live config (the bind
-    // table and the theme name), so this cannot run until core.init above has
-    // published the state -- it used to sit next to the X connect, 20 lines
-    // BEFORE core.init, where events.grabMouseButtons() called getState() and
-    // aborted the boot with "core: getState() called before init()". It is here
-    // so the input layer's own order still reads setup-then-buildKeybinds.
+    // table and the theme name), so both run only after core.init above has
+    // published the state: any earlier, getState() panics ("called before
+    // init()"). Placement also keeps the input layer's own order reading
+    // setup-then-buildKeybinds.
     // The mouse grab itself is sequenced from HERE: grabs reads input's
     // resolved keybind list, so input must not import grabs back.
     input.setup(x.conn, x.screen);
@@ -181,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     requests.flush(x.conn);
     log.info("hana booted up successfully!", .{});
 
-    // Re-exec session hand-off (restart.execNext sets restart_env). The env
+    // Re-exec session hand-off (restart.execNext sets restore_env). The env
     // var is the ONLY adoption gate: execNext sets it alongside a file it has
     // just written, so an env-gated boot always reads its own predecessor's
     // record. A cold boot (no env) adopts nothing, and discards a leftover

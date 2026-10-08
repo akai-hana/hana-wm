@@ -82,7 +82,7 @@ pub const Sink = struct {
     ptr: *anyopaque,
     vt: *const VTable,
 
-    pub const VTable = struct {
+    const VTable = struct {
         map: *const fn (*anyopaque, model.WindowId) void,
         configure: *const fn (*anyopaque, model.WindowId, Configure) void,
         border_pixel: *const fn (*anyopaque, model.WindowId, u32) void,

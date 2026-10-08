@@ -27,12 +27,12 @@ pub const max_file_bytes = 1024 * 1024;
 /// spends the most comments defending against. Both bounds sit far above any
 /// real config (the reference set is 6 files, ~30KB).
 pub const max_config_files = 128;
-pub const max_total_config_bytes = 8 * 1024 * 1024;
+const max_total_config_bytes = 8 * 1024 * 1024;
 
 /// The files one load consumed, in merge order, plus their running byte total.
 /// The list is what the re-exec snapshot freezes; the total is the half of the
 /// load ceiling that a file COUNT cannot express. Both counters move in one
-/// place (`parseAndMerge`), the single choke point every read passes through, so
+/// place (`mergeAndRecord`), the single choke point every read passes through, so
 /// a new file-reading path cannot forget to check them.
 pub const ReadSet = struct {
     paths: std.ArrayList([]const u8) = .empty,
@@ -272,9 +272,9 @@ pub fn parseDirDoc(a: std.mem.Allocator, read: *ReadSet, in: DirInput) !parser.D
 }
 
 /// Errors that mean "nothing to load HERE", so the search moves on without a
-/// warning. One list for the search: the previous spelling had the dir loop and
-/// the file loop pass their own inline set each, so the two could drift without
-/// anything noticing, and a typo'd entry is a warning that never fires.
+/// warning. One list for the search, shared by the dir loop and the file loop
+/// so they cannot drift apart, and a typo'd entry is a warning that never
+/// fires.
 /// (NotDir is inert for a single-file path, which is why one set fits both.)
 ///
 /// The pinned-snapshot branch in `loadConfigDefault` keeps its own switch on

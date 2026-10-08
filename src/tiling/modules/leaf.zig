@@ -9,7 +9,7 @@ const Region = tiling.Region;
 /// gap at each seam; border subtracted at leaf nodes only. Requires the
 /// engine contract's non-empty `v.order` (recursion halves never produce an
 /// empty sub-slice for n >= 2).
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
 
     // Strip the outer gap; each recursive split inserts one gap at its seam

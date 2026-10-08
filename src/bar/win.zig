@@ -10,8 +10,6 @@
 //! Atom storage is owned on this module (resolved once in initAtoms), not by
 //! the bar orchestrator.
 
-const std = @import("std");
-
 const core = @import("core");
 const types = @import("types");
 const xcb = core.xcb;

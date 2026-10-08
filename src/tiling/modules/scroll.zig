@@ -26,7 +26,7 @@ pub fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
 
 /// Compute scroll layout: half-screen slots, full gap at screen edges and
 /// half-gap at interior boundaries. Off-viewport slots hidden; offset clamped.
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
     const windows = v.order;
 

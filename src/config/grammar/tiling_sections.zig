@@ -44,8 +44,8 @@ const max_master_count: u8 = 10;
 /// Tiling's NON-scalar structures: the layouts array (cycle order +
 /// per-workspace overrides), per-layout variant preferences, and
 /// master-stack counts. Every tiling SCALAR ([tiling] flags, aesthetics,
-/// master trio) is driven by schema.applyAll; like parseTiling always did,
-/// all of it stays gated on the [tiling] section existing.
+/// master trio) is driven by schema.applyAll; all of it stays gated on the
+/// [tiling] section existing.
 pub fn parseTilingStructures(
     allocator: std.mem.Allocator,
     doc: *parser.Document,

@@ -46,7 +46,7 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 
 /// A device keymap flattened to the level-0 keysym per keycode, plus whether
 /// it passed the health check.
-pub const BuiltTable = struct {
+const BuiltTable = struct {
     table: [constants.x11_max_keycode]u32,
     /// True if the keymap has at least min_keymap_symbols reachable keysyms in
     /// the 8..128 range.
@@ -70,7 +70,7 @@ pub fn buildKeysymTable(km: *xkb_keymap) BuiltTable {
 }
 
 /// One (keysym, keycode) pair in the reverse index.
-pub const ReverseEntry = struct { keysym: u32, keycode: u8 };
+const ReverseEntry = struct { keysym: u32, keycode: u8 };
 
 /// The reverse index: the populated level-0 keysyms, sorted by keysym.
 ///

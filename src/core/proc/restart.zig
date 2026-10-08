@@ -73,43 +73,10 @@ pub fn consumeReexec() bool {
 /// callers that hand it to `execv`. Null when re-exec was never armed (init
 /// saw no /proc). `execNext` takes this form so the hand-off does not
 /// re-duplicate a string the process is already holding.
-///
-/// This USED to be two functions: a `?[]const u8` `selfPath` and this
-/// sentinel form. COREH-14 added the sentinel form because the one-shot
-/// re-exec path was `mustDupeZ`-ing the path to satisfy `execv`, and left
-/// the original behind with no callers. It claimed the event loop handed it
-/// to execNext, which was never true.
 fn selfPathZ() ?[:0]const u8 {
     return exec_path_z;
 }
 
-/// Execs `self_path` IN PLACE, inheriting environ/DISPLAY. Never returns.
-/// MUST be called only after the X connection is closed (handleReexec does):
-/// a live inherited fd would keep the old client (and its root
-/// SubstructureRedirect grab) alive while the fresh connection tries to
-/// claim the same grab, and the server would reject the newcomer with
-/// BadAccess.
-///
-/// Deliberately NO fork: the process identity (pid and parent) survives
-/// the hand-off. Under startx the display lives exactly as long as the
-/// session client (xinit -> Xsession -> .xinitrc -> this process); replacing
-/// the image in place keeps that chain unbroken, so the successor boots into
-/// a live server and the session only ends when the new WM actually exits.
-/// (The original fork-then-exit design killed every supervised re-exec:
-/// the parent's exit made the session script return and xinit tore down
-/// Xorg mid-hand-off.)
-///
-/// The restore path crosses the hand-off in `restore_env`: execv inherits
-/// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
-/// environment is the one channel a fresh boot can see.
-/// The complete re-exec hand-off, assembled once and owned by `restart`.
-///
-/// These three values used to travel separately: the event loop held the exec
-/// path, built the restore path, and called into config for the snapshot path
-/// before handing each to `execNext` as loose arguments. Three sources of truth
-/// for one transition means the sequence has to be re-derived at every call
-/// site, and nothing can assert the set is complete. Naming the record makes
-/// "what crosses the hand-off" a single declaration.
 /// The environment variables that carry the re-exec hand-off. The WRITER
 /// (`execNext`) and the READER (boot, via `restorePathFromEnv`) have to agree
 /// exactly, and both sides used to spell the names as string literals at their
@@ -126,6 +93,14 @@ pub fn restorePathFromEnv() ?[*:0]const u8 {
     return std.c.getenv(restore_env);
 }
 
+/// The complete re-exec hand-off, assembled once and owned by `restart`.
+///
+/// These three values used to travel separately: the event loop held the exec
+/// path, built the restore path, and called into config for the snapshot path
+/// before handing each to `execNext` as loose arguments. Three sources of truth
+/// for one transition means the sequence has to be re-derived at every call
+/// site, and nothing can assert the set is complete. Naming the record makes
+/// "what crosses the hand-off" a single declaration.
 const Handoff = struct {
     /// Sentinel-terminated (`selfPathZ()`); this process's own image.
     self_path: [:0]const u8,
@@ -153,6 +128,25 @@ pub fn currentHandoff(restore_path: []const u8, config_snapshot: ?[:0]const u8) 
     };
 }
 
+/// Execs `self_path` IN PLACE, inheriting environ/DISPLAY. Never returns.
+/// MUST be called only after the X connection is closed (handleReexec does):
+/// a live inherited fd would keep the old client (and its root
+/// SubstructureRedirect grab) alive while the fresh connection tries to
+/// claim the same grab, and the server would reject the newcomer with
+/// BadAccess.
+///
+/// Deliberately NO fork: the process identity (pid and parent) survives
+/// the hand-off. Under startx the display lives exactly as long as the
+/// session client (xinit -> Xsession -> .xinitrc -> this process); replacing
+/// the image in place keeps that chain unbroken, so the successor boots into
+/// a live server and the session only ends when the new WM actually exits.
+/// (The original fork-then-exit design killed every supervised re-exec:
+/// the parent's exit made the session script return and xinit tore down
+/// Xorg mid-hand-off.)
+///
+/// The restore path crosses the hand-off in `restore_env`: execv inherits
+/// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
+/// environment is the one channel a fresh boot can see.
 pub fn execNext(handoff: Handoff) noreturn {
     const self_z = handoff.self_path;
     const restore_z = mustDupeZ(handoff.restore_path, "restore path");

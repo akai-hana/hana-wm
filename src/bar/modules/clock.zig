@@ -11,7 +11,7 @@
 //! also moves the reserved slot width, so the bar re-lays the row for the new
 //! mode rather than ticking in place (see bar.updateClock).
 //! Single-threaded by construction -- all state lives on the main thread, so
-//! there are no locks, flags, or drain races (docs/clock-plan.md).
+//! there are no locks, flags, or drain races.
 
 const std = @import("std");
 const types = @import("types");

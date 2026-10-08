@@ -35,7 +35,7 @@ const model = @import("model");
 /// window at once and must not assume sliced input.
 /// Origin top-left, y-down; use the engine's `outerArea`/`shrinkClamped`/
 /// `waY` helpers (see monocle.zig, the smallest shipped layout).
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     if (v.order.len == 0) return;
 
     // TODO: your placement algorithm. This template stacks every window at

@@ -115,7 +115,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
         return;
     }
     // Scroll buttons 4/5: no click semantics, no drag anchor. The repaint is
-    // segment-scoped (see redrawScrolledSegment) so a fast wheel sweep never
+    // segment-scoped (see redrawScopedSegment) so a fast wheel sweep never
     // forces full-bar redraws.
     //
     // Note: `s.drag_segment` is deliberately NOT nulled on a scroll press --

@@ -40,7 +40,6 @@ pub const xk_end = editor.xk_end;
 pub const Action = editor.Action;
 pub const Mode = editor.Mode;
 pub const EditorState = editor.EditorState;
-pub const Handlers = editor.Handlers;
 pub const handleCtrl = editor.handleCtrl;
 pub const insertChar = editor.insertChar;
 pub const insertSlice = editor.insertSlice;
