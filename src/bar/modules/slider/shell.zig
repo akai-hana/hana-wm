@@ -44,7 +44,6 @@ const time = @import("time");
 const level = @import("level");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const scaffold = @import("scaffold");
 const contract = @import("contract");
 
 /// The generated registry, imported directly: this file never imports the
@@ -218,14 +217,14 @@ fn applyCommitWindow(idx: usize) void {
 /// DIFFERENT values. `widthState.resolved` is now that one rule, shared
 /// with systatus, so the hit-test, the drag range and the reservation cannot
 /// disagree about what "not measured yet" means.
-/// The shared `scaffold.widthState` singleton for this control's name, which
+/// The shared `segmod.widthState` singleton for this control's name, which
 /// owns the store / consumeRedrawRequest / resolved triple. The hand-rolled
 /// `slot_w` field plus its inline "did the width change? mark dirty"
 /// was a second implementation of code systatus already used, and this module
 /// is comptime-indexed by `subs`, so one instantiation per name is exactly
 /// the state each control needs.
 fn widthStateFor(comptime idx: usize) type {
-    return scaffold.widthState(subs[idx].name);
+    return segmod.widthState(subs[idx].name);
 }
 
 fn reservedWidth(idx: usize) u16 {

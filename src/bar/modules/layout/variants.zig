@@ -7,7 +7,7 @@ const pipeline = @import("pipeline");
 const actions = @import("actions");
 const contract = @import("contract");
 const core = @import("core");
-const scaffold = @import("scaffold");
+const segmod = @import("segment");
 
 // Layout registry (build-generated); the active layout is a `u8` index into
 // it, and each module carries its own variant indicator list. Empty when the
@@ -48,7 +48,7 @@ fn getIndicator() []const u8 {
 /// no indicator is available -- a successful zero-width draw, which is not the
 /// same thing as a failed one (see contract.Painted).
 fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
-    return scaffold.drawAndStore("variants", dc, config, height, start_x, getIndicator());
+    return segmod.drawAndStore("variants", dc, config, height, start_x, getIndicator());
 }
 
-pub const module = scaffold.module("variants", draw, actions.stepVariantDir, .{ .mode = .measured_relayout });
+pub const module = segmod.module("variants", draw, actions.stepVariantDir, .{ .mode = .measured_relayout });

@@ -39,10 +39,9 @@ const Metrics = metrics.Metrics;
 const segmod = @import("segment");
 const barwin = @import("win");
 
-// Bar visibility: `visibility` holds the pure policy decisions; `visibility_glue`
-// holds the map/unmap + screen-claim wire glue that applies them.
+// Bar visibility: policy (pure decisions) + the apply* wire family
+// (map/unmap + screen-claim publish + reconcile), one file with two sections.
 const visibility = @import("visibility");
-const visibility_glue = @import("visibility_glue");
 const input_events = @import("input_events");
 const repaint = @import("repaint");
 
@@ -53,7 +52,7 @@ const contract = @import("contract");
 
 const state = @import("state");
 // The state itself now lives in state.zig (a leaf, so the repaint /
-// visibility_glue / input_events satellites can read it without
+// visibility / input_events satellites can read it without
 // importing this file back -- that import was the cycle). Aliased here
 // so this file's own call sites keep their vocabulary; `gBar` is a
 // POINTER to the shared handle, because a struct-by-value alias would
@@ -206,12 +205,12 @@ pub fn init() !void {
     // dangle as soon as this init returns, and the prompt calls back through
     // it on the first toggle.
     g_bar_handlers = .{
-        .presentForPrompt = visibility_glue.presentForPrompt,
-        .dismissAfterPrompt = visibility_glue.dismissAfterPrompt,
+        .presentForPrompt = visibility.presentForPrompt,
+        .dismissAfterPrompt = visibility.dismissAfterPrompt,
         .isBarWindow = isBarWindow,
     };
     for (segmod.all()) |seg| if (seg.init) |f| try f(cs.alloc, cs.conn, &g_bar_handlers);
-    visibility_glue.syncScreenClaim();
+    visibility.syncScreenClaim();
 }
 
 pub fn deinit() void {
@@ -302,7 +301,7 @@ fn applyReload(old: *State, m: Metrics) !void {
     new_state.vis.preferred = old.vis.preferred;
     gBar.state = new_state;
     usable_area.setSurfaceWindow(new_bar.setup.win_id);
-    visibility_glue.syncScreenClaim();
+    visibility.syncScreenClaim();
     repaint.submitDrawBlockingFull();
     if (new_state.vis.shown) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
     // No explicit destroy: `deinit` now owns the window and its colormap.
@@ -347,7 +346,7 @@ fn applyBarScreenPosition() i16 {
     // publishes the new edge to core BEFORE the caller's reconcile re-derives
     // any placement from it. Core owns the area math; the bar only
     // contributes "I take this many pixels from this edge."
-    visibility_glue.syncScreenClaim();
+    visibility.syncScreenClaim();
     return new_y;
 }
 
@@ -371,7 +370,7 @@ pub fn isBarWindow(win: u32) bool {
 pub fn setBarState(action: types.Action) void {
     const s = gBar.state orelse return;
     if (action == .toggle_bar_visibility) s.vis.preferred = !s.vis.preferred;
-    visibility_glue.applyFullscreenVisibility();
+    visibility.applyFullscreenVisibility();
 }
 
 pub fn updateIfDirty() void {
@@ -384,7 +383,7 @@ pub fn updateIfDirty() void {
     const fullscreen_rev = core.fullscreen.rev();
     if (s.facts.fullscreen_rev != fullscreen_rev) {
         s.facts.fullscreen_rev = fullscreen_rev;
-        visibility_glue.applyFullscreenVisibility();
+        visibility.applyFullscreenVisibility();
     }
     if (!s.vis.shown) return;
 
@@ -485,8 +484,8 @@ pub const surfaces = @import("contract_x11").Surfaces{
     .handleButtonMotion = input_events.handleButtonMotion,
     .handleButtonRelease = input_events.handleButtonRelease,
     .setBarState = setBarState,
-    .hideBarForFullscreen = visibility_glue.hideBarForFullscreen,
-    .updateBarVisibilityForWorkspace = visibility_glue.updateBarVisibilityForWorkspace,
+    .hideBarForFullscreen = visibility.hideBarForFullscreen,
+    .updateBarVisibilityForWorkspace = visibility.updateBarVisibilityForWorkspace,
     .toggleBarSegmentAnchor = toggleBarSegmentAnchor,
     .barForcedHiddenByFullscreen = visibility.barForcedHiddenByFullscreen,
     .chromeToggleOverlay = chromeToggleOverlay,

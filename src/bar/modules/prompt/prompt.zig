@@ -13,7 +13,6 @@ const contract_x11 = @import("contract_x11");
 
 const masks = @import("masks");
 const segmod = @import("segment");
-const scaffold = @import("scaffold");
 const editor = @import("editor");
 const completion = @import("completion");
 const render = @import("render");
@@ -430,7 +429,7 @@ fn overlayDrawHook(ctx: *anyopaque, x: u16) !u16 {
     return draw(dc, x);
 }
 
-pub const module = scaffold.module(
+pub const module = segmod.module(
     "prompt",
     drawHook,
     null,

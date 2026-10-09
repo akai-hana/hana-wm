@@ -24,7 +24,6 @@ const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
 
-const scaffold = @import("scaffold");
 const time = @import("time");
 const read_interval_ms: i64 = 2000;
 
@@ -154,14 +153,14 @@ const Readout = struct {
 var g_readouts: [subs.len]Readout = @splat(.{});
 
 /// The last drawn width of a readout is NOT tracked in `Readout`: it is the
-/// shared `scaffold.widthState` singleton for that readout's name, which owns
+/// shared `segmod.widthState` singleton for that readout's name, which owns
 /// the store / consume / naturalWidth triple. The bar-private copy of that
 /// triple (a `g_slot_width` array plus an inline "did the width change? mark
 /// dirty" at the draw site) was a second implementation of code that already
 /// existed, and the two could drift; every readout is comptime-indexed by
 /// `segmentFor`, so one instantiation per name is exactly the state each needs.
 fn widthStateFor(comptime idx: usize) type {
-    return scaffold.widthState(subs[idx].name);
+    return segmod.widthState(subs[idx].name);
 }
 
 /// A rendered readout: the full segment text plus the span of the value within

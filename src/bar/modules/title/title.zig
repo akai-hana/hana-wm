@@ -18,7 +18,6 @@ const segmod = @import("segment");
 const geom = @import("geom");
 const vocab = @import("vocab");
 const contract = @import("contract");
-const scaffold = @import("scaffold");
 // The scrolling title addon (the carousel) binds its motion, cycle and
 // frame-pacing hooks to this contract; membership in the generated
 // `title_subs` registry is driven by file presence alone, so this module
@@ -401,7 +400,7 @@ fn needsRepaintHook() bool {
 var scroll_active: bool = false;
 
 /// This module's bar-segment contribution (registry binding).
-pub const module = scaffold.module(
+pub const module = segmod.module(
     "title",
     drawHook,
     null,

@@ -11,6 +11,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
+const action_mod = @import("action");
 const types = @import("types");
 const restart = @import("restart");
 const constants = @import("constants");
@@ -174,7 +175,7 @@ pub fn executeAction(action: *const types.Action) void {
 }
 
 /// The one way to run a scaffolded tiling op. `tag` is the action it runs, and
-/// the `comptime` check makes `types.needsTilingFocusScaffold` a GATE rather
+/// the `comptime` check makes `action_mod.needsTilingFocusScaffold` a GATE rather
 /// than documentation: grafting a tag the type says does not need it (or
 /// renaming an arm so the graft silently covers a different tag) is a build
 /// error, not a runtime surprise.
@@ -188,8 +189,8 @@ pub fn executeAction(action: *const types.Action) void {
 /// that direction. `pub` for mouse.zig, whose toggle_floating_window
 /// mouse binds graft through it.
 pub inline fn grafted(comptime tag: std.meta.Tag(types.Action), comptime op: anytype, arg: anytype) void {
-    comptime if (types.needsTilingFocusScaffold(tag)) {} else @compileError(
-        "dispatch.grafted used for an action types.needsTilingFocusScaffold does not declare",
+    comptime if (action_mod.needsTilingFocusScaffold(tag)) {} else @compileError(
+        "dispatch.grafted used for an action action_mod.needsTilingFocusScaffold does not declare",
     );
     focus.setSuppressReason(.tiling_operation);
     op(arg);

@@ -44,15 +44,10 @@ pub inline fn model() *const model_mod.Model {
 /// readers take `*const` from `model()`, writers explicitly opt into `mut()`.
 /// Zero-cost.
 ///
-/// Deliberately bumps NO fact revision ("rev bumps into mut()" was considered
-/// by the KISS audit and rejected): mut() cannot know WHICH fact a mutation
-/// changed -- `focus.setFocus(pipeline.mut(), ...)` is a focus_rev change, a
-/// params write is layout_rev, and an unconditional window_rev here would
-/// repaint every bar segment on every focus change (a real regression: window
-/// dirties drive the all-segments sweep, focus only the title). Fact bumps
-/// stay adjacent to the change that owns them; the ONE structural bump
-/// lives in reconcileGrab, which is the pattern for making a bump
-/// impossible-to-forget -- when a path has a single meaning, not generally.
+/// Deliberately bumps NO fact revision: the bump policy (why fact revs stay
+/// adjacent to their owning change, and why reconcileGrab's window bump is
+/// the one structural exception) is model-owner role documentation and lives
+/// with the role in ARCHITECTURE.md section 5.3.
 pub inline fn mut() *model_mod.Model {
     if (!core.isModelReady()) @panic("pipeline.mut() called before init()");
     return &instance;

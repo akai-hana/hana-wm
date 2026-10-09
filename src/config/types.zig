@@ -2,9 +2,10 @@
 //! Defines all types used to represent the WM configuration schema.
 
 const std = @import("std");
+const action = @import("action");
 const constants = @import("constants");
+const defaults = @import("defaults");
 const ids = @import("ids");
-const model = @import("model");
 const scaling = @import("scaling");
 
 /// A value that can be expressed as either an absolute pixel count or a
@@ -95,145 +96,14 @@ pub const palette_text_color = "text_color";
 
 // Keybinding and action types
 
-pub const Dir = enum { forward, reverse };
-pub const SwapMode = enum { normal, focus_swap };
-/// Single source: the model owns the restore-order vocabulary (its enum is
-/// what minimize/actions dispatch on); config aliases it so the Action knob
-/// and the runtime share one type and one definition.
-pub const RestoreOrder = model.RestoreOrder;
-
-pub const Action = union(enum) {
-    exec: []const u8,
-    close_window,
-    /// In-place config reload: re-reads config.toml and applies the diff to
-    /// the live model, without restarting the process (proc.reload flag).
-    /// On success the live config is also frozen into the re-exec snapshot.
-    reload_config,
-    /// Unconditional in-place re-exec of the current binary at the resolved
-    /// executable path (restart.requestReexec): reloads the whole process,
-    /// no binary-change check. BINARY-ONLY: the successor boots from the
-    /// frozen last-good config snapshot (HANA_CONFIG_DIR), never re-reading
-    /// the config files; chain with reload_config for a full reload.
-    reload_hana,
-    cycle_layout: Dir,
-    toggle_bar_visibility,
-    toggle_bar_position,
-    set_master_width: Dir,
-    set_master_count: Dir,
-    /// Grow the topmost/bottommost stack slave's share of the column (mod+n/o).
-    grow_stack: Dir,
-    toggle_floating_window,
-    toggle_fullscreen,
-    swap_master: SwapMode,
-    switch_workspace: u8,
-    move_to_workspace: u8,
-    toggle_tag: u8,
-    /// Ordered list of actions executed left-to-right (owned slice).
-    /// A `+`-linked group in a config list becomes a `.parallel` step (see
-    /// below); the enclosing `.sequence` runs steps in order, so a mixed list
-    /// like `[a, b + c, d]` is a, then b+c, then d.
-    sequence: []Action,
-    /// One batch of sub-actions launched together: every member is dispatched
-    /// before the enclosing sequence proceeds to its next step, and no member
-    /// waits on another (owned slice). The WM is single-threaded, so this is
-    /// the same-batch form of parallelism: sync actions complete back-to-back
-    /// and `exec` children run as concurrent processes.
-    parallel: []Action,
-    dump_state,
-    minimize_window,
-    unminimize: RestoreOrder,
-    unminimize_all,
-    cycle_variants: Dir,
-    toggle_prompt,
-    /// Shows all windows from every workspace at once; toggled on/off.
-    all_workspaces,
-    /// Pin/unpin focused window to every workspace.
-    pin_window,
-    /// Cycle focus forward/right or backward/left.
-    cycle_focus: Dir,
-    /// Move focused window forward.
-    move_window_next,
-    /// Move focused window backward.
-    move_window_prev,
-    /// Shift scroll-layout viewport left/right by one slot.
-    scroll_view: Dir,
-
-    pub fn deinit(self: *Action, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .exec => |cmd| allocator.free(cmd),
-            .sequence, .parallel => |acts| {
-                for (acts) |*a| a.deinit(allocator);
-                allocator.free(acts);
-            },
-            // Payload-free variants.
-            .all_workspaces, .close_window, .dump_state, .grow_stack, .minimize_window, .move_to_workspace, .move_window_next, .move_window_prev, .pin_window, .reload_config, .reload_hana, .swap_master, .switch_workspace, .toggle_bar_position, .toggle_bar_visibility, .toggle_floating_window, .toggle_fullscreen, .toggle_prompt, .toggle_tag, .unminimize, .unminimize_all => {},
-            // Copy payloads (Dir, u8): nothing to free.
-            .set_master_width, .set_master_count, .cycle_focus, .cycle_layout, .cycle_variants, .scroll_view => {},
-            // Deliberately no `else`: a new Action variant carrying an owned
-            // allocation has to name its free here, at compile time. A
-            // catch-all would make every future payload leak by default.
-        }
-    }
-};
-
-/// Actions that need the tiling-op focus scaffold: transient focus noise
-/// suppressed, then a settle grab, wrapped around the mutation.
-///
-/// This is a property OF THE ACTION, so it is declared here beside the union
-/// rather than left implicit in whichever switch arm happens to call the
-/// helper. The failure mode that motivated it: the graft lived at three
-/// dispatch arms, so a new mutating tag was scaffolded or not by which arm
-/// somebody wrote, and the answer was invisible at the type. The `switch` below
-/// has no `else` on purpose -- adding a variant is a compile error naming
-/// this decision, not a silent default.
-///
-/// Why only these three, when `set_master_width`, `swap_master`,
-/// `move_window_*` and `scroll_view` also mutate the layout: those reconcile
-/// inside the action itself (`actions.adjustPrimaryWidthAction` and friends
-/// each end in `pipeline.reconcileGrab`) and never move focus, so there is no
-/// transient focus event to suppress and no settle grab owed. The three
-/// grafted tags DO move focus as a side effect -- toggling float and cycling
-/// layout/variants re-derive the focused window -- so they take one grab for
-/// the whole operation instead of paying focus-then-reconcile's two.
-pub fn needsTilingFocusScaffold(comptime tag: std.meta.Tag(Action)) bool {
-    return switch (tag) {
-        // Re-derives focus as a side effect of the mutation.
-        .toggle_floating_window, .cycle_layout, .cycle_variants => true,
-        // Pure layout mutations: self-reconciling, focus-preserving.
-        .set_master_width,
-        .set_master_count,
-        .grow_stack,
-        .swap_master,
-        .move_window_next,
-        .move_window_prev,
-        .scroll_view,
-        .toggle_fullscreen,
-        // Everything else (lifecycle, bar chrome, workspaces/tags, exec,
-        // diagnostics, min/unminimize, sequence/parallel) touches neither the
-        // layout nor focus: each has its own focus transition where it needs
-        // one, and grafting here would suppress focus changes users asked for.
-        .close_window,
-        .reload_config,
-        .reload_hana,
-        .exec,
-        .sequence,
-        .parallel,
-        .dump_state,
-        .cycle_focus,
-        .switch_workspace,
-        .move_to_workspace,
-        .toggle_tag,
-        .all_workspaces,
-        .pin_window,
-        .toggle_bar_visibility,
-        .toggle_bar_position,
-        .toggle_prompt,
-        .minimize_window,
-        .unminimize,
-        .unminimize_all,
-        => false,
-    };
-}
+// The `Action` union and its payload vocabulary (`Dir`, `SwapMode`,
+// `RestoreOrder`) moved to `action.zig` — a types-free module input
+// consumes on its own stem. `Dir` and `Action` re-export here because
+// `Keybind`/`MouseBind`, the contract, and the tests name them through this
+// file; `needsTilingFocusScaffold` is generic (comptime tag) and cannot be
+// const-aliased, so `input/dispatch` and the input tests import `action`.
+pub const Dir = action.Dir;
+pub const Action = action.Action;
 
 pub const Keybind = struct {
     modifiers: u16, // u16 per XCB spec; xcb_grab_key rejects wider types
@@ -261,7 +131,7 @@ pub const MouseBind = struct {
 
 /// Maximum bytes any lowered config name (layout names, string_map keys) may
 /// occupy. Single home for the 32-byte buffers that config lookups lower into;
-/// grammar/layout_names.zig derives its bound from this so the two can't drift.
+/// vocab/layout_names.zig derives its bound from this so the two can't drift.
 pub const max_config_name = 32;
 
 /// Lowercases `str` into a `max_len`-byte stack buffer if it fits; returns
@@ -321,8 +191,8 @@ pub const TilingConfig = struct {
     master_count: u8 = 1,
     gap_width: ScalableValue = ScalableValue.absolute(10.0),
     border_width: ScalableValue = ScalableValue.absolute(2.0),
-    border_focused: Color = default_focused_border,
-    border_unfocused: Color = default_unfocused_border,
+    border_focused: Color = defaults.default_focused_border,
+    border_unfocused: Color = defaults.default_unfocused_border,
     /// Smallest on-screen width/height a tiled window (and floating drag
     /// resize) is allowed to reach, in pixels.
     min_window_dim: u16 = constants.min_window_dim,
@@ -397,20 +267,6 @@ pub const TilingConfig = struct {
 
 // Bar types
 
-// Default color scheme for the focused/unfocused tiling borders.
-const default_focused_border: Color = 0x5294E2;
-const default_unfocused_border: Color = 0x383C4A;
-
-/// Default accent color; declared once so every referencing field has a single source of truth.
-const default_accent: Color = 0x61AFEF;
-
-// Default bar background/foreground scheme. Kept in one place so the bar's
-// color defaults read as a palette rather than scattered hex literals.
-const default_bar_bg: Color = 0x222222;
-const default_bar_fg: Color = 0xBBBBBB;
-const default_bar_selected_bg: Color = 0x005577;
-const default_bar_selected_fg: Color = 0xEEEEEE;
-
 /// Where in the workspace cell the activity indicator is drawn. The `string_map`
 /// below is the accepted TOML spelling: cardinal names verbatim; diagonal names
 /// with hyphens or underscores in either axis order ("left-up" == "up_left").
@@ -470,13 +326,6 @@ pub const BarLayout = struct {
         self.segments.deinit(allocator);
     }
 };
-
-/// Type-level defaults for optional string fields in BarConfig.
-/// When a field is `null`, the corresponding default is used at read time.
-pub const default_clock_format: []const u8 = "%Y-%m-%d %H:%M:%S";
-pub const default_run_prompt: []const u8 = "run: ";
-pub const default_indicator_focused: []const u8 = "■";
-pub const default_indicator_unfocused: []const u8 = "□";
 
 /// Meanings for the free helpers' `retain_capacity` argument: `keep_capacity`
 /// reuses backing storage (a config reload repopulates the same lists), while
@@ -562,21 +411,21 @@ pub const BarConfig = struct {
     spacing: ScalableValue = ScalableValue.absolute(12.0),
 
     // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
-    bg: Color = default_bar_bg,
-    fg: Color = default_bar_fg,
-    selected_bg: Color = default_bar_selected_bg,
-    selected_fg: Color = default_bar_selected_fg,
+    bg: Color = defaults.default_bar_bg,
+    fg: Color = defaults.default_bar_fg,
+    selected_bg: Color = defaults.default_bar_selected_bg,
+    selected_fg: Color = defaults.default_bar_selected_fg,
 
     // Palette canon, declared in the theme's palette section; the other three
     // exist so the palette is first-class config even though rendering
     // consumes them through the title/run chains below.
-    primary_color: Color = default_accent,
-    secondary_color: Color = default_accent,
-    alternative_color: Color = default_accent,
-    text_color: Color = default_accent,
-    title_accent_color: Color = default_accent,
-    title_unfocused_accent: Color = default_bar_bg,
-    title_minimized_accent: Color = default_accent,
+    primary_color: Color = defaults.default_accent,
+    secondary_color: Color = defaults.default_accent,
+    alternative_color: Color = defaults.default_accent,
+    text_color: Color = defaults.default_accent,
+    title_accent_color: Color = defaults.default_accent,
+    title_unfocused_accent: Color = defaults.default_bar_bg,
+    title_minimized_accent: Color = defaults.default_accent,
 
     workspace_icons: std.ArrayList([]const u8) = .empty,
     indicator_size: ScalableValue = ScalableValue.percentage(30.0),

@@ -10,6 +10,7 @@
 const std = @import("std");
 const testing = std.testing;
 
+const action_mod = @import("action");
 const types = @import("types");
 const keybind = @import("keybind");
 const grabs = @import("grabs");
@@ -235,7 +236,7 @@ test "dispatch map refuses a config generation it was not built against" {
 // so the two cannot drift.
 test "tiling scaffold table matches the dispatcher's grafted set" {
     // The tags whose arms route through `dispatch.grafted`, spelled out. If a
-    // tag is added to `types.needsTilingFocusScaffold` this list is where it
+    // tag is added to `action_mod.needsTilingFocusScaffold` this list is where it
     // gets named, and the assertion below is what makes the naming mandatory.
     const grafted_tags = [_]std.meta.Tag(types.Action){
         .toggle_floating_window,
@@ -244,7 +245,7 @@ test "tiling scaffold table matches the dispatcher's grafted set" {
     };
 
     inline for (grafted_tags) |tag| {
-        try testing.expect(types.needsTilingFocusScaffold(tag));
+        try testing.expect(action_mod.needsTilingFocusScaffold(tag));
     }
 
     // And the converse: every tag the declaration claims is scaffolded is
@@ -258,10 +259,10 @@ test "tiling scaffold table matches the dispatcher's grafted set" {
         inline for (grafted_tags) |g| {
             if (g == tag) claimed = true;
         }
-        if (types.needsTilingFocusScaffold(tag) != claimed) {
+        if (action_mod.needsTilingFocusScaffold(tag) != claimed) {
             std.debug.print(
                 "action '{s}': needsTilingFocusScaffold={} but grafted={}\n",
-                .{ fields[i].name, types.needsTilingFocusScaffold(tag), claimed },
+                .{ fields[i].name, action_mod.needsTilingFocusScaffold(tag), claimed },
             );
             return error.TilingScaffoldDeclarationMismatch;
         }
