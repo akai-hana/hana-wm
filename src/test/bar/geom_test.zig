@@ -13,10 +13,10 @@ const std = @import("std");
 const testing = std.testing;
 
 const geom = @import("geom");
-const segment = @import("segment");
+const vocab = @import("vocab");
 
-const TitleEntry = segment.TitleEntry;
-const TitleSnapshot = segment.TitleSnapshot;
+const TitleEntry = vocab.TitleEntry;
+const TitleSnapshot = vocab.TitleSnapshot;
 
 fn snapOf(
     ms: *const std.AutoHashMapUnmanaged(u32, void),

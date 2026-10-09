@@ -5,28 +5,26 @@
 //! configured height, screen) and, in two of the four cases, from a font
 //! measurement. They used to live in a module-level `var` written by
 //! `bar.calcBarHeightAndFontSize` and read back out of the global by
-//! `drawing.SizedFontList`, which made the bar's own font size reachable
+//! `fonts.SizedFontList`, which made the bar's own font size reachable
 //! only through mutable process state that a half-finished reload could leave
 //! wrong -- and that a failed reload had to save and restore by hand.
 //!
 //! The whole resolution is one pure function here. Its only impure input is
 //! the font probe, passed in as a callback, so the rules are unit-testable
 //! without Pango, a screen, or a live config.
+//!
+//! The LIVE adapters -- reading the current config/screen and measuring the
+//! fonts through Pango's throwaway surface -- sit at the bottom of this
+//! file (they moved here from bar.zig, which used to own the "supply the
+//! live pieces" section). They are the impure half; `resolve` above stays
+//! exactly as testable as it was.
 
 const std = @import("std");
 
+const core = @import("core");
+const fonts = @import("fonts");
 const scale = @import("dpi");
 const types = @import("types");
-
-/// Default point size for scaled metrics; also the size embedded in the
-/// fallback font description (`default_fallback_font`), so drawing's
-/// last-resort font and the metric probe always agree.
-const default_scaled_font_size: u16 = 10;
-
-/// Fallback Pango font description used when no configured font loads:
-/// monospace at the default `default_scaled_font_size` point size.
-pub const default_fallback_font: [:0]const u8 =
-    std.fmt.comptimePrint("monospace:size={d}", .{default_scaled_font_size});
 
 /// A trial point size for measuring the configured fonts. Arbitrary but
 /// stable: only the ascent+descent TOTAL is used, as a px-per-point ratio, so
@@ -40,7 +38,7 @@ pub const Metrics = struct {
     /// Effective point size for the bar's own text: the configured size
     /// DPI-scaled, then refined against the bar height when configured as a
     /// percentage.
-    font_size: u16 = default_scaled_font_size,
+    font_size: u16 = fonts.default_scaled_font_size,
     /// The bar's pixel height. Always resolved -- either the configured height
     /// scaled into the policy's range, or the fonts' own ascent+descent.
     height: u16 = 0,
@@ -113,4 +111,55 @@ fn percentageOf(in: Inputs, bar_height: u16, probe: Probe) ?u16 {
         @as(f32, std.math.maxInt(u16)),
     );
     return @as(u16, @intFromFloat(@round(clamped)));
+}
+
+// Bar height / font-size resolution.
+//
+// The RULES live in `resolve` above, which is pure: it
+// takes the configured values, the screen, and a font probe, and returns a
+// `Metrics` value. These adapters only supply the two live pieces -- the
+// current config, and a probe that measures through
+// fonts.probeFontMetrics' throwaway surface (no live DrawContext is
+// touched) -- and threads the result into bar creation, draw-context
+// construction, and the surviving State's own value. No global, no config
+// mutation, and no save/restore: a bar's metrics belong to that bar.
+
+/// Measures the configured fonts at `trial_pt`. The point size is always
+/// explicit: the only two callers are the metric probe itself (a fixed trial
+/// size) and `resolve`'s height decision, which measures at the
+/// DPI-scaled base.
+fn probeMetrics(trial_pt: u16) ?fonts.FontMetrics {
+    const cs = core.getState();
+    var sized = fonts.SizedFontList.build(cs.alloc, cs.config.bar.fonts.items, trial_pt) catch return null;
+    defer sized.deinit();
+    return fonts.probeFontMetrics(
+        cs.alloc,
+        core.dpi(),
+        sized.items,
+    );
+}
+
+/// Resolves the bar's metrics from the live config and screen. The rules
+/// themselves live in `metrics.resolve`; this only supplies them.
+pub fn resolveBarMetrics() Metrics {
+    const cs = core.getState();
+    return resolve(.{
+        .font_size = cs.config.bar.font_size,
+        .height = cs.config.bar.height,
+        .screen_height = cs.screen.height_in_pixels,
+    }, probeTextHeight);
+}
+
+/// The `Probe` adapter: the configured fonts' ascent+descent at a
+/// trial point size, or null when none could be measured.
+///
+/// Pango reports i16 and a descent is a positive-downward distance here, so
+/// the total is taken in i32 and floored at 0: a font that reports a
+/// pathological negative total must clamp to "no measurement" rather than
+/// wrap through `@intCast` in ReleaseFast.
+fn probeTextHeight(trial_pt: u16) ?u32 {
+    const m = probeMetrics(trial_pt) orelse return null;
+    const total: i32 = @as(i32, m.ascent) + @as(i32, m.descent);
+    if (total <= 0) return null;
+    return @intCast(total);
 }

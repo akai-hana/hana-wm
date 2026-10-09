@@ -6,12 +6,12 @@
 //! window to the new workspace, or drops it to de-fullscreen when that
 //! destination already has an owner (dispatched through the registry, so
 //! `fullscreen` is never named here). Workspace count and per-workspace
-//! config overrides are owned elsewhere (tracking latches the count;
+//! config overrides are owned elsewhere (query latches the count;
 //! actions.seedParamsFromConfig seeds the params).
 
 const model = @import("model");
-const window = @import("window");
-const providerOf = window.providerOf;
+const registry = @import("registry");
+const providerOf = registry.providerOf;
 
 /// Test-only; the production switch path is `actions.switchTo`.
 pub fn switchTo(m: *model.Model, ws: model.WSId) void {
@@ -72,7 +72,8 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 
 /// Fullscreen record follows the move; a destination owner drops the mover
 /// into de-fullscreen rather than clobbering the resident. Ghost records
-/// (minimized-from-fullscreen) move their ws too, following the parked mask.
+/// (minimized-from-fullscreen) move their workspace too, following the
+/// parked mask.
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     // Model query, not a peer-module dispatch. The dispatch returned
     // null when no covering module is bound, which made "is this window
@@ -84,8 +85,8 @@ fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId
 }
 
 /// Remove tag `ws`; the last remaining tag is protected (returns false).
-/// Fullscreen-on-removed-ws transfers to the lowest remaining bit, or drops
-/// into de-fullscreen when that destination is occupied.
+/// Fullscreen on the removed workspace transfers to the lowest remaining bit,
+/// or drops into de-fullscreen when that destination is occupied.
 pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
@@ -135,7 +136,7 @@ pub fn allViewToggle(m: *model.Model) bool {
 }
 
 /// This module's window sub-system contribution: pure model transitions;
-/// lifecycle is handled by the tracking facade's init (count latch) and
+/// lifecycle is handled by the query facade's init (count latch) and
 /// model state lives in the model.
 pub const module: @import("contract").WindowModule = .{
     .name = "workspaces",

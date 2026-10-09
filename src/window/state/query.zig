@@ -18,6 +18,7 @@ const core = @import("core");
 const constants = @import("constants");
 const pipeline = @import("pipeline");
 const model_mod = @import("model");
+const usable_area = @import("usable_area");
 
 fn m() ?*const model_mod.Model {
     if (!core.isModelReady()) return null;
@@ -40,6 +41,21 @@ pub const Entry = struct {
 pub fn isManaged(win: u32) bool {
     const mm = m() orelse return false;
     return mm.store.has(win);
+}
+
+/// True for the null window, the root, or one of this layer's own X surfaces
+/// (bar/output -- usable_area.isSurfaceWindow); never a valid focus or
+/// manage target. The complement of isValidManagedWindow below.
+pub inline fn isInvalidWindow(win: u32) bool {
+    return win == 0 or win == core.getState().root or usable_area.isSurfaceWindow(win);
+}
+
+/// True when `win` is a real manage target we are tracking. The single
+/// predicate for "is this window ours" (events.zig, reconcile paths);
+/// window.zig re-exports this so `window.*` stays the stable facade for
+/// callers outside the layer.
+pub inline fn isValidManagedWindow(win: u32) bool {
+    return !isInvalidWindow(win) and isManaged(win);
 }
 
 /// NOTE: rebuild-per-call is correct for correctness; a dirty flag
@@ -113,7 +129,7 @@ pub fn deinit() void {
 
 /// Read-through facade over `model.current`, the single source of truth:
 /// every write path (actions.switchTo) mutates the model directly, so a
-/// tracking query needs no separate storage. Null before pipeline.init
+/// read-only query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
     // core.isModelReady() and nothing else: the model-live question has one

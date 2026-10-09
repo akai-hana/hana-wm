@@ -23,7 +23,7 @@ const spawn = @import("spawn");
 const diag = @import("diag");
 const lifecycle = @import("lifecycle");
 const atoms = @import("atoms");
-const tracking = @import("tracking");
+const query = @import("query");
 // Bar hook set; the core-owned `surfaces` composition root, absent-safe.
 const surfaces = @import("surfaces").Surfaces;
 
@@ -43,7 +43,7 @@ fn toggleBarPosition() void {
     // future one) releases it without having to remember.
     const grab = pipeline.grabScoped();
     defer grab.deinit();
-    const current_ws = tracking.getCurrentWorkspace() orelse {
+    const current_ws = query.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         // The bar re-anchor already changed the usable-area claim; re-derive
         // placements from it even when there is no current workspace to

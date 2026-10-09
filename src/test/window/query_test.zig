@@ -1,5 +1,5 @@
-//! Facade-vs-ledger parity tests (src/window/state/tracking.zig vs
-//! src/core/x11/reconcile.zig). The tracking facade is a read-through of the
+//! Facade-vs-ledger parity tests (src/window/state/query.zig vs
+//! src/core/x11/reconcile.zig). The query facade is a read-through of the
 //! model; the sent ledger is the "what's on the wire" authority. After a
 //! reconcile the two must agree window-for-window on the managed set, on
 //! current-workspace visibility, and on parked state.
@@ -20,7 +20,7 @@ const testing = std.testing;
 const core = @import("core");
 const model = @import("model");
 const pipeline = @import("pipeline");
-const tracking = @import("tracking");
+const query = @import("query");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
@@ -34,7 +34,7 @@ const testColor = helpers.testColor;
 
 const Recorder = test_sink.TestSink(.record);
 
-/// Re-arms the pipeline global model (which the tracking facade reads) and
+/// Re-arms the pipeline global model (which the query facade reads) and
 /// the sync/capacity module stores, returning the mutable instance handle.
 /// Then every reconcile in a test runs over `pipeline.model()` so facade and
 /// ledger observe the identical state.
@@ -46,7 +46,7 @@ fn pipelineModel() *model.Model {
     // production now read the SAME readiness answer.
     //
     // pipeline.init() itself is deliberately NOT called here: it expects a
-    // live X connection and these tests are headless; the tracking facade only
+    // live X connection and these tests are headless; the query facade only
     // reads the MODEL, never the X sink g_sink, so the undefined `var
     // instance` is never observed -- the very next line overwrites it through
     // the same mutation gate.
@@ -54,7 +54,7 @@ fn pipelineModel() *model.Model {
     const m = pipeline.mut();
     m.* = helpers.makeModel(); // makeModel already re-arms the module stores
     ledger.init();
-    tracking.init();
+    query.init();
     return m;
 }
 
@@ -67,7 +67,7 @@ fn reg(m: *model.Model, win: model.WindowId, ws_idx: u8) !void {
     try model.register(m, win, model.WSId.fromIndex(ws_idx));
 }
 
-test "facade agrees with ledger on managed set, masks, and ws visibility" {
+test "facade agrees with ledger on managed set, masks, and workspace visibility" {
     var m = pipelineModel();
     var rec = Recorder{};
     defer rec.deinit();
@@ -88,7 +88,7 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
     try testing.expectEqual(@as(usize, 3), m.store.count());
     const wins = [_]model.WindowId{ 101, 102, 201 };
     for (wins) |w| {
-        try testing.expect(tracking.isManaged(w));
+        try testing.expect(query.isManaged(w));
         try testing.expect(ledger.sentGet(w) != null);
     }
 
@@ -97,18 +97,18 @@ test "facade agrees with ledger on managed set, masks, and ws visibility" {
     for (wins) |w| {
         try testing.expectEqual(
             model.maskedOn(m.store.get(w).?.mask, m.current),
-            tracking.isOnCurrentWorkspace(w),
+            query.isOnCurrentWorkspace(w),
         );
     }
 
     // Workspace visibility parity: ws0 windows are on the current workspace
     // and were placed (ledger visible); the ws1 window is parked on the wire
     // (ledger has no visible rect) and the facade agrees.
-    try testing.expect(tracking.isOnCurrentWorkspace(101));
+    try testing.expect(query.isOnCurrentWorkspace(101));
     try testing.expect(ledger.lastRectFor(101) != null);
-    try testing.expect(tracking.isOnCurrentWorkspace(102));
+    try testing.expect(query.isOnCurrentWorkspace(102));
     try testing.expect(ledger.lastRectFor(102) != null);
-    try testing.expect(!tracking.isOnCurrentWorkspace(201));
+    try testing.expect(!query.isOnCurrentWorkspace(201));
     try testing.expect(ledger.lastRectFor(201) == null);
 }
 
@@ -131,10 +131,10 @@ test "facade tracks the workspace switch exactly like the ledger" {
     m.current = model.WSId.fromIndex(1);
     reconcile(m, &rec, .{ .force_restack = true });
 
-    try testing.expectEqual(@as(u8, 1), tracking.getCurrentWorkspace().?);
-    try testing.expect(!tracking.isOnCurrentWorkspace(101));
+    try testing.expectEqual(@as(u8, 1), query.getCurrentWorkspace().?);
+    try testing.expect(!query.isOnCurrentWorkspace(101));
     try testing.expect(ledger.lastRectFor(101) == null);
-    try testing.expect(tracking.isOnCurrentWorkspace(201));
+    try testing.expect(query.isOnCurrentWorkspace(201));
     try testing.expect(ledger.lastRectFor(201) != null);
 }
 
@@ -153,14 +153,14 @@ test "minimized windows are invisible to both facade and ledger" {
     reconcile(m, &rec, .{});
 
     // The window is still managed and tagged on ws0...
-    try testing.expect(tracking.isManaged(102));
-    try testing.expect(tracking.isOnCurrentWorkspace(102));
+    try testing.expect(query.isManaged(102));
+    try testing.expect(query.isOnCurrentWorkspace(102));
     // ...but not visible: facade sees the parked presence, ledger has no
     // visible rect (the park was actually sent).
     try testing.expect(ledger.lastRectFor(102) == null);
 
-    // The sibling keeps full visibility on both sides of the seam.
-    try testing.expect(tracking.isOnCurrentWorkspace(101));
+    // The sibling keeps full visibility on both sides of the boundary.
+    try testing.expect(query.isOnCurrentWorkspace(101));
     try testing.expect(ledger.lastRectFor(101) != null);
 }
 
@@ -183,10 +183,10 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
     // covering occupant owns the screen, so no rect. Focus folding already
     // collapses the cycle pool to the occupant (focus.zig cycleTarget), so
     // the model-truth read cannot leak a parked window into focus recovery.
-    try testing.expect(tracking.isManaged(101));
-    try testing.expect(tracking.isOnCurrentWorkspace(101));
+    try testing.expect(query.isManaged(101));
+    try testing.expect(query.isOnCurrentWorkspace(101));
     try testing.expect(ledger.lastRectFor(101) != null);
-    try testing.expect(tracking.isManaged(102));
-    try testing.expect(tracking.isOnCurrentWorkspace(102));
+    try testing.expect(query.isManaged(102));
+    try testing.expect(query.isOnCurrentWorkspace(102));
     try testing.expect(ledger.lastRectFor(102) == null);
 }

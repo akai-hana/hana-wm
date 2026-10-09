@@ -24,12 +24,12 @@
 const std = @import("std");
 const testing = std.testing;
 
-const drawing = @import("drawing");
+const fonts = @import("fonts");
 
 test "probeFontMetrics runs repeatedly on the named-font path" {
     const families = [_][]const u8{"Sans"};
     for (0..8) |_| {
-        const m = drawing.probeFontMetrics(testing.allocator, 96.0, &families);
+        const m = fonts.probeFontMetrics(testing.allocator, 96.0, &families);
         try testing.expect(m != null);
     }
 }
@@ -39,7 +39,7 @@ test "probeFontMetrics runs repeatedly on the fallback-font path" {
     // `pango_font_description_from_string` call inside `loadFont`, so it is a
     // distinct branch for a `defer`-ordering mistake to hide in.
     for (0..8) |_| {
-        const m = drawing.probeFontMetrics(testing.allocator, 96.0, &.{});
+        const m = fonts.probeFontMetrics(testing.allocator, 96.0, &.{});
         try testing.expect(m != null);
     }
 }
@@ -49,6 +49,6 @@ test "probeFontMetrics completes and returns, even with no resolvable font" {
     // builds the layout and the description but may resolve no family, so
     // getMetrics legitimately returns 0/0. Asserting the numbers would make
     // this file fail on fontconfig availability, which is not what it is for.
-    const m = drawing.probeFontMetrics(testing.allocator, 96.0, &[_][]const u8{"Sans"});
+    const m = fonts.probeFontMetrics(testing.allocator, 96.0, &[_][]const u8{"Sans"});
     try testing.expect(m != null);
 }

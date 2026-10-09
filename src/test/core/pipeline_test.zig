@@ -133,7 +133,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expectEqual(w1, fx.inputFocus());
 
-    // 1. Fullscreen w1 (keybind on the focused window).
+    // 1. Fullscreen w1 (keybinding on the focused window).
     actions.fullscreenToggleWindow(w1);
     fx.flush();
     try std.testing.expectEqual(w1, m.focused.?);
@@ -191,7 +191,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     actions.fullscreenToggleWindow(w1);
     fx.flush();
 
-    // 2. MODEL TRUTH gates the hide. Screen-sized dimensions with a model that
+    // 2. MODEL TRUTH gates the bar hide. Screen-sized dimensions with a model that
     //    says NOT covering must NOT move the bar: that combination is a client
     //    reporting fullscreen-shaped geometry after being told to leave, and
     //    hiding the bar there is the bug the dimensions-only version had.

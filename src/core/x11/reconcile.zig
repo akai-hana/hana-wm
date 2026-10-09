@@ -15,7 +15,7 @@
 //! RECONCILE ALGORITHM - UNCONDITIONAL COMPUTE, DELTA SEND. Each reconcile
 //! computes the desired state for every stored window that needs it (an
 //! OFF-WORKSPACE fast path elides windows provably already parked -- not the
-//! covering winner, not on the current ws, or presence parked -- and already
+//! covering winner, not on the current workspace, or presence parked -- and already
 //! parked in the ledger: no recompute, no resend), so a client that mutated
 //! its own geometry/border behind our back is repaired on the very next reconcile
 //! -- drift-proof by construction, no diff cache, no sweep counter, no
@@ -134,7 +134,7 @@ const Plan = struct {
     /// The core model helper resolves which covering window owns the current
     /// workspace's screen. OR semantics (anchor-or-visible over the store),
     /// deliberately distinct from the fullscreen module's AND scan (rec +
-    /// present + recorded on ws); sync must not enumerate optional modules,
+    /// present + recorded on `ws`); sync must not enumerate optional modules,
     /// so it reads model truth.
     fs_win: ?model.WindowId = null,
     placements: contract.List = .{},
@@ -296,7 +296,7 @@ fn sendAll(
         const last = (if (gop) |g| g.* else ledger.SentEntry.blank());
 
         // OFF-WORKSPACE FAST PATH: a desire that is PROVABLY parked (not the
-        // covering winner, not on the current ws, or presence parked) and is
+        // covering winner, not on the current workspace, or presence parked) and is
         // already parked in the ledger needs no recompute and no send -- the
         // full path would derive parked, elide the park resend (last.parked
         // already true), never be a fallback winner, and rewrite the same

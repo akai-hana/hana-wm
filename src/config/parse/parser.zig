@@ -441,7 +441,7 @@ fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
 // flattened. Values are SHARED, never copied: all documents in a load share
 // one arena, so pointers stay valid until the load's arena reset. Scalar
 // getters resolve to the LAST element (later files win); asArray sees the
-// full accumulation so keybinds, `include`, `layouts`, etc. chain. The result
+// full accumulation so keybindings, `include`, `layouts`, etc. chain. The result
 // is always an ACCUMULATED array (genuinely duplicated keys), marking it so
 // literal arrays (bracket lists / bare multi-token spellings) stay distinct:
 // scalar later-wins applies to accumulated arrays only.
@@ -487,7 +487,7 @@ fn insertOrAccumulate(
 }
 
 // Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
-// exactly as within one file: a keybind in two files runs both actions.
+// exactly as within one file: a keybinding in two files runs both actions.
 // Scalar reads resolve to the last declaration (later file wins); array
 // reads see the full accumulation; `src` is unmodified. Keys and values are
 // shared (arena), so nothing is copied or freed.
@@ -924,7 +924,7 @@ const Parser = struct {
         }
 
         // Duplicate key: accumulate both values into an array rather
-        // than overwriting, so a keybind can bind multiple actions:
+        // than overwriting, so a keybinding can bind multiple actions:
         //
         //   Mod+Shift+1 = "move_to_workspace_1"
         //   Mod+Shift+1 = "toggle_tag_1"

@@ -1,4 +1,4 @@
-//! The prompt's completion provider seam: the sorted `$PATH`
+//! The prompt's completion provider: the sorted `$PATH`
 //! executable table, the ghost-completion suffix, and the
 //! run-history ring (newest first, persisted append-only under
 //! `$HOME`). State lives in this module's global so no allocation

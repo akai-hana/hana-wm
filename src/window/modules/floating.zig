@@ -12,14 +12,15 @@ const builtin = @import("builtin");
 const core = @import("core");
 
 const window = @import("window");
+const registry = @import("registry");
 const focus = @import("focus");
-const tracking = @import("tracking");
+const query = @import("query");
 
 const hz = @import("hz");
 const time = @import("time");
 
 const pipeline = @import("pipeline");
-const actions = @import("actions");
+const ledger = @import("ledger");
 const usable_area = @import("usable_area");
 
 const model = @import("model");
@@ -159,7 +160,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (usable_area.isSurfaceWindow(win)) return;
-    if (window.isCoveringMode(pipeline.model(), win)) return;
+    if (model.isCovering(pipeline.model(), win)) return;
 
     // Reject unmanaged/foreign windows: a drag on a window the WM does not own
     // would no-op every setFloatingRect/dragRect (store.getPtr fails) while
@@ -204,13 +205,13 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         // A base-tiled window detaches to floating on first motion (see
         // updateDrag); move also skips snap on that first event so the
         // window doesn't appear frozen at a tiled edge.
-        .pending_float = tracking.isTiledMode(win),
+        .pending_float = query.isTiledMode(win),
     };
     focus.grabFocus(win, .user_command);
     // Raise the dragged window immediately outside any server grab (grabFocus
     // has already ungrabAndFlush'd); routed through the shared sink's
     // sanctioned stack primitive + flush so wire stays in sync. Drag ticks
-    // keep going flushless via geometry.dragRect's targeted reconcile
+    // keep going flushless via the local dragRect's targeted reconcile
     // (1 configure, no grab).
     const s = pipeline.syncSink();
     s.stackOnly(win, .above);
@@ -342,6 +343,33 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) model.Rect 
     };
 }
 
+/// First motion of a drag on a tiled window detaches it to floating at its
+/// current geometry (pending-float detach + remove + retile). Shares the
+/// detach transition with the toggle_floating action through
+/// `model.detachTiledToFloating` (one spelling, ledger lookup at the caller);
+/// this module reaches model/pipeline directly rather than round-tripping
+/// through the action layer.
+fn detachToFloating(win: core.WindowId) bool {
+    const m = pipeline.mut();
+    const e = m.store.getPtr(win) orelse return false;
+    if (model.isCovering(m, win)) return false;
+    if (e.anchor != .tiled) return false;
+    const r = ledger.lastRectFor(win) orelse return false;
+    model.detachTiledToFloating(m, e, win, r);
+    pipeline.reconcileGrab(.{});
+    return true;
+}
+
+/// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
+/// window's geometry (1 XCB call) instead of replaying all windows. On every
+/// motion event; the rect lands through this module's own setFloatingRect
+/// hook (we ARE the provider, so no providerOf round trip).
+fn dragRect(win: core.WindowId, r: model.Rect) void {
+    const m = pipeline.mut();
+    setFloatingRect(m, win, r);
+    reconcile.reconcileDragTick(m, pipeline.syncSink(), win);
+}
+
 /// Applies pointer motion to the active drag. No-op if no drag is active.
 pub fn updateDrag(x: i16, y: i16) void {
     if (!g_state.drag.active) return;
@@ -353,7 +381,7 @@ pub fn updateDrag(x: i16, y: i16) void {
         // Abort the drag when the detach fails: the window is still tiled, so
         // every setFloatingRect/dragRect would no-op and g_state.drag.active
         // would latch a dead drag that blocks future drags. Clear it instead.
-        if (!actions.detachToFloating(drag.window)) {
+        if (!detachToFloating(drag.window)) {
             drag.active = false;
             return;
         }
@@ -387,7 +415,7 @@ pub fn updateDrag(x: i16, y: i16) void {
     if (now - drag.last_commit_ns >= period_ns) {
         drag.last_commit_ns = now;
         if (drag.pending_rect) |r| {
-            actions.dragRect(drag.window, r);
+            dragRect(drag.window, r);
             drag.pending_rect = null;
         }
     }
@@ -399,7 +427,7 @@ pub fn stopDrag() void {
     if (g_state.drag.active) {
         const drag = &g_state.drag;
         if (drag.pending_rect) |r| {
-            actions.dragRect(drag.window, r);
+            dragRect(drag.window, r);
             drag.pending_rect = null;
             drag.last_rect = r;
         }
@@ -444,7 +472,7 @@ pub fn honorConfigureRequest(
     win: model.WindowId,
     req: model.ConfigureReq,
 ) model.HonorDecision {
-    if (window.callHookBool(.isWindowHidden, .{ m, win })) return .ignored;
+    if (registry.callHookBool(.isWindowHidden, .{ m, win })) return .ignored;
     const e = m.store.getPtr(win) orelse return .ignored;
     if (e.presence == .covering) return .ignored; // fullscreen owns geometry
     switch (e.anchor) {

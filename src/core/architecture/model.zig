@@ -26,8 +26,8 @@ const bounded = @import("bounded");
 /// Alias of the canonical WindowId (`@import("ids").WindowId`; see ids.zig).
 pub const WindowId = @import("ids").WindowId;
 /// Alias of the canonical WorkspaceId (`@import("ids").WorkspaceId`). Model
-/// never imports core (xcb-free layer rule); within the model, ws values are
-/// read as array indices via `.index`. See the ids.zig header for the
+/// never imports core (xcb-free layer rule); within the model, `ws` values
+/// are read as array indices via `.index`. See the ids.zig header for the
 /// single-definition rationale.
 pub const WSId = @import("ids").WorkspaceId;
 
@@ -168,7 +168,7 @@ pub const LayoutParams = struct {
 };
 
 pub const BaseMode = union(enum) {
-    /// Home workspace membership is DERIVED (exactly one ws.tiled_order list
+    /// Home workspace membership is DERIVED (exactly one `ws`.tiled_order list
     /// holds a tiled window; findHome). Visibility on other tagged workspaces
     /// is a sync-time mask filter (engine stays mask-agnostic).
     tiled,
@@ -251,6 +251,17 @@ pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     return null;
 }
 
+/// Shared tiled->floating detach (toggle_floating / drag-detach): seeds the
+/// floating anchor from `rect` and drops the home-list membership. `rect` is
+/// the window's last-sent (on-screen) geometry, fetched from the X11 ledger
+/// by the caller -- model stays ledger-free. One spelling, reached by both
+/// the action layer and the floating module directly.
+pub fn detachTiledToFloating(m: *Model, e: *Entry, win: WindowId, rect: Rect) void {
+    if (e.home_ws) |home| removeValue(&m.ws[home.index].tiled_order, win);
+    e.anchor = .{ .floating = rect };
+    e.home_ws = null; // no longer in tiled_order
+}
+
 pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!void {
     if (m.store.has(win)) return;
     const target: WSId = hint_ws orelse m.current;
@@ -272,9 +283,9 @@ pub fn register(m: *Model, win: WindowId, hint_ws: ?WSId) error{CapacityFull}!vo
 pub fn unregister(m: *Model, win: WindowId) void {
     if (!m.store.remove(win)) return;
     // Scrub EVERY workspace's lists, not just the cached home_ws. A stale id
-    // left in some other ws's tiled_order would make a later layout pass move
-    // or draw a window the store no longer has, and there is no way to detect
-    // that from the entry once it is gone. Whole-model scan, provably
+    // left in some other workspace's tiled_order would make a later layout
+    // pass move or draw a window the store no longer has, and there is no
+    // way to detect that from the entry once it is gone. Whole-model scan, provably
     // idempotent, and it removes the home_ws-then-unregister ordering dance.
     for (&m.ws) |*s| {
         removeValue(&s.tiled_order, win);
@@ -298,8 +309,8 @@ pub inline fn visibleEntry(m: *const Model, e: *const Entry, ws: WSId) bool {
 }
 
 /// Whether `e` is pinned: its mask carries the soft all-workspaces sentinel
-/// (every conceivable ws bit set), making it visible everywhere and immune
-/// to tag edits. Feature modules test this predicate instead of spelling out
+/// (every conceivable workspace bit set), making it visible everywhere and
+/// immune to tag edits. Feature modules test this predicate instead of
 /// `mask == ALL_MASK`, keeping the sentinel's meaning in one place.
 pub inline fn isPinned(e: Entry) bool {
     return e.mask == ALL_MASK;
@@ -307,7 +318,7 @@ pub inline fn isPinned(e: Entry) bool {
 
 /// Whether `e` is tagged on `ws`: the tag-membership test behind the
 /// visible/tiled-count predicates, re-exported via `maskedOn` for facades that
-/// hold only a raw mask (tracking/window re-derive `maskedOn(e.mask, ws)`).
+/// hold only a raw mask (query/window re-derive `maskedOn(e.mask, ws)`).
 pub inline fn taggedOn(e: Entry, ws: WSId) bool {
     return maskedOn(e.mask, ws);
 }
@@ -354,7 +365,7 @@ pub fn isCoveringOn(m: *const Model, win: WindowId, ws: WSId) bool {
 
 /// The covering occupant owning the screen on `ws`: anchor-or-visibility OR
 /// union. Pure core computation, so sync/bar resolve the screen owner without
-/// enumerating optional subsystems. At most one occupant per ws by the
+/// enumerating optional subsystems. At most one occupant per workspace by
 /// reconciler. (fullscreen's occupant hook is a stricter AND scan: covering +
 /// anchored + visible — see fullscreen.visibleCoveringOnWs.)
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
@@ -537,7 +548,7 @@ pub fn collectCyclePool(m: *const Model, ws: WSId, buf: []WindowId) usize {
 /// delegates here, and tests exercise the same logic without linking the
 /// protocol layers. Tier order on workspace `ws`: focus MRU (newest first),
 /// reversed tiled_order, then any visible floating-base window not in
-/// tiled_order. First visibleOn(ws) candidate wins; null when nothing
+/// tiled_order. First `visibleOn(ws)` candidate wins; null when nothing
 /// qualifies. `excluded` is a candidate the caller already rejected (e.g. a
 /// no_input window that can never hold X focus) — it is skipped across all
 /// tiers so the caller can re-scan for the next focusable window.
@@ -557,8 +568,9 @@ pub fn fallbackFocusCandidate(m: *const Model, ws: WSId, excluded: ?WindowId) ?W
         const cand = m.ws[ws.index].tiled_order.items[j];
         if (qualifies(m, cand, ws, excluded)) return cand;
     }
-    // 3. any floating window on ws (base geometry, not in tiled_order).
-    //    A covering window owns the screen, so it is not a fallback target.
+    // 3. any floating window on the workspace (base geometry, not in
+    //    tiled_order). A covering window owns the screen, so it is not a
+    //    fallback target.
     //    Linear membership check per floating entry against tiled_order;
     //    adequate for <50 windows.
     var it = m.store.iterator();

@@ -1,4 +1,4 @@
-//! Unit tests for the fullscreen module's model-facing seam: the
+//! Unit tests for the fullscreen module's model-facing surface: the
 //! covering-occupant state machine asserted through the model it
 //! mutates (toggle round-trips, minimize-from-fullscreen restore,
 //! covering_ws intent, occupant scans, parked-ghost exclusion) and
@@ -37,7 +37,7 @@ const regCur = helpers.regCur;
 const expectOrder = helpers.expectOrder;
 const addFloating = helpers.addFloating;
 
-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE ws
+/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
 /// list; every listed id exists in the store (single-membership invariant).
 /// Floating and parked (minimized) windows are home-free.
 fn assertSingleMembership(m: *const Model) !void {
@@ -97,7 +97,7 @@ test "fullscreen toggling and minimize-from-fullscreen" {
     // Anchor is UNCHANGED while parked (still floating; fs rec is a ghost).
     try testing.expect(e.anchor == .floating);
     try testing.expect(r.eql(e.anchor.floating));
-    // Ghost fullscreen record STILL reports the ws while parked.
+    // Ghost fullscreen record STILL reports the workspace while parked.
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 2));
     minimize.restore(&m, 2);
     e = m.store.get(2).?;
@@ -143,9 +143,9 @@ test "fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
 }
 
 // minimizing-from-fullscreen KEEPS the mode, so the ghost record still
-// reports the ws while parked, but visibleOn is false. Callers must gate on
+// reports the workspace while parked, but visibleOn is false. Callers must gate on
 // visibility (coverage/occupancy query), not the raw mode.
-test "fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
+test "fullscreenWsOf keeps the workspace while minimized-from-fullscreen" {
     var m = makeModel();
 
     regCur(&m, 30);
@@ -166,9 +166,9 @@ test "fullscreenWsOf keeps the ws while minimized-from-fullscreen" {
     try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
 }
 
-// FSQ: model fullscreen semantics: mode ignores visibility, on-ws checks the
+// FSQ: model fullscreen semantics: mode ignores visibility, on-workspace checks the
 // RECORD's workspace only, and occupancy also requires visibility.
-test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
+test "FSQ: model fullscreen queries (mode / on-workspace / visible occupant)" {
     var m = makeModel();
 
     regCur(&m, 50);
@@ -178,16 +178,16 @@ test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     try testing.expect(!model.isCoveringOn(&m, unknown_win, WSId.fromIndex(0))); // unknown id
     try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
 
-    _ = fullscreen.toggleFullscreen(&m, 50); // record targets current ws (0)
+    _ = fullscreen.toggleFullscreen(&m, 50); // record targets current workspace (0)
     try testing.expect(model.isCovering(&m, 50));
     try testing.expect(model.isCoveringOn(&m, 50, WSId.fromIndex(0)));
-    try testing.expect(!model.isCoveringOn(&m, 50, WSId.fromIndex(1))); // other-ws record
+    try testing.expect(!model.isCoveringOn(&m, 50, WSId.fromIndex(1))); // other-workspace record
     try testing.expectEqual(@as(?WindowId, 50), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
 
     // A record for a workspace the window isn't tagged to is NOT an occupant:
     // occupancy requires visibility (sync parks such strays).
     try model.register(&m, 51, WSId.fromIndex(1)); // tagged to ws1 only
-    _ = fullscreen.toggleFullscreen(&m, 51); // record ws = current (0)
+    _ = fullscreen.toggleFullscreen(&m, 51); // record `ws` = current (0)
     try testing.expect(model.isCovering(&m, 51));
     try testing.expect(model.isCoveringOn(&m, 51, WSId.fromIndex(0)));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 51));
@@ -202,18 +202,18 @@ test "FSQ: model fullscreen queries (mode / on-ws / visible occupant)" {
     try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
 }
 
-// The occupant scan claims the covering winner per ws and excludes parked
+// The occupant scan claims the covering winner per workspace and excludes parked
 // ghosts (minimized-from-fullscreen windows never claim the screen). A
-// switch claim (new window covers while another owns the ws) releases the
-// previous occupant, so one ws never has two live covering claims. The module
-// seam delegates to the pure model scan; the two agree by construction.
+// switch claim (new window covers while another owns the workspace) releases the
+// previous occupant, so one workspace never has two live covering claims. The module
+// hook delegates to the pure model scan; the two agree by construction.
 test "occupant scan winner resolution and parked-ghost exclusion" {
     var m = makeModel();
 
     regCur(&m, 60);
     regCur(&m, 61);
     try testing.expectEqual(@as(?model.WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
-    _ = fullscreen.toggleFullscreen(&m, 60); // covering on ws 0
+    _ = fullscreen.toggleFullscreen(&m, 60); // covering on workspace 0
     try testing.expectEqual(@as(?model.WindowId, 60), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
     _ = fullscreen.toggleFullscreen(&m, 61); // switch: 61 releases 60's claim
     try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
@@ -237,7 +237,7 @@ test "toggleFullscreen writes covering_ws core intent" {
     try testing.expectEqual(@as(?WSId, null), m.store.get(90).?.covering_ws);
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
 
-    _ = fullscreen.toggleFullscreen(&m, 90); // on ws 0
+    _ = fullscreen.toggleFullscreen(&m, 90); // on workspace 0
     var e = m.store.get(90).?;
     try testing.expect(e.presence == .covering);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), e.covering_ws);
@@ -251,7 +251,7 @@ test "toggleFullscreen writes covering_ws core intent" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
 }
 
-// The module occupant seam delegates to the model scan and agrees with it on
+// The module occupant hook delegates to the model scan and agrees with it on
 // the parked-ghost exclusion.
 test "coveringOccupantOnWs excludes parked ghosts" {
     var m = makeModel();
@@ -262,8 +262,8 @@ test "coveringOccupantOnWs excludes parked ghosts" {
     try testing.expectEqual(@as(?WindowId, 91), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
 
     // Minimize-from-fullscreen: covering_ws is KEPT (ghost) but presence is
-    // parked, so neither the module seam nor the model helper reports an
-    // occupant on ws 0.
+    // parked, so neither the module hook nor the model helper reports an
+    // occupant on workspace 0.
     try minimize.minimize(&m, 91);
     try testing.expect(m.store.get(91).?.presence == .parked);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(91).?.covering_ws);
@@ -281,14 +281,14 @@ test "coveringOccupantOnWs excludes parked ghosts" {
 
 // A move/tag retarget (workspaces path) keeps the model's covering_ws in
 // lockstep with the retargeted module record.
-test "move/tag retarget tracks covering_ws to the new ws" {
+test "move/tag retarget tracks covering_ws to the new workspace" {
     var m = makeModel();
 
-    regCur(&m, 93); // home ws 0
-    _ = fullscreen.toggleFullscreen(&m, 93); // covering ws 0
+    regCur(&m, 93); // home workspace 0
+    _ = fullscreen.toggleFullscreen(&m, 93); // covering workspace 0
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(93).?.covering_ws);
 
-    // moveWindowToWs retargets the covering window to ws 2 (destination free):
+    // moveWindowToWs retargets the covering window to workspace 2 (destination free):
     // the module record AND the model's covering_ws must both follow.
     workspaces.moveWindowToWs(&m, 93, WSId.fromIndex(2));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), m.store.get(93).?.covering_ws);

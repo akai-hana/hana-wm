@@ -4,8 +4,15 @@
 //! segment module (and bar.zig) imports -- `Frame` (live workspace visitability;
 //! an alias for architecture/contract.zig's Frame, so the `naturalWidth` hook
 //! can type its frame parameter), `DrawCtx` (the per-frame scratch bar builds
-//! for each segment's draw), the title render/snapshot machinery, and the
-//! prompt service-handle struct.
+//! for each segment's draw), the shared title constants, and the prompt
+//! service-handle struct. The title render/snapshot TYPES live with the title
+//! module in `modules/title/vocab.zig` (Phase 4 step 25).
+//!
+//! It is also the bar's feature-probe surface: the registry-resolved
+//! capability helpers (`segId`, `isRole`, `roleIndexOf`,
+//! `hasRegisteredSegments`, and the role id-sets such as `self_ticking_ids`)
+//! computed against the generated `bar_modules` array, so the bar and its
+//! modules locate each other by NAME without importing each other directly.
 //!
 //! Segments are discovered under the bar's `modules/` directory and register
 //! into the build-generated `bar_modules.modules` array; the bar orchestrator
@@ -20,6 +27,7 @@ const core = @import("core");
 const constants = @import("constants");
 
 const drawing = @import("drawing");
+const vocab = @import("vocab");
 const types = @import("types");
 const contract = @import("contract");
 const model = @import("model");
@@ -49,7 +57,7 @@ pub const Frame = contract.Frame;
 /// knowledge (gated on `build_options.has_minimize`); the bar invokes these
 /// hooks through the registry-dispatched DrawCtx so bar.zig never names a
 /// window addon. `m` is the live model passed as `*const anyopaque`
-/// (type-free seam); the title segment casts back.
+/// (type-free contract); the title segment casts back.
 pub const MinimizedApi = struct {
     /// Synthesize the full minimized-window set into `set` (bar's title shot).
     collect: ?*const fn (
@@ -100,12 +108,12 @@ pub const DrawCtx = struct {
     focused_window: ?u32 = null,
     focused_title: []const u8 = "",
     minimized_title: []const u8 = "",
-    current_ws_entries: []const TitleEntry = &.{},
+    current_ws_entries: []const vocab.TitleEntry = &.{},
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void) = &.{},
 
     /// The title renderer's stable per-frame context (dc/config/height/
     /// start_x/width/conn). The start_x/width are the segment's on-screen box.
-    pub fn titleRenderContext(self: *const DrawCtx, start_x: u16, width: u16) TitleRenderContext {
+    pub fn titleRenderContext(self: *const DrawCtx, start_x: u16, width: u16) vocab.TitleRenderContext {
         return .{
             .dc = self.dc,
             .config = self.config,
@@ -116,7 +124,7 @@ pub const DrawCtx = struct {
     }
 
     /// The title renderer's per-frame snapshot, built from the bar-filled slots.
-    pub fn titleSnapshot(self: *const DrawCtx) TitleSnapshot {
+    pub fn titleSnapshot(self: *const DrawCtx) vocab.TitleSnapshot {
         return .{
             .focused_window = self.focused_window,
             .focused_title = self.focused_title,
@@ -143,47 +151,6 @@ pub const offscreen_rect: model.Rect = .{
     .y = std.math.maxInt(i16),
     .width = 0,
     .height = 0,
-};
-
-// The title segment's geometry -- its window list, the pixel-perfect tiling
-// shared by its draw and the bar's hit-test -- is not shared segment
-// vocabulary. It lives in modules/title/geom.zig, next to the only thing that
-// renders it.
-
-/// Stable per-call rendering context: geometry and draw state. It carries no
-/// X connection: the title draw had one only to call
-/// `hz.ensureRefreshRateDetected`, which boot (`main`) primes at startup, and
-/// a render that mutates global detection state is a phase violation.
-pub const TitleRenderContext = struct {
-    dc: *drawing.DrawContext,
-    config: types.BarConfig,
-    height: u16,
-    start_x: u16,
-    width: u16,
-};
-
-/// One current-workspace window as the title segment sees it: id, borrowed
-/// title, and the sync truth-rect for the frame. The AoS replacement for the
-/// three parallel arrays (`frame.wins` / `titles_buf` / `geoms_buf`, exposed
-/// as `current_ws_wins`/`titles`/`geoms`) that shared only an index -- a
-/// window's whole record now travels as one value, so the snapshot cannot
-/// hand the draw one array's length and another's contents.
-pub const TitleEntry = struct {
-    window: u32,
-    /// Borrowed from the WM-owned title cache (wincache.peekTitle); the bar
-    /// refreshes every entry each frame before the draw.
-    title: []const u8,
-    geom: ?model.Rect,
-};
-
-/// Per-frame volatile snapshot captured before drawing.
-pub const TitleSnapshot = struct {
-    focused_window: ?u32,
-    focused_title: []const u8,
-    minimized_title: []const u8,
-    /// The current workspace's windows in frame order (see TitleEntry).
-    entries: []const TitleEntry,
-    minimized_set: *const std.AutoHashMapUnmanaged(u32, void),
 };
 
 /// Which core fact-revision to mark-dirty with: the field names of
@@ -294,4 +261,34 @@ pub fn naturalWidthOf(id: ?usize, frame: *const Frame, clock_width: u16) u16 {
     const i = id orelse return 0;
     if (bar_mods[i].naturalWidth) |nw| return nw(frame, clock_width);
     return 0;
+}
+/// The whole bar registry as a slice: the ONE way consumers reach the
+/// generated array. Every raw `bar_modules` import outside this file routes
+/// through here or the helpers above (Phase 4 step 26), so the registry has
+/// a single home.
+pub inline fn all() []const contract.Segment {
+    return &bar_mods;
+}
+
+/// Registry entry at a resolved `id`. Callers reach this only after a
+/// registry capability/role lookup matched a name; a match is impossible
+/// when the registry is empty (guarded like every other index: a zero-length
+/// array is a comptime error to index even under a runtime check).
+pub inline fn segmentAt(id: usize) *const contract.Segment {
+    if (comptime !hasRegisteredSegments()) unreachable;
+    return &bar_mods[id];
+}
+
+/// Runs the void hook `hook` over every registered segment (the
+/// init/teardown/notification family).
+pub fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
+    contract.callAll(contract.Segment, bar_mods[0..], hook, .{});
+}
+
+/// True when ANY registered segment's `hook` returns true (short-circuiting
+/// walk; the predicate family: keypress routing, elapsed-seconds fan-out,
+/// redraw-request folding).
+pub fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytype) bool {
+    for (bar_mods) |seg| if (@field(seg, @tagName(hook))) |f| if (@call(.auto, f, args)) return true;
+    return false;
 }

@@ -5,7 +5,7 @@
 //! its former tiled slot and a monotonic sequence number. This module owns the
 //! transitions around that state: minimize/restore, FIFO/LIFO restore-target
 //! selection, restore-all-on-workspace, record cleanup for torn-down windows,
-//! and the `contract.WindowModule` persistence seam that round-trips a record
+//! and the `contract.WindowModule` persistence hooks that round-trip a record
 //! as a 9-byte blob (0x5A magic + slot + seq).
 
 const std = @import("std");
@@ -121,8 +121,9 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
             // Only re-seat at the recorded index when restoring to the SAME
             // workspace the slot was taken from: the index is meaningless in a
             // different destination's list and would scramble its ordering
-            // (a multi-tag window, or the user moved to another tagged ws
-            // before restoring). Cross-workspace restores append at the end.
+            // (a multi-tag window, or the user moved to another tagged
+            // workspace before restoring). Cross-workspace restores append at
+            // the end.
             const same_origin = if (rec.origin) |o| o.eql(h) else false;
             if (same_origin) {
                 const last = list.len - 1;
@@ -250,7 +251,7 @@ pub fn count() u32 {
 /// Fills `set` with every currently minimized window ID, replacing any prior
 /// contents. Infallible: an allocation failure leaves that window's entry out
 /// (every call site downstream swallows it the same way — the bar omits a
-/// hidden window rather than abort). Binds the collectHiddenSet seam.
+/// hidden window rather than abort). Binds the collectHiddenSet hook.
 pub fn collectHiddenSet(
     m: *const model.Model,
     set: *std.AutoHashMapUnmanaged(model.WindowId, void),
@@ -262,7 +263,7 @@ pub fn collectHiddenSet(
         set.put(allocator, rec.win, {}) catch {};
 }
 
-/// Persistence seam (contract.WindowModule.serializeWindow): marshals this
+/// Persistence hook (contract.WindowModule.serializeWindow): marshals this
 /// window's parked record as an opaque 9-byte blob ([0]=0x5A 'Z' magic,
 /// {slot-or-maxInt:u32, seq:u32}). The magic lets the registry deserialize
 /// loop self-identify (minimize claims only parked windows). Returns null
@@ -288,7 +289,7 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
     return held;
 }
 
-/// Persistence seam (contract.WindowModule.deserializeWindow): adopts the blob
+/// Persistence hook (contract.WindowModule.deserializeWindow): adopts the blob
 /// written by `serializeWindow` and replays the park on the live model.
 pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (bytes.len != 9 or bytes[0] != min_magic) return false; // not our blob; let the loop continue
@@ -328,7 +329,7 @@ pub fn onWindowGone(win: u32) void {
 }
 
 /// This module's window sub-system contribution: lifecycle + persistence
-/// seam + record cleanup for torn-down windows.
+/// hooks + record cleanup for torn-down windows.
 pub const module: @import("contract").WindowModule = .{
     .name = "minimize",
     .init = init,

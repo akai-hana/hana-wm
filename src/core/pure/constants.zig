@@ -102,7 +102,7 @@ pub const mouse_button_scroll_down: u8 = 5;
 pub const baseline_dpi: f32 = 96.0;
 
 /// Maximum tiled windows on a single workspace (per-workspace tiled_order
-/// capacity, applied per ws). Buffers sized from this are indexed by
+/// capacity, applied per workspace). Buffers sized from this are indexed by
 /// usize/u16, so raising it only costs memory; keep it a compile-time bound
 /// so stack buffers stay stack buffers.
 pub const max_tiled_windows: usize = 64;

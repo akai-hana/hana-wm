@@ -16,7 +16,9 @@ const types = @import("types");
 
 const segmod = @import("segment");
 const geom = @import("geom");
+const vocab = @import("vocab");
 const contract = @import("contract");
+const scaffold = @import("scaffold");
 // The scrolling title addon (the carousel) binds its motion, cycle and
 // frame-pacing hooks to this contract; membership in the generated
 // `title_subs` registry is driven by file presence alone, so this module
@@ -24,13 +26,13 @@ const contract = @import("contract");
 // falls back to its real built-in static (ellipsis) rendering -- no stub.
 const time = @import("time");
 /// The whole scroll decoration for one frame, as ONE value. Declared HERE, in
-/// the contract, not in the extensor: the seam's shape must not depend on
+/// the contract, not in the extensor: this contract's shape must not depend on
 /// whether carousel.zig is present, which is the whole point of the addon
 /// registry.
 ///
 /// The title used to call `offsetFor` for the offset and then separately ask
 /// `scrollingActive` whether the scroll was live and call `cyclePx` for its
-/// period -- three seam calls whose agreement was a cross-member invariant
+/// period -- three scroller calls whose agreement was a cross-member invariant
 /// nothing enforced, with `cyclePx` duplicated in the title so it could
 /// re-derive the period from a width it had measured itself.
 pub const Scroll = struct {
@@ -47,17 +49,17 @@ pub const Scroll = struct {
 
 pub const Scroller = struct {
     /// The whole scroll decoration for one frame, in one call: offset, cycle
-    /// and the active bit. Three separate seam queries (offsetFor /
+    /// and the active bit. Three separate scroller queries (offsetFor /
     /// scrollingActive / cyclePx) had to agree with each other across the
-    /// seam boundary, and the title carried its own copy of cyclePx to make
+    /// addon boundary, and the title carried its own copy of cyclePx to make
     /// that possible.
     offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, now_ms: i64) Scroll,
     pivot: *const fn () void,
     pollDeadlineMs: *const fn (now_ms: i64, hz: f64) i32,
 };
-// The seam is a SINGLETON slot, and taking `addons[0]` said nothing about
+// The scroller is a SINGLETON slot, and taking `addons[0]` said nothing about
 // that: a second `Scroller` addon was silently dropped while the registry
-// kept looking like a registry. One decorator composes; two need the seam
+// kept looking like a registry. One decorator composes; two need the slot
 // to become a capability query.
 const subs = @import("title_subs").addons;
 comptime {
@@ -65,7 +67,7 @@ comptime {
 }
 const scroller: ?Scroller = if (subs.len != 0) subs[0] else null;
 
-/// The seam's pivot, resolved once with the null check the three call sites
+/// The scroller's pivot, resolved once with the null check the three call sites
 /// (overlay close, bar shown, reload) would otherwise each have to repeat.
 fn noPivot() void {}
 const pivot: *const fn () void = if (scroller) |s| s.pivot else noPivot;
@@ -74,7 +76,7 @@ const pivot: *const fn () void = if (scroller) |s| s.pivot else noPivot;
 // value (contract.BarOverlay) on its Segment, which this module finds through
 // the generated bar segment registry -- name-free, like every other registry
 // capability. Nothing in the closed core names the overlay module.
-const overlay: ?contract.BarOverlay = if (contract.providerOf(contract.Segment, @import("bar_modules").modules[0..], .overlay)) |m|
+const overlay: ?contract.BarOverlay = if (contract.providerOf(contract.Segment, segmod.all(), .overlay)) |m|
     m.overlay.?
 else
     null;
@@ -103,8 +105,8 @@ const title_lead_px: u16 = 4;
 /// the bar); no X11 and no owned buffers to free here. Infallible: every text
 /// and rect op on this path is.
 fn drawInner(
-    ctx: segmod.TitleRenderContext,
-    snapshot: segmod.TitleSnapshot,
+    ctx: vocab.TitleRenderContext,
+    snapshot: vocab.TitleSnapshot,
 ) u16 {
     // No refresh-rate detection here: `bar.init` primes it once at startup, and
     // detection writes global state (the monitor's Hz memo every other segment
@@ -124,8 +126,8 @@ fn drawInner(
 
 /// Draw a window resolved via DrawCtx as the single-window case.
 fn drawSingleWindow(
-    ctx: segmod.TitleRenderContext,
-    snapshot: segmod.TitleSnapshot,
+    ctx: vocab.TitleRenderContext,
+    snapshot: vocab.TitleSnapshot,
 ) void {
     const single_win = snapshot.entries[0].window;
     const is_minimized = snapshot.minimized_set.contains(single_win);
@@ -143,9 +145,9 @@ fn drawSingleWindow(
     // they are not one `if/else` over a chosen title.
     if (is_minimized) {
         // The minimized cell draws its title statically and never consults the
-        // scroll seam, but a marquee the pre-minimize focused frame left live
+        // scroller, but a marquee the pre-minimize focused frame left live
         // would otherwise keep repainting (needsRepaintHook) and waking the
-        // bar on its pollDeadline. Hand the seam one retiring call (enabled=
+        // bar on its pollDeadline. Hand the scroller one retiring call (enabled=
         // false) so the carousel stops scrolling and the poll deadline clears.
         if (scroller) |s| {
             const title_width = if (snapshot.minimized_title.len > 0) ctx.dc.measureTextWidth(snapshot.minimized_title) else 0;
@@ -192,7 +194,7 @@ fn drawSingleWindow(
 /// and the plain text if it fits. `text_w` is measured here rather than handed
 /// in, because all three cases want it and no caller could have it cheaper.
 fn drawFittedTitle(
-    ctx: segmod.TitleRenderContext,
+    ctx: vocab.TitleRenderContext,
     baseline_y: u16,
     sg: SegmentGeometry,
     window: u32,
@@ -204,7 +206,7 @@ fn drawFittedTitle(
     const now = time.monotonicMs();
 
     // Unfocused cells never touch the carousel: it tracks exactly one cell per
-    // frame, the focused one. For the focused cell the seam is consulted on
+    // frame, the focused one. For the focused cell the scroller is consulted on
     // BOTH outcomes -- scrolling when it still overflows, and a retiring call
     // (enabled = false) when it no longer does, so the state machine and with it
     // the poll deadline and the needsRepaint query stop asking for frames.
@@ -219,7 +221,7 @@ fn drawFittedTitle(
                 ctx.config.carousel_speed_px_s,
                 now,
             );
-            // The seam's one call carries the active bit, so it is recorded here
+            // The scroller's one call carries the active bit, so it is recorded here
             // for the one consumer that is not a draw (needsRepaintHook).
             scroll_active = scroll.active;
             if (scroll.active) {
@@ -262,7 +264,7 @@ inline fn accentFor(
         unfocused_fallback;
 }
 
-fn titleTextGeom(ctx: segmod.TitleRenderContext, seg_x: u16, seg_w: u16) SegmentGeometry {
+fn titleTextGeom(ctx: vocab.TitleRenderContext, seg_x: u16, seg_w: u16) SegmentGeometry {
     const scaled_padding = ctx.config.scaledSegmentPadding(ctx.height);
     return .{
         .seg_x = seg_x,
@@ -277,8 +279,8 @@ fn titleTextGeom(ctx: segmod.TitleRenderContext, seg_x: u16, seg_w: u16) Segment
 /// max_visible_windows entries) and the width pass (Pango measureTextWidth per
 /// non-focused cell) are computed fresh each frame.
 fn drawSegmentedTitles(
-    ctx: segmod.TitleRenderContext,
-    snapshot: segmod.TitleSnapshot,
+    ctx: vocab.TitleRenderContext,
+    snapshot: vocab.TitleSnapshot,
 ) void {
     // No empty-workspace guard here: `drawInner` has already dispatched the
     // zero case, so the gather cannot see an empty list from this path.
@@ -390,33 +392,37 @@ fn needsRepaintHook() bool {
     return scroll_active;
 }
 
-/// The last frame's scroll-active bit, recorded from the single seam call.
+/// The last frame's scroll-active bit, recorded from the single scroller call.
 /// This is the title's copy of what used to be an out-of-band `scrollingActive`
-/// QUERY on the seam: the value now arrives together with the offset it
+/// QUERY on the scroller: the value now arrives together with the offset it
 /// describes, and the title remembers it for the one consumer that is not a
 /// draw (needsRepaintHook). Written by `drawFittedTitle`, the one place the
-/// seam is called from either outcome.
+/// scroller is called from either outcome.
 var scroll_active: bool = false;
 
 /// This module's bar-segment contribution (registry binding).
-pub const module: @import("contract").Segment = .{
-    .name = "title",
-    .center_slot = true,
-    .dirty_sources = .{ .focus = true, .frame = true },
-    .needsRepaint = needsRepaintHook,
-    .pollTimeoutMs = pollTimeoutMsHook,
-    .naturalWidth = naturalWidthHook,
-    .draw = drawHook,
-    .onClick = onClickHook,
-    // Both hooks rebase the scroller's elapsed-time clock at `pivot`, for two
-    // different reasons, so the reasons live at `pivot` itself. On show: a
-    // marquee that was scrolling when the bar hid resumes from its last shown
-    // offset rather than catching the whole hidden gap in one frame (which
-    // would land it mid-cycle). On reload: config is about to change the
-    // scroller's own inputs (carousel speed, the bar's padding, the cell's
-    // usable width), so the base is rebased instead of integrated across the
-    // change -- without it a reload mid-scroll produced one frame whose dt
-    // spanned the old and the new geometry at once.
-    .onBarShown = pivot,
-    .invalidateReloadCaches = pivot,
-};
+pub const module = scaffold.module(
+    "title",
+    drawHook,
+    null,
+    .{
+        .mode = .self_measured,
+        .center_slot = true,
+        .dirty_sources = .{ .focus = true, .frame = true },
+        .needsRepaint = needsRepaintHook,
+        .pollTimeoutMs = pollTimeoutMsHook,
+        .natural_width = naturalWidthHook,
+        .on_click = onClickHook,
+        // Both hooks rebase the scroller's elapsed-time clock at `pivot`, for two
+        // different reasons, so the reasons live at `pivot` itself. On show: a
+        // marquee that was scrolling when the bar hid resumes from its last shown
+        // offset rather than catching the whole hidden gap in one frame (which
+        // would land it mid-cycle). On reload: config is about to change the
+        // scroller's own inputs (carousel speed, the bar's padding, the cell's
+        // usable width), so the base is rebased instead of integrated across the
+        // change -- without it a reload mid-scroll produced one frame whose dt
+        // spanned the old and the new geometry at once.
+        .onBarShown = pivot,
+        .invalidateReloadCaches = pivot,
+    },
+);

@@ -164,7 +164,7 @@ pub inline fn markModelReady() void {
 }
 
 /// True once core.init() ran, i.e. State (conn/screen/config/alloc) is live.
-/// Guards boot-time config latches (e.g. the tracking workspace-count latch)
+/// Guards boot-time config latches (e.g. the query workspace-count latch)
 /// that a test harness may invoke before core is ready. Reads State itself
 /// rather than the phase: "is State populated" is a fact about State, and a
 /// headless fixture legitimately answers no while still having a model.

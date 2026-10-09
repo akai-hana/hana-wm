@@ -30,7 +30,7 @@ const page_alloc = std.heap.page_allocator;
 
 /// A deterministic, non-trivial model: three tiled windows spread over two
 /// workspaces plus one floating window, with focus, reordered tiled order and
-/// custom workspace params and per-ws runtime viewport state.
+/// custom workspace params and per-workspace runtime viewport state.
 fn buildFixtureModel(m: *model.Model) !void {
     try model.register(m, 1, model.WSId.fromIndex(0));
     try model.register(m, 2, model.WSId.fromIndex(0));
@@ -40,7 +40,7 @@ fn buildFixtureModel(m: *model.Model) !void {
         .mask = model.bit(model.WSId.fromIndex(0)),
         .anchor = .{ .floating = .{ .x = 5, .y = 6, .width = 100, .height = 80 } },
     });
-    model.reorderTiled(m, 2, 0); // ws 0 tiled order [2, 1]
+    model.reorderTiled(m, 2, 0); // workspace 0 tiled order [2, 1]
 
     m.current = model.WSId.fromIndex(1);
     m.all_view_active = true;
@@ -138,7 +138,7 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
     try testing.expect(handoff.loaded() == retained);
 }
 
-test "F10: applyModelLevel restores focus, ws state and every membership" {
+test "F10: applyModelLevel restores focus, workspace state and every membership" {
     var src = helpers.makeModel();
     try buildFixtureModel(&src);
 

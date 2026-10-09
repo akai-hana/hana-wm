@@ -2,7 +2,12 @@
 //! variants, slider, systatus; tags has its own cell-width math) and the
 //! naturalWidth/draw/onClick hook wiring every module builds through,
 //! collapsed into a single comptime builder parameterized by an `Opts` struct.
+//! The builder is the ONE binding style: every registered segment -- icons,
+//! clock, layout/variants, tags, title, prompt -- constructs its
+//! `contract.Segment` through `module` below, so no module raw-binds the
+//! literal shape anymore (structure audit step 28).
 
+const std = @import("std");
 const segmod = @import("segment");
 const contract = @import("contract");
 const drawing = @import("drawing");
@@ -129,18 +134,33 @@ const SlotMode = enum {
     /// not the width that happened to paint -- and a painted-width report
     /// would be measuring the wrong thing.
     self_measured,
+    /// No width participation at all: no reservation probe unless one is
+    /// supplied explicitly, no paint report, no redraw request. The prompt's
+    /// shape -- an overlay-first segment whose row draw exists but whose
+    /// width the bar never measures or derives.
+    unmeasured,
 };
 
-/// Optional bindings for the segment, one field per contract.Segment hook the
-/// icon-ish modules can set. Unset fields keep the builder defaults.
+/// Optional bindings for the segment: one field per contract.Segment hook a
+/// module can set. Unset fields keep the contract defaults (the builder only
+/// ever fills them in).
 const Opts = struct {
     /// How this slot's width behaves; see SlotMode. Defaults to the safest
     /// measured shape.
     mode: SlotMode = .measured_no_relayout,
     self_ticking: bool = false,
+    center_slot: bool = false,
+    /// Which core fact-revisions repaint this segment (title: focus+frame;
+    /// tags: frame).
+    dirty_sources: contract.DirtySources = .{},
+    needsRepaint: ?*const fn () bool = null,
     clickable: bool = true,
+    init: ?*const fn (std.mem.Allocator, *const anyopaque, ?*const anyopaque) anyerror!void = null,
+    deinit: ?*const fn (std.mem.Allocator) void = null,
     pollTimeoutMs: ?*const fn () i32 = null,
+    onPollWakeup: ?*const fn () void = null,
     secondsElapsed: ?*const fn ([]const u8) bool = null,
+    onBarShown: ?*const fn () void = null,
     /// Cleared via the uniform invalidate hook on bar (re)creation. Segments
     /// without a real invalidate (layout/variants) keep their last measured
     /// width as the row reservation: zeroing it would make the first measure
@@ -149,19 +169,31 @@ const Opts = struct {
     invalidate: ?*const fn () void = null,
     /// Clears per-module caches on config reload (font/padding may change).
     invalidateReloadCaches: ?*const fn () void = null,
+    /// Raw redraw-request walker; wins over the mode-derived one (the prompt
+    /// folds its own pending requests).
+    consumeRedrawRequest: ?*const fn () bool = null,
+    handleKeypress: ?*const fn (*const contract.KeyPressEvent, ?*const types.Action) bool = null,
     measureString: ?*const fn () []const u8 = null,
     /// Reserved row width probe; defaults to the measure-string passthrough
     /// (clock) when `measureString` is set, else the cached drawn width.
     natural_width: ?NaturalWidth = null,
     on_click: ?OnClick = null,
+    overlay: ?contract.BarOverlay = null,
 };
 
-/// The width-state naturalWidth/draw/onClick wiring, one adapter per hook.
+/// The draw wiring: adapts a module's draw function to the contract hook.
+/// Three shapes, picked at comptime from the function's signature --
+/// `(*anyopaque, x)` is already contract-shaped and passes through (title,
+/// prompt), `(*DrawCtx, x)` gets the scratch pointer cast (tags), and
+/// `(dc, config, height, x)` gets the unpacked icon-module form.
 fn drawHook(comptime draw: anytype) *const fn (*anyopaque, u16) anyerror!contract.Painted {
+    const info = @typeInfo(@TypeOf(draw)).@"fn";
     return struct {
         fn f(ctx: *anyopaque, x: u16) !contract.Painted {
             const c = segmod.castDraw(ctx);
-            return draw(c.dc, c.config, c.height, x);
+            if (comptime info.params.len == 4) return draw(c.dc, c.config, c.height, x);
+            if (comptime info.params[0].type.? == *anyopaque) return draw(ctx, x);
+            return draw(c, x);
         }
     }.f;
 }
@@ -188,9 +220,9 @@ fn passthroughWidth(_: *const contract.Frame, clock_width: u16) u16 {
     return clock_width;
 }
 
-/// The Segment binding for an icon-ish module with a cached-width draw +
-/// optional direction-click action. `opts.mode` additionally wires the
-/// redraw-request path.
+/// The Segment binding for a bar segment module: cached-width draw +
+/// optional direction-click action + every raw capability the Opts carry.
+/// `opts.mode` additionally wires the width-state/redraw-request path.
 pub fn module(
     comptime name: []const u8,
     comptime draw: anytype,
@@ -201,25 +233,46 @@ pub fn module(
     return .{
         .name = name,
         .self_ticking = opts.self_ticking,
+        .center_slot = opts.center_slot,
+        .dirty_sources = opts.dirty_sources,
+        .needsRepaint = opts.needsRepaint,
         .clickable = opts.clickable,
+        .init = opts.init,
+        .deinit = opts.deinit,
         .pollTimeoutMs = opts.pollTimeoutMs,
+        .onPollWakeup = opts.onPollWakeup,
         .secondsElapsed = opts.secondsElapsed,
+        .onBarShown = opts.onBarShown,
         .invalidate = opts.invalidate,
         .invalidateReloadCaches = opts.invalidateReloadCaches,
-        .consumeRedrawRequest = switch (opts.mode) {
+        // A raw redraw-request walker wins over the mode-derived one (the
+        // prompt folds its own pending requests; the measured layout slots
+        // raise theirs from the width store).
+        .consumeRedrawRequest = if (opts.consumeRedrawRequest) |c| c else switch (opts.mode) {
             .measured_relayout => W.consumeRedrawRequest,
             else => null,
         },
+        .handleKeypress = opts.handleKeypress,
         .measureString = opts.measureString,
-        .naturalWidth = opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),
+        .naturalWidth = switch (opts.mode) {
+            // Out of the width economy: the reservation probe stays whatever
+            // was supplied explicitly (normally nothing).
+            .unmeasured => opts.natural_width,
+            else => opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),
+        },
         .draw = drawHook(draw),
         // The bar's post-draw width report lands in this module's own width
         // state, so the reservation the naturalWidth hook reads back is
         // written from exactly one call site.
         .onPainted = switch (opts.mode) {
             .measured_relayout, .measured_no_relayout => W.store,
-            .self_measured => null,
+            .self_measured, .unmeasured => null,
         },
-        .onClick = opts.on_click orelse clickHook(action),
+        .overlay = opts.overlay,
+        // Comptime-nested: an explicit on_click wins; otherwise the
+        // direction-step adapter, but only when a step action was actually
+        // passed (a `null` action -- clock/prompt/title -- leaves the field
+        // null, and the pruned branch keeps clickHook off a null call).
+        .onClick = if (opts.on_click) |oc| oc else if (@TypeOf(action) == @TypeOf(null)) null else clickHook(action),
     };
 }

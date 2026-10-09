@@ -23,8 +23,12 @@ fn lessStrings(_: void, a: []const u8, b_: []const u8) bool {
 // gathered in one place so they're easy to audit together instead of being
 // scattered as inline literals.
 
-const source_root = "src/";
-const entry_point_path = source_root ++ "main.zig";
+// No trailing slash: discoverAll joins paths as "{dir}/{name}", and a
+// trailing slash here used to produce `src//...` rel_paths that never matched
+// the layer guard's "src/config/" prefix tests (the guard was inert until
+// 2026-10).
+const source_root = "src";
+const entry_point_path = source_root ++ "/main.zig";
 const fallback_toml_path = "config/fallback.toml";
 const max_fallback_toml_bytes = 1024 * 1024; // Memory limit just in case.
 
@@ -90,7 +94,8 @@ pub fn build(b: *std.Build) !void {
     // the default suite keeps them as cheap smoke runs so a passing
     // `zig build test` never writes to stderr (the build runner flags any
     // test stderr as `failed command:` even on success).
-    build_opts.addOption(bool, "bench", b.option(bool, "bench", "Run latency/benchmark tests with full iteration counts and timing output (opt-in; off by default)") orelse false);
+    const bench_enabled = b.option(bool, "bench", "Run latency/benchmark tests with full iteration counts and timing output (opt-in; off by default)") orelse false;
+    build_opts.addOption(bool, "bench", bench_enabled);
 
     // Module discovery — runs before has_* probes so file-existence flags can
     // be derived from the discovered module set instead of re-probing the
@@ -364,11 +369,7 @@ pub fn build(b: *std.Build) !void {
                 try stems.append(b.allocator, entry.key_ptr.*);
             }
         }
-        std.mem.sort([]const u8, stems.items, {}, struct {
-            fn lt(_: void, a: []const u8, c: []const u8) bool {
-                return std.mem.lessThan(u8, a, c);
-            }
-        }.lt);
+        std.mem.sort([]const u8, stems.items, {}, lessStrings);
 
         var filter_matched = false;
         for (stems.items) |stem| {
@@ -434,9 +435,15 @@ pub fn build(b: *std.Build) !void {
     // rather than to stderr, because the test protocol treats ANY stderr as a
     // failed command: printing to stderr is what made the only invocation that
     // can compile bench mode exit non-zero on a fully passing suite. The step
-    // is a distinct name rather than a flag alias so "run the benches" is a
-    // discoverable thing to type and cannot be mistaken for the plain suite.
-    b.step("bench", "Run latency/benchmark tests (add -Dbench=true for full iterations)").dependOn(unit_test_step);
+    // FAILS LOUDLY when the flag is absent instead of silently running the
+    // cheap smoke loops — a discoverable step name that quietly does something
+    // else is worse than an error.
+    const bench_step = b.step("bench", "Run latency/benchmark tests (requires -Dbench=true)");
+    if (bench_enabled) {
+        bench_step.dependOn(unit_test_step);
+    } else {
+        bench_step.dependOn(&b.addFail("zig build bench requires -Dbench=true; without it the bench tests are smoke runs and the step would silently do nothing useful").step);
+    }
 
     // Plugin-template compile gate: dev/plugin-template/** is compiled against
     // the real discovered modules (cross-wired like an in-tree module), so the
@@ -1927,17 +1934,16 @@ const Module = struct {
         name: []const u8,
         rel_path: []const u8,
         edges: []const []const u8,
+        source_paths: *const std.StringHashMap([]const u8),
     ) !void {
         // The model is the one pure root: it holds the WM's state AND the
         // Rect/Margins value objects that state holds. `satI16` is also needed
         // by the pure tiling layer, which is why the coordinate helpers cannot
         // live on the x11 side. The shelf siblings in src/core/pure/ are
         // xcb-free by construction. architecture/contract.zig moved its xcb
-        // event TYPES and the Surfaces hook set out to seams.zig, but
-        // its own import edges (`types`, `build_options`, the generated
-        // `tiling_modules`) are only admitted by this layering via config/
-        // tiling allowances -- so it is NOT covered by the import-edge scan
-        // below, only by Rule 3's body sweep.
+        // event TYPES and the Surfaces hook set out to contract_x11.zig (was
+        // seams.zig), so contract.zig itself is pure vocabulary and is
+        // covered by this scan like any other pure module.
         const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig"))
             "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
@@ -1948,7 +1954,7 @@ const Module = struct {
             return;
 
         for (edges) |dep| {
-            if (!pureLayerAllows(layer, dep)) {
+            if (!pureLayerAllows(layer, dep, source_paths)) {
                 std.debug.print(
                     "Error: layer guard: pure-{s} module '{s}' imports hub module '{s}'. The pure layers may only import the shared utility shelf, `model`, and their own layer; see assertPureLayerImports in build.zig.\n",
                     .{ layer, name, dep },
@@ -1961,25 +1967,38 @@ const Module = struct {
     /// The allowed-import policy behind `assertPureLayerImports`. The pure
     /// shelf (src/core/pure/) is xcb-free by construction and safe for every
     /// layer; `model` is the shared data model AND the geometry vocabulary
-    /// (Rect/Margins) that the state holds; the per-layer extras are the pure
-    /// neighborhoods each layer legitimately reaches (tiling's own seam plus
-    /// the `contract` decls; config's own parsing siblings plus the pure
-    /// `keysyms`). Anything else is hub wiring and belongs behind an
-    /// interface, not an import.
-    fn pureLayerAllows(layer: []const u8, dep: []const u8) bool {
+    /// (Rect/Margins) that the state holds. A pure layer's OWN siblings are
+    /// derived from the discovery walk (`source_paths`), not hand-listed —
+    /// the previous static list went stale the moment config split into
+    /// grammar/parse/reload/source and the guard (already inert on a
+    /// double-slash path bug) could never have caught it. The per-layer
+    /// extras are the pure neighborhoods each layer legitimately reaches
+    /// outside its own directory: tiling's `contract` decls; config's pure
+    /// `keysyms` bridge into input. Anything else is hub wiring and belongs
+    /// behind an interface, not an import.
+    fn pureLayerAllows(
+        layer: []const u8,
+        dep: []const u8,
+        source_paths: *const std.StringHashMap([]const u8),
+    ) bool {
         const shelf = [_][]const u8{
-            "constants", "log",     "ids",  "masks",     "paths",    "bounded",
-            "idmap",     "scaling", "time", "lifecycle", "dpi_math",
+            "constants", "log",     "ids",  "masks",    "paths", "bounded",
+            "idmap",     "scaling", "time", "dpi_math",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
         if (std.mem.eql(u8, dep, "model")) return true;
         if (std.mem.eql(u8, layer, "model")) return false;
-        if (std.mem.eql(u8, layer, "tiling")) {
-            return std.mem.eql(u8, dep, "tiling") or std.mem.eql(u8, dep, "contract");
-        }
-        if (std.mem.eql(u8, layer, "config")) {
-            const siblings = [_][]const u8{ "parser", "schema", "types", "fallback", "keysyms" };
-            for (siblings) |m| if (std.mem.eql(u8, m, dep)) return true;
+        // Same-layer siblings: any discovered module whose own source path
+        // lives under this layer's directory root.
+        if (source_paths.get(dep)) |dep_path| {
+            if (std.mem.eql(u8, layer, "tiling")) {
+                if (std.mem.startsWith(u8, dep_path, "src/tiling/")) return true;
+                if (std.mem.eql(u8, dep, "contract")) return true;
+            }
+            if (std.mem.eql(u8, layer, "config")) {
+                if (std.mem.startsWith(u8, dep_path, "src/config/")) return true;
+                if (std.mem.eql(u8, dep, "keysyms")) return true;
+            }
         }
         return false;
     }
@@ -2039,7 +2058,7 @@ const Module = struct {
                         .{ rel_path, @errorName(err) },
                     );
                 };
-                try assertPureLayerImports(name, rel_path, edges.items);
+                try assertPureLayerImports(name, rel_path, edges.items, source_paths);
             }
             for (edges.items) |dep_name| {
                 if (mod.import_table.contains(dep_name)) continue;

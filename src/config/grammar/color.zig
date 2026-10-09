@@ -11,7 +11,7 @@
 //! `weightFromToken`/`splitWeightPrefix`), which the bare-token
 //! interpreter classifies with. This file sits between parser and
 //! schema: it reads parser's `Value` and token grammar, and schema
-//! (and bar_properties) read this file's decoders. The seam is
+//! (and bar_properties) read this file's decoders. The dependency is
 //! one-directional -- parser never imports color -- so it cannot
 //! cycle, which is how bar_properties sits beside schema without
 //! a schema<->bar_properties loop.

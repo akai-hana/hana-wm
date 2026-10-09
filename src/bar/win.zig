@@ -15,6 +15,7 @@ const types = @import("types");
 const xcb = core.xcb;
 
 const drawing = @import("drawing");
+const surface = @import("surface");
 
 const atom = @import("atoms");
 /// All atoms needed to declare the bar window as a dock to the compositor.
@@ -131,7 +132,7 @@ pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void 
 pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWindowSetup {
     const cs = core.getState();
     const visual_id = if (want_transparency)
-        drawing.findVisualByDepth(cs.screen, 32)
+        surface.findVisualByDepth(cs.screen, 32)
     else
         cs.screen.root_visual;
     const depth: u8 = if (want_transparency) 32 else xcb.XCB_COPY_FROM_PARENT;

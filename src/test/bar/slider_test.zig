@@ -177,10 +177,6 @@ test "valueRange rejects offsets that would overflow the bounds check" {
 // level hook entirely. These fakes are what make the other half checkable.
 var g_fake_answer: ?u8 = null;
 
-fn fakeLevel() ?u8 {
-    return g_fake_answer;
-}
-
 const FakeLevel = struct {
     fn levelHook() ?u8 {
         return g_fake_answer;
@@ -192,7 +188,7 @@ const FakeLevel = struct {
     fn noRead() bool {
         return false;
     }
-    fn label(_: types.BarConfig, _: []u8) slider.Label {
+    fn label(_: types.BarConfig, _: []u8) drawing.Label {
         return .{ .text = "", .value_start = 0, .value_len = 0 };
     }
 };

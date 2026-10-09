@@ -4,8 +4,8 @@
 //! raw `extern` declarations live apart from the drawing logic so
 //! `drawing.zig` is a layer of logic over them, not a file whose
 //! first fifth is a C-header translation. Nothing outside the bar
-//! drawing layer names these bindings; `drawing.zig` is their sole
-//! consumer and qualifies every use through this module.
+//! drawing layer names these bindings; `drawing.zig`, `fonts.zig` and `surface.zig`
+//! are their consumers and qualify every use through this module.
 
 const core = @import("core");
 const xcb = core.xcb;
