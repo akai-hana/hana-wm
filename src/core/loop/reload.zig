@@ -1,7 +1,7 @@
 //! Config reload: load, validate, and atomically swap in a new
 //! config, then rebuild the subsystems that read it. Keybindings
 //! regrab only when the key PAIR layout changed; bar and tiling
-//! rebuild unconditionally (see persist/diff.zig). Split out of
+//! rebuild unconditionally (see config.detectChanges). Split out of
 //! events.zig (review 05-input round 2). A transition concern --
 //! driven by the reload flag the event loop consumes -- not
 //! per-event path work.
@@ -14,7 +14,6 @@ const window = @import("window");
 const admission = @import("admission");
 const actions = @import("actions");
 const grabs = @import("grabs");
-const query = @import("query");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
@@ -93,7 +92,7 @@ pub fn handleConfigReload() !void {
     // hand-off be a single core call instead of a pointer swap that leaves two
     // sites reasoning about who frees what. Only the regrab is skipped for an
     // unchanged pair layout; bar and tiling rebuild unconditionally so no
-    // borrowed state outlives the box the swap releases (see diff.zig).
+    // borrowed state outlives the box the swap releases (see config.detectChanges).
     const changes = config.detectChanges(cs.config, new_ptr);
 
     // Ownership moves to the new box and the displaced one is released in the
@@ -107,11 +106,6 @@ pub fn handleConfigReload() !void {
     // for the whole process lifetime (init at boot, deinit only at shutdown),
     // so this reload never sees a null state.
     input.buildKeybinds(new_ptr.keybindings.items);
-
-    // Config-derived counts latched into window modules must re-latch too:
-    // query's workspace_count was only ever read at init, so a reload that
-    // edits [workspaces] count/enabled would otherwise keep the boot value.
-    query.reLatchWorkspaceCount();
 
     // Freeze the now-live config as the re-exec source: a later reload_hana
     // (binary-only reload) boots from this snapshot rather than from the

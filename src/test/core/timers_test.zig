@@ -1,4 +1,5 @@
-//! Tests for the event loop's deadline reducer (`core/loop/timers.zig`).
+//! Tests for the event loop's deadline reducer (`core/loop/events.zig`,
+//! former timers.zig, merged 2026-10-10).
 //!
 //! Pure arithmetic over a source list, so it runs headless: the reduction is
 //! what decides whether the loop blocks forever, and the cases that matter are
@@ -7,7 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const timers = @import("timers");
+const timers = @import("events");
 
 // Sources are named no-arg functions rather than closures over locals: a
 // `Source` is a bare function pointer, so each answer gets its own decl.

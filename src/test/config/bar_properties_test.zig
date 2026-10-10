@@ -4,14 +4,13 @@
 //! props WITHOUT a color map entry, and palette references after
 //! collectPalette. The full-pipeline spellings (composite arrays, mixes,
 //! every `=`/bare/0-1 flag form) are pinned by schema_test; these are the
-//! unit-level contracts underneath them. The knobs table comes from the same
-//! schema re-export schema.applyAll passes; collectPalette runs exactly as
-//! applyAll does before the entries read.
+//! unit-level contracts underneath them. `schema.applyBarProperties` is the
+//! same decoder applyAll calls; collectPalette runs exactly as applyAll does
+//! before the entries read.
 
 const std = @import("std");
 const testing = std.testing;
 
-const bar_properties = @import("bar_properties");
 const color = @import("color");
 const parser = @import("parser");
 const schema = @import("schema");
@@ -20,7 +19,7 @@ const types = @import("types");
 fn load(a: std.mem.Allocator, cfg: *types.Config, src: []const u8) !void {
     var doc = try parser.parse(a, src, "<bar-props-test>");
     color.collectPalette(&doc);
-    try bar_properties.applyBarProperties(schema.knobs, testing.allocator, &doc, cfg);
+    try schema.applyBarProperties(testing.allocator, &doc, cfg);
 }
 
 test "gates: pre-seeded maps clear when [bar] or [bar.properties] is absent" {

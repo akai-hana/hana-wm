@@ -2,8 +2,8 @@
 //! Parses hana's TOML-inspired configuration format into structured values.
 //!
 //! The document model (`Value`, `Section`, `Document`, the duplicate-key
-//! policy, `ParseError`) lives beside this file in `document.zig`, and the
-//! cross-file merge in `merge.zig`; both re-export their names through this
+//! policy, `ParseError`) and the cross-file merge live beside this file in
+//! `document.zig`; both re-export their names through this
 //! file so existing `parser.*` call sites keep one import. What the model
 //! owns (nothing -- one arena per load) is documented in `document.zig`.
 //!
@@ -36,17 +36,16 @@ const log = @import("log");
 const types = @import("types");
 
 const document = @import("document");
-const merge = @import("merge");
 
-// Re-exports: the model moved beside this file (document.zig) and the
-// cross-file merge to merge.zig; `parser.*` keeps naming both so callers
-// (schema, sections, discover, tests) hold one import. The dialect itself
+// Re-exports: the model and the cross-file merge both live beside this file
+// (document.zig); `parser.*` keeps naming them so callers (schema, sections,
+// discover, tests) hold one import. The dialect itself
 // -- tokenizer, weight/color token spellings, `parse` -- stays here.
 pub const Value = document.Value;
 pub const Section = document.Section;
 pub const Document = document.Document;
 pub const palette_var_names = document.palette_var_names;
-pub const mergeDocumentsInto = merge.mergeDocumentsInto;
+pub const mergeDocumentsInto = document.mergeDocumentsInto;
 const ParseError = document.ParseError;
 
 /// Core parser for a `(weight:DIGITS[%])` prefix at the head of `s`, where `s`

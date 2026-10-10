@@ -57,7 +57,7 @@ test "at-capacity cache drops new entries but keeps overwrites" {
     wincache.init(alloc);
     defer wincache.deinit();
 
-    const max = @import("props").max_window_cache;
+    const max = @import("icccm").max_window_cache;
 
     // Fill past the ceiling with title writes (the fixed-capacity IdMap
     // enforces the cap; key 0 is its never-used sentinel, so the ids here
