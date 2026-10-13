@@ -212,42 +212,6 @@ Since this is all an arbitrary design choice, it is optional and re-categorizabl
 
 > BTW, pull requests with custom themes are very much welcome. :-)
 
-## Backlight write policy
-
-The slider's brightness sub talks to the panel through the kernel's own sysfs
-interface (`/sys/class/backlight/<dev>/brightness`), so a commit is one tiny
-file write — no subprocess, applied immediately, un-throttled. That native
-path needs write permission on the node; by default the nodes are root-only,
-and hana silently falls back to a rate-limited `brightnessctl` spawn.
-
-To opt into the native, un-throttled path, install the shipped udev rules and
-add your user to the `video` group:
-
-```sh
-sudo install -m 0644 contrib/udev/90-hana-backlight.rules /etc/udev/rules.d/
-sudo udevadm control --reload && sudo udevadm trigger
-sudo usermod -aG video $USER   # then log out and back in
-```
-
-With no rule installed, hana still works: the brightnessctl fallback does the
-write for you (clamped, coalesced, throttled), just with a subprocess boundary
-per commit. See `config/README.md` for the `brightness_device` config knob.
-
----
-
-# Roadmap
-
-Planned, not-yet-shipped items:
-
-- **External bar support** — hana currently ships its own integrated bar;
-  driving an external bar (dwm-style `setstatus`) is not implemented yet.
-- **Ratio `%N` spelling** — the config parser accepts `N%` but not the
-  reversed `%N` form yet.
-- **Finer window rules** — rules today cover class → workspace and class →
-  float; rule-driven properties (border color, gaps, …) are future work.
-- **Scaling polish** — cross-display scaling works, but per-monitor fine-tuning
-  is still being refined.
-
 ---
 
 # Development
@@ -259,36 +223,7 @@ zig build check
 dev/scripts/xtest.sh zig build test   # THE test command: Xvfb-backed
 ```
 
-- **Always run the suite through `dev/scripts/xtest.sh`.** It starts its own
-  isolated Xvfb, points `DISPLAY` at it, and sets `HANA_REQUIRE_X=1`. A bare
-  `zig build test` is headless, so every X-gated test becomes a `SkipZigTest`
-  that still counts green — a passing summary covering ~44 fewer tests than it
-  looks like. On a machine with a live hana session, going bare is also how
-  those tests end up on the real `:0`, grabbing focus from your session.
-
-- `dev/scripts/check-layers.sh` (invoked by `zig build check`) enforces the
-  subsystem layering described under [Architecture](#architecture).
-- `zig build check-all` additionally runs the modularity matrix
-  (`dev/scripts/check-modularity.sh`: builds each module in isolation) — kept
-  separate from `check` because it cold-builds ~31 configurations.
-- Latency benchmarks are opt-in: `zig build test -Dbench` (or the
-  `zig build bench` step) runs the `perf_test`/`focus_latency_test`/
-  `tiling_latency_test` full loops and appends the timings to
-  `.zig-cache/bench/timings.txt` (off by default, so the normal suite stays
-  fast and silent). `zig build
-  -Dprofile-key` instruments the key-dispatch path (receive → action latency).
-- End-to-end X scenarios live in `dev/harness/`. `dev/harness/run-scenario.sh
-  --golden S01-spawn-tiled …` records a baseline, and `--compare` diffs a run
-  against `dev/harness/golden/` (normalized tree/property/state-log snapshots);
-  `--compare-raw` is a byte-exact variant and `--keep` leaves the isolated
-  Xvfb + hana up for inspection.
-- Unit tests live in `src/test/`. X-gated window
-  tests self-pass when no display is available, printing `SKIP:`/`WARN:` to a
-  TTY only (interactive runs); set `HANA_REQUIRE_X=1` to turn any skip into a
-  hard failure. `dev/scripts/xtest.sh` already sets it, so that path can never
-  go green by skipping.
-- The tree carries no `TODO`/`FIXME` markers: `rg -n "TODO|FIXME" src/` is
-  empty by design (open work lives in the issue tracker, not the source).
+TO-DO
 
 ---
 
