@@ -1,6 +1,6 @@
 //! The usable-area claim arithmetic and the occupancy contract it encodes.
 //!
-//! These are the tests that make (6.10) non-reversible by accident: the claim
+//! These are the tests that make the rule non-reversible by accident: the claim
 //! table and the pure solver are what a future "fullscreen means no work
 //! area" shortcut would be tempted to bypass, so the cases that a shortcut
 //! would get wrong are stated explicitly here rather than left to a reviewer
@@ -80,7 +80,7 @@ test "releasing the claim restores the full screen" {
     // The path a fullscreen window actually takes: the bar unmaps, releases,
     // and the area goes whole again with no fullscreen input anywhere. If
     // this test needed a fullscreen fact to pass, occupancy would have two
-    // encodings -- which is exactly what (6.10) ruled out.
+    // encodings -- which is exactly what the rule ruled out.
     {
         usable_area.setClaim(.top, 30);
         defer usable_area.releaseClaim();

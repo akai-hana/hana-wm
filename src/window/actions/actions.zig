@@ -45,7 +45,7 @@ pub fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
 /// Convenience: true when `win` is the covering (fullscreen) occupant on its
 /// workspace.
 pub fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
-    return model_mod.isCoveringOn(m, win, m.current); // 12.4: model query
+    return model_mod.isCoveringOn(m, win, m.current); // Model query
 }
 
 // Re-exports: the five action groups live in their own files
@@ -120,7 +120,7 @@ const RetileOpts = struct {
 ///
 /// Each mode names which facts IT bumps. The plain and restack modes
 /// deliberately do NOT bump the window fact here: both reconcile through
-/// `pipeline.reconcileGrab`, which owns that bump (10.5), so the actions
+/// `pipeline.reconcileGrab`, which owns that bump, so the actions
 /// that route through them get the invariant without having to remember
 /// it, and this one cannot double-bump on the way there. The focus variants
 /// reconcile through `pipeline.reconcileGrabFocus`, which does not bump, so

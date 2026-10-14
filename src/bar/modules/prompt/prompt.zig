@@ -282,7 +282,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
         return acceptGhost();
     }
 
-    // (27.4) No handler installed means there is no modal engine to dispatch
+    // No handler installed means there is no modal engine to dispatch
     // to, so insert mode falls back to the basic editor. With one installed,
     // insert keys go to the handler like every other mode -- an extensor that
     // implements this contract is no longer bypassed for not being "vim".

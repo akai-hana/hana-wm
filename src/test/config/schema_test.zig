@@ -645,7 +645,7 @@ test "validate rejects off-range ratio master_width" {
     // noisy test. That guard is severed: src/core/pure/log.zig silences
     // std.log in test binaries, and validate() surfaces InvalidConfig on its
     // own error return, so the negatives are directly assertable -- and are
-    // covered in config_test by the 15.1 / 15.12 cases too.
+    // covered in config_test's boot and file-ceiling cases too.
     var out_of_band = try loadToml(testing.allocator, "mw-big", "[tiling]\nmaster_width = 99%\n");
     defer out_of_band.deinit(testing.allocator);
     try testing.expectError(error.InvalidConfig, config.validate(&out_of_band));
@@ -816,7 +816,7 @@ test "display.dpi: integer and fractional spellings both widen; absent stays nul
 }
 
 test "legacy drun_* keys still parse after the rename to run_*" {
-    // (27.7) The rename is only safe if an UNEDITED existing config keeps
+    // The rename is only safe if an UNEDITED existing config keeps
     // working, so the alias path is pinned here rather than assumed: these are
     // the exact key spellings hana shipped, loaded into the renamed fields.
     var legacy = try loadToml(testing.allocator, "drun-alias",

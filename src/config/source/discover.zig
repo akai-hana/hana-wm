@@ -288,7 +288,7 @@ const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
 /// (boot) falls back to the embedded config, and the reload path lets them
 /// propagate so the live config is kept. The set is named so the search's
 /// hard-fail list and boot's fallback list cannot drift apart -- they are the
-/// same policy, spelled twice, and the ceilings (15.12) joined both.
+/// same policy, spelled twice, and the ceilings joined both.
 fn isFatalLoadError(err: anyerror) bool {
     return switch (err) {
         error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes => true,

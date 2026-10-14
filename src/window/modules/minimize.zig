@@ -181,7 +181,7 @@ fn bestSeq(
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
         if (skip_covering) {
-            // 12.1: read the model's covering intent directly instead of
+            // Read the model's covering intent directly instead of
             // asking a PEER MODULE through the contract hook. The hook's
             // answer is only right when the covering module is compiled in --
             // `isCoveringMode` is null otherwise, so this scan silently kept

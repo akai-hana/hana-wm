@@ -3,7 +3,7 @@
 //! properties, the prepare/apply split, dedup, and the clear path. Self-skips
 //! on machines without an X server so `zig build test` stays green headless.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: tiling
 
@@ -297,7 +297,7 @@ test "focus: parked cursor cannot steal a fresh spawn's focus (sticky-at-pixel s
     try std.testing.expect(focus.protocolParityHolds());
 }
 
-// 10.6: the destroyed-window guard applies to `.user_command` too.
+// The destroyed-window guard applies to `.user_command` too.
 //
 // The guard used to be `if (reason == .mouse_click and !isWindowMapped(...))`,
 // with `.user_command` excluded because the focus-cycle callers had already

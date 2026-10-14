@@ -23,7 +23,7 @@ test "ids: fromIndex accepts wider ints via the checked internal cast" {
     try testing.expectEqual(@as(u8, 5), ids.WorkspaceId.fromIndex(@as(u16, 5)).index);
 }
 
-// --- workspace validity: ONE notion (7.6/7.7) -----------------------------
+// --- workspace validity: ONE notion -----------------------------
 
 test "isValidWorkspaceIndex is the single range definition" {
     try testing.expect(ids.isValidWorkspaceIndex(0));

@@ -7,7 +7,7 @@ const constants = @import("constants");
 const log = @import("log");
 const core = @import("core");
 
-// Single @cImport owner for libxkbcommon lives in keymap.zig (19.8): the same
+// Single @cImport owner for libxkbcommon lives in keymap.zig: the same
 // two headers were translated once here and once in keysyms.zig, giving two
 // translation units to keep in sync for no benefit.
 const keymap = @import("keymap");

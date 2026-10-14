@@ -1,4 +1,4 @@
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: tiling
 
@@ -14,7 +14,7 @@
 // changed bits) the sync ledger recorded as last-sent -- which is what this
 // instrumentation quantifies as a function of window count. A reconcile that
 // re-sent the full desired state every pass (the invariant reconcile_test
-// pins against) was the cost center 14.9 had to remove.
+// pins against) was the cost center an earlier fix had to remove.
 //
 // The Mod+k caller shape (`focus.cycleTarget` then
 // `focus.grabFocusWithDuty`) now runs the viewport snap as a duty INSIDE the
@@ -38,7 +38,7 @@ const bench = build_options.bench;
 
 const nowNs = time.monotonicNs;
 
-const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn between iterations
+const makeModel = helpers.makeBareModel; // Bench: no module-store churn between iterations
 
 const regCur = helpers.regCur;
 
@@ -72,7 +72,7 @@ test "latency: reconcile cost + request count at focus change" {
         // changed since, and reconcile never flushes or grabs itself
         // ("DO NOT FLUSH HERE. Caller owns flushing"). This is the
         // delta-elision invariant asserted at every scale -- a full-state
-        // re-send (the pre-14.9 cost center) fails here at each n.
+        // re-send (the cost center before the fix) fails here at each n.
         try std.testing.expectEqual(@as(usize, 0), probe.total);
 
         if (bench)

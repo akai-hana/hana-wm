@@ -27,7 +27,7 @@ pub const TestOp = union(enum) {
     pixel: struct { win: model.WindowId, p: u32 },
     park: model.WindowId,
     stack: struct { win: model.WindowId, s: sinkmod.Stack },
-    /// (28.1) The four ops that used to be silent shims. Recording them is what
+    /// The four ops that used to be silent shims. Recording them is what
     /// makes the fullscreen EWMH transition assertable at all: fullscreen.zig
     /// asserts nothing observable about set_state_atom otherwise, because the
     /// test sink swallowed every call.
@@ -274,7 +274,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(s, op.stack.s);
         }
 
-        /// Asserts op `i` is a `set_state_atom` fullscreen transition. (28.1)
+        /// Asserts op `i` is a `set_state_atom` fullscreen transition.
         pub fn expectEwmhFullscreen(
             self: *const Self,
             i: usize,
@@ -290,19 +290,19 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(add, op.ewmh_fullscreen.add);
         }
 
-        /// Asserts op `i` is a bare `flush`. (28.1)
+        /// Asserts op `i` is a bare `flush`.
         pub fn expectFlush(self: *const Self, i: usize) !void {
             comptime if (mode != .record) @compileError("expectFlush requires record mode");
             try std.testing.expect(self.ops.items[i] == .flush);
         }
 
-        /// Asserts op `i` is a `grab_server`. (28.1)
+        /// Asserts op `i` is a `grab_server`.
         pub fn expectGrab(self: *const Self, i: usize) !void {
             comptime if (mode != .record) @compileError("expectGrab requires record mode");
             try std.testing.expect(self.ops.items[i] == .grab_server);
         }
 
-        /// Asserts op `i` is an `ungrab_and_flush`. (28.1)
+        /// Asserts op `i` is an `ungrab_and_flush`.
         pub fn expectUngrab(self: *const Self, i: usize) !void {
             comptime if (mode != .record) @compileError("expectUngrab requires record mode");
             try std.testing.expect(self.ops.items[i] == .ungrab_and_flush);

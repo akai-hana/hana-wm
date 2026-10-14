@@ -337,7 +337,7 @@ pub inline fn yieldsModelFocus(t: FocusTransition) bool {
     };
 }
 
-/// The focus ETIQUETTE for one `Reason` (10.7): all three per-reason
+/// The focus ETIQUETTE for one `Reason`: all three per-reason
 /// policies as DATA, in one row, instead of three separate switches that
 /// each had to be re-read to answer "what does a workspace switch do?".
 const Etiquette = struct {
@@ -390,7 +390,7 @@ fn etiquetteFor(reason: Reason) Etiquette {
     };
 }
 
-/// The ONE destroyed-window guard for a focus target (10.6). False when `win`
+/// The ONE destroyed-window guard for a focus target. False when `win`
 /// may not take focus or be raised.
 ///
 /// Three checks, in the order that stops the work soonest, and ONE place they
@@ -640,8 +640,7 @@ pub fn drainTilingOpSettle() void {
 // (floating windows are admitted too), so the buffer is sized by the model
 // store capacity rather than max_tiled_windows.
 
-/// Cycle focus one step, committing the viewport-snap duty in the SAME grab
-/// (10.10).
+/// Cycle focus one step, committing the viewport-snap duty in the SAME grab.
 ///
 /// This is the coupled form. The two calls the input path used to make --
 /// `if (focus.cycleTarget(dir)) |t| focus.grabFocusWithDuty(t, .user_command,
@@ -652,7 +651,7 @@ pub fn drainTilingOpSettle() void {
 /// (one extra grab-and-reconcile later, or not at all). The "the snap rides
 /// along in the cycle's grab" rule lived only in a comment at the call site.
 ///
-/// Deliberately NOT the whole of 10.10: `cycleTarget` is still `pub` for the
+/// Deliberately NOT the whole refactor: `cycleTarget` is still `pub` for the
 /// pure read. Privatizing it is the right end state, but its only other
 /// consumers are assertions in the X-gated focus_test that this environment
 /// cannot execute, and the mechanical conversion (cycleTarget reads -> cycleFocus

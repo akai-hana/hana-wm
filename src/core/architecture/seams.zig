@@ -63,7 +63,7 @@ pub const Surfaces = struct {
     toggleBarSegmentAnchor: *const fn () void,
     /// True when fullscreen currently forces the bar hidden. The action layer
     /// needs this to decide whether a re-anchor's reconcile is meaningful
-    /// (20.2); the predicate is the bar's, so it is reached through the same
+    /// The predicate is the bar's, so it is reached through the same
     /// hook table as the re-anchor itself rather than imported directly.
     barForcedHiddenByFullscreen: ?*const fn (*const model.Model, u8) bool,
     chromeToggleOverlay: *const fn () void,

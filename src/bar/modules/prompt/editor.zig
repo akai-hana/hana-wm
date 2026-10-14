@@ -40,7 +40,7 @@ pub const Mode = enum(u2) {
     /// Pixel width of this mode's hint, measured once and cached in `cache`.
     /// 0 means "no hint", which is what suppresses the pill entirely.
     ///
-    /// (27.5) The pill is the extensor's UI, so the WIDTH POLICY belongs to the
+    /// The pill is the extensor's UI, so the WIDTH POLICY belongs to the
     /// mode rather than to the bar: the host used to measure the provider's
     /// label and decide on its own what a mode with no label means. Asking the
     /// mode for its hint width moves the "no label => no pill" rule next to the
@@ -234,7 +234,7 @@ pub fn insertChar(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
     return .none;
 }
 
-/// True once a handler set has been registered. (27.4)
+/// True once a handler set has been registered.
 ///
 /// Sticky: nothing unregisters handlers, and a build with no extensor never
 /// calls registerHandlers at all, which is what leaves insert mode basic.
@@ -260,7 +260,7 @@ pub var handlers: Handlers = .{};
 
 pub fn registerHandlers(h: Handlers) void {
     handlers = h;
-    // (27.4) Registering a handler set is what MAKES this a modal prompt, and
+    // Registering a handler set is what MAKES this a modal prompt, and
     // the two places that used to ask `config.bar.vim_mode` were really asking
     // that question through a config key -- so a compiled-in extensor that
     // implements the modal engine was silently bypassed in insert mode and had

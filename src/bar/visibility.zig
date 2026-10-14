@@ -49,7 +49,7 @@ pub const Reason = enum {
     fullscreen_claims_screen,
 };
 
-pub const DesiredVisibility = struct {
+const DesiredVisibility = struct {
     should_be_visible: bool,
     reason: Reason,
 };

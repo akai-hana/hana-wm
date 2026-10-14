@@ -279,7 +279,7 @@ pub fn build(b: *std.Build) !void {
     // standalone `zig test <file>` cannot resolve them (module-root escape),
     // which is why tests go through the build system.
     const unit_test_step = b.step("test", "Run unit tests");
-    // (28.6) Feature name -> is-it-built bool. The gate a test declares in its
+    // Feature name -> is-it-built bool. The gate a test declares in its
     // own source resolves through this, so the two sides can only disagree by
     // naming a feature that does not exist -- which is a hard error below, not
     // a silent wrong answer.
@@ -302,7 +302,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "volume", .on = has_volume },
     };
 
-    // (28.7) Restrict the run to one *_test file. A BUILD-side filter, not
+    // Restrict the run to one *_test file. A BUILD-side filter, not
     // just a pass-through: see the filter_matched check in the loop below.
     const test_filter = b.option([]const u8, "test-filter", "Run only this *_test file (e.g. model_test)");
     // X-gated integration tests connect to the same $DISPLAY; chain their run
@@ -349,7 +349,7 @@ pub fn build(b: *std.Build) !void {
                 return error.StaleTestGate;
             }
         }
-        // (28.7) Iterate a SORTED stem list, not the discovery map's iterator.
+        // Iterate a SORTED stem list, not the discovery map's iterator.
         // The map's order was unspecified, so the order test binaries were
         // created in -- and therefore the order the X-gated chain below is
         // assembled in -- varied between runs. That was harmless for
@@ -373,7 +373,7 @@ pub fn build(b: *std.Build) !void {
         var filter_matched = false;
         for (stems.items) |stem| {
             const entry = discovery.modules.getPtr(stem).?;
-            // (28.6) x_gated metadata stays in the build; the FEATURE
+            // x_gated metadata stays in the build; the FEATURE
             // gate is read from the test's own source, sitting next to the
             // imports that make it necessary. Absence from this table is now
             // normal (it just means "not X-gated"); the reverse -- a row
@@ -386,7 +386,7 @@ pub fn build(b: *std.Build) !void {
                 return error.NoTestSourcePath;
             const gate = try readTestGate(b, rel, &feature_flags);
             if (!gate.on) continue;
-            // (28.7) -Dtest-filter=<stem> restricts the run to one file while
+            // -Dtest-filter=<stem> restricts the run to one file while
             // developing. filter_matched makes an unmatched name a loud error
             // rather than a green run of nothing -- a typo would otherwise look
             // exactly like a passing suite.
@@ -401,7 +401,7 @@ pub fn build(b: *std.Build) !void {
             SystemLibraries.link(entry.*);
             const t = b.addTest(.{ .root_module = entry.* });
             const run = b.addRunArtifact(t);
-            // (28.7) Each run step is individually named, so
+            // Each run step is individually named, so
             // `zig build test.<stem>` runs exactly one file.
             const one_name = std.fmt.allocPrint(b.allocator, "test.{s}", .{stem}) catch @panic("oom");
             const one_desc = std.fmt.allocPrint(b.allocator, "Run only {s}.zig", .{stem}) catch @panic("oom");
@@ -427,7 +427,7 @@ pub fn build(b: *std.Build) !void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
 
-    // 28.2: `zig build bench -Dbench=true` runs the latency/benchmark tests
+    // `zig build bench -Dbench=true` runs the latency/benchmark tests
     // with their full iteration counts and records the timings.
     //
     // The timings go to `.zig-cache/bench/timings.txt` (see helpers.benchLog)
@@ -1032,7 +1032,7 @@ fn deriveOwnerContracts(
 /// Packages that get a GENERATED sub-registry (`<package>_subs`), each entry
 /// binding one file-sibling that self-declares `pub const <binding>`.
 ///
-/// (23.7) A directory is NOT a family by itself. Only a package listed HERE gets
+/// A directory is NOT a family by itself. Only a package listed HERE gets
 /// a sub-registry, and only its self-declaring siblings join it (see
 /// `declaresBinding`); a file beside a listed package without the declaration is
 /// a private implementation file that stays a plain discovered module. That
@@ -1408,10 +1408,10 @@ fn buildSubsRegistryModule(
 /// compile against the real modules, the import name to expose it under in
 /// the generated wrapper, and whether the current tree provides its
 /// dependencies (a skipped entry is left out of the wrapper entirely).
-/// One feature a test may gate itself on. (28.6)
+/// One feature a test may gate itself on.
 const FeatureFlag = struct { name: []const u8, on: bool };
 
-/// A test's self-declared build gate. (28.6)
+/// A test's self-declared build gate.
 ///
 /// The gate moves into the test file because the thing that determines whether
 /// a test CAN compile is which modules it imports, and the file that knows
@@ -1904,11 +1904,18 @@ const Module = struct {
     /// cross-wiring — one graph, so it cannot drift from a second hand-kept
     /// dependency list. The hub layers (core, window, input, bar) may import
     /// each other at will (hub-and-spoke); the pure layers may only depend on
-    /// the pure vocabulary (src/core/pure/) and their own neighborhood. Because any
-    /// import cycle with a pure member needs the pure module to reach INTO
-    /// the hub, this makes pure-layer cycles structurally impossible and
-    /// catches regressions like the old config -> xkbcommon -> core -> config
-    /// cycle (config now parses keysym names through the pure `keysyms`).
+    /// the pure vocabulary (src/core/pure/) and their own neighborhood.
+    ///
+    /// This is a DIRECT-edge (1-hop) guard: it rejects a pure layer's own
+    /// import of a hub module — the direction that produced the old
+    /// config -> xkbcommon -> core -> config cycle (config now parses keysym
+    /// names through `keysyms`) — and catches regressions of that shape. It
+    /// does not prove the module graph acyclic in general. Known exception:
+    /// `keysyms`, the config-facing keysym-name parser, lives in src/input/
+    /// and imports `keymap` for input's xkbcommon cImport (keymap is input's
+    /// @cImport owner and cannot move to config), so that edge is scanned as
+    /// a hub edge rather than a pure one and a directory-level config⇄input
+    /// dependency passes the one-hop check by construction.
     ///
     /// This check is the IMPORT-EDGE guard only. The complementary body/
     /// reference sweep (any bare `xcb` token in the model vocabulary, tiling,

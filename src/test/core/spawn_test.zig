@@ -1,6 +1,6 @@
 //! The spawn pipe's success/failure rule, pinned without forking anything.
 //!
-//! (4.12) exists because the rule was inverted and nothing noticed. The bug was
+//! Exists because the rule was inverted and nothing noticed. The bug was
 //! only visible by reading the predicate against its own comment, so the
 //! comment is not evidence; these are.
 

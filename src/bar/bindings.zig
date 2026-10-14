@@ -65,7 +65,7 @@ pub const PangoContext = opaque {};
 pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics = opaque {};
 pub const PangoAttrList = opaque {};
-// (22.1) PangoAttribute was opaque, which was fine while every attribute was
+// PangoAttribute was opaque, which was fine while every attribute was
 // created by Pango and only ever inserted whole. A foreground attribute over a
 // SUB-RANGE needs its start_index/end_index set by us, so the leading fields
 // (the type/kop and the two range fields) are now declared. Pango's own header
@@ -107,7 +107,7 @@ pub extern fn pango_layout_set_font_description(
     desc: ?*PangoFontDescription,
 ) void;
 pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
-/// (22.7) Creates a fresh layout sharing `ctx`. This is what lets a text run
+/// Creates a fresh layout sharing `ctx`. This is what lets a text run
 /// own its own layout without building a cairo surface and context per run.
 pub extern fn pango_layout_new(ctx: *PangoContext) ?*PangoLayout;
 /// Pass null for either dimension if not needed.
@@ -178,7 +178,7 @@ pub extern fn pango_attr_style_new(style: pango_style_t) ?*PangoAttribute;
 
 /// An attribute list owns its attributes; every attribute `insert`-ed must
 /// NOT be freed by the caller.
-/// Creates a foreground-colour attribute. (22.1)
+/// Creates a foreground-colour attribute.
 /// Takes r/g/b in 0..65535 (Pango's scale) rather than hana's 0xRRGGBB.
 pub extern fn pango_attr_foreground_new(red: u16, green: u16, blue: u16) ?*PangoAttribute;
 pub extern fn pango_attr_list_new() ?*PangoAttrList;
@@ -187,7 +187,7 @@ pub extern fn pango_attr_list_unref(list: *PangoAttrList) void;
 pub extern fn pango_layout_set_attributes(layout: *PangoLayout, attrs: ?*PangoAttrList) void;
 
 /// The Pango layout does NOT take ownership of the list; the list must stay
-/// alive while set, and be unref'd afterwards. (22.7) A `TextRun` now owns both
+/// alive while set, and be unref'd afterwards. A `TextRun` now owns both
 /// the list and the layout it is attached to and unrefs them together in
 /// `deinit`, so that lifetime is structural rather than a pairing callers have
 /// to remember.

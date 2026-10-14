@@ -114,7 +114,7 @@ fn handleDestroyNotify(event: *anyopaque) void {
 
 // Adapts input.handleMappingNotify to the EventHandler shape. Only the
 // `request` field matters: it says WHICH mapping changed, and only a keyboard
-// mapping change invalidates the keycode->keysym table (19.2). A keyboard
+// mapping change invalidates the keycode->keysym table. A keyboard
 // change also makes the installed key grabs stale, and the regrab runs HERE
 // rather than inside input because grabs reads input's resolved keybind list:
 // calling it from there closed an import cycle (the same reason mouse
@@ -228,7 +228,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
         // re-detection here; they sit above the fixed dispatch table.
         .randr => {
             // Re-read the screen size BEFORE the surface path runs, and only
-            // when it really changed (6.2). Core's cached `Screen` is the
+            // when it really changed. Core's cached `Screen` is the
             // pointer the server filled in at setup, so without this a
             // resolution change left the work area, percentage heights and
             // font scaling all sized for the display as it was at startup. The

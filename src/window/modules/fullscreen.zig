@@ -28,7 +28,7 @@ pub const PendingBar = struct {
 /// exclusive PER WINDOW (arming one clears the other for that window), so one
 /// entry per window carries both.
 ///
-/// PER WINDOW, not one slot (12.7). A single optional slot meant arming a
+/// PER WINDOW, not one slot. A single optional slot meant arming a
 /// second window's intent silently DISCARDED the first: that window's
 /// ConfigureNotify then found nothing pending, never bumped the fact, and its
 /// bar state stayed whatever the second window decided -- a hide that never
@@ -265,7 +265,7 @@ pub fn notifyConfigureIfPending(win: u32, width: u16, height: u16) void {
     const screen_h = @as(u16, @intCast(cs.screen.height_in_pixels));
 
     // The ConfigureNotify DIMENSIONS are the confirmation that the server has
-    // caught up, but the decision itself is MODEL TRUTH (12.7): the bar
+    // caught up, but the decision itself is MODEL TRUTH: the bar
     // follows `presence == .covering`, not "the numbers went back to normal".
     // Inferring hide/show from the dimensions is what let the bar re-show
     // while the model still recorded a covering occupant (a client that

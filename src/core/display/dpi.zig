@@ -19,7 +19,7 @@ const baseline_dpi = constants.baseline_dpi;
 // resolution, so font sizing degrades more gracefully on smaller screens.
 const font_baseline_height: f32 = 1080.0;
 
-/// The bar-height policy as ONE value (6.8). These were three loose pub consts
+/// The bar-height policy as ONE value. These were three loose pub consts
 /// a caller had to know to apply together; nothing stopped someone clamping
 /// against the min and forgetting the cap. Grouping them makes "the policy"
 /// a thing you can pass, not a convention you have to remember.
@@ -124,7 +124,7 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
         log.warn("Ignoring unreasonable Xft.dpi value {d:.1}", .{xft_dpi});
     }
 
-    // 6.3: the formula is pure and returns null for a 0mm screen (the
+    // The formula is pure and returns null for a 0mm screen (the
     // "virtual display" case), so the decision and its log stay here.
     const geometry_dpi = dpi_math.calcDpiFromGeometry(.{
         .width_px = screen.width_in_pixels,
@@ -148,7 +148,7 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 /// rather than the screen baseline, so font sizes degrade more gracefully on
 /// smaller screens.
 ///
-/// Takes the height as a plain value rather than a `core.Screen` (6.5). There
+/// Takes the height as a plain value rather than a `core.Screen`. There
 /// used to be two shapes of this one function -- this one took a whole
 /// `Screen`, and a sibling took `RefDims { screen_h, screen_w }` -- so a
 /// caller holding only a height, or the wrong half of a `RefDims`, had no

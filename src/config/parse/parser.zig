@@ -41,7 +41,7 @@ const types = @import("types");
 
 /// A parsed value.
 ///
-/// Deliberately carries NO source span (16.1/16.3): the section already records
+/// Deliberately carries NO source span: the section already records
 /// the source line of every key it inserted (`Entry.line`),
 /// and that is the line a user needs -- a knob error is reported against a KEY
 /// PATH inside a section, and every diagnostic in this file reaches the section

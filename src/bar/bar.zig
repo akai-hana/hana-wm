@@ -84,7 +84,7 @@ const self_ticking_ids = state.self_ticking_ids;
 // drawing.probeFontMetrics' throwaway surface (no live DrawContext is
 // touched) -- and threads the result into bar creation, draw-context
 // construction, and the surviving State's own value. No global, no config
-// mutation, and no save/restore: a bar's metrics belong to that bar (21.5).
+// mutation, and no save/restore: a bar's metrics belong to that bar.
 
 /// Measures the configured fonts at `trial_pt`. The point size is always
 /// explicit: the only two callers are the metric probe itself (a fixed trial
@@ -102,7 +102,7 @@ fn probeMetrics(trial_pt: u16) ?drawing.FontMetrics {
 }
 
 /// Resolves the bar's metrics from the live config and screen. The rules
-/// themselves live in `metrics.resolve` (21.5); this only supplies them.
+/// themselves live in `metrics.resolve`; this only supplies them.
 fn resolveBarMetrics() Metrics {
     const cs = core.getState();
     return metrics.resolve(.{
@@ -347,7 +347,7 @@ fn applyReload(old: *State, m: Metrics) !void {
     // The new bar's metrics were resolved from the NEW config (percentage
     // sizes refine against the new height). If it fails to materialize the
     // surviving bar keeps its OWN metrics -- they live on the old State's
-    // value now, so there is no global left to save and put back (21.5).
+    // value now, so there is no global left to save and put back.
     const new_bar = createBar(m, barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, height)) catch |err| {
         // The caller has already swapped cs.config to the new config and frees
         // the OLD config when this returns. The old bar survives this failed
@@ -378,10 +378,10 @@ fn applyReload(old: *State, m: Metrics) !void {
 /// and reports its new occupancy. It does NOT decide which edge that is (core
 /// owns that flip), and it does NOT reconcile -- reconciling takes the X grab,
 /// and doing that from a rendering module was the layering violation this
-/// split exists to remove (20.2). The caller reconciles, after this has
+/// split exists to remove. The caller reconciles, after this has
 /// published the claim, so window placement is re-derived from the new usable
 /// area.
-pub fn applyBarScreenPosition() i16 {
+fn applyBarScreenPosition() i16 {
     const s = gBar.state orelse return 0;
     const cs = core.getState();
     const new_y = barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, s.render.height);

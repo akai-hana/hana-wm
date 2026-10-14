@@ -62,7 +62,7 @@ fn printStdout(comptime fmt: []const u8, args: anytype) void {
 /// screen, so it refuses to draw onto a running session). `name` names the test
 /// in the SKIP banner.
 ///
-/// (28.4) The skip is a real `error.SkipZigTest` rather than a null the caller
+/// The skip is a real `error.SkipZigTest` rather than a null the caller
 /// turns into `orelse return`. The old shape made a skip a SILENT PASS: the
 /// test reported green to the runner and to any CI reading the log, so a run in
 /// which the entire integration layer never executed looked identical to a run
@@ -389,7 +389,7 @@ pub const Fx = struct {
     /// The geometry hana actually SENT for `win`, from the sync ledger --
     /// the sole "last thing sent" owner -- or null if nothing was sent.
     ///
-    /// (28.8) This REPLACES an `expectedPlacementOf` that recomputed the
+    /// This REPLACES an `expectedPlacementOf` that recomputed the
     /// placement by calling `tiling.compute` again with the same order, params
     /// and workarea. That oracle could only ever confirm the engine agreed
     /// with itself: if `tiling.compute` were wrong, the recomputation would be
@@ -411,7 +411,7 @@ pub const Fx = struct {
 
     /// Asserts the X server's geometry for `win` equals the geometry hana
     /// recorded sending, with the configured border width (the end-to-end
-    /// round-trip check). (28.8)
+    /// round-trip check).
     pub fn expectTiledGeometry(self: *const Fx, win: u32) !void {
         const sent = self.sentGeometry(win) orelse return error.MissingPlacement;
         const g = self.geometry(win) orelse return error.ClosedWindow;

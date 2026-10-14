@@ -46,13 +46,13 @@ pub const ext_format_version: u8 = 2;
 /// Header byte length for a name-stamped blob: version + name length + the
 /// name itself. The name is variable-length, so this is a function of the
 /// module name rather than a constant -- a fixed 2-byte ordinal header is
-/// what [3.11] removed. Shared by the writer (save path) and `decodeExt`.
+/// what was removed. Shared by the writer (save path) and `decodeExt`.
 fn extHeaderLen(name_len: usize) usize {
     return 2 + name_len;
 }
 
 /// One blob's decoded header: the payload to hand a module, plus WHICH module
-/// the header claims, if any. (9.10)
+/// the header claims, if any.
 ///
 /// `decodeExt` below is the ONLY place the on-disk header format is
 /// interpreted, so a format change is a change there rather than at every
@@ -67,7 +67,7 @@ const ExtHeader = struct {
     legacy_ordinal: ?usize,
 };
 
-/// Decodes a stored ext blob's header. (9.10)
+/// Decodes a stored ext blob's header.
 ///
 /// `blob` is the raw stored bytes: one length check and one version switch,
 /// so all three header facts come from a single parse and cannot disagree
