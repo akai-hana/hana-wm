@@ -21,11 +21,6 @@ const scaling = @import("scaling");
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
-// `initialized()` -- the named "is the model live" predicate -- was a pure
-// forward to core.isModelReady() after the Phase unification, and tracking
-// kept a third spelling (modelReady()) on top of it. The KISS audit's 3->1:
-// both facades deleted, every gate reads core.isModelReady() directly (its
-// doc is the one place that explains why the gate exists).
 
 var instance: model_mod.Model = undefined;
 pub fn init() void {
@@ -97,7 +92,6 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
 var g_sink: xcb_sink.XcbSink = undefined;
 
 /// The shared XCB sink: inited once in init(), then free across every use.
-/// The shared XCB sink: inited once in init(), then free across every use.
 /// Public for the grab-free wire-write seams this pipeline no longer wraps
 /// (geometry's targeted drag tick, floating's drag raise): a raw request
 /// sequence with no model or grab involvement belongs at the call site.
@@ -108,15 +102,12 @@ pub inline fn syncSink() sink.Sink {
 var g_ctx: reconcile.Ctx = undefined;
 
 /// The tiling engine environment for a workspace, resolved from live config
-/// (scaled margins, min_dim, master side). Shared by `ctx()` and the test
-/// fixture's placement expectations, so the fixture mirrors production env
-/// resolution instead of hand-building it.
+/// (scaled margins, min_dim, master side).
 ///
 /// It takes no layout params: everything left in `Env` is a config-derived
 /// constant, while the workspace's VARIANT index is model state that reaches a
-/// layout module as `View.params.variant_idx`. It used to be copied in here as
-/// well, which gave one fact two homes and had the layouts reading the copy.
-pub fn tilingEnv() contract.Env {
+/// layout module as `View.params.variant_idx`.
+fn tilingEnv() contract.Env {
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     return .{
@@ -402,16 +393,3 @@ pub inline fn reconcileGrabFocus(
     reconcile.run(&instance, g.c.?, o);
     if (order == .after) focus.applyPendingFocus(t);
 }
-
-// The old `grabCtx` manual-grab seam is gone. It could be called from inside
-// a grab -- the fullscreen EWMH hook did exactly that -- and it rebuilt the
-// ctx, re-ran the pre-reconcile duties, and documented a
-// `caller MUST ungrabAndFlush` contract its one in-grab caller could not
-// honour without releasing the enclosing grab. Its callers now use
-// currentCtx() to join a grab in flight, or a named entry point.
-//
-// The reconcile-family fan-out is likewise gone: `reconcileGrab(opts)` and
-// `reconcileGrabFocus(...)` are the two entry points; the drag tick (geometry),
-// the drag raise (floating), the hover focus-only commit (focus) and the
-// fullscreen grab orchestration (manage) live at their sole callers, and the
-// withServerGrab closure wrapper they shared was deleted with them.

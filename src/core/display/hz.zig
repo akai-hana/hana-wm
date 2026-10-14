@@ -44,7 +44,7 @@ pub fn detectedHz() f64 {
 /// invariant -- a reading outside it is not a usable pacing rate for
 /// any consumer -- so it is enforced here, once, rather than
 /// re-derived (and risked disagreeing) at each call site.
-pub fn publishDetectedRate(rate: f64) void {
+fn publishDetectedRate(rate: f64) void {
     if (std.math.isFinite(rate) and rate >= min_sane_hz and rate <= max_sane_hz) {
         state.rate_hz = rate;
         log.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
@@ -239,13 +239,9 @@ fn rateFromNotifyEvent(event: *anyopaque) ?f64 {
 
 // Pipelined refresh detection
 //
-// The old path fired one request and immediately drained it with _reply,
-// blocking per dependant: screen resources, then output primary, then per
-// output (output info -> crtc info) = 1 + 2*N blocking waits. The pipelined
-// path fires every independent cookie first, then collects the replies in
-// order (poll-preferring via the XCB reply calls), collapsing the N waits into
-// three phases: (1) resources + primary, (2) all output infos, (3) all crtc
-// infos.
+// Every independent cookie is fired first, then the replies are collected in
+// order (poll-preferring via the XCB reply calls), in three phases:
+// (1) resources + primary, (2) all output infos, (3) all crtc infos.
 
 fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
     // Phase 1: fire both independent requests, then drain them in order.
@@ -296,13 +292,10 @@ fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
 /// falling back to other outputs when the primary has no active mode. All
 /// output-info requests are fired before any reply is collected, and all
 /// crtc-info requests are fired before any reply is collected, so the whole
-/// probe takes ~3 blocking waits regardless of output count (vs 1 + 2*N before).
-/// One candidate output carried across the three probe phases: the
-/// output-info cookie and reply, then the crtc-info cookie. The AoS record
-/// for the four parallel arrays this replaces (order / out_cookies /
-/// out_info_ptrs / crtc_cookies, indexed only by position) -- one index, one
-/// lifetime, and the reply that its own cleanup loop frees sits beside the
-/// cookie that produced it.
+/// probe takes ~3 blocking waits regardless of output count. One candidate
+/// output carried across the three probe phases: the output-info cookie and
+/// reply, then the crtc-info cookie, so the reply sits beside the cookie that
+/// produced it.
 const OutputProbe = struct {
     out: xcb.xcb_randr_output_t,
     out_cookie: xcb.xcb_randr_get_output_info_cookie_t = undefined,

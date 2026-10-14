@@ -23,7 +23,7 @@ const font_baseline_height: f32 = 1080.0;
 /// a caller had to know to apply together; nothing stopped someone clamping
 /// against the min and forgetting the cap. Grouping them makes "the policy"
 /// a thing you can pass, not a convention you have to remember.
-pub const BarHeightPolicy = struct {
+const BarHeightPolicy = struct {
     /// Minimum bar height in pixels. Callers validate config values against
     /// this before calling scaleBarHeight.
     min_px: u16 = 20,

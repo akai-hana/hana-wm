@@ -459,7 +459,7 @@ pub inline fn focusedBorderColor(m: *const Model, win: WindowId, focused_px: u32
 /// workspace) with no check. Routing the write through here means the model
 /// decides whether `ws` is addressable, and the pipeline holds no pointer
 /// into model state at all.
-pub fn applyParamsDelta(m: *Model, ws: WSId, delta: anytype) void {
+pub fn applyParamsDelta(m: *Model, ws: WSId, delta: LayoutParams) void {
     std.debug.assert(ws.isValid());
     m.ws[ws.index].params = delta;
 }
