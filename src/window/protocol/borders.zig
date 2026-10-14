@@ -46,6 +46,7 @@ pub fn isBehindCoveringWindowWith(
 /// occupant table (see `model.coveringOccupants` — every caller sweeps
 /// windows, so the table is built once per sweep, never per window).
 pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 {
+    if (comptime !build_options.has_tiling) return 0; // borderless: no tiled chrome
     // Covering windows render borderless via the bw=0/pixel=0 policy in
     // sync; this predicate covers callers outside reconcile.
     const m = pipeline.state();

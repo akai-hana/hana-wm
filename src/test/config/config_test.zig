@@ -87,6 +87,7 @@ test "readFileAlloc growth path handles stat-less files (/proc)" {
 // Config-load pipeline tests (loadToml -> buildConfigFromDoc)
 
 const types = @import("types");
+const composed = @import("composed");
 
 const loadToml = scratch.loadToml;
 
@@ -99,8 +100,8 @@ test "plain {kill} bind substitutes before parseAction" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
-    const kb = &cfg.keybindings.items[0];
+    try testing.expectEqual(@as(usize, 1), cfg.core.keybindings.items.len);
+    const kb = &cfg.core.keybindings.items[0];
     try testing.expect(kb.action == .exec);
     try testing.expectEqualStrings("pkill -9 ghostty", kb.action.exec);
 }
@@ -119,14 +120,14 @@ test "workspace/_N actions still resolve after the substitution hoist" {
     defer cfg.deinit(testing.allocator);
 
     // 12 glob workspace binds + 4 glob exec binds + 1 direct _N bind.
-    try testing.expectEqual(@as(usize, 17), cfg.keybindings.items.len);
+    try testing.expectEqual(@as(usize, 17), cfg.core.keybindings.items.len);
     // The 4 exec binds carry the substituted payload, not a literal {kill}.
-    for (cfg.keybindings.items[12..16]) |kb| {
+    for (cfg.core.keybindings.items[12..16]) |kb| {
         try testing.expect(kb.action == .exec);
         try testing.expectEqualStrings("pkill -9 term", kb.action.exec);
     }
     // Direct workspace_1 form resolves to 0-indexed switch_workspace 0.
-    try testing.expectEqual(types.Action{ .switch_workspace = 0 }, cfg.keybindings.items[16].action);
+    try testing.expectEqual(types.Action{ .switch_workspace = 0 }, cfg.core.keybindings.items[16].action);
 }
 
 test "sequence array elements containing {kill} substitute" {
@@ -138,8 +139,8 @@ test "sequence array elements containing {kill} substitute" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
-    const seq = cfg.keybindings.items[0].action.sequence;
+    try testing.expectEqual(@as(usize, 1), cfg.core.keybindings.items.len);
+    const seq = cfg.core.keybindings.items[0].action.sequence;
     try testing.expectEqual(@as(usize, 3), seq.len);
     try testing.expect(seq[0] == .exec);
     try testing.expectEqualStrings("pkill -9 alpha", seq[0].exec);
@@ -155,8 +156,8 @@ test "reload chain parses as a reload_config + reload_hana sequence" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
-    const seq = cfg.keybindings.items[0].action.sequence;
+    try testing.expectEqual(@as(usize, 1), cfg.core.keybindings.items.len);
+    const seq = cfg.core.keybindings.items[0].action.sequence;
     try testing.expectEqual(@as(usize, 2), seq.len);
     try testing.expectEqual(types.Action.reload_config, seq[0]);
     try testing.expectEqual(types.Action.reload_hana, seq[1]);
@@ -170,8 +171,8 @@ test "a '+' batch parses as one parallel group" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
-    const par = cfg.keybindings.items[0].action.parallel;
+    try testing.expectEqual(@as(usize, 1), cfg.core.keybindings.items.len);
+    const par = cfg.core.keybindings.items[0].action.parallel;
     try testing.expectEqual(@as(usize, 2), par.len);
     try testing.expectEqual(types.Action.reload_config, par[0]);
     try testing.expectEqual(types.Action.reload_hana, par[1]);
@@ -185,8 +186,8 @@ test "commas sequence batches, '+' runs a batch in parallel" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
-    const seq = cfg.keybindings.items[0].action.sequence;
+    try testing.expectEqual(@as(usize, 1), cfg.core.keybindings.items.len);
+    const seq = cfg.core.keybindings.items[0].action.sequence;
     try testing.expectEqual(@as(usize, 3), seq.len);
     try testing.expectEqual(types.Action.close_window, seq[0]);
     const par = seq[1].parallel;
@@ -204,8 +205,8 @@ test "unspaced literal '+' in an exec command is preserved" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), cfg.keybindings.items.len);
-    const act = cfg.keybindings.items[0].action;
+    try testing.expectEqual(@as(usize, 1), cfg.core.keybindings.items.len);
+    const act = cfg.core.keybindings.items[0].action;
     try testing.expect(act == .exec);
     try testing.expectEqualStrings("xdotool key ctrl+plus", act.exec);
 }
@@ -218,7 +219,7 @@ test "array filtering to zero actions yields no binding" {
     );
     defer cfg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 0), cfg.keybindings.items.len);
+    try testing.expectEqual(@as(usize, 0), cfg.core.keybindings.items.len);
 }
 
 test "a document with skipped (broken) lines fails the load" {
@@ -259,8 +260,8 @@ test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
 // Config reload change detection deltas
 
 test "detectChanges: identical configs report no key changes" {
-    var a = types.Config{};
-    var b = types.Config{};
+    var a = composed.Config{};
+    var b = composed.Config{};
     defer a.deinit(testing.allocator);
     defer b.deinit(testing.allocator);
 
@@ -269,9 +270,9 @@ test "detectChanges: identical configs report no key changes" {
 }
 
 test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
-    var base = types.Config{};
+    var base = composed.Config{};
     defer base.deinit(testing.allocator);
-    try base.keybindings.append(testing.allocator, .{
+    try base.core.keybindings.append(testing.allocator, .{
         .modifiers = 5,
         .keysym = 0x1002,
         .action = .close_window,
@@ -279,9 +280,9 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
 
     // Same mods/keysym, different action: keys must NOT be reported changed,
     // so a hot-reload that only rebinds an action skips the regrab.
-    var action_only = types.Config{};
+    var action_only = composed.Config{};
     defer action_only.deinit(testing.allocator);
-    try action_only.keybindings.append(testing.allocator, .{
+    try action_only.core.keybindings.append(testing.allocator, .{
         .modifiers = 5,
         .keysym = 0x1002,
         .action = .toggle_prompt,
@@ -290,9 +291,9 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
     try testing.expect(!ac.keys);
 
     // Same modifiers, different keysym: keys DID change.
-    var moved = types.Config{};
+    var moved = composed.Config{};
     defer moved.deinit(testing.allocator);
-    try moved.keybindings.append(testing.allocator, .{
+    try moved.core.keybindings.append(testing.allocator, .{
         .modifiers = 5,
         .keysym = 0x1003,
         .action = .close_window,
@@ -301,14 +302,14 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
     try testing.expect(mc.keys);
 
     // A keybinding added: keys changed.
-    var added = types.Config{};
+    var added = composed.Config{};
     defer added.deinit(testing.allocator);
-    try added.keybindings.append(testing.allocator, .{
+    try added.core.keybindings.append(testing.allocator, .{
         .modifiers = 5,
         .keysym = 0x1002,
         .action = .close_window,
     });
-    try added.keybindings.append(testing.allocator, .{
+    try added.core.keybindings.append(testing.allocator, .{
         .modifiers = 5,
         .keysym = 0x1004,
         .action = .dump_state,
@@ -318,18 +319,18 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
 }
 
 test "detectChanges: mouse-bind pair layout changes are keys changes too" {
-    var base = types.Config{};
+    var base = composed.Config{};
     defer base.deinit(testing.allocator);
-    try base.mouse_bindings.append(testing.allocator, .{
+    try base.core.mouse_bindings.append(testing.allocator, .{
         .modifiers = 4,
         .button = 1,
         .action = .close_window,
     });
 
     // Same mods/button, different action: no regrab.
-    var action_only = types.Config{};
+    var action_only = composed.Config{};
     defer action_only.deinit(testing.allocator);
-    try action_only.mouse_bindings.append(testing.allocator, .{
+    try action_only.core.mouse_bindings.append(testing.allocator, .{
         .modifiers = 4,
         .button = 1,
         .action = .toggle_prompt,
@@ -337,9 +338,9 @@ test "detectChanges: mouse-bind pair layout changes are keys changes too" {
     try testing.expect(!config.detectChanges(&base, &action_only).keys);
 
     // Same button, different modifiers: regrab.
-    var remod = types.Config{};
+    var remod = composed.Config{};
     defer remod.deinit(testing.allocator);
-    try remod.mouse_bindings.append(testing.allocator, .{
+    try remod.core.mouse_bindings.append(testing.allocator, .{
         .modifiers = 5,
         .button = 1,
         .action = .close_window,
@@ -347,9 +348,9 @@ test "detectChanges: mouse-bind pair layout changes are keys changes too" {
     try testing.expect(config.detectChanges(&base, &remod).keys);
 
     // Same modifiers, different button: regrab.
-    var rebutton = types.Config{};
+    var rebutton = composed.Config{};
     defer rebutton.deinit(testing.allocator);
-    try rebutton.mouse_bindings.append(testing.allocator, .{
+    try rebutton.core.mouse_bindings.append(testing.allocator, .{
         .modifiers = 4,
         .button = 3,
         .action = .close_window,
@@ -357,14 +358,14 @@ test "detectChanges: mouse-bind pair layout changes are keys changes too" {
     try testing.expect(config.detectChanges(&base, &rebutton).keys);
 
     // A mouse binding added: regrab.
-    var added = types.Config{};
+    var added = composed.Config{};
     defer added.deinit(testing.allocator);
-    try added.mouse_bindings.append(testing.allocator, .{
+    try added.core.mouse_bindings.append(testing.allocator, .{
         .modifiers = 4,
         .button = 1,
         .action = .close_window,
     });
-    try added.mouse_bindings.append(testing.allocator, .{
+    try added.core.mouse_bindings.append(testing.allocator, .{
         .modifiers = 4,
         .button = 3,
         .action = .dump_state,
@@ -435,7 +436,7 @@ test "theme quartet: a [tiling] theme merges over a functional [tiling] config" 
 // Boot degradation, search policy, load ceilings
 // ---------------------------------------------------------------------------
 
-test "A config that parses but fails validate falls back at BOOT" {
+test "A config that fails fragment validate falls back at BOOT" {
     const alloc = testing.allocator;
     var box = try snapshot_test.Sandbox.init(alloc, "invalid-boot");
     defer box.deinit(alloc);
@@ -452,20 +453,18 @@ test "A config that parses but fails validate falls back at BOOT" {
     // be a perfectly good config and the test would prove nothing.
     try box.write("hana/config.toml", "[tiling]\nmaster_width = 500%\n");
 
+    // The load FAILS inside composed.parse (tiling_config.validate returns
+    // error.InvalidConfig), and that is a fatal search error (see
+    // discover.isFatalLoadError): it propagates out of loadConfigDefault
+    // rather than warn-and-skipping to the next search path.
     var source: config.DefaultSource = .fallback;
-    var loaded = try config.loadConfigDefault(alloc, &source, true);
-    defer loaded.deinit(alloc);
-    // The LOAD succeeds (validate runs later, at boot) ...
-    try testing.expectEqual(config.DefaultSource.user, source);
-    // ... and it is the load that reports the problem, as a load always does.
-    try testing.expectError(error.InvalidConfig, config.validate(&loaded));
+    try testing.expectError(error.InvalidConfig, config.loadConfigDefault(alloc, &source, true));
 
     // `load` is the boot entry point, and it must come back with a config
-    // rather than the error. Exercised for real, not simulated: the fallback
-    // is loaded, validated, and returned.
+    // rather than the error: the catch in loadFor swaps in the embedded
+    // fallback. Exercised for real, not simulated.
     var booted = try config.load(alloc);
     defer booted.deinit(alloc);
-    try config.validate(&booted);
     // The fallback's own master width (55%), not the impossible 500%.
     try testing.expect(booted.tiling.master_width.is_percentage);
     try testing.expect(scaling.asRatio(booted.tiling.master_width) <= model.max_master_width);

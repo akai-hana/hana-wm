@@ -25,6 +25,7 @@
 //! while the admission policy lives here.
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -149,6 +150,7 @@ pub fn buildRulesMapFrom(
 
 /// Rebuilds the live map from the current config (see buildRulesMapFrom).
 pub fn buildRulesMap() void {
+    if (comptime !build_options.has_workspaces) return;
     const alloc = state.?.alloc orelse return;
     buildRulesMapFrom(&state.?.rules_map, alloc, core.getState().config.workspaces.rules.items);
 }
@@ -329,8 +331,11 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     // Workspace resolution cookies (conditional).
     const wm_class_atom = atoms.getAtomOrZero("WM_CLASS");
     const c_wm_class: ?xcb.xcb_get_property_cookie_t =
-        if (cs.config.workspaces.rules.items.len > 0 and wm_class_atom != 0)
-            icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, icccm.property_max_length)
+        if (comptime build_options.has_workspaces)
+            if (cs.config.workspaces.rules.items.len > 0 and wm_class_atom != 0)
+                icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, icccm.property_max_length)
+            else
+                null
         else
             null;
 

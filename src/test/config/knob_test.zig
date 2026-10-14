@@ -1,9 +1,11 @@
-//! Schema-driven config tests: proof points for the comptime knob table in
-//! schema.zig.
+// build-gate: bar, tiling, workspaces, floating
+//! Knob-driven config tests: proof points for the per-fragment comptime
+//! knob tables (core_config, tiling_config, bar_config, workspaces_config,
+//! floating_config) driven through knob.zig's generic engine.
 //!
 //! Covers the four behaviors the refactor must preserve exactly:
-//!   1. Table defaults are byte-equal to types.Config's field initializers
-//!      (the anti-drift pin behind getDefaultConfig's synthesis).
+//!   1. Every fragment's table defaults are byte-equal to its Config's
+//!      field initializers (the anti-drift pin behind parse synthesis).
 //!   2. A config file with no keys yields those same defaults end-to-end,
 //!      including the non-scalar seed data (layouts, icons, bar columns).
 //!   3. Every alias spelling resolves identically ([tiling] flat names vs
@@ -23,34 +25,52 @@ const testing = std.testing;
 // diagnostics; src/core/pure/log.zig silences all std.log diagnostics in
 // test binaries, so this stays quiet on success.
 const config = @import("config");
-const schema = @import("schema");
+const knob = @import("knob");
 const types = @import("types");
+const composed = @import("composed");
+const core_config = @import("core_config");
+const tiling_config = @import("tiling_config");
+const bar_config = @import("bar_config");
+const workspaces_config = @import("workspaces_config");
+const floating_config = @import("floating_config");
 const scratch = @import("scratch");
 
 const loadToml = scratch.loadToml;
 
-/// Asserts every knob of `cfg` equals its table default. The comparator is
-/// itself driven by the knob table, so a new schema entry is covered the
-/// moment it is declared.
-fn expectAllDefaults(cfg: *const types.Config) !void {
-    const proto: types.Config = .{};
-    inline for (schema.knobs) |k| {
-        if (!std.meta.eql(schema.value(cfg, k.target), schema.value(&proto, k.target))) {
-            std.debug.print("knob '{s}' deviates from its types.Config default\n", .{k.target});
+/// Asserts every knob of one fragment's `cfg` equals its table default. The
+/// comparator is itself driven by the fragment's knob table, so a new entry
+/// is covered the moment it is declared.
+fn expectFragmentDefaults(comptime CfgT: type, comptime knobs: []const knob.Knob, cfg: *const CfgT) !void {
+    const proto: CfgT = .{};
+    inline for (knobs) |k| {
+        if (!std.meta.eql(knob.value(CfgT, cfg, k.target), knob.value(CfgT, &proto, k.target))) {
+            std.debug.print("knob '{s}' deviates from its default\n", .{k.target});
             return error.SchemaDefaultMismatch;
         }
     }
 }
 
-test "types.Config{} carries sensible field initializers" {
-    const proto: types.Config = .{};
-    try testing.expect(proto.bar.enabled);
-    try testing.expectEqual(@as(u8, 9), proto.workspaces.count);
-    try testing.expectEqual(@as(u32, 0x222222), proto.bar.bg);
-    try testing.expectEqual(@as(u32, 0x61AFEF), proto.bar.primary_color);
-    try testing.expectEqual(types.MasterSide.left, proto.tiling.master_side);
-    try testing.expectEqual(types.BarScreenPosition.top, proto.bar.bar_position);
-    try testing.expectEqual(types.ScalableValue.percentage(50.0), proto.tiling.master_width);
+fn expectAllDefaults(cfg: *const composed.Config) !void {
+    try expectFragmentDefaults(types.CoreConfig, &core_config.knobs, &cfg.core);
+    try expectFragmentDefaults(tiling_config.Config, &tiling_config.knobs, &cfg.tiling);
+    try expectFragmentDefaults(bar_config.Config, &bar_config.knobs, &cfg.bar);
+    try expectFragmentDefaults(workspaces_config.Config, &workspaces_config.knobs, &cfg.workspaces);
+    try expectFragmentDefaults(floating_config.Config, &floating_config.knobs, &cfg.floating);
+}
+
+test "fragment Configs carry sensible field initializers" {
+    const bar_proto: bar_config.Config = .{};
+    try testing.expect(bar_proto.enabled);
+    try testing.expectEqual(@as(u32, 0x222222), bar_proto.bg);
+    try testing.expectEqual(@as(u32, 0x61AFEF), bar_proto.primary_color);
+    try testing.expectEqual(bar_config.BarScreenPosition.top, bar_proto.bar_position);
+
+    const ws_proto: workspaces_config.Config = .{};
+    try testing.expectEqual(@as(u8, 9), ws_proto.count);
+
+    const tiling_proto: tiling_config.Config = .{};
+    try testing.expectEqual(tiling_config.MasterSide.left, tiling_proto.master_side);
+    try testing.expectEqual(types.ScalableValue.percentage(50.0), tiling_proto.master_width);
 }
 
 test "key-less config file loads pure table defaults end-to-end" {
@@ -65,23 +85,31 @@ test "key-less config file loads pure table defaults end-to-end" {
     try testing.expectEqual(@as(usize, 9), cfg.bar.workspace_icons.items.len);
     try testing.expectEqualStrings("9", cfg.bar.workspace_icons.items[8]);
     try testing.expectEqual(@as(usize, 3), cfg.bar.layout.items.len);
-    try testing.expectEqual(types.BarSegmentAnchor.left, cfg.bar.layout.items[0].position);
+    try testing.expectEqual(bar_config.BarSegmentAnchor.left, cfg.bar.layout.items[0].position);
     try testing.expectEqualStrings("workspaces", cfg.bar.layout.items[0].segments.items[0]);
-    try testing.expectEqual(types.BarSegmentAnchor.center, cfg.bar.layout.items[1].position);
+    try testing.expectEqual(bar_config.BarSegmentAnchor.center, cfg.bar.layout.items[1].position);
     try testing.expectEqualStrings("title", cfg.bar.layout.items[1].segments.items[0]);
-    try testing.expectEqual(types.BarSegmentAnchor.right, cfg.bar.layout.items[2].position);
+    try testing.expectEqual(bar_config.BarSegmentAnchor.right, cfg.bar.layout.items[2].position);
     try testing.expectEqualStrings("clock", cfg.bar.layout.items[2].segments.items[0]);
 }
 
 // Alias parity: both spellings must land on identical configs.
 
-fn expectConfigsEqual(a: *const types.Config, b: *const types.Config) !void {
-    inline for (schema.knobs) |k| {
-        if (!std.meta.eql(schema.value(a, k.target), schema.value(b, k.target))) {
+fn expectFragmentEqual(comptime CfgT: type, comptime knobs: []const knob.Knob, a: *const CfgT, b: *const CfgT) !void {
+    inline for (knobs) |k| {
+        if (!std.meta.eql(knob.value(CfgT, a, k.target), knob.value(CfgT, b, k.target))) {
             std.debug.print("knob '{s}' differs between alias spellings\n", .{k.target});
             return error.AliasParityBroken;
         }
     }
+}
+
+fn expectConfigsEqual(a: *const composed.Config, b: *const composed.Config) !void {
+    try expectFragmentEqual(types.CoreConfig, &core_config.knobs, &a.core, &b.core);
+    try expectFragmentEqual(tiling_config.Config, &tiling_config.knobs, &a.tiling, &b.tiling);
+    try expectFragmentEqual(bar_config.Config, &bar_config.knobs, &a.bar, &b.bar);
+    try expectFragmentEqual(workspaces_config.Config, &workspaces_config.knobs, &a.workspaces, &b.workspaces);
+    try expectFragmentEqual(floating_config.Config, &floating_config.knobs, &a.floating, &b.floating);
 }
 
 test "master trio: flat [tiling] names match dedicated section" {
@@ -108,7 +136,7 @@ test "master trio: flat [tiling] names match dedicated section" {
 
     try expectConfigsEqual(&flat, &dedicated);
     try testing.expectEqual(@as(u8, 3), dedicated.tiling.master_count);
-    try testing.expectEqual(types.MasterSide.right, dedicated.tiling.master_side);
+    try testing.expectEqual(tiling_config.MasterSide.right, dedicated.tiling.master_side);
     try testing.expectEqual(types.ScalableValue.percentage(60.0), dedicated.tiling.master_width);
 }
 
@@ -243,13 +271,13 @@ test "selected workspace tag: per-state composite styling + indicator color" {
     try testing.expectEqual(@as(?u32, 0x00FF00), cfg.bar.selected_indicator_color);
     // Composite entry landed in the segment maps, not a scalar knob field.
     try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.segment_fg.get("workspaces_selected").?);
-    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segment_props.get("workspaces_selected").?);
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.segment_props.get("workspaces_selected").?);
     // The selected tag uses the composite color and bold weight...
     try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.workspaceTextFg(true));
-    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.workspaceIconProps(true));
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.workspaceIconProps(true));
     // ...while unselected tags keep the bar-wide fg and no style.
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.workspaceTextFg(false));
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.workspaceIconProps(false));
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.workspaceIconProps(false));
     // The selected tag's glyph uses its own color; unselected tags keep the
     // shared indicator/bar-fg fallback.
     try testing.expectEqual(@as(u32, 0x00FF00), cfg.bar.workspaceIndicatorColor(true));
@@ -273,10 +301,10 @@ test "selected workspace tag: per-state composite styling + indicator color" {
     try testing.expectEqual(@as(u32, 0xFF0000), layered.bar.workspaceTextFg(false));
     // Flags layer: base italic OR'd with the selected tag's bold.
     try testing.expectEqual(
-        types.SegmentProps{ .italic = true, .bold = true },
+        bar_config.SegmentProps{ .italic = true, .bold = true },
         layered.bar.workspaceIconProps(true),
     );
-    try testing.expectEqual(types.SegmentProps{ .italic = true }, layered.bar.workspaceIconProps(false));
+    try testing.expectEqual(bar_config.SegmentProps{ .italic = true }, layered.bar.workspaceIconProps(false));
 
     // Absent knobs keep the defaults; with no composite entries the selected
     // tag falls back to selected_fg, the rest to fg, and the selected indicator
@@ -414,13 +442,13 @@ test "per-segment text colors: bar.properties keys override segment fg" {
     // Style flags ride the same composite entry: `underline`/`bold`/`italic`
     // booleans, combinable with a color. Style-only segments keep the default
     // fg and still get their flags.
-    try testing.expectEqual(types.SegmentProps{ .italic = true }, cfg.bar.segmentProps("cpu"));
-    try testing.expectEqual(types.SegmentProps{ .underline = true }, cfg.bar.segmentProps("volume"));
-    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segmentProps("brightness"));
-    try testing.expectEqual(types.SegmentProps{ .bold = true, .underline = true }, cfg.bar.segmentProps("clock"));
+    try testing.expectEqual(bar_config.SegmentProps{ .italic = true }, cfg.bar.segmentProps("cpu"));
+    try testing.expectEqual(bar_config.SegmentProps{ .underline = true }, cfg.bar.segmentProps("volume"));
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.segmentProps("brightness"));
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true, .underline = true }, cfg.bar.segmentProps("clock"));
     // Everything else stays plain; the map holds only non-default entries.
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("ram"));
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("batt"));
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("ram"));
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("batt"));
     try testing.expectEqual(@as(usize, 4), cfg.bar.segment_props.count());
 }
 
@@ -444,22 +472,22 @@ test "per-segment properties: composite entries decode every spelling" {
 
     // Color + `name=bool` composite.
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.bar.segmentFg("a"));
-    try testing.expectEqual(types.SegmentProps{ .underline = true }, cfg.bar.segmentProps("a"));
+    try testing.expectEqual(bar_config.SegmentProps{ .underline = true }, cfg.bar.segmentProps("a"));
     // Bare-flag shorthand (true by default).
     try testing.expectEqual(@as(u32, 0x00AA00), cfg.bar.segmentFg("b"));
-    try testing.expectEqual(types.SegmentProps{ .bold = true }, cfg.bar.segmentProps("b"));
-    try testing.expectEqual(types.SegmentProps{ .italic = true }, cfg.bar.segmentProps("c"));
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true }, cfg.bar.segmentProps("b"));
+    try testing.expectEqual(bar_config.SegmentProps{ .italic = true }, cfg.bar.segmentProps("c"));
     // Style-only entry, no color: fg stays default.
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("d"));
-    try testing.expectEqual(types.SegmentProps{ .bold = true, .italic = true }, cfg.bar.segmentProps("d"));
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true, .italic = true }, cfg.bar.segmentProps("d"));
     // `name=false` clears (a no-op here, so no entry is stored).
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("e"));
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("e"));
     // 0/1 integers spell booleans.
-    try testing.expectEqual(types.SegmentProps{ .underline = true }, cfg.bar.segmentProps("f"));
-    try testing.expectEqual(types.SegmentProps{ .italic = false, .bold = true }, cfg.bar.segmentProps("g"));
+    try testing.expectEqual(bar_config.SegmentProps{ .underline = true }, cfg.bar.segmentProps("f"));
+    try testing.expectEqual(bar_config.SegmentProps{ .italic = false, .bold = true }, cfg.bar.segmentProps("g"));
     // An unknown bare token is neither a color nor a flag: warn-and-skip, so
     // the segment stays plain with the default fg.
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("h"));
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("h"));
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("h"));
     // Only non-default flag sets are stored (a, b, c, d, f, g).
     try testing.expectEqual(@as(usize, 6), cfg.bar.segment_props.count());
@@ -476,7 +504,7 @@ test "per-segment colors: no [bar.properties] table leaves map empty" {
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_value_fg.count());
     try testing.expectEqual(@as(usize, 0), cfg.bar.segment_props.count());
     try testing.expectEqual(@as(u32, 0x070809), cfg.bar.segmentFg("cpu"));
-    try testing.expectEqual(types.SegmentProps{}, cfg.bar.segmentProps("cpu"));
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg.bar.segmentProps("cpu"));
 }
 
 test "warn-and-revert: out-of-range scalars revert to defaults" {
@@ -502,11 +530,11 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     try testing.expectEqual(@as(u16, 125), cfg.bar.carousel_speed_px_s);
     try testing.expectEqual(types.ScalableValue.percentage(10.0), cfg.bar.font_size);
     try testing.expectEqual(types.ScalableValue.absolute(10.0), cfg.tiling.gap_width);
-    try testing.expectEqual(types.ScalableValue.absolute(8.0), cfg.snap_distance);
+    try testing.expectEqual(types.ScalableValue.absolute(8.0), cfg.floating.snap_distance);
     try testing.expectEqual(@as(u8, 9), cfg.workspaces.count);
     // An absurd dpi warns back to null, i.e. to detection, rather than
     // scaling the whole UI by a number nobody meant.
-    try testing.expectEqual(@as(?f32, null), cfg.dpi);
+    try testing.expectEqual(@as(?f32, null), cfg.core.dpi);
 }
 
 test "bar.position is case-insensitive; unknown spellings keep .top" {
@@ -516,7 +544,7 @@ test "bar.position is case-insensitive; unknown spellings keep .top" {
         \\
     );
     defer bottom.deinit(testing.allocator);
-    try testing.expectEqual(types.BarScreenPosition.bottom, bottom.bar.bar_position);
+    try testing.expectEqual(bar_config.BarScreenPosition.bottom, bottom.bar.bar_position);
 
     // Position parsing is any-case, via BarScreenPosition.string_map through
     // types.enumFromString; "TOP" resolves to .top (not .bottom).
@@ -526,7 +554,7 @@ test "bar.position is case-insensitive; unknown spellings keep .top" {
         \\
     );
     defer shouty.deinit(testing.allocator);
-    try testing.expectEqual(types.BarScreenPosition.top, shouty.bar.bar_position);
+    try testing.expectEqual(bar_config.BarScreenPosition.top, shouty.bar.bar_position);
 
     var mixed = try loadToml(testing.allocator, "pos-mixed",
         \\[bar]
@@ -534,7 +562,7 @@ test "bar.position is case-insensitive; unknown spellings keep .top" {
         \\
     );
     defer mixed.deinit(testing.allocator);
-    try testing.expectEqual(types.BarScreenPosition.bottom, mixed.bar.bar_position);
+    try testing.expectEqual(bar_config.BarScreenPosition.bottom, mixed.bar.bar_position);
 }
 
 test "layouts array caps at 256 entries" {
@@ -572,7 +600,7 @@ test "config/fallback.toml loads cleanly through the real pipeline" {
     defer cfg.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u16, 50), cfg.tiling.min_window_dim);
-    try testing.expectEqual(types.BarScreenPosition.bottom, cfg.bar.bar_position);
+    try testing.expectEqual(bar_config.BarScreenPosition.bottom, cfg.bar.bar_position);
 }
 
 test "getRatio: bare integers are percentages (indicator_padding)" {
@@ -633,33 +661,26 @@ test "getRatio strict: transparency rejects bare integers" {
     try testing.expectEqual(@as(f32, 0.5), pct.bar.transparency);
 }
 
-test "validate rejects off-range ratio master_width" {
-    // These used to be unchecked locally on the grounds that a failing
-    // validate logs an err-level diagnostic and the test runner would flag a
-    // noisy test. That guard is severed: src/core/pure/log.zig silences
-    // std.log in test binaries, and validate() surfaces InvalidConfig on its
-    // own error return, so the negatives are directly assertable -- and are
-    // covered in config_test's boot and file-ceiling cases too.
-    var out_of_band = try loadToml(testing.allocator, "mw-big", "[tiling]\nmaster_width = 99%\n");
-    defer out_of_band.deinit(testing.allocator);
-    try testing.expectError(error.InvalidConfig, config.validate(&out_of_band));
-
-    var negative_pixels = try loadToml(testing.allocator, "mw-neg", "[tiling]\nmaster_width = -50\n");
-    defer negative_pixels.deinit(testing.allocator);
-    try testing.expectError(error.InvalidConfig, config.validate(&negative_pixels));
+test "fragment validate rejects off-range ratio master_width at load" {
+    // tiling_config.validate returns error.InvalidConfig, which composed.parse
+    // propagates straight out of the load (boot falls back; reload keeps live
+    // -- see config.loadFor). The negatives are directly assertable on
+    // loadToml, and are covered in config_test's boot case too.
+    try testing.expectError(error.InvalidConfig, loadToml(testing.allocator, "mw-big", "[tiling]\nmaster_width = 99%\n"));
+    try testing.expectError(error.InvalidConfig, loadToml(testing.allocator, "mw-neg", "[tiling]\nmaster_width = -50\n"));
 }
 
-test "validate accepts pixel master_width above the ratio ceiling" {
-    // The live-WM spot-check for the negative branch lives above now that
-    // the err-log path is assertable directly (see the rejection test above):
-    // 99% ratio and negative pixels are both pinned at the error level.
+test "load accepts pixel master_width above the ratio ceiling" {
+    // The rejection half lives above: 99% ratio and negative pixels are
+    // both pinned at the error level. A bare-pixel 600 is a perfectly good
+    // absolute width (the screen size is unknown at parse time), so the
+    // load must succeed and keep it.
     var px = try loadToml(testing.allocator, "mw-px",
         \\[tiling]
         \\master_width = 600
         \\
     );
     defer px.deinit(testing.allocator);
-    try config.validate(&px);
     try testing.expectEqual(types.ScalableValue.absolute(600.0), px.tiling.master_width);
 }
 
@@ -796,17 +817,17 @@ test "display.dpi: integer and fractional spellings both widen; absent stays nul
     // read only one of them would accept `dpi = 144` and ignore `dpi = 144.0`.
     var whole = try loadToml(testing.allocator, "dpi-whole", "[display]\ndpi = 144\n");
     defer whole.deinit(testing.allocator);
-    try testing.expectEqual(@as(?f32, 144.0), whole.dpi);
+    try testing.expectEqual(@as(?f32, 144.0), whole.core.dpi);
 
     var fraction = try loadToml(testing.allocator, "dpi-frac", "[display]\ndpi = 96.5\n");
     defer fraction.deinit(testing.allocator);
-    try testing.expectEqual(@as(?f32, 96.5), fraction.dpi);
+    try testing.expectEqual(@as(?f32, 96.5), fraction.core.dpi);
 
     // Absent means "auto", which is the difference between this knob being
     // an override and being a replacement for detection.
     var absent = try loadToml(testing.allocator, "dpi-absent", "[bar]\nheight = 30\n");
     defer absent.deinit(testing.allocator);
-    try testing.expectEqual(@as(?f32, null), absent.dpi);
+    try testing.expectEqual(@as(?f32, null), absent.core.dpi);
 }
 
 test "legacy drun_* keys still parse after the rename to run_*" {

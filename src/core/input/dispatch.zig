@@ -8,6 +8,7 @@
 //! `xcb_destroy_window` fallback -- protocol text and a last-resort close, not
 //! sync-bound geometry, which is why this file carries its own allowlist entry.
 const std = @import("std");
+const build_options = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -45,6 +46,7 @@ const process = @import("process");
 /// screen claim while it moves, and that claim has to be visible to core
 /// before the reconcile recomputes placements from it.
 fn toggleBarPosition() void {
+    if (comptime !build_options.has_bar) return;
     surfaces.toggleBarSegmentAnchor();
 
     // One token owns grab+ungrab+flush, so the early return below (and any

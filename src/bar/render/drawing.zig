@@ -11,6 +11,7 @@ const std = @import("std");
 const core = @import("core");
 const log = @import("log");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const fonts = @import("fonts");
 const surface = @import("surface");
 const bindings = @import("bindings");
@@ -18,7 +19,7 @@ const bindings = @import("bindings");
 /// The clock's display format: the configured value, or the built-in default
 /// when unset. Single accessor shared by the clock segment and the bar's
 /// updateClock (each previously re-derived the same fallback).
-pub fn clockFormat(config: types.BarConfig) []const u8 {
+pub fn clockFormat(config: bar_config.Config) []const u8 {
     return config.clock_format orelse types.default_clock_format;
 }
 
@@ -301,7 +302,7 @@ pub const DrawContext = struct {
         text: []const u8,
         max_width: ?u16,
         color: u32,
-        props: types.SegmentProps,
+        props: bar_config.SegmentProps,
     ) void {
         var run = self.fonts.beginRun(text, props, null);
         defer run.deinit();
@@ -321,7 +322,7 @@ pub const DrawContext = struct {
         y: u16,
         text: []const u8,
         color: u32,
-        props: types.SegmentProps,
+        props: bar_config.SegmentProps,
     ) void {
         self.drawTextImpl(x, y, text, null, color, props);
     }
@@ -346,7 +347,7 @@ pub const DrawContext = struct {
         bg: u32,
         fg: u32,
         min_w: ?u16,
-        props: types.SegmentProps,
+        props: bar_config.SegmentProps,
     ) !u16 {
         // One run measured AND painted. These used to be two separate
         // operations on a shared layout, which is precisely how a styled
@@ -374,7 +375,7 @@ pub const DrawContext = struct {
 
     /// Measures `text` with `props` styling applied, so a styled draw reserves
     /// exactly the width it will paint.
-    pub fn measureTextWidthStyled(self: *DrawContext, text: []const u8, props: types.SegmentProps) u16 {
+    pub fn measureTextWidthStyled(self: *DrawContext, text: []const u8, props: bar_config.SegmentProps) u16 {
         var run = self.fonts.beginRun(text, props, null);
         defer run.deinit();
         return run.measure();
@@ -411,13 +412,13 @@ pub const DrawContext = struct {
 /// variants, clock).
 pub fn drawPaddedSegment(
     dc: *DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     x: u16,
     segment_name: []const u8,
     text: []const u8,
     cover_text: ?[]const u8,
-    props: types.SegmentProps,
+    props: bar_config.SegmentProps,
 ) !u16 {
     const padding = config.scaledSegmentPadding(height);
     return dc.paintedSegment(
@@ -443,14 +444,14 @@ pub fn drawPaddedSegment(
 /// a value color is added.
 pub fn drawPaddedSegmentValue(
     dc: *DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     x: u16,
     segment_name: []const u8,
     text: []const u8,
     value_start: usize,
     value_len: usize,
-    props: types.SegmentProps,
+    props: bar_config.SegmentProps,
 ) !u16 {
     const padding = config.scaledSegmentPadding(height);
     const range = valueRange(text, value_start, value_len);

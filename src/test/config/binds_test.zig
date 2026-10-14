@@ -15,7 +15,7 @@ const masks = @import("masks");
 const parser = @import("parser");
 const types = @import("types");
 
-fn load(a: std.mem.Allocator, cfg: *types.Config, src: []const u8) !void {
+fn load(a: std.mem.Allocator, cfg: *types.CoreConfig, src: []const u8) !void {
     var doc = try parser.parse(a, src, "<binds-test>");
     try binds.parseKeybindings(testing.allocator, &doc, cfg);
 }
@@ -27,7 +27,7 @@ fn ks(name: []const u8) u32 {
 test "plain bind: modifier mask, keysym, exec fallback payload" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -46,7 +46,7 @@ test "plain bind: modifier mask, keysym, exec fallback payload" {
 test "modifier spellings fold onto the same masks (case-insensitive)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -76,7 +76,7 @@ test "modifier spellings fold onto the same masks (case-insensitive)" {
 test "Mod placeholder substitutes into keys but never becomes a binding itself" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -97,7 +97,7 @@ test "Mod placeholder substitutes into keys but never becomes a binding itself" 
 test "kill placeholder absent: an unresolved {kill} execs verbatim" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -113,7 +113,7 @@ test "kill placeholder absent: an unresolved {kill} execs verbatim" {
 test "glob range and comma tokens expand; each bind parses on its own" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -137,7 +137,7 @@ test "glob range and comma tokens expand; each bind parses on its own" {
 test "descending glob range falls back to a literal key that fails to parse" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     // Range {3-1} is warned and skipped, so the glob degenerates to the
     // literal key "Mod4+{3-1}" whose final token is no keysym -> bind dropped
@@ -154,7 +154,7 @@ test "descending glob range falls back to a literal key that fails to parse" {
 test "mouse bindings: buttons, aliases, and modifier masks" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -176,7 +176,7 @@ test "mouse bindings: buttons, aliases, and modifier masks" {
 test "mouse and keysym in one bind: ambiguous, dropped without leaking" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -191,7 +191,7 @@ test "mouse and keysym in one bind: ambiguous, dropped without leaking" {
 test "parallel batch: whitespace-bounded + splits, literal plus does not" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -214,7 +214,7 @@ test "parallel batch: whitespace-bounded + splits, literal plus does not" {
 test "array values: sequence, parallel-inside-sequence, unwrap, skips" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[binds]
@@ -253,7 +253,7 @@ test "array values: sequence, parallel-inside-sequence, unwrap, skips" {
 test "the alternate [Keybindings] section name binds identically" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[Keybindings]
@@ -269,7 +269,7 @@ test "the alternate [Keybindings] section name binds identically" {
 test "a sectionless document binds nothing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: types.CoreConfig = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[bar]

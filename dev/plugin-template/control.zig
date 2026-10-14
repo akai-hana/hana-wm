@@ -28,6 +28,7 @@
 //! slider module, so contract drift self-fails on `zig build check`.
 
 const types = @import("types");
+const bar_config = @import("bar_config");
 const slider = @import("slider");
 const drawing = @import("drawing");
 
@@ -97,7 +98,7 @@ fn commitCost() slider.CommitCost {
 /// region; valid until the next call. `renderLineValue` is the
 /// shared `{pct}`/`{state}` substitution walker — use it unless
 /// your display format is genuinely bespoke.
-fn label(config: types.BarConfig, buf: []u8) drawing.Label {
+fn label(config: bar_config.Config, buf: []u8) drawing.Label {
     _ = config; // TODO: your config-driven format string, if any.
     return drawing.renderLineValue(default_format, g_pct, null, buf);
 }

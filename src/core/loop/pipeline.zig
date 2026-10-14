@@ -7,6 +7,7 @@ const std = @import("std");
 const model_mod = @import("model");
 const core = @import("core");
 const focus = @import("focus");
+const types = @import("types");
 const window_state_ops = @import("window_state_ops");
 const xcb_sink = @import("sink");
 const usable_area = @import("usable_area");
@@ -71,6 +72,7 @@ pub inline fn mut() *model_mod.Model {
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
     if (core.isModelReady()) return state().ws[state().current.index].params.kind;
+    if (comptime !build_options.has_tiling) return contract.default_kind;
     return defaultIndexForLayoutName(core.getState().config.tiling.defaultLayout());
 }
 
@@ -113,6 +115,11 @@ var g_ctx: reconcile.Ctx = undefined;
 /// constant, while the workspace's VARIANT index is model state that reaches a
 /// layout module as `View.params.variant_idx`.
 fn tilingEnv() contract.Env {
+    if (comptime !build_options.has_tiling) return .{
+        .margins = .{ .gap = 0, .border = 0 },
+        .min_dim = types.default_min_window_dim,
+        .primary_on_right = false,
+    };
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     return .{
@@ -168,6 +175,7 @@ fn ctx() *reconcile.Ctx {
 /// instead. Reads MODEL focus; focus.zig mirrors every transition into
 /// m.focused, so this is the same single source of truth.
 fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
+    if (comptime !build_options.has_tiling) return 0;
     const cfg = &core.getState().config.tiling;
     return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }

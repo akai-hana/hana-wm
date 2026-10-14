@@ -10,6 +10,7 @@
 const std = @import("std");
 const log = @import("log");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const bindings = @import("bindings");
 
 /// Default point size for scaled metrics; also the size embedded in the
@@ -192,7 +193,7 @@ pub const FontBook = struct {
     pub fn beginRun(
         self: *FontBook,
         text: []const u8,
-        props: types.SegmentProps,
+        props: bar_config.SegmentProps,
         sized_px: ?u16,
     ) TextRun {
         const l = bindings.pango_layout_new(bindings.pango_layout_get_context(self.pango_layout)) orelse
@@ -267,7 +268,7 @@ inline fn pxToPango(px: u16) f64 {
 /// (underline, bold, italic), or null when no flags are set. The caller owns
 /// the returned list and must unref it (bindings.pango_attr_list_unref) once detached
 /// from the layout.
-fn buildStyleAttrs(props: types.SegmentProps) ?*bindings.PangoAttrList {
+fn buildStyleAttrs(props: bar_config.SegmentProps) ?*bindings.PangoAttrList {
     if (props.isDefault()) return null;
     const list = bindings.pango_attr_list_new() orelse return null;
     // On a partial attribute-creation failure, unref the list (which frees

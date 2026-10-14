@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const contract = @import("bar_contract");
 const level = @import("level");
@@ -131,7 +132,7 @@ pub const Sub = struct {
     /// Renders the idle label into `buf` (control-scoped scratch) from the
     /// control's own state and config, plus the label's numeric region;
     /// valid until the next call.
-    label: *const fn (types.BarConfig, []u8) drawing.Label,
+    label: *const fn (bar_config.Config, []u8) drawing.Label,
     /// Right-click action (volume's mute toggle); null = reserved no-op.
     secondary: ?*const fn () void = null,
     /// Idle width when the control has never laid out (natural-reserve

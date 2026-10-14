@@ -1,17 +1,17 @@
 //! Tiling's non-scalar config structures: the layouts array (cycle order +
 //! per-workspace overrides), per-layout variant preferences, and master-
-//! stack counts -- the tables the comptime schema walk (schema.applyAll)
-//! does not cover. The workspace-rules family lives in rules.zig; the bar
-//! family lives in bar_sections.zig. Every parser here is gated on its
-//! parent section existing, exactly as the scalar knobs are, and every
-//! owned string it stores is duped off the parsed document so it outlives
-//! the load-scoped arena.
+//! stack counts -- the tables the knob engine (tiling_config.knobs via
+//! knob.applyAll) does not cover. Called from tiling_config.parse; every
+//! parser here is gated on its parent section existing, exactly as the
+//! scalar knobs are, and every owned string it stores is duped off the
+//! parsed document so it outlives the load-scoped arena.
 
 const std = @import("std");
 const log = @import("log");
 const model = @import("model");
 const parser = @import("parser");
 const types = @import("types");
+const tiling_config = @import("tiling_config");
 const layout_names = @import("layout_names");
 
 /// Parses a 1-based workspace number from a bare token, warning with `fmt` on
@@ -32,8 +32,8 @@ fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: 
 
 /// Appends one layout name (duped) to the tiling layout cycle -- the seed
 /// both the default config and the single-layout parse path use.
-pub fn seedDefaultLayout(allocator: std.mem.Allocator, cfg: *types.Config, name: []const u8) !void {
-    try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, name));
+pub fn seedDefaultLayout(allocator: std.mem.Allocator, cfg: *tiling_config.Config, name: []const u8) !void {
+    try cfg.layouts.append(allocator, try allocator.dupe(u8, name));
 }
 
 /// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
@@ -47,12 +47,12 @@ const max_master_count: u8 = 10;
 pub fn parseTilingStructures(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
-    cfg: *types.Config,
+    cfg: *tiling_config.Config,
 ) !void {
     const section = doc.getSection(types.section_tiling) orelse return;
-    types.freeStrings(&cfg.tiling.layouts, allocator, types.keep_capacity);
-    cfg.tiling.workspace_layout_overrides.clearRetainingCapacity();
-    types.freeStringMap(&cfg.tiling.variants, allocator, types.keep_capacity);
+    types.freeStrings(&cfg.layouts, allocator, types.keep_capacity);
+    cfg.workspace_layout_overrides.clearRetainingCapacity();
+    types.freeStringMap(&cfg.variants, allocator, types.keep_capacity);
     if (section.getAsOrWarn([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
         const layout_str = section.getAsOrWarn([]const u8, "layout") orelse types.canon_master_layout;
         try seedDefaultLayout(allocator, cfg, layout_names.canonicalLayoutName(layout_str));
@@ -74,18 +74,18 @@ const flat_variant_keys = [_]struct { key: []const u8, canon: []const u8 }{
 /// for the same key is freed first.
 fn setTilingVariant(
     allocator: std.mem.Allocator,
-    cfg: *types.Config,
+    cfg: *tiling_config.Config,
     canon: []const u8,
     value: []const u8,
 ) !void {
-    if (cfg.tiling.variants.fetchRemove(canon)) |kv| {
+    if (cfg.variants.fetchRemove(canon)) |kv| {
         allocator.free(kv.key);
         allocator.free(kv.value);
     }
     const key = try allocator.dupe(u8, canon);
     errdefer allocator.free(key);
     const val = try allocator.dupe(u8, value);
-    try cfg.tiling.variants.put(allocator, key, val);
+    try cfg.variants.put(allocator, key, val);
 }
 
 /// The `[tiling.layouts.*]` sub-table family, scanned once: a bare
@@ -99,7 +99,7 @@ fn setTilingVariant(
 fn parseTilingLayoutSubtables(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
-    cfg: *types.Config,
+    cfg: *tiling_config.Config,
 ) !void {
     if (doc.getSection(types.section_tiling)) |sec| for (flat_variant_keys) |fk|
         if (sec.getAs([]const u8, fk.key)) |v| try setTilingVariant(allocator, cfg, fk.canon, v);
@@ -118,7 +118,7 @@ fn parseTilingLayoutSubtables(
             const seg = tail[0 .. tail.len - suffix.len];
             if (std.mem.eql(u8, layout_names.canonicalLayoutName(seg), types.canon_master_layout)) {
                 const counts_sec = entry.value_ptr;
-                cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
+                cfg.workspace_master_count_overrides.clearRetainingCapacity();
                 var inner = counts_sec.orderedIterator();
                 while (inner.next()) |p| {
                     if (tryParseWsToken(p.key, model.max_workspaces, "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
@@ -129,7 +129,7 @@ fn parseTilingLayoutSubtables(
                         if (count_val < 0 or count_val > max_master_count)
                             log.warn("master-stack.counts: count {} for workspace {} out of range [0,{d}], skipping", .{ count_val, ws_1based, max_master_count })
                         else
-                            try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
+                            try cfg.workspace_master_count_overrides.append(allocator, .{
                                 .workspace_idx = model.WorkspaceId.fromIndex(ws_1based - 1),
                                 .count = @intCast(count_val),
                             });
@@ -168,7 +168,7 @@ fn parseWorkspaceListInto(
     layout_name: []const u8,
     layout_idx: u8,
     variant: ?[]const u8,
-    overrides: *std.ArrayList(types.WorkspaceLayoutOverride),
+    overrides: *std.ArrayList(tiling_config.WorkspaceLayoutOverride),
 ) !void {
     var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
     while (ws_iter.next()) |ws_tok| {
@@ -195,14 +195,14 @@ const max_layouts = model.max_layouts;
 /// name is skipped with a warning (resolution, not spelling, is authoritative).
 /// The optional trailing group after an appended layout name: a workspace
 /// list and/or a variants word, consumed in either order. A variants word
-/// is stored into `cfg.tiling.variants` under the canonical layout name and
+/// is stored into `cfg.variants` under the canonical layout name and
 /// also, when a workspace list follows, feeds the per-workspace overrides.
 /// `i` advanced past every consumed token; null when the trailing token is
 /// another layout name or nothing (a malformed variants word also yields
 /// null, leaving the word for the caller's warn-and-skip).
 fn parseLayoutTrailing(
     allocator: std.mem.Allocator,
-    cfg: *types.Config,
+    cfg: *tiling_config.Config,
     name_lower: []const u8,
     arr: []const parser.Value,
     i: *usize,
@@ -233,7 +233,7 @@ fn parseLayoutTrailing(
 fn parseLayoutsArray(
     allocator: std.mem.Allocator,
     arr: []const parser.Value,
-    cfg: *types.Config,
+    cfg: *tiling_config.Config,
 ) !void {
     var i: usize = 0;
     while (i < arr.len) : (i += 1) {
@@ -246,7 +246,7 @@ fn parseLayoutsArray(
             log.warn("layouts array: layout name '{s}' at index {} is longer than the {d}-byte limit, skipping", .{ raw_name, i, layout_names.max_layout_name });
             continue;
         };
-        const is_dup = for (cfg.tiling.layouts.items) |existing| {
+        const is_dup = for (cfg.layouts.items) |existing| {
             if (std.mem.eql(u8, existing, name_lower)) break true;
         } else false;
         if (is_dup) {
@@ -259,17 +259,17 @@ fn parseLayoutsArray(
         // ring is capped at max_layouts (the overrides index into it via a
         // u8), checked BEFORE the cast so an overlong config can't trap in
         // ReleaseFast.
-        if (cfg.tiling.layouts.items.len >= max_layouts) {
+        if (cfg.layouts.items.len >= max_layouts) {
             log.warn("layouts array: maximum of {d} unique layouts reached, skipping '{s}'", .{ max_layouts, raw_name });
             continue;
         }
-        const layout_idx: u8 = @intCast(cfg.tiling.layouts.items.len);
-        try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_names.canonicalLayoutName(name_lower)));
+        const layout_idx: u8 = @intCast(cfg.layouts.items.len);
+        try cfg.layouts.append(allocator, try allocator.dupe(u8, layout_names.canonicalLayoutName(name_lower)));
 
         // Optional trailing group: a workspace list and/or variants word.
         if (try parseLayoutTrailing(allocator, cfg, name_lower, arr, &i)) |trail| {
             if (trail.ws_list) |ws_str| {
-                try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, trail.variants, &cfg.tiling.workspace_layout_overrides);
+                try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, trail.variants, &cfg.workspace_layout_overrides);
             }
         }
     }

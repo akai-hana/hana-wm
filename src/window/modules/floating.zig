@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 
 const core = @import("core");
 const build_options = @import("build_options");
+const types = @import("types");
 
 const window = @import("window");
 const registry = @import("registry");
@@ -69,7 +70,7 @@ const DragState = struct {
 /// Percentages are relative to screen width.
 fn snapDistance() i32 {
     const cs = core.getState();
-    const sv = cs.config.snap_distance;
+    const sv = cs.config.floating.snap_distance;
     if (sv.value == 0) return 0;
     const sw: f32 = @floatFromInt(cs.screen.width_in_pixels);
     return @intFromFloat(@round(scaling.scaleToPixels(sv, sw)));
@@ -278,7 +279,10 @@ fn sizeEnvelope(hints: model.SizeHints, bw2: i32, min_dim: i32) HintLimits {
 /// minimum are always available there.
 fn sizeHintLimits(win: u32) HintLimits {
     const bw2: i32 = @as(i32, core.borderWidth()) * 2;
-    const min_dim: i32 = core.getState().config.tiling.min_window_dim;
+    const min_dim: i32 = if (comptime build_options.has_tiling)
+        core.getState().config.tiling.min_window_dim
+    else
+        types.default_min_window_dim;
     // Window may withdraw mid-drag; treat it as hint-less (no constraint).
     const hints = (pipeline.state().store.get(win) orelse return .{
         .min_w = min_dim,
@@ -489,7 +493,10 @@ pub fn honorConfigureRequest(
             var min_dim: i32 = 0;
             if (core.isReady()) {
                 bw2 = @as(i32, core.borderWidth()) * 2;
-                min_dim = core.getState().config.tiling.min_window_dim;
+                min_dim = if (comptime build_options.has_tiling)
+                    core.getState().config.tiling.min_window_dim
+                else
+                    types.default_min_window_dim;
             }
             const limits = sizeEnvelope(e.size_hints, bw2, min_dim);
             if (req.width) |v|

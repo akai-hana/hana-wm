@@ -13,6 +13,7 @@
 const std = @import("std");
 
 const types = @import("types");
+const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const query = @import("query");
 const window = @import("window");
@@ -54,7 +55,7 @@ var cache_ws_all_active: bool = false;
 // Config + height captured at the last draw, so the natural-width path can
 // recompute the cell width before a full ensureCache pass has run on the
 // current (config, height) pair.
-var last_config: types.BarConfig = undefined;
+var last_config: bar_config.Config = undefined;
 var last_height: u16 = 0;
 var last_geom_valid: bool = false;
 // All-view (all_workspaces / Mod+5) collapse: while the flag is active every
@@ -71,7 +72,7 @@ var cached_ind_x_off: u16 = 0;
 var cached_ind_y: u16 = 0;
 
 /// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
-inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
+inline fn getLabel(i: usize, config: bar_config.Config) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
     if (i < workspace_labels.len) return workspace_labels[i];
     return "?";
@@ -85,7 +86,7 @@ fn invalidate() void {
 /// Rebuilds the label-width and geometry cache if stale.
 fn ensureCache(
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     ws_current: u8,
     ws_all_active: bool,
@@ -134,7 +135,7 @@ fn indicatorPos(
     bar_height: u16,
     item_w: u16,
     item_h: u16,
-    location: types.IndicatorLocation,
+    location: bar_config.IndicatorLocation,
     padding: f32,
 ) struct { x: u16, y: u16 } {
     const cw: f32 = @floatFromInt(cell_w);
@@ -168,7 +169,7 @@ fn indicatorPos(
 /// and the single all-view collapse cell.
 fn drawCell(
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     x: u16,
     cell_w: u16,
@@ -212,7 +213,7 @@ fn anyWorkspaceHasWindows(ws_has_windows: []const bool) bool {
 /// the 8+ tags collapse into a single "花" tag rendered as current.
 fn drawFrame(
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     start_x: u16,
     ws_current: u8,

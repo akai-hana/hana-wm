@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const slider = @import("slider");
 const drawing = @import("drawing");
 const spawn_capture = @import("spawn_capture");
@@ -360,14 +361,14 @@ fn write(w: slider.Write, v: u8) void {
 /// Renders the display string into `buf`, substituting every `{pct}`
 /// placeholder, and returns the text (plus the numeric region); a truncated
 /// tail is still a complete, scan-safe string.
-fn renderDisplay(config: types.BarConfig, pct: u8, buf: []u8) drawing.Label {
+fn renderDisplay(config: bar_config.Config, pct: u8, buf: []u8) drawing.Label {
     const fmt = config.brightness_format orelse default_format;
     return drawing.renderLineValue(fmt, pct, null, buf);
 }
 
 /// Copies the config's `brightness_device` pin into the owned buffer (config
 /// string slices are freed on reload; poll-time reads need a stable copy).
-fn cacheConfigPin(config: types.BarConfig) void {
+fn cacheConfigPin(config: bar_config.Config) void {
     const pin = config.brightness_device orelse "";
     g_pin_len = @min(pin.len, max_dev_len);
     @memcpy(g_pin[0..g_pin_len], pin[0..g_pin_len]);
@@ -384,7 +385,7 @@ pub fn setDisplayForTest(pct: u8) void {
     g_pct = pct;
 }
 
-pub fn label(config: types.BarConfig, buf: []u8) drawing.Label {
+pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
     cacheConfigPin(config);
     return renderDisplay(config, g_pct, buf);
 }

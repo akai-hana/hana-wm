@@ -30,6 +30,7 @@
 const std = @import("std");
 const log = @import("log");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const slider = @import("slider");
 const drawing = @import("drawing");
 const spawn_capture = @import("spawn_capture");
@@ -441,7 +442,7 @@ fn write(w: slider.Write, v: u8) void {
 /// from a sink when no sink was ever reached -- and it is also the one string
 /// that reads as "muted" to a user while inviting a pointless volume-up scroll.
 /// MUTE is the honest terminal state and matches what the user asked for.
-fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) drawing.Label {
+fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Label {
     const effective_mute = muted or !g_has_value;
     const fmt = if (effective_mute)
         (config.volume_muted_format orelse default_muted_format)
@@ -484,7 +485,7 @@ pub fn clearNativeBackendForTest() void {
     g_native_alsa = null;
 }
 
-pub fn label(config: types.BarConfig, buf: []u8) drawing.Label {
+pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
     return renderDisplay(config, g_muted, buf);
 }
 

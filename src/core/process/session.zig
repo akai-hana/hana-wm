@@ -3,6 +3,7 @@
 //! records with feature-owned extension blobs.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const config_mod = @import("config");
 const core = @import("core");
 const log = @import("log");
@@ -13,6 +14,7 @@ const snapshot = @import("snapshot");
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
 /// scenario matrix removes the tiling subsystem entirely).
 const tiling_mods = @import("tiling_contract").tiling_mods;
+const contract = @import("tiling_contract");
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
 const pipeline_mod = @import("pipeline");
@@ -424,6 +426,7 @@ pub fn loaded() ?*const StateFile {
 /// last resort as contract.default_kind. Runs only on the removed-layout path
 /// (applyModelLevel) where core is already initialized and config is live.
 fn resumableDefaultKind() u8 {
+    if (comptime !build_options.has_tiling) return contract.default_kind;
     const layout_name = core.getState().config.tiling.defaultLayout();
     return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }

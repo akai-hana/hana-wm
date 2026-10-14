@@ -79,10 +79,10 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Embed config/fallback.toml at build time; an absent file becomes an
-    // empty stub rather than a failed build.
-    const fallback_toml = readFallbackToml(b);
-    const fallback_toml_mod = buildFallbackTomlModule(b, fallback_toml, target, optimize);
-
+    // empty stub rather than a failed build. Read AFTER discovery (moved from
+    // the top of build) so the line-level filter can drop the `[tiling...]` /
+    // `[bar...]` / `[workspaces]` / `[drag]` blocks of subsystems absent from
+    // this tree -- the fallback is shared source for every modularity shape.
     // Build options
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "profile_key", b.option(bool, "profile-key", "Instrument the key dispatch path to log receive->action latency") orelse false);
@@ -100,6 +100,14 @@ pub fn build(b: *std.Build) !void {
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
 
     const features = probeFeatures(&discovery, build_opts);
+
+    // Config fragments (`*_config` stems) drive the generated `composed`
+    // facade; discovered here so an orphan fragment fails the build before
+    // any generated source references it.
+    const config_fragments = try discoverConfigFragments(b, &discovery);
+
+    const fallback_toml = filterFallbackToml(b, readFallbackToml(b), &discovery);
+    const fallback_toml_mod = buildFallbackTomlModule(b, fallback_toml, target, optimize);
 
     // Restrict the run to one *_test stem. Applied in wireUnitTests, where a
     // name matching nothing is a hard error rather than a silent empty run.
@@ -121,7 +129,7 @@ pub fn build(b: *std.Build) !void {
         modules_step.dependOn(&b.addSystemCommand(&.{ "printf", "%s", buf.items }).step);
     }
 
-    const gen = try buildGeneratedModules(b, &discovery, build_opts, target, optimize);
+    const gen = try buildGeneratedModules(b, &discovery, config_fragments, build_opts, target, optimize);
     const build_opts_mod = gen.build_opts_mod;
     const surfaces_mod = gen.surfaces_mod;
     const has_usr = gen.has_usr;
@@ -145,8 +153,10 @@ pub fn build(b: *std.Build) !void {
 
 /// Names claimed by `injectShared` that would collide with the generated
 /// import every module receives. `surfaces` is reserved for the chrome-surface
-/// registration module; no `src/surfaces.zig` may exist.
-const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml", "surfaces" };
+/// registration module; no `src/surfaces.zig` may exist. `composed` is the
+/// build-generated config facade (see `buildComposedModule`); no
+/// `src/composed.zig` may exist.
+const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml", "surfaces", "composed" };
 
 /// Shared artefacts injected into every module, root and discovered alike.
 const SharedBuildContext = struct {
@@ -304,6 +314,7 @@ const GeneratedModules = struct {
 fn buildGeneratedModules(
     b: *std.Build,
     discovery: *Module.DiscoveryContext,
+    config_fragments: []const ConfigFragment,
     build_opts: *std.Build.Step.Options,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -380,6 +391,15 @@ fn buildGeneratedModules(
         b.allocator,
         "tiling_seam",
         buildTilingSeamModule(b, &discovery.modules, build_opts_mod, target, optimize),
+    );
+    // Config facade: the composed top-level Config assembled from the
+    // discovered `*_config` fragments. Injected into every module through
+    // owner_modules (like the registries) so config.zig, main, and the tests
+    // all reach it as `@import("composed")`.
+    try owner_modules.put(
+        b.allocator,
+        "composed",
+        buildComposedModule(b, &discovery.modules, config_fragments, build_opts_mod, target, optimize),
     );
     var oms_it = owner_modules.valueIterator();
     while (oms_it.next()) |m| {
@@ -858,6 +878,218 @@ fn buildTilingSeamModule(
     });
     if (discovered.get("tiling")) |m| mod.addImport("tiling", m);
     return mod;
+}
+
+/// One discovered config fragment: the `<owner>_config` stem and its owner
+/// module name (the `composed.Config` field name).
+const ConfigFragment = struct {
+    owner: []const u8,
+    stem: []const u8,
+};
+
+/// Discovers every `*_config` fragment on the src/ walk (skipping the
+/// reserved `composed` name and the always-present `core_config`, which the
+/// composed module dispatches by name rather than field). Each fragment's
+/// owner (the stem minus `_config`) must be a discovered module -- a fragment
+/// without its subsystem is a build error, not a silent drop. Sorted by owner
+/// so the generated parse/deinit order is deterministic.
+fn discoverConfigFragments(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+) ![]ConfigFragment {
+    var list: std.ArrayList(ConfigFragment) = .empty;
+    var it = discovery.source_paths.iterator();
+    while (it.next()) |entry| {
+        const stem = entry.key_ptr.*;
+        if (!std.mem.endsWith(u8, stem, "_config")) continue;
+        if (std.mem.eql(u8, stem, "composed")) continue;
+        // Not a config fragment despite the stem: `core_config` is the
+        // always-present core fragment the facade dispatches by name, and
+        // `model_config` is the reload/boot SEEDING root (config→model param
+        // stamping), which owns no Config struct at all.
+        if (std.mem.eql(u8, stem, "core_config")) continue;
+        if (std.mem.eql(u8, stem, "model_config")) continue;
+        const owner = stem[0 .. stem.len - "_config".len];
+        if (owner.len == 0) continue;
+        if (!discovery.modules.contains(owner)) {
+            std.debug.print(
+                "Error: config fragment '{s}' ({s}) has no owning module '{s}'. Rename or delete the file.\n",
+                .{ stem, entry.value_ptr.*, owner },
+            );
+            return error.OrphanConfigFragment;
+        }
+        try list.append(b.allocator, .{
+            .owner = try b.allocator.dupe(u8, owner),
+            .stem = try b.allocator.dupe(u8, stem),
+        });
+    }
+    std.mem.sort(ConfigFragment, list.items, {}, struct {
+        fn less(_: void, a: ConfigFragment, b_: ConfigFragment) bool {
+            return std.mem.lessThan(u8, a.owner, b_.owner);
+        }
+    }.less);
+    return list.toOwnedSlice(b.allocator);
+}
+
+/// Generates the build-owned `composed` config facade alongside its source
+/// file, and returns the module to register under that name.
+///
+/// The facade is the top-level `Config` (the old monolithic types.Config),
+/// assembled from the always-present `core_config` plus every discovered
+/// `<owner>_config` fragment: one field, one parse/validate call, one deinit
+/// call per fragment. Deleting an optional subsystem deletes its fragment
+/// file, which regenerates a shorter struct -- the field and every call
+/// vanish, so no config trace of the module survives. The fragment contract
+/// (Config/parse/validate/deinit) is uniform, so the generator never names a
+/// subsystem.
+fn buildComposedModule(
+    b: *std.Build,
+    discovered: *std.StringHashMap(*std.Build.Module),
+    fragments: []const ConfigFragment,
+    build_opts: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    var src: std.ArrayList(u8) = .empty;
+
+    src.appendSlice(b.allocator,
+        \\//! The composed config: the top-level `Config` assembled from the
+        \\//! discovered `*_config` fragments plus the always-present
+        \\//! `core_config`. Generated by build.zig; never committed. Deleting an
+        \\//! optional subsystem regenerates a shorter struct: the fragment's
+        \\//! field, parse/validate calls and deinit call simply vanish, leaving
+        \\//! zero config trace of the removed module.
+        \\//!
+        \\//! Fragment contract (every `<owner>_config` module must export):
+        \\//!   `Config`   -- the subsystem config struct (field defaults seed)
+        \\//!   `parse`    -- `fn (std.mem.Allocator, *parser.Document) !Config`
+        \\//!   `validate` -- `fn (*const Config) !void` (error.InvalidConfig
+        \\//!                 fails the load; warn-and-continue stays in parse)
+        \\//!   `deinit`   -- method on Config
+        \\//!
+        \\//! Every field is a NON-optional with a `= .{}` default: an absent
+        \\//! fragment omits the field entirely rather than carrying an
+        \\//! optional payload the whole tree would test (the C4 disposition).
+        \\
+        \\const std = @import("std");
+        \\const types = @import("types");
+        \\const parser = @import("parser");
+        \\const color = @import("color");
+        \\const core_config = @import("core_config");
+        \\
+    ) catch unreachable;
+    for (fragments) |f| {
+        src.print(b.allocator, "const {s} = @import(\"{s}\");\n", .{ f.stem, f.stem }) catch unreachable;
+    }
+
+    src.appendSlice(b.allocator,
+        \\
+        \\pub const Config = struct {
+        \\    core: types.CoreConfig = .{},
+        \\
+    ) catch unreachable;
+    for (fragments) |f| {
+        src.print(b.allocator, "    {s}: {s}.Config = .{{}},\n", .{ f.owner, f.stem }) catch unreachable;
+    }
+
+    src.appendSlice(b.allocator,
+        \\
+        \\    pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        \\        self.core.deinit(allocator);
+        \\
+    ) catch unreachable;
+    for (fragments) |f| {
+        src.print(b.allocator, "        self.{0s}.deinit(allocator);\n", .{f.owner}) catch unreachable;
+    }
+    src.appendSlice(b.allocator,
+        \\    }
+        \\
+        \\};
+        \\
+        \\/// Assembles a Config from a parsed document: palette first (color knobs
+        \\/// may reference the reserved variables), then the always-present core
+        \\/// fragment, then each discovered fragment in owner order. An
+        \\/// `error.InvalidConfig` from any validate fails the whole load (boot
+        \\/// falls back; reload keeps the live config); the errdefer tears down
+        \\/// whatever was assembled so far. An empty document yields the same
+        \\/// defaults the old `getDefaultConfig` seeded, because every fragment
+        \\/// self-seeds its owned non-scalars and its scalars come from field
+        \\/// initializers.
+        \\pub fn parse(allocator: std.mem.Allocator, doc: *parser.Document) !Config {
+        \\    var cfg: Config = .{};
+        \\    errdefer cfg.deinit(allocator);
+        \\    color.collectPalette(doc);
+        \\    cfg.core = try core_config.parse(allocator, doc);
+        \\    try core_config.validate(&cfg.core);
+        \\
+    ) catch unreachable;
+    for (fragments) |f| {
+        src.print(
+            b.allocator,
+            "    cfg.{0s} = try {1s}.parse(allocator, doc);\n" ++
+                "    try {1s}.validate(&cfg.{0s});\n\n",
+            .{ f.owner, f.stem },
+        ) catch unreachable;
+    }
+    src.appendSlice(b.allocator,
+        \\    return cfg;
+        \\}
+        \\
+    ) catch unreachable;
+
+    var imports: std.ArrayList(Import) = .empty;
+    imports.append(b.allocator, .{ .name = "build_options", .module = build_opts }) catch unreachable;
+    imports.append(b.allocator, .{ .name = "types", .module = discovered.get("types").? }) catch unreachable;
+    imports.append(b.allocator, .{ .name = "parser", .module = discovered.get("parser").? }) catch unreachable;
+    imports.append(b.allocator, .{ .name = "color", .module = discovered.get("color").? }) catch unreachable;
+    imports.append(b.allocator, .{ .name = "core_config", .module = discovered.get("core_config").? }) catch unreachable;
+    for (fragments) |f| {
+        imports.append(b.allocator, .{ .name = f.stem, .module = discovered.get(f.stem).? }) catch unreachable;
+    }
+    return makeGeneratedModule(b, target, optimize, "composed.zig", src.items, imports.items);
+}
+
+/// Drops the `[section]` blocks whose owning subsystem is absent from the
+/// embedded fallback TOML text. The fallback is shared source for every
+/// modularity shape (a no-bar tree still embeds the same file), so without
+/// this filter a no-bar build would parse `[bar...]` sections into an
+/// unconsumed-key warning storm. Line-oriented: a section line starts a run;
+/// every following line belongs to it until the next section line. The
+/// fallback carries no multi-line arrays, so a line is a safe unit. Returns
+/// `toml` unchanged when present sections all map to present modules; null
+/// stays null.
+fn filterFallbackToml(
+    b: *std.Build,
+    toml: ?[]const u8,
+    discovery: *const Module.DiscoveryContext,
+) ?[]const u8 {
+    const raw = toml orelse return null;
+    var out: std.ArrayList(u8) = .empty;
+    var keep = true;
+    var it = std.mem.splitScalar(u8, raw, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len > 0 and trimmed[0] == '[') {
+            const close = std.mem.indexOfScalar(u8, trimmed, ']') orelse trimmed.len;
+            const section = std.mem.trim(u8, trimmed[1..close], " \t");
+            keep = fallbackSectionAllowed(section, discovery);
+        }
+        if (keep) out.appendSlice(b.allocator, line) catch return raw;
+        out.append(b.allocator, '\n') catch return raw;
+    }
+    return out.items;
+}
+
+/// True when the fallback's `[section]` (or its family prefix) belongs to a
+/// subsystem present in this tree. The FIRST dotted component picks the
+/// owner: `tiling.*`, `bar.*` (incl. bar.properties/layout/modules),
+/// `workspaces`/`workspace.rules.*`/`rules.*` -> workspaces, `drag` ->
+/// floating. Unrecognized sections always stay (core-owned vocabulary).
+fn fallbackSectionAllowed(section: []const u8, discovery: *const Module.DiscoveryContext) bool {
+    const dot = std.mem.indexOfScalar(u8, section, '.');
+    const head = if (dot) |d| section[0..d] else section;
+    const owner = if (std.mem.eql(u8, head, "tiling")) "tiling" else if (std.mem.eql(u8, head, "bar")) "bar" else if (std.mem.eql(u8, head, "workspaces")) "workspaces" else if (std.mem.eql(u8, head, "workspace")) "workspaces" else if (std.mem.eql(u8, head, "rules")) "workspaces" else if (std.mem.eql(u8, head, "drag")) "floating" else return true;
+    return discovery.modules.contains(owner);
 }
 
 /// The per-owner stem registry for every `modules/` directory.
@@ -2343,9 +2575,20 @@ const Module = struct {
         source_paths: *const std.StringHashMap([]const u8),
     ) bool {
         const shelf = [_][]const u8{
-            "log", "masks", "bounded", "idmap", "scaling",
+            "log",   "masks",    "bounded", "idmap", "scaling",
+            // The config-parse vocabulary every `*_config` fragment needs to
+            // read TOML: the shared types, the parser/document, the knob
+            // engine, and the color decoder. All xcb-free by construction, so
+            // a pure fragment in src/tiling/ may reach them without touching
+            // hub wiring.
+            "types", "document", "parser",  "knob",  "color",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
+        // The generated config facade: injected into every module like the
+        // registries, so it is never a discovered-module edge -- allowed here
+        // so the pure config layer's `@import("composed")` cannot trip the
+        // guard if edge-based wiring ever sees the name.
+        if (std.mem.eql(u8, dep, "composed")) return true;
         if (std.mem.eql(u8, dep, "model") or
             std.mem.eql(u8, dep, "domain")) return true;
         if (std.mem.eql(u8, layer, "model")) return false;
@@ -2355,6 +2598,9 @@ const Module = struct {
             if (std.mem.eql(u8, layer, "tiling")) {
                 if (std.mem.startsWith(u8, dep_path, "src/tiling/")) return true;
                 if (std.mem.eql(u8, dep, "tiling_contract")) return true;
+                // tiling_sections canonicalizes layout names through the
+                // config-layer vocab module (which itself stays pure).
+                if (std.mem.eql(u8, dep, "layout_names")) return true;
             }
             if (std.mem.eql(u8, layer, "config")) {
                 if (std.mem.startsWith(u8, dep_path, "src/config/")) return true;

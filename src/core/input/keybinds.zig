@@ -116,7 +116,7 @@ pub fn handleMappingNotify(keyboard: bool) bool {
     // change cannot leave the grab path reading a list resolved against the
     // old keyboard. The regrab itself is the CALLER's step (core/loop
     // events.zig), sequenced right after this call.
-    buildKeybinds(cs.config.keybindings.items);
+    buildKeybinds(cs.config.core.keybindings.items);
     return true;
 }
 

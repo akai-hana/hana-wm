@@ -213,7 +213,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 /// times is reported once, and the message names the binding's index in config
 /// order so it can be found.
 pub fn reportUndeliverableMouseBinds() void {
-    const binds = core.getState().config.mouse_bindings.items;
+    const binds = core.getState().config.core.mouse_bindings.items;
     // The grab as `keybinds.grabMouseButtons` actually makes it, handed to the
     // pure rule so that rule needs no knowledge of the X layer and stays
     // unit-testable.
@@ -264,7 +264,7 @@ pub fn findMouseBind(
 /// Returns true and releases the grab if a binding is found, false otherwise.
 fn tryConfigMouseBind(mods: u16, button: u8, win: u32, ts: u32) bool {
     // Linear scan is intentional: mouse bindings are few (~5-10), hash overhead not worth it.
-    const mb = findMouseBind(core.getState().config.mouse_bindings.items, mods, button) orelse
+    const mb = findMouseBind(core.getState().config.core.mouse_bindings.items, mods, button) orelse
         return false;
 
     // Most mouse binds execute against the keyboard-focused window

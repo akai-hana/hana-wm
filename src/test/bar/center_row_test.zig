@@ -14,6 +14,7 @@ const testing = std.testing;
 const center_row = @import("center_row");
 const segmod = @import("segment");
 const types = @import("types");
+const bar_config = @import("bar_config");
 
 /// The registry's self-ticking set, resolved at comptime exactly as
 /// the bar resolves its role sets (the capability query is
@@ -34,14 +35,14 @@ test "centerShare splits evenly, leftmost slots carry the remainder" {
     try testing.expectEqual(@as(u16, 0), center_row.centerShare(0, 3, 2));
 }
 
-fn centerLayout(segments: []const []const u8) !types.BarLayout {
-    var lay = types.BarLayout{ .position = .center, .segments = .empty };
+fn centerLayout(segments: []const []const u8) !bar_config.BarLayout {
+    var lay = bar_config.BarLayout{ .position = .center, .segments = .empty };
     for (segments) |s| try lay.segments.append(testing.allocator, s);
     return lay;
 }
 
 test "centerRowBudget is empty for non-center rows" {
-    var lay = types.BarLayout{ .position = .left, .segments = .empty };
+    var lay = bar_config.BarLayout{ .position = .left, .segments = .empty };
     defer lay.segments.deinit(testing.allocator);
     const frame = segmod.Frame{};
     const budget = center_row.centerRowBudget(lay, 1000, 10, &frame, 0);
@@ -90,7 +91,7 @@ test "centerRowBudget floors a thin budget at the title minimum" {
     try testing.expectEqual(@as(u16, 50), tiny.remaining);
 }
 
-fn stubWidth(_: void, text: []const u8, props: types.SegmentProps) u16 {
+fn stubWidth(_: void, text: []const u8, props: bar_config.SegmentProps) u16 {
     // Props are part of the injected probe's contract: a bold segment must
     // measure wider than a plain one, so the expected walk below fails if
     // mergedClockWidth ever stops threading each module's OWN props through.
@@ -105,9 +106,9 @@ test "mergedClockWidth is the max self-ticker span plus double padding" {
     // semantics, the 2x padding multiplier, and the per-module props
     // threading (bold only the clock, so a shared-default regression
     // measures the +500 away).
-    var config = types.BarConfig{};
+    var config = bar_config.Config{};
     try config.segment_props.put(testing.allocator, try testing.allocator.dupe(u8, "clock"), .{ .bold = true });
-    defer types.freeSegmentMap(types.SegmentProps, &config.segment_props, testing.allocator);
+    defer bar_config.freeSegmentMap(bar_config.SegmentProps, &config.segment_props, testing.allocator);
     const height: u16 = 100;
     const padding = config.scaledSegmentPadding(height);
     var expected: u16 = 0;

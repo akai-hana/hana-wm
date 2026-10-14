@@ -2,19 +2,11 @@
     .name = .hana,
     .fingerprint = 0x5708b600455b58f3,
     .version = "0.1.0",
+
     .minimum_zig_version = "0.16.0",
-    // Wired system libraries. Single source of truth: the build script's
-    // SystemLibraries reads this `.links` table at build time (every `zig
-    // build` re-reads the file), so the two sides cannot drift. A consumer
-    // that depends on hana as a package gets `.links` applied on ITS build,
-    // i.e. the plain `linkSystemLibrary` calls a local `zig build` already
-    // performs -- a benign duplicate, since system-library linking is
-    // idempotent.
+
     .paths = .{ "build.zig", "build.zig.zon", "src", "config" },
-    // dev/ is excluded by design: it holds local-only tooling (the
-    // check-layers.sh layer guards that `zig build check` shells out to),
-    // which is not meaningful package-consumer surface and would only bloat
-    // a published package.
+
     .links = .{
         "xcb-keysyms",
         "xkbcommon-x11",

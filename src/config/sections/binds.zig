@@ -265,7 +265,7 @@ fn resolveModPlaceholder(
     return key;
 }
 
-pub fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
+pub fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.CoreConfig) !void {
     const section = doc.getSection(types.section_binds) orelse doc.getSection(types.section_binds_alt) orelse return;
     var mod_placeholder: ?[]const u8 = null;
     var kill_placeholder: ?[]const u8 = null;

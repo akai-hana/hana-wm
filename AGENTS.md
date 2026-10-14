@@ -35,6 +35,10 @@ hana is a modular X11 window manager (+ integrated bar) written in Zig **0.16.0*
    vocabulary), `src/core/architecture/contract_dispatch.zig`
    (providerOf/callAll) — and the build-generated registries
    (`window_modules`, `tiling_modules`, `bar_modules`).
+   Config knobs live in per-subsystem `*_config.zig` fragments discovered by
+   the build and composed into the generated `composed` module (exporting
+   `Config` + `parse`); deleting a subsystem deletes its fragment and its
+   config field with it.
    New community modules must compile against the templates in
    `dev/plugin-template/` (gated by `zig build check-plugin-template`, part of
    `zig build check`).
@@ -50,7 +54,7 @@ hana is a modular X11 window manager (+ integrated bar) written in Zig **0.16.0*
 | Pre-commit gate (fmt + check, `--test` adds suite) | `dev/scripts/check-before-commit.sh --test` |
 
 Only wrap a gate in `ZBUILD_THROTTLE=1` (nice + pinned cores + `-j2`) when the
-user explicitly asks for throttled/lightweight runs — default to full speed.
+user explicitly asks for throttled/lightweight runs — otherwise, default to full speed (no ZBUILD_THROTTLE, -j16).
 | Feature-deletion matrix (heavy: ~31 cold builds) | `dev/scripts/check-modularity.sh -j 4` |
 | Latency benchmarks (opt-in) | `zig build test -Dbench` → `.zig-cache/bench/timings.txt` |
 | Key-dispatch latency instrumentation | `zig build -Dprofile-key` |

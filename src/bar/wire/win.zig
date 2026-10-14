@@ -12,6 +12,7 @@
 
 const core = @import("core");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const xcb = core.xcb;
 
 const drawing = @import("drawing");
@@ -60,7 +61,7 @@ pub fn initAtoms() void {
 /// the bar lands -- a wrong reference is a bar on the wrong edge, or past the
 /// bottom of the screen, with no error to point at it. As a pure function of
 /// its arguments it is checkable without a display.
-pub fn calcBarYPos(position: types.BarScreenPosition, screen_height_px: u16, height: u16) i16 {
+pub fn calcBarYPos(position: bar_config.BarScreenPosition, screen_height_px: u16, height: u16) i16 {
     return if (position == .bottom)
         @intCast(@as(i32, screen_height_px) - height)
     else

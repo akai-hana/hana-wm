@@ -5,11 +5,19 @@ There is no schema duty: every file is parsed with hana's own TOML parser, so
 malformed values are either warned-and-ignored or rejected while keeping the
 previous config in memory.
 
+Sections follow the build: each optional subsystem ships a `*_config.zig`
+fragment next to its code, and the binary only parses the sections owned by
+the fragments it was compiled with. A `[tiling]` key in a bar-only build (or
+any section whose owning subsystem was deleted from the tree) is simply
+unrecognized — warned about like any unknown section and ignored. The
+embedded fallback config is pre-filtered the same way, so a minimal build
+boots silently with no inert-section noise.
+
 The stock split (arbitrary, and entirely up to you):
 
 | file                 | role                                        |
 | -------------------- | ------------------------------------------- |
-| `config.toml`        | functional behavior, bar, rules                 |
+| `config.toml`        | functional behavior, bar, rules             |
 | `themes/akai.toml`   | visual palette & appearance                 |
 | `binds.toml`         | keybindings, incl. personal program binds   |
 | `fallback.toml`      | built-in config used when no file is found  |
