@@ -12,6 +12,7 @@ const model = @import("model");
 const constants = @import("constants");
 
 const helpers = @import("helpers");
+const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
@@ -24,7 +25,7 @@ const unfocused_pixel = helpers.unfocused_pixel;
 const testColor = helpers.testColor;
 const golden = helpers.std_golden;
 
-const Recorder = helpers.TestSink(.record);
+const Recorder = test_sink.TestSink(.record);
 
 const Fixture = struct {
     m: model.Model,

@@ -7,12 +7,12 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const masks = @import("masks");
-const constants = @import("constants");
 
 const log = @import("log");
 const xtrace = @import("xtrace");
 const config = @import("config");
 const scale = @import("dpi");
+const hz = @import("hz");
 const input = @import("input");
 const window = @import("window");
 const ledger = @import("ledger");
@@ -20,7 +20,6 @@ const focus = @import("focus");
 
 const signals = @import("signals");
 const pipeline = @import("pipeline");
-const actions = @import("actions");
 const restart = @import("restart");
 const persist = @import("persist");
 const spawn = @import("spawn");
@@ -30,6 +29,10 @@ const build_options = @import("build_options");
 const lifecycle = @import("lifecycle");
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
+// Config reload (the SIGHUP / reload_config transition) lives in
+// reload.zig (review 05-input round 2): a lifecycle concern, not
+// per-event path work.
+const reload = @import("reload");
 
 const fd_xcb = 0;
 const fd_signal = 1;
@@ -46,11 +49,6 @@ const max_queued_drain: usize = 256;
 /// the highest is MappingNotify (34), so 36 leaves headroom. The table lookup
 /// is guarded by this bound (dispatch()).
 const event_dispatch_table = 36;
-
-/// Upper bound for the XCB cookie scratch buffer in grabKeybindings
-/// (max distinct keybindings x lock_modifiers.len combinations).
-/// Raise if you ever exceed 128 keybindings.
-const max_keybind_cookies = 1024;
 
 const EventHandler = *const fn (event: *anyopaque) void;
 
@@ -173,11 +171,11 @@ const dispatch_table = blk: {
 /// cannot alias an extension base onto a RandR code, because a client only
 /// receives the events it selected and hana selects its RandR range by name.
 fn isRandrEvent(code: u8) bool {
-    // RandR is a bar feature (render pacing). With no bar compiled in,
-    // `randrFirstEvent` is the no-op, which reports 0, and the `r != 0` test
-    // below is what makes this false -- so there is no build flag to consult
-    // here, and adding a hook to the contract cannot leave this unguarded.
-    const r = surfaces.randrFirstEvent();
+    // RandR detection is a display feature, compiled into every tree
+    // and armed once at boot; `randrFirstEvent` reports 0 until then,
+    // and the `r != 0` test below is what makes this false before
+    // arming -- so there is no build flag to consult here.
+    const r = hz.randrFirstEvent();
     return (r != 0 and code >= r and code <= r + 1);
 }
 
@@ -249,9 +247,9 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
                 core.setDpi(scale.detectDpi(cs.conn, cs.screen));
             }
             // Pass the raw event: a CRTC-change payload carries the active
-            // mode id, letting the bar resolve the rate from its cached mode
-            // table with zero XCB round-trips (see hz.handleRandrNotifyEvent).
-            surfaces.handleRandrEvent(event);
+            // mode id, letting the probe resolve the rate from its cached
+            // mode table with zero XCB round-trips (see hz.handleRandrNotifyEvent).
+            hz.handleRandrNotifyEvent(event);
         },
         .core => dispatch_table[event_type & masks.core_event_code_mask].?(event),
     }
@@ -357,251 +355,6 @@ pub const no_window: u32 = 0;
 /// isMotion instead of re-spelling the raw `@as(*u8, @ptrCast(e)).*` read.
 inline fn eventType(e: anytype) u8 {
     return @as(*u8, @ptrCast(e)).*;
-}
-
-const CookieEntry = struct { cookie: xcb.xcb_void_cookie_t, keycode: u8 };
-
-fn fillGrabCookies(cookies: []CookieEntry) usize {
-    var n: usize = 0;
-    const cs = core.getState();
-    // The compiled list, not cs.config.keybindings: keycodes are derived from
-    // the live keyboard and deliberately not stored in config.
-    for (input.resolvedKeybinds()) |kb| {
-        const keycode = kb.keycode orelse continue;
-
-        // Check once per keybinding that the full lock-modifier set fits.
-        // Avoids a per-lock branch and prevents partial grabs if the buffer is nearly full.
-        if (n + masks.lock_modifiers.len > cookies.len) {
-            log.warn(
-                "Too many keybindings. Increase max_keybind_cookies (currently {})",
-                .{max_keybind_cookies},
-            );
-            break;
-        }
-
-        for (masks.lock_modifiers) |lock| {
-            cookies[n] = .{
-                .cookie = xcb.xcb_grab_key_checked(
-                    cs.conn,
-                    0,
-                    cs.root,
-                    @intCast(kb.modifiers | lock),
-                    keycode,
-                    xcb.XCB_GRAB_MODE_ASYNC,
-                    xcb.XCB_GRAB_MODE_ASYNC,
-                ),
-                .keycode = keycode,
-            };
-            n += 1;
-        }
-    }
-    return n;
-}
-
-fn checkGrabCookies(cookies: []const CookieEntry) usize {
-    var failed: usize = 0;
-    const conn = core.getState().conn;
-    for (cookies) |entry| {
-        if (xcb.xcb_request_check(conn, entry.cookie)) |err| {
-            std.c.free(err);
-            log.warn("Failed to grab keycode: {}", .{entry.keycode});
-            failed += 1;
-        }
-    }
-    return failed;
-}
-
-/// The buttons the root mouse grab covers, in grab order. Published because
-/// `input.undeliverableMouseBindReason` has to judge reachability against the
-/// very set that is grabbed here; one list, so the grab and the check cannot
-/// disagree about which buttons can ever arrive.
-pub const mouse_grab_buttons = [_]u8{
-    constants.mouse_button_left,
-    constants.mouse_button_middle,
-    constants.mouse_button_right,
-    constants.mouse_button_scroll_up,
-    constants.mouse_button_scroll_down,
-};
-
-/// Grabs Super+Button{1,2,3,4,5} (including the scroll buttons) on the root
-/// window for every lock-modifier combination, checking each one.
-///
-/// Lives beside `grabKeybindings` and uses its discipline on purpose. This
-/// used to fire forty unverified grabs in the input layer: a grab that failed
-/// (another client already holds Super+Button1 -- a screenshot tool, a
-/// keymap tool, or the WM that was here before) was indistinguishable from one
-/// that succeeded, so the mouse binds silently stopped firing with nothing on
-/// stderr to say why. Each failure now names the button and modifier that did
-/// not take.
-pub fn grabMouseButtons() void {
-    const cs = core.getState();
-    var cookies: [mouse_grab_buttons.len * masks.lock_modifiers.len]xcb.xcb_void_cookie_t = undefined;
-    var labels: [mouse_grab_buttons.len * masks.lock_modifiers.len]MouseGrabLabel = undefined;
-    var n: usize = 0;
-    for (mouse_grab_buttons) |button| {
-        for (masks.lock_modifiers) |lock| {
-            cookies[n] = xcb.xcb_grab_button(
-                cs.conn,
-                0,
-                cs.root,
-                xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-                    xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
-                    xcb.XCB_EVENT_MASK_POINTER_MOTION,
-                xcb.XCB_GRAB_MODE_SYNC,
-                xcb.XCB_GRAB_MODE_SYNC,
-                cs.root,
-                xcb.XCB_NONE,
-                button,
-                @intCast(masks.mod_super | lock),
-            );
-            labels[n] = .{ .button = button, .lock = lock };
-            n += 1;
-        }
-    }
-    // Fire every cookie before reading any reply, the same round-trip
-    // discipline as the key grabs.
-    var failed: usize = 0;
-    for (cookies[0..n], labels[0..n]) |cookie, label| {
-        if (xcb.xcb_request_check(cs.conn, cookie)) |err| {
-            std.c.free(err);
-            failed += 1;
-            if (failed <= 4) log.warn(
-                "Failed to grab Super+Button{d}{s} on the root window; " ++
-                    "another client is holding it, so that mouse binding will not fire",
-                .{ label.button, if (label.lock == 0) "" else " (with a lock modifier held)" },
-            );
-        }
-    }
-    if (failed > 4) log.warn("{} further mouse grab(s) failed", .{failed - 4});
-    _ = xcb.xcb_flush(cs.conn);
-}
-
-const MouseGrabLabel = struct { button: u8, lock: u16 };
-
-/// Ungrabs all keys, then re-grabs every configured keybinding across all
-/// lock modifier combinations. Fires all grab cookies before reading any
-/// reply to reduce round-trips.
-pub fn grabKeybindings() void {
-    const cs = core.getState();
-    _ = xcb.xcb_ungrab_key(cs.conn, xcb.XCB_GRAB_ANY, cs.root, xcb.XCB_MOD_MASK_ANY);
-
-    var cookies: [max_keybind_cookies]CookieEntry = undefined;
-    const n = fillGrabCookies(&cookies);
-
-    const failed = checkGrabCookies(cookies[0..n]);
-    if (failed > 0) log.warn("{} keybinding(s) failed to grab", .{failed});
-
-    _ = xcb.xcb_flush(cs.conn);
-}
-
-// Loads and validates a new config, then applies it atomically via pointer
-// swap. On failure the old config remains active.
-//
-// Ordering is load-bearing:
-//   1. Keybind resolution runs pre-swap on the new config.
-//   2. The swap precedes subsystem reloads (reloadBorders / reloadConfig /
-//      surfaces.onReload) so they rebuild from the NEW config. (The old ordering kept
-//      stale settings, then freed string slices the new bar had shallow-copied;
-//      a use-after-free on the next draw.)
-//   3. grabKeybindings() runs post-swap because fillGrabCookies() reads the
-//      live config.
-//   4. errdefer frees the heap-allocated new config if anything fails pre-swap.
-//      Post-swap all calls are infallible, so no errdefer is needed.
-fn handleConfigReload() !void {
-    log.info("Reload requested", .{});
-    const cs = core.getState();
-
-    var source: config.DefaultSource = .fallback;
-    // Load the LIVE config tree, never the re-exec snapshot restart.config_dir_env
-    // points at: the pin stays set for the whole process lifetime after the
-    // first reload_hana, and honoring it here would re-read the frozen last-
-    // good snapshot instead of the user's freshly edited files, so bind/theme
-    // changes would never hot-reload. refreshSnapshot below then re-freezes
-    // the now-live config as the re-exec source.
-    const new_config = config.loadConfigDefault(cs.alloc, &source, false) catch |err| {
-        // A TOML parse error already reported per-line warnings; treat it as
-        // a hard failure and keep the live config rather than swapping in a
-        // partially-merged one. Nothing to deinit here: the load failed before
-        // new_ptr existed, and the load path's own errdefers released its
-        // internals. The early return also skips keybind regrabbing. The
-        // failure is reported once, at the caller (the sole reload reporter).
-        return err;
-    };
-    // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
-    // The defer below frees the allocation unless the swap commits.
-    const new_ptr = try cs.alloc.create(@TypeOf(new_config));
-    new_ptr.* = new_config;
-    // The defer owns BOTH the Config internals and the box itself, so any
-    // pre-swap failure or early return frees the whole allocation. `committed`
-    // flips once the swap makes the live state own it; post-swap all calls are
-    // infallible, so the defer stays dormant.
-    var committed = false;
-    defer if (!committed) {
-        new_ptr.deinit(cs.alloc);
-        cs.alloc.destroy(new_ptr);
-    };
-
-    // A load with no user config comes back as a successful embedded
-    // fallback load. Boot keeps that fallback; on RELOAD a missing user config
-    // must NOT silently swap in the fallback. loadConfigDefault reports the
-    // source (user vs fallback) directly, so no second existence probe is
-    // needed. This plain return is NOT an error, but the defer still fires
-    // (not committed) and frees the short-lived fallback allocation.
-    if (source != .user) {
-        log.err(
-            "Config reload rejected: no user config file found. " ++
-                "Keeping current config (the embedded fallback is boot-only)",
-            .{},
-        );
-        return;
-    }
-
-    try config.validate(new_ptr);
-    // XKB exists for the whole process lifetime (init at boot, deinit only at
-    // shutdown), so this reload never sees a null state.
-    input.buildKeybinds(new_ptr.keybindings.items);
-
-    // Per-subsystem change detection, BEFORE the swap: it reads both boxes, and
-    // the swap below releases the old one. Detecting first is what lets the
-    // hand-off be a single core call instead of a pointer swap that leaves two
-    // sites reasoning about who frees what. Only tear down and rebuild the
-    // subsystems whose config actually changed -- e.g. a bar color tweak should
-    // not regrab keybindings, and a keybinding change should not rebuild the
-    // bar.
-    const changes = config.detectChanges(cs.config, new_ptr);
-
-    // Ownership moves to the new box and the displaced one is released in the
-    // same call, so shutdown's `core.deinitOwnedConfig()` and this reload can
-    // never both free the same box.
-    core.replaceOwnedConfig(new_ptr);
-    committed = true;
-
-    // Freeze the now-live config as the re-exec source: a later reload_hana
-    // (binary-only reload) boots from this snapshot rather than from the
-    // (possibly mid-edit or broken) config files.
-    config.refreshSnapshot(cs.alloc);
-
-    // The bar survives a reload that does not touch it: it reads the live
-    // config at draw time, so nothing has to be re-pointed and no copy can
-    // be left borrowing the config the caller is about to free.
-    //
-    // No `has_bar` guard: `surfaces.onReload` is the no-op hook when no
-    // surface module is compiled in, so the gate is already inside the type.
-    if (changes.bar) surfaces.onReload();
-    if (changes.tiling) {
-        actions.applyConfigReload();
-        // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
-        // and sweeping first would send every border twice -- once here, once
-        // again deduped against fresh state. Sweeping last lets borders.apply
-        // dedup against entries the reconcile just wrote.
-        window.reloadBorders();
-        // Rebuild after the swap so borrowed key slices point into the new config's memory.
-        window.buildRulesMap();
-    }
-
-    if (changes.keys) grabKeybindings();
-
-    log.info("Reload complete (bar={} tiling={} keys={})", .{ changes.bar, changes.tiling, changes.keys });
 }
 
 // Re-exec hand-off, driven by restart.consumeReexec() in run(). The sequence
@@ -916,7 +669,7 @@ pub fn run() void {
         // that fails keeps the last-good snapshot, so the re-exec still lands
         // on the previously live config.
         if (lifecycle.consumeReload())
-            handleConfigReload() catch |err| log.err("Reload failed: {}", .{err});
+            reload.handleConfigReload() catch |err| log.err("Reload failed: {}", .{err});
 
         if (restart.consumeReexec())
             handleReexec() catch |err| log.err("Re-exec failed: {}", .{err});
@@ -933,9 +686,8 @@ pub fn run() void {
 
         // Run any refresh-rate re-detection deferred by a RandR event. It
         // performs synchronous XCB round-trips, so it must run here, outside
-        // event dispatch, never mid-batch. RandR is a bar feature: without a
-        // bar the extension is never queried and nothing is ever pending.
-        surfaces.runPendingRedetect(cs.conn);
+        // event dispatch, never mid-batch.
+        hz.runPendingRedetect(cs.conn);
 
         // No `has_bar` guard: `updateClock` is a no-op hook with no surface
         // module compiled in, which is the whole point of the generated

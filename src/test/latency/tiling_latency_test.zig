@@ -19,6 +19,7 @@ const std = @import("std");
 const model = @import("model");
 const tiling = @import("tiling");
 const helpers = @import("helpers");
+const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 
 const time = @import("time");
@@ -37,7 +38,7 @@ const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn 
 const regCur = helpers.regCur;
 const nowNs = time.monotonicNs;
 
-const CountingSink = helpers.TestSink(.category);
+const CountingSink = test_sink.TestSink(.category);
 
 const colorOfFocused = helpers.colorOfFocused;
 const makeCtx = helpers.makeCtx;

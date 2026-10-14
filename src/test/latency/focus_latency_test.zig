@@ -21,6 +21,7 @@
 const std = @import("std");
 const model = @import("model");
 const helpers = @import("helpers");
+const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 
 const time = @import("time");
@@ -38,7 +39,7 @@ const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn 
 
 const regCur = helpers.regCur;
 
-const CountingSink = helpers.TestSink(.count);
+const CountingSink = test_sink.TestSink(.count);
 
 const colorOfFocused = helpers.colorOfFocused;
 

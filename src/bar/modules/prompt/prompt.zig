@@ -11,10 +11,11 @@ const types = @import("types");
 const contract = @import("contract");
 const contract_x11 = @import("contract_x11");
 
-const drawing = @import("drawing");
 const masks = @import("masks");
-const paths = @import("paths");
 const segmod = @import("segment");
+const editor = @import("editor");
+const completion = @import("completion");
+const render = @import("render");
 // The vim modal-editing engine is a prompt addon: its lifecycle (and mode
 // UI) rides the generated `prompt_subs` registry, so this module never names
 // it. Dropping vim.zig just shortens the `addons` array and leaves the basic
@@ -25,278 +26,36 @@ pub const Addon = struct {
     deinit: *const fn (std.mem.Allocator) void,
 };
 pub const addons = @import("prompt_subs").addons;
-pub const XK = core.XK;
-const xk_back_space = @intFromEnum(XK.BackSpace);
-pub const xk_return = @intFromEnum(XK.Return);
-pub const xk_escape = @intFromEnum(XK.Escape);
-const xk_delete = @intFromEnum(XK.Delete);
-pub const xk_left = @intFromEnum(XK.Left);
-pub const xk_right = @intFromEnum(XK.Right);
-pub const xk_home = @intFromEnum(XK.Home);
-pub const xk_end = @intFromEnum(XK.End);
 
-/// 256 input chars fits a full `.desktop` file path plus arguments, the
-/// longest payload a run-segment entry can produce.
-const default_max_input: usize = 256;
-
-/// drun history path relative to $HOME; shared by the append and the
-/// load-order list so both spell the same file.
-const run_history_suffix = ".local/share/drun/history";
-pub const Action = enum { none, deactivate, spawn };
-
-pub const Mode = enum(u2) {
-    insert = 0,
-    normal = 1,
-
-    /// Hint text for this mode, or "" when the active provider has none.
-    /// Provided by the mode's owner, not chosen by the host.
-    pub fn label(self: Mode) []const u8 {
-        return handlers.mode_label(self);
-    }
-
-    /// Pixel width of this mode's hint, measured once and cached in `cache`.
-    /// 0 means "no hint", which is what suppresses the pill entirely.
-    ///
-    /// (27.5) The pill is the extensor's UI, so the WIDTH POLICY belongs to the
-    /// mode rather than to the bar: the host used to measure the provider's
-    /// label and decide on its own what a mode with no label means. Asking the
-    /// mode for its hint width moves the "no label => no pill" rule next to the
-    /// label that produces it, so the two cannot drift.
-    ///
-    /// The cache cell is passed in rather than kept here on purpose: it has to
-    /// be invalidated when the font changes on reload (see onDeactivate), which
-    /// is a host lifecycle fact the mode has no way to observe.
-    pub fn hintWidth(self: Mode, dc: *drawing.DrawContext, cache: *?u16) u16 {
-        const text = self.label();
-        if (text.len == 0) {
-            // Do not memoise the empty case: a provider that starts with no
-            // hint and installs one later must be measured when it appears.
-            cache.* = null;
-            return 0;
-        }
-        return measureCached(cache, dc, text);
-    }
-};
-
-pub const EditorState = struct {
-    allocator: std.mem.Allocator = undefined,
-    max_input: usize = 0,
-    buf: []u8 = &.{},
-    len: usize = 0,
-    cursor: usize = 0,
-    mode: Mode = .insert,
-
-    pub fn init(allocator: std.mem.Allocator, max_input: usize) !EditorState {
-        return .{
-            .allocator = allocator,
-            .max_input = max_input,
-            .buf = try allocator.alloc(u8, max_input),
-        };
-    }
-    pub fn reset(es: *EditorState) void {
-        es.* = .{
-            .allocator = es.allocator,
-            .max_input = es.max_input,
-            .buf = es.buf,
-        };
-    }
-    pub fn deinit(es: *EditorState) void {
-        es.allocator.free(es.buf);
-        es.* = .{};
-    }
-};
-
-fn onDeactivate(_: *EditorState) void {}
-pub fn insertSlice(es: *EditorState, slice: []const u8) void {
-    if (es.max_input == 0 or es.len + 1 >= es.max_input) return;
-    const n = @min(slice.len, es.max_input - 1 - es.len);
-    if (n == 0) return;
-    if (es.cursor < es.len) {
-        std.mem.copyBackwards(
-            u8,
-            es.buf[es.cursor + n .. es.len + n],
-            es.buf[es.cursor..es.len],
-        );
-    }
-    @memcpy(es.buf[es.cursor .. es.cursor + n], slice[0..n]);
-    es.len += n;
-    es.cursor += n;
-}
-
-/// Removes [from, to) from the buffer and places the cursor at `from`.
-///
-/// The mode-aware clamp lives here rather than in the caller: in NORMAL mode a
-/// cursor may sit ON the last character (it addresses it, so the next motion
-/// has something to act on), and a delete that emptied the tail would
-/// otherwise leave normal mode addressing `len`, one past the end. Five
-/// divergent memmove+clamp copies existed between this module and the vim
-/// extensor; this is the one that owns the rule, and both now call it.
-pub fn deleteRange(es: *EditorState, from: usize, to: usize) void {
-    if (from >= to or to > es.len) return;
-    const n = to - from;
-    std.mem.copyForwards(u8, es.buf[from .. es.len - n], es.buf[to..es.len]);
-    es.len -= n;
-    es.cursor = from;
-    if (es.mode == .normal and es.len > 0 and es.cursor >= es.len)
-        es.cursor = es.len - 1;
-}
-
-/// Overwrites in place at `pos` with `bytes`, up to the end of the current
-/// content. The length CANNOT change: this is a replacement primitive for
-/// edits that keep the buffer's extent (a case toggle, an in-place rewrite of
-/// a run), not an insert. Overflow past the end of the content is dropped
-/// rather than appending, so a caller cannot silently grow the buffer by using
-/// the overwrite to mean an insert.
-pub fn overwriteAt(es: *EditorState, pos: usize, bytes: []const u8) void {
-    if (pos >= es.len) return;
-    const n = @min(bytes.len, es.len - pos);
-    if (n == 0) return;
-    @memcpy(es.buf[pos..][0..n], bytes[0..n]);
-}
-
-pub inline fn isPrintableAscii(sym: xcb.xcb_keysym_t) bool {
-    return sym >= 0x20 and sym <= 0x7e;
-}
-
-/// Deletes the word immediately before the cursor (readline Ctrl-W
-/// semantics): the run of non-space chars plus the space run separating it
-/// from the previous word. No-op at the buffer head.
-fn deleteWordBack(es: *EditorState) void {
-    if (es.cursor == 0) return;
-    var start = es.cursor;
-    while (start > 0 and es.buf[start - 1] == ' ') start -= 1;
-    while (start > 0 and es.buf[start - 1] != ' ') start -= 1;
-    // Eat the inter-word space run that separated this word from the previous
-    // one, so deleting "two" out of "one two" leaves "one", not "one ".
-    while (start > 0 and es.buf[start - 1] == ' ') start -= 1;
-    if (start == es.cursor) return;
-    std.mem.copyForwards(
-        u8,
-        es.buf[start .. es.len - (es.cursor - start)],
-        es.buf[es.cursor..es.len],
-    );
-    es.len -= es.cursor - start;
-    es.cursor = start;
-}
-
-/// Deletes the text from `from` to the end of the buffer (Ctrl-K): the tail
-/// is discarded and the cursor clamps into range.
-fn clearToEnd(es: *EditorState, from: usize) void {
-    es.len = from;
-    es.cursor = @min(es.cursor, es.len);
-}
-
-fn backspace(es: *EditorState) void {
-    if (es.cursor == 0) return;
-    std.mem.copyForwards(
-        u8,
-        es.buf[es.cursor - 1 .. es.len - 1],
-        es.buf[es.cursor..es.len],
-    );
-    es.cursor -= 1;
-    es.len -= 1;
-}
-
-/// Base Ctrl-key handler (used whenever the vim overlay is absent): the
-/// readline editing set plus Ctrl-C, so a Ctrl-modified key in a bare prompt
-/// never disappears without an effect. The vim overlay layers its own keys on
-/// top of this one.
-pub fn handleCtrl(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    switch (sym) {
-        'c' => return .deactivate,
-        'a' => es.cursor = 0,
-        'e' => es.cursor = es.len,
-        'u' => deleteRange(es, 0, es.cursor),
-        'k' => clearToEnd(es, es.cursor),
-        'w' => deleteWordBack(es),
-        'h' => backspace(es),
-        else => {},
-    }
-    return .none;
-}
-
-pub fn handleInsertBasic(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    return if (sym == xk_escape) .deactivate else insertChar(es, sym);
-}
-
-/// Shared insert-mode editing for a printable/control key: text insertion and
-/// cursor navigation, returning .none. Escape is invisible here: callers add
-/// the escape exit themselves (handleInsertBasic deactivates, the vim overlay
-/// calls exitToNormal).
-pub fn insertChar(es: *EditorState, sym: xcb.xcb_keysym_t) Action {
-    switch (sym) {
-        xk_return => return .spawn,
-        xk_back_space => backspace(es),
-        xk_delete => if (es.cursor < es.len) {
-            std.mem.copyForwards(
-                u8,
-                es.buf[es.cursor .. es.len - 1],
-                es.buf[es.cursor + 1 .. es.len],
-            );
-            es.len -= 1;
-        },
-        xk_left => {
-            if (es.cursor > 0) es.cursor -= 1;
-        },
-        xk_right => {
-            if (es.cursor < es.len) es.cursor += 1;
-        },
-        xk_home => es.cursor = 0,
-        xk_end => es.cursor = es.len,
-        else => if (isPrintableAscii(sym)) {
-            const ch: u8 = @truncate(sym);
-            insertSlice(es, &[1]u8{ch});
-        },
-    }
-    return .none;
-}
-
-/// True once a handler set has been registered. (27.4)
-///
-/// Sticky: nothing unregisters handlers, and a build with no extensor never
-/// calls registerHandlers at all, which is what leaves insert mode basic.
-var addon_active: bool = false;
-
-pub const Handlers = struct {
-    handle_insert: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleInsertBasic,
-    handle_normal: *const fn (*EditorState, xcb.xcb_keysym_t) Action = struct {
-        fn f(_: *EditorState, _: xcb.xcb_keysym_t) Action {
-            return .none;
-        }
-    }.f,
-    handle_ctrl: *const fn (*EditorState, xcb.xcb_keysym_t) Action = handleCtrl,
-    on_deactivate: *const fn (*EditorState) void = onDeactivate,
-    mode_label: *const fn (Mode) []const u8 = struct {
-        fn f(_: Mode) []const u8 {
-            return "";
-        }
-    }.f,
-};
-
-var handlers: Handlers = .{};
-
-pub fn registerHandlers(h: Handlers) void {
-    handlers = h;
-    // (27.4) Registering a handler set is what MAKES this a modal prompt, and
-    // the two places that used to ask `config.bar.vim_mode` were really asking
-    // that question through a config key -- so a compiled-in extensor that
-    // implements the modal engine was silently bypassed in insert mode and had
-    // its mode pill suppressed, purely because the user had not set
-    // `vim_mode`. The flag is the honest answer to "is a handler installed",
-    // and it leaves `vim_mode` a policy input a handler may consult instead of
-    // a second dispatch mode the host switches on.
-    addon_active = true;
-}
-
-const c = @cImport({
-    @cInclude("unistd.h");
-    @cInclude("stdlib.h");
-    @cInclude("stdio.h");
-    @cInclude("fcntl.h");
-    @cInclude("dirent.h");
-    @cInclude("sys/stat.h");
-    @cInclude("sys/wait.h");
-});
+// Editor contract re-exports: the vim extensor and the tests import
+// these through the package core (`prompt`), never through the
+// private `editor` sibling, so the split is invisible to them.
+pub const XK = editor.XK;
+pub const xk_return = editor.xk_return;
+pub const xk_escape = editor.xk_escape;
+pub const xk_left = editor.xk_left;
+pub const xk_right = editor.xk_right;
+pub const xk_home = editor.xk_home;
+pub const xk_end = editor.xk_end;
+pub const Action = editor.Action;
+pub const Mode = editor.Mode;
+pub const EditorState = editor.EditorState;
+pub const Handlers = editor.Handlers;
+pub const handleCtrl = editor.handleCtrl;
+pub const insertChar = editor.insertChar;
+pub const insertSlice = editor.insertSlice;
+pub const deleteRange = editor.deleteRange;
+pub const overwriteAt = editor.overwriteAt;
+pub const isPrintableAscii = editor.isPrintableAscii;
+pub const registerHandlers = editor.registerHandlers;
+// Completion seam re-exports: `wordAtCursor` is the pure
+// token-under-cursor split, pinned by completion_test.zig through
+// the package core like the editor contract above.
+pub const WordAtCursor = completion.WordAtCursor;
+pub const wordAtCursor = completion.wordAtCursor;
+pub const CompletionSource = completion.CompletionSource;
+pub const handleInsertBasic = editor.handleInsertBasic;
+const default_max_input = editor.default_max_input;
 
 // XCB keysyms bindings (link with -lxcb-keysyms).
 
@@ -310,27 +69,9 @@ extern fn xcb_key_symbols_get_keysym(
     col: c_int,
 ) xcb.xcb_keysym_t;
 
-// Minimum pixel width of the block cursor; ensures it is visible even on
-// the narrowest glyphs (e.g. '.', '!').
-const min_cursor_px: u16 = 8;
 // Cursor blink half-period: cursor is visible for this many ms, then
 // invisible for the same duration.
 const cursor_blink_ms: u64 = 300;
-// Number of editing modes (derived from prompt's Mode enum at comptime).
-const num_modes = @typeInfo(Mode).@"enum".fields.len;
-
-const cursor_width: u16 = 1;
-const cursor_v_pad: u16 = 2;
-/// Ink/pill margin: scrolled post-cursor text stops this many px short of the
-/// mode pill so ink never bleeds into it.
-const pill_ink_gap_px: u16 = 2;
-const max_completions: usize = 1024;
-const max_completion_len: usize = 64;
-const max_history: usize = 128;
-const max_history_line: usize = default_max_input;
-// History-file path scratch size (HOME + suffix); shared by the append and
-// load paths so the two buffers can't drift apart.
-const history_path_buf_len = 512;
 
 const PromptState = struct {
     is_active: bool = false,
@@ -343,72 +84,23 @@ const PromptState = struct {
     handlers: ?*const segmod.BarHandlers = null,
 
     key_syms: ?*xcb_key_symbols_t = null,
-    cached_prompt_w: ?u16 = null,
-    // Cached pixel width of each mode label, indexed by `vim.Mode` integer value.
-    cached_mode_w: [num_modes]?u16 = .{null} ** num_modes,
-
-    // Completion table: `max_completions` fixed 65-byte zero-terminated slots,
-    // embedded in the global so no allocation/partial-OOM bookkeeping exists.
-    // `comp_count` is the live length; slots beyond it are stale.
-    comp_names: [max_completions][max_completion_len + 1:0]u8 = .{.{0} ** (max_completion_len + 1)} ** max_completions,
-    comp_count: usize = 0,
-
-    // Ghost text: the completion suffix shown dimmed after the cursor.
-    ghost_buf: [max_completion_len:0]u8 = .{0} ** max_completion_len,
-    ghost_len: usize = 0,
-    is_blink_visible: bool = true,
-
-    // Caret geometry cached after the first insert-mode draw.  Font metrics
-    // and bar height are constant between reloads, so these never need clearing.
-    cached_caret_top: ?u16 = null,
-    cached_caret_h: ?u16 = null,
-
-    hist_entries: [max_history][max_history_line + 1:0]u8 = .{.{0} ** (max_history_line + 1)} ** max_history,
-    hist_count: usize = 0,
-    hist_head: usize = 0,
-    is_hist_loaded: bool = false,
-    // Tracks whether the $PATH scan has run at all, separate from comp_count:
-    // a legitimately empty result leaves comp_count at 0, and gating on that
-    // would re-scan $PATH on every activation.
-    is_completions_loaded: bool = false,
 
     // Set by key handlers, `activate`, and `deactivate` to notify the bar
     // that the prompt area needs to be redrawn.  Consumed (read + cleared)
     // by `consumeRedrawRequest` to avoid a circular import between prompt <-> bar.
     redraw_pending: bool = false,
-
-    // Caret-blink scoped repaint: set by `blinkTick`, cleared in `draw`.
-    // Unlike `redraw_pending` (which forces a full-bar redraw because it
-    // accompanies layout-affecting changes), this only asks the host title
-    // slot to repaint, so a caret toggle costs one title-region blit rather
-    // than a whole-bar repaint.
-    blink_repaint: bool = false,
-
-    // Layout cache: pixel width of the pre-caret text, the block-caret width,
-    // and the scroll offset keeping the caret visible.  Recomputed in
-    // `drawActive` only when `layout_dirty` is set (keypress, activate,
-    // or bar-height change): the caret-blink redraws an identical
-    // frame each blink, so ticks reuse these instead of ~20 Pango shape passes.
-    cached_pre_w: u16 = 0,
-    cached_caret_w: u16 = 0,
-    cached_scroll_x: u16 = 0,
-    cached_height: u16 = 0,
-    layout_dirty: bool = true,
 };
 
 var g: PromptState = .{};
 
 /// Invalidates every cache derived from config/font metrics or bar height.
-/// Called from bar.applyReload: these module globals are built against the
-/// OLD config's fonts and bar height, and a reload can change both. Without
-/// this the prompt renders with stale widths/geometry until its next full
-/// cycle (the old "constant between reloads" assumption was wrong).
+/// Called from bar.applyReload: the renderer's module globals are built
+/// against the OLD config's fonts and bar height, and a reload can change
+/// both. Without this the prompt renders with stale widths/geometry until
+/// its next full cycle (the old "constant between reloads" assumption was
+/// wrong).
 fn invalidateReloadCaches() void {
-    g.cached_prompt_w = null;
-    g.cached_mode_w = .{null} ** num_modes;
-    g.cached_caret_top = null;
-    g.cached_caret_h = null;
-    g.layout_dirty = true;
+    render.invalidateReloadCaches();
 }
 
 fn vimModeEnabled() bool {
@@ -441,14 +133,13 @@ fn blinkPollTimeoutMs() i32 {
 /// the clock's cadence.
 fn blinkTick() void {
     if (!g.is_active or g.vim_state.mode != .insert) return;
-    g.is_blink_visible = !g.is_blink_visible;
-    g.blink_repaint = true;
+    render.blinkTick();
 }
 
 /// Overlay repaint query (contract.BarOverlay.needsRepaint): true while a caret
 /// toggle is waiting to be drawn. Cleared inside `draw`.
 fn overlayNeedsRepaint() bool {
-    return g.blink_repaint;
+    return render.overlayNeedsRepaint();
 }
 
 /// Returns true and clears the flag if a prompt-driven redraw is outstanding.
@@ -586,7 +277,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // not just in vim mode: otherwise Ctrl-C (and Ctrl-W with vim on) is
     // swallowed by the `.none` fallback and can't cancel the prompt.
     if (ctrl_held) {
-        const action = handlers.handle_ctrl(&g.vim_state, sym);
+        const action = editor.handlers.handle_ctrl(&g.vim_state, sym);
         // handleCtrl may have deleted text (Ctrl-W / Ctrl-U), so the ghost is
         // recomputed in the shared tail.  The blink phase is left untouched.
         return finishKeyPress(action, false);
@@ -601,11 +292,11 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // to, so insert mode falls back to the basic editor. With one installed,
     // insert keys go to the handler like every other mode -- an extensor that
     // implements this contract is no longer bypassed for not being "vim".
-    const action = if (!addon_active and g.vim_state.mode == .insert)
+    const action = if (!editor.addon_active and g.vim_state.mode == .insert)
         handleInsertBasic(&g.vim_state, sym)
     else switch (g.vim_state.mode) {
-        .insert => handlers.handle_insert(&g.vim_state, sym),
-        .normal => handlers.handle_normal(&g.vim_state, sym),
+        .insert => editor.handlers.handle_insert(&g.vim_state, sym),
+        .normal => editor.handlers.handle_normal(&g.vim_state, sym),
     };
     return finishKeyPress(action, true);
 }
@@ -615,9 +306,9 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
 /// and schedule a redraw.  Returns true (event consumed).
 fn finishKeyPress(action: Action, refresh_blink: bool) bool {
     handleAction(action);
-    updateGhost();
-    if (refresh_blink) g.is_blink_visible = true;
-    g.layout_dirty = true;
+    completion.updateGhost(&g.vim_state);
+    if (refresh_blink) render.showCaret();
+    render.markLayoutDirty();
     g.redraw_pending = true;
     return true;
 }
@@ -626,11 +317,12 @@ fn finishKeyPress(action: Action, refresh_blink: bool) bool {
 /// limit), then finishes the key press, which recomputes the ghost for the
 /// new buffer. Returns true (event consumed).
 fn acceptGhost() bool {
-    const n_ghost: usize = if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
-        @min(g.ghost_len, g.vim_state.max_input - 1 - g.vim_state.len)
+    const ghost = completion.ghost();
+    const n_ghost: usize = if (ghost.len > 0 and g.vim_state.cursor == g.vim_state.len)
+        @min(ghost.len, g.vim_state.max_input - 1 - g.vim_state.len)
     else
         0;
-    if (n_ghost > 0) insertSlice(&g.vim_state, g.ghost_buf[0..n_ghost]);
+    if (n_ghost > 0) insertSlice(&g.vim_state, ghost[0..n_ghost]);
     return finishKeyPress(.none, true);
 }
 
@@ -640,10 +332,10 @@ fn acceptGhost() bool {
 fn draw(ctx: *segmod.DrawCtx, x: u16) !u16 {
     // Clearing before the draw (not after) means a draw error still consumes
     // the request, so a persistently failing overlay can't re-request forever.
-    g.blink_repaint = false;
+    render.clearBlinkRepaint();
     // While covered, title's pollTimeoutMsHook contributes no marquee wakeup
     // (title owns that decision), so no explicit carousel pause is needed here.
-    return drawActive(ctx.dc, &ctx.config, ctx.height, x, ctx.width);
+    return render.drawActive(ctx.dc, &ctx.config, ctx.height, x, ctx.width, &g.vim_state);
 }
 
 /// Dispatches a vim.Action returned by a mode handler: executes/closes on spawn,
@@ -654,7 +346,7 @@ fn handleAction(action: Action) void {
         .deactivate => deactivate(),
         .spawn => {
             const cmd = g.vim_state.buf[0..g.vim_state.len];
-            if (cmd.len > 0) spawnCommand(cmd);
+            if (cmd.len > 0) completion.spawnCommand(cmd);
             deactivate();
         },
     }
@@ -662,12 +354,12 @@ fn handleAction(action: Action) void {
 
 fn activate() void {
     g.vim_state.reset();
-    g.ghost_len = 0;
-    g.layout_dirty = true;
+    completion.clearGhost();
+    render.markLayoutDirty();
     // Load completions and history on first activation.
-    if (!g.is_completions_loaded) loadCompletions();
-    if (!g.is_hist_loaded) loadHistory();
-    g.is_blink_visible = true;
+    if (!completion.isCompletionsLoaded()) completion.loadCompletions();
+    if (!completion.isHistLoaded()) completion.loadHistory(g.allocator);
+    render.showCaret();
 
     const cs = core.getState();
     const cookie = xcb.xcb_grab_keyboard(
@@ -692,7 +384,7 @@ fn activate() void {
         return;
     }
     g.is_active = true;
-    g.layout_dirty = true;
+    render.markLayoutDirty();
     g.redraw_pending = true;
     // Force the bar to the absolute top for the prompt's duration so it's
     // always visible/reachable; reversed in deactivate() via dismissAfterPrompt().
@@ -705,7 +397,7 @@ fn activate() void {
 
 fn deactivate() void {
     g.is_active = false;
-    if (vimModeEnabled()) handlers.on_deactivate(&g.vim_state);
+    if (vimModeEnabled()) editor.handlers.on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
     _ = xcb.xcb_flush(conn);
@@ -714,797 +406,6 @@ fn deactivate() void {
     // forced it to the top (e.g. re-hide it if a fullscreen window is still
     // active): see the comment on presentForPrompt() in activate().
     if (g.handlers) |h| h.dismissAfterPrompt();
-}
-
-/// Scan every directory in $PATH and collect executable names into the static
-/// completion table.  Called once on first activation.
-fn loadCompletions() void {
-    g.comp_count = 0;
-    // Mark attempted up front: a missing $PATH or an empty result must not
-    // re-trigger the scan on the next activation.
-    g.is_completions_loaded = true;
-    const path_env_ptr = c.getenv("PATH") orelse return;
-    const path_env = std.mem.span(path_env_ptr);
-
-    var dir_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-
-    var dir_it = paths.dirIterator(path_env);
-    outer: while (dir_it.next()) |dir_path| {
-        if (dir_path.len >= dir_buf.len) continue;
-        @memcpy(dir_buf[0..dir_path.len], dir_path);
-        dir_buf[dir_path.len] = 0;
-
-        const dirp = c.opendir(&dir_buf) orelse continue;
-        defer _ = c.closedir(dirp);
-
-        while (c.readdir(dirp)) |entry| {
-            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&entry.*.d_name)));
-            // d_type 0 (DT_UNKNOWN on filesystems with no type) counts as a
-            // candidate: it rules out only "obviously not a plain file"; the
-            // X_OK probe inside isRunnableFile is the real test.
-            const dt = entry.*.d_type;
-            if (dt != 0 and dt != c.DT_REG and dt != c.DT_LNK) continue;
-            if (!isRunnableFile(dir_path, name)) continue;
-            if (offerCompletion(name)) break :outer;
-        }
-    }
-
-    // Sort for O(log n) binary search in updateGhost.
-    const entries = g.comp_names[0..g.comp_count];
-    std.sort.pdq([max_completion_len + 1:0]u8, entries, {}, struct {
-        fn lt(_: void, a: [max_completion_len + 1:0]u8, b: [max_completion_len + 1:0]u8) bool {
-            return std.mem.order(u8, std.mem.sliceTo(&a, 0), std.mem.sliceTo(&b, 0)) == .lt;
-        }
-    }.lt);
-}
-
-/// True when `name` under `dir_path` is executable, so it can be offered as a
-/// command completion.  Filters empty/oversized/dot-prefixed names and probes
-/// the executable bit on the joined path.
-fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
-    if (name.len == 0 or name.len > max_completion_len) return false;
-    if (name[0] == '.') return false;
-
-    var full_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    return paths.exeInDir(&full_path_buf, dir_path, name);
-}
-
-/// Stores `name` into the next completion slot.  Returns true when the table is
-/// full and the $PATH scan should stop.
-fn offerCompletion(name: []const u8) bool {
-    const slot = &g.comp_names[g.comp_count];
-    @memcpy(slot[0..name.len], name);
-    slot[name.len] = 0;
-    g.comp_count += 1;
-    return g.comp_count >= max_completions;
-}
-
-/// Binary searches the sorted completion table for the first entry >= `prefix`.
-/// Returns the insertion index (0..comp_count); existence is an eql() at the
-/// returned index, inlined at the call site.
-fn compLowerBound(prefix: []const u8) usize {
-    var lo: usize = 0;
-    var hi: usize = g.comp_count;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        if (std.mem.order(u8, compName(mid), prefix) == .lt) lo = mid + 1 else hi = mid;
-    }
-    return lo;
-}
-
-fn compName(i: usize) []const u8 {
-    return std.mem.sliceTo(&g.comp_names[i], 0);
-}
-
-fn histEntry(i: usize) []const u8 {
-    return std.mem.sliceTo(&g.hist_entries[(g.hist_head + i) % max_history], 0);
-}
-
-/// Clamps `suffix` into g.ghost_buf/g.ghost_len.  Shared by both updateGhost
-/// branches, which only differ in how they find the match.
-inline fn setGhost(suffix: []const u8) void {
-    const n = @min(suffix.len, max_completion_len);
-    @memcpy(g.ghost_buf[0..n], suffix[0..n]);
-    g.ghost_len = n;
-}
-
-/// The word under the cursor: the buffer up to the cursor, back to the last
-/// space, as {token, byte offset of the token's first byte}.
-///
-/// (27.3) The old code took the first space in the WHOLE buffer and bailed if
-/// one existed, so nothing past the first argument could ever be completed --
-/// "git ch" got no ghost even when "checkout" was in the table. Word-at-cursor
-/// is what the completion sources actually need: they match a token, not a
-/// prefix of a line, and the buffer they see is exactly the token.
-///
-/// `cursor` is passed rather than read so the split is a pure function of
-/// (buffer, cursor) and testable without the module's global state.
-pub const WordAtCursor = struct {
-    token: []const u8,
-    /// Byte offset of `token` within the buffer it came from.
-    start: usize,
-};
-
-pub fn wordAtCursor(buf: []const u8, cursor: usize) WordAtCursor {
-    const upto = buf[0..@min(cursor, buf.len)];
-    const start = if (std.mem.lastIndexOfScalar(u8, upto, ' ')) |i| i + 1 else 0;
-    return .{ .token = upto[start..], .start = start };
-}
-
-/// Where a candidate match comes from. (27.3)
-///
-/// The two sources need genuinely different lookups -- one walks a ring newest
-/// first, the other binary-searches a sorted table -- but they are the same
-/// QUESTION ("what extends this token?"), and expressing that as a union keeps
-/// the priority order in one place instead of spread across two loops that
-/// have to be kept in sync by hand.
-pub const CompletionSource = enum {
-    /// The history ring, newest entry first: what the user actually ran
-    /// before, which outranks anything merely installed.
-    history,
-    /// The sorted executable table, lower-bounded to the first entry >=
-    /// `token`. The first entry past the bound that starts with the token and
-    /// is longer IS the shortest match, since the table is sorted.
-    executables,
-};
-
-/// Ghost for `token` from `source`, or null when that source has no
-/// completion. The suffix only: `setGhost` receives text to APPEND to what is
-/// already typed.
-///
-/// Returned slices point into the module's own storage (the ring and the
-/// comp table), so they are valid until the next completion-table or history
-/// rebuild -- the same lifetime the caller's buffer already had.
-fn completeToken(token: []const u8, source: CompletionSource) ?[]const u8 {
-    if (token.len == 0) return null;
-    return switch (source) {
-        .history => completeFromHistory(token),
-        .executables => completeFromExecutables(token),
-    };
-}
-
-fn completeFromHistory(token: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (i < g.hist_count) : (i += 1) {
-        const entry = histEntry(i);
-        if (entry.len == 0) continue;
-        // Cheap reject on the first byte: history is a ring of up to
-        // max_history entries and nearly all fail here.
-        if (entry[0] != token[0]) continue;
-        // Match the token under the CURSOR, not the entry's first word. This is
-        // the second half of (27.3): a multi-word history line completes its
-        // last-word continuation, so "git ch" can complete from "git checkout".
-        const target = wordAtCursor(entry, entry.len).token;
-        if (target.len <= token.len) continue;
-        if (!std.mem.startsWith(u8, target, token)) continue;
-        // The tail is the completion, but only up to the next space: completing
-        // the whole rest of the line would ghost in a trailing argument too.
-        const rest = target[token.len..];
-        const tail = if (std.mem.indexOfScalar(u8, rest, ' ')) |sp| rest[0..sp] else rest;
-        if (tail.len == 0) continue;
-        return tail;
-    }
-    return null;
-}
-
-fn completeFromExecutables(token: []const u8) ?[]const u8 {
-    var i: usize = compLowerBound(token);
-    while (i < g.comp_count) : (i += 1) {
-        const name = compName(i);
-        if (!std.mem.startsWith(u8, name, token)) return null; // past all matches
-        if (name.len <= token.len) continue; // exact match, not a completion
-        return name[token.len..];
-    }
-    return null;
-}
-
-/// Recompute the ghost-text suggestion based on the current buffer.
-/// Priority: history (newest first) -> any executable match.
-/// INSERT mode only, and only with the cursor at the end of the buffer: a
-/// ghost is a suggestion about text that is about to be appended, which a
-/// mid-buffer cursor has no room for.
-fn updateGhost() void {
-    g.ghost_len = 0;
-
-    if (g.vim_state.mode != .insert or g.vim_state.len == 0 or
-        g.vim_state.cursor != g.vim_state.len) return;
-
-    // The token under the cursor, so an ARGUMENT completes (27.3). The old
-    // shape bailed on any space in the buffer, which made every second word
-    // un-completable; the cost of the scan is nil because the buffer is at most
-    // `max_input` (256) bytes and every candidate lookup below reads it anyway.
-    const word = wordAtCursor(g.vim_state.buf[0..g.vim_state.len], g.vim_state.len);
-    if (word.token.len == 0) return;
-
-    for ([_]CompletionSource{ .history, .executables }) |source| {
-        if (completeToken(word.token, source)) |suffix| {
-            setGhost(suffix);
-            return;
-        }
-    }
-}
-
-/// Prepend `cmd` to the in-memory history ring (newest at index 0), shifting
-/// entries right by one slot.
-/// Silently no-ops when cmd is empty or exceeds max_history_line.
-fn histPrepend(cmd: []const u8) void {
-    if (cmd.len == 0 or cmd.len > max_history_line) return;
-    // Skip consecutive duplicates (shell convention): when the newest entry
-    // already equals this command, re-running it must not stack the ring.
-    if (g.hist_count > 0 and std.mem.eql(u8, histEntry(0), cmd)) return;
-
-    g.hist_head = if (g.hist_head == 0) max_history - 1 else g.hist_head - 1;
-    const slot = &g.hist_entries[g.hist_head];
-    @memcpy(slot[0..cmd.len], cmd);
-    slot[cmd.len] = 0;
-    if (g.hist_count < max_history) g.hist_count += 1;
-}
-
-fn histAppendToFile(cmd: []const u8) void {
-    if (cmd.len == 0) return;
-    const home = std.mem.span(c.getenv("HOME") orelse return);
-
-    var path_buf: [history_path_buf_len:0]u8 = undefined;
-    const file_path = std.fmt.bufPrintZ(
-        &path_buf,
-        "{s}/{s}",
-        .{ home, run_history_suffix },
-    ) catch return;
-
-    const last_sep = std.mem.lastIndexOfScalar(u8, file_path, '/') orelse return;
-    path_buf[last_sep] = 0;
-    _ = c.mkdir(@ptrCast(&path_buf), 0o700);
-    path_buf[last_sep] = '/';
-
-    const fd = c.open(@ptrCast(&path_buf), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, @intCast(paths.restricted_file_mode)));
-    if (fd < 0) return;
-    defer _ = c.close(fd);
-    _ = c.write(fd, cmd.ptr, cmd.len);
-    _ = c.write(fd, "\n", 1);
-}
-
-/// Parse one line from a shell history file into `out`, returning its length
-/// (0 to skip).  Understands fish `"- cmd: ..."`, zsh `": <ts>:<elapsed>;..."` or
-/// bare lines, and bash/run bare lines (`#` timestamp markers skipped).
-fn histParseLine(line: []const u8, out: []u8) usize {
-    if (line.len == 0) return 0;
-
-    var cmd = line;
-
-    if (std.mem.startsWith(u8, cmd, "- cmd: ")) {
-        cmd = cmd["- cmd: ".len..];
-    } else if (cmd.len > 2 and cmd[0] == ':' and cmd[1] == ' ') {
-        if (std.mem.indexOfScalar(u8, cmd, ';')) |semi| {
-            cmd = cmd[semi + 1 ..];
-        }
-    } else if (cmd[0] == '#') {
-        return 0;
-    }
-
-    cmd = std.mem.trim(u8, cmd, " \t\r");
-
-    if (cmd.len == 0 or cmd.len > max_history_line) return 0;
-    @memcpy(out[0..cmd.len], cmd);
-    return cmd.len;
-}
-
-/// Fixed byte window read from a history file's tail: an overgrown
-/// file must not push its newest entries out of reach of one bounded read.
-const hist_read_window: usize = 256 * 1024 - 1;
-
-/// Load history from `path` into the in-memory ring, processing lines in
-/// reverse so the newest entry ends up at index 0.
-fn histLoadFile(path: []const u8) void {
-    const io = std.Options.debug_io;
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return;
-    defer file.close(io);
-
-    // History semantics want the NEWEST entries, which live at the file's
-    // tail. Position the read window at EOF - window so an overgrown file
-    // can't push recent entries out of the fixed read; a partial
-    // line at the window head is dropped below.
-    const fsize: u64 = if (file.stat(io) catch null) |st| st.size else 0;
-    const read_off: u64 = if (fsize > hist_read_window) fsize - hist_read_window else 0;
-
-    const file_buf = g.allocator.alloc(u8, hist_read_window) catch return;
-    defer g.allocator.free(file_buf);
-    const n_read = file.readPositionalAll(io, file_buf, read_off) catch return;
-    if (n_read == 0) return;
-    var text = file_buf[0..n_read];
-    if (read_off > 0) {
-        // Drop the cut-mid-line fragment at the window start; its real
-        // content lives in the unread region before the window.
-        const nl = std.mem.indexOfScalar(u8, text, '\n') orelse return;
-        text = text[nl + 1 ..];
-    }
-
-    // Only the trailing max_lines lines are eligible: history consumers walk
-    // them back-to-front for newest-first priority, so dropping the head of
-    // an overgrown file keeps the freshest entries visible once it outgrows
-    // the window. The ranges live in a ring indexed modulo max_lines, so the
-    // scan only ever remembers the LAST max_lines lines.
-    const max_lines = max_history * 2;
-    var line_starts: [max_lines]usize = undefined;
-    var line_ends: [max_lines]usize = undefined;
-    var total: usize = 0;
-
-    var pos: usize = 0;
-    while (pos < text.len) {
-        const end = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse text.len;
-        line_starts[total % max_lines] = pos;
-        line_ends[total % max_lines] = end;
-        total += 1;
-        pos = end + 1;
-    }
-
-    var out_line: [max_history_line]u8 = undefined;
-
-    // Build a hash set of already-loaded entries so duplicate detection is O(1)
-    // instead of O(n^2).  Pre-populate with any entries that were prepended by
-    // earlier histLoadFile calls in the same session.
-    var seen = std.AutoHashMapUnmanaged(u64, void){};
-    defer seen.deinit(g.allocator);
-    for (0..g.hist_count) |di| {
-        seen.put(g.allocator, std.hash.Wyhash.hash(0, histEntry(di)), {}) catch {};
-    }
-
-    // Walk the kept lines back-to-front so the newest entry ends up at index 0.
-    var li: usize = 0;
-    while (li < @min(total, max_lines)) : (li += 1) {
-        if (g.hist_count >= max_history) break;
-        const ri = (total - 1 - li) % max_lines;
-        const line = text[line_starts[ri]..line_ends[ri]];
-        const len = histParseLine(line, &out_line);
-        if (len == 0) continue;
-        const h = std.hash.Wyhash.hash(0, out_line[0..len]);
-        if (seen.contains(h)) continue;
-        histPrepend(out_line[0..len]);
-        seen.put(g.allocator, h, {}) catch {};
-    }
-}
-
-/// Load history from run -> bash -> zsh -> fish (load order).
-/// Because `histPrepend()` inserts at index 0, fish ends up with the highest
-/// suggestion priority in `updateGhost`.
-fn loadHistory() void {
-    g.is_hist_loaded = true;
-    var path_buf: [history_path_buf_len]u8 = undefined;
-    const home = std.mem.span(c.getenv("HOME") orelse return);
-
-    const history_suffixes = [_][]const u8{
-        run_history_suffix,
-        ".bash_history",
-        ".zsh_history",
-        ".local/share/fish/fish_history",
-    };
-    for (history_suffixes) |suffix| {
-        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ home, suffix }) catch continue;
-        histLoadFile(path);
-    }
-}
-
-fn spawnCommand(cmd: []const u8) void {
-    histPrepend(cmd);
-    histAppendToFile(cmd);
-
-    // cmd.len <= default_max_input - 1 (enforced by the vim buffer
-    // insert clamp), so buf always has room for the null terminator.
-    var buf: [default_max_input]u8 = undefined;
-    @memcpy(buf[0..cmd.len], cmd);
-    buf[cmd.len] = 0;
-    const cmd_z: [*:0]const u8 = buf[0..cmd.len :0];
-
-    const pid = c.fork();
-    if (pid == 0) {
-        // Double-fork detaches the grandchild from this process so the bar
-        // does not wait on it when it exits.
-        const pid2 = c.fork();
-        if (pid2 == 0) {
-            _ = c.setsid();
-            const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
-            _ = c.execvp("/bin/sh", @ptrCast(&argv));
-            std.process.exit(1);
-        }
-        std.process.exit(0);
-    } else if (pid > 0) {
-        var status: c_int = 0;
-        _ = c.waitpid(pid, &status, 0);
-    }
-}
-
-const WidthRel = enum { ge, gt };
-
-/// Binary search: first byte offset where `measureTextWidth(text[0..offset])`
-/// is `>= t` (ge) or `> t` (gt). Returns `text.len` when no index satisfies
-/// it. Mapped a pixel scroll offset to a character boundary (ge) or finds the
-/// first index overflowing a width cap (gt); moved here from drawing.zig
-/// (prompt is its only consumer).
-fn measureBound(dc: *drawing.DrawContext, text: []const u8, t: u16, comptime rel: WidthRel) usize {
-    var lo: usize = 0;
-    var hi: usize = text.len;
-    while (lo < hi) {
-        const mid = lo + (hi - lo) / 2;
-        const w = dc.measureTextWidth(text[0..mid]);
-        const past = if (rel == .ge) w >= t else w > t;
-        if (!past) lo = mid + 1 else hi = mid;
-    }
-    return lo;
-}
-
-/// On-screen origin of a `w`-wide span at pen `px` clipped to the visible
-/// window `[tl, se)`, or null when the span lies fully off-screen. Shared by
-/// the pre-cursor span draw and the block cursor: both must skip the
-/// invisible prefix and start painting at `max(px, tl)`.
-inline fn clipOrigin(px: i32, w: u32, tl: i32, se: i32) ?i32 {
-    if (px + @as(i32, @intCast(w)) <= tl or px >= se) return null;
-    return @max(px, tl);
-}
-
-/// Draw `text` from the virtual pen `px` clipped to `[text_left_x, scroll_end_x)`.
-/// Non-post (`post=false`) is the pre-cursor span: hard-clips both edges without
-/// ellipsis and always advances `px.*` by the full text width, using the caller's
-/// measured `text_w` (null to measure here). Post (`post=true`) ellipsizes on
-/// overflow to the right edge and never advances the pen.
-inline fn drawScrollSpan(
-    comptime post: bool,
-    dc: *drawing.DrawContext,
-    px: *i32,
-    text_left_x: u16,
-    scroll_end_x: u16,
-    baseline: u16,
-    text: []const u8,
-    text_w: ?u16,
-    color: u32,
-) !void {
-    if (post) {
-        if (text.len == 0 or px.* >= @as(i32, scroll_end_x)) return;
-        const draw_x: u16 = @intCast(@max(px.*, @as(i32, text_left_x)));
-        const remaining: u16 = scroll_end_x -| draw_x;
-        if (remaining > 0)
-            dc.drawTextEllipsis(draw_x, baseline, text, remaining, color);
-        return;
-    }
-    const w = text_w orelse dc.measureTextWidth(text);
-    defer px.* += @intCast(w);
-    if (w == 0) return;
-
-    const tl: i32 = text_left_x;
-    const se: i32 = scroll_end_x;
-    const origin = clipOrigin(px.*, w, tl, se) orelse return;
-
-    // Skip the prefix that lies off-screen to the left.
-    const start: usize = if (px.* < tl) measureBound(dc, text, @intCast(tl - px.*), .ge) else 0;
-
-    const draw_x: u16 = @intCast(origin);
-    const available: u16 = @intCast(se - origin);
-
-    // Clip the visible suffix to the available width on the right.  When no
-    // left clip occurred and the full text fits, `w` (already measured) skips
-    // the binary-search pass entirely.
-    const suffix = text[start..];
-    const visible = if (start == 0 and w <= available)
-        text
-    else blk: {
-        const sb = measureBound(dc, suffix, available, .gt);
-        break :blk if (sb < suffix.len) suffix[0 .. sb - 1] else suffix;
-    };
-    if (visible.len > 0)
-        dc.drawText(draw_x, baseline, visible, color);
-}
-
-const CursorStyle = struct {
-    text_left_x: u16,
-    scroll_end_x: u16,
-    baseline: u16,
-    height: u16,
-    accent: u32,
-    bg: u32,
-};
-
-/// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
-///
-/// Shared by visual selection highlighting and the normal/replace character
-/// cursor: "highlight a byte range with an accent block and inverse text".
-/// `lo == hi` draws an empty space-sized block (end-of-line).
-inline fn drawBlockCursor(
-    dc: *drawing.DrawContext,
-    px: *i32,
-    style: CursorStyle,
-    buf: []const u8,
-    lo: usize,
-    hi: usize,
-    text_w: ?u16,
-) void {
-    const block_text = if (hi > lo) buf[lo..hi] else " ";
-    const block_w = @max(text_w orelse dc.measureTextWidth(block_text), min_cursor_px);
-
-    if (clipOrigin(px.*, block_w, style.text_left_x, style.scroll_end_x)) |origin| {
-        const draw_x: u16 = @intCast(origin);
-        const vis_w: u16 = @intCast(@min(@as(i32, block_w), @as(i32, style.scroll_end_x) - px.*));
-        if (vis_w > 0) {
-            dc.fillRect(
-                draw_x,
-                cursor_v_pad,
-                vis_w,
-                style.height -| cursor_v_pad * 2,
-                style.accent,
-            );
-            if (hi > lo)
-                dc.drawText(draw_x, style.baseline, block_text, style.bg);
-        }
-    }
-    px.* += @intCast(block_w);
-}
-
-/// Lazily cache the caret geometry: font metrics and bar height are constant
-/// between reloads, so this runs at most once.  Hoisted before the pill and
-/// mode branches so the lazy-init runs exactly once regardless of which
-/// branch executes first.
-fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
-    if (g.cached_caret_top == null) {
-        const asc, const desc = dc.metrics();
-        const font_h: u16 = @intCast(@max(0, @as(i32, asc) + @as(i32, desc)));
-        // The caret's top is the baseline less the ascent: vertical-centering
-        // math identical to drawing.baselineY's (top_pad + asc), so derive it
-        // from there instead of re-rolling the (height -| font_h) / 2 formula.
-        // Clamp a possibly-negative ascent before the u16 cast.
-        const asc_u: u16 = @intCast(@max(0, @as(i32, asc)));
-        g.cached_caret_top = dc.baselineY(height) -| asc_u;
-        g.cached_caret_h = @min(font_h, height);
-    }
-}
-
-/// Pixel width of `text`, measured once and cached (font and text are
-/// constant between reloads). Shared by promptWidth and the mode pill.
-fn measureCached(cache: *?u16, dc: *drawing.DrawContext, text: []const u8) u16 {
-    return cache.* orelse blk: {
-        const w = dc.measureTextWidth(text);
-        cache.* = w;
-        break :blk w;
-    };
-}
-
-/// Pixel width of the prompt text, measured once and cached (font and prompt
-/// are constant between reloads).
-fn promptWidth(dc: *drawing.DrawContext, prompt: []const u8) u16 {
-    return measureCached(&g.cached_prompt_w, dc, prompt);
-}
-
-/// Recompute the cached caret widths and scroll offset, but only when
-/// `layout_dirty` or a bar-height change demands it.  The caret-blink redraws
-/// an identical frame every blink, so blink ticks reuse these instead of ~20
-/// Pango shape passes per tick; the cache needs invalidating only when
-/// buffer, cursor, mode, or height changes.
-fn refreshLayoutCache(
-    dc: *drawing.DrawContext,
-    height: u16,
-    prompt: []const u8,
-    prompt_w: u16,
-    pre_cur_text: []const u8,
-    max_scroll_px: u16,
-) void {
-    if (!g.layout_dirty and height == g.cached_height) return;
-
-    if (g.layout_dirty) g.cached_pre_w = dc.measureTextWidth(pre_cur_text);
-    // When !layout_dirty: only height changed; text and cursor are unchanged,
-    // so cached_pre_w remains valid.
-    g.cached_caret_w = if (g.vim_state.mode == .insert)
-        cursor_width
-    else
-        @max(
-            dc.measureTextWidth(if (g.vim_state.cursor < g.vim_state.len)
-                g.vim_state.buf[g.vim_state.cursor .. g.vim_state.cursor + 1]
-            else
-                " "),
-            min_cursor_px,
-        );
-
-    var scroll_x: u16 = 0;
-    const cursor_right = prompt_w + g.cached_pre_w + g.cached_caret_w;
-    if (cursor_right > max_scroll_px) {
-        const min_scroll: u16 = cursor_right -| max_scroll_px;
-        // Snap scroll_x to the nearest character boundary at/past min_scroll:
-        // without it, drawSpan renders text[start..] at text_left_x while the
-        // character begins past it in virtual space: a phantom gap next to the
-        // caret.
-        if (min_scroll <= prompt_w) {
-            const idx = measureBound(dc, prompt, min_scroll, .ge);
-            scroll_x = dc.measureTextWidth(prompt[0..idx]);
-        } else {
-            const min_in_pre: u16 = min_scroll - prompt_w;
-            const idx = measureBound(dc, pre_cur_text, min_in_pre, .ge);
-            scroll_x = prompt_w + dc.measureTextWidth(pre_cur_text[0..idx]);
-        }
-    }
-    g.cached_scroll_x = scroll_x;
-    g.cached_height = height;
-    g.layout_dirty = false;
-}
-
-/// Right-pinned mode widget: a filled pill (accent bg, white text) with
-/// `pill_h_pad` on both sides so the text never touches the pill edge and
-/// there's a gap to the scrollable region. The label is the active vim mode's
-/// label (empty in the null-vim build, which skips the pill entirely).
-///
-/// Returns the scrollable region's right edge (the pill's left edge), or null
-/// when no room remains for text; callers return immediately.
-fn drawPill(
-    dc: *drawing.DrawContext,
-    height: u16,
-    baseline: u16,
-    text_left_x: u16,
-    text_end_x: u16,
-    accent: u32,
-) ?u16 {
-    const pill_h_pad: u16 = 6;
-    const white: u32 = 0xFFFFFFFF;
-
-    // (27.4) The pill describes the mode the handler is actually in. Gating it
-    // on the config key suppressed it for exactly the addons that installed a
-    // mode engine, so the bar showed a mode the user was in with no label.
-    // (27.5) The width comes from the mode, not from measuring here: the bar no
-    // longer owns the "label implies pill" rule, only the drawing of it.
-    const mode_idx: usize = @intFromEnum(g.vim_state.mode);
-    const mode_w: u16 = if (addon_active)
-        g.vim_state.mode.hintWidth(dc, &g.cached_mode_w[mode_idx])
-    else
-        0;
-    const mode_label = if (addon_active) g.vim_state.mode.label() else "";
-
-    // The pill only exists when the mode has a hint; with no addon, or no
-    // hint, the text region gets the full width.
-    const show_pill = mode_w > 0;
-    const pill_w: u16 = mode_w + pill_h_pad * 2;
-    const pill_fits = text_end_x >= pill_w;
-
-    // Reserve the pill width on the right; the scrollable region ends here.
-    // When the label cannot fit we drop the pill but still give the text the
-    // whole region: blanking the prompt because the mode pill didn't fit hid
-    // the user's typing.
-    const scroll_end_x: u16 = if (show_pill and pill_fits)
-        text_end_x - pill_w
-    else
-        text_end_x;
-    if (text_left_x >= scroll_end_x) return null;
-
-    if (show_pill and pill_fits) {
-        const pill_x: u16 = text_end_x - pill_w;
-        dc.fillRect(
-            pill_x,
-            cursor_v_pad,
-            pill_w,
-            height -| cursor_v_pad * 2,
-            accent,
-        );
-        dc.drawText(pill_x + pill_h_pad, baseline, mode_label, white);
-    }
-
-    return scroll_end_x;
-}
-
-/// Insert mode: blinking thin caret; the caret position does not consume its
-/// character, and ghost text appears dimmed after the cursor when at end.
-/// Post-cursor text is drawn by the shared tail in drawActive.
-fn drawInsertMode(
-    dc: *drawing.DrawContext,
-    baseline: u16,
-    text_left_x: u16,
-    scroll_end_x: u16,
-    px: *i32,
-    accent: u32,
-) !void {
-    // Caret geometry was pre-computed in ensureCaretGeom.
-    const caret_top = g.cached_caret_top.?;
-    const caret_h = g.cached_caret_h.?;
-    if (g.is_blink_visible and px.* >= @as(i32, text_left_x) and px.* < @as(i32, scroll_end_x)) {
-        dc.fillRect(@intCast(px.*), caret_top, cursor_width, caret_h, accent);
-    }
-
-    // Ghost text (only when cursor is at end).
-    if (g.ghost_len > 0 and g.vim_state.cursor == g.vim_state.len)
-        try drawScrollSpan(true, dc, px, text_left_x, scroll_end_x, baseline, g.ghost_buf[0..g.ghost_len], null, accent);
-}
-
-/// NORMAL: full-character block cursor. Post-cursor text is drawn by the
-/// shared tail in drawActive.
-fn drawNormalMode(
-    dc: *drawing.DrawContext,
-    height: u16,
-    baseline: u16,
-    text_left_x: u16,
-    scroll_end_x: u16,
-    px: *i32,
-    accent: u32,
-    bg: u32,
-) !void {
-    const cur_hi = @min(g.vim_state.cursor + @intFromBool(g.vim_state.mode != .insert), g.vim_state.len);
-
-    const style: CursorStyle = .{ .text_left_x = text_left_x, .scroll_end_x = scroll_end_x, .baseline = baseline, .height = height, .accent = accent, .bg = bg };
-    drawBlockCursor(
-        dc,
-        px,
-        style,
-        g.vim_state.buf,
-        g.vim_state.cursor,
-        cur_hi,
-        g.cached_caret_w,
-    );
-}
-
-/// Render the active input UI.
-///
-/// Layout: [ pad | scrollable: PROMPT | pre | CURSOR/SELECTION | post |
-/// MODE_LABEL | pad ].  The mode label is pinned right (never scrolls); the
-/// scrollable region keeps the cursor in view.
-fn drawActive(
-    dc: *drawing.DrawContext,
-    // By pointer, not by value: this is a per-frame draw that only READS
-    // config, and a full `BarConfig` struct copy per frame bought nothing.
-    config: *const types.BarConfig,
-    height: u16,
-    start_x: u16,
-    width: u16,
-) !u16 {
-    const end_x = start_x + width;
-    const pad = config.scaledSegmentPadding(height);
-    const accent = config.runPromptColor();
-    const bg = config.runBg();
-    const fg = config.runFg();
-    const prompt = config.run_prompt orelse types.default_run_prompt;
-
-    dc.fillRect(start_x, 0, width, height, bg);
-
-    const baseline = dc.baselineY(height);
-    const text_left_x = start_x + pad;
-    const text_end_x = end_x -| pad;
-    if (text_left_x >= text_end_x) return end_x;
-
-    ensureCaretGeom(dc, height);
-
-    // Mode widget, pinned right; does not scroll.  Its left edge bounds the
-    // scrollable text region.
-    const scroll_end_x = drawPill(dc, height, baseline, text_left_x, text_end_x, accent) orelse
-        return end_x;
-    // Clip post-cursor text 2 px before the pill so ink never bleeds into it.
-    const post_clip_end_x = scroll_end_x -| pill_ink_gap_px;
-
-    const max_scroll_px: u16 = scroll_end_x - text_left_x;
-    const prompt_w = promptWidth(dc, prompt);
-
-    // In INSERT mode the caret doesn't consume its character; post_text
-    // starts at cursor and caret_w is `cursor_width`; all other modes use a
-    // full-character block.
-    const pre_cur_text = g.vim_state.buf[0..g.vim_state.cursor];
-    refreshLayoutCache(dc, height, prompt, prompt_w, pre_cur_text, max_scroll_px);
-
-    // Draw prompt.
-    var px: i32 = @as(i32, text_left_x) - @as(i32, g.cached_scroll_x);
-    try drawScrollSpan(false, dc, &px, text_left_x, scroll_end_x, baseline, prompt, prompt_w, accent);
-
-    // Pre-cursor span: rendered identically as the first step of BOTH modes,
-    // so it's hoisted here and the branch bodies carry only what differs.
-    if (pre_cur_text.len > 0)
-        try drawScrollSpan(false, dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, g.cached_pre_w, fg);
-
-    // Mode-specific caret/ghost rendering; post-cursor text is common to both
-    // (the block cursor advances px past its own character in NORMAL, the
-    // caret consumes none in INSERT), so it is drawn once below.
-    switch (g.vim_state.mode) {
-        .insert => try drawInsertMode(dc, baseline, text_left_x, scroll_end_x, &px, accent),
-        else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, &px, accent, bg),
-    }
-
-    const post_start = @min(g.vim_state.cursor + @intFromBool(g.vim_state.mode != .insert), g.vim_state.len);
-    try drawScrollSpan(true, dc, &px, text_left_x, post_clip_end_x, baseline, g.vim_state.buf[post_start..g.vim_state.len], null, fg);
-
-    // No blitRegion here: the prompt draws as a segment inside performDraw,
-    // whose end-of-batch queueBlit copies the whole frame (and the caller
-    // flushes it). A mid-frame region copy+flush here would (a) enqueue a
-    // redundant second copy_area + flush per prompt frame and, worse, (b)
-    // snapshot the off-screen pixmap BEFORE sibling segments in the same
-    // batch are painted, briefly showing stale neighbors. Let the batch-end
-    // full blit win.
-    return end_x;
 }
 
 /// This module's bar-segment contribution. The prompt is a runtime overlay

@@ -14,6 +14,7 @@ const model = @import("model");
 const constants = @import("constants");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
+const test_sink = @import("test_sink");
 
 const time = @import("time");
 // Bench marks only run (full iterations + timing output) under `-Dbench`.
@@ -175,7 +176,7 @@ test "bench: reconcile pass (50 windows)" {
     try fill(&m, 50);
     model.setFocus(&m, 25);
 
-    var recorder = helpers.TestSink(.none){};
+    var recorder = test_sink.TestSink(.none){};
 
     ledger.init();
     defer ledger.init();
@@ -206,7 +207,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     ledger.init();
     defer ledger.init();
 
-    var recorder = helpers.TestSink(.none){};
+    var recorder = test_sink.TestSink(.none){};
     var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
 
     // Warm once so the sent ledger is seeded (steady-state drag).
