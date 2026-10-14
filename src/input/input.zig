@@ -3,7 +3,8 @@
 //! (modifiers, keysym) -> Action dispatch map (rebuilt on startup and on config
 //! reload or keyboard-mapping change). Mouse intake -- the button/motion
 //! handlers, press classification, and drag routing -- lives in mouse.zig and
-//! is re-exported below; key dispatch and the Super+click grab setup stay here.
+//! is re-exported below; key dispatch stays here (the Super+click grab itself
+//! is installed by `grabs.grabMouseButtons`, see `setup` below).
 //! The action dispatcher itself (executeAction) lives in dispatch.zig,
 //! re-exported below: mouse.zig dispatches config mouse binds
 //! through dispatch.zig directly, so neither mouse nor dispatch needs to import
@@ -129,7 +130,7 @@ pub fn buildKeybinds(keybindings: []types.Keybind) void {
         log.warn("buildKeybinds: realloc for {} bindings failed ({}); keeping the old set", .{ keybindings.len, err });
         return;
     };
-    resolved_binds = keybind.resolveKeycodes(keybindings, state, resolved_binds);
+    keybind.resolveKeycodes(keybindings, state, resolved_binds);
     keybind.reportUnresolved(resolved_binds);
     keybind_resolver.rebuildDispatchMap(keybindings, alloc, core.config_rev.rev());
 }
@@ -198,7 +199,7 @@ pub fn handleMappingNotify(keyboard: bool) bool {
 /// The report is pure analysis of the config against `keybind.mouse_grab_buttons`,
 /// so it needs no grab to exist yet.
 pub fn setup(conn: core.Connection, screen: core.Screen) void {
-    cursor.Cursor.setupRoot(conn, screen);
+    cursor.setupRoot(conn, screen);
     mouse.reportUndeliverableMouseBinds();
 }
 

@@ -1,7 +1,6 @@
 //! Scroll tiling layout.
 //! Places windows in half-screen slots along a scrollable horizontal strip.
 
-const std = @import("std");
 const model = @import("model");
 const tiling = @import("tiling");
 

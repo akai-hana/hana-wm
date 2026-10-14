@@ -71,9 +71,6 @@ fn enableDetectableAutoRepeat(conn: core.Connection) void {
     }
 }
 
-/// Keycodes in the X11 range, minus the reserved low ones. The index itself,
-/// and the two ordering rules that decide which key a keysym resolves to, now
-/// live in keymap.zig with the rest of the pure transform (19.5).
 pub const XkbState = struct {
     context: *xkb_context,
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
@@ -121,13 +118,12 @@ pub const XkbState = struct {
         xkb.xkb_context_unref(self.context);
     }
 
-    /// Rebuilds the keysym table after a server-side mapping change
-    /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms
-    /// from the table, so it must track the new mapping or bindings silently
-    /// stop matching; on failure the old mapping is kept.
-    /// Rebuilds the keycode->keysym table after a keyboard mapping change.
-    /// Caller must be on the main thread; it runs inside the event loop and
-    /// makes exactly one keymap attempt (see `keymapForRebuild`).
+    /// Rebuilds the keycode->keysym table after a server-side mapping change
+    /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY); dispatch resolves keysyms
+    /// from it, so it must track the new mapping or bindings silently stop
+    /// matching. On failure the old mapping is kept. Caller must be on the
+    /// main thread; it runs inside the event loop and makes exactly one
+    /// keymap attempt (see `keymapForRebuild`).
     pub fn rebuild(self: *XkbState, xcb_conn: core.Connection) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) {
@@ -236,10 +232,6 @@ fn retryDeviceId(xcb_conn: core.Connection) !i32 {
     return withRetries(i32, xcb_conn, deviceOnce, error.XkbNoKeyboard);
 }
 
-/// Minimum reachable keysyms in the health-check window for a keymap to count
-/// as populated. A healthy keymap has 100+; 40 accepts minimal/embedded
-/// keymaps while still rejecting the empty keymap a not-yet-ready XKB returns
-/// at startup.
 /// Builds a fresh keysym table for the connection's current keymap.
 /// Shared by init and rebuild: both acquire a device keymap and convert it to
 /// the flat table, differing only in how a failure is handled.

@@ -63,7 +63,7 @@ pub fn logShadowConflict(
 
 /// One dispatchable binding: the packed dispatch key plus where the action
 /// lives in the current config's keybindings slice.
-pub const DispatchEntry = struct {
+const DispatchEntry = struct {
     /// High 32 bits modifiers, low 32 keysym. One u64 compare orders the whole
     /// table, which is why the resolver is a sorted slice and not a hash map.
     key: u64,
@@ -203,27 +203,21 @@ pub const ResolvedBind = struct {
     keycode: ?u8,
 };
 
-/// Resolve every keybinding against `state`, WITHOUT writing the derived
-/// keycode back into the config.
+/// Resolve every keybinding against `state`, writing each resolved bind into
+/// `out`, WITHOUT touching the derived keycode in the config.
 ///
-/// The keycode used to be stored in `types.Keybind.keycode`, which made a
-/// derived value look like authored config: it survived a reload that changed
-/// the keyboard, it was part of a struct the parser does not produce, and
-/// "did this binding resolve" became a question about a nullable field in
-/// shared config state rather than about the resolution itself. The resolver
-/// now returns what it derived and the grab path consumes that.
+/// The keycode is deliberately not stored in `types.Keybind.keycode`: a
+/// derived value in the config struct would survive a reload that changed the
+/// keyboard and would look like authored config. The resolver derives it here
+/// and the grab path consumes `out`.
 pub fn resolveKeycodes(
     keybindings: []const types.Keybind,
     state: *const xkbcommon.XkbState,
     out: []ResolvedBind,
-) []ResolvedBind {
+) void {
     // The caller sizes `out` from the binding count (input.zig reallocs to
-    // keybindings.len one line earlier and returns early if that fails), so the
-    // old `if (n == out.len) break` could never fire: at iteration i the
-    // counter was i, and i never reaches keybindings.len. Zipping the two
-    // ranges states the precondition instead of re-deriving it -- and unlike
-    // the break, a mismatch panics loudly rather than silently returning a
-    // short list.
+    // keybindings.len one line earlier), so the zip is exact: a length
+    // mismatch panics loudly rather than silently resolving a short list.
     for (keybindings, out) |kb, *dst| {
         dst.* = .{
             .modifiers = kb.modifiers,
@@ -231,13 +225,12 @@ pub fn resolveKeycodes(
             .keycode = state.keysymToKeycode(kb.keysym),
         };
     }
-    return out[0..keybindings.len];
 }
 
-/// The root-window mouse grab, as data. `input.zig` builds this from the very
-/// tables `setupGrabs` iterates, so the grab and the reachability rule cannot
-/// drift apart. Passed IN rather than imported so this module stays free of X
-/// knowledge and the rule stays unit-testable.
+/// The root-window mouse grab, as data. `mouse.zig` builds this from the very
+/// tables `grabs.grabMouseButtons` iterates, so the grab and the reachability
+/// rule cannot drift apart. Passed IN rather than imported so this module stays
+/// free of X knowledge and the rule stays unit-testable.
 pub const MouseGrabSpec = struct {
     /// Button numbers the grab covers.
     buttons: []const u8,
