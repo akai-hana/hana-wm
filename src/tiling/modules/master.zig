@@ -1,7 +1,7 @@
 //! Master-stack tiling layout.
 //! Master + stack panes, spilling overflow into a column-major grid.
 
-const model = @import("wm_state");
+const model = @import("model");
 const tiling = @import("tiling");
 
 const scaling = @import("scaling");

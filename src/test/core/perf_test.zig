@@ -10,14 +10,16 @@
 
 // Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
-// build-gate: minimize, fullscreen, workspaces
+// build-gate: minimize, fullscreen, workspaces, tiling
 
 const std = @import("std");
 const testing = std.testing;
-const model = @import("wm_state");
+const model = @import("model");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 
 const core = @import("core");
 // Bench marks only run (full iterations + timing output) under `-Dbench`.
@@ -27,6 +29,7 @@ const bench = build_options.bench; // Timings -> file
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
+const tiling = @import("tiling");
 
 const Model = model.Model;
 const WindowId = model.WindowId;
@@ -42,7 +45,7 @@ const makeCtx = helpers.makeCtx;
 
 /// Registers ids 1..n with home-workspace hint 0 (the fill most benchmarks use).
 fn fill(m: *Model, n: u32) !void {
-    for (0..n) |i| try model.register(m, @intCast(i + 1), model.WSId.fromIndex(0));
+    for (0..n) |i| try window_state_ops.register(m, @intCast(i + 1), model.WSId.fromIndex(0));
 }
 
 test "bench: findHome scan (100 wins, 10 workspaces)" {
@@ -169,8 +172,8 @@ test "bench: reorderTiled (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        model.reorderTiled(&m, 50, 0);
-        model.reorderTiled(&m, 50, 49);
+        tiling.reorderTiled(&m, 50, 0);
+        tiling.reorderTiled(&m, 50, 49);
     }
     const elapsed_ns = nowNs() - t0;
     const per_op_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 2));
@@ -191,7 +194,7 @@ fn testColor(_: model.WindowId, _: *const model.Model) u32 {
 test "bench: reconcile pass (50 windows)" {
     var m = makeModel();
     try fill(&m, 50);
-    model.setFocus(&m, 25);
+    focus.setFocus(&m, 25);
 
     ledger.init();
     defer ledger.init();
@@ -215,7 +218,7 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     // sends only the dragged window's geometry).
     var m = makeModel();
     try fill(&m, 50);
-    model.setFocus(&m, 25);
+    focus.setFocus(&m, 25);
 
     // Float window 50 so it participates in the drag fast path.
     const dragged: WindowId = 50;
@@ -307,20 +310,20 @@ test "bench: fallbackFocusCandidate (50 wins)" {
     var m = makeModel();
     try fill(&m, 50);
     for (0..50) |i| {
-        model.setFocus(&m, @intCast(i + 1));
+        focus.setFocus(&m, @intCast(i + 1));
     }
 
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = model.fallbackFocusCandidate(&m, model.WSId.fromIndex(0), null);
+        _ = focus.fallbackFocusCandidate(&m, model.WSId.fromIndex(0), null);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
     if (bench) helpers.benchLog("[bench] fallbackFocusCandidate (50 wins): {d:.1} ns/call\n", .{per_call_ns});
     // With all 50 visible and 50 the newest focus, the walk resolves to it;
     // null or any other id means the candidate tiers lost their inputs.
-    try testing.expectEqual(@as(?WindowId, 50), model.fallbackFocusCandidate(&m, model.WSId.fromIndex(0), null));
+    try testing.expectEqual(@as(?WindowId, 50), focus.fallbackFocusCandidate(&m, model.WSId.fromIndex(0), null));
 }
 
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {

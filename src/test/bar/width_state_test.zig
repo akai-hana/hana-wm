@@ -10,7 +10,7 @@
 //! three now share.
 
 const std = @import("std");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 const segmod = @import("segment");
 
 /// A mutable cell a module-level `onPainted` can write, so the test can watch

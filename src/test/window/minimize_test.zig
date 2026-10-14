@@ -17,9 +17,11 @@ const testing = std.testing;
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
 // warn-level overflow diagnostic; src/core/pure/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -166,9 +168,9 @@ test "minimize seq stamps drive LIFO/FIFO restore candidates" {
 
     try minimize.init();
     defer minimize.deinit();
-    try model.register(&m, 10, WSId.fromIndex(0)); // workspace 0
-    try model.register(&m, 11, WSId.fromIndex(0));
-    try model.register(&m, 12, WSId.fromIndex(1)); // workspace 1: must never win on workspace 0
+    try window_state_ops.register(&m, 10, WSId.fromIndex(0)); // workspace 0
+    try window_state_ops.register(&m, 11, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 12, WSId.fromIndex(1)); // workspace 1: must never win on workspace 0
     try minimize.minimize(&m, 10); // seq 0 (oldest)
     try minimize.minimize(&m, 11); // seq 1 (newest)
     try testing.expectEqual(@as(u32, 2), minimize.count());
@@ -190,8 +192,8 @@ test "minimize seq stamps drive LIFO/FIFO restore candidates" {
 test "latestMinimizedBase skips fullscreen-current and other workspaces" {
     var m = makeModel();
 
-    try model.register(&m, 20, WSId.fromIndex(0));
-    try model.register(&m, 21, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 20, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 21, WSId.fromIndex(0));
     _ = fullscreen.toggleFullscreen(&m, 21);
     try minimize.minimize(&m, 20); // plain base, older
     try minimize.minimize(&m, 21); // fullscreen, newer
@@ -212,24 +214,24 @@ test "fallbackFocusCandidate tiers pick the previous focus" {
     defer minimize.deinit();
     regCur(&m, 10);
     regCur(&m, 11); // tiled_order [10, 11]
-    model.setFocus(&m, 11); // user focused 11 first...
-    model.setFocus(&m, 10); // ...then 10; MRU now [10, 11]
-    try testing.expectEqual(@as(?WindowId, 10), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    focus.setFocus(&m, 11); // user focused 11 first...
+    focus.setFocus(&m, 10); // ...then 10; MRU now [10, 11]
+    try testing.expectEqual(@as(?WindowId, 10), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 
     // Minimizing the FOCUSED window (10): the previous focus (11) wins via
     // the MRU tier even though 10 is still newest in the MRU list - visibleOn
     // rejects minimized entries.
     try minimize.minimize(&m, 10);
-    try testing.expectEqual(@as(?WindowId, 11), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    try testing.expectEqual(@as(?WindowId, 11), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 
     // Both hidden: reversed tiled_order tier is exhausted by visibility too,
     // a floating window becomes the candidate, and an empty workspace yields null.
     try minimize.minimize(&m, 11);
     try addFloating(&m, 12, .{ .x = 0, .y = 0, .width = 50, .height = 50 });
-    try testing.expectEqual(@as(?WindowId, 12), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    try testing.expectEqual(@as(?WindowId, 12), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 
-    model.unregister(&m, 12);
-    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    window_state_ops.unregister(&m, 12);
+    try testing.expectEqual(@as(?WindowId, null), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 }
 
 // A rejected candidate (e.g. no_input, which can never hold X focus) must be
@@ -245,19 +247,19 @@ test "fallbackFocusCandidate exclusion skips to the next focusable" {
 
     // MRU head (21) is the excluded no_input window: the scan must skip it
     // and still find 20, not return null.
-    try testing.expectEqual(@as(?WindowId, 20), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), 21));
+    try testing.expectEqual(@as(?WindowId, 20), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), 21));
 
     // Excluding every candidate yields null (the caller then clears to root).
     try addFloating(&m, 22, .{ .x = 0, .y = 0, .width = 50, .height = 50 });
-    model.unregister(&m, 20);
-    model.unregister(&m, 21);
-    try testing.expectEqual(@as(?WindowId, 22), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
-    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), 22));
+    window_state_ops.unregister(&m, 20);
+    window_state_ops.unregister(&m, 21);
+    try testing.expectEqual(@as(?WindowId, 22), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    try testing.expectEqual(@as(?WindowId, null), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), 22));
 
     // Exclusion is not in effect returns the normal MRU head again.
     regCur(&m, 20);
     regCur(&m, 21);
-    try testing.expectEqual(@as(?WindowId, 21), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    try testing.expectEqual(@as(?WindowId, 21), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 }
 
 // closing the focused window must hand focus to the
@@ -267,22 +269,22 @@ test "close-fallback candidate after unregister is the previous focus" {
 
     regCur(&m, 40);
     regCur(&m, 41);
-    model.setFocus(&m, 40); // focused first...
-    model.setFocus(&m, 41); // ...then 41 holds focus; MRU [41, 40]
+    focus.setFocus(&m, 40); // focused first...
+    focus.setFocus(&m, 41); // ...then 41 holds focus; MRU [41, 40]
 
     // Simulate the close path's capture point + unregister.
     const was_focused = m.focused == 41;
     try testing.expect(was_focused);
-    model.unregister(&m, 41);
+    window_state_ops.unregister(&m, 41);
     try testing.expectEqual(@as(?WindowId, null), m.focused); // cleared by unregister
 
     // The wiring must resolve the target AFTER this point via:
-    try testing.expectEqual(@as(?WindowId, 40), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    try testing.expectEqual(@as(?WindowId, 40), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 
     // Closing the LAST window: no candidate remains -> caller clears focus
     // (same terminal state as minimizing everything).
-    model.unregister(&m, 40);
-    try testing.expectEqual(@as(?WindowId, null), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
+    window_state_ops.unregister(&m, 40);
+    try testing.expectEqual(@as(?WindowId, null), focus.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 }
 
 // restoreAllOnWs restores every minimized window in slot order.
@@ -292,9 +294,9 @@ test "restoreAllOnWs restores in slot order" {
     try minimize.init();
     defer minimize.deinit();
     // Minimize every window on workspace 0, then restore them all in one call.
-    try model.register(&m, 10, WSId.fromIndex(0));
-    try model.register(&m, 20, WSId.fromIndex(0));
-    try model.register(&m, 30, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 10, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 20, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 30, WSId.fromIndex(0));
     try minimize.minimize(&m, 10);
     try minimize.minimize(&m, 20);
     try minimize.minimize(&m, 30);
@@ -354,10 +356,10 @@ test "restore to home workspace leaves the current workspace's stack intact" {
     try minimize.init();
     defer minimize.deinit();
 
-    try model.register(&m, 10, WSId.fromIndex(0)); // home 0
-    try model.register(&m, 11, WSId.fromIndex(0)); // home 0
-    try model.register(&m, 20, WSId.fromIndex(1)); // home 1
-    try model.register(&m, 21, WSId.fromIndex(1)); // home 1
+    try window_state_ops.register(&m, 10, WSId.fromIndex(0)); // home 0
+    try window_state_ops.register(&m, 11, WSId.fromIndex(0)); // home 0
+    try window_state_ops.register(&m, 20, WSId.fromIndex(1)); // home 1
+    try window_state_ops.register(&m, 21, WSId.fromIndex(1)); // home 1
     try expectOrder(&m, WSId.fromIndex(0), &.{ 10, 11 });
     try expectOrder(&m, WSId.fromIndex(1), &.{ 20, 21 });
 

@@ -9,9 +9,12 @@ const testing = std.testing;
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
 // warn-level overflow diagnostic; src/core/pure/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
+const seed = @import("model_seeding");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
@@ -146,7 +149,7 @@ test "register honors hinted workspace" {
     var m = makeModel();
 
     regCur(&m, 1);
-    try model.register(&m, 2, WSId.fromIndex(3));
+    try window_state_ops.register(&m, 2, WSId.fromIndex(3));
     try expectOrder(&m, WSId.fromIndex(0), &.{1});
     try expectOrder(&m, WSId.fromIndex(3), &.{2});
     try testing.expectEqual(model.bit(model.WSId.fromIndex(3)), m.store.get(2).?.mask);
@@ -248,7 +251,7 @@ test "all-view flag drives visibility for every stored window" {
     var m = makeModel();
 
     regCur(&m, 1);
-    try model.register(&m, 2, WSId.fromIndex(2));
+    try window_state_ops.register(&m, 2, WSId.fromIndex(2));
     try testing.expect(!model.visibleOn(&m, 1, WSId.fromIndex(1)));
     try testing.expect(!model.visibleOn(&m, 2, WSId.fromIndex(0)));
 
@@ -271,30 +274,30 @@ test "reorder and swapPrimary" {
     for ([_]WindowId{ 1, 2, 3, 4 }) |w| regCur(&m, w);
 
     // Out-of-range target clamps to last position.
-    model.reorderTiled(&m, 1, far_position);
+    tiling.reorderTiled(&m, 1, far_position);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 2, 3, 4, 1 });
-    model.reorderTiled(&m, 1, 0);
+    tiling.reorderTiled(&m, 1, 0);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3, 4 });
-    model.reorderTiled(&m, 3, 0);
+    tiling.reorderTiled(&m, 3, 0);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 3, 1, 2, 4 });
 
     // Floating/unknown windows have no home; reordering is a no-op.
     try addFloating(&m, 9, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
-    model.reorderTiled(&m, 9, 0);
-    model.reorderTiled(&m, unknown_win, 0);
+    tiling.reorderTiled(&m, 9, 0);
+    tiling.reorderTiled(&m, unknown_win, 0);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 3, 1, 2, 4 });
 
     // swapPrimary exchanges slots 0 and 1.
-    model.swapPrimary(&m);
+    tiling.swapPrimary(&m);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 3, 2, 4 });
-    model.swapPrimary(&m);
+    tiling.swapPrimary(&m);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 3, 1, 2, 4 });
 
     // Fewer than two tiled windows: no-op.
     var small = makeModel();
 
     regCur(&small, 7);
-    model.swapPrimary(&small);
+    tiling.swapPrimary(&small);
     try expectOrder(&small, WSId.fromIndex(0), &.{7});
 }
 
@@ -310,36 +313,36 @@ test "swapFocusedWithPrevious swaps focused and previous slots" {
     // Focus 2 then 3: MRU = [3,2,1]; focused 3 in the LAST slot, previous 2
     // in the middle. The swap must exchange them right where they sit, not
     // the list head/follower.
-    model.setFocus(&m, 2);
-    model.setFocus(&m, 3);
-    model.swapFocusedWithPrevious(&m);
+    focus.setFocus(&m, 2);
+    focus.setFocus(&m, 3);
+    tiling.swapFocusedWithPrevious(&m);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 3, 2 });
     try testing.expectEqual(@as(?WindowId, 3), m.focused);
 
     // Toggling again swaps the same pair back (alt-tab shape).
-    model.swapFocusedWithPrevious(&m);
+    tiling.swapFocusedWithPrevious(&m);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3 });
 
     // Single MRU entry (first focus): no-op.
     var lone = makeModel();
     regCur(&lone, 7);
-    model.setFocus(&lone, 7);
-    model.swapFocusedWithPrevious(&lone);
+    focus.setFocus(&lone, 7);
+    tiling.swapFocusedWithPrevious(&lone);
     try expectOrder(&lone, WSId.fromIndex(0), &.{7});
 
     // No focus at all: no-op.
     var none_focus = makeModel();
     for ([_]WindowId{ 8, 9 }) |w| regCur(&none_focus, w);
-    model.swapFocusedWithPrevious(&none_focus);
+    tiling.swapFocusedWithPrevious(&none_focus);
     try expectOrder(&none_focus, WSId.fromIndex(0), &.{ 8, 9 });
 
     // Previously focused window has no tiled slot here (floating): no-op.
     var floating_prev = makeModel();
     for ([_]WindowId{ 10, 11 }) |w| regCur(&floating_prev, w);
-    model.setFocus(&floating_prev, 10);
+    focus.setFocus(&floating_prev, 10);
     try addFloating(&floating_prev, 12, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
-    model.setFocus(&floating_prev, 12); // focused 12, previous 10 (tiled)
-    model.swapFocusedWithPrevious(&floating_prev);
+    focus.setFocus(&floating_prev, 12); // focused 12, previous 10 (tiled)
+    tiling.swapFocusedWithPrevious(&floating_prev);
     try expectOrder(&floating_prev, WSId.fromIndex(0), &.{ 10, 11 });
 }
 
@@ -351,29 +354,29 @@ test "stepTiled wraps at both ends" {
     for ([_]WindowId{ 1, 2, 3, 4 }) |w| regCur(&m, w);
 
     // Forward from the last slot wraps to the head.
-    model.stepTiled(&m, 4, 1);
+    tiling.stepTiled(&m, 4, 1);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 4, 1, 2, 3 });
     // Backward from the head wraps to the tail.
-    model.stepTiled(&m, 4, -1);
+    tiling.stepTiled(&m, 4, -1);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3, 4 });
 
     // Middle slots step by one without touching the edges.
-    model.stepTiled(&m, 2, 1);
+    tiling.stepTiled(&m, 2, 1);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 3, 2, 4 });
-    model.stepTiled(&m, 2, -1);
+    tiling.stepTiled(&m, 2, -1);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3, 4 });
 
     // Repeated forward steps rotate the window completely around the ring.
-    for (0..4) |_| model.stepTiled(&m, 4, 1);
+    for (0..4) |_| tiling.stepTiled(&m, 4, 1);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3, 4 });
 
     // Lone tiled windows and unknown windows are no-ops.
     var lone = makeModel();
 
     regCur(&lone, 7);
-    model.stepTiled(&lone, 7, 1);
+    tiling.stepTiled(&lone, 7, 1);
     try expectOrder(&lone, WSId.fromIndex(0), &.{7});
-    model.stepTiled(&m, unknown_win, 1);
+    tiling.stepTiled(&m, unknown_win, 1);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2, 3, 4 });
 }
 
@@ -391,22 +394,22 @@ test "cycle pool follows tiled order through swaps and moves" {
     // still walked the store would be caught by the very first assertion.
     for ([_]WindowId{ 30, 10, 20 }) |w| regCur(&m, w);
     try expectOrder(&m, ws, &.{ 30, 10, 20 });
-    try testing.expectEqual(@as(usize, 3), model.collectCyclePool(&m, ws, &buf));
+    try testing.expectEqual(@as(usize, 3), focus.collectCyclePool(&m, ws, &buf));
     try testing.expectEqualSlices(WindowId, &.{ 30, 10, 20 }, buf[0..3]);
 
     // Mod+Tab (swap_master_focus_swap) exchanges two slots: the cycle must
     // show the exchanged positions, not the pre-swap one.
-    model.setFocus(&m, 10);
-    model.setFocus(&m, 20);
-    model.swapFocusedWithPrevious(&m);
+    focus.setFocus(&m, 10);
+    focus.setFocus(&m, 20);
+    tiling.swapFocusedWithPrevious(&m);
     try expectOrder(&m, ws, &.{ 30, 20, 10 });
-    _ = model.collectCyclePool(&m, ws, &buf);
+    _ = focus.collectCyclePool(&m, ws, &buf);
     try testing.expectEqualSlices(WindowId, &.{ 30, 20, 10 }, buf[0..3]);
 
     // Mod+Shift+j/k (stepTiled) moves a window one slot: same requirement.
-    model.stepTiled(&m, 30, 1);
+    tiling.stepTiled(&m, 30, 1);
     try expectOrder(&m, ws, &.{ 20, 30, 10 });
-    _ = model.collectCyclePool(&m, ws, &buf);
+    _ = focus.collectCyclePool(&m, ws, &buf);
     try testing.expectEqualSlices(WindowId, &.{ 20, 30, 10 }, buf[0..3]);
 }
 
@@ -423,23 +426,23 @@ test "cycle pool appends untiled windows and honors visibility" {
     // Floating on workspace 0: no tiled slot, so it trails the tiled run.
     try addFloating(&m, 5, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
     // Tiled on workspace 1 but ALSO tagged on workspace 0: visible here, no slot here.
-    try model.register(&m, 3, WSId.fromIndex(1));
+    try window_state_ops.register(&m, 3, WSId.fromIndex(1));
     if (m.store.getPtr(3)) |e| e.mask = model.bit(ws) | model.bit(WSId.fromIndex(1));
 
-    try testing.expectEqual(@as(usize, 4), model.collectCyclePool(&m, ws, &buf));
+    try testing.expectEqual(@as(usize, 4), focus.collectCyclePool(&m, ws, &buf));
     try testing.expectEqualSlices(WindowId, &.{ 1, 2, 3, 5 }, buf[0..4]);
 
     // A parked window leaves the pool (mirrors visibleEntry).
     m.store.getPtr(1).?.presence = .parked;
-    _ = model.collectCyclePool(&m, ws, &buf);
+    _ = focus.collectCyclePool(&m, ws, &buf);
     try testing.expectEqualSlices(WindowId, &.{ 2, 3, 5 }, buf[0..3]);
 
     // Untagging hides it too, unless all-view relaxes the tag test.
     if (m.store.getPtr(3)) |e| e.mask = model.bit(WSId.fromIndex(1));
-    _ = model.collectCyclePool(&m, ws, &buf);
+    _ = focus.collectCyclePool(&m, ws, &buf);
     try testing.expectEqualSlices(WindowId, &.{ 2, 5 }, buf[0..2]);
     m.all_view_active = true;
-    _ = model.collectCyclePool(&m, ws, &buf);
+    _ = focus.collectCyclePool(&m, ws, &buf);
     try testing.expectEqualSlices(WindowId, &.{ 2, 3, 5 }, buf[0..3]);
     m.all_view_active = false;
 
@@ -447,14 +450,14 @@ test "cycle pool appends untiled windows and honors visibility" {
     // cycle step can never fade focus into what is behind it.
     m.store.getPtr(2).?.presence = .covering;
     m.store.getPtr(2).?.covering_ws = ws;
-    try testing.expectEqual(@as(usize, 1), model.collectCyclePool(&m, ws, &buf));
+    try testing.expectEqual(@as(usize, 1), focus.collectCyclePool(&m, ws, &buf));
     try testing.expectEqual(@as(WindowId, 2), buf[0]);
 
     // Off-current workspaces pool their own windows, in their own order.
     var other = makeModel();
     regCur(&other, 4);
-    try model.register(&other, 6, WSId.fromIndex(1));
-    try testing.expectEqual(@as(usize, 1), model.collectCyclePool(&other, WSId.fromIndex(1), &buf));
+    try window_state_ops.register(&other, 6, WSId.fromIndex(1));
+    try testing.expectEqual(@as(usize, 1), focus.collectCyclePool(&other, WSId.fromIndex(1), &buf));
     try testing.expectEqual(@as(WindowId, 6), buf[0]);
 }
 
@@ -464,12 +467,12 @@ test "unregister cleans all references" {
 
     regCur(&m, 1);
     regCur(&m, 2);
-    model.setFocus(&m, 1);
+    focus.setFocus(&m, 1);
     try minimize.minimize(&m, 2);
     regCur(&m, 3);
     _ = fullscreen.toggleFullscreen(&m, 3);
 
-    model.unregister(&m, 1);
+    window_state_ops.unregister(&m, 1);
     try testing.expect(!m.store.has(1));
     // Window 2 left tiled_order when it was minimized; only 3 remains.
     try expectOrder(&m, WSId.fromIndex(0), &.{3});
@@ -481,7 +484,7 @@ test "unregister cleans all references" {
     // Destroying a minimized window clears its only ref (the store entry).
     try testing.expectEqual(@as(u32, 1), minimize.count()); // window 2 minimized
     try testing.expect(minimize.isMinimized(&m, 2));
-    model.unregister(&m, 2);
+    window_state_ops.unregister(&m, 2);
     try testing.expect(!m.store.has(2));
     try testing.expectEqual(@as(usize, 1), m.store.count());
     // model.unregister never touches module bookkeeping; the WIRE layer fires
@@ -491,13 +494,13 @@ test "unregister cleans all references" {
     try testing.expect(!minimize.isMinimized(&m, 2));
 
     // Destroying a fullscreen window leaves no dangling refs either.
-    model.unregister(&m, 3);
+    window_state_ops.unregister(&m, 3);
     try testing.expect(!m.store.has(3));
     try expectOrder(&m, WSId.fromIndex(0), &.{});
 
     // Unknown/double unregister are safe.
-    model.unregister(&m, 1);
-    model.unregister(&m, unknown_win);
+    window_state_ops.unregister(&m, 1);
+    window_state_ops.unregister(&m, unknown_win);
 }
 
 // honorConfigureRequest decisions per anchor/presence.
@@ -563,7 +566,7 @@ test "config reload rescales params, keeps scroll viewport" {
     m.ws[1].params.primary_width = 0.9;
 
     const tpl: model.LayoutParams = .{ .kind = 2, .primary_width = 0.6 };
-    model.applyConfigReload(&m, tpl);
+    seed.applyConfigReload(&m, tpl);
 
     for (&m.ws) |*s| {
         try testing.expectEqual(@as(u8, 2), s.params.kind);
@@ -579,18 +582,18 @@ test "focus MRU ordering and cap" {
     var m = makeModel();
 
     const wins = registerRange(&m, model.mru_capacity + 4, 50);
-    for (wins) |w| model.setFocus(&m, w);
+    for (wins) |w| focus.setFocus(&m, w);
     try testing.expectEqual(@as(?WindowId, wins[wins.len - 1]), m.focused);
     const mru = m.ws[0].focus_mru.constSlice();
     try testing.expectEqual(@as(usize, model.mru_capacity), mru.len);
     try testing.expectEqual(wins[wins.len - 1], mru[0]);
     try testing.expectEqual(wins[4], mru[mru.len - 1]); // oldest four evicted
     // Refocusing an existing entry moves it to the front without duplicating.
-    model.setFocus(&m, wins[10]);
+    focus.setFocus(&m, wins[10]);
     try testing.expectEqual(wins[10], m.ws[0].focus_mru.constSlice()[0]);
     try testing.expectEqual(@as(usize, model.mru_capacity), m.ws[0].focus_mru.len);
     // Unknown window: focused unchanged.
-    model.setFocus(&m, unknown_win);
+    focus.setFocus(&m, unknown_win);
     try testing.expectEqual(@as(?WindowId, wins[10]), m.focused);
 }
 
@@ -665,7 +668,7 @@ test "capacity refusals happen before any mutation" {
         defer minimize.deinit();
         wins = registerRange(&m, max_minimized + 1, 200);
         for (wins[0 .. wins.len - 1]) |w| try minimize.minimize(&m, w);
-        model.setFocus(&m, wins[wins.len - 1]);
+        focus.setFocus(&m, wins[wins.len - 1]);
         try testing.expectError(error.CapacityFull, minimize.minimize(&m, wins[wins.len - 1]));
     }
 
@@ -677,10 +680,10 @@ test "capacity refusals happen before any mutation" {
         var ref = makeModel();
 
         for (wins) |w| {
-            try model.register(&ref, w, null);
+            try window_state_ops.register(&ref, w, null);
         }
         for (wins[0 .. wins.len - 1]) |w| try minimize.minimize(&ref, w);
-        model.setFocus(&ref, wins[wins.len - 1]);
+        focus.setFocus(&ref, wins[wins.len - 1]);
         // The refused model equals a pristine replay of the accepted prefix...
         try testing.expect(eqModel(&m, &ref));
         // ...and specifically, the attempted window was NOT parked/minimized:
@@ -695,9 +698,9 @@ test "capacity refusals happen before any mutation" {
     var fm = Model{};
     var i: WindowId = 500;
     while (fm.ws[0].tiled_order.len < model.max_tiled_per_ws) : (i += 1) {
-        try model.register(&fm, i, null);
+        try window_state_ops.register(&fm, i, null);
     }
-    try testing.expectError(error.CapacityFull, model.register(&fm, i, null));
+    try testing.expectError(error.CapacityFull, window_state_ops.register(&fm, i, null));
     try testing.expect(!fm.store.has(i));
 }
 
@@ -705,13 +708,13 @@ test "capacity refusals happen before any mutation" {
 test "identical operation sequences produce identical models" {
     const seq = struct {
         fn run(m: *Model) !void {
-            for ([_]WindowId{ 1, 2, 3, 4, 5 }) |w| try model.register(m, w, null);
-            try model.register(m, 6, WSId.fromIndex(2));
+            for ([_]WindowId{ 1, 2, 3, 4, 5 }) |w| try window_state_ops.register(m, w, null);
+            try window_state_ops.register(m, 6, WSId.fromIndex(2));
             workspaces.switchTo(m, WSId.fromIndex(1));
-            try model.register(m, 7, null);
+            try window_state_ops.register(m, 7, null);
             workspaces.switchTo(m, WSId.fromIndex(0));
-            model.reorderTiled(m, 3, 0);
-            model.swapPrimary(m);
+            tiling.reorderTiled(m, 3, 0);
+            tiling.swapPrimary(m);
             try minimize.minimize(m, 4);
             minimize.restore(m, 4);
             try minimize.minimize(m, 5);
@@ -720,13 +723,13 @@ test "identical operation sequences produce identical models" {
             workspaces.pinToggle(m, 1);
             workspaces.moveWindowToWs(m, 7, model.WSId.fromIndex(1));
             stepCycle(m, 1);
-            model.adjustPrimaryWidth(m, 0.1);
-            model.setFocus(m, 3);
-            model.setFocus(m, 1);
+            tiling.adjustPrimaryWidth(m, 0.1);
+            focus.setFocus(m, 3);
+            focus.setFocus(m, 1);
             _ = workspaces.allViewToggle(m);
             _ = workspaces.allViewToggle(m);
-            model.unregister(m, 5);
-            model.applyConfigReload(m, .{ .kind = 3 });
+            window_state_ops.unregister(m, 5);
+            seed.applyConfigReload(m, .{ .kind = 3 });
         }
     };
     var a = makeModel();
@@ -744,7 +747,7 @@ test "identical operation sequences produce identical models" {
     // Sanity: the comparator distinguishes divergent histories.
     var c = makeModel();
     try seq.run(&c);
-    model.setFocus(&c, 2);
+    focus.setFocus(&c, 2);
     try testing.expect(!eqModel(&a, &c));
 }
 
@@ -756,7 +759,7 @@ test "home_ws: register sets cache to current workspace" {
 
 test "home_ws: register on non-zero workspace" {
     var m = makeModel();
-    try model.register(&m, 1, WSId.fromIndex(3));
+    try window_state_ops.register(&m, 1, WSId.fromIndex(3));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(3)), m.store.get(1).?.home_ws);
 }
 
@@ -828,9 +831,9 @@ test "adjustPrimaryWidth clamps" {
     var m = makeModel();
 
     workspaces.switchTo(&m, WSId.fromIndex(0));
-    model.adjustPrimaryWidth(&m, 10.0); // far above the ceiling
+    tiling.adjustPrimaryWidth(&m, 10.0); // far above the ceiling
     try testing.expect(m.ws[0].params.primary_width <= 0.95);
-    model.adjustPrimaryWidth(&m, -10.0); // far below the floor
+    tiling.adjustPrimaryWidth(&m, -10.0); // far below the floor
     try testing.expect(m.ws[0].params.primary_width >= 0.05);
 }
 
@@ -841,8 +844,8 @@ test "spawn admission tiles (on-current focused; off-current target-only)" {
 
     // On-current spawn: register(m, win, null) + setFocus (mirrors
     // admission.mapRequest's on_current=true path).
-    try model.register(&m, 1, null);
-    model.setFocus(&m, 1);
+    try window_state_ops.register(&m, 1, null);
+    focus.setFocus(&m, 1);
     var e = m.store.get(1).?;
     try testing.expect(e.anchor == .tiled);
     try testing.expect(e.presence == .present);
@@ -853,7 +856,7 @@ test "spawn admission tiles (on-current focused; off-current target-only)" {
     // register(m, win, 0) tiles it there; mapRequest's on_current=false early
     // return means it must NOT steal model focus.
     workspaces.switchTo(&m, WSId.fromIndex(2));
-    try model.register(&m, 2, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 2, WSId.fromIndex(0));
     e = m.store.get(2).?;
     try testing.expect(e.anchor == .tiled);
     try testing.expect(e.presence == .present);
@@ -885,7 +888,7 @@ test "border-width honor leaves tiled membership intact across a retile" {
     try expectOrder(&m, WSId.fromIndex(0), &.{ 1, 2 });
 
     // A retile (slot swap) still finds the window; membership/mask intact.
-    model.swapPrimary(&m);
+    tiling.swapPrimary(&m);
     try expectOrder(&m, WSId.fromIndex(0), &.{ 2, 1 });
     try testing.expectEqual(model.bit(model.WSId.fromIndex(0)), m.store.get(1).?.mask);
     try assertSingleMembership(&m);
@@ -901,8 +904,8 @@ test "tag-move of a minimized window moves the record; restore lands on the new 
     try minimize.init();
     defer minimize.deinit();
 
-    try model.register(&m, 30, WSId.fromIndex(0)); // home 0
-    try model.register(&m, 31, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 30, WSId.fromIndex(0)); // home 0
+    try window_state_ops.register(&m, 31, WSId.fromIndex(0));
     try minimize.minimize(&m, 30);
     try testing.expect(minimize.isMinimized(&m, 30));
 

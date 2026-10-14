@@ -1,7 +1,7 @@
 //! BSP (leaf) tiling layout.
 //! Recursively bisects the screen along the longer axis to produce balanced regions.
 
-const model = @import("wm_state");
+const model = @import("model");
 const tiling = @import("tiling");
 const Region = tiling.Region;
 

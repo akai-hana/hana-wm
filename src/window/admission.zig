@@ -35,9 +35,11 @@ const icccm = @import("icccm");
 const reply_mod = @import("reply");
 const title_cache = @import("title_cache");
 const atoms = @import("atoms");
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 const focus = @import("focus");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
+const window_state_ops = @import("window_state_ops");
+const tiling_seam = @import("tiling_seam");
 const types = @import("types");
 const window = @import("window");
 const session = @import("session");
@@ -435,7 +437,7 @@ pub fn mapRequest(
 
     // A defined refusal (store or home-list full) leaves the window
     // unmanaged.
-    model_mod.register(m, win, if (on_current) null else model_mod.WSId.fromIndex(target_ws)) catch {
+    window_state_ops.register(m, win, if (on_current) null else model_mod.WSId.fromIndex(target_ws)) catch {
         log.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
         // Evict, or a refused window's XID lingers in the cache forever: XIDs
         // are recycled, so the next client to be handed this id would inherit
@@ -457,10 +459,10 @@ pub fn mapRequest(
     if (float_rect) |rect| {
         if (e) |ep| model_mod.detachTiledToFloating(m, ep, win, rect);
     } else {
-        // Primary-fifo variant spawn placement (moved out of model.register;
-        // it is SPAWN policy, not membership policy): a new window takes the
-        // primary-column head slot, and the previous head window drops one
-        // slot.
+        // Primary-fifo variant spawn placement (it is SPAWN policy, not
+        // membership policy — register itself lives in window_state_ops):
+        // a new window takes the primary-column head slot, and the previous
+        // head window drops one slot.
         {
             // Clamp the requested home workspace so a misconfigured target
             // can't index past the `ws` array in ReleaseFast (defense in depth;
@@ -476,7 +478,7 @@ pub fn mapRequest(
             if (contract.moduleOf(p.kind)) |mv| {
                 if (mv.fifo_variant) |v| {
                     if (p.variant_idx == v and m.ws[home.index].tiled_order.len > 1)
-                        model_mod.reorderTiled(m, win, 0);
+                        tiling_seam.reorderTiled(m, win, 0);
                 }
             }
         }

@@ -11,12 +11,14 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 
 const build_options = @import("build_options");
 const tiling = @import("tiling");
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 const config = @import("config");
 // Scroll-only tests runtime-skip below, but the stub must still expose the
 // two members their bodies reference so a scroll-less tree compiles.
@@ -78,7 +80,7 @@ const Fixture = struct {
             .hv = undefined,
             .wa = wa,
         };
-        for (wins) |w| try model.register(&self.m, w, null);
+        for (wins) |w| try window_state_ops.register(&self.m, w, null);
         // Materialize hints aligned index-for-index with the order slice.
         const s0 = &self.m.ws[0];
         for (s0.tiled_order.constSlice(), 0..) |w, i| {
@@ -244,7 +246,7 @@ test "fibonacci overflow fallback" {
     var fx: Fixture = undefined;
     try fx.initAt(&wins, .{ .x = 0, .y = 0, .width = 200, .height = 200 });
 
-    model.setFocus(&fx.m, 75); // deep in the overflow tail
+    focus.setFocus(&fx.m, 75); // deep in the overflow tail
 
     const v = tuned(&fx);
     const out = computeOf(K_FIB, v);
@@ -327,7 +329,7 @@ test "monocle gaps variant" {
     var fx: Fixture = undefined;
     try fx.init(&.{ 11, 12, 13 });
 
-    model.setFocus(&fx.m, 12);
+    focus.setFocus(&fx.m, 12);
 
     fx.m.ws[0].params.variant_idx = MONOCLE_GAP_VARIANT;
     const v = tuned(&fx);
@@ -501,7 +503,7 @@ test "emission order pin across layouts" {
     var fx: Fixture = undefined;
     try fx.init(&.{ 11, 12, 13 });
 
-    model.setFocus(&fx.m, 12);
+    focus.setFocus(&fx.m, 12);
 
     // Every input-order layout emits exactly the tiled_order sequence.
     // Scroll is a removeable addon, so prune it when absent (its registry

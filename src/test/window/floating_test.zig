@@ -11,9 +11,10 @@ const testing = std.testing;
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
 // warn-level overflow diagnostic; src/core/pure/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
+const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
@@ -64,7 +65,7 @@ test "setFloatingRect updates floating window geometry" {
     floating.setFloatingRect(&m, 5, new_r);
     try testing.expect(new_r.eql(m.store.get(5).?.anchor.floating));
     // A tiled window is untouched by geometry updates.
-    try model.register(&m, 6, WSId.fromIndex(0));
+    try window_state_ops.register(&m, 6, WSId.fromIndex(0));
     floating.setFloatingRect(&m, 6, new_r);
     try testing.expect(m.store.get(6).?.anchor == .tiled);
     // An unknown window is ignored without crashing.

@@ -11,10 +11,11 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
 const types = @import("types");
 const build_options = @import("build_options");
+const window_state_ops = @import("window_state_ops");
 
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
@@ -68,7 +69,7 @@ test "moveWindowToWs: full destination list cancels the move before any mutation
     var m = helpers.makeModel();
     helpers.regCur(&m, 404); // stays on workspace 0; the destination stays full
     for (0..model.max_tiled_per_ws) |i| {
-        try model.register(&m, @as(model.WindowId, @intCast(500 + i)), model.WSId.fromIndex(1));
+        try window_state_ops.register(&m, @as(model.WindowId, @intCast(500 + i)), model.WSId.fromIndex(1));
     }
     try testing.expectEqual(@as(usize, model.max_tiled_per_ws), m.ws[1].tiled_order.len);
 

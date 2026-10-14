@@ -22,6 +22,7 @@ const action_mod = @import("action");
 const pipeline = @import("pipeline");
 const query = @import("query");
 const window = @import("window");
+const diagnostic = @import("diagnostic");
 const surfaces = @import("surfaces").Surfaces;
 const atoms = @import("atoms");
 const spawn = @import("spawn");
@@ -118,7 +119,7 @@ pub fn executeAction(action: *const types.Action) void {
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => process.reload(),
         .reload_hana => process.requestReexec(),
-        .dump_state => window.dumpState(),
+        .dump_state => diagnostic.dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
             log.err("exec failed: {}", .{err}),
         // A `+` batch is fire-and-forget: members are launched together, no
@@ -156,9 +157,9 @@ pub fn executeAction(action: *const types.Action) void {
         // pairing is no longer this call site's responsibility.
         .cycle_focus => |dir| focus.cycleFocus(dir, &window.snapViewportFocusedDuty),
 
-        // Workspaces. workspaces.zig self-gates to a single implicit
-        // workspace when core.getState().config.workspaces.enabled is false,
-        // so these calls are always valid regardless of that setting.
+        // Workspaces. A tree without the workspaces module collapses to a
+        // single implicit workspace (query.getWorkspaceCount), so these
+        // calls are always valid regardless of workspace count.
         // Dispatched through the registry: the workspaces module is optional,
         // so a tree without it has no binder and the command no-ops instead of
         // this file failing to compile.

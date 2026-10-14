@@ -1,5 +1,6 @@
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
+const window_state_ops = @import("window_state_ops");
 const build_options = @import("build_options");
 
 const core = @import("core");
@@ -60,7 +61,7 @@ pub fn makeBareModel() model.Model {
 }
 
 pub fn regCur(m: *model.Model, win: model.WindowId) void {
-    model.register(m, win, null) catch unreachable;
+    window_state_ops.register(m, win, null) catch unreachable;
 }
 
 /// Shared tiled-order expectation: `ws`'s ordered ids equal `expected`

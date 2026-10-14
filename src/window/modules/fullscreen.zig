@@ -8,7 +8,7 @@
 
 const core = @import("core");
 const xcb = core.xcb;
-const model = @import("wm_state");
+const model = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
 const build_options = @import("build_options");
@@ -389,7 +389,7 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
     // sites, so non-profiled builds skip the clock samples.
     const fs_t0: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
     const wm = providerOf(.toggleCovering) orelse return;
-    if (!core.getState().config.fullscreen_enabled) return;
+    if (!build_options.has_fullscreen) return;
     const m = pipeline.mut();
     // Never cover a window off the viewed workspace: the covering
     // record binds the current workspace and would claim it while hidden.
@@ -510,7 +510,7 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
 
 /// This module's window sub-system contribution: lifecycle + coverage hooks +
 /// the EWMH/bar protocol hooks.
-pub const module: @import("contract").WindowModule = .{
+pub const module: @import("window_contract").WindowModule = .{
     .name = "fullscreen",
     .init = init,
     .deinit = deinit,

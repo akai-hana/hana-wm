@@ -1,7 +1,7 @@
 //! Scroll tiling layout.
 //! Places windows in half-screen slots along a scrollable horizontal strip.
 
-const model = @import("wm_state");
+const model = @import("model");
 const tiling = @import("tiling");
 
 // GROW DUTY (optional): on window grow, callers may pre-clamp viewport_offset

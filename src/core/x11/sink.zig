@@ -36,7 +36,7 @@ const xcb = core.xcb;
 pub const offscreen_x_position: i32 = -30000;
 const log = @import("log");
 
-const model = @import("wm_state");
+const model = @import("model");
 const requests = @import("requests");
 /// Stacking mode vocabulary for a request. `above` is currently the only mode
 /// the WM emits.

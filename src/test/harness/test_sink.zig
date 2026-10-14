@@ -13,7 +13,7 @@
 //! breakdown question.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const sinkmod = @import("sink");
 
 pub const TestOp = union(enum) {

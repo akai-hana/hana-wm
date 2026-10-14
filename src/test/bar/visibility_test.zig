@@ -50,7 +50,8 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     // display (SKIP headless like the other fixture tests).
     const fixture = @import("fixture");
     const pipeline = @import("pipeline");
-    const model = @import("wm_state");
+    const model = @import("model");
+    const window_state_ops = @import("window_state_ops");
     const fx = try fixture.setUp("F03 fullscreen occupancy");
     defer fx.deinit();
 
@@ -60,7 +61,7 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     try testing.expect(!visibility.barForcedHiddenByFullscreen(m, 0));
 
     // A covering occupant on workspace 0 claims the screen: the coercion fires.
-    try model.register(m, 1, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 1, model.WSId.fromIndex(0));
     const ent = m.store.getPtr(1).?;
     ent.presence = .covering;
     ent.covering_ws = model.WSId.fromIndex(0);

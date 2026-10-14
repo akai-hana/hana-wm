@@ -9,7 +9,7 @@
 //! build that keeps them O(store) instead of O(N^2).
 
 const core = @import("core");
-const model = @import("wm_state");
+const model = @import("model");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const requests = @import("requests");
@@ -18,7 +18,7 @@ const ledger = @import("ledger");
 const borders = @import("borders");
 
 inline fn tilingActive() bool {
-    return core.getState().config.tiling.enabled;
+    return build_options.has_tiling;
 }
 
 /// Fill `buf` with the per-workspace covering-occupant table in ONE store

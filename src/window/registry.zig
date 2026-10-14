@@ -17,18 +17,19 @@
 
 const std = @import("std");
 
-const contract = @import("contract");
-const model = @import("wm_state");
+const contract = @import("window_contract");
+const dispatch = @import("contract_dispatch");
+const model = @import("model");
 const window_mods = @import("window_modules").modules;
 
-/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
+/// Registry lookup for the hook `field` (see `dispatch.providerOf`), null when
 /// no module binds it; shared by the whole window layer.
 /// Thin typed forward onto the single canonical `contract` dispatch family
 /// (two primitives: providerOf + callAll).
 pub fn providerOf(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
 ) ?*const contract.WindowModule {
-    return contract.providerOf(contract.WindowModule, window_mods[0..], field);
+    return dispatch.providerOf(contract.WindowModule, window_mods[0..], field);
 }
 
 /// First-match dispatch: invokes the first module that binds `field`, nothing
@@ -59,13 +60,13 @@ pub fn dispatchAll(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
 ) void {
-    contract.callAll(contract.WindowModule, window_mods[0..], field, args);
+    dispatch.callAll(contract.WindowModule, window_mods[0..], field, args);
 }
 
 /// Like dispatchAll but returns true at the first provider whose hook does;
 /// false when no provider binds the hook or none returns true. The any-true
 /// scan is stated here (one consumer per owner layer -- see the dispatch-
-/// primitives note in contract.zig); the fallible fan-out variant was inlined
+/// primitives note in contract_dispatch.zig); the fallible fan-out variant was inlined
 /// at its single lifecycle-init call site.
 pub fn dispatchFirstTrue(
     comptime field: std.meta.FieldEnum(contract.WindowModule),

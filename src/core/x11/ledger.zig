@@ -12,7 +12,7 @@
 //! `reconcile`'s header owns the behavioural reads of this ledger; the field
 //! semantics live on `SentEntry` below.
 
-const model = @import("wm_state");
+const model = @import("model");
 
 /// What we last sent per window; WRITE-ONLY bookkeeping (the file header owns
 /// why it is wrong-by-design to consult from anywhere else). Field semantics

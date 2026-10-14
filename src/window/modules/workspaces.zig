@@ -7,7 +7,7 @@
 //! destination already has an owner (dispatched through the registry, so
 //! `fullscreen` is never named here). Workspace count and per-workspace
 //! config overrides are owned elsewhere (query latches the count;
-//! core/architecture/seed.zig seeds the params).
+//! config/model_seeding.zig seeds the params).
 //!
 //! The module also owns the WORKSPACE COMMANDS (switch, move, tag, pin,
 //! all-view): each is one model transition plus one reconcile entry, and
@@ -18,7 +18,7 @@
 //! covers the model transitions, not the commands layered on them).
 
 const core = @import("core");
-const model = @import("wm_state");
+const model = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
 const surfaces = @import("surfaces").Surfaces;
@@ -382,7 +382,7 @@ pub fn switchWorkspace(ws_idx: u8) void {
 /// This module's window sub-system contribution: pure model transitions;
 /// lifecycle is handled by the query facade's init (count latch) and
 /// model state lives in the model.
-pub const module: @import("contract").WindowModule = .{
+pub const module: @import("window_contract").WindowModule = .{
     .name = "workspaces",
     .sendToWs = moveWindowToWs,
     .addToWs = tagAdd,

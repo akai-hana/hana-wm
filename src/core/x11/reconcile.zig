@@ -52,7 +52,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
-const model = @import("wm_state");
+const model = @import("model");
 const log = @import("log");
 
 /// The tiling engine is reached through the build-generated `tiling_seam`:
@@ -61,9 +61,9 @@ const log = @import("log");
 /// reconcile path still runs (park/map/stack) with the layout-computation
 /// block skipped and the placement lookup table left empty. The interchange
 /// TYPES (View/List/Placement/Env/HintsView/parked_rect) come from the tiling
-/// contract (contract.zig), which both the tiling engine and this reconciler
+/// contract (tiling_contract.zig), which both the tiling engine and this reconciler
 /// reference — no mirrored duplicate to keep in lockstep, and no local stub.
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 const tiling = @import("tiling_seam").tiling;
 const ledger = @import("ledger");
 const trace = @import("trace");
@@ -181,7 +181,7 @@ fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
     // ONE activation gate, and it also SUPPLIES the geometry. This used
     // to be `build_options.has_tiling` (a COMPILE-time fact) while the bar
     // reported the active layout from `contract.activeLayoutKind` (enabled AND
-    // registered), so with `tiling.enabled = false` the bar showed "no layout"
+    // registered), so a runtime-disabled tiling made the bar show "no layout"
     // and the geometry still tiled -- two answers to one question. Gating on
     // the resolved kind also subsumes the no-tiling build (an empty registry
     // resolves to null).

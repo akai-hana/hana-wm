@@ -16,11 +16,13 @@
 // build-gate: tiling
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const tiling = @import("tiling");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 
 const core = @import("core");
 const ledger = @import("ledger");
@@ -49,7 +51,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-workspace, 1..50 win"
     inline for (.{ 1, 8, 20, 35, 50 }) |n| {
         var m = makeModel();
         for (0..n) |i| regCur(&m, @intCast(i + 1));
-        model.setFocus(&m, 1);
+        focus.setFocus(&m, 1);
 
         ledger.init();
         defer ledger.init();
@@ -118,11 +120,11 @@ test "tiling: reconcile cost with windows spread across 10 workspaces" {
         var id: WindowId = 1;
         for (0..10) |ws| {
             for (0..per_ws) |_| {
-                _ = try model.register(&m, id, model.WSId.fromIndex(ws));
+                _ = try window_state_ops.register(&m, id, model.WSId.fromIndex(ws));
                 id += 1;
             }
         }
-        model.setFocus(&m, 1);
+        focus.setFocus(&m, 1);
 
         ledger.init();
         defer ledger.init();
@@ -153,7 +155,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     const n = 50;
     var m = makeModel();
     for (0..n) |i| regCur(&m, @intCast(i + 1));
-    model.setFocus(&m, 1);
+    focus.setFocus(&m, 1);
 
     ledger.init();
     defer ledger.init();
@@ -209,7 +211,7 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
     inline for (.{ 1, 20, 35, 50 }) |n| {
         var m = makeModel();
         for (0..n) |i| regCur(&m, @intCast(i + 1));
-        model.setFocus(&m, 1);
+        focus.setFocus(&m, 1);
 
         ledger.init();
         defer ledger.init();

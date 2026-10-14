@@ -9,7 +9,7 @@
 //! discipline). Every model mutation belongs to its transition owner
 //! (window/focus); all model reads go through core.isModelReady()
 //! (the one spelling), so boot order never touches an undefined instance.
-//! It exists as a LIGHT read surface: core/loop, core/proc, input and bar
+//! It exists as a LIGHT read surface: core/loop, core/process, input and bar
 //! readers must not import window.zig (drags focus/admission) or
 //! pipeline's reconcile chain for a predicate.
 
@@ -17,8 +17,9 @@ const std = @import("std");
 
 const core = @import("core");
 const pipeline = @import("pipeline");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
 const usable_area = @import("usable_area");
+const build_options = @import("build_options");
 
 fn m() ?*const model_mod.Model {
     if (!core.isModelReady()) return null;
@@ -96,16 +97,17 @@ pub inline fn getCurrentWorkspace() ?u8 {
 }
 
 /// The workspace count from the live config, derived on read: collapses to a
-/// single implicit workspace when the workspaces feature is disabled. The
-/// u64 workspace bitmask caps the count; clamp (never crash) so a corrupt
-/// config count can't overflow the mask in ReleaseFast. Callers before
-/// core.init (headless test harnesses) get the default of 1. A hot reload
-/// that edits `[workspaces] count`/`enabled` is picked up by the next read —
-/// no latch to re-arm.
+/// single implicit workspace when the workspaces feature is not compiled in
+/// (a tree without `src/window/modules/workspaces.zig` has no binder, so a
+/// multi-count would be phantom). The u64 workspace bitmask caps the count;
+/// clamp (never crash) so a corrupt config count can't overflow the mask in
+/// ReleaseFast. Callers before core.init (headless test harnesses) get the
+/// default of 1. A hot reload that edits `[workspaces] count` is picked up by
+/// the next read — no latch to re-arm.
 pub inline fn getWorkspaceCount() usize {
+    if (comptime !build_options.has_workspaces) return 1;
     if (!core.isReady()) return 1;
-    const cs = core.getState().config.workspaces;
-    return if (cs.enabled) @min(@as(usize, cs.count), model_mod.max_workspaces) else 1;
+    return @min(@as(usize, core.getState().config.workspaces.count), model_mod.max_workspaces);
 }
 
 /// True while the all_workspaces (Mod+5) all-view flag is active: every

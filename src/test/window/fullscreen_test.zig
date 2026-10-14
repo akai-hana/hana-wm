@@ -13,9 +13,10 @@ const testing = std.testing;
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
 // warn-level overflow diagnostic; src/core/pure/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
+const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
@@ -186,7 +187,7 @@ test "FSQ: model fullscreen queries (mode / on-workspace / visible occupant)" {
 
     // A record for a workspace the window isn't tagged to is NOT an occupant:
     // occupancy requires visibility (sync parks such strays).
-    try model.register(&m, 51, WSId.fromIndex(1)); // tagged to ws1 only
+    try window_state_ops.register(&m, 51, WSId.fromIndex(1)); // tagged to ws1 only
     _ = fullscreen.toggleFullscreen(&m, 51); // record `ws` = current (0)
     try testing.expect(model.isCovering(&m, 51));
     try testing.expect(model.isCoveringOn(&m, 51, WSId.fromIndex(0)));

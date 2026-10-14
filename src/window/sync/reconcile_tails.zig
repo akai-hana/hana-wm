@@ -14,15 +14,18 @@
 const std = @import("std");
 const core = @import("core");
 const log = @import("log");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
 const build_options = @import("build_options");
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 const usable_area = @import("usable_area");
 // Layout-name resolution for the state dump and the layout cycle, via the
-// build-generated seam.
-const tiling = @import("tiling_seam").tiling;
+// build-generated seam. The seam's top level also carries the has_tiling-gated
+// op stubs (reorderTiled/stepTiled/...) so these transitions need no
+// per-call guard of their own.
+const tiling_seam = @import("tiling_seam");
+const tiling = tiling_seam.tiling;
 
 /// The four reconcile shapes a tiling action can ask for, as ONE axis.
 ///
@@ -133,7 +136,7 @@ pub fn stepVariantDir(dir: i32) void {
 
 pub fn adjustPrimaryWidthAction(delta: f32) void {
     const m = pipeline.mut();
-    model_mod.adjustPrimaryWidth(m, delta);
+    tiling_seam.adjustPrimaryWidth(m, delta);
     pipeline.reconcileGrab(.{});
 }
 
@@ -163,7 +166,7 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
     const mru = m.ws[m.current.index].focus_mru.constSlice();
     if (mru.len < 2 or mru[1] == focused) return;
     const displaced = mru[1];
-    model_mod.swapFocusedWithPrevious(m);
+    tiling_seam.swapFocusedWithPrevious(m);
     var ft: focus.FocusTransition = .none;
     if (focus_swap) {
         // A no_input displaced window must not take model focus.
@@ -179,7 +182,7 @@ pub fn moveFocused(delta: i32) void {
     const win = m.focused orelse return;
     // Modulo wrap (dwm stack rotate): stepping past either edge of the home
     // list's tiled order cycles back around, matching the focus-step parity.
-    model_mod.stepTiled(m, win, delta);
+    tiling_seam.stepTiled(m, win, delta);
     pipeline.reconcileGrab(.{});
 }
 
