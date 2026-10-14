@@ -161,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
     try signals.setup();
     defer signals.deinit();
 
-    grabs.grabKeybindings();
+    grabs.grabKeybindings(input.resolvedKeybinds());
     try window.init(alloc);
     defer window.deinit();
 
