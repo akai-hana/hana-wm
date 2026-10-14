@@ -64,7 +64,7 @@ fonts = [
 
 # When set as a percentage, this'll be the font's size in respect to bar height.
 # e.g. `100%` => font is as big as it could be, without spilling out of the bar. 
-font_size = 77.5%
+font_size = 72.5%
 
 # Basically, any value under 100% effectively acts as padding between the text
 # and the bar's dimensions, and anything above 100% will overflow outside of it.
