@@ -5,6 +5,7 @@ const std = @import("std");
 
 const types = @import("types");
 const scaling = @import("scaling");
+const build_options = @import("build_options");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
 const xcbmod = @import("xcb");
@@ -38,16 +39,16 @@ pub const eventCast = xcbmod.eventCast;
 
 /// Alias of the canonical `model.WindowId` (xcb_window_t); see the model
 /// header for the single-definition rationale.
-pub const WindowId = @import("wm_state").WindowId;
+pub const WindowId = @import("model").WindowId;
 
 /// Workspace index wrapper. `model.WSId` is this same type; see the model
 /// header for the single-definition rationale.
-pub const WorkspaceId = @import("wm_state").WorkspaceId;
+pub const WorkspaceId = @import("model").WorkspaceId;
 
 /// The single workspace-index range check (model.isValidWorkspaceIndex);
 /// re-exported here so callers outside core speak the same predicate as
 /// `WorkspaceId.isValid`.
-pub const isValidWorkspaceIndex = @import("wm_state").isValidWorkspaceIndex;
+pub const isValidWorkspaceIndex = @import("model").isValidWorkspaceIndex;
 
 /// Why keyboard focus is temporarily withheld from a window.
 pub const FocusSuppressReason = enum {
@@ -126,9 +127,9 @@ pub const config_rev = factAccessors("config_rev");
 // instead of importing `tiling`, so `tiling` stays a true contract. They are
 // thin config reads core can answer from its own config.
 
-/// Whether the tiling windowing paradigm is enabled (config fact).
+/// Whether the tiling windowing paradigm is compiled in (build fact).
 pub inline fn tilingEnabled() bool {
-    return getState().config.tiling.enabled;
+    return build_options.has_tiling;
 }
 
 /// Scaled tiling border width in pixels (config fact).
@@ -207,23 +208,6 @@ pub fn init(
         .config = config,
         .dpi_info = initial_dpi,
     };
-}
-
-/// Flips the bar between the top and bottom edge and returns the new position.
-///
-/// The single writer of `config.bar.bar_position`. It lived inside the
-/// bar's renderer, which meant a rendering module owned a config field: the
-/// one place that could change the bar's edge was a function whose job was
-/// drawing it, and any other code that wanted to reason about the edge had to
-/// know that. The flip is a config decision, so it is made where the config
-/// lives; the bar is then told to re-anchor, and is not asked to decide.
-pub fn toggleBarScreenPosition() types.BarScreenPosition {
-    const st = getState();
-    st.config.bar.bar_position = switch (st.config.bar.bar_position) {
-        .top => .bottom,
-        .bottom => .top,
-    };
-    return st.config.bar.bar_position;
 }
 
 /// Re-reads the current screen size and writes it into the cached `Screen`,

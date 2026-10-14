@@ -29,7 +29,7 @@ const types = @import("types");
 
 const focus = @import("focus");
 const pipeline = @import("pipeline");
-const model = @import("wm_state");
+const model = @import("model");
 const query = @import("query");
 
 const window = @import("window");
@@ -50,7 +50,8 @@ const render = @import("render");
 // Window-addon registry (generated): the hidden-set synthesis is routed
 // through the collectHiddenSet hook instead of naming the minimize or
 // fullscreen module directly.
-const contract = @import("contract");
+const contract = @import("bar_contract");
+const dispatch = @import("contract_dispatch");
 
 const state = @import("state");
 // The state itself now lives in state.zig (a leaf, so the render /
@@ -217,7 +218,7 @@ pub fn init() !void {
 
 pub fn deinit() void {
     const alloc = core.getState().alloc;
-    contract.callAll(contract.Segment, segmod.all(), .deinit, .{alloc});
+    dispatch.callAll(contract.Segment, segmod.all(), .deinit, .{alloc});
     if (gBar.state) |s| {
         s.render.dc.deinit();
         s.deinit();
@@ -560,12 +561,17 @@ fn applyBarScreenPosition() i16 {
     return new_y;
 }
 
-/// The surface hook for the toggle-bar-position action: ask core to flip the
-/// edge, then re-anchor. The reconcile that follows is the caller's (see
-/// core/input/dispatch.zig's `.toggle_bar_position` action), because it is a layout
-/// decision made outside the renderer.
+/// The surface hook for the toggle-bar-position action: flip the bar's edge
+/// (the `config.bar.bar_position` mutation lives here — the bar owns its
+/// edge), then re-anchor. The reconcile that follows is the caller's (see
+/// core/input/dispatch.zig's `.toggle_bar_position` action), because it is a
+/// layout decision made outside the renderer.
 pub fn toggleBarSegmentAnchor() void {
-    _ = core.toggleBarScreenPosition();
+    const cfg = &core.getState().config.bar;
+    cfg.bar_position = switch (cfg.bar_position) {
+        .top => .bottom,
+        .bottom => .top,
+    };
     _ = applyBarScreenPosition();
 }
 

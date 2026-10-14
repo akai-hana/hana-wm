@@ -93,17 +93,17 @@ lives in `[tiling]` itself — usually themed by the theme file.
 
 ### `[drag]`
 
-`enabled` and `snap_distance` for the drag-and-drop placement behavior.
+`snap_distance` for the drag-and-drop placement behavior.
 
 ### `[fullscreen]`
 
-`enabled` toggles the fullscreen-window feature.
+No keys: the fullscreen feature's presence is decided at build time
+(module `fullscreen`), not by config.
 
 ### `[workspaces]`
 
-`count` — number of workspaces, 1–64 — and `enabled` for the workspaces
-segment. Both are also accepted under the alias section
-`[bar.modules.workspaces]`.
+`count` — number of workspaces, 1–64. Also accepted under the alias
+section `[bar.modules.workspaces]`.
 
 ### `[bar]`
 

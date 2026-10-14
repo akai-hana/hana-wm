@@ -16,7 +16,7 @@ const log = @import("log");
 /// The uid suffix in the fallback is load-bearing. Callers own the returned
 /// slice. Deliberately NOT used by native_pulse's socket probe: PulseAudio's
 /// `/run/user/{uid}` fallback is a different convention, not this policy.
-/// Consumers: this module's snapshot dir and proc/session's restore file.
+/// Consumers: this module's snapshot dir and process/session's restore file.
 /// Used to live in the dissolved `paths` module; the snapshot is one of the
 /// two consumers the policy was written for, so it is the natural owner.
 pub fn runtimeFile(alloc: std.mem.Allocator, base: []const u8, ext: []const u8) ![]u8 {

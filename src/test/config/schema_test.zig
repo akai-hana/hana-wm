@@ -45,7 +45,6 @@ fn expectAllDefaults(cfg: *const types.Config) !void {
 test "types.Config{} carries sensible field initializers" {
     const proto: types.Config = .{};
     try testing.expect(proto.bar.enabled);
-    try testing.expect(proto.fullscreen_enabled);
     try testing.expectEqual(@as(u8, 9), proto.workspaces.count);
     try testing.expectEqual(@as(u32, 0x222222), proto.bar.bg);
     try testing.expectEqual(@as(u32, 0x61AFEF), proto.bar.primary_color);
@@ -139,24 +138,21 @@ test "[tiling] gap/border quartet reads" {
     try testing.expectEqual(types.ScalableValue.absolute(7.0), lone.tiling.gap_width);
 }
 
-test "[bar.modules.workspaces] and [workspaces] agree on count/enabled" {
+test "[bar.modules.workspaces] and [workspaces] agree on count" {
     var flat_ws = try loadToml(testing.allocator, "ws-flat",
         \\[workspaces]
         \\count = 5
-        \\enabled = false
         \\
     );
     defer flat_ws.deinit(testing.allocator);
     var nested = try loadToml(testing.allocator, "ws-nested",
         \\[bar.modules.workspaces]
         \\count = 5
-        \\enabled = false
         \\
     );
     defer nested.deinit(testing.allocator);
     try expectConfigsEqual(&flat_ws, &nested);
     try testing.expectEqual(@as(u8, 5), nested.workspaces.count);
-    try testing.expect(!nested.workspaces.enabled);
 }
 
 test "per_segment_padding feeds BarConfig.spacing; workspaces count pads icons" {
@@ -576,7 +572,6 @@ test "config/fallback.toml loads cleanly through the real pipeline" {
     defer cfg.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u16, 50), cfg.tiling.min_window_dim);
-    try testing.expect(cfg.tiling.enabled);
     try testing.expectEqual(types.BarScreenPosition.bottom, cfg.bar.bar_position);
 }
 
