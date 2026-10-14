@@ -11,6 +11,7 @@
 //! never on the file stem.
 
 const types = @import("types");
+const defaults = @import("defaults");
 const drawing = @import("drawing");
 const query = @import("query");
 const actions = @import("actions");
@@ -18,7 +19,6 @@ const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
 const contract = @import("contract");
-const scaffold = @import("scaffold");
 
 /// Reserved row width when the workspaces module is compiled in but reports
 /// zero workspaces (moved here from bar.zig: width policy belongs to the
@@ -176,9 +176,9 @@ fn drawCell(
 
     if (has_windows) {
         const glyph = if (is_current)
-            config.indicator_focused orelse types.default_indicator_focused
+            config.indicator_focused orelse defaults.default_indicator_focused
         else
-            config.indicator_unfocused orelse types.default_indicator_unfocused;
+            config.indicator_unfocused orelse defaults.default_indicator_unfocused;
         const color = config.workspaceIndicatorColor(is_current);
         // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
         try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, config.scaledIndicatorSize(height), color);
@@ -310,7 +310,7 @@ fn onClickHook(ctx: *const contract.ClickCtx) bool {
     return true;
 }
 
-pub const module = scaffold.module("workspaces", draw, null, .{
+pub const module = segmod.module("workspaces", draw, null, .{
     .mode = .self_measured,
     .dirty_sources = .{ .frame = true },
     .invalidate = invalidate,

@@ -16,7 +16,7 @@
 const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
-const scaffold = @import("scaffold");
+const segmod = @import("segment");
 const contract = @import("contract");
 
 const time = @import("time");
@@ -254,13 +254,13 @@ fn onClickHook(ctx: *const contract.ClickCtx) bool {
 
 /// This module's bar-segment contribution (registry binding). Reserved width
 /// is the bar's merged clock budget (State.Clock.width), passed in as the
-/// `naturalWidth` argument and returned unmodified -- the scaffold's
+/// `naturalWidth` argument and returned unmodified -- the builder's
 /// measure-string passthrough. There is deliberately no clock-local width
 /// store: the budget is re-derived at State.init, on the mode-aware staleness
 /// path (bar.updateClock -> adoptFreshClockWidth), and within one second of
 /// any config change on a surviving bar (the ordinary tick), always from the
 /// same live probe the draw measures.
-pub const module = scaffold.module(
+pub const module = segmod.module(
     "clock",
     draw,
     null,

@@ -3,7 +3,7 @@
 //! identity helpers, and the hook walkers.
 //!
 //! Split OUT of `bar.zig` to break three import cycles: `repaint`,
-//! `visibility_glue`, and `input_events` all read this state on every batch,
+//! `visibility`, and `input_events` all read this state on every batch,
 //! and importing `bar.zig` for it dragged them into a cycle with the file
 //! that also drives them (bar.zig imports all three). With the state in its
 //! own leaf, those three import THIS file and nothing imports them back.
@@ -57,10 +57,10 @@ fn selfTickerIndex(id: ?usize) ?usize {
 /// thread; no mutex protection required.
 pub const Bar = struct {
     state: ?*State = null,
-    /// True when visibility_glue.presentForPrompt() had to map an
+    /// True when visibility.presentForPrompt() had to map an
     /// otherwise-hidden bar (e.g. hidden by a fullscreen window, or by the
     /// user toggling it off) purely so the inline prompt would be visible.
-    /// visibility_glue.dismissAfterPrompt() checks this to know whether
+    /// visibility.dismissAfterPrompt() checks this to know whether
     /// hiding the bar again is part of "returning to normal" -- the flag's
     /// whole lifecycle (set, cleared, guarded against) lives in that file.
     prompt_forced_visible: bool = false,
@@ -355,7 +355,7 @@ pub const State = struct {
         // through their uniform invalidate hook (tags/workspaces); layout and
         // variants deliberately bind none, keeping their last measured width
         // so a re-measure never reserves a 0-width slot for a frame (see
-        // scaffold.Opts.invalidate).
+        // segment.Opts.invalidate).
         segmod.runVoidHook(.invalidate);
         return s;
     }
