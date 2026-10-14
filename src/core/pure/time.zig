@@ -1,5 +1,4 @@
-//! Monotonic and wall-clock reads.
-//!
+//! Monotonic and wall-clock time utilities.
 //! Two distinct families, deliberately not interchangeable: `monotonic*` is
 //! wall-independent and is what deadlines and frame deltas must use;
 //! `realtime*` is for displayed timestamps and expiry against the wall clock.

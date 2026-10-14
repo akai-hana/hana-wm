@@ -1,13 +1,5 @@
-//! The display-free half of DPI resolution: the RESOURCE_MANAGER string
-//! parser, the geometry->DPI formula, and the sanity band.
-//!
-//! 6.3: these were pure functions sitting in `display/dpi.zig`, which imports
-//! `core`/`xcb` for the two PROBES around them. Being on the x11 side they
-//! could not be unit tested at all (this build only executes `*_test` module
-//! roots, and an x11-dependent module is not one), so the parser -- the part
-//! most likely to be wrong, since it hand-parses a user-editable X resource
-//! string -- had no coverage. The probes stay in dpi.zig; everything below is
-//! X-free and testable.
+//! Display-free DPI math: RESOURCE_MANAGER parsing, geometry→DPI formula,
+//! and sanity band; pure and testable without X server.
 
 const std = @import("std");
 

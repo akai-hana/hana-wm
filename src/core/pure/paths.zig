@@ -1,8 +1,6 @@
-//! Filesystem path helpers.
-//! Shared $PATH walking for the config-side terminal detector (fallback.zig)
-//! and the prompt's command completer (prompt.zig): one probe order, one
-//! common-dir fast path, no duplicated split/scan logic. Also the home of the
-//! XDG config-home policy (configHome), which the config loader consumes.
+//! Filesystem path utilities (XDG config home, $PATH walking) shared across
+//! config and bar modules. Provides a single probe order and fast-paths to
+//! avoid duplicated split/scan logic.
 
 const std = @import("std");
 

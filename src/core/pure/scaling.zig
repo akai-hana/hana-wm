@@ -1,9 +1,6 @@
-//! Canonical scaling formulas: pure functions of a ScalableValue, no DPI
-//! lookup.
-//!
-//! `display/dpi.zig` (which measures DPI) and `config/` (which parses
-//! ScalableValues) both call into these, so there is exactly one formula to
-//! maintain. X-free and allocation-free: the DPI probe stays on the x11 side.
+//! Canonical scaling formulas: pure functions over ScalableValue (no DPI
+//! lookup), the single source for deriving pixel counts from absolute or
+//! percentage values. XCB-free and allocation-free.
 
 const std = @import("std");
 

@@ -1,16 +1,5 @@
-//! The event loop's deadline policy
-//!
-//! The loop blocks in poll() forever unless a timer source says otherwise,
-//! and turning "several sources may speak" into one number is a POLICY, not
-//! arithmetic. It used to live in two files at once: `bar.pollTimeoutMs`
-//! reduced over the bar's own modules taking the shortest non-negative value,
-//! and then the loop re-applied the same ignore-the-negatives rule at its call
-//! site (`if (ms >= 0)`). Both halves had to agree, and neither file could
-//! see the other's.
-//!
-//! `Timers` owns the whole rule once. Core holds the list, the loop asks the
-//! one question, and a timer source is a list entry rather than a branch at
-//! the call site.
+//! Event loop deadline policy: aggregates active timer sources to compute the
+//! next poll timeout; centralizes the min-non-negative rule. No allocations.
 
 /// One timer source. `null` means "this source wants no wakeup"; a
 /// non-negative value is "wake me in this many ms".

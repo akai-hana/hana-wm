@@ -1,6 +1,15 @@
-//! Window lifecycle
-//! Manages window creation, destruction, configuration, and event handling
-//! for all managed windows.
+//! X11-facing window protocol layer: the event boundary for managed toplevels.
+//! Translates MapRequest / UnmapNotify / DestroyNotify / ConfigureRequest /
+//! Enter-LeaveNotify / PropertyNotify / ClientMessage into model transitions
+//! (actions, focus) and owns what surrounds them: admission policy (WM_CLASS
+//! workspace/float rules plus the spawn queue keyed by _NET_WM_PID), boot-time
+//! adoption of pre-existing root children from the restore file, child-to-
+//! toplevel resolution for Electron/Qt/GTK clients, WM_NORMAL_HINTS parsing,
+//! and the per-batch border sweep.
+//!
+//! Also this layer's stable facade: window.zig re-exports the icccm protocol
+//! surface and the window-module hook dispatch (providerOf, callHook*, etc.) so
+//! `window.*` is the import seam instead of icccm/contract.
 
 const std = @import("std");
 

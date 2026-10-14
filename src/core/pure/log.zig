@@ -1,5 +1,5 @@
-//! Debug logging and error helpers.
-//! User-facing diagnostics and verbose tracing, routed through std.log.
+//! Debug logging and error helpers; user-facing diagnostics routed through
+//! std.log.
 
 const std = @import("std");
 

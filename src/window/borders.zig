@@ -1,5 +1,8 @@
-//! Shared border helpers.
-//! Resolves border color and width and applies them atomically across tiled and floating paths.
+//! Shared border helpers for tiled and floating windows.
+//! Resolves border visibility, color, and width (hiding borders for covering/
+//! fullscreen windows and windows behind covering occupants), and applies them
+//! atomically with ledger-backed deduplication to avoid redundant XCB configure
+//! requests.
 
 const core = @import("core");
 const xcb = core.xcb;

@@ -1,11 +1,8 @@
-//! Keybinding resolution: keysym -> keycode (via the live XKB state) plus the
-//! (modifiers, keysym) -> Action dispatch map consumed on the hot key path.
-//!
-//! This lives in the input layer, not in `config/types`: config owns the
-//! *parsed* bindings (pure data, no X), while turning a keysym into a keycode
-//! needs a live `XkbState`. Keeping the resolver here breaks the
-//! `types -> xkbcommon -> core -> types` import cycle and leaves the config
-//! layer X-free.
+//! Keybinding resolution: keysym → keycode via live XKB state and
+//! (modifiers, keysym) → Action dispatch map consumed on the hot key path.
+//! Config owns parsed bindings (pure data, no X); keycode resolution requires
+//! live XkbState, keeping the resolver in the input layer breaks the
+//! types→xkbcommon→core→types cycle and leaves config X-free.
 
 const std = @import("std");
 const log = @import("log");

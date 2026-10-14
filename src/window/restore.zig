@@ -2,11 +2,11 @@
 //! takes over the X clients a predecessor left behind.
 //!
 //! hana never reparents, so clients stay direct root children across an execv
-//! and the successor can adopt them by scanning the root's children. This lives
-//! with the window layer rather than in the composition root because it is
-//! three subsystem calls (persist, adopt, focus) wearing a boot-order
-//! constraint -- reviewing it in isolation from those subsystems is what made
-//! it look like composition-root work in the first place.
+//! and the successor can adopt them by scanning the root's children. main calls
+//! adoptSession exactly once -- after surfaces.init() (bar up so bar-aware work
+//! area is live) and before events.run() -- sequencing persist, window adoption,
+//! and focus against each other. Pure subsystem ordering; no X requests, config,
+//! or dispatch of its own.
 
 const std = @import("std");
 const core = @import("core");

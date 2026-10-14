@@ -1,5 +1,10 @@
-//! User input handling
-//! Handles keyboard, mouse buttons, pointer motion, and drag operations.
+//! Raw X input -> configured actions: the single router the event loop hands
+//! key, button, and motion events to. Owns the live XKB state and the
+//! (modifiers, keysym) -> Action dispatch map (rebuilt on startup and on config
+//! reload or keyboard-mapping change), decides press semantics (bar/window/
+//! focus/bind/drag/replay), and enforces the Super+click SYNC grab invariant.
+//! Delegates to keybind.zig for resolution, surfaces for chrome routing,
+//! actions for tiling/floating work, ending in executeAction dispatcher.
 
 const std = @import("std");
 

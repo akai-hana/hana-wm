@@ -1,8 +1,8 @@
-//! Per-window window-data cache.
-//! Dedupes border color/width for sync, bridges WM_NORMAL_HINTS into the
-//! model, and owns the WM's per-window title cache. Geometry lives in the
-//! model/sync ledger instead.
-//!
+//! Per-window cache for window metadata.
+//! Caches WM_NORMAL_HINTS (SizeHints) and the window title as the single source
+//! of truth. Title reads use cache-only peeks (no X11 on the draw path), with
+//! pipelined batch admission (_NET_WM_NAME preferred over WM_NAME) and a
+//! single-window refresh on rename. Geometry remains in the model/sync ledger.
 //! The title cache is the single source of truth for window titles: admission
 //! fires _NET_WM_NAME + WM_NAME as part of the pipelined admission cookie
 //! batch and caches the winner per window id; a title PropertyNotify

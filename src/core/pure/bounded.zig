@@ -1,12 +1,5 @@
-//! Bounded collections.
-//!
-//! Shared shape used by the window module's caches, the minimize module's
-//! minimized-window record, and the spawn module's pending-spawn table: a
-//! fixed-capacity array plus a length, with linear-scan find, append, and
-//! remove-and-compact. Plus the sorted-key binary-search store (Store) that
-//! backs the model's window entries and the sync ledger.
-//!
-//! Layer note: xcb-free by construction, safe for model/tiling to import.
+//! Bounded, allocation-free collections with fixed capacity (linear lists and
+//! sorted-key Store) for process-lifetime tables; xcb-free.
 
 const std = @import("std");
 

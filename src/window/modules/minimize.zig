@@ -1,27 +1,18 @@
-//! Complete minimize feature: state transitions + read helpers.
-//! A self-contained plugin over the model: minimized state lives in this
-//! module's OWN static store (g_recs), and the model only ever sees the
-//! generic `.parked` presence pattern. The module owns the transitions
-//! (minimize/restore + restore-order selection), the persistence seam
-//! (serialize/deserialize), and record cleanup for torn-down windows
-//! (onWindowGone). The core never names minimize.
-//!
-//! The deserialize hook receives the wire layer's `*model.Model` directly
-//! (see contract.WindowModule); the core interface file carries the model type,
-//! and adoption rewrites model state only through the window layer's
-//! gate-holding restore path.
+//! Minimize feature: hides a window from the core by writing only its generic
+//! `.parked` presence; the core never names minimize. The real minimized state
+//! lives in this module's own static, allocation-free, bounded record table
+//! (`g_recs`, capped at `constants.max_minimized`), one record per window with
+//! its former tiled slot and a monotonic sequence number. This module owns the
+//! transitions around that state: minimize/restore, FIFO/LIFO restore-target
+//! selection, restore-all-on-workspace, record cleanup for torn-down windows,
+//! and the `contract.WindowModule` persistence seam that round-trips a record
+//! as a 9-byte blob (0x5A magic + slot + seq).
 
 const std = @import("std");
 const constants = @import("constants");
 const model = @import("model");
 const log = @import("log");
-// Peers reach each other's hooks through the generated window registry,
 const bounded = @import("bounded");
-// never by naming a sibling module: deleting a sibling only shortens the
-// registry, and capabilities stay provider-agnostic. 12.1 removed minimize's
-// last `window.*` use (the covering-mode peek), so it imports no window-layer
-// module at all now -- which is the peer rule actually holding rather than
-// just being documented next to a violation.
 
 fn resetState() void {
     g_recs.clear();

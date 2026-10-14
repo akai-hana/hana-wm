@@ -1,10 +1,5 @@
-//! Model-pipeline entry glue. This module owns the global Model instance,
-//! builds the per-reconcile reconcile.Ctx from live state, and exposes the
-//! reconcile slots entry points call.
-//!
-//! Entry points: init() (startup), dragTick() (floating drag motion),
-//! reconcileNow() (retile/EWMH/manage/unmanage), and the
-//! fullscreenToggleWindow/workspace hooks routed from the window layer.
+//! Model-pipeline glue: owns the global Model, builds reconcile.Ctx per tick,
+//! exposes slot entry points and reconcile hooks; X-free.
 
 const std = @import("std");
 const model_mod = @import("model");
