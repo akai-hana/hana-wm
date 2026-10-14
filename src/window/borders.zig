@@ -134,3 +134,13 @@ pub fn apply(conn: core.Connection, win: u32) void {
     const c = resolveBorderColor(win);
     if (ledger.markSentBorderPixelIfChanged(win, c)) requests.setBorderPixel(conn, win, c);
 }
+
+/// apply() against a PRECOMPUTED occupant table, for the reload sweep:
+/// resolveBorderColor would rebuild the table per window, making the reload
+/// O(windows * store). One build (coveringOccupants) + applyWidth +
+/// resolveBorderColorWith keeps that sweep at O(store) total.
+pub fn applyWith(conn: core.Connection, win: u32, occupants: []const ?model.WindowId) void {
+    applyWidth(conn, win);
+    const c = resolveBorderColorWith(win, occupants);
+    if (ledger.markSentBorderPixelIfChanged(win, c)) requests.setBorderPixel(conn, win, c);
+}
