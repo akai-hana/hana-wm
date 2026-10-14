@@ -5,13 +5,10 @@
 //! wire side -- map/unmap, the claim publish, and the reconcile that
 //! reacts to the claim change.
 //!
-//! The host state (`State`, `gBar`) lives in `bar.zig` and the
-//! draw submission in `draw.zig`; `bar.zig` imports this file for
-//! the apply* entry points: the files form the bar subsystem's
-//! intentional import cycle. Every cross-reference is a runtime
-//! access (state reads, primitive calls), never a comptime one, so
-//! the lazy module analysis has no cycle to walk -- the same
-//! hub-and-spoke shape check-layers.sh documents for core<->window.
+//! The host state (`State`, `gBar`) lives in `state.zig` and the draw
+//! submission in `repaint.zig`; this file reads the state through that leaf
+//! and never imports `bar.zig` back. `bar.zig` imports this file for the
+//! apply* entry points -- one direction, so there is no cycle at all.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -21,9 +18,9 @@ const pipeline = @import("pipeline");
 const usable_area = @import("usable_area");
 const visibility = @import("visibility");
 
-const bar = @import("bar");
-const draw = @import("draw");
-const State = bar.State;
+const state = @import("state");
+const repaint = @import("repaint");
+const State = state.State;
 
 /// Pushes the bar's current screen-space claim to core.screen. Called
 /// at each point where the bar's occupancy of the screen changes
@@ -32,15 +29,15 @@ const State = bar.State;
 /// area. Core owns the area math; the bar only contributes "I take
 /// this many pixels from this edge."
 pub fn syncScreenClaim() void {
-    const s = bar.gBar.state orelse return;
+    const s = state.gBar.state orelse return;
     const cs = core.getState();
     const edge: usable_area.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
     const px: u16 = if (s.vis.shown) s.render.height else 0;
-    usable_area.setClaim(usable_area.bar_id, edge, px);
+    usable_area.setClaim(edge, px);
 }
 
 pub fn raiseBar() void {
-    if (bar.gBar.state) |s|
+    if (state.gBar.state) |s|
         _ = xcb.xcb_configure_window(
             s.win.conn,
             s.win.win_id,
@@ -93,12 +90,12 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
         // Tell continuous-motion segments the bar is (re)appearing, so the
         // title marquee resumes from its last shown offset instead of
         // teleporting across the whole hidden gap on this first frame.
-        bar.runVoidHook(.onBarShown);
+        state.runVoidHook(.onBarShown);
         if (do_reconcile) {
             // Fullscreen toggle path: render to the off-screen pixmap inside
             // the grab so the caller's single ungrabAndFlush ships geometry +
             // blit as exactly one compositor frame.
-            draw.submitDrawBlockingFull();
+            repaint.submitDrawBlockingFull();
         } else {
             // Workspace-switch path: skip the redundant inline render. The
             // switch already bumped the window fact, so updateIfDirty repaints
@@ -106,11 +103,11 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
             // switch); an inline draw here would be a full duplicate render AND
             // would paint the stale pre-switch focused-title (model.focused has
             // not landed on the new workspace yet).
-            draw.requestFullRedraw();
+            repaint.requestFullRedraw();
         }
     }
     if (grab) |g| {
-        g.reconcileNow();
+        g.reconcileNow(.{});
         if (should_be_visible) raiseBar();
     }
 }
@@ -131,13 +128,13 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
 /// disappears atomically with the fullscreen geometry. No-ops when the bar
 /// is already hidden or not initialised.
 pub fn hideBarForFullscreen() void {
-    const s = bar.gBar.state orelse return;
+    const s = state.gBar.state orelse return;
     if (!s.vis.shown) return;
     // The prompt overlay is a use-case for being on-top: a fullscreen enter
     // while the inline prompt is open must not yank the workspace switch,
     // since the user is typing into a chrome state that expects the overlay.
     // dismissAfterPrompt recomputes the natural decision at exit.
-    if (bar.gBar.prompt_forced_visible) return;
+    if (state.gBar.prompt_forced_visible) return;
     applyVisibility(s, false, false);
 }
 
@@ -157,12 +154,12 @@ pub fn applyFullscreenVisibility() void {
 /// selects the workspace-switch flavor (no reconcile; the caller reconciles)
 /// vs the fullscreen-fact reaction (reconciles inside the claim).
 fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
-    const s = bar.gBar.state orelse return;
+    const s = state.gBar.state orelse return;
     // While the inline prompt has forced the bar above everything, any
     // natural-visibility recompute (workspace switch, fullscreen fact tick)
     // must not unmap it below the prompt; dismissAfterPrompt recomputes the
     // natural decision when the prompt exits.
-    if (bar.gBar.prompt_forced_visible) return;
+    if (state.gBar.prompt_forced_visible) return;
     const decision = visibility.desiredVisibility(pipeline.model(), ws, s.vis.preferred);
     // The comparison against the bar's mapped state is the ORCHESTRATOR's, not
     // the policy's: the policy returns the target and why, and deciding whether

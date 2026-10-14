@@ -56,7 +56,7 @@ const segmod = @import("segment");
 const scaffold = @import("scaffold");
 const contract = @import("contract");
 const time = @import("time");
-const meter = @import("meter");
+const level = @import("level");
 
 const c = @cImport({
     @cInclude("stdio.h");
@@ -368,45 +368,52 @@ pub const Sub = struct {
     probeNaturalWidth: u16 = 44,
 };
 
-const Instance = struct {
-    /// Latched on the control's first read (the segment's first draw arms
-    /// it; see `g_armed`).
+/// One control's mutable state, indexed by registry position (segment i ==
+/// subs[i]). The AoS slot for what used to be five parallel arrays
+/// (g_inst/g_armed/g_pending_redraw/g_throttle/g_drag): the arrays shared
+/// only an index, so a control's lifecycle was spread across five
+/// declarations to keep in lockstep. One struct says which fields belong to
+/// the same control, and `&g_state[idx]` hands the whole lifecycle to a
+/// helper at once (the same shape systatus's `Readout` gives its readouts).
+const SubState = struct {
+    /// Set by the control's first draw (which arms it: the segment doesn't
+    /// wake the loop before the bar actually renders it).
+    armed: bool = false,
+    /// A value-changed redraw is owed (see `consumeRedrawRequestFor`).
+    pending_redraw: bool = false,
+    /// Whether this control is currently scrubbed by a press-hold (one
+    /// exclusive drag per segment).
+    drag: bool = false,
     next_read_ms: i64 = 0,
+    /// The control's commit scheduler, pointing at its own write hook. `subs`
+    /// is comptime-generated, so the wiring is a comptime loop with no runtime
+    /// init and no per-event lookup.
+    throttle: Throttle,
     /// Sub-scoped label scratch, so each control's label stays valid until
     /// its own next draw.
     scratch: [128]u8 = undefined,
 };
 
-/// Per-segment state, indexed by registry position (segment i == subs[i]).
-var g_inst: [subs.len]Instance = [_]Instance{.{}} ** subs.len;
-var g_armed: [subs.len]bool = @splat(false);
-var g_pending_redraw: [subs.len]bool = @splat(false);
-/// One scheduler per control, each already pointing at its own control's write
-/// hook. `subs` is comptime-generated, so the wiring is a comptime loop with no
-/// runtime init and no per-event lookup.
-var g_throttle: [subs.len]Throttle = blk: {
-    var t: [subs.len]Throttle = undefined;
-    for (0..subs.len) |i| t[i] = .{ .interval_ms = throttle_ms, .write = subs[i].write };
-    break :blk t;
+var g_state: [subs.len]SubState = blk: {
+    var states: [subs.len]SubState = undefined;
+    for (0..subs.len) |i| states[i] = .{ .throttle = .{ .interval_ms = throttle_ms, .write = subs[i].write } };
+    break :blk states;
 };
 
 /// Applies control `idx`'s declared commit window to its scheduler, once the
 /// control is known. Called at arm time; a control that shares the default
 /// keeps it.
 fn applyCommitWindow(idx: usize) void {
-    if (subs[idx].commit_window_ms) |w| g_throttle[idx].interval_ms = w;
+    if (subs[idx].commit_window_ms) |w| g_state[idx].throttle.interval_ms = w;
 }
-/// Whether this control is currently scrubbed by a press-hold (one exclusive
-/// drag per segment).
-var g_drag: [subs.len]bool = @splat(false);
 
-/// Linear slider mapping across a slot. Lifted to `bar/meter.zig` (26.8): it
+/// Linear slider mapping across a slot. Lifted to `bar/level.zig` (26.8): it
 /// is not a slider concept -- every horizontal meter needs it -- and the
 /// zero-width-slot rule and the far-edge saturation had to be right in
 /// whichever module happened to need them first. This re-export keeps the
 /// slider's own name working, so the pure test and the core keep the same
 /// entry point.
-pub const pctFromSlot = meter.pctFromSlot;
+pub const pctFromSlot = level.pctFromSlot;
 
 /// The width the bar reserves for control `idx`, and the ONE denominator for
 /// everything that needs a slider's width: the row reservation
@@ -478,7 +485,7 @@ pub fn subLevelOrZero(sub: Sub) u8 {
 fn commitPreview(idx: usize, pct: u8) void {
     const sub = subs[idx];
     sub.write(.preview, pct);
-    g_throttle[idx].apply(sub.commit_cost(), pct);
+    g_state[idx].throttle.apply(sub.commit_cost(), pct);
 }
 
 /// Poll deadline for control `idx`: the segment doesn't arm itself until its
@@ -487,10 +494,11 @@ fn commitPreview(idx: usize, pct: u8) void {
 /// otherwise (0 = due now): the earliest of the control's read cadence and an
 /// owed commit flush.
 fn pollDeadlineMsFor(idx: usize) i32 {
-    if (!g_armed[idx]) return -1;
-    var deadline: i64 = g_inst[idx].next_read_ms;
-    if (g_throttle[idx].pending) {
-        const flush_at = g_throttle[idx].last_ms + g_throttle[idx].interval_ms;
+    const st = &g_state[idx];
+    if (!st.armed) return -1;
+    var deadline: i64 = st.next_read_ms;
+    if (st.throttle.pending) {
+        const flush_at = st.throttle.last_ms + st.throttle.interval_ms;
         if (flush_at < deadline) deadline = flush_at;
     }
     const left = deadline - nowMs();
@@ -499,20 +507,21 @@ fn pollDeadlineMsFor(idx: usize) i32 {
 }
 
 fn onPollWakeupFor(idx: usize) void {
-    if (!g_armed[idx]) return;
+    const st = &g_state[idx];
+    if (!st.armed) return;
     // Sweep an owed scroll/drag commit whose throttle window has elapsed
     // (the read cadence below stays gated: this wake exists purely to land
     // the newest value the backend hasn't seen yet).
-    g_throttle[idx].flushOwed(subLevelOrZero(subs[idx]));
-    const inst = &g_inst[idx];
-    if (nowMs() < inst.next_read_ms) return;
-    inst.next_read_ms = nowMs() + subs[idx].read_interval_ms;
-    if (subs[idx].read()) g_pending_redraw[idx] = true;
+    st.throttle.flushOwed(subLevelOrZero(subs[idx]));
+    if (nowMs() < st.next_read_ms) return;
+    st.next_read_ms = nowMs() + subs[idx].read_interval_ms;
+    if (subs[idx].read()) st.pending_redraw = true;
 }
 
 fn consumeRedrawRequestFor(idx: usize) bool {
-    const p = g_pending_redraw[idx];
-    g_pending_redraw[idx] = false;
+    const st = &g_state[idx];
+    const p = st.pending_redraw;
+    st.pending_redraw = false;
     return p;
 }
 
@@ -547,12 +556,12 @@ fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
 fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     const dc = segmod.castDraw(ctx);
     const sub = subs[idx];
-    const inst = &g_inst[idx];
+    const st = &g_state[idx];
     // First draw arms the control: fill its label before its own cadence.
-    if (!g_armed[idx]) {
+    if (!st.armed) {
         _ = sub.read();
-        g_armed[idx] = true;
-        inst.next_read_ms = nowMs() + sub.read_interval_ms;
+        st.armed = true;
+        st.next_read_ms = nowMs() + sub.read_interval_ms;
         applyCommitWindow(idx);
     }
     // Absent backend: nothing to show (a zero-width slot, unclickable, never
@@ -560,14 +569,14 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     if (!subPresent(subs[idx])) return contract.Painted.nothing(x);
     // While scrubbed the control is a loading bar; the label resumes on the
     // drag-end redraw.
-    if (g_drag[idx]) {
+    if (st.drag) {
         // The scrub fills the reserved slot, so the painted span IS the
         // reserved width -- reporting it is a no-op against the measured label
         // width it replaces, which is exactly the intent: the label width must
         // survive the scrub so the drag-end redraw re-renders it in place.
         return contract.Painted.span(x, drawDragBar(dc, x, reservedWidth(idx), subLevelOrZero(subs[idx])));
     }
-    const label = sub.label(dc.config, &inst.scratch);
+    const label = sub.label(dc.config, &st.scratch);
     const end_x = try drawing.drawPaddedSegmentValue(dc.dc, dc.config, dc.height, x, sub.name, label.text, label.value_start, label.value_len, dc.config.segmentProps(sub.name));
     // Report the ACTUAL painted width, not the row reservation: the palette
     // must follow the text, or the segment locks onto the startup probe and
@@ -587,6 +596,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
 /// reserved for controls without one.
 fn onClickFor(idx: usize, ctx: *const contract.ClickCtx) bool {
     const sub = subs[idx];
+    const st = &g_state[idx];
     if (!ctx.is_left and !ctx.is_right) return false;
     if (!subPresent(subs[idx])) return false;
     // Bound by the SAME width the row reserved, not by the last painted width:
@@ -598,21 +608,21 @@ fn onClickFor(idx: usize, ctx: *const contract.ClickCtx) bool {
         if (!sub.writable()) return false;
         // Enter drag mode immediately, and restart the commit clock after
         // this press's set so the first motion doesn't double-send.
-        g_drag[idx] = true;
+        st.drag = true;
         sub.write(.apply, pctAt(idx, ctx.offset));
-        g_throttle[idx].reset();
+        st.throttle.reset();
     } else {
         const secondary = sub.secondary orelse return false;
         secondary();
     }
-    g_pending_redraw[idx] = true;
+    st.pending_redraw = true;
     ctx.redraw();
     return true;
 }
 
 fn onScrollFor(idx: usize, dir: i8, redraw: *const fn () void) bool {
     const sub = subs[idx];
-    if (!g_armed[idx]) return false;
+    if (!g_state[idx].armed) return false;
     if (!subPresent(subs[idx])) return false;
     if (!sub.writable()) return false;
     const base: u16 = subLevelOrZero(subs[idx]);
@@ -638,12 +648,12 @@ fn onScrollFor(idx: usize, dir: i8, redraw: *const fn () void) bool {
 /// most every `throttle_ms`. A value owed inside the throttle window is
 /// coalesced and flushed on release, or by the poll loop.
 ///
-/// Deliberately does NOT raise `g_pending_redraw`: bar.zig's post-batch
+/// Deliberately does NOT raise `pending_redraw`: bar.zig's post-batch
 /// `updateIfDirty` folds that flag into a FULL-bar redraw, defeating the
 /// scoped `redraw` callback every motion. The bar passes the segment-scoped
 /// repaint here, so the display is updated without re-laying the whole bar.
 fn onDragMotionFor(idx: usize, offset: u16, redraw: *const fn () void) bool {
-    if (!g_drag[idx]) return false;
+    if (!g_state[idx].drag) return false;
     if (!subs[idx].writable()) return false;
     commitPreview(idx, pctAt(idx, offset));
     redraw();
@@ -653,11 +663,12 @@ fn onDragMotionFor(idx: usize, offset: u16, redraw: *const fn () void) bool {
 /// Scrub end (button-1 release): force-land any owed commit, re-read the
 /// control so its label shows the truth, and repaint back to text mode.
 fn onDragEndFor(idx: usize, redraw: *const fn () void) void {
-    g_throttle[idx].finish(subLevelOrZero(subs[idx]));
-    if (g_drag[idx]) {
-        g_drag[idx] = false;
+    const st = &g_state[idx];
+    st.throttle.finish(subLevelOrZero(subs[idx]));
+    if (st.drag) {
+        st.drag = false;
         _ = subs[idx].read();
-        g_pending_redraw[idx] = true;
+        st.pending_redraw = true;
         redraw();
     }
 }
@@ -688,7 +699,7 @@ pub fn segmentFor(comptime i: usize) contract.Segment {
         /// bound's denominator read back.
         fn onPainted(width: u16) void {
             widthStateFor(i).store(width);
-            if (widthStateFor(i).consumeRedrawRequest()) g_pending_redraw[i] = true;
+            if (widthStateFor(i).consumeRedrawRequest()) g_state[i].pending_redraw = true;
         }
         fn onClick(ctx: *const contract.ClickCtx) bool {
             return onClickFor(i, ctx);

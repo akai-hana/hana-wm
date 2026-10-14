@@ -99,9 +99,10 @@ const SegmentGeometry = struct {
 /// `scaledSegmentPadding`.
 const title_lead_px: u16 = 4;
 
-/// Shared body of all title draw entry points. Titles/geoms are read from the
-/// snapshot (in-process caches populated by the bar); no X11 and no owned
-/// buffers to free here. Infallible: every text and rect op on this path is.
+/// Shared body of all title draw entry points. The window entries (id,
+/// title, geom) are read from the snapshot (in-process caches populated by
+/// the bar); no X11 and no owned buffers to free here. Infallible: every text
+/// and rect op on this path is.
 fn drawInner(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
@@ -110,7 +111,7 @@ fn drawInner(
     // detection writes global state (the monitor's Hz memo every other segment
     // reads), so calling it from a DRAW made a render mutate the state the next
     // frame's pacing decision depends on. The field it needed is gone with it.
-    const window_count = snapshot.current_ws_wins.len;
+    const window_count = snapshot.entries.len;
     // Empty workspace: fill the background and fall through to the shared end.
     if (window_count == 0) {
         ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, ctx.config.bg);
@@ -127,7 +128,7 @@ fn drawSingleWindow(
     ctx: segmod.TitleRenderContext,
     snapshot: segmod.TitleSnapshot,
 ) void {
-    const single_win = snapshot.current_ws_wins[0];
+    const single_win = snapshot.entries[0].window;
     const is_minimized = snapshot.minimized_set.contains(single_win);
     const workspace_has_focus = snapshot.focused_window != null;
 
@@ -283,7 +284,7 @@ fn drawSegmentedTitles(
     // No empty-workspace guard here: `drawInner` has already dispatched the
     // zero case, so the gather cannot see an empty list from this path.
     var scratch: geom.GatherScratch = .{};
-    const sorted = scratch.gather(snapshot, snapshot.current_ws_wins) orelse return;
+    const sorted = scratch.gather(snapshot) orelse return;
 
     const window_count: u32 = @intCast(sorted.len);
     const baseline_y = ctx.dc.baselineY(ctx.height);
