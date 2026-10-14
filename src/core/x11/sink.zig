@@ -10,14 +10,14 @@
 //! rather than forcing every primitive through `requests.zig`, and the
 //! check-layers allowlist covers this file). Each shim wraps the exact request
 //! pattern it consolidates here:
-//!   configure     ~ one xcb_configure_window, mask assembled from the
-//!                   that merges a stack mode into the same request)
-//!   borderWidth   ~ borders.applyWidth's send (dedup lives in LastSent);
-//!                   inline xcb_configure_window in this seam
+//!   map           ~ xcb_map_window (fresh window before its park)
+//!   configure     ~ one xcb_configure_window; the mask is assembled from
+//!                   the Configure fields, with the stack mode merged into
+//!                   the same request when it changed
 //!   borderPixel   ~ requests.setBorderPixel
 //!   park          ~ X-offscreen + BELOW merged into one request
 //!   stackOnly     ~ requests.raiseWindow (ABOVE; the only stack mode)
-//!   setEwmhFullscreen ~ xcb_change_property (_NET_WM_STATE_FULLSCREEN)
+//!   setStateAtom  ~ read-merge-write of one _NET_WM_STATE atom list
 //!   flush/grab    ~ conn.flush / requests.grabServer / ungrabAndFlush
 
 const std = @import("std");
@@ -202,6 +202,11 @@ pub const XcbSink = struct {
     /// touching the property rather than corrupting it.
     const max_ewmh_states = 64;
 
+    /// Set / clear `atom` on `_NET_WM_STATE` for `win`, preserving the rest of
+    /// the list. A no-op (nothing is written) when the atom's presence already
+    /// matches the request -- a strictness the REPLACE path owed the client:
+    /// it unconditionally sent the merged list, firing a PropertyNotify with a
+    /// (possibly re-ordered) value for a semantically unchanged state.
     fn setStateAtomShim(
         ptr: *anyopaque,
         win: u32,
@@ -213,6 +218,7 @@ pub const XcbSink = struct {
 
         var state_atoms: [max_ewmh_states]u32 = undefined;
         var count: usize = 0;
+        var has_atom = false;
         const get_cookie = xcb.xcb_get_property(conn, 0, win, state_atom, xcb.XCB_ATOM_ATOM, 0, state_atoms.len);
         if (xcb.xcb_get_property_reply(conn, get_cookie, null)) |reply| {
             defer std.c.free(reply);
@@ -227,13 +233,32 @@ pub const XcbSink = struct {
                 const n: usize = @intCast(reply.*.value_len);
                 const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, state_atoms.len)];
                 for (existing) |a| {
-                    if (a == atom or a == 0) continue;
+                    if (a == atom) {
+                        has_atom = true;
+                        continue;
+                    }
+                    if (a == 0) continue;
                     state_atoms[count] = a;
                     count += 1;
                 }
             }
         }
-        if (add and count < state_atoms.len) {
+
+        // What the request intends to change about `atom`'s membership. Adding
+        // one the list already carries (or removing one it never had) leaves
+        // the property value identical, so publishing would only fire a
+        // spurious PropertyNotify without any observable change: skip the write.
+        const membership_changes = if (add) !has_atom else has_atom;
+        if (!membership_changes) return;
+
+        if (add) {
+            if (count >= state_atoms.len) {
+                // The preserved set already filled our buffering capacity; the
+                // add would at best silently no-op (dropping the new atom), at
+                // worst overwrite a slot we dropped. Don't write.
+                log.warn("_NET_WM_STATE on 0x{x} holds {d} atoms; cannot add without corrupting the list", .{ win, max_ewmh_states });
+                return;
+            }
             state_atoms[count] = atom;
             count += 1;
         }

@@ -6,6 +6,7 @@
 //! Extracted from model_test.zig; same makeModel fixture and
 //! fullscreen discipline as the parent file.
 
+// build-gate: fullscreen, minimize, workspaces
 const std = @import("std");
 const testing = std.testing;
 
@@ -76,8 +77,6 @@ fn assertSingleMembership(m: *const Model) !void {
         }
     }
 }
-
-// register -> tiled in current ws order, mask set.
 
 // toggleFullscreen round trips; minimize-from-fullscreen keeps its
 // record (parked) and restore returns straight back to fullscreen.

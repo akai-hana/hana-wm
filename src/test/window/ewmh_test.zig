@@ -55,7 +55,11 @@ fn wmStateRequest(win: u32, action: u32) xcb.xcb_client_message_event_t {
     ev.type = atoms.getAtomOrZero("_NET_WM_STATE");
     ev.data.data32[0] = action;
     ev.data.data32[1] = atoms.getAtomOrZero("_NET_WM_STATE_FULLSCREEN");
-    ev.data.data32[2] = 0; // "normal" source
+    ev.data.data32[2] = 0; // second state atom: none requested
+    // EWMH carries the source indication (1 = application, 2 = pager) in
+    // data32[3], not data32[2]. The handler does not read it yet, but the
+    // fixture message must be shaped the way EWMH says clients send it.
+    ev.data.data32[3] = 1;
     return ev;
 }
 

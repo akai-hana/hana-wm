@@ -10,6 +10,7 @@
 //! The minimize module's process-global store is re-armed by
 //! helpers.makeModel, so these tests pass in any order.
 
+// build-gate: minimize, fullscreen, workspaces
 const std = @import("std");
 const testing = std.testing;
 
@@ -96,8 +97,6 @@ fn assertSingleMembership(m: *const Model) !void {
         }
     }
 }
-
-// register -> tiled in current ws order, mask set.
 
 // minimize tiled -> parked, removed from tiled_order; capacity refuses
 // once the minimized budget (MAX_MINIMIZED) is exhausted.

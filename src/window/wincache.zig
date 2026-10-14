@@ -289,12 +289,12 @@ fn takePropertyReply(
     return buf[0..len];
 }
 
-/// Caches `title` for `win`, duplicating the string and freeing the previous
-/// copy (if any). A full cache drops a NEW window's title rather than evicting
-/// an existing one (overwrites of already-cached windows still work).
-/// Public because it is the cache's write side (the pipelined admission path
-/// reaches it through `collectTitleCookies`), which the headless
-/// `wincache_test` exercises for the overwrite/free/cap lifecycle.
+/// Caches `title` for `win` by copying it into the entry's inline buffer
+/// (POD storage, no heap, no free). A full cache drops a NEW window's title
+/// rather than evicting an existing one (overwrites of already-cached
+/// windows still work). Public because it is the cache's write side (the
+/// pipelined admission path reaches it through `collectTitleCookies`), which
+/// the headless `wincache_test` exercises for the overwrite/cap lifecycle.
 pub fn storeTitle(win: u32, title: []const u8) void {
     const c = live();
     if (c.getPtr(win)) |wd| {

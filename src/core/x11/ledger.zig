@@ -69,8 +69,8 @@ const State = struct {
     sent: model.Store(model.WindowId, SentEntry, model.store_capacity) = .{},
 };
 
-/// Owned by the compositor process; re-init() on reconnect. Module-private:
-/// all access goes through this file's API.
+/// Owned by the compositor process (process-lifetime; init() only re-arms
+/// between tests). Module-private: all access goes through this file's API.
 var st: State = .{};
 
 pub fn init() void {
@@ -100,13 +100,8 @@ pub fn forget(win: model.WindowId) void {
     _ = st.sent.remove(win);
 }
 
-/// Record a border width sent for `win` without disturbing the ledger's
-/// geometry/park state. Called by the border-detail path (window.zig) after a
-/// width-only send so the next full reconcile's need_bw check
-/// (`!last.has_rect or last.bw != bw`) elides the redundant resend. No-op
-/// when the ledger is full or the get-or-put errors (sentGetOrPut contract).
-/// Note that a parked window changed its own geometry, so the next reconcile
-/// must re-park it instead of taking the elision. Called from the
+/// Note that a parked window changed its own geometry, so the next
+/// reconcile must re-park it instead of taking the elision. Called from the
 /// ConfigureNotify route for MANAGED windows only: an unmanaged client's
 /// configure says nothing about our park.
 pub fn markParkedDirty(win: model.WindowId) void {
@@ -115,6 +110,11 @@ pub fn markParkedDirty(win: model.WindowId) void {
     st.sent.getPtr(win).?.parked_dirty = true;
 }
 
+/// Record a border width sent for `win` without disturbing the ledger's
+/// geometry/park state. Called by the border-detail path (window.zig) after a
+/// width-only send so the next full reconcile's need_bw check
+/// (`!last.has_rect or last.bw != bw`) elides the redundant resend. No-op
+/// when the ledger is full or the get-or-put errors (sentGetOrPut contract).
 pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
     const gop = sentGetOrPut(win) orelse return;
     gop.bw = w;

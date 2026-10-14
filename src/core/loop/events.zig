@@ -265,7 +265,7 @@ fn dispatchOwned(event: *anyopaque) void {
     // WM cannot recover. One branch when disabled, and `watches` is the only
     // thing consulted before anything is formatted.
     const t = eventType(event);
-    if (xtrace.enabled()) xtrace.inbound(t, eventWindow(event));
+    if (xtrace.enabled() and xtrace.watches(eventWindow(event))) xtrace.inbound(t, eventWindow(event));
     dispatch(t, event);
 }
 

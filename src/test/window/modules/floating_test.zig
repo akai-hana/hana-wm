@@ -4,6 +4,7 @@
 //! the model they mutate. Extracted from model_test.zig; same
 //! makeModel fixture as the parent file.
 
+// build-gate: floating, fullscreen, minimize
 const std = @import("std");
 const testing = std.testing;
 

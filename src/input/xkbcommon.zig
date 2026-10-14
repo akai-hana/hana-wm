@@ -157,8 +157,9 @@ pub const XkbState = struct {
         return self.keysym_by_keycode[keycode];
     }
 
-    /// Reverse-look up a keysym to its keycode (config parsing only). Scans the
-    /// flat table (248 entries, all in L1 cache).
+    /// Reverse-look up a keysym to its keycode: bisects the reverse index
+    /// built over the flat table. Serves config parsing AND the live grab
+    /// path (resolveKeycodes), not config alone.
     ///
     /// The table holds level-0 symbols, so a Shift-only keysym (e.g. `@`) can
     /// resolve to null; callers should warn, since such a binding cannot be

@@ -16,13 +16,18 @@ const pipeline = @import("pipeline");
 const borders = @import("borders");
 const fixture = @import("fixture");
 const model = @import("model");
-const parser = @import("parser");
 const types = @import("types");
-
 const scaling = @import("scaling");
+
 test "core.borderWidth resolves absolute and percentage border widths" {
     const fx = try fixture.setUp("borders.width");
     defer fx.deinit();
+
+    // Config mutations this file makes must not leak into the process-global
+    // core state: later X-gated tests read core.borderWidth() against a fresh
+    // shared Fx reset, so restore it here.
+    const saved_width = fx.config.tiling.border_width;
+    defer fx.config.tiling.border_width = saved_width;
 
     // Default config: absolute 2px, percentage disabled.
     try testing.expectEqual(@as(u16, 2), core.borderWidth());
@@ -46,6 +51,12 @@ test "core.borderWidth resolves absolute and percentage border widths" {
 test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
     const fx = try fixture.setUp("borders.color");
     defer fx.deinit();
+
+    const saved_focused = fx.config.tiling.border_focused;
+    const saved_unfocused = fx.config.tiling.border_unfocused;
+    defer fx.config.tiling.border_focused = saved_focused;
+    defer fx.config.tiling.border_unfocused = saved_unfocused;
+
     fx.config.tiling.border_focused = 0x111111;
     fx.config.tiling.border_unfocused = 0x222222;
 
@@ -71,6 +82,12 @@ test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
 test "borders.resolveBorderColor is 0 for a screen-covering window" {
     const fx = try fixture.setUp("borders.covering");
     defer fx.deinit();
+
+    const saved_focused = fx.config.tiling.border_focused;
+    const saved_unfocused = fx.config.tiling.border_unfocused;
+    defer fx.config.tiling.border_focused = saved_focused;
+    defer fx.config.tiling.border_unfocused = saved_unfocused;
+
     fx.config.tiling.border_focused = 0x111111;
     fx.config.tiling.border_unfocused = 0x222222;
 

@@ -30,9 +30,32 @@ fn resolve() void {
         const t = std.mem.trim(u8, part, " \t");
         if (t.len == 0) continue;
         const v = std.fmt.parseInt(u32, t, 0) catch continue;
-        ids.append(gpa, v) catch return;
+        ids.append(gpa, v) catch |err| {
+            // A partial ids list is still a hand-owned slab: free it and bail
+            // with a visible failure, leaving watch null so the disabled gate
+            // keeps holding (armed was set up top).
+            ids.deinit(gpa);
+            log.warn("[xtrace] HANA_XTRACE OOM ({}) -- tracing disabled", .{err});
+            return;
+        };
     }
-    watch = ids.toOwnedSlice(gpa) catch &[_]u32{};
+    if (ids.items.len == 0) {
+        // A non-empty value that parsed no ids (garbage, stray commas) is
+        // NOT "trace everything": an empty watch read as always-true, waking
+        // the tracer on every event. Treat it as a disabled, reported misconfig.
+        log.warn("[xtrace] HANA_XTRACE={s} contains no valid window ids; tracing disabled", .{raw});
+        ids.deinit(gpa);
+        return;
+    }
+    watch = ids.toOwnedSlice(gpa) catch |err| {
+        // toOwnedSlice failure leaves the ids buffer hand-owned; free it,
+        // report, and stay disabled. Note: this must NOT return &[_]u32{} --
+        // that would alias the "trace everything" sentinel and turn a config
+        // error into an ear on every event.
+        ids.deinit(gpa);
+        log.warn("[xtrace] HANA_XTRACE OOM ({}) -- tracing disabled", .{err});
+        return;
+    };
 }
 
 const gpa = std.heap.c_allocator;

@@ -354,9 +354,6 @@ pub fn isCoveringOn(m: *const Model, win: WindowId, ws: WSId) bool {
 /// enumerating optional subsystems. At most one occupant per ws by the
 /// reconciler. (fullscreen's occupant hook is a stricter AND scan: covering +
 /// anchored + visible — see fullscreen.fullscreenOccupantOnWs.)
-/// The first covering occupant on `ws`: rec.ws == ws AND
-/// present-not-parked AND visibleOn. At most one module binds
-/// this.
 pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {

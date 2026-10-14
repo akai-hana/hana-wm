@@ -63,7 +63,8 @@ pub fn requestReexec() void {
 }
 
 /// Atomic, mirrors proc.consumeReload: true exactly once per request.
-/// Consumed by the event loop before consumeReload.
+/// Consumed by the event loop AFTER consumeReload (events.run checks reload
+/// first, re-exec second).
 pub fn consumeReexec() bool {
     return should_reexec.swap(false, .acq_rel);
 }
