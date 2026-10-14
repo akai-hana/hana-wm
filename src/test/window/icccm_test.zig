@@ -8,17 +8,16 @@ const std = @import("std");
 const testing = std.testing;
 
 const icccm = @import("icccm");
-const props = @import("props");
 
 test "peek on an empty cache is a miss (never a blocking query)" {
-    props.reset();
-    defer props.reset();
+    icccm.reset();
+    defer icccm.reset();
     try testing.expect(icccm.peekInputModelResolved(42) == null);
 }
 
 test "ICCCM 4.1.7 matrix: take_focus × accepts_input selects the delivery model" {
-    props.reset();
-    defer props.reset();
+    icccm.reset();
+    defer icccm.reset();
 
     // (take_focus, accepts_input) → model, per §4.1.7.
     const Case = struct { take_focus: bool, accepts_input: bool, model: icccm.InputModel };
@@ -31,7 +30,7 @@ test "ICCCM 4.1.7 matrix: take_focus × accepts_input selects the delivery model
 
     for (cases, 0..) |c, i| {
         const win: u32 = @intCast(100 + i);
-        props.put(win, .{
+        icccm.put(win, .{
             .accepts_input = c.accepts_input,
             .wm_delete = false,
             .take_focus = c.take_focus,
@@ -53,11 +52,11 @@ test "provisionalResolution is the documented miss-path verdict" {
 }
 
 test "cache eviction puts a window back on the miss path" {
-    props.reset();
-    defer props.reset();
+    icccm.reset();
+    defer icccm.reset();
 
-    props.put(7, .{ .accepts_input = true, .wm_delete = true, .take_focus = true });
+    icccm.put(7, .{ .accepts_input = true, .wm_delete = true, .take_focus = true });
     try testing.expect(icccm.peekInputModelResolved(7) != null);
-    props.evict(7);
+    icccm.evict(7);
     try testing.expect(icccm.peekInputModelResolved(7) == null);
 }

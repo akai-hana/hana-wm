@@ -28,9 +28,9 @@ const alloc = std.heap.c_allocator;
 const window = @import("window");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
-const restart = @import("restart");
+const lifecycle = @import("lifecycle");
+const admission = @import("admission");
 const handoff = @import("handoff");
-const restore = @import("restore");
 const focus = @import("focus");
 
 const atoms = @import("atoms");
@@ -140,8 +140,8 @@ pub fn main(init: std.process.Init) !void {
     input.buildKeybinds(config_ptr.keybindings.items);
 
     // Arm the unified reload: resolve the exec path before any reload/reexec
-    // request can arrive (restart.init).
-    restart.init();
+    // request can arrive (lifecycle.init).
+    lifecycle.init();
 
     // Drop the Config internals and the heap box core owns. No identity guard:
     // a reload goes through core.replaceOwnedConfig, which releases the
@@ -179,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
     requests.flush(x.conn);
     log.info("hana booted up successfully!", .{});
 
-    // Re-exec session hand-off (restart.execNext sets restore_env). The env
+    // Re-exec session hand-off (lifecycle.execNext sets restore_env). The env
     // var is the ONLY adoption gate: execNext sets it alongside a file it has
     // just written, so an env-gated boot always reads its own predecessor's
     // record. A cold boot (no env) adopts nothing, and discards a leftover
@@ -187,9 +187,9 @@ pub fn main(init: std.process.Init) !void {
     // ONCE: the same record drives the adoption below and the retirement at
     // the end, and nothing in this process writes restore_env (execNext's
     // setenv runs in the predecessor, and is noreturn here anyway).
-    const restore_path_z = restart.restorePathFromEnv();
+    const restore_path_z = lifecycle.restorePathFromEnv();
     if (restore_path_z) |path_z| {
-        restore.adoptSession(std.mem.span(path_z));
+        admission.adoptSession(std.mem.span(path_z));
     } else {
         handoff.discardOrphan(alloc);
     }
