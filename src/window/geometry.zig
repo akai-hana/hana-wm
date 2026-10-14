@@ -57,9 +57,15 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
         .tiled => {
             if (!detachTiledToFloating(m, e, win)) return;
         },
-        .floating => {
+        .floating => |r| {
             e.anchor = .tiled;
-            repairStrandedHome(m, e, win);
+            if (!repairStrandedHome(m, e, win)) {
+                // The destination tiled list was full, so the window could not
+                // be re-seated: keep it floating with its original rect rather
+                // than leaving it anchored-tiled with no seat.
+                e.anchor = .{ .floating = r };
+                return;
+            }
         },
     }
     actions.retile(.{ .mode = .restack }, null);
@@ -68,12 +74,18 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
 /// Defense in depth (the stranded-slot bug class): repair a tiled-anchored
 /// window that has no home-list entry instead of leaving it a
 /// tiling-invisible window this toggle could never fix again.
-fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.WindowId) void {
-    if (model_mod.findHome(m, win) != null) return;
+fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.WindowId) bool {
+    if (model_mod.findHome(m, win) != null) return true;
     if (model_mod.lowestBit(e.mask)) |h| {
-        _ = m.ws[h.index].tiled_order.append(win);
+        // Append fails when the destination tiled list is full; only commit
+        // home_ws when the seat actually got an entry, and report failure so
+        // the caller can revert the anchor. Committing home_ws anyway would
+        // leave the window anchored-tiled with no seat -- the exact stranded
+        // state this function exists to prevent.
+        if (!m.ws[h.index].tiled_order.append(win)) return false;
         e.home_ws = h;
     }
+    return true;
 }
 
 /// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
@@ -88,13 +100,14 @@ pub fn dragRect(win: model_mod.WindowId, r: model_mod.Rect) void {
 
 /// First motion of a drag on a tiled window detaches it to floating at its
 /// current geometry (pending-float detach + remove + retile).
-pub fn detachToFloating(win: model_mod.WindowId) void {
+pub fn detachToFloating(win: model_mod.WindowId) bool {
     const m = pipeline.mut(&gate);
-    const e = m.store.getPtr(win) orelse return;
-    if (isCoveringMode(m, win)) return;
-    if (e.anchor != .tiled) return;
-    if (!detachTiledToFloating(m, e, win)) return;
+    const e = m.store.getPtr(win) orelse return false;
+    if (isCoveringMode(m, win)) return false;
+    if (e.anchor != .tiled) return false;
+    if (!detachTiledToFloating(m, e, win)) return false;
     pipeline.reconcileGrab();
+    return true;
 }
 
 // floating drag commands (registry loops)
