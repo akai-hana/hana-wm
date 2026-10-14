@@ -9,12 +9,15 @@
 //! spellings stay in parser -- `parseColor` (a hex string to a
 //! u32) and the weight markers (`parseWeightPrefix`/`isWeightToken`/
 //! `weightFromToken`/`splitWeightPrefix`), which the bare-token
-//! interpreter classifies with. This file sits between parser and
-//! schema: it reads parser's `Value` and token grammar, and schema
-//! (and bar_properties) read this file's decoders. The dependency is
-//! one-directional -- parser never imports color -- so it cannot
-//! cycle, which is how bar_properties sits beside schema without
-//! a schema<->bar_properties loop.
+//! interpreter classifies with. This file sits in `parse/` between
+//! parser and schema: it reads parser's `Value` and token grammar, and
+//! schema (and bar_properties, now beside it in `parse/`) read this
+//! file's decoders. The dependency is one-directional -- parser never
+//! imports color -- so it cannot cycle; bar_properties takes the knob
+//! table as a parameter, so schema<->bar_properties stays loop-free
+//! too. With color and bar_properties both living in `parse/`, the
+//! config layer's cross-directory edge is gone outright: `parse/`
+//! imports nothing from `sections/` or `vocab/`.
 
 const std = @import("std");
 const log = @import("log");

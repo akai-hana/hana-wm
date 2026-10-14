@@ -1,7 +1,7 @@
 //! Config reload: load, validate, and atomically swap in a new
 //! config, then rebuild the subsystems that read it. Keybindings
 //! regrab only when the key PAIR layout changed; bar and tiling
-//! rebuild unconditionally (see reload/diff.zig). Split out of
+//! rebuild unconditionally (see persist/diff.zig). Split out of
 //! events.zig (review 05-input round 2). A transition concern --
 //! driven by the reload flag the event loop consumes -- not
 //! per-event path work.

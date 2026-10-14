@@ -317,6 +317,61 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
     try testing.expect(ec.keys);
 }
 
+test "detectChanges: mouse-bind pair layout changes are keys changes too" {
+    var base = types.Config{};
+    defer base.deinit(testing.allocator);
+    try base.mouse_bindings.append(testing.allocator, .{
+        .modifiers = 4,
+        .button = 1,
+        .action = .close_window,
+    });
+
+    // Same mods/button, different action: no regrab.
+    var action_only = types.Config{};
+    defer action_only.deinit(testing.allocator);
+    try action_only.mouse_bindings.append(testing.allocator, .{
+        .modifiers = 4,
+        .button = 1,
+        .action = .toggle_prompt,
+    });
+    try testing.expect(!config.detectChanges(&base, &action_only).keys);
+
+    // Same button, different modifiers: regrab.
+    var remod = types.Config{};
+    defer remod.deinit(testing.allocator);
+    try remod.mouse_bindings.append(testing.allocator, .{
+        .modifiers = 5,
+        .button = 1,
+        .action = .close_window,
+    });
+    try testing.expect(config.detectChanges(&base, &remod).keys);
+
+    // Same modifiers, different button: regrab.
+    var rebutton = types.Config{};
+    defer rebutton.deinit(testing.allocator);
+    try rebutton.mouse_bindings.append(testing.allocator, .{
+        .modifiers = 4,
+        .button = 3,
+        .action = .close_window,
+    });
+    try testing.expect(config.detectChanges(&base, &rebutton).keys);
+
+    // A mouse binding added: regrab.
+    var added = types.Config{};
+    defer added.deinit(testing.allocator);
+    try added.mouse_bindings.append(testing.allocator, .{
+        .modifiers = 4,
+        .button = 1,
+        .action = .close_window,
+    });
+    try added.mouse_bindings.append(testing.allocator, .{
+        .modifiers = 4,
+        .button = 3,
+        .action = .dump_state,
+    });
+    try testing.expect(config.detectChanges(&base, &added).keys);
+}
+
 // Re-exec config snapshot
 //
 // refreshSnapshot freezes the winning config so a binary-only re-exec
