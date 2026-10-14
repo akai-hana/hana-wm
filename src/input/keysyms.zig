@@ -19,8 +19,15 @@ pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 /// `"Super_L"` agree), or `XKB_KEY_NoSymbol` when the name is unknown. `name`
 /// may carry trailing NUL bytes; parsing stops at the first NUL.
 pub fn keysymFromName(name: []const u8) u32 {
+    // xkb_keysym_from_name wants a NUL-terminated C string; a name without an
+    // embedded NUL handed it the buffer's first byte with no terminator and an
+    // out-of-bounds read. Copy into our own NUL-terminated buffer regardless.
+    var buf: [256]u8 = undefined;
     const z = std.mem.sliceTo(name, 0);
-    return xkb.xkb_keysym_from_name(z.ptr, xkb.XKB_KEYSYM_CASE_INSENSITIVE);
+    const n = @min(z.len, buf.len - 1);
+    @memcpy(buf[0..n], z[0..n]);
+    buf[n] = 0;
+    return xkb.xkb_keysym_from_name(&buf, xkb.XKB_KEYSYM_CASE_INSENSITIVE);
 }
 
 /// XKB name for `keysym` (e.g. XKB_KEY_at -> "at") into `buf`, returning a

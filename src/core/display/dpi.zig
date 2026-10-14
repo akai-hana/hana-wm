@@ -143,14 +143,10 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     return geometry_dpi;
 }
 
-/// Scales a font size value against the screen height, clamped to a minimum of 1px.
-/// Percentage values are relative to font_baseline_height (1080px) rather than the
-/// screen baseline, so font sizes degrade more gracefully on smaller screens.
-/// Note the asymmetry with scaleBarHeight below: that sibling delegates to
-/// scaling.scaleToPixels because bar height is an absolute figure against
-/// the screen baseline, while font size keeps this inline relative-to-1080 form.
 /// Scales a font size value against the screen HEIGHT, clamped to a minimum of
-/// 1px.
+/// 1px. Percentage values are relative to font_baseline_height (1080px)
+/// rather than the screen baseline, so font sizes degrade more gracefully on
+/// smaller screens.
 ///
 /// Takes the height as a plain value rather than a `core.Screen` (6.5). There
 /// used to be two shapes of this one function -- this one took a whole

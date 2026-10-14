@@ -32,9 +32,7 @@ const constants = @import("constants");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
 const helpers = @import("helpers");
 
-/// Bounded placement buffer width, mirroring the engine's own cap.
 const ledger = @import("ledger");
-pub const max_order = constants.max_tiled_windows;
 
 /// Why the fixture refused to connect, so setUp can pick the right banner.
 const SkipReason = enum { no_x, live_wm };
@@ -99,14 +97,6 @@ pub fn setUp(name: []const u8) error{SkipZigTest}!*Fx {
     return fx;
 }
 
-/// A test-owned transition-layer gate: gives the reset path a mutable model
-/// (model.unregister) without touching src/* production code.
-var gate: pipeline.Gate = .{};
-
-fn mutModel() *model.Model {
-    return pipeline.mut(&gate);
-}
-
 /// Server-reported window geometry. X11 sizes include the border, so
 /// `width`/`height` are the outer footprint like the engine's placements.
 pub const Geometry = struct {
@@ -157,6 +147,14 @@ pub const Fx = struct {
     root: u32,
     alloc: std.mem.Allocator,
     config: types.Config,
+    /// Every id created through createWindow(): the model only ADMITS a
+    /// fraction of them, and a stray far-from-admission one would otherwise
+    /// stay internal-invisible to the model-drain loop in reset().
+    // Fixed-capacity, no heap: the Fx is process-global and shared across
+    // tests, so an append-owned list allocation would leak out of any single
+    // test's deinit boundary.
+    tracked_wins: [128]u32 = undefined,
+    tracked_count: usize = 0,
 
     var g_fx: ?*Fx = null;
 
@@ -237,13 +235,16 @@ pub const Fx = struct {
     /// a previous test and re-init the model/ledger. Runs at every connect()
     /// (see above); the connection is kept for the process lifetime.
     pub fn reset(self: *Fx) void {
-        const m = mutModel();
-        while (m.store.count() > 0) {
-            const win = m.store.at(m.store.count() - 1).key;
+        // Destroy every window createWindow made -- not only the ones the model
+        // admitted (newer contract fact: the old drain walked the model, and a
+        // test-added stray like ewmh_test's `stranger` was never registered, so
+        // it stayed effective over the shared display after its test). The
+        // model/ledger re-arms via pipeline.init() which both clear the
+        // admitted-composition too.
+        for (self.tracked_wins[0..self.tracked_count]) |win| {
             _ = xcb.xcb_destroy_window(self.conn, win);
-            model.unregister(m, win);
-            ledger.forget(win);
         }
+        self.tracked_count = 0;
         self.flush();
         pipeline.init();
     }
@@ -266,7 +267,7 @@ pub const Fx = struct {
     /// override_redirect protects the test's geometry/focus assertions from a
     /// foreign window manager running on the same $DISPLAY (the repo's own
     /// harness runs these under a dedicated Xvfb; this is defense in depth).
-    pub fn createWindow(self: *const Fx) u32 {
+    pub fn createWindow(self: *Fx) u32 {
         const win = xcb.xcb_generate_id(self.conn);
         const value_mask: u32 = xcb.XCB_CW_OVERRIDE_REDIRECT;
         const value_list = [_]u32{1}; // override_redirect = true
@@ -285,6 +286,10 @@ pub const Fx = struct {
             value_mask,
             &value_list,
         );
+        if (self.tracked_count < self.tracked_wins.len) {
+            self.tracked_wins[self.tracked_count] = win;
+            self.tracked_count += 1;
+        }
         return win;
     }
 

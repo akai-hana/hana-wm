@@ -184,10 +184,10 @@ pub const WindowModule = struct {
     // handle and does NOT @constCast), and each module decides from that
     // state whether it owns the window's blob (at most one module returns
     // bytes per window). `deserializeWindow` returns whether this module
-    // claimed the blob; persist stamps the claiming module's registry ordinal
-    // (plus a version) onto every blob, so adoption fast-paths on that ordinal
-    // and falls back to the hooks' self-identifying format tag (magic byte)
-    // when the ordinal no longer resolves.
+    // claimed the blob; persist stamps the claiming module's name onto every
+    // blob, so adoption fast-paths on that name and falls back to the legacy
+    // registry ordinal -- then the hooks' self-identifying format tag (magic
+    // byte) -- when the name no longer resolves.
     serializeWindow: ?*const fn (*const model.Model, u32, std.mem.Allocator) ?[]const u8 = null,
     deserializeWindow: ?*const fn (u32, []const u8, *model.Model) bool = null,
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,

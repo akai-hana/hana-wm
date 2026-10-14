@@ -37,7 +37,10 @@ test "normalizeModifiers keeps real modifiers, strips lock and button bits" {
         masks.toMask(masks.normalizeModifiers(masks.mod_control | masks.mod_super | masks.mod_numlock | masks.mod_scrolllock | 0x0100)),
     );
     // All-ones folds to exactly the binding mask, never wider.
-    try testing.expectEqual(masks.mod_mask_binding, masks.toMask(masks.normalizeModifiers(0xffff)));
+    try testing.expectEqual(
+        masks.mod_shift | masks.mod_control | masks.mod_alt | masks.mod_super,
+        masks.toMask(masks.normalizeModifiers(0xffff)),
+    );
     try testing.expectEqual(@as(u16, 0), masks.toMask(masks.normalizeModifiers(masks.mod_capslock | masks.mod_numlock)));
 }
 

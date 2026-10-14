@@ -7,8 +7,6 @@
 //!
 //! Layer note: connection-free, so it is importable from the pure layers.
 
-const std = @import("std");
-
 const constants = @import("constants");
 
 pub const xkb = @cImport({

@@ -167,7 +167,8 @@ pub fn seedParamsFromConfig() void {
             // string still applies to the active kind).
             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        if (cfg.masterCountLookup()[id]) |mc| s.params.primary_count = mc;
+        if (cfg.masterCountLookup()[id]) |mc|
+            s.params.primary_count = @min(mc, @as(u8, @intCast(@max(1, max_primary_count))));
     }
 }
 
