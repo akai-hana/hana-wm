@@ -27,6 +27,7 @@ const input = @import("input");
 const alloc = std.heap.c_allocator;
 const window = @import("window");
 const actions = @import("actions");
+const seed = @import("seed");
 const pipeline = @import("pipeline");
 const lifecycle = @import("lifecycle");
 const admission = @import("admission");
@@ -169,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
     // variants, master count, and per-workspace overrides stay inert until
     // the first explicit reload. No reconcile here: nothing is managed yet,
     // so there is no X state to push.
-    actions.seedParamsFromConfig();
+    seed.seedParamsFromConfig();
 
     // Direct subsystem init: surfaces is the composition root for chrome;
     // window/tiling/bar hooks dispatch through the build-generated registries.

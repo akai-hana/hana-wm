@@ -12,7 +12,7 @@ const config = @import("config");
 const input = @import("input");
 const window = @import("window");
 const admission = @import("admission");
-const actions = @import("actions");
+const seed = @import("seed");
 const grabs = @import("grabs");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `surfaces.onReload()` call below compiles away.
@@ -119,7 +119,7 @@ pub fn handleConfigReload() !void {
     // No `has_bar` guard: `surfaces.onReload` is the no-op hook when no
     // surface module is compiled in, so the gate is already inside the type.
     surfaces.onReload();
-    actions.applyConfigReload();
+    seed.applyConfigReload();
     // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
     // and sweeping first would send every border twice -- once here, once
     // again deduped against fresh state. Sweeping last lets the sweep
