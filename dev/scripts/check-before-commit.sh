@@ -34,20 +34,31 @@ for arg in "$@"; do
     esac
 done
 
+# Speed policy: FULL SPEED BY DEFAULT. With ZBUILD_THROTTLE=1 every step
+# below (fmt, build check, modularity, tests) routes through the throttle
+# wrapper dev/scripts/zbuild.sh (nice + pinned cores + -j2), and the flag
+# propagates to nested gates such as check-layers. Plain runs are untouched.
+zb=(zig build)
+fmt_cmd=(zig fmt --check .)
+if [ "${ZBUILD_THROTTLE:-0}" = "1" ]; then
+    zb=(dev/scripts/zbuild.sh)
+    fmt_cmd=(dev/scripts/zbuild.sh -- zig fmt --check .)
+fi
+
 echo "[check-before-commit] fmt check..."
-zig fmt --check .
+"${fmt_cmd[@]}"
 
 echo "[check-before-commit] zig build check (type-check + plugin-template + layers)..."
-zig build check
+"${zb[@]}" check
 
 if [ "$RUN_MODULARITY" -eq 1 ]; then
     echo "[check-before-commit] feature-deletion modularity matrix..."
-    zig build check-modularity
+    "${zb[@]}" check-modularity
 fi
 
 if [ "$RUN_TEST" -eq 1 ]; then
     echo "[check-before-commit] isolated test suite..."
-    dev/scripts/xtest.sh zig build test
+    dev/scripts/xtest.sh "${zb[@]}" test
 fi
 
 echo "[check-before-commit] OK"

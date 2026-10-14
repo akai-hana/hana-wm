@@ -261,3 +261,77 @@ pure/x11 split (only rename), usable_area placement.
 7. `grabs.zig`: loop/ vs proc/ — do you have a preference, or should I
    decide? I'd default to keeping it in loop/ and revisiting if proc/
    grows a boot-lifecycle cluster.
+
+---
+
+## Resolutions (2026-10-06)
+
+1. **diag/xtrace** — the `src/core/diag/` move ships only together with the
+   future `hana --dump-state` CLI path (the `.dump_state` dispatch action
+   already exists); no move until then.
+2. **`persist.zig` → `handoff.zig`** — DONE. Importers, call-site aliases,
+   log prefixes (`handoff:`), `persist_version` → `handoff_version`, the test
+   file (`handoff_test.zig`), and ARCHITECTURE.md updated. Side finding: the
+   crash-recovery story in main.zig's comment was false — the restore file is
+   adopted ONLY via `HANA_RESTORE` (set solely by `execNext` next to a file it
+   just wrote), so after a crash the file sat orphaned forever while the
+   comment claimed it "is exactly what recovery needs". Resolution: the env
+   gate stays closed (no crash adoption — the XID-recycling hazard is real);
+   cold boots now discard the leftover (`handoff.discardOrphan`) and the
+   graceful-exit comment says what actually happens.
+3. **`contract_x11.zig` → `seams.zig`** — DONE (one-word naming rule).
+   Header rewritten: it claimed BarHandlers/TitleRender/DrawCtx, which live in
+   `bar/segment.zig`; the file actually exports `KeyPressEvent` + `Surfaces`.
+   merge-into-contract stays off the table (check-layers Rule 3).
+4. **reconcile/ledger** — behavioural reads stay in reconcile's header
+   ("Exactly five", numbered); field semantics now live only on
+   `SentEntry`; the stale "four" counts in ledger.zig and ARCHITECTURE.md
+   are gone. No information is stated twice.
+5. **`paths.zig`** — `pub const probe_order` built once here (source of
+   truth), dedup set derived from it (`probe_set`); not inlined at call
+   sites. Header now names the real consumers. Note: SIMPLIFICATION_PLAN_v6
+   C-06 had de-pub'd the old zero-consumer `pub common_dirs`; `probe_order`
+   is pub again per this decision — one word to flip it back.
+6. **`timers.zig`** — stays in `loop/`. The bar owns its half
+   (`bar.pollTimeoutMs`); events reaches it only through the generated
+   `surfaces` seam (build.zig), so moving it would break the has_bar=false
+   build shape. Revisit when a second deadline source exists.
+7. **`grabs.zig`** — moved to `src/input/grabs.zig` (it reads
+   `input.resolvedKeybinds()`; input.zig already documents the mutual
+   runtime-only dependency). check-layers.sh Rule-1 allowlist path updated.
+
+## Second pass — other src/ directories (2026-10-06)
+
+Scope: the directory axis (grouping, placement, naming) for `bar/`,
+`window/`, `config/`, `input/`, `tiling/`, `test/`. Per-file shape was
+already blessed twice (`dev/review`, `dev/review-r2`: 0△/0▽) and stays
+touched only where a name or path required it.
+
+8. **Renames** — DONE. `bar/draw.zig` → `repaint.zig` (submission/scoped
+   repaint orchestrator; `drawing.zig` keeps the Cairo/Pango context — the
+   one-letter draw/drawing pair was the tree's worst stem collision);
+   `bar/meter.zig` → `level.zig` (+ `meter_test` → `level_test`, and the
+   build feature `has_meter` / `// build-gate: meter` → `has_level` /
+   `level` — the gate feature name is keyed to the stem); `modulate.zig` →
+   `actions/parked.zig` (state noun from the model's `Presence.parked`,
+   covering all four tails — minimize + restore×3; stems `minimize` and
+   `restore` are taken by the module and session adoption, and the
+   intermediate `unpark` name covered only one pole); `wm.zig` →
+   `manage.zig` (manage/unmanage lifecycle).
+   `visibility_glue.zig` kept its `_glue` suffix (allowlisted,
+   self-describing); `ws.zig` kept (product vocabulary, hub-private).
+9. **Subgroups** — DONE. `window/`: facade root (`window`, `admission`,
+   `restore`) + `actions/` (hub + five groups) + `protocol/` (focus, icccm,
+   borders, identity, hints) + `state/` (tracking, wincache) + `modules/`
+   (unchanged). `config/`: root (`config`, `types`) + `source/` (discover,
+   fallback) + `parse/` (parser, schema, validate) + `grammar/` (sections,
+   binds, rules, color, action_names, layout_names, bar_properties) +
+   `reload/` (snapshot, diff). Build discovery is stem-keyed outside
+   `modules/` trees, so moves are build-neutral (same mechanism as
+   `core/`); the `src/config/` purity prefix and Rule-3 `find` are
+   recursive-safe. check-layers Rule-1 paths for focus/borders/icccm and
+   ARCHITECTURE §7/§11 updated. Tests stay category-flat (test/core and
+   test/engine are flat too — depth mirroring is category-level only).
+   input/, tiling/, and test/ reviewed: no changes (keysyms/keymap stay in
+   `input/` — the `@cImport` borrows chain them there and build.zig's
+   `pureLayerAllows` documents config's whitelist of `keysyms`).

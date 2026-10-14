@@ -59,7 +59,7 @@ wire_allowed() {
         # protocol (kept in window.*). focus.zig rides the
         # allowlist for that protocol duty (set_input_focus / raise / the
         # _NET_ACTIVE_WINDOW property write).
-        src/window/focus.zig) ;;
+        src/window/protocol/focus.zig) ;;
 
         # pipeline.raiseWindowNow and its one caller (the floating drag tick):
         # raising the dragged window is a STACKING write, and it goes out
@@ -122,7 +122,7 @@ wire_allowed() {
         # border sweep). A width-only configure is NOT a geometry/map
         # mutation and runs outside reconcile by design; the wincache
         # cacheBorderWidth dedup keeps it from spamming the server.
-        src/window/borders.zig) ;;
+        src/window/protocol/borders.zig) ;;
 
         # ICCCM client-message sends (pat1's xcb_send_event): WM_TAKE_FOCUS
         # (icccm.zig hands focus to windows that advertise the protocol),
@@ -132,7 +132,7 @@ wire_allowed() {
         # §4.1.2.7). These are client protocol text, not sync-bound wire
         # mutations. window.zig was already allowlisted above;
         # icccm.zig joins them here for this family.
-        src/window/icccm.zig) ;;
+        src/window/protocol/icccm.zig) ;;
 
         # src/test/x11/fixture.zig is a TEST DOUBLE: it drives a real X
         # connection owned by the X-gated harness to destroy leftover windows
@@ -163,11 +163,11 @@ wire_allowed() {
         # bar's keyboard grab-drop flush; input/mouse.zig is the Super+click
         # grab-unwind flush (finishGrab pushes the buffer after the two
         # xcb_allow_events replay/async calls -- no mutation of its own);
-        # core/loop/grabs.zig is the grab-installation flush
+        # input/grabs.zig is the grab-installation flush
         # (grabMouseButtons/grabKeybindings push the buffer after firing
         # all grab cookies -- the grabs themselves are not Rule-1 mutations).
         # These are documented non-mutations, not Rule-1 sends.
-        src/core/loop/events.zig|src/core/display/hz.zig|src/bar/modules/prompt/prompt.zig|src/input/mouse.zig|src/core/loop/grabs.zig) ;;
+        src/core/loop/events.zig|src/core/display/hz.zig|src/bar/modules/prompt/prompt.zig|src/input/mouse.zig|src/input/grabs.zig) ;;
 
         *) return 1 ;;
     esac
@@ -239,8 +239,10 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # that scan, is the last line of defense on bodies. Only the model file is
 # swept: it is the pure root (state plus the Rect/Margins value objects and
 # their coordinate helpers), its pure/ siblings carry no xcb tokens by
-# construction. architecture/contract.zig IS on this side of the sweep since
-# the xcb event TYPES moved out to its sibling contract_x11.zig: the contract
+# construction. architecture/contract.zig (and its split siblings
+# contract_window.zig / contract_segment.zig -- same pure vocabulary, see the
+# file-split note in the contract entry) IS on this side of the sweep since
+# the xcb event TYPES moved out to its sibling seams.zig: the contract
 # now names the key-press event as an opaque `KeyPressEvent` and carries the
 # connection as `*const anyopaque`, so it is xcb-free vocabulary and is swept
 # like any other pure file.)
@@ -259,7 +261,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/architecture/model.zig src/core/architecture/contract.zig src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/model.zig src/core/architecture/contract.zig src/core/architecture/contract_window.zig src/core/architecture/contract_segment.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do
@@ -268,8 +270,13 @@ if [ -n "$hits" ]; then
     done <<< "$hits"
 fi
 
-# Rule 4: formatting.
-if ! zig fmt --check . >/dev/null 2>&1; then
+# Rule 4: formatting. Full speed by default; with ZBUILD_THROTTLE=1 the
+# pass routes through dev/scripts/zbuild.sh like every other gate step.
+fmt_cmd=(zig fmt --check .)
+if [ "${ZBUILD_THROTTLE:-0}" = "1" ]; then
+    fmt_cmd=(dev/scripts/zbuild.sh -- zig fmt --check .)
+fi
+if ! "${fmt_cmd[@]}" >/dev/null 2>&1; then
     viol "rule 4 (zig fmt --check)"
 fi
 

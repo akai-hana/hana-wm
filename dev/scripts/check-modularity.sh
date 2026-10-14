@@ -106,6 +106,15 @@ remove_paths() {
 
 # Build and return 0 on success, 1 on failure.
 # stdout/stderr go to a log file; on failure the log is shown.
+# Speed policy: full speed by default; with ZBUILD_THROTTLE=1 each scenario
+# build routes through dev/scripts/zbuild.sh (nice + pinned cores), which
+# also propagates the flag to nested gates. Scenario copies live outside
+# the repo, so the wrapper path must be absolute and it runs in the
+# scenario's cwd (-- mode does not cd).
+ZIG=(zig build)
+if [[ "${ZBUILD_THROTTLE:-0}" == "1" ]]; then
+    ZIG=("$SCRIPT_DIR/zbuild.sh" -- zig build)
+fi
 try_build() {
     local root="$1"
     local log="$root/_build.log"
@@ -114,9 +123,9 @@ try_build() {
         local -a opts=(-j"$JOBS")
         [[ -n "$OPTIMIZE" ]] && opts+=("-Doptimize=$OPTIMIZE")
         if [[ "$VERBOSE" -eq 1 ]]; then
-            zig build "${opts[@]}" 2>&1
+            "${ZIG[@]}" "${opts[@]}" 2>&1
         else
-            zig build "${opts[@]}" >"$log" 2>&1
+            "${ZIG[@]}" "${opts[@]}" >"$log" 2>&1
         fi
     )
 }
