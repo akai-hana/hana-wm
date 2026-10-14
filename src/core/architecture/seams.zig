@@ -1,6 +1,9 @@
-//! X-aware half of the contract: extends contract.zig with XCB-typed seams
-//! (BarHandlers, TitleRender, DrawCtx) for wire-touching modules; vocabulary
-//! only, includes core.xcb types.
+//! X-aware half of the contract: the XCB-typed seams that extend contract.zig
+//! for wire-touching modules -- the concrete `KeyPressEvent` behind the
+//! contract's opaque type, and the `Surfaces` hook set a chrome-surface module
+//! binds. Vocabulary only (declarations, no behavior); includes core.xcb types.
+//! The split from contract.zig is what keeps contract.zig itself inside the
+//! Rule-3 xcb sweep's reach (check-layers.sh), so do not merge them back.
 
 const core = @import("core");
 const xcb = core.xcb;
