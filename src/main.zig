@@ -8,10 +8,12 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const events = @import("events");
+const grabs = @import("grabs");
 const signals = @import("signals");
 const config = @import("config");
 const types = @import("types");
 const scale = @import("dpi");
+const hz = @import("hz");
 const log = @import("log");
 const build_options = @import("build_options");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
@@ -118,6 +120,11 @@ pub fn main(init: std.process.Init) !void {
     // core.getState() call.
     core.init(x.conn, x.screen, x.root, alloc, config_ptr, dpi);
 
+    // Arm refresh-rate detection once at boot: a display feature (the
+    // rate serves bar render pacing and the floating drag throttle),
+    // idempotent, and it needs the root window core.init just published.
+    hz.ensureRefreshRateDetected(x.conn);
+
     // Mouse grabs and the cursor theme both read the live config (the bind
     // table and the theme name), so this cannot run until core.init above has
     // published the state -- it used to sit next to the X connect, 20 lines
@@ -151,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
     try signals.setup();
     defer signals.deinit();
 
-    events.grabKeybindings();
+    grabs.grabKeybindings();
     try window.init(alloc);
     defer window.deinit();
 
