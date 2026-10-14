@@ -31,7 +31,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // was missing v.workarea.x and the top window landed at the screen's left
     // edge whenever the workarea started off-origin.
     const top_rect = tiling.insetRect(
-        v.workarea.x + @as(i32, inset),
+        tiling.waX(v.workarea) + @as(i32, inset),
         tiling.waY(v) +| inset,
         v.workarea.width,
         v.workarea.height,
