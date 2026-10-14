@@ -176,7 +176,7 @@ fn redrawSegmentScoped(s: *State, id: usize) void {
 /// pass draw (null = draw unmeasured); `flush_blit` picks the immediate
 /// blitRegion+flush (timer-driven clock path -- no event-loop flush is
 /// coming) vs queueBlit (event-loop batch, no flush).
-pub fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, flush_blit: bool) void {
+fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u16, flush_blit: bool) void {
     if (state.segAt(id).draw == null) return;
     // Clear the whole reserved slot first: a display-mode shrink paints less
     // than the reservation, and the leftover region must show clean
@@ -186,7 +186,7 @@ pub fn redrawSlotScoped(s: *State, id: usize, x: u16, bound_w: u16, pinned_w: ?u
     // Shared harness: catches/logs draw errors, and a segment that painted
     // nothing (an error, or genuinely nothing to show) reports width 0, which
     // must skip the blit below. The segment states that rather than the bar
-    // inferring it from an unchanged x (21.7).
+    // inferring it from an unchanged x.
     const drawn = s.drawSegment(&ctx, id, x, pinned_w);
     if (!drawn.drew) return;
     const drawn_w: u16 = drawn.painted.width;

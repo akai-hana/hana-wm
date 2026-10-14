@@ -46,7 +46,7 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 /// Move `win`'s covering intent to `dest`, or drop it when a resident occupant
 /// there swallows the transfer.
 ///
-/// 12.8: the demote direction is EXPLICIT. This used to demote by calling
+/// The demote direction is EXPLICIT. This used to demote by calling
 /// `toggleCovering`, whose correctness depended entirely on a guard the caller
 /// had already proved -- `win` really was covering. Toggle is a two-edged verb:
 /// if that proof were ever lost (a reordered check, a new caller, a provider
@@ -74,7 +74,7 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 /// into de-fullscreen rather than clobbering the resident. Ghost records
 /// (minimized-from-fullscreen) move their ws too, following the parked mask.
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
-    // 12.4: model query, not a peer-module dispatch. The dispatch returned
+    // Model query, not a peer-module dispatch. The dispatch returned
     // null when no covering module is bound, which made "is this window
     // covering" answer false in such a build -- while the model still held the
     // intent, and handoff.zig restores it across a session restart.
@@ -91,7 +91,7 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     if (@popCount(e.mask) <= 1) return false;
     if (!model.taggedOn(e.*, ws)) return false; // tag wasn't set: true no-op
     e.mask &= ~model.bit(ws);
-    // 12.4: model query (see transferFullscreenOnMove).
+    // Model query (see transferFullscreenOnMove).
     if (model.isCoveringOn(m, win, ws)) {
         const dest = model.lowestBit(e.mask) orelse unreachable;
         retargetOrDropFullscreen(m, win, dest);

@@ -129,7 +129,7 @@ const State = struct {
 
 var g_state: State = .{};
 
-/// Re-arms the process-global drag state. (28.3)
+/// Re-arms the process-global drag state.
 ///
 /// The test fixture calls this for the same reason it calls minimize's and
 /// fullscreen's deinit/init: `g_state` is process-global state that a test can
@@ -142,7 +142,7 @@ pub fn resetState() void {
 }
 
 /// Test-only seam: leaves a drag ACTIVE, standing in for a test that never
-/// reached its `stopDrag`. (28.3)
+/// reached its `stopDrag`.
 ///
 /// Needed because the real `startDrag` calls `core.getState()`, so the leak
 /// this item is about cannot be reproduced headlessly any other way. Guarded

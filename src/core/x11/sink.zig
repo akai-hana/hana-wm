@@ -115,7 +115,7 @@ pub const Sink = struct {
     }
     /// Add (`add`) or remove (`!add`) one `_NET_WM_STATE` atom on `win`,
     /// preserving every other atom in the list. Generalized from the
-    /// fullscreen-only shim (5.5): the read-merge-replace dance is list
+    /// fullscreen-only shim: the read-merge-replace dance is list
     /// editing, and nothing about it is specific to fullscreen.
     pub inline fn setStateAtom(self: Sink, win: model.WindowId, state_atom: u32, atom: u32, add: bool) void {
         self.vt.set_state_atom(self.ptr, win, state_atom, atom, add);

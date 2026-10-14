@@ -6,7 +6,7 @@
 //! edge rules -- a zero-width slot must stay defined, and an offset past the
 //! far edge must saturate rather than exceed 100 -- and each copy is a chance
 //! to get one of them wrong. The slider core was the first user, and when a
-//! second meter arrived it would have been the second copy. (26.8)
+//! second meter arrived it would have been the second copy.
 //!
 //! The mapping is deliberately not a "physics" model: a bar is 0-100 by
 //! definition at the wire level, so there is no curve, no detent and no

@@ -325,10 +325,10 @@ fn drawPill(
     const pill_h_pad: u16 = 6;
     const white: u32 = 0xFFFFFFFF;
 
-    // (27.4) The pill describes the mode the handler is actually in. Gating it
+    // The pill describes the mode the handler is actually in. Gating it
     // on the config key suppressed it for exactly the addons that installed a
     // mode engine, so the bar showed a mode the user was in with no label.
-    // (27.5) The width comes from the mode, not from measuring here: the bar no
+    // The width comes from the mode, not from measuring here: the bar no
     // longer owns the "label implies pill" rule, only the drawing of it.
     const mode_idx: usize = @intFromEnum(vim_state.mode);
     const mode_w: u16 = if (editor.addon_active)

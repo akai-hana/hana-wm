@@ -40,7 +40,7 @@ pub const Sandbox = struct {
     /// Stands in for XDG_RUNTIME_DIR: refreshSnapshot creates `hana-config`
     /// inside it.
     runtime: []u8,
-    /// (28.5) Owns the temp tree `root`/`runtime` live in, so cleanup is a
+    /// Owns the temp tree `root`/`runtime` live in, so cleanup is a
     /// single TmpDir drop instead of two recursive deletes that can each
     /// half-succeed.
     tmp: std.testing.TmpDir,
@@ -52,7 +52,7 @@ pub const Sandbox = struct {
     prior_runtime_dir: ?[:0]u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, name: []const u8) !Sandbox {
-        // (28.5) A per-sandbox tmpDir rather than a child of a shared
+        // A per-sandbox tmpDir rather than a child of a shared
         // process-global scratch dir. Two consequences worth naming: the
         // isolation no longer depends on a PRNG argument, and
         // TmpDir.cleanup() removes the whole tree on drop, so there is no
@@ -93,7 +93,7 @@ pub const Sandbox = struct {
                 alloc.free(v);
             }
         }
-        // (28.5) tmp.cleanup() removes the whole tree, root and runtime
+        // Tmp.cleanup() removes the whole tree, root and runtime
         // included. The old deleteTreeAbs pair removed each independently and
         // ignored failures, so a partially-failed delete silently left files
         // behind with nothing left to retry with.

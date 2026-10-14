@@ -52,7 +52,7 @@ pub const Sub = struct {
     read: *const fn () ?Sample,
 };
 
-/// One reading from a readout, carrying its DISPLAY text. (25.3)
+/// One reading from a readout, carrying its DISPLAY text.
 ///
 /// This used to be `?u8` -- a bare 0-100 percent -- and the core hardcoded
 /// "{d}%" when rendering it. That put the readout's presentation in the wrong
@@ -81,7 +81,7 @@ pub fn percentSample(buf: []u8, value: u8) Sample {
 pub const subs = @import("systatus_subs").subs;
 
 /// One file read, with truncation reported rather than hidden.
-pub const FileRead = struct {
+const FileRead = struct {
     bytes: []const u8,
     /// True when the read filled `buf` completely, so the tail was dropped and
     /// the contents cannot be trusted whole. `readSmallFile` used to discard
@@ -165,15 +165,15 @@ fn widthStateFor(comptime idx: usize) type {
 }
 
 /// A rendered readout: the full segment text plus the span of the value within
-/// it. (25.3) Offsets, not a subslice, so the painter never has to recover a
+/// it. Offsets, not a subslice, so the painter never has to recover a
 /// position from an address.
-pub const Rendered = struct {
+const Rendered = struct {
     text: []const u8,
     value_start: usize,
     value_len: usize,
 };
 
-/// PURE (25.3): renders "<label> <value>" into `buf` from a sample. No globals,
+/// PURE: renders "<label> <value>" into `buf` from a sample. No globals,
 /// no I/O, no latching -- the absence and tolerance POLICY stays in `refresh`,
 /// so this half of the segment is directly testable. Before the split, the
 /// formatting, the value-span bookkeeping, the miss latching and the change
@@ -299,7 +299,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
         return contract.Painted.nothing(x);
     }
 
-    // (25.3) The stored offsets go straight to the painter; no subslice is
+    // The stored offsets go straight to the painter; no subslice is
     // manufactured here just to carry a position.
     const end_x = try drawing.drawPaddedSegmentValue(c.dc, c.config, c.height, x, subs[idx].name, st.last[0..st.len], st.value_start, st.value_len, c.config.segmentProps(subs[idx].name));
 
@@ -307,7 +307,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     // follow the text or the segment locks onto the startup probe and paints
     // over its right neighbors ("RAM 42%" clipped by the next slot). The bar
     // hands that width back through onPainted, whose store raises the redraw
-    // request on change (21.7), so the re-layout is not this module's job.
+    // request on change, so the re-layout is not this module's job.
     return contract.Painted.span(x, end_x);
 }
 

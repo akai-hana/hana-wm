@@ -1,7 +1,7 @@
 //! Golden-sequence tests for the sync layer: a recording sink captures every
 //! queued request; each scenario asserts the exact op sequence.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: tiling, minimize, fullscreen
 
@@ -492,7 +492,7 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectPark(0, 901);
 }
 
-// 11.4: the border-pixel dedup the sweep and the reconcile now share.
+// The border-pixel dedup the sweep and the reconcile now share.
 //
 // The subtle case is pixel 0. A blank ledger record's `pixel` field is 0, so a
 // comparison of `pixel != new` alone would elide the very first send for a
@@ -518,14 +518,14 @@ test "ledger: the border-pixel dedup does not swallow a real black border" {
     try testing.expect(!ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // elided
 }
 
-// 13.6: layout activation is ONE question, and "no active layout" still has to
+// Layout activation is ONE question, and "no active layout" still has to
 // produce a screen. Before this, the geometry path was gated on the COMPILE-time
 // `has_tiling` while the bar reported the active layout from
 // `contract.activeLayoutKind` (enabled AND registered). Gating on the resolved
 // kind alone is not enough: a `.tiled` entry with no placement is parked on
 // first sight (invisible) and frozen at its last rect afterwards (piled up), so
 // the inactive path must supply geometry rather than none.
-test "13.6: an inactive layout floats every window at the work area" {
+test "An inactive layout floats every window at the work area" {
     var fx: Fixture = undefined;
     fx.init();
     defer fx.deinit();
@@ -577,7 +577,7 @@ test "13.6: an inactive layout floats every window at the work area" {
     try testing.expectEqual(@as(usize, 2), seen);
 }
 
-// (28.1) The four ops that used to be silent shims. Before this, 4 of the
+// The four ops that used to be silent shims. Before this, 4 of the
 // sink's 11 vtable entries recorded nothing at all, so no test could assert
 // that hana grabbed the server before a fullscreen change, that it flushed,
 // or that the EWMH fullscreen atom was even set -- the shims discarded every

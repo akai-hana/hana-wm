@@ -48,7 +48,7 @@ pub inline fn model() *const model_mod.Model {
 /// params write is layout_rev, and an unconditional window_rev here would
 /// repaint every bar segment on every focus change (a real regression: window
 /// dirties drive the all-segments sweep, focus only the title). Fact bumps
-/// stay adjacent to the change that owns them; the ONE structural bump (10.5)
+/// stay adjacent to the change that owns them; the ONE structural bump
 /// lives in reconcileGrab, which is the pattern for making a bump
 /// impossible-to-forget -- when a path has a single meaning, not generally.
 pub inline fn mut() *model_mod.Model {
@@ -144,7 +144,7 @@ fn ctx() *reconcile.Ctx {
         .env = env,
         .color_of = colorOf,
         .bar_win = usable_area.mappedSurfaceWindow(),
-        // 13.6: resolved ONCE here, through the same call the bar uses, so
+        // Resolved ONCE here, through the same call the bar uses, so
         // geometry and the bar's "no layout" report can never disagree.
         .layout_active = contract.activeLayoutKind(
             model().ws[model().current.index].params.kind,
@@ -174,7 +174,7 @@ fn preReconcileDuties() void {
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
     // module receives a mutable pointer into the model anymore).
     //
-    // 8.8: the WRITE goes through model.applyParamsDelta rather than a raw
+    // The WRITE goes through model.applyParamsDelta rather than a raw
     // `*LayoutParams` taken from the model. The value-in/value-out shape
     // already stopped layout modules from mutating; this closes the last
     // un-gated channel, which was this pipeline function itself holding a
@@ -309,7 +309,7 @@ pub fn grabOnly() ScopedGrab {
 /// the key-dispatch path) so release WMs compile it out.
 ///
 /// This lived in `reconcile` next to the grab bracket it instrumented
-/// (5.4). The bracket belongs to the pipeline, so the measurement of the
+/// The bracket belongs to the pipeline, so the measurement of the
 /// bracket belongs here with it.
 const retile_prof = log.WindowedProfiler(
     build_options.profile_key,
@@ -317,7 +317,7 @@ const retile_prof = log.WindowedProfiler(
     std.log.info,
 );
 
-/// The default reconcile entry: bump the WINDOW fact first (10.5), then
+/// The default reconcile entry: bump the WINDOW fact first, then
 /// reconcile under a fresh server grab with the given opts -- `.{}` for a
 /// plain retile, `.{ .force_restack = true }` to re-emit stacking even when
 /// the ledger says nothing moved. The retile profiler measures the whole
@@ -355,7 +355,7 @@ pub inline fn reconcileGrab(o: reconcile.Opts) void {
 /// model-derived adjustment that depends on the new focus (the viewport snap)
 /// into the same reconcile instead of opening a second grab.
 ///
-/// 10.8: it runs ONLY on the `.before` leg, so a `.after` caller passing a
+/// It runs ONLY on the `.before` leg, so a `.after` caller passing a
 /// duty had it dropped with no diagnostic -- the function returned normally
 /// and the caller reasonably believed its adjustment had been folded in.
 /// `assert`ed here rather than left to the doc, because the drop is silent and

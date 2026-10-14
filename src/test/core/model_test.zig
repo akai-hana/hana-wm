@@ -1,5 +1,5 @@
 //! Unit tests for the model layer.
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: minimize, fullscreen, floating, workspaces, tiling
 
@@ -46,7 +46,7 @@ const far_position: usize = 99;
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
 
 const regCur = helpers.regCur;
 const expectOrder = helpers.expectOrder;
@@ -86,7 +86,7 @@ fn eqModel(a: *const Model, b: *const Model) bool {
         if (sa.params.primary_width != sb.params.primary_width) return false;
         if (sa.params.primary_count != sb.params.primary_count) return false;
         if (sa.params.secondary_balance != sb.params.secondary_balance) return false;
-        // 8.4: the viewport fields were NOT compared, so a determinism replay
+        // The viewport fields were NOT compared, so a determinism replay
         // that diverged in scroll offset or history passed as equal. Both are
         // per-workspace layout params that a preReconcile duty mutates, which
         // is exactly the kind of state a replay has to catch.
@@ -114,7 +114,7 @@ fn assertSingleMembership(m: *const Model) !void {
             }
         }
         try testing.expectEqual(@as(usize, 1), homes);
-        // 8.4: the cached home_ws must name the workspace that ACTUALLY holds
+        // The cached home_ws must name the workspace that ACTUALLY holds
         // the window. The single-membership count above only proves exactly
         // one list mentions it; a stale home_ws pointing elsewhere is the
         // "stranded home" bug, and the count check cannot see it.

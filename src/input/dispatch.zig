@@ -29,7 +29,7 @@ const surfaces = @import("surfaces").Surfaces;
 
 /// The toggle-bar-position action: re-anchor the bar, then reconcile.
 ///
-/// The reconcile lives here rather than in the bar's renderer (20.2). It takes
+/// The reconcile lives here rather than in the bar's renderer. It takes
 /// the X grab and re-derives every window placement from the new usable area,
 /// which is a layout decision about the whole session, not something a
 /// rendering module should be reaching for on its own account. The order
@@ -145,7 +145,7 @@ pub fn executeAction(action: *const types.Action) void {
         // inside the focus transition's single grab (see
         // actions.snapViewportFocusedDuty), so a cycle that scrolls the
         // viewport is still one grab+reconcile, not focus-then-snap's two --
-        // and 10.10's cycleFocus pairs the target with that duty, so the
+        // and focus.cycleFocus pairs the target with that duty, so the
         // pairing is no longer this call site's responsibility.
         .cycle_focus => |dir| focus.cycleFocus(dir, &actions.snapViewportFocusedDuty),
 

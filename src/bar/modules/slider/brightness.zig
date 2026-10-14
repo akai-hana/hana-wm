@@ -331,7 +331,7 @@ fn commitPct(v: u8) void {
 
 /// One-shot apply (press, drag end): commit then re-read so the display
 /// follows the device immediately rather than on the next poll tick.
-/// The one write entry point (26.8), replacing `previewPct` / `commitPct` /
+/// The one write entry point, replacing `previewPct` / `commitPct` /
 /// `applyPct`.
 ///
 /// The three were one function each, and the clamp and the display update were
@@ -391,7 +391,7 @@ pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
 
 /// The displayed level, or null while no backlight device has answered. The
 /// absence and the value were a `{bool, u8}` pair latched together; they are
-/// one optional now (26.8).
+/// one optional now.
 fn currentLevel() ?u8 {
     return if (g_has_value) g_pct else null;
 }

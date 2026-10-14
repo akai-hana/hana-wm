@@ -145,7 +145,7 @@ pub const WindowModule = struct {
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
     toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
-    // 12.4: `isCoveringMode`, `coveringWsOf` and `isCoveringOnWs` are GONE.
+    // `isCoveringMode`, `coveringWsOf` and `isCoveringOnWs` are GONE.
     // Each body was a pure read of the model's `covering_ws` field, so the
     // three hooks were three copies of a model query behind a dispatch that
     // returns null when no covering module is bound -- meaning "is this window
@@ -157,13 +157,13 @@ pub const WindowModule = struct {
     /// anchor-or-visible OR). Both exist and both are used: the model scan
     /// answers "who owns the screen", the strict one answers "which covering
     /// window is actually usable here". Renamed from `coveringOccupantOnWs`
-    /// (12.5) because sharing a name with the model scan is what let the two
+    /// Because sharing a name with the model scan is what let the two
     /// different semantics read as interchangeable. At most one module binds
     /// this.
     visibleCoveringOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
     /// One-way covering release: clear `win`'s covering intent and presence.
     /// Unlike `toggleCovering` this never ENTERS covering mode, so a peer that
-    /// means "demote" cannot turn into "promote" (12.8).
+    /// means "demote" cannot turn into "promote".
     releaseCovering: ?*const fn (*model.Model, model.WindowId) void = null,
     /// Retarget `win`'s covering intent to `ws` without dropping it (a
     /// covering window stays covering across a workspace move/tag change).

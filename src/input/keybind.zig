@@ -149,7 +149,7 @@ pub const KeybindResolver = struct {
     /// Returns a pointer into the current config's keybindings slice, or null.
     /// `mods` is a `BindingMods`, not a raw X modifier state: the table is
     /// keyed by masked masks, so an unmasked value would be a silent
-    /// never-match (19.4).
+    /// never-match.
     pub inline fn lookup(
         self: *const KeybindResolver,
         mods: masks.BindingMods,

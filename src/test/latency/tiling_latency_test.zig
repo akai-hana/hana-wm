@@ -11,7 +11,7 @@
 //! but the COMPUTE is O(total windows), so a retile's CPU cost grows with
 //! total window count even though few windows actually move.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: tiling
 
@@ -34,7 +34,7 @@ const bench = build_options.bench;
 
 const WindowId = model.WindowId;
 
-const makeModel = helpers.makeBareModel; // (28.3) bench: no module-store churn between iterations
+const makeModel = helpers.makeBareModel; // Bench: no module-store churn between iterations
 const regCur = helpers.regCur;
 const nowNs = time.monotonicNs;
 
@@ -90,7 +90,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
 
         // Follow-up pass: the changed reconcile left true steady state, so a
         // fresh one sends NOTHING. A regression to full-state re-send (the
-        // pre-14.9 cost center this file exists to quantify) fails here.
+        // cost center before the fix this file exists to quantify) fails here.
         var steady = CountingSink{};
         var steady_ctx = makeCtx(steady.sink(), colorOfFocused, helpers.std_wa);
         reconcile.run(&m, &steady_ctx, .{});
@@ -99,7 +99,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
         if (bench)
             helpers.benchLog(
                 "[tiling] n={d} (1ws): steady reconcile={d:.1} ns/pass, layout-change reconcile={d:.1} ns, requests on change={d} (configure={d},map={d})\n",
-                // (28.2) Was `move.geom`: TestSink has no `geom` counter. The
+                // Was `move.geom`: TestSink has no `geom` counter. The
                 // configure counter is the geometry-send counter -- configure
                 // is how a moved window's new rect reaches the server -- so
                 // this prints the number the label always meant.
@@ -250,7 +250,7 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         if (bench)
             helpers.benchLog(
                 "[tiling] layout switch n={d}: {d} XCB requests queued in grab (configure={d}, map={d}, park={d}, pixel={d})\n",
-                // (28.2) `sink` did not exist in this scope at all -- the sink
+                // `sink` did not exist in this scope at all -- the sink
                 // here is `counting` -- and `geom`/`bw` are not TestSink
                 // fields. All four placeholders are read off `counting`.
                 .{ n, counting.total, counting.configure, counting.map, counting.park, counting.pixel },

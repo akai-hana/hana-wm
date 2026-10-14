@@ -4,7 +4,7 @@
 //! modules' formulas (modules/*.zig), so any drift fails loudly. Fixture:
 //! windows registered on workspace 0 via model.register.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: tiling
 
@@ -265,7 +265,7 @@ test "fibonacci overflow fallback" {
     // The raised window sits in the leftover region, hint-free here.
     //
     // Addressed BY WINDOW, not by index. This used to be `expectP(&out, 5, 75,
-    // ...)` -- position 5 -- which is exactly the property 14.9 had to remove:
+    // ...)` -- position 5 -- which is exactly the property the fix had to remove:
     // fibonacci emitted the raised window early, so the index that held it was
     // a function of the traversal, not of the layout. The rect is the golden
     // value; the slot it lands in is the engine's business.
@@ -559,7 +559,7 @@ test "layout cycle is config-order and wraps" {
     }
 }
 
-/// The shared placement-invariant checker (14.9). Every layout's own tests pin
+/// The shared placement-invariant checker. Every layout's own tests pin
 /// GOLDEN rects, which is exactly the blind spot: a golden test passes when a
 /// layout emits the right numbers for the right window and nothing at all says
 /// anything about the properties that must hold for EVERY input. These five
@@ -609,7 +609,7 @@ fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
 // The sweep: every registered layout x every variant x n = 0..12, at the
 // standard work area AND at a deliberately hostile 120x120 one (where
 // min_dim floors and clamps actually engage instead of being no-ops).
-test "14.9: every layout satisfies the placement invariants at every size" {
+test "Every layout satisfies the placement invariants at every size" {
     if (!build_options.has_tiling) return error.SkipZigTest;
     // The workarea injections for the invariant sweep, extended beyond the
     // origin case: a side-claimed origin (`x=40, y=50`) catches the missing
@@ -652,7 +652,7 @@ test "14.9: every layout satisfies the placement invariants at every size" {
                         assertInvariants(&out, v, wa) catch |err| {
                             // Dump both sequences: an order mismatch is only
                             // actionable next to the two lists that disagree.
-                            std.debug.print("14.9 FAIL {s} variant={d} n={d} wa=({d},{d}) {d}x{d} env=(gap={d},border={d},min={d}): {s}\n", .{
+                            std.debug.print("FAIL {s} variant={d} n={d} wa=({d},{d}) {d}x{d} env=(gap={d},border={d},min={d}): {s}\n", .{
                                 lm.name, vi, n, wa.x, wa.y, wa.width, wa.height, env.margins.gap, env.margins.border, env.min_dim, @errorName(err),
                             });
                             std.debug.print("  order   :", .{});

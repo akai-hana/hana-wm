@@ -4,7 +4,7 @@
 //! init/deinit path that forwards the workspace count to tracking is
 //! exercised by the window-layer fixture's boot wiring, not here).
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: workspaces
 

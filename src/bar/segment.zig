@@ -148,7 +148,7 @@ pub const offscreen_rect: model.Rect = .{
 // The title segment's geometry -- its window list, the pixel-perfect tiling
 // shared by its draw and the bar's hit-test -- is not shared segment
 // vocabulary. It lives in modules/title/geom.zig, next to the only thing that
-// renders it (21.6).
+// renders it.
 
 /// Stable per-call rendering context: geometry and draw state. It carries no
 /// X connection: the title draw had one only to call
@@ -201,7 +201,7 @@ pub fn hasSource(sources: contract.DirtySources, source: DirtySourcesSource) boo
 
 /// Resolves a configured segment name to its registry index, or null when no
 /// module with that name is compiled in (segment removed or unknown).
-pub fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
+fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
     for (modules, 0..) |m, i| {
         if (std.mem.eql(u8, m.name, name)) return i;
     }

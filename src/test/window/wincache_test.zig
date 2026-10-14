@@ -14,7 +14,7 @@ const testing = std.testing;
 
 const wincache = @import("wincache");
 
-// 11.5: the title is a fixed inline buffer now, so there is no ownership left
+// The title is a fixed inline buffer now, so there is no ownership left
 // to test -- which is the point. This used to be "title ownership: overwrite
 // frees prior, remove frees owned", which asserted the three free paths that
 // no longer exist. What remains worth pinning is the copy semantics they used

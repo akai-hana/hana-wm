@@ -2,7 +2,7 @@
 //! covering-occupant state machine asserted through the model it
 //! mutates (toggle round-trips, minimize-from-fullscreen restore,
 //! covering_ws intent, occupant scans, parked-ghost exclusion) and
-//! the module's own PendingBarTable (the 12.7 deferred-bar intents).
+//! the module's own PendingBarTable (the deferred-bar intents).
 //! Extracted from model_test.zig; same makeModel fixture and
 //! fullscreen discipline as the parent file.
 
@@ -31,7 +31,7 @@ const unknown_win: WindowId = 999;
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
 
 const regCur = helpers.regCur;
 const expectOrder = helpers.expectOrder;
@@ -55,7 +55,7 @@ fn assertSingleMembership(m: *const Model) !void {
             }
         }
         try testing.expectEqual(@as(usize, 1), homes);
-        // 8.4: the cached home_ws must name the workspace that ACTUALLY holds
+        // The cached home_ws must name the workspace that ACTUALLY holds
         // the window. The single-membership count above only proves exactly
         // one list mentions it; a stale home_ws pointing elsewhere is the
         // "stranded home" bug, and the count check cannot see it.
@@ -298,7 +298,7 @@ test "move/tag retarget tracks covering_ws to the new ws" {
     try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
 }
 
-test "12.7: deferred bar pending is per-window, not a single slot" {
+test "Deferred bar pending is per-window, not a single slot" {
     if (!build_options.has_fullscreen) return error.SkipZigTest;
     const Table = fullscreen.PendingBarTable;
     const max = Table.max;

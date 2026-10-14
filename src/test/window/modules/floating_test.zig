@@ -29,7 +29,7 @@ const unknown_win: WindowId = 999;
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
 
 const regCur = helpers.regCur;
 const addFloating = helpers.addFloating;

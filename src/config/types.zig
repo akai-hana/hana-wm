@@ -355,7 +355,7 @@ pub const TilingConfig = struct {
     pub fn masterCountLookup(self: *const TilingConfig) [constants.max_workspaces]?u8 {
         var lookup: [constants.max_workspaces]?u8 = .{null} ** constants.max_workspaces;
         for (self.workspace_master_count_overrides.items) |o| {
-            // One validity notion, not a second inline range test (7.6).
+            // One validity notion, not a second inline range test.
             if (o.workspace_idx.isValid())
                 lookup[o.workspace_idx.index] = o.count;
         }
