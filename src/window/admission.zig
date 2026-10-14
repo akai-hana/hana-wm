@@ -630,7 +630,7 @@ pub fn adoptRootWindows() !usize {
         // rule, matching the MapRequest admission policy.
         const float = if (entry.record == null) resolveClassFloat(entry.cookies.c_wm_class) else false;
         // resolveClassFloat already consumed the WM_CLASS reply, so draining it
-        // again via discardAdmissionCookies(cookies, true) would double-dispose
+        // again (drainAdmissionCookies with all=true) would double-dispose
         // the same XCB reply (a freed sequence wedged at the 16-bit wrap, plus
         // a leaked discard entry per adopted window). Null it out in the drain
         // copy: the spawn-queue cookie is still discarded below, and when a

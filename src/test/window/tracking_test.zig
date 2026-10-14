@@ -1,4 +1,4 @@
-//! Facade-vs-ledger parity tests (src/window/tracking.zig vs
+//! Facade-vs-ledger parity tests (src/window/state/tracking.zig vs
 //! src/core/x11/reconcile.zig). The tracking facade is a read-through of the
 //! model; the sent ledger is the "what's on the wire" authority. After a
 //! reconcile the two must agree window-for-window on the managed set, on

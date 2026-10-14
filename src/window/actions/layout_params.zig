@@ -103,11 +103,9 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
 
 // config reload
 
-/// Per-workspace seed overrides resolved from `cfg` (built via the shared
-/// last-wins lookup rules on TilingConfig). The one labeled bundle driving
-/// per-workspace param seeding here (the separate workspaces override store
-/// was dead and is gone, C12).
-/// Seeds every workspace's model params from the CURRENT config. Shared by
+/// Seeds every workspace's model params from the CURRENT config, resolving
+/// per-workspace overrides through the shared last-wins lookup rules on
+/// TilingConfig. Shared by
 /// boot-time initialization (without this the config's tiling
 /// params/workspace overrides stay inert until the first explicit reload)
 /// and post-reload re-seeding; mirrors the per-workspace override model:

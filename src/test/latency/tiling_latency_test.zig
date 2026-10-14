@@ -23,10 +23,10 @@ const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 
 const time = @import("time");
-// Latency instrumentation only runs its full loops + timing output under
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
+// Latency instrumentation only runs its full loops + timing output under
 // `-Dbench`; the default suite keeps a silent smoke so `zig build
 // test` never writes to stderr (the runner flags test stderr as `failed
 // command:` even on success).

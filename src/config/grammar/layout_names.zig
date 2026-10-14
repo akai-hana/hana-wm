@@ -46,9 +46,9 @@ pub const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
 /// below.
 pub const max_layout_name = types.max_config_name;
 
-/// Layout-name normalization shared by isLayoutName, parseLayoutVariant and
-/// parseLayoutsArray: lowercases `name` into `buf`, returning null when it
-/// exceeds `max_layout_name` bytes so the caller can warn-and-skip (mirroring
+/// Layout-name normalization shared by isLayoutName and parseLayoutsArray:
+/// lowercases `name` into `buf`, returning null when it exceeds
+/// `max_layout_name` bytes so the caller can warn-and-skip (mirroring
 /// types.lowerSlice's caller-buffer semantics). Canonicalization of the
 /// master-stack aliases stays with the storage sites, which need it.
 pub fn normalizeLayoutName(buf: *[max_layout_name]u8, name: []const u8) ?[]const u8 {

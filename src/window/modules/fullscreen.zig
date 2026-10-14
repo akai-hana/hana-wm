@@ -157,22 +157,12 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
     return true;
 }
 
-// 12.4: `isFullscreenMode`, `fullscreenWsOf` and `isFullscreenOnWs` are GONE.
-// Each was a private copy of a model read (`covering_ws`), reached through a
-// contract dispatch that resolves to null when no covering module is bound --
-// so "is this window covering" was false in a build without one, and became
-// a per-provider answer for a per-field fact. The queries are `model.isCovering`,
-// `model.coveringWsOf` and `model.isCoveringOn`; they carry the same GHOST
-// semantics these had (a minimized-from-covering window keeps `covering_ws`
-// set and still reports its workspace).
-
-/// Clears `win`'s covering intent, returning the window to plain presence.
-/// The anchor needs no replay: nothing mutates a covering window's anchor
+/// Clears `win`'s covering intent and covering presence, returning the window
+/// to plain presence, and does nothing at all if `win` is not covering. The
+/// anchor needs no replay: nothing mutates a covering window's anchor
 /// (floating's setFloatingRect is gated on `presence != .covering`), so the
 /// base mode stands as recorded. Shared by the toggle-offs and the
 /// occupant-eviction path.
-/// One-way covering release (12.8): clears the intent and the covering
-/// presence, and does nothing at all if `win` is not covering.
 ///
 /// `toggleCovering` reaches this same body, but only after proving the window
 /// IS covering. A peer that means "demote" (the workspaces move/tag seam) must
@@ -251,8 +241,7 @@ pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     );
 }
 
-// The protocol-side geometry commit helpers are gone: reconcile.run derives
-// their wire traffic from the model.
+// Protocol-side geometry commits are derived by reconcile.run from the model.
 
 /// Called from the ConfigureNotify handler in events.zig. Drives both deferred
 /// bar transitions: hide on confirmed fullscreen dimensions (enter), show on

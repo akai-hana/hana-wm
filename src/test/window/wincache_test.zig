@@ -3,7 +3,7 @@
 //! Everything here runs without an X connection: the cache's entry lifecycle
 //! (title ownership, at-capacity drop) is pure allocation bookkeeping,
 //! so the leak-checking testing allocator pins it. The wire-touching half
-//! (fireTitleCookies/collectTitleCookies, sendBorderColorIfChanged, and the
+//! (fireTitleCookies/collectTitleCookies and the
 //! border-width dedup, which lives in the sync ledger now) needs a live
 //! display and stays in the integration layer. Size hints are NOT tested
 //! here: they have a single store (the model entry, threaded through

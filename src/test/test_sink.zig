@@ -263,10 +263,9 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(win, op.map);
         }
 
-        /// Asserts op `i` is a bare restack (`stack_only`) carrying `s`. The
-        /// other fixtures previously reasoned about restack through
-        /// `configure.stack`; this is the direct assertion on the op that
-        /// `reconcile/pipeline.zig` route around 14.8.
+        /// Asserts op `i` is a bare restack (`stack_only`) carrying `s`,
+        /// instead of reading the restack off a `configure.stack` like the
+        /// configure-shaped fixtures do.
         pub fn expectStackOp(self: *const Self, i: usize, win: model.WindowId, s: sinkmod.Stack) !void {
             comptime if (mode != .record) @compileError("expectStackOp requires record mode");
             const op = self.ops.items[i];

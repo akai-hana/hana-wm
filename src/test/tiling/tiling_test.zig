@@ -613,7 +613,7 @@ test "14.9: every layout satisfies the placement invariants at every size" {
     if (!build_options.has_tiling) return error.SkipZigTest;
     // The workarea injections for the invariant sweep, extended beyond the
     // origin case: a side-claimed origin (`x=40, y=50`) catches the missing
-    // wa.x placements, and the 120x120 hostile keep the clamps turning on.
+    // wa.x placements, and the 120x120 hostile one keeps the clamps turning on.
     const areas = [_]model.Rect{
         helpers.std_wa,
         .{ .x = 0, .y = 0, .width = 120, .height = 120 },

@@ -195,8 +195,7 @@ fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
             const slot = m.store.indexOf(w) orelse continue;
             const e = m.store.at(slot).val;
             if (!model.taggedOn(e.*, m.current)) continue;
-            // First write wins, mirroring the removed findPlacement's
-            // first-match semantics; the store holds each id once so this is
+            // First write wins; the store holds each id once so this is
             // just defensive.
             if (plan.pl_of_slot[slot] == null) plan.pl_of_slot[slot] = n;
             order_buf[n] = w;
@@ -534,8 +533,8 @@ fn computeDesire(
 /// has no placement this reconcile (multi-tag orphan, off-workspace, no-tiling
 /// build). `slot` must be < m.store.count(); the table was built alongside
 /// placements in reconcile. Indexes into a copy-cached slice so a module that
-/// emits fewer placements than ordered windows degrades to null (same as the
-/// removed linear scan) instead of indexing out of bounds.
+/// emits fewer placements than ordered windows degrades to null instead of
+/// indexing out of bounds.
 fn placementOfSlot(
     placements: *const contract.List,
     pl_of_slot: *const [model.store_capacity]?usize,

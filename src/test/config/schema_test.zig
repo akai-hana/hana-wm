@@ -95,9 +95,9 @@ test "master trio: flat [tiling] names match dedicated section" {
         \\
     );
     defer flat.deinit(testing.allocator);
-    // The bare [tiling] marker matters: like the old parseTiling early
-    // return, the whole tiling family -- including the dedicated spellings
-    // -- stays inert unless the [tiling] section itself exists.
+    // The bare [tiling] marker matters: the whole tiling family -- including
+    // the dedicated spellings -- stays inert unless the [tiling] section
+    // itself exists.
     var dedicated = try loadToml(testing.allocator, "master-dedicated",
         \\[tiling]
         \\[tiling.layouts.master-stack]
@@ -523,7 +523,7 @@ test "bar.position is case-insensitive; unknown spellings keep .top" {
     defer bottom.deinit(testing.allocator);
     try testing.expectEqual(types.BarScreenPosition.bottom, bottom.bar.bar_position);
 
-    // C8: now any-case, via BarScreenPosition.string_map through
+    // Position parsing is any-case, via BarScreenPosition.string_map through
     // types.enumFromString; "TOP" resolves to .top (not .bottom).
     var shouty = try loadToml(testing.allocator, "pos-shouty",
         \\[bar]

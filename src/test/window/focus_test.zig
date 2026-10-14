@@ -1,5 +1,5 @@
 //! X-gated integration tests for the two-phase focus protocol
-//! (src/window/focus.zig): ICCCM input-model resolution against real server
+//! (src/window/protocol/focus.zig): ICCCM input-model resolution against real server
 //! properties, the prepare/apply split, dedup, and the clear path. Self-skips
 //! on machines without an X server so `zig build test` stays green headless.
 

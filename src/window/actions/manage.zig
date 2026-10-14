@@ -34,9 +34,7 @@ const window_mods = @import("window_modules").modules;
 /// so the classification lives with it).
 const FullscreenKind = enum { enter, exit, switch_ };
 
-/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
-/// no module binds it; canonical scan lives in window.providerOf.
-const providerOf = actions.providerOf;
+const providerOf = window.providerOf;
 
 // covering (screen claim)
 

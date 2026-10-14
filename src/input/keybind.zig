@@ -11,11 +11,6 @@ const keysyms = @import("keysyms");
 const xkbcommon = @import("xkbcommon");
 const masks = @import("masks");
 
-/// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
-/// config's keybindings, plus the keycode-resolution step that feeds it.
-/// Module-owned by `input` (not embedded in Config) so the config layer stays
-/// X-free; `input.deinitKeybinds` tears it down before the Actions its entries
-/// point into are freed.
 /// Orders the dispatch table by packed key, applied ONCE after the table is
 /// built (see rebuildDispatchMap). The key is a u64 built as
 /// (modifiers << 32) | keysym, so this is also a plain numeric order on the
@@ -69,6 +64,11 @@ const DispatchEntry = struct {
     action: *const types.Action,
 };
 
+/// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
+/// config's keybindings.
+/// Module-owned by `input` (not embedded in Config) so the config layer stays
+/// X-free; `input.deinitKeybinds` tears it down before the Actions its entries
+/// point into are freed.
 pub const KeybindResolver = struct {
     /// Sorted ascending by `key`, so lookup is a bisection with no hash state,
     /// no tombstones, and no per-rebuild rehashing. A config has tens of

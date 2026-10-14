@@ -187,7 +187,7 @@ test "refreshSnapshot freezes only the config files the load consumed" {
     defer alloc.free(env[1]);
 
     // What the loader actually reads: one top-level file plus an include.
-    // `include` is only honoured as a ROOT key (parser.zig:230), so it has to
+    // `include` is only honoured as a ROOT key, so it has to
     // sit above the first table header.
     try box.write("hana/config.toml",
         \\include = ["themes/akai.toml"]

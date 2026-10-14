@@ -14,7 +14,6 @@ const hz = @import("hz");
 
 const types = @import("types");
 
-const drawing = @import("drawing");
 const segmod = @import("segment");
 const geom = @import("geom");
 const contract = @import("contract");

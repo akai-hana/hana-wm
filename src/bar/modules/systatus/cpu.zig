@@ -1,7 +1,7 @@
 //! Systatus CPU readout.
 //! Computes aggregate core utilization % from the delta of the first
 //! /proc/stat line. The very first read has no previous sample to subtract, so
-//! it takes one short real measurement of its own (see `boot_priming_ns`) and
+//! it takes one short real measurement of its own (see `bootAverage`) and
 //! reports that: the segment renders on the first frame like RAM/VOL/BRT do,
 //! rather than staying collapsed for a tick.
 //!

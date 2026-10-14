@@ -19,8 +19,6 @@ const log = @import("log");
 
 const actions = @import("actions");
 
-/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
-/// no module binds it; canonical scan lives in window.providerOf.
 const providerOf = actions.providerOf;
 
 /// Shared change guard for the tag/pin actions: the window must be present in
@@ -160,8 +158,8 @@ pub fn switchTo(ws_idx: u8) void {
     // masks do not exist in the model.
     m.all_view_active = false;
 
-    // model.current is the ONLY store for the current workspace; the
-    // tracking/workspaces mirrors are deleted (read-through facades now).
+    // model.current is the ONLY store for the current workspace; the other
+    // layers read through it.
     m.current = model_mod.WSId.fromIndex(ws_idx);
 
     // Bump the window fact: the workspace indicator always changes on switch.

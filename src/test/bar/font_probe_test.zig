@@ -29,7 +29,8 @@ const drawing = @import("drawing");
 test "probeFontMetrics runs repeatedly on the named-font path" {
     const families = [_][]const u8{"Sans"};
     for (0..8) |_| {
-        _ = drawing.probeFontMetrics(testing.allocator, 96.0, &families);
+        const m = drawing.probeFontMetrics(testing.allocator, 96.0, &families);
+        try testing.expect(m != null);
     }
 }
 
@@ -38,7 +39,8 @@ test "probeFontMetrics runs repeatedly on the fallback-font path" {
     // `pango_font_description_from_string` call inside `loadFont`, so it is a
     // distinct branch for a `defer`-ordering mistake to hide in.
     for (0..8) |_| {
-        _ = drawing.probeFontMetrics(testing.allocator, 96.0, &.{});
+        const m = drawing.probeFontMetrics(testing.allocator, 96.0, &.{});
+        try testing.expect(m != null);
     }
 }
 

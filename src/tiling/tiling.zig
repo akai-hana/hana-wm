@@ -204,7 +204,7 @@ pub inline fn cellStride(cell: u16, gap: u16, i: u16) u16 {
 /// skip (drop the new placement) rather than an overflow — ReleaseFast never
 /// traps, and a full list means we're already showing the outer edges.
 inline fn appendPlacement(out: *List, win: model.WindowId, rect: model.Rect, visible: bool) void {
-    if (!out.append(.{ .win = win, .rect = rect, .visible = visible })) return;
+    _ = out.append(.{ .win = win, .rect = rect, .visible = visible });
 }
 
 /// Emit a visible placement with the window's size hints applied to `rect`.
@@ -279,7 +279,7 @@ pub fn layoutByName(name: []const u8) ?u8 {
 /// names through this one function. The fallback is the caller's choice: the
 /// neutral default (index 0) or a caller-chosen seed kind.
 pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
-    if (layoutByName(name)) |k| return @intCast(k);
+    if (layoutByName(name)) |k| return k;
     log.warn(
         "Config: layout name '{s}' did not resolve to a registered layout; " ++
             "using layout '{s}'",
@@ -314,7 +314,7 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     var n: usize = 0;
     for (names) |nm| if (layoutByName(nm)) |idx| {
         if (n < indices.len) {
-            indices[n] = @intCast(idx);
+            indices[n] = idx;
             n += 1;
         }
     };

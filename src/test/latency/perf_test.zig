@@ -1,8 +1,8 @@
 //! Micro-benchmarks for model/reconcile hot paths.
 //!
-//! Run: zig build test -Dbench --summary all (timing goes to stdout/stderr
-//! only under -Dbench; the default suite runs these as silent
-//! smokes so `zig build test` stays quiet).
+//! Run: zig build test -Dbench --summary all (timings are appended to
+//! `.zig-cache/bench/timings.txt` only under -Dbench; the default suite runs
+//! these as silent smokes so `zig build test` stays quiet).
 
 // (28.6) Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
