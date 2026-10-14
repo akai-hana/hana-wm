@@ -1,25 +1,107 @@
-//! XKB bindings and keyboard state.
-//! Wraps libxkbcommon/libxcb-xkb to track keyboard state and resolve keysyms.
-
+//! XKB keyboard state: the live keycode->keysym table, its construction from
+//! the server's keymap, and the one-shot XKB extension negotiation that
+//! makes the table possible. Absorbs xkbcommon.zig plus the state variable
+//! and lifecycle functions input.zig used to hold.
+//!
+//! This is the lowest layer of src/core/input: it depends on nothing else in
+//! the directory (only `keymap`, the connection-free table vocabulary), so
+//! everything above it -- keybinds, keys, dispatch -- can read the live
+//! keyboard without any of them reaching back.
 const std = @import("std");
 
-const constants = @import("constants");
-const log = @import("log");
 const core = @import("core");
 
-// Single @cImport owner for libxkbcommon lives in keymap.zig: the same
-// two headers were translated once here and once in keysyms.zig, giving two
-// translation units to keep in sync for no benefit.
+const log = @import("log");
+
+// Single @cImport owner for libxkbcommon lives in keymap.zig: the same two
+// headers were translated once here and once in keysyms.zig (since merged
+// into keymap), giving two translation units to keep in sync for no benefit.
 const keymap = @import("keymap");
 const xkb = keymap.xkb;
 
 const xkb_context = keymap.xkb_context;
 
+// ---------------------------------------------------------------------------
+// Module-owned XKB state (from input.zig).
+// ---------------------------------------------------------------------------
+
+var xkb_state: ?XkbState = null;
+
+/// Initialises the XKB context, keymap, and key state
+/// from the server's current keyboard configuration.
+pub fn initXkb(conn: core.Connection) !void {
+    xkb_state = try XkbState.init(conn);
+}
+
+/// Tears down XKB state. Must be called after all other deinit steps.
+pub fn deinitXkb() void {
+    if (xkb_state) |*s| s.deinit();
+    xkb_state = null;
+}
+
+/// Returns a read-only view of the module-owned XkbState, or null only at boot
+/// before initXkb has run and at shutdown after deinitXkb (there is no reload
+/// window; see the reload path in config/reload.zig). The pointer is invalidated by
+/// deinitXkb and must not be cached across it.
+///
+/// Const, deliberately. Zig has no private fields, so a struct's fields are
+/// reachable by anyone holding a pointer to it -- which made the live
+/// keycode->keysym table and the reverse index a mutation surface: any module
+/// could overwrite a key's keysym or truncate the index, and the dispatch path
+/// would read the damage with no way to tell it from a real mapping. Handing
+/// out `*const` closes every field but one: `rebuild`, which this module calls
+/// below and which rebuilds both tables as a unit.
+pub fn getXkbState() ?*const XkbState {
+    return if (xkb_state) |*s| s else null;
+}
+
+/// The one mutable handle on the XKB state, kept inside this module: the
+/// mapping-change path needs to replace the tables, and nothing else does.
+fn getXkbStateMut() ?*XkbState {
+    return if (xkb_state) |*s| s else null;
+}
+
+/// Rebuilds the keycode->keysym table after the server changes the keyboard
+/// mapping (setxkbmap/xmodmap). `keyboard` is the event's `request` field
+/// narrowed to MappingKeyboard; false for the modifier-map and pointer
+/// mapping events that arrive through the same type, which are ignored.
+/// Keybind resolution is keysym-indexed, so rebuilding the flat keycode->keysym
+/// table keeps existing bindings working under the new layout.
+///
+/// Returns true when the table was actually rebuilt, i.e. when the keycodes
+/// may have moved under the caller and everything derived from them (the key
+/// grabs, the compiled bind list) is now stale. Returns false for the
+/// modifier-map and pointer-button remaps that arrive through the same
+/// event: those are common (`xmodmap` touches both), and rebuilding for them
+/// threw away working state and made the user pay a full ungrab/regrab storm
+/// over a change that cannot have affected any binding. The modifier map is
+/// not part of the keycode->keysym table, and button remapping is the
+/// client's own business.
+///
+/// This is deliberately the XKB HALF only. Re-resolving the compiled binds
+/// from the new table belongs to `keybinds.handleMappingNotify`, which calls
+/// this; making the composite live here would put a keybinds -> xkb ->
+/// keybinds import cycle back into the directory this refactor exists to
+/// make acyclic.
+pub fn rebuildKeymap(keyboard: bool) bool {
+    if (!keyboard) return false;
+    const state = getXkbStateMut() orelse return false;
+    state.rebuild(core.getState().conn);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// XKB state, retry ladder, and detectable auto-repeat (from xkbcommon.zig).
+// ---------------------------------------------------------------------------
 /// The XKB setup requests are sent once after setup; these retries cover the
 /// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
 /// get_core_keyboard_device_id, keymap creation), while the X server is still
 /// being established.
 const max_xkb_retries: u8 = 3;
+
+/// Delay between those retries. Short enough to be imperceptible, long enough
+/// to avoid busy-spinning while XKB initialises (~1 polling cycle at 50 Hz).
+const xkb_retry_delay_ms: u64 = 20;
 
 /// Detectable auto-repeat: the server emits a held key's repeat as KeyPress
 /// events WITHOUT the deactivating KeyRelease X11's default autorepeat elides
@@ -76,7 +158,7 @@ pub const XkbState = struct {
     /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
     /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
     /// No allocator needed; 256 x 4 bytes = 1 KiB, lives inside XkbState.
-    keysym_by_keycode: [constants.x11_max_keycode]u32,
+    keysym_by_keycode: [keymap.x11_max_keycode]u32,
     /// Reverse index over the same table, sorted by keysym. Held as one value
     /// (not a bare array plus a separate count) so the pair can never be
     /// updated apart -- `len` is how many entries are live, and the rest of
@@ -98,8 +180,8 @@ pub const XkbState = struct {
         try retrySetup(xcb_conn);
 
         // Enable detectable auto-repeat after the XKB extension is negotiated.
-        // See the constants block above for why this is required for correct
-        // held-key repeat handling.
+        // See the note on `xkb_detectable_auto_repeat_mask` above for why this
+        // is required for correct held-key repeat handling.
         enableDetectableAutoRepeat(xcb_conn);
 
         const device_id = try retryDeviceId(xcb_conn);
@@ -175,7 +257,7 @@ pub const XkbState = struct {
 /// shorten the delay.
 fn retryDelay(attempt: u8) void {
     if (attempt >= max_xkb_retries - 1) return;
-    const ns = constants.xkb_retry_delay_ms * std.time.ns_per_ms;
+    const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
     var req = std.os.linux.timespec{
         .sec = @intCast(ns / std.time.ns_per_s),
         .nsec = @intCast(ns % std.time.ns_per_s),
@@ -244,7 +326,7 @@ const keymapOnceArgs = struct {
     device_id: i32,
 };
 
-fn keymapOnce(args: keymapOnceArgs) ?[constants.x11_max_keycode]u32 {
+fn keymapOnce(args: keymapOnceArgs) ?[keymap.x11_max_keycode]u32 {
     const km = xkb.xkb_x11_keymap_new_from_device(
         args.ctx,
         @ptrCast(args.conn),
@@ -258,9 +340,9 @@ fn keymapOnce(args: keymapOnceArgs) ?[constants.x11_max_keycode]u32 {
 
 /// Retries keymap creation up to max_xkb_retries times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
-fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) ![constants.x11_max_keycode]u32 {
+fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) ![keymap.x11_max_keycode]u32 {
     return withRetries(
-        [constants.x11_max_keycode]u32,
+        [keymap.x11_max_keycode]u32,
         keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id },
         keymapOnce,
         error.XkbKeymapFailed,

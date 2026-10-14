@@ -1,18 +1,27 @@
 //! X-free keymap utilities: given an `xkb_keymap`, build a flat keycode→keysym
-//! table and a reverse index. Pure functions of the compiled keymap; no X
-//! connection or `xkb_state`. Home to the keymap readiness heuristic and keycode
-//! tie-break policy (headless-testable). Single `@cImport` owner for libxkbcommon;
-//! xkbcommon.zig and keysyms.zig borrow it from here, translated once instead
-//! of once per importer.
+//! table and a reverse index, plus keysym-name parsing. Pure functions of the
+//! compiled keymap; no X connection or `xkb_state`. Home to the keymap
+//! readiness heuristic and keycode tie-break policy (headless-testable).
+//! Single `@cImport` owner for libxkbcommon; xkb.zig borrows it from here,
+//! translated once instead of once per importer.
 //!
-//! Layer note: connection-free, so it is importable from the pure layers.
+//! Layer note: connection-free, so it is importable from the pure layers --
+//! which is what lets config parse binding names through this module instead
+//! of reaching into a live-device-state input module.
 
-const constants = @import("constants");
+const std = @import("std");
 
 pub const xkb = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
     @cInclude("xkbcommon/xkbcommon-x11.h");
 });
+
+/// X11 reserves keycodes 0..7; the first real keycode is 8. The flat keysym
+/// table therefore covers 8..255.
+pub const x11_min_keycode: u8 = 8;
+/// The keycode space is 0..255; tables and bitsets covering the full range are
+/// sized from this.
+pub const x11_max_keycode: usize = 256;
 
 pub const xkb_context = xkb.struct_xkb_context;
 const xkb_keymap = xkb.struct_xkb_keymap;
@@ -20,7 +29,7 @@ const xkb_keymap = xkb.struct_xkb_keymap;
 pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 
 /// Keycodes in the X11 range, minus the reserved low ones.
-pub const reverse_capacity = constants.x11_max_keycode - constants.x11_min_keycode;
+pub const reverse_capacity = x11_max_keycode - x11_min_keycode;
 
 /// Upper keycode the readiness heuristic scans. A keymap that is populated
 /// across the whole range but empty in the low end -- a partially built one --
@@ -47,7 +56,7 @@ fn baseSymbol(km: *xkb_keymap, kc: u8) u32 {
 /// A device keymap flattened to the level-0 keysym per keycode, plus whether
 /// it passed the health check.
 const BuiltTable = struct {
-    table: [constants.x11_max_keycode]u32,
+    table: [x11_max_keycode]u32,
     /// True if the keymap has at least min_keymap_symbols reachable keysyms in
     /// the 8..128 range.
     healthy: bool,
@@ -59,9 +68,9 @@ const BuiltTable = struct {
 /// The `kc < keymap_health_hi` guard keeps the health count to the low-end
 /// window while the table runs to x11_max_keycode.
 pub fn buildKeysymTable(km: *xkb_keymap) BuiltTable {
-    var table: [constants.x11_max_keycode]u32 = [_]u32{XKB_KEY_NoSymbol} ** constants.x11_max_keycode;
+    var table: [x11_max_keycode]u32 = [_]u32{XKB_KEY_NoSymbol} ** x11_max_keycode;
     var valid_keys: u32 = 0;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
+    for (x11_min_keycode..x11_max_keycode) |kc| {
         const sym = baseSymbol(km, @intCast(kc));
         table[kc] = sym;
         if (sym != XKB_KEY_NoSymbol and kc < keymap_health_hi) valid_keys += 1;
@@ -110,10 +119,10 @@ pub const ReverseIndex = struct {
 /// precisely so both rules are testable: the forward table is 256 u32s of
 /// literals, and the interesting behaviour is what happens when keysyms
 /// collide.
-pub fn buildReverseIndex(table: [constants.x11_max_keycode]u32) ReverseIndex {
+pub fn buildReverseIndex(table: [x11_max_keycode]u32) ReverseIndex {
     var out: [reverse_capacity]ReverseEntry = undefined;
     var n: usize = 0;
-    for (constants.x11_min_keycode..constants.x11_max_keycode) |kc| {
+    for (x11_min_keycode..x11_max_keycode) |kc| {
         const sym = table[kc];
         if (sym == XKB_KEY_NoSymbol) continue;
         // Insertion sort by keysym, ascending, with the LOWEST keycode first
@@ -145,4 +154,36 @@ pub fn buildReverseIndex(table: [constants.x11_max_keycode]u32) ReverseIndex {
         w += 1;
     }
     return .{ .index = out, .len = w };
+}
+
+// ---------------------------------------------------------------------------
+// Keysym-name parsing (merged from keysyms.zig): pure libxkbcommon table
+// lookups, no X connection, xkb_state, or XKB extension setup. They live here
+// because this file owns the single @cImport of the libxkbcommon header they
+// call through -- the reason keysyms.zig existed as a separate file at all was
+// to keep config from importing a live-device-state module, and this module
+// is connection-free, so that property survives the merge.
+// ---------------------------------------------------------------------------
+
+/// Keysym for `name` under case-insensitive lookup (so `"super_l"` and
+/// `"Super_L"` agree), or `XKB_KEY_NoSymbol` when the name is unknown. `name`
+/// may carry trailing NUL bytes; parsing stops at the first NUL.
+pub fn keysymFromName(name: []const u8) u32 {
+    // xkb_keysym_from_name wants a NUL-terminated C string; a name without an
+    // embedded NUL handed it the buffer's first byte with no terminator and an
+    // out-of-bounds read. Copy into our own NUL-terminated buffer regardless.
+    var buf: [256]u8 = undefined;
+    const z = std.mem.sliceTo(name, 0);
+    const n = @min(z.len, buf.len - 1);
+    @memcpy(buf[0..n], z[0..n]);
+    buf[n] = 0;
+    return xkb.xkb_keysym_from_name(&buf, xkb.XKB_KEYSYM_CASE_INSENSITIVE);
+}
+
+/// XKB name for `keysym` (e.g. XKB_KEY_at -> "at") into `buf`, returning a
+/// slice of `buf` holding the name. Used for diagnostic messages.
+pub fn keysymGetName(keysym: u32, buf: []u8) []const u8 {
+    const n = xkb.xkb_keysym_get_name(keysym, buf.ptr, buf.len);
+    const len: usize = if (n < 0) 0 else @min(@as(usize, @intCast(n)), buf.len);
+    return buf[0..len];
 }
