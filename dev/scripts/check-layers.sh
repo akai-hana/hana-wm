@@ -45,7 +45,7 @@ wire_allowed() {
         # geometry is honored for floating windows and BW recorded for tiled
         # -- protocol duty that answers the CLIENT, not layout.
         # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
-        src/window/window.zig|src/window/wincache.zig) ;;
+        src/window/window.zig) ;;
 
         # Admission preamble: claimManagedEventMask sets the management
         # event mask (PropertyNotify / StructureNotify / FocusChange
@@ -180,18 +180,11 @@ wire_allowed() {
 # requests.grabServer wrapper (Rule 2 matches both; see pat2 below).
 grab_allowed() {
     case "$1" in
-        # core/x11/wire.zig hosts the shared grab/ungrabAndFlush PRIMITIVES;
-        # sync.zig's reconcileUnderGrab calls
-        # these; the primitive home is not itself a policy violation, but
-        # grep cannot tell call from definition.
+        # core/x11/requests.zig hosts the shared grab/ungrabAndFlush
+        # PRIMITIVES; reconcile.reconcileUnderGrab calls these; the primitive
+        # home is not itself a policy violation, but grep cannot tell call
+        # from definition.
         src/core/x11/requests.zig) ;;
-
-        # Bar's OWN window lifecycle, the counterpart of its Rule 1 entry:
-        # position toggle (Y-reposition) and show/hide (map/unmap) bracket
-        # their config/visibility changes with a server grab and issue the
-        # wire reconfig before reconcile. Already documented in wire_allowed;
-        # the grab is the same policy boundary.
-        src/bar/bar.zig) ;;
 
         *) return 1 ;;
     esac
@@ -276,7 +269,7 @@ if [ -n "$hits" ]; then
 fi
 
 # Rule 4: formatting.
-if ! zig fmt --check src/ >/dev/null 2>&1; then
+if ! zig fmt --check . >/dev/null 2>&1; then
     viol "rule 4 (zig fmt --check)"
 fi
 
