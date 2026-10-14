@@ -127,9 +127,6 @@ const max_window_tree_depth = constants.max_window_tree_depth;
 // reads it. Still exactly one context per process, this is for
 // reset discipline, not multi-context support.
 const State = struct {
-    /// Module allocator, set in init(). Null before the first init() call.
-    alloc: ?std.mem.Allocator = null,
-
     /// Caller-owned scratch for tracking.allWindowsInto (border sweeps).
     snapshot: [model_mod.store_capacity]tracking.Entry = undefined,
 
@@ -267,7 +264,6 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // rather than carrying over whatever the previous cycle left
     // behind.
     state = .{};
-    state.?.alloc = alloc;
     tracking.init();
     focus.init();
     wincache.init(alloc);

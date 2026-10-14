@@ -213,8 +213,7 @@ pub fn fullscreenSetWindow(win: model_mod.WindowId, want: ?bool) void {
 ///
 /// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
 /// through as a parameter because no model entry exists when the reply
-/// drains. The model entry is the single store for size hints; the former
-/// wincache staging bridge (cacheSizeHints/peekHints) was deleted with it.
+/// drains. The model entry is the single store for size hints.
 pub fn mapRequest(
     win: model_mod.WindowId,
     target_ws: u8,

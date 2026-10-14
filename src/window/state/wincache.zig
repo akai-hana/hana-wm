@@ -19,30 +19,18 @@ const atoms = @import("atoms");
 const requests = @import("requests");
 const idmap = @import("idmap");
 
-/// Cached-title capacity, in bytes. A title longer than this is truncated at
-/// store time.
-///
-/// 256 is chosen from the consumer, not from the 1024-byte `title_fetch_len`
-/// fetch: the bar truncates for display against the available width, so the
-/// tail of a long title was never rendered anyway. Keeping the cache inline
-/// costs `max_window_cache` (512) x this, so a buffer sized to the FETCH
-/// rather than to the DISPLAY would have tripled the cache for bytes no
-/// reader can see.
-/// Hard cap on a cached title, so the inline buffer is a fixed size.
+/// Hard cap on a cached title, in bytes; longer titles are truncated at
+/// store time (`setTitle`). Sized from the consumer: the bar truncates for
+/// display against the available width, so the tail of a long title is never
+/// rendered, and the inline buffer costs `max_window_cache` (512) x this, so
+/// a bigger buffer would only buy bytes no reader can see. The title fetch is
+/// sized to this constant, so fetch and cache move together.
 pub const max_title_len = 256;
 
 const WindowData = struct {
-    /// Cached _NET_WM_NAME / WM_NAME in a fixed inline buffer (11.5).
-    ///
-    /// This was heap-duped into a module allocator, which made the title the
-    /// only non-POD field in the entry and bought three ownership
-    /// obligations: free on overwrite, free on removeWindow, and a
-    /// free-everything walk in deinit. Every one of those was a place to
-    /// forget the free -- `storeTitle` had to free the fresh copy on the
-    /// at-capacity path, and a missed free leaked per title rewrite, bounded
-    /// by nothing but the client's patience. The entry is now POD: no
-    /// allocator, no free paths, nothing to leak, and `removeWindow`/`deinit`
-    /// are plain map operations.
+    /// Cached _NET_WM_NAME / WM_NAME in a fixed inline buffer (11.5): POD
+    /// storage, no allocator, no free paths -- `removeWindow`/`deinit` are
+    /// plain map operations and no title rewrite can leak.
     title_buf: [max_title_len]u8 = @splat(0),
     title_len: u16 = 0,
 
@@ -100,10 +88,6 @@ pub fn removeWindow(window_id: u32) void {
 
 // Window-title cache
 
-/// How many bytes of a title to fetch. Generous for real titles; longer
-/// titles are truncated (parity with the old bar title fetches).
-const title_fetch_len: u32 = 1024;
-
 const property_no_delete = constants.property_no_delete;
 
 // EWMH atoms, resolved once (null when the server lacks them).
@@ -139,7 +123,7 @@ pub fn fireTitleCookies(conn: core.Connection, win: u32) TitleCookies {
             net_wm_name orelse 0,
             utf_type,
             0,
-            title_fetch_len,
+            max_title_len,
         ),
         .wm_name = xcb.xcb_get_property(
             conn,
@@ -148,7 +132,7 @@ pub fn fireTitleCookies(conn: core.Connection, win: u32) TitleCookies {
             xcb.XCB_ATOM_WM_NAME,
             xcb.XCB_ATOM_STRING,
             0,
-            title_fetch_len,
+            max_title_len,
         ),
     };
 }
@@ -164,7 +148,7 @@ pub fn discardTitleCookies(conn: core.Connection, cookies: TitleCookies) void {
 /// _NET_WM_NAME when it carries bytes, else the legacy WM_NAME. Blocking, so
 /// it rides the admission drain exactly like the other cached properties.
 pub fn collectTitleCookies(conn: core.Connection, win: u32, cookies: TitleCookies) void {
-    var buf: [title_fetch_len]u8 = undefined;
+    var buf: [max_title_len]u8 = undefined;
     storeTitle(win, pickTitle(conn, cookies, &buf));
 }
 
@@ -172,7 +156,7 @@ pub fn collectTitleCookies(conn: core.Connection, win: u32, cookies: TitleCookie
 /// but single-window and rare -- never in the draw path.
 pub fn refreshTitle(conn: core.Connection, win: u32) bool {
     const cookies = fireTitleCookies(conn, win);
-    var buf: [title_fetch_len]u8 = undefined;
+    var buf: [max_title_len]u8 = undefined;
     const title = pickTitle(conn, cookies, &buf);
     if (std.mem.eql(u8, title, peekTitle(win))) return false;
     storeTitle(win, title);

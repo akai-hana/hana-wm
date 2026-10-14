@@ -4,7 +4,6 @@
 const tiling = @import("tiling");
 const model = @import("model");
 
-// Variant index of the "relaxed" variant; must match variantParse order below.
 /// The ONE variant table for this layout.
 const variants = [_]tiling.Variant{
     .{ .name = "rigid", .indicator = "[#]" },

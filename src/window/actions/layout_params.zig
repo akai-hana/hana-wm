@@ -23,6 +23,17 @@ const log = @import("log");
 
 const actions = @import("actions");
 
+/// Primary-column capacity: a sane handful of slots, capped at a quarter of
+/// the managed-window ceiling so one workspace can't statically claim the
+/// store. The config grammar lets master_count rise to its u8 ceiling; every
+/// path that stamps primary_count funnels through `capPrimaryCount`.
+const max_primary_count = model_mod.store_capacity / 4;
+
+/// Clamps a configured/adjusted primary count into [1, max_primary_count].
+fn capPrimaryCount(count: u8) u8 {
+    return @min(count, @as(u8, @intCast(max_primary_count)));
+}
+
 pub fn cycleLayoutKind(dir: i32) void {
     const m = pipeline.mut();
     cycleActiveLayout(m, dir);
@@ -57,13 +68,10 @@ pub fn adjustPrimaryWidthAction(delta: f32) void {
 }
 
 pub fn adjustPrimaryCount(delta: i32) void {
-    // Primary-column capacity: a sane handful of slots, capped at a quarter
-    // of the managed-window ceiling so one workspace can't statically claim
-    // the store.
-    const max_primary_count = model_mod.store_capacity / 4;
     const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
-    p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, max_primary_count)));
+    const next = std.math.clamp(@as(i32, p.primary_count) + delta, 1, max_primary_count);
+    p.primary_count = @intCast(next);
     pipeline.reconcileGrab(.{});
 }
 
@@ -131,13 +139,11 @@ pub fn seedParamsFromConfig() void {
     const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, contract.default_kind);
 
     const m = pipeline.mut();
-    // The config grammar lets master_count rise to its u8 ceiling, but the
-    // runtime path caps primary_count at store_capacity/4. Seeding the raw
-    // u8 here would slip those couple-dozen windows directly into compute's
-    // master_n, where the master-column fit gate then has to reject them;
-    // clamp at seed time instead.
-    const max_primary_count = model_mod.store_capacity / 4;
-    const primary_count = @min(cfg.master_count, @as(u8, @intCast(@max(1, max_primary_count))));
+    // The config grammar lets master_count rise to its u8 ceiling; seeding
+    // the raw u8 would slip those couple-dozen windows directly into
+    // compute's master_n, where the master-column fit gate then has to
+    // reject them; clamp at seed time instead.
+    const primary_count = capPrimaryCount(cfg.master_count);
     // Global default template, stamped across every workspace by
     // applyConfigReload (preserves viewport runtime state). Per-workspace
     // overrides are re-stamped in the loop below.
@@ -171,8 +177,7 @@ pub fn seedParamsFromConfig() void {
             // string still applies to the active kind).
             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        if (count_overrides[id]) |mc|
-            s.params.primary_count = @min(mc, @as(u8, @intCast(@max(1, max_primary_count))));
+        if (count_overrides[id]) |mc| s.params.primary_count = capPrimaryCount(mc);
     }
 }
 

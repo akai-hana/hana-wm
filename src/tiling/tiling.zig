@@ -338,12 +338,10 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
     const f = m.compute orelse {
-        // A null compute can only come from a misbuilt registry entry; with
-        // asserts compiled out (ReleaseFast), it used to leak past as a
-        // silent empty `out`. Park everything ourselves and say it, so the
-        // screen isn't an untestable all-blank state and the reason is
-        // actionable.
-        std.log.warn("tiling: layout model has a null compute hook; parking {} window(s) for kind {}", .{ v.order.len, kind });
+        // A null compute can only come from a misbuilt registry entry. Park
+        // everything ourselves and say it, so the screen isn't an untestable
+        // all-blank state and the reason is actionable.
+        log.warn("tiling: layout model has a null compute hook; parking {} window(s) for kind {}", .{ v.order.len, kind });
         for (v.order) |win| emitHidden(out, win);
         return;
     };

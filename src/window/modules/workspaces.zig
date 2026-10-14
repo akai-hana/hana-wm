@@ -20,7 +20,7 @@ pub fn switchTo(m: *model.Model, ws: model.WSId) void {
 
 pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     const e = m.store.getPtr(win) orelse return;
-    if (ws.index >= m.ws.len) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
+    if (!ws.isValid()) return; // bad target: indexing m.ws[ws] below would OOB (ReleaseFast)
     if (model.isPinned(e.*)) return; // pinned stays everywhere-visible
 
     // Refuse-before-mutate: full destination list cancels the move.

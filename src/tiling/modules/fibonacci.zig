@@ -44,14 +44,13 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // how the same fact ends up with two homes. Hoisted above first use.
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
-    const border2 = model.doubledBorder(m);
     // NOTE: the overflow gate deliberately stays border-only (geometry of what
     // the strip can carry). The min_dim requirement is handled AT EMISSION by
     // capping w/h to the strip's content area, so raising this gate to include
     // min_dim is redundant with the emission cap and only moves the overflow
     // threshold -- a stricter gate trips overflow earlier and changes layout
     // batching.
-    const min_region = m.gap *| 2 +| border2;
+    const min_region = tiling.totalInset(m.gap, m);
 
     const outer = tiling.outerArea(v.workarea, m.gap);
     var cur = outer;
