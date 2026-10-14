@@ -11,7 +11,7 @@
 const std = @import("std");
 const drawing = @import("drawing");
 const types = @import("types");
-const model = @import("wm_state");
+const model = @import("model");
 
 // The title segment's geometry -- its window list, the pixel-perfect tiling
 // shared by its draw and the bar's hit-test -- is not shared segment

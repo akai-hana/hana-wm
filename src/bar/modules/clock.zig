@@ -17,7 +17,7 @@ const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 
 const core = @import("core");
 const c = @cImport(@cInclude("time.h"));

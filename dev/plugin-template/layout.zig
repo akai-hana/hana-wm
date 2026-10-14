@@ -25,7 +25,7 @@
 //! compile against the same `tiling` API they use.
 
 const tiling = @import("tiling");
-const wm_state = @import("wm_state");
+const model = @import("model");
 
 /// Compute this layout into `out` (already cleared by the engine). MUST
 /// append exactly one placement per window in `v.order` — either a real
@@ -44,7 +44,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     const m = v.env.margins;
     const area = tiling.outerArea(v.workarea, m.gap);
     const inset = tiling.totalInset(m.gap, m);
-    const rect = wm_state.Rect{
+    const rect = model.Rect{
         .x = @intCast(area.x),
         .y = @intCast(tiling.waY(v)),
         .width = tiling.shrinkClamped(area.w, inset, v.env.min_dim),

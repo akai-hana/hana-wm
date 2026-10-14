@@ -17,7 +17,8 @@ const types = @import("types");
 const segmod = @import("segment");
 const geom = @import("geom");
 const vocab = @import("vocab");
-const contract = @import("contract");
+const contract = @import("bar_contract");
+const dispatch = @import("contract_dispatch");
 // The scrolling title addon (the carousel) binds its motion, cycle and
 // frame-pacing hooks to this contract; membership in the generated
 // `title_subs` registry is driven by file presence alone, so this module
@@ -80,7 +81,7 @@ const pivot: *const fn () void = if (scroller) |s| s.pivot else noPivot;
 // value (contract.BarOverlay) on its Segment, which this module finds through
 // the generated bar segment registry -- name-free, like every other registry
 // capability. Nothing in the closed core names the overlay module.
-const overlay: ?contract.BarOverlay = if (contract.providerOf(contract.Segment, segmod.all(), .overlay)) |m|
+const overlay: ?contract.BarOverlay = if (dispatch.providerOf(contract.Segment, segmod.all(), .overlay)) |m|
     m.overlay.?
 else
     null;

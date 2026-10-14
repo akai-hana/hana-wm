@@ -48,7 +48,7 @@ var g_polls: u32 = 0;
 /// prompt (`*const segment.BarHandlers` — presentForPrompt/dismissAfterPrompt/
 /// isBarWindow). Cast it on this side; leave null-ignored when your
 /// segment needs no bar services.
-/// `conn` is `*const anyopaque`, not `core.Connection`: `contract.zig` is
+/// `conn` is `*const anyopaque`, not `core.Connection`: `bar_contract.zig` is
 /// xcb-free so the segment hook can name no X type. Cast it back with
 /// `@ptrCast(@constCast(conn))` if you actually need the connection.
 pub fn init(allocator: std.mem.Allocator, conn: *const anyopaque, handlers: ?*const anyopaque) anyerror!void {
@@ -168,7 +168,7 @@ pub fn onClick(
 //   .dirty_sources = .{ .focus = true, .frame = true }, // repaint on fact-revs
 //   .clickable = false,            // skip click-hit bounds (clock)
 //   .needsRepaint = needsRepaint,  // "repaint me every draw while active"
-pub const module: @import("contract").Segment = .{
+pub const module: @import("bar_contract").Segment = .{
     .name = "template", // TODO: unique config identity, e.g. "clock"
     .init = init,
     .deinit = deinit,

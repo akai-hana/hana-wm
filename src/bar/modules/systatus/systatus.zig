@@ -22,7 +22,7 @@
 const std = @import("std");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 
 const core = @import("core");
 const read_interval_ms: i64 = 2000;

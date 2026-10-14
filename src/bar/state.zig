@@ -18,14 +18,13 @@ const std = @import("std");
 const core = @import("core");
 const types = @import("types");
 const query = @import("query");
-const model = @import("wm_state");
+const model = @import("model");
 const title_cache = @import("title_cache");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const vocab = @import("vocab");
 const barwin = @import("win");
 const center_row = @import("center_row");
-const contract = @import("contract");
 
 // The capability sets live in segment.zig (their one home); these aliases
 // keep state's remaining reader (`title_id`) unqualified.

@@ -19,15 +19,15 @@ const window = @import("window");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
-const contract = @import("contract");
-const wm_state = @import("wm_state");
+const contract = @import("bar_contract");
+const model = @import("model");
 
 /// Comptime number strings "1".."64" for workspace display labels. Sized to
 /// the shared workspace ceiling so the table cannot disagree with the model's
 /// fixed-size workspace array.
-const workspace_labels: [wm_state.max_workspaces][]const u8 = blk: {
+const workspace_labels: [model.max_workspaces][]const u8 = blk: {
     @setEvalBranchQuota(10_000);
-    var labels: [wm_state.max_workspaces][]const u8 = undefined;
+    var labels: [model.max_workspaces][]const u8 = undefined;
     for (&labels, 1..) |*label, i| label.* = std.fmt.comptimePrint("{d}", .{i});
     break :blk labels;
 };

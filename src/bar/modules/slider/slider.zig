@@ -38,7 +38,7 @@
 const std = @import("std");
 const types = @import("types");
 const drawing = @import("drawing");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 const level = @import("level");
 const shell = @import("shell");
 

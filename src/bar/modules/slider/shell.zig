@@ -44,7 +44,7 @@ const core = @import("core");
 const level = @import("level");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 
 /// The generated registry, imported directly: this file never imports the
 /// package core (see header), so the contract is reached as the registry

@@ -2,8 +2,8 @@
 //! holds, mask/tag vocabulary, layout-parameter records, feature-vocabulary
 //! enums, constants, pure helpers, and the generic sorted-key Store re-export.
 //! The runtime state that HOLDS this vocabulary (Entry, WsState, Model) and
-//! every state operation live beside it in `core/wm_state.zig` — this file is
-//! PRIVATE to that facade: only `wm_state` imports it, so nothing else can
+//! every state operation live beside it in `core/model.zig` — this file is
+//! PRIVATE to that facade: only `model` imports it, so nothing else can
 //! reach past the facade.
 //!
 //! Geometry lives here rather than in a `geom` module because it is not a
@@ -23,13 +23,13 @@ const std = @import("std");
 const bounded = @import("bounded");
 
 /// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId`
-/// and `wm_state.WindowId` are aliases of this single definition, so window ids
+/// and `model.WindowId` are aliases of this single definition, so window ids
 /// cross the core/state boundary without conversion.
 pub const WindowId = u32;
 
 /// Canonical workspace identifier type.
 ///
-/// `core.WorkspaceId` and `wm_state.WSId` are both names for this single
+/// `core.WorkspaceId` and `model.WSId` are both names for this single
 /// struct, so workspace ids cross the core/state boundary without conversion.
 /// The type keeps a `.index` member so state code can keep using `ws` values
 /// directly as array indices; integer-typed boundaries (wire formats,
