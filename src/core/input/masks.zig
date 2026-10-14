@@ -1,7 +1,9 @@
-//! Modifier masks, event masks, and the binding-mask helpers; a member of
-//! the pure shelf (src/core/pure/). The protocol constants are spelled as
-//! their X protocol values rather than `@import("xcb")` names so the shelf
-//! stays xcb-free by construction; src/test/core/masks_test.zig pins every
+//! Input-layer protocol vocabulary: modifier masks, event masks, mouse button
+//! codes, and the binding-mask helpers. A member of the pure shelf (listed in
+//! build.zig's pureLayerAllows), so config/ may import it; it lives beside its
+//! main consumers in src/core/input/. The protocol constants are spelled as
+//! their X protocol values rather than `@import("xcb")` names so it stays
+//! xcb-free by construction; src/test/core/masks_test.zig pins every
 //! literal against the XCB names, so a divergence fails there instead of
 //! silently changing grab/input behavior.
 
@@ -16,10 +18,17 @@ pub const mod_numlock: u16 = 1 << 4;
 pub const mod_scrolllock: u16 = 1 << 5;
 pub const mod_super: u16 = 1 << 6;
 
+// Mouse button codes (X11 button numbering)
+pub const mouse_button_left: u8 = 1;
+pub const mouse_button_middle: u8 = 2;
+pub const mouse_button_right: u8 = 3;
+pub const mouse_button_scroll_up: u8 = 4;
+pub const mouse_button_scroll_down: u8 = 5;
+
 // Modifier keysym band. X11 reserves XK_Shift_L..XK_Hyper_R (0xFFE1..0xFFEE)
 // for modifier keys; the check widens that band by one key on each side (none
 // of which are valid editing/navigation keys) so bare modifier presses can be
-// dropped without logging noise. Shared by input.zig and the prompt.
+// dropped without logging noise. Shared by core/input/keys.zig and the prompt.
 pub const modifier_keysym_lo: u32 = 0xFFE0;
 pub const modifier_keysym_hi: u32 = 0xFFEF;
 
@@ -36,7 +45,7 @@ pub inline fn isModifierKeysym(keysym: u32) bool {
 /// singles, the three pairs, the triple). Consumers only iterate it / use `.len`.
 /// Every lock-modifier bit in one mask: the OR of `lock_modifiers` below.
 /// A binding compares equal regardless of lock-key state, so a rule about what
-/// a bind can match has to treat these bits as absent (input.zig's
+/// a bind can match has to treat these bits as absent (core/input/keybinds.zig's
 /// `undeliverableMouseBindReason` is the consumer).
 pub const lock_bits: u16 = mod_capslock | mod_numlock | mod_scrolllock;
 
@@ -72,7 +81,7 @@ pub const EventMasks = struct {
     //    XMaskEvent loop, so root never needs it. Ours are async; the
     //    Super+Button grab from grabs.grabMouseButtons stays engaged for the
     //    whole gesture (AsyncPointer; see keepDragGrab in mouse.zig), so this
-    //    bit is what lets the release reach input.handleButtonRelease and clear
+    //    bit is what lets the release reach mouse.handleButtonRelease and clear
     //    drag.active. Without it, drag.active sticks true and handleEnterNotify
     //    drops every hover-focus EnterNotify until the WM restarts.
     //  - KEY_RELEASE: the release half of every binding press. Key RELEASE
@@ -81,7 +90,7 @@ pub const EventMasks = struct {
     //    every repeat (a passive grab reports the release to the grab window,
     //    but the root mask, not the grab, decides which events the WM actually
     //    receives — without the release bit, the detectable-auto-repeat
-    //    press/release stream in input.zig would still work for presses but
+    //    press/release stream in core/input/mouse.zig would still work for presses but
     //    releases would be lost).
     // X protocol EventMask bits: KeyPress=1<<0, KeyRelease=1<<1,
     // ButtonPress=1<<2, ButtonRelease=1<<3, EnterWindow=1<<4,

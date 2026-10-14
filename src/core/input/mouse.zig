@@ -2,28 +2,28 @@
 //! and routing to the floating drag engine. Split out of input.zig
 //! (review 05-input, Phase 6): the press-classification and
 //! motion-routing halves -- the mouse gesture state machine -- are a
-//! distinct concern from key dispatch. Every symbol is re-exported by
-//! input.zig, so the events.zig dispatch table, main.setup, and the
-//! input tests keep their single unchanged surface.
+//! distinct concern from key dispatch. The event loop dispatches straight
+//! to this module now (no facade), and config mouse binds reach the action
+//! interpreter through `dispatch` -- one dependency, not the input <-> mouse
+//! cycle that used to stand between the two.
 
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
-const constants = @import("constants");
 const masks = @import("masks");
 const log = @import("log");
 const window = @import("window");
 const query = @import("query");
 const focus = @import("focus");
-const keybind = @import("keybind");
-const grabs = @import("grabs");
-const actions = @import("actions");
 const surfaces = @import("surfaces").Surfaces;
-// The action dispatcher lives in input.zig (re-merged from dispatch.zig
-// 2026-10-10): mouse binds dispatch through it, forming a lazy
-// input <-> mouse import cycle; the
-// alias keeps the call sites' `dispatch.*` spelling.
-const dispatch = @import("input");
+// Bind compilation, the conflict reporter, and the root-grab spec live
+// together in keybinds.zig; mouse reads all three (the shadow reporter, the
+// grab the reachability rule is judged against).
+const keybinds = @import("keybinds");
+// The action dispatcher lives in dispatch.zig: mouse binds dispatch through
+// it. The alias keeps the call sites' `dispatch.*` spelling, and because
+// dispatch does NOT import this file the two can never cycle.
+const dispatch = @import("dispatch");
 
 /// Dispatches a priority-ordered button-press event, splitting the two named
 /// paths: a plain click on the bar window routes to the bar; every other
@@ -95,7 +95,7 @@ pub const MouseIntent = union(enum) {
 /// True for the two wheel buttons: they carry scroll-bind semantics and never
 /// click or drag.
 inline fn isScrollButton(button: u8) bool {
-    return button == constants.mouse_button_scroll_up or button == constants.mouse_button_scroll_down;
+    return button == masks.mouse_button_scroll_up or button == masks.mouse_button_scroll_down;
 }
 
 pub fn classifyMousePress(p: MousePress) MouseIntent {
@@ -108,7 +108,7 @@ pub fn classifyMousePress(p: MousePress) MouseIntent {
     if (!p.target_managed) return .unmanaged;
     if (!p.super_held) return .focus_click;
     if (p.bind_fired) return .bound_action;
-    if (p.button == constants.mouse_button_left or p.button == constants.mouse_button_right)
+    if (p.button == masks.mouse_button_left or p.button == masks.mouse_button_right)
         return .start_drag;
     return .replay;
 }
@@ -152,7 +152,7 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
         // The bind dispatch already released the grab.
         .bound_action => {},
         .start_drag => {
-            actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+            window.dispatchAll(.startDrag, .{ managed_window, event.detail, event.root_x, event.root_y });
             keepDragGrab(event.time);
         },
     }
@@ -166,8 +166,8 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     // drag state latches and later un-pressed motions keep moving the window
     // via the still-active updateDrag path. Route to the bar only when no
     // floating drag is in flight.
-    if (actions.isDragging()) {
-        actions.stopDrag();
+    if (window.dispatchFirstTrue(.isDragging, .{})) {
+        window.dispatchAll(.stopDrag, .{});
         return;
     }
     // Releases on the bar window terminate a segment scrub (the bar clears
@@ -188,8 +188,8 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     // window: routing to the bar first would freeze updateDrag (the drag stops
     // moving over the bar) and feed spurious scrub motion. Route to the bar
     // only when no floating drag is in flight.
-    if (actions.isDragging()) {
-        actions.updateDrag(event.root_x, event.root_y);
+    if (window.dispatchFirstTrue(.isDragging, .{})) {
+        window.dispatchAll(.updateDrag, .{ event.root_x, event.root_y });
         return;
     }
 
@@ -214,16 +214,16 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 /// order so it can be found.
 pub fn reportUndeliverableMouseBinds() void {
     const binds = core.getState().config.mouse_bindings.items;
-    // The grab as `grabs.grabMouseButtons` actually makes it, handed to the
+    // The grab as `keybinds.grabMouseButtons` actually makes it, handed to the
     // pure rule so that rule needs no knowledge of the X layer and stays
     // unit-testable.
-    const grab: grabs.MouseGrabSpec = .{
-        .buttons = &grabs.mouse_grab_buttons,
+    const grab: keybinds.MouseGrabSpec = .{
+        .buttons = &keybinds.mouse_grab_buttons,
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
     };
     for (binds, 0..) |mb, i| {
-        const reason = grabs.undeliverableMouseBindReason(mb, grab) orelse continue;
+        const reason = keybinds.undeliverableMouseBindReason(mb, grab) orelse continue;
         var dup = false;
         for (binds[0..i]) |earlier| {
             if (earlier.button == mb.button and earlier.modifiers == mb.modifiers) dup = true;
@@ -254,7 +254,7 @@ pub fn findMouseBind(
     var found: ?*const types.MouseBind = null;
     for (binds, 0..) |*mb, i| {
         if (mb.modifiers != mods or mb.button != button) continue;
-        if (found != null) keybind.logShadowConflict("Mouse binding", i, mods, "button", button);
+        if (found != null) keybinds.logShadowConflict("Mouse binding", i, mods, "button", button);
         found = mb;
     }
     return found;
@@ -276,7 +276,7 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, ts: u32) bool {
     switch (mb.action) {
         .toggle_floating_window => {
             const target = if (win != 0) win else focus.getFocused() orelse return true;
-            dispatch.grafted(.toggle_floating_window, actions.toggleFloating, target);
+            dispatch.grafted(.toggle_floating_window, dispatch.toggleFloatingWindow, target);
         },
         else => dispatch.executeAction(&mb.action),
     }

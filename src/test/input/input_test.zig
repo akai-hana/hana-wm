@@ -12,12 +12,10 @@ const testing = std.testing;
 
 const action_mod = @import("action");
 const types = @import("types");
-const keybind = @import("keybind");
-const grabs = @import("grabs");
+const keybinds = @import("keybinds");
+const mouse = @import("mouse");
 const masks = @import("masks");
 const log = @import("log");
-const constants = @import("constants");
-const input = @import("input");
 
 /// Stand-in config generation for the resolver tests. Any value works: what
 /// they pin is that a table built at generation N only answers for N.
@@ -47,7 +45,7 @@ test "normalizeModifiers keeps real modifiers, strips lock and button bits" {
 }
 
 test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {
-    var resolver = keybind.KeybindResolver{};
+    var resolver = keybinds.KeybindResolver{};
     defer resolver.deinit(testing.allocator);
 
     var binds = [_]types.Keybind{
@@ -68,7 +66,7 @@ test "KeybindResolver resolves (mods, keysym) and rejects non-matches" {
 }
 
 test "KeybindResolver: a later binding on the same key wins" {
-    var resolver = keybind.KeybindResolver{};
+    var resolver = keybinds.KeybindResolver{};
     defer resolver.deinit(testing.allocator);
 
     var binds = [_]types.Keybind{
@@ -81,7 +79,7 @@ test "KeybindResolver: a later binding on the same key wins" {
 }
 
 test "KeybindResolver: lookup returns a pointer into the live binding slice" {
-    var resolver = keybind.KeybindResolver{};
+    var resolver = keybinds.KeybindResolver{};
     defer resolver.deinit(testing.allocator);
 
     var binds = [_]types.Keybind{
@@ -105,8 +103,8 @@ test "KeybindResolver: lookup returns a pointer into the live binding slice" {
 // and the key simply does nothing. The rule is pure and takes the grab as
 // data, so every unreachable shape is pinned here without an X server.
 test "mouse binds the root grab cannot deliver are identifiable" {
-    const grab: grabs.MouseGrabSpec = .{
-        .buttons = &grabs.mouse_grab_buttons,
+    const grab: keybinds.MouseGrabSpec = .{
+        .buttons = &keybinds.mouse_grab_buttons,
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
     };
@@ -121,7 +119,7 @@ test "mouse binds the root grab cannot deliver are identifiable" {
     };
     for (never_delivered) |u| {
         const mb: types.MouseBind = .{ .modifiers = u.mods, .button = u.button, .action = .{ .close_window = {} } };
-        if (grabs.undeliverableMouseBindReason(mb, grab) == null) {
+        if (keybinds.undeliverableMouseBindReason(mb, grab) == null) {
             std.debug.print("mods=0x{x} button={} was reported reachable\n", .{ u.mods, u.button });
             return error.UnreachableBindNotDetected;
         }
@@ -137,7 +135,7 @@ test "mouse binds the root grab cannot deliver are identifiable" {
     };
     for (reachable) |r| {
         const mb: types.MouseBind = .{ .modifiers = r.mods, .button = r.button, .action = .{ .close_window = {} } };
-        if (grabs.undeliverableMouseBindReason(mb, grab)) |why| {
+        if (keybinds.undeliverableMouseBindReason(mb, grab)) |why| {
             std.debug.print("mods=0x{x} button={} wrongly rejected: {s}\n", .{ r.mods, r.button, why });
             return error.ReachableBindRejected;
         }
@@ -152,16 +150,16 @@ test "mouse binds the root grab cannot deliver are identifiable" {
 // window, so they have to work over the desktop and the bar), and focus must
 // precede the bind lookup.
 test "mouse press classification orders its branches and settles the grab" {
-    const L = constants.mouse_button_left;
-    const R = constants.mouse_button_right;
-    const M = constants.mouse_button_middle;
-    const UP = constants.mouse_button_scroll_up;
-    const DOWN = constants.mouse_button_scroll_down;
+    const L = masks.mouse_button_left;
+    const R = masks.mouse_button_right;
+    const M = masks.mouse_button_middle;
+    const UP = masks.mouse_button_scroll_up;
+    const DOWN = masks.mouse_button_scroll_down;
 
     // (super, button, target_managed, bind_fired) -> expected intent
     const cases = [_]struct {
-        f: input.MousePress,
-        want: std.meta.Tag(input.MouseIntent),
+        f: mouse.MousePress,
+        want: std.meta.Tag(mouse.MouseIntent),
     }{
         // Scroll binds precede the managed guard: over the desktop (no
         // managed target) an unbound Super+scroll still releases rather than
@@ -187,7 +185,7 @@ test "mouse press classification orders its branches and settles the grab" {
         .{ .f = .{ .super_held = true, .button = M, .target_managed = true, .bind_fired = false }, .want = .replay },
     };
     for (cases) |c| {
-        const got = input.classifyMousePress(c.f);
+        const got = mouse.classifyMousePress(c.f);
         if (std.meta.activeTag(got) != c.want) {
             std.debug.print(
                 "super={} button={} managed={} bound={} -> {s}, want {s}\n",
@@ -204,7 +202,7 @@ test "mouse press classification orders its branches and settles the grab" {
 // checked invariant: a stale table must fail CLOSED (the key does nothing) and
 // say so exactly once, never dereference a freed Action.
 test "dispatch map refuses a config generation it was not built against" {
-    var resolver: keybind.KeybindResolver = .{};
+    var resolver: keybinds.KeybindResolver = .{};
     defer resolver.deinit(testing.allocator);
     var binds = [_]types.Keybind{
         .{ .modifiers = masks.mod_super, .keysym = 0x0071, .action = .{ .dump_state = {} } },
@@ -291,7 +289,7 @@ test "mouse bind shadowing: last entry wins and every shadowed entry is reported
     log.collector = &diag;
     defer log.collector = prev;
 
-    const found = input.findMouseBind(&binds, masks.mod_super, B1).?;
+    const found = mouse.findMouseBind(&binds, masks.mod_super, B1).?;
     try testing.expectEqual(types.Action.reload_config, found.action);
 
     // Two shadowed entries (#2 and #3, 1-based), so two reports -- not one per
@@ -302,9 +300,9 @@ test "mouse bind shadowing: last entry wins and every shadowed entry is reported
 
     // An unmatched trigger is silent: absence of a binding is not a conflict.
     const seen = diag.count();
-    try testing.expect(input.findMouseBind(&binds, masks.mod_super, 2) == null);
+    try testing.expect(mouse.findMouseBind(&binds, masks.mod_super, 2) == null);
     try testing.expectEqual(seen, diag.count());
     // And a modifier mismatch misses even though the button exists.
-    try testing.expect(input.findMouseBind(&binds, masks.mod_alt, B1) == null);
+    try testing.expect(mouse.findMouseBind(&binds, masks.mod_alt, B1) == null);
     try testing.expectEqual(seen, diag.count());
 }
