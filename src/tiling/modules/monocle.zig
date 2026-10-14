@@ -16,7 +16,7 @@ const variant_gaps: u8 = tiling.variantIndex(&variants, "gaps");
 /// screen edge when gaps enabled, else zero. All dimensions are u16 and
 /// shrunk via shrinkClamped (floor clamped to min_dim). Requires the engine
 /// contract's non-empty `v.order`.
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
     const gaps = v.params.variant_idx == variant_gaps;

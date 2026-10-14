@@ -133,10 +133,6 @@ pub fn readPctFrom(base: []const u8, class: Class, dev: []const u8) ?u8 {
     return pctFromRaw(raw, max);
 }
 
-/// Writes `val` into a sysfs text attribute. Returns false on any failure
-/// (missing device, permission denied, read-only mount). Raw POSIX I/O: the
-/// node must be written as-is, and O_TRUNC keeps file-backed lookalikes
-/// (used by tests) from keeping stale tail bytes.
 /// Why a sysfs write did not happen. `denied` is the ONLY outcome that says
 /// something about this user's authority on the node; every other failure is
 /// transient and says nothing, so it must not latch the module read-only.
@@ -153,6 +149,10 @@ fn classify(err: std.posix.E) WriteResult {
     };
 }
 
+/// Writes `val` into a sysfs text attribute, reporting ok/denied/transient
+/// on failure (missing device, permission denied, read-only mount). Raw
+/// POSIX I/O: the node must be written as-is, and O_TRUNC keeps file-backed
+/// lookalikes (used by tests) from keeping stale tail bytes.
 fn writeU32File(path: []const u8, val: u32) WriteResult {
     var pz: [std.fs.max_path_bytes]u8 = undefined;
     if (path.len >= pz.len) return .transient;
@@ -373,14 +373,11 @@ fn cacheConfigPin(config: types.BarConfig) void {
 
 /// Idle label hook: the slider core renders this during the segment's draw.
 /// Test-only seam: the display state `label` reads (`g_pct`) is module-private,
-/// and the inline tests that used to live in this file had direct access to it.
-/// They are dead for good reason, not just unused: this harness runs tests from
-/// the test ROOT, so an inline test in an imported module is never even
-/// ANALYZED. The two `label` tests below were still calling the pre-26.8
-/// by-pointer signature, so they could not have compiled had they run. They now
-/// live in `src/test/bar/brightness_test.zig` and need this to set their state.
-/// A plain `pub` on the global would export mutable global state to every
-/// importer; this scopes the write to an obviously test-shaped name.
+/// and its tests live in `src/test/bar/brightness_test.zig`, which needs this
+/// to set their state: this harness runs tests from the test ROOT, so an
+/// inline test in an imported module is never even ANALYZED. A plain `pub` on
+/// the global would export mutable global state to every importer; this
+/// scopes the write to an obviously test-shaped name.
 pub fn setDisplayForTest(pct: u8) void {
     g_pct = pct;
 }

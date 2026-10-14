@@ -14,8 +14,6 @@ const build_options = @import("build_options");
 
 const actions = @import("actions");
 
-/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
-/// no module binds it; canonical scan lives in window.providerOf.
 const providerOf = actions.providerOf;
 
 const callHook = actions.callHook;

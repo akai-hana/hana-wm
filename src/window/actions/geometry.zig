@@ -22,8 +22,6 @@ const usable_area = @import("usable_area");
 
 const actions = @import("actions");
 
-/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
-/// no module binds it; canonical scan lives in window.providerOf.
 const providerOf = actions.providerOf;
 
 const dispatchAll = actions.dispatchAll;

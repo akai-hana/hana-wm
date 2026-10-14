@@ -93,10 +93,14 @@ pub const MouseIntent = union(enum) {
 /// scroll binds precede the managed-window guard; focus precedes the bind
 /// lookup; the drag and the replay fallback are both "Super and unbound", and
 /// only the button number tells them apart.
+/// True for the two wheel buttons: they carry scroll-bind semantics and never
+/// click or drag.
+inline fn isScrollButton(button: u8) bool {
+    return button == constants.mouse_button_scroll_up or button == constants.mouse_button_scroll_down;
+}
+
 pub fn classifyMousePress(p: MousePress) MouseIntent {
-    if (p.super_held and
-        (p.button == constants.mouse_button_scroll_up or p.button == constants.mouse_button_scroll_down))
-    {
+    if (p.super_held and isScrollButton(p.button)) {
         // A fired scroll bind reports the SAME intent as any other fired bind,
         // so every intent has exactly one grab outcome and a path cannot
         // release twice (or, once the discipline is trusted, not at all).
@@ -123,8 +127,7 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
     // target a window and must fire over the desktop and the bar too; every
     // other bind targets the clicked window, which is not known to be managed
     // until the lookup above has run. `classifyMousePress` documents the order.
-    const scroll_bind = super_held and (event.detail == constants.mouse_button_scroll_up or
-        event.detail == constants.mouse_button_scroll_down);
+    const scroll_bind = super_held and isScrollButton(event.detail);
     const bind_fired = if (scroll_bind)
         tryConfigMouseBind(mods, event.detail, 0, event.time)
     else if (target_managed and super_held)

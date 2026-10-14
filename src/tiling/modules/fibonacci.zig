@@ -38,7 +38,7 @@ const SpiralDirection = enum(u2) {
 /// Compute Fibonacci spiral layout. Outer gap stripped first; each split
 /// halves the remaining dimension with one gap at the seam. Drawn by pointer;
 /// helpers take the pointer to avoid copies in the recursion.
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     // LayoutCtx.init copies v.env.margins and v.env.min_dim precisely so
     // modules read them from ctx rather than re-deriving from v.env, which is
     // how the same fact ends up with two homes. Hoisted above first use.

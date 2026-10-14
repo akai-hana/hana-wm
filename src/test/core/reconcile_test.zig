@@ -23,7 +23,47 @@ const cfg_bw = helpers.cfg_bw;
 const focused_pixel = helpers.focused_pixel;
 const unfocused_pixel = helpers.unfocused_pixel;
 const testColor = helpers.testColor;
-const golden = helpers.std_golden;
+
+/// Golden master-layout rects on the standard 800x600 fixture (gap 8 /
+/// border 2, default 50/50 split), derived from the shared constants instead
+/// of magic literals: any resize of std_wa/std_env propagates to every golden
+/// assertion. Formulas mirror tiling/modules/master.zig (totalInset,
+/// stackSeamMargin); these are the rects the recorded ops assert against.
+const golden = struct {
+    const gap: u16 = helpers.std_env.margins.gap; // 8
+    const border: u16 = helpers.std_env.margins.border; // 2
+    /// Outer gap both sides + both borders (master.zig totalInset).
+    const total_inset: u16 = gap *| 2 +| border *| 2; // 20
+    /// Half-gap toward the stack + row pitch (master.zig stackSeamMargin).
+    const seam: u16 = gap / 2 +| (gap +| border *| 2); // 16
+    const inner_h: u16 = helpers.std_wa.height -| total_inset; // 580
+    const split_w: u16 = helpers.std_wa.width / 2; // round(800 * 0.5) = 400
+
+    /// Single window filling the master pane.
+    const single = model.Rect{
+        .x = @intCast(gap),
+        .y = @intCast(gap),
+        .width = helpers.std_wa.width -| total_inset,
+        .height = inner_h,
+    };
+    /// Master pane of a two-window 50/50 split.
+    const master = model.Rect{
+        .x = @intCast(gap),
+        .y = @intCast(gap),
+        .width = split_w -| seam,
+        .height = inner_h,
+    };
+    /// Stack pane of a two-window 50/50 split: origin = master_w, then a
+    /// half-gap step; the stack column shrinks by the same seam.
+    const stack = model.Rect{
+        .x = @intCast(split_w +| gap / 2),
+        .y = @intCast(gap),
+        .width = split_w -| seam,
+        .height = inner_h,
+    };
+    /// Fullscreen rect: the entire work area.
+    const fullscreen = helpers.std_wa;
+};
 
 const Recorder = test_sink.TestSink(.record);
 

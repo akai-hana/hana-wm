@@ -15,7 +15,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const core = @import("core");
-const xcb = core.xcb;
 const constants = @import("constants");
 const log = @import("log");
 const types = @import("types");
@@ -462,7 +461,7 @@ pub const State = struct {
     drag_segment: ?usize = null,
     /// Segment id being serviced by a scroll `onScroll` dispatch while its
     /// scoped repaint callback runs, so the callback repaints only the
-    /// scrolled segment's recorded bound (see redrawScrolledSegment) instead
+    /// scrolled segment's recorded bound (see redrawScopedSegment) instead
     /// of forcing a full-bar redraw. Set around the dispatch in
     /// handleButtonPress and cleared before it returns.
     scroll_segment: ?usize = null,
