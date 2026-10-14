@@ -15,7 +15,7 @@
 //! a section of types.zig.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 
 pub const Dir = enum { forward, reverse };
 pub const SwapMode = enum { normal, focus_swap };

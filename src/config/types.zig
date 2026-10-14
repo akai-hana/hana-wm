@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const action = @import("action");
-const model = @import("wm_state");
+const model = @import("model");
 const scaling = @import("scaling");
 
 /// Largest 1-based workspace number accepted when parsing a workspace
@@ -194,7 +194,6 @@ pub const WorkspaceMasterCountOverride = struct {
 pub const canon_master_layout = "master";
 
 pub const TilingConfig = struct {
-    enabled: bool = true,
     layouts: std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
     master_side: MasterSide = .left,
     master_width: ScalableValue = ScalableValue.percentage(50.0),
@@ -608,7 +607,7 @@ pub const BarConfig = struct {
 
     /// Resolves a ScalableValue to pixels: the percentage path multiplies the
     /// reference dimension by `factor`, the absolute path is used verbatim
-    /// (canonical formula lives in `core/pure/scaling`).
+    /// (canonical formula lives in `core/display/scaling`).
     inline fn scaleValue(sv: ScalableValue, bar_height: u16, factor: f32) f32 {
         return scaling.scaleToPixels(sv, @as(f32, @floatFromInt(bar_height)) * factor);
     }
@@ -654,9 +653,6 @@ pub const Rule = struct {
 };
 
 pub const WorkspaceConfig = struct {
-    /// When false, every window lives on a single implicit workspace and
-    /// all workspace-switching keybindings/actions are no-ops.
-    enabled: bool = true,
     count: u8 = 9,
     rules: std.ArrayList(Rule) = .empty,
 
@@ -674,11 +670,6 @@ pub const Config = struct {
     tiling: TilingConfig = .{},
     workspaces: WorkspaceConfig = .{},
     bar: BarConfig = .{},
-
-    /// Each subsystem is always fully compiled in; these flags just gate
-    /// whether its behavior (and keybindings/actions that drive it) is active.
-    fullscreen_enabled: bool = true,
-    drag_enabled: bool = true,
 
     /// How close (in px or %) a window edge must be to a monitor/bar boundary
     /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.

@@ -10,7 +10,7 @@
 //! schema_test; nothing in the runtime config-loading path names them.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const log = @import("log");
 const parser = @import("parser");
 const types = @import("types");
@@ -102,25 +102,19 @@ fn barColorOpt(places: []const Placement, target: []const u8, sibling: []const u
 /// `needs` list.
 pub const knobs = [_]Knob{
     // [drag]
-    knob(&.{place(types.section_drag, "enabled")}, "drag_enabled", .b),
     knob(&.{place(types.section_drag, "snap_distance")}, "snap_distance", .{ .scalable = 0.0 }),
-
-    // [fullscreen]
-    knob(&.{place(types.section_fullscreen, "enabled")}, "fullscreen_enabled", .b),
 
     // [display]
     knob(&.{place(types.section_display, "dpi")}, "dpi", .{ .opt_float = .{ .min = 20.0, .max = 1000.0 } }),
 
     // [bar.modules.workspaces] | [workspaces]
     knob(&.{ place(types.section_bar_modules_workspaces, "count"), place(types.section_workspaces, "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = model.max_workspaces } }),
-    knob(&.{ place(types.section_bar_modules_workspaces, "enabled"), place(types.section_workspaces, "enabled") }, "workspaces.enabled", .b),
 
     // [tiling]: functional knobs gated on the section itself -- a lone
     // [tiling] carrying only the
     // aesthetics quartet (a theme file's shape) never fed these
     // knobs. (The aesthetics quartet below is UNGATED: it's
     // visual, so themes may ship it without any functional key.)
-    knobGated(&.{place(types.section_tiling, "enabled")}, "tiling.enabled", .b, types.section_tiling),
     knobGated(&.{place(types.section_tiling, "global_layout")}, "tiling.global_layout", .b, types.section_tiling),
     knobGated(&.{place(types.section_tiling, "min_window_dim")}, "tiling.min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, types.section_tiling),
 
@@ -335,8 +329,8 @@ fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
 /// targets themselves always resolve from `types.Config` (whose nested fields
 /// ARE these subtrees), so the prefixes exist to spell the full path of a
 /// subtree field in the coverage report -- a target is written relative to its
-/// subtree (`gap_width`, `bar.bg`) EXCEPT for the handful of top-level Config
-/// knobs (`snap_distance`, `fullscreen_enabled`), which carry no prefix.
+/// subtree (`gap_width`, `bar.bg`) EXCEPT for the single top-level Config
+/// knob (`snap_distance`), which carries no prefix.
 const coverage_subtrees = [_]struct { prefix: []const u8, ty: type }{
     .{ .prefix = "", .ty = types.Config },
     .{ .prefix = "tiling.", .ty = types.TilingConfig },

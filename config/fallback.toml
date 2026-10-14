@@ -2,7 +2,6 @@
 # This config is used when no config.toml is found
 
 [tiling]
-enabled     = true
 layout      = "master"
 master_side = "left"
 

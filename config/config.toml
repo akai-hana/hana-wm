@@ -25,7 +25,6 @@ include = ["themes/akai.toml"]
 # ---------------------------------------------------------------------------
 
 [tiling]
-enabled = true
 
 # When false (default), each workspace remembers its own layout independently.
 # When true, changing the layout on one workspace changes it everywhere.
@@ -88,7 +87,6 @@ variants = "relaxed"   # "rigid" (strict grid) | "relaxed" (last window expands)
 
 # -- Drag & drop --
 [drag]
-enabled       = true
 snap_distance = 16 # Pixel distance at which windows snap together
 
 # ---------------------------------------------------------------------------

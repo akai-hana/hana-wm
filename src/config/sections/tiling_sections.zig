@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const log = @import("log");
-const model = @import("wm_state");
+const model = @import("model");
 const parser = @import("parser");
 const types = @import("types");
 const layout_names = @import("layout_names");

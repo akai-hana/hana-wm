@@ -145,4 +145,4 @@ brightness_value = primary_color # brightness slider number
 # drun command runner colors (all optional; omit to use bar-wide defaults)
  # drun_bg           = "#0d0d14"  # background (default: bar bg)
  # drun_fg           = "#ebd9bc"  # typed text  (default: bar fg)
- # drun_prompt_color = primary_color  # prompt text + cursor (default: primary_color)
+ drun_prompt_color = primary_color  # prompt text + cursor (default: primary_color)

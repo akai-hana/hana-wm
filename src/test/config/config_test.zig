@@ -17,7 +17,7 @@ const testing = std.testing;
 // src/core/pure/log.zig silences all std.log diagnostics in test binaries,
 // so this stays quiet on success.
 const config = @import("config");
-const model = @import("wm_state");
+const model = @import("model");
 const discover = @import("discover");
 const scaling = @import("scaling");
 const scratch = @import("scratch");
@@ -423,7 +423,6 @@ test "theme quartet: a [tiling] theme merges over a functional [tiling] config" 
     try testing.expectEqual(config.DefaultSource.user, source);
 
     // The functional knobs survive the merge...
-    try testing.expect(cfg.tiling.enabled);
     try testing.expectEqual(@as(u8, 1), cfg.tiling.master_count);
     try testing.expectEqualStrings("lifo", cfg.tiling.variants.get("master").?);
     // ...and the theme's quartet lands on the tiling fields.

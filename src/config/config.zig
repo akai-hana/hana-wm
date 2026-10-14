@@ -2,7 +2,7 @@
 //! Loads, parses, and validates TOML config files.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const fallback = @import("fallback");
 const log = @import("log");
 const scaling = @import("scaling");
