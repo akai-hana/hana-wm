@@ -5,7 +5,7 @@
 //! this harness, so those five were dead; they are recovered below alongside
 //! the file-backed read/write and device-resolution paths.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: seg_brightness
 
@@ -25,7 +25,7 @@ fn writeAttr(root: std.Io.Dir, comptime class: []const u8, dev: []const u8, comp
     try root.writeFile(io, .{ .sub_path = rel, .data = data });
 }
 
-/// The 25.3 span form: `Label` carries `value_start`/`value_len` rather than a
+/// The span form: `Label` carries `value_start`/`value_len` rather than a
 /// subslice, so assertions spell the comparison out instead of relying on a
 /// `?[]const u8` field these tests used to have.
 fn valueSpan(l: slider.Label) []const u8 {

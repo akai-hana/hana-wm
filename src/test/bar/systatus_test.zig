@@ -6,7 +6,7 @@
 //! one would make the suite fail the moment a readout file is added or removed
 //! -- precisely the open-module churn this surface is designed to absorb.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: seg_systatus
 
@@ -184,7 +184,7 @@ test "parseCapacity trims, parses and range-checks" {
     try std.testing.expectEqual(@as(?u8, null), batt.parseCapacity("abc\n"));
 }
 
-test "the bar's painted-width report drives the reservation (21.7)" {
+test "the bar's painted-width report drives the reservation" {
     // The reservation used to depend on each draw remembering to store its own
     // width -- a silent omission that shows up as a segment locked onto its
     // startup width, clipped by its right neighbours. The bar now owns the
@@ -211,7 +211,7 @@ test "the bar's painted-width report drives the reservation (21.7)" {
     }
 }
 
-// (25.3) The pure half of a systatus segment. `refresh` used to do the
+// The pure half of a systatus segment. `refresh` used to do the
 // formatting, the value-span bookkeeping, the miss latching and the change
 // detection in one function over module globals, so none of it could be
 // tested. `render` is the formatting half, split out and now reachable.
@@ -226,7 +226,7 @@ test "render lays out label, space and value, and reports the value span" {
 }
 
 test "render does not assume the value is a percentage" {
-    // (25.3) The point of the Sample: the core used to hardcode "{d}%", so a
+    // The point of the Sample: the core used to hardcode "{d}%", so a
     // readout could only ever be a percentage.
     var buf: [64]u8 = undefined;
     for ([_][]const u8{ "2.4G", "up", "3 of 7", "", "\xc2\xb5F" }) |value| {

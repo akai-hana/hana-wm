@@ -2,7 +2,7 @@
 //!
 //! systatus and slider both reserve a row span, feed it the width they actually
 //! painted, and owe a redraw when that width changes. slider used to keep its
-//! own `slot_w` field for this (21.4), and the copy had already drifted once:
+//! own `slot_w` field for this, and the copy had already drifted once:
 //! the click hit-test read the raw painted width and so rejected every press
 //! while it was still 0 -- the first click on a freshly laid-out slider did
 //! nothing -- while the drag denominator and the row reservation fell back to
@@ -83,7 +83,7 @@ test "each tag is its own state, so controls cannot overwrite each other" {
     try std.testing.expectEqual(@as(u16, 22), B.measured());
 }
 
-test "the bar's post-draw step hands the width back and reports a paint (21.7)" {
+test "the bar's post-draw step hands the width back and reports a paint" {
     // This is the handoff the whole item is about, and it lived inside the
     // bar's draw loop -- which needs a live DrawContext and an X connection,
     // so it had no test at all. `scaffold.finishDraw` is that policy as a pure

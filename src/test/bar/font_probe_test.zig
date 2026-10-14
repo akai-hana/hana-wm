@@ -16,7 +16,7 @@
 //! clean miss, and this is the only place the ordering gets exercised. So:
 //! repeated invocation, both font-name branches, and no crash.
 //!
-//! The leak fix itself ([22.2]) is recorded in the ledger with this same
+//! The leak fix itself is recorded in the ledger with this same
 //! limitation. Detecting it would need a GLib-level allocation counter or an
 //! RSS-delta test, both of which are environment-fragile enough that they
 //! would flake more often than the leak they watch.

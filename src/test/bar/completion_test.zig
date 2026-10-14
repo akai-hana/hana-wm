@@ -1,4 +1,4 @@
-//! Word-at-cursor completion seam (27.3).
+//! Word-at-cursor completion seam.
 //!
 //! `updateGhost` used to bail on ANY space in the buffer, so the second and
 //! later words of a command could never be completed: typing "git ch" showed no
@@ -11,7 +11,7 @@
 //! behavior change: a token after a space is found, and the reported offset
 //! points at the token's first byte.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: vim, seg_prompt
 
