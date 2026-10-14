@@ -15,7 +15,6 @@
 //! stem is taken by the core event loop.
 
 const std = @import("std");
-const build_options = @import("build_options");
 const xcb = @import("core").xcb;
 const actions = @import("actions");
 const focus = @import("focus");
@@ -62,7 +61,13 @@ pub fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right:
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
     if (bar.gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
-        if (build_options.has_floating and actions.isDragging()) s.dirty.flag = true else draw.performDraw();
+        // A damaged region must be REPAINTED now, even mid-drag: the old
+        // special-case set the dirty flag and skipped performDraw, but the
+        // tick-driven next draw would then see no seg bits dirty, skip
+        // repainting entirely, and clear the flag again -- the exposed region
+        // is never redrawn. The drag itself defers its own per-tick blit, so
+        // the expose deserves a full performDraw here.
+        draw.performDraw();
     };
 }
 
@@ -113,7 +118,11 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // Scroll buttons 4/5: no click semantics, no drag anchor. The repaint is
     // segment-scoped (see redrawScrolledSegment) so a fast wheel sweep never
     // forces full-bar redraws.
-    s.drag_segment = null;
+    //
+    // Note: `s.drag_segment` is deliberately NOT nulled on a scroll press --
+    // a button-1 drag currently in flight has its anchor here, and clearing
+    // it would lose the anchor, so handleButtonRelease's `orelse return`
+    // drops onDragEnd (throttled commit unflushed, drag render mode stuck).
     if (detail == constants.mouse_button_scroll_up or
         detail == constants.mouse_button_scroll_down)
     {

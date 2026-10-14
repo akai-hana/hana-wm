@@ -368,16 +368,13 @@ fn tryRungNativeAlsa() bool {
     return false;
 }
 
-/// The latency class of one commit on the live backend. Every rung is a
-/// subprocess, so this is always `.rate_limited` while a backend is latched
-/// and while none is; it reports `.immediate` only when the backend is known,
-/// which today no rung reaches. Kept as a per-sub query because the slider
-/// core throttles on it and brightness's sysfs path genuinely is immediate --
-/// folding the answer to a constant here would push that distinction into
-/// every caller.
-/// Now genuinely variable, which is why it stays a per-sub query: the two
-/// native rungs are a single ioctl (or an in-process libpulse call) and are
-/// `.immediate`, while the two subprocess rungs fork and are `.rate_limited`.
+/// The latency class of one commit on the live backend: the two native rungs
+/// are a single ioctl (or an in-process libpulse call) and report
+/// `.immediate`, while the two subprocess rungs fork and are
+/// `.rate_limited`. Kept as a per-sub query because the slider core throttles
+/// on it and brightness's sysfs path genuinely is immediate -- folding the
+/// answer to a constant here would push that distinction into every
+/// caller.
 /// The slider core throttles on this, so folding it to a constant would either
 /// throttle the native path needlessly or let the subprocess rungs commit on
 /// every scroll event.
@@ -488,6 +485,15 @@ pub fn setDisplayForTest(pct: u8, muted: bool) void {
 /// path exists for.
 pub fn clearValueForTest() void {
     g_has_value = false;
+}
+
+/// Test seam for the latch/rung mapping: the native backends are process
+/// globals latched once, and a test that never clears them lets one stale
+/// backend choice leak into the next test's assertion. Clearing here keeps each
+/// latchedRung decision pinned to this test's own state.
+pub fn clearNativeBackendForTest() void {
+    g_native_pulse = null;
+    g_native_alsa = null;
 }
 
 pub fn label(config: types.BarConfig, buf: []u8) slider.Label {

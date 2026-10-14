@@ -15,11 +15,6 @@
 const std = @import("std");
 const native_alsa = @import("native_alsa");
 
-test {
-    _ = native_alsa;
-    _ = std;
-}
-
 // ---------------------------------------------------------------------------
 // Recovered dead tests, formerly INLINE in native_alsa.zig. A canary
 // `expectEqual(1, 2)` appended to that file does not fail, so the import in
@@ -99,11 +94,12 @@ test "shim match is case-insensitive and substring-based" {
 test "card name extraction stops at the NUL and tolerates a full field" {
     // A 32-char name with no terminator must yield all 32 bytes rather than
     // reading past the field, and a short one must not carry trailing zeros.
+    // Exercises the same helper cardName calls (native_alsa.clipToFirstNul),
+    // not a locally re-derived extraction: a regression in the real one
+    // fails here.
     const full = "a" ** 32;
-    const trimmed = std.mem.trimEnd(u8, full, "\x00");
-    try std.testing.expectEqual(@as(usize, 32), trimmed.len);
+    try std.testing.expectEqual(@as(usize, 32), native_alsa.clipToFirstNul(full).len);
 
     const padded = [_]u8{ 'H', 'D', 'A', 0, 0, 0 };
-    const end = std.mem.indexOfScalar(u8, &padded, 0).?;
-    try std.testing.expectEqualStrings("HDA", padded[0..end]);
+    try std.testing.expectEqualStrings("HDA", native_alsa.clipToFirstNul(&padded));
 }

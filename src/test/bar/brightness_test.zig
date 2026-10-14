@@ -241,6 +241,9 @@ test "label honors configuration" {
     cfg.brightness_format = "Level {pct}";
     var buf: [128]u8 = undefined;
     brightness.setDisplayForTest(42);
+    // The seam writes a module global shared by the whole test binary:
+    // restore the neutral 0 so test order never becomes load-bearing.
+    defer brightness.setDisplayForTest(0);
     try std.testing.expectEqualStrings("Level 42", brightness.label(cfg, &buf).text);
     try std.testing.expectEqualStrings("42", valueSpan(brightness.label(cfg, &buf)));
 }
@@ -248,6 +251,7 @@ test "label honors configuration" {
 test "label default format" {
     var buf: [128]u8 = undefined;
     brightness.setDisplayForTest(33);
+    defer brightness.setDisplayForTest(0);
     try std.testing.expectEqualStrings("BRT 33%", brightness.label(types.BarConfig{}, &buf).text);
     try std.testing.expectEqualStrings("33%", valueSpan(brightness.label(types.BarConfig{}, &buf)));
 }

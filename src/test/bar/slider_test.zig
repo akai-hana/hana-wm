@@ -5,6 +5,8 @@
 //! These are state-free so they run against the real registry without
 //! touching state; the subprocess-free paths avoid touching devices.
 
+// build-gate: seg_slider, meter
+
 const std = @import("std");
 const slider = @import("slider");
 const meter = @import("meter");

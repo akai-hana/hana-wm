@@ -185,6 +185,11 @@ fn probeTextHeight(trial_pt: u16) ?u32 {
 /// blink, marquee repaint-marking, ...) then submits a draw. The bar never
 /// names a segment.
 pub fn onPollWakeup() void {
+    // First gate is the lifecycle: with no live bar (disabled via config
+    // reload, pre-init, or post-deinit), module hooks must not run at all --
+    // the cadence here is what would put a dead-module background wake up at
+    // the frame rate.
+    const s = gBar.state orelse return;
     runVoidHook(.onPollWakeup);
     // A module's poll hook (e.g. the prompt's caret-blink toggle) must reach
     // the draw's repaint gate: fold any queued module redraw request into the
@@ -192,9 +197,7 @@ pub fn onPollWakeup() void {
     // (updateIfDirty) does, so the animation is visible even when the loop is
     // waking only on the poll timer with no X traffic to trigger that path.
     // performDraw consumes the redraw request itself; no consume here.
-    if (gBar.state) |s| {
-        _ = draw.foldModuleRedraw(s);
-    }
+    _ = draw.foldModuleRedraw(s);
     draw.performDraw();
 }
 
@@ -204,15 +207,21 @@ pub fn onPollWakeup() void {
 /// THIS is the single place that turns that into absence, because it is the
 /// bar's whole contribution to core's deadline reduction (see core/loop/timers).
 pub fn pollTimeoutMs() ?i32 {
+    // A bar-less session wants no wakeups from module hooks at all: polling,
+    // then dispatching every dead module's cadence at the frame rate, is a
+    // real idle-consumption bug (a bar disabled via reload never stops its
+    // clocks but keeps dispatching).
+    const s = gBar.state orelse return null;
     // A hidden bar paints nothing, so no per-frame deadline (clock tick,
-    // caret blink, carousel scroll) can make progress: the modules would
-    // re-arm polling forever without ever being drawn to, spinning the event
-    // loop at the frame rate in the background (notably the title carousel,
-    // whose offset only advances inside a draw). Suppress all deadlines while
-    // hidden; the next visibility transition re-arms them.
-    if (gBar.state) |s| {
-        if (!s.vis.shown) return -1;
-    }
+    // caret blink, carousel scroll) can make progress...
+    if (!s.vis.shown) return null;
+
+    // Module hooks still speak in negatives ("no wake needed"); THIS is the
+    // single place that turns that into absence, because it is the bar's
+    // whole contribution to core's deadline reduction. Reducing to `null`
+    // here is what keeps a hidden or empty-set bar from starving other tick
+    // sources -- a bare -1 would slip past the reduce as an immediate
+    // "want to wake NOW" preference.
     var nearest: ?i32 = null;
     for (bar_mods) |m| {
         if (m.pollTimeoutMs) |h| {
@@ -346,13 +355,10 @@ const RightCluster = struct {
     widths: [max_right_segments]u16 = undefined,
     /// Number of right segments encountered this frame.
     count: usize = 0,
-    /// Reserved width the right cluster occupies: segment widths plus the
-    /// inter-segment spacing, minus the trailing gap of each right layout.
-    total: u16 = 0,
     /// Running solve index, advanced per right layout so each layout reads
     /// its own slice of `widths`.
     ridx: usize = 0,
-    /// u32 accumulator for `total`; saturates into the u16 on conversion.
+    /// u32 accumulator for `right_total`; saturates into the u16 on conversion.
     total_raw: u32 = 0,
     /// Scaled inter-segment spacing, cached by solve so the backward pass
     /// does not re-derive it per layout.
@@ -558,7 +564,6 @@ const TitleScratch = struct {
     /// borrow. Copying costs one memcpy and removes the question of which
     /// readers may hold the slice across a cache write.
     focused_title_buf: [wincache.max_title_len]u8 = undefined,
-    focused_title_len: u16 = 0,
 };
 
 /// Last-seen core fact revisions (see core.Facts). Each is diffed against the
@@ -815,16 +820,19 @@ pub const State = struct {
     /// end-of-batch tick can region-scope a repaint (drawClockOnly). Written
     /// for every configured self-ticker in ANY cluster (left/center/right);
     /// unconfigured self-tickers stay invalid and are never repainted.
-    fn recordSelfTickerScope(self: *State, frame: *const segmod.Frame, name: []const u8, x: u16) void {
+    fn recordSelfTickerScope(self: *State, name: []const u8, x: u16, w: u16) void {
         // `comptime` on the length: with no self-ticking segment compiled in,
         // `Clock.segs` is a zero-length array and the indexed store below is
         // still analyzed, which is a compile error. The length is a comptime
         // constant, so this drops the whole body before it is analyzed.
         if (comptime self_ticking_ids.len == 0) return;
         if (selfTickerIndex(name)) |i| {
+            // The solved slot width is threaded through (its naturalWidth hook
+            // ran during the layout pass) rather than re-measured here: the
+            // latter made every self-ticker's hook run twice per frame.
             self.clock.segs[i] = .{
                 .x = x,
-                .width = self.measureSegmentWidth(frame, name),
+                .width = w,
                 .valid = true,
             };
         }
@@ -864,10 +872,8 @@ pub const State = struct {
         if (ctx.focused_window) |fw| {
             const src = wincache.peekTitle(fw);
             @memcpy(self.title_data.focused_title_buf[0..src.len], src);
-            self.title_data.focused_title_len = @intCast(src.len);
             ctx.focused_title = self.title_data.focused_title_buf[0..src.len];
         } else {
-            self.title_data.focused_title_len = 0;
             ctx.focused_title = "";
         }
         ctx.minimized_title = minimized_title;
@@ -1130,8 +1136,6 @@ pub const State = struct {
                     else
                         plan.cluster.widths[start..][0..lay.segments.items.len];
                     const n = lay.segments.items.len;
-                    var local: [max_right_segments]u16 = undefined;
-                    if (widths) |ws| @memcpy(local[0..n], ws);
                     var cur_x = plan.cluster.right_x;
                     var pending_gap = false;
                     var i = n;
@@ -1166,7 +1170,6 @@ pub const State = struct {
     /// cursor, which used to live in drawRightSegments, is already baked into
     /// the plan's slot positions.
     fn paintRowPlan(self: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_redraw: bool) void {
-        const frame = &ctx.frame;
         const scaled_spacing = renderBar().scaledSpacing(self.render.height);
         // Left/center advance, threaded separately from the plan's right-cluster
         // positions: a right slot's `x` is final, but a left/center slot's is
@@ -1184,7 +1187,7 @@ pub const State = struct {
             // Self-ticker scope is recorded in ANY cluster: drawClockOnly
             // depends on it regardless of where the clock is laid out.
             const slot_x = if (slot.is_right) slot.x else x;
-            if (slot.self_ticking) self.recordSelfTickerScope(frame, slot.name, slot_x);
+            if (slot.self_ticking) self.recordSelfTickerScope(slot.name, slot_x, slot.w);
             self.recordClickBound(slot.name, slot_x, slot.w);
 
             if (!slot.repaintable) {
@@ -1222,7 +1225,7 @@ pub const State = struct {
                 // previous layout's pending gap would clear a second time
                 // where the old per-layout loop started clean.
                 if (slot.right_layout_start) pending_gap = false;
-                const drew = self.drawSegment(ctx, slot.name, slot.x, null).drew;
+                const drew = self.drawSegment(ctx, slot.name, slot.x, slot.w).drew;
                 if (drew and pending_gap) self.paintGap(slot.x +| slot.w, scaled_spacing);
                 // A failed draw still occupies its slot as empty space, so the
                 // next leftward segment gets the same gap solve computed. That
@@ -1573,7 +1576,11 @@ pub fn updateIfDirty() void {
     const window_rev = core.window.rev();
     const layout_rev = core.layout.rev();
     if (s.facts.focus_rev != focus_rev) s.markDirtySource(.focus);
-    if (s.facts.window_rev != window_rev) s.markDirty();
+    // window_rev previously skipped through blanket `markDirty()` even though
+    // title and tags declare they want `.frame` dirtying; using the frame
+    // source keeps the non-frame segments (clock, carousel, systatus) from
+    // being swept along on every window churn fact bump.
+    if (s.facts.window_rev != window_rev) s.markDirtySource(.frame);
     if (s.facts.layout_rev != layout_rev) {
         draw.requestFullRedraw();
     }
