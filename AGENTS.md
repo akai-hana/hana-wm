@@ -60,10 +60,11 @@ CI additionally runs the full suite, `zig build`, and the modularity matrix.
 
 ## Layout
 
-- `src/core/` — event loop, X11 layer, reconcile boundary, `architecture/`
-  (contracts + `model.zig`, the single source of truth for window state,
-  deliberately X11-free).
-- `src/window/`, `src/tiling/`, `src/bar/`, `src/input/`, `src/config/` —
+- `src/core/` — event loop, X11 layer, input handling (`core/input/`:
+  `xkb`, `keybinds`, `keys`, `mouse`, `dispatch`, `cursor`, `keymap`),
+  reconcile boundary, `architecture/` (contracts + `domain.zig` + `wm_state.zig`,
+  the single source of truth for window state, deliberately X11-free).
+- `src/window/`, `src/tiling/`, `src/bar/`, `src/config/` —
   subsystems; optional ones (`tiling`, `bar`, most modules) can be deleted.
 - `src/test/` — unit tests, organized by area (`core`, `window`, `tiling`,
   `bar`, `input`, `config`, `harness`, `bench`).
@@ -73,8 +74,9 @@ CI additionally runs the full suite, `zig build`, and the modularity matrix.
 
 ## Notes
 
-- `model` (in `src/core/architecture/model.zig`) is the single writer of window
+- `wm_state` (in `src/core/wm_state.zig`) is the single writer of window
   state; sync goes single-writer through the model (guarded by `zig build check`).
+  Vocabulary lives in `src/core/architecture/domain.zig`.
 - Unit tests that need a display self-skip with `SkipZigTest` when none is
   available; `xtest.sh` sets `HANA_REQUIRE_X=1` so that path can never go green
   by skipping.
