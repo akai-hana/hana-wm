@@ -41,9 +41,12 @@ exact pixels.
 | `50%`      | percent of the relevant base (screen, bar, …) |
 | `12`       | exact pixels (a bare number IS the pixel value; no `px` suffix is parsed) |
 
-- Ratio knobs (e.g. `transparency`) additionally accept a plain `0.0–1.0`
-  float. Mind the bare-`1` ambiguity rule: for these knobs `1` means **1%**,
-  not 1.0 — write `1.0` or `100%` for fully opaque.
+- Ratio knobs additionally accept a plain `0.0–1.0` float.
+  `indicator_padding` also reads bare integers as percentages
+  (0-100) — mind the bare-`1` rule: `1` means **1%**, not 1.0.
+  `transparency` is stricter: bare integers are rejected (warned
+  and ignored), so write `0.5` or `50%`; `1.0` or `100%` is
+  fully opaque.
 - Colors accept `"#RRGGBB"`, `#RRGGBB`, or `0xRRGGBB`, quoted or not. A bare
   all-digit spelling is hex too when it has exactly 6 (`RRGGBB`) or 8
   (`RRGGBBAA`) digits — e.g. `112233` reads as `0x112233`; any other bare
@@ -84,9 +87,9 @@ per-layout overrides. A `[tiling.layouts.<name>]` table carries that layout's
 `variants` string; the master family additionally accepts `count`, `side`, and
 `width` under `[tiling.layouts.master-stack]`, and per-workspace count
 overrides under `[tiling.layouts.master-stack.counts]` (1-based workspace =
-count; only meaningful with `global_layout = false`). Window chrome lives in
-`[tiling.aesthetics]` (`gap_width`, `border_width`, `border_focused`,
-`border_unfocused`) — usually themed by the theme file.
+count; only meaningful with `global_layout = false`). Window chrome
+(`gap_width`, `border_width`, `border_focused`, `border_unfocused`)
+lives in `[tiling]` itself — usually themed by the theme file.
 
 ### `[drag]`
 

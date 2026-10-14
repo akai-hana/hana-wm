@@ -52,7 +52,6 @@ pub const section_bar = "bar";
 pub const section_bar_properties = "bar.properties";
 pub const section_rules = "rules";
 pub const section_workspace_rules = "workspace.rules";
-pub const section_tiling_aesthetics = "tiling.aesthetics";
 pub const section_tiling_layouts_master_stack = "tiling.layouts.master-stack";
 pub const section_binds = "binds";
 pub const section_binds_alt = "Keybindings";
