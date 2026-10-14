@@ -1,13 +1,5 @@
-//! Spawn engine: detached command execution for keybind `exec` actions.
-//!
-//! One fork plus setsid, with the WM installed as a child subreaper
-//! (makeSubreaper, called from core.init) so orphans re-parent to hana rather
-//! than accumulating somewhere nothing will collect them. A single O_CLOEXEC
-//! pipe carries the outcome: success closes the child's copy automatically, and
-//! execvp failure writes tag_failed before exiting. The spawned PID is known
-//! from fork() itself, so there is no pid message to parse and no second writer
-//! to race. EOF ends the conversation; entries resolve via drainPendingSpawns()
-//! (every event batch) or reapPendingChildren() (SIGCHLD).
+//! Detached command spawning for `exec` actions: fork+setsid, WM as subreaper,
+//! O_CLOEXEC pipe for outcome reporting; PIDs tracked and reaped in event loop.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -54,6 +46,7 @@ const log = @import("log");
 const time = @import("time");
 const tracking = @import("tracking");
 const window = @import("window");
+const admission = @import("admission");
 
 const bounded = @import("bounded");
 const lifecycle = @import("lifecycle");
@@ -359,7 +352,7 @@ fn finishSpawn(entry: *PendingSpawn) void {
         return;
     }
     if (entry.spawn_ws) |ws| {
-        window.registerSpawn(core.WorkspaceId.fromIndex(ws), @intCast(entry.pid));
+        admission.registerSpawn(core.WorkspaceId.fromIndex(ws), @intCast(entry.pid));
     }
 }
 

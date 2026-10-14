@@ -1,28 +1,6 @@
-//! WM state hand-off across a re-exec (see the restart module for the
-//! trigger/exec machinery).
-//!
-//! Pure serialize/deserialize of the model to a temp file: no X11 traffic.
-//! save() dumps the model; the booting process loadToGlobal()s the file and
-//! the adoption path (window.adoptRootWindows) consumes the records while
-//! applyModelLevel() restores model-level fields (current/ws params/orders/
-//! focused). home_ws is derived (with presence) and NOT serialized.
-//!
-//! Seam: each WindowRecord carries `presence` (model.Presence) and
-//! an opaque `ext` blob (stamped as `[version][registry ordinal][payload]`,
-//! see `ext_format_version`). Only `presence` and the identity/mode survive in
-//! the model; `ext` is feature-owned bytes (plus the ownership stamp) carried
-//! verbatim and handed back to the owning module (via the window_modules
-//! registry) during adoption/wire deserialize. The raw bytes are serialized
-//! with std.json as a []const u8 (an array of numbers; ~10 bytes/window,
-//! deterministic round-trip).
-//!
-//! Wire format: std.json over the shadow records below, which mirror the
-//! model types field-for-field. Floats round-trip exactly: std.json prints an
-//! f32 as its exact f64 widening and the parse narrows back to the same bits
-//! (verified against Zig 0.16's std.json.Stringify). All MAX_WS workspaces
-//! are always serialized (array position is the index), so parse-time
-//! indexing needs no bounds work and a hand-edited file cannot name a
-//! workspace that was never saved.
+//! Pure serialize/deserialize of WM model state to a temp file for re-exec
+//! hand-off; X11-free, arena-based loading, JSON wire format over shadow
+//! records with feature-owned extension blobs.
 
 const std = @import("std");
 const config_mod = @import("config");
@@ -58,7 +36,7 @@ const persist_version: u32 = 5;
 /// wrapped as `[ext_format_version][name length][claiming module name][payload]`
 /// -- the name is the module's stable `contract.WindowModule.name`, not its
 /// position in the build-generated `window_modules` registry. Adoption
-/// (window.applyRestoredRecord) fast-paths on the name and falls back to the
+/// (admission.applyRestoredRecord) fast-paths on the name and falls back to the
 /// magic-byte scan when the name no longer resolves (module removed or
 /// renamed) — the
 /// self-identifying format tags each module embeds in its payload keep the

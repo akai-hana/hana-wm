@@ -1,11 +1,12 @@
 //! X11-facing window protocol layer: the event boundary for managed toplevels.
 //! Translates MapRequest / UnmapNotify / DestroyNotify / ConfigureRequest /
 //! Enter-LeaveNotify / PropertyNotify / ClientMessage into model transitions
-//! (actions, focus) and owns what surrounds them: admission policy (WM_CLASS
-//! workspace/float rules plus the spawn queue keyed by _NET_WM_PID), boot-time
-//! adoption of pre-existing root children from the restore file, child-to-
-//! toplevel resolution for Electron/Qt/GTK clients, WM_NORMAL_HINTS parsing,
-//! and the per-batch border sweep.
+//! (actions, focus) and owns what surrounds them: boot-time adoption of
+//! pre-existing root children from the restore file, child-to-toplevel
+//! resolution for Electron/Qt/GTK clients, WM_NORMAL_HINTS parsing, and the
+//! per-batch border sweep. The admission policy itself (WM_CLASS
+//! workspace/float rules, the spawn queue, the five-cookie admission
+//! pipeline) lives in admission.zig.
 //!
 //! Also this layer's stable facade: window.zig re-exports the icccm protocol
 //! surface and the window-module hook dispatch (providerOf, callHook*, etc.) so
@@ -16,17 +17,18 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const constants = @import("constants");
-const masks = @import("masks");
 const log = @import("log");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const icccm = @import("icccm");
+const hints = @import("hints");
 const build_options = @import("build_options");
 const window_mods = @import("window_modules").modules;
 const usable_area_mod = @import("usable_area");
 const wincache = @import("wincache");
 const borders = @import("borders");
 const pipeline = @import("pipeline");
+const admission = @import("admission");
 const actions = @import("actions");
 const persist = @import("persist");
 const contract = @import("contract");
@@ -36,7 +38,6 @@ const atoms = @import("atoms");
 const bounded = @import("bounded");
 const idmap = @import("idmap");
 const requests = @import("requests");
-const scaling = @import("scaling");
 const time = @import("time");
 // Private transition-layer gate for mutable model access (per-owner token,
 const ledger = @import("ledger");
@@ -109,54 +110,21 @@ pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
 pub const sendWMTakeFocusKnown = icccm.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
-// XSizeHints flags (ICCCM 4.1.2.3)
-const p_min_size: u32 = 0x10;
-const p_max_size: u32 = 0x20;
-const p_resize_inc: u32 = 0x40;
-const p_aspect: u32 = 0x80;
-const p_base_size: u32 = 0x100;
-
-const wm_normal_hints_long_length: u32 = 18; // flags + 17 fields (up to base_size/win_gravity)
-
 const max_window_tree_depth = constants.max_window_tree_depth;
-
-// Spawn queue: pending (workspace, pid) assignments for newly-mapped windows,
-// consumed by actions.mapRequest at admission. Capped at spawn_queue_capacity;
-// overflow logs and drops the entry rather than growing unbounded.
-
-const SpawnEntry = struct {
-    workspace: u8,
-    /// _NET_WM_PID of the grandchild; 0 for daemon-mode terminals.
-    pid: u32,
-};
-
-// Bounds pending spawns awaiting their first map, not the tiled-window pool.
-const spawn_queue_capacity: usize = 64;
 
 // All mutable window-module state is grouped into a single State struct
 // (mirroring the pattern focus.zig uses) so init()/deinit() each reset
 // everything in one assignment, and a deinit()+init() cycle can't leave a
-// stale field behind. Still exactly one context per process, this is for
+// stale field behind. The admission sub-state (spawn queue, rules maps,
+// spawn-cursor snapshot) lives in admission.zig beside the policy that
+// reads it. Still exactly one context per process, this is for
 // reset discipline, not multi-context support.
 const State = struct {
     /// Module allocator, set in init(). Null before the first init() call.
     alloc: ?std.mem.Allocator = null,
 
-    spawn_queue: std.ArrayListUnmanaged(SpawnEntry) = .empty,
-
-    // Workspace-rule fast-lookup map: WM_CLASS name -> target workspace,
-    // rebuilt from config.workspaces.rules at init and on every reload.
-    // Keys borrow slices from the config, valid until the next rebuild.
-    rules_map: std.StringHashMapUnmanaged(u8) = .{},
-
     /// Caller-owned scratch for tracking.allWindowsInto (border sweeps).
     snapshot: [model_mod.store_capacity]tracking.Entry = undefined,
-
-    // Float-rule fast-lookup map: WM_CLASS name -> float, rebuilt from the
-    // same config rules (entries whose `float` bit is set). First rule wins;
-    // a name lives in exactly one of the two maps. Keys borrow slices from the
-    // config, valid until the next rebuild.
-    float_rules: std.StringHashMapUnmanaged(void) = .{},
 
     // Warn-once latch for client-message diagnostics (see
     // handleClientMessage): a looping pager would otherwise flood the log.
@@ -184,13 +152,6 @@ const State = struct {
     // so the event loop can skip the redundant second sweep. Reset at the
     // end of each batch.
     borders_flushed_this_batch: bool = false,
-
-    /// Pointer root position snapshot at spawn-admission time. The first
-    /// crossing event armed by a `.window_spawn` suppress compares against
-    /// this to tell a synthetic crossing (the new window mapping under a
-    /// parked cursor) apart from a real hover that must refocus. Recorded in
-    /// handleMapRequest; consumed by suppressSpawnCrossing.
-    spawn_cursor: struct { x: i16 = 0, y: i16 = 0 } = .{},
 };
 
 var state: ?State = null;
@@ -285,77 +246,45 @@ pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn 
     return win;
 }
 
-/// Keys are borrowed slices into the config's allocations, valid until the
-/// next rebuild. If a class name appears in multiple rules, the first rule
-/// wins, matching a plain linear scan through the rule list. Float rules land
-/// in `float_rules` (workspace rules in `rules_map`); a name can only ever be
-/// one or the other, never both.
-pub fn buildRulesMap() void {
-    const alloc = state.?.alloc orelse return;
-    state.?.rules_map.clearRetainingCapacity();
-    state.?.float_rules.clearRetainingCapacity();
-    for (core.getState().config.workspaces.rules.items) |rule| {
-        if (rule.float) {
-            // A workspace rule for this name already won; never promote it to
-            // floating after the fact.
-            if (state.?.rules_map.contains(rule.class_name)) continue;
-            // getOrPut: first occurrence wins. On OOM the entry is silently
-            // dropped, the window behaves as if unruled.
-            _ = state.?.float_rules.getOrPut(alloc, rule.class_name) catch {};
-        } else {
-            // A float rule for this name already won; never tile it after the
-            // fact.
-            if (state.?.float_rules.contains(rule.class_name)) continue;
-            // putNoClobber: first occurrence wins. On OOM the entry is silently
-            // dropped, the window is routed to the current workspace instead.
-            state.?.rules_map.putNoClobber(alloc, rule.class_name, rule.workspace) catch {};
-        }
-    }
-}
-
 pub fn init(alloc: std.mem.Allocator) !void {
-    // Reset every field to its zero value so that a deinit() + init() cycle
-    // (session restart, test harness) starts from a clean slate rather than
-    // carrying over whatever the previous cycle left behind.
+    // Reset every field to its zero value so that a deinit() + init()
+    // cycle (session restart, test harness) starts from a clean slate
+    // rather than carrying over whatever the previous cycle left
+    // behind.
     state = .{};
     state.?.alloc = alloc;
     tracking.init();
     focus.init();
     wincache.init(alloc);
-    // Uniform lifecycle dispatch: each compiled-in sub-system's init runs,
-    // absent modules aren't in the array, so nothing else needs a has_* guard.
+    // Uniform lifecycle dispatch: each compiled-in sub-system's init
+    // runs, absent modules aren't in the array, so nothing else needs
+    // a has_* guard.
     try dispatchAllTry(.init, .{});
-    // Pre-allocate spawn queue capacity for the common case (a handful of
-    // concurrent spawns). Failure is non-fatal; the list grows on demand.
-    state.?.spawn_queue.ensureTotalCapacity(alloc, 16) catch |err| {
-        log.warn(
-            "window: spawn queue pre-allocation failed ({s}); will grow on demand",
-            .{@errorName(err)},
-        );
-    };
     icccm.setCacheArmed(true);
-    buildRulesMap();
+    // Admission sub-state (spawn queue, rules maps, spawn-cursor
+    // snapshot): reset and rules-map rebuild live with the admission
+    // policy in admission.zig.
+    admission.init(alloc);
 }
 
 pub fn deinit() void {
     wincache.deinit();
-    // Uniform lifecycle dispatch: every compiled-in sub-system's deinit runs,
-    // absent modules aren't in the array.
+    // Uniform lifecycle dispatch: every compiled-in sub-system's
+    // deinit runs, absent modules aren't in the array.
     dispatchAll(.deinit, .{});
-    // Free heap-backed state before the reset below wipes the struct; a bare
-    // `state = .{}` would leak the spawn queue's and rules map's backing memory.
-    if (state.?.alloc) |a| {
-        state.?.spawn_queue.deinit(a);
-        state.?.rules_map.deinit(a);
-        state.?.float_rules.deinit(a);
-    }
-    // Clear the focus-property cache before focus/tracking deinit, whose
+    // Free the admission sub-state's heap-backed memory (spawn queue,
+    // rules maps) before its reset wipes the struct.
+    admission.deinit();
+    // Clear the focus-property cache before focus/tracking deinit,
+    // whose
     // managed-window sweeps must not encounter a partially-valid cache.
     icccm.setCacheArmed(false);
     focus.deinit();
     tracking.deinit();
-    // Set to null so any accidental post-deinit access null-derefs instead of
-    // silently reading freed state. init() restores it to .{} unconditionally.
+    // Set to null so any accidental post-deinit access null-derefs
+    // instead of
+    // silently reading freed state. init() restores it to .{}
+    // unconditionally.
     state = null;
 }
 
@@ -379,275 +308,10 @@ pub inline fn isValidManagedWindow(win: u32) bool {
 // Button grab management is owned by focus.zig (a focus-protocol concern).
 // Off-workspace windows that need initial grab setup call focus.initWindowGrabs.
 
-pub inline fn clampToValidWorkspace(target: u8, fallback: core.WorkspaceId) core.WorkspaceId {
-    return if (target < tracking.getWorkspaceCount())
-        core.WorkspaceId.fromIndex(target)
-    else
-        fallback;
-}
-
-/// A matched class rule: either a workspace target or the float marker. The
-/// float bit is set for "float" rules, in which case `workspace` is null and
-/// the window is admitted floating on the current workspace.
-const AdmissionRule = struct {
-    workspace: ?u8,
-    float: bool,
-};
-
-/// Resolves a pre-fired WM_CLASS property cookie against workspace and float
-/// rules. Parses the WM_CLASS reply inline (no allocation), then does two O(1)
-/// hash lookups per map (class, then instance). The maps are built at init()
-/// and after every config reload, so no linear rule scan runs at spawn time.
-fn findAdmissionRuleByClass(cookie: xcb.xcb_get_property_cookie_t) ?AdmissionRule {
-    const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return null;
-    defer std.c.free(reply);
-    if (reply.*.format != 8 or reply.*.value_len == 0) return null;
-
-    const raw: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    const data = raw[0..reply.*.value_len];
-
-    // WM_CLASS is two consecutive null-terminated strings: "instance\0class\0".
-    // Trim trailing nulls per component, not on the whole buffer: trimming the
-    // whole buffer first turns "instance\0\0" (empty class) into "instance"
-    // with no separator, silently skipping the instance lookup.
-    const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
-    const instance = data[0..sep];
-
-    const class_start = sep + 1;
-    const class_raw = if (class_start < data.len) data[class_start..] else "";
-    const class_end = std.mem.indexOfScalar(u8, class_raw, 0) orelse class_raw.len;
-    const class = class_raw[0..class_end];
-
-    return matchRule(instance, class);
-}
-
-/// The WM_CLASS rule match, split from the XCB property read above so the
-/// POLICY is testable without a server: two O(1) hash lookups, class first
-/// (when non-empty) then instance, float rules winning over workspace rules at
-/// each step. Reading a property is not part of this decision.
-fn matchRule(instance: []const u8, class: []const u8) ?AdmissionRule {
-    if (class.len > 0) {
-        if (state.?.float_rules.contains(class)) return .{ .workspace = null, .float = true };
-        if (state.?.rules_map.get(class)) |ws| return .{ .workspace = ws, .float = false };
-    }
-    if (instance.len > 0) {
-        if (state.?.float_rules.contains(instance)) return .{ .workspace = null, .float = true };
-        if (state.?.rules_map.get(instance)) |ws| return .{ .workspace = ws, .float = false };
-    }
-    return null;
-}
-
-/// Tries an exact PID match first, then falls back to the sole-pending-entry
-/// heuristic. The caller only fires `c_net_wm_pid` when the queue is non-empty,
-/// so no empty-queue case is handled here.
-fn findSpawnQueueWorkspace(
-    c_net_wm_pid: xcb.xcb_get_property_cookie_t,
-) ?u8 {
-    const win_pid: u32 = pid: {
-        const pid_reply = xcb.xcb_get_property_reply(
-            core.getState().conn,
-            c_net_wm_pid,
-            null,
-        ) orelse break :pid 0;
-        defer std.c.free(pid_reply);
-        if (pid_reply.*.format != 32 or pid_reply.*.value_len < 1) break :pid 0;
-        break :pid icccm.u32Values(pid_reply)[0];
-    };
-
-    // Exact PID match only. Daemon-mode entries (pid == 0) are intentionally
-    // NOT matched against windows without _NET_WM_PID (win_pid == 0): that
-    // would conflate "terminal that will fork a grandchild" with "app that
-    // simply doesn't set _NET_WM_PID", letting an unrelated app silently
-    // consume the daemon entry and route to the wrong workspace.
-    for (state.?.spawn_queue.items, 0..) |e, i| {
-        if (win_pid != 0 and e.pid == win_pid) {
-            _ = state.?.spawn_queue.swapRemove(i);
-            return e.workspace;
-        }
-    }
-
-    // Sole-entry fallback: with exactly one pending entry there's no ambiguity
-    // (the app was launched via `sh -c "cmd"` and reports a grandchild PID).
-    // With multiple entries we can't know which one this window belongs to;
-    // consuming items[0] would mis-route it to the oldest pending spawn's
-    // workspace, so return null and let handleMapRequest fall back to current_ws.
-    if (state.?.spawn_queue.items.len != 1) {
-        log.debug(
-            "spawn: no exact PID match for pid={d}, {d} pending; ambiguous, routing to current ws",
-            .{ win_pid, state.?.spawn_queue.items.len },
-        );
-        return null;
-    }
-    log.debug(
-        "spawn: no exact PID match for pid={d}, sole entry ws={d}, using heuristic",
-        .{ win_pid, state.?.spawn_queue.items[0].workspace },
-    );
-    const ws = state.?.spawn_queue.items[0].workspace;
-    _ = state.?.spawn_queue.swapRemove(0); // order has no semantic meaning
-    return ws;
-}
-
-/// The admission policy for a brand-new spawn: the target workspace (class
-/// rule, then spawn-queue PID rule, else current) plus whether the class rule
-/// floats the window.
-const AdmissionDecision = struct {
-    workspace: core.WorkspaceId,
-    float: bool,
-};
-
-/// Drains pre-fired WM_CLASS / _NET_WM_PID cookies to resolve the admission
-/// decision. Cookies are fired by the caller (handleMapRequest) together with
-/// the other three property queries so the X server can process all five in
-/// parallel; this function only drains the two workspace-resolution replies.
-fn resolveAdmissionDecision(
-    current_ws: core.WorkspaceId,
-    c_wm_class: ?xcb.xcb_get_property_cookie_t,
-    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
-) AdmissionDecision {
-    const cs = core.getState();
-
-    // Drain replies: WM_CLASS first, then _NET_WM_PID.
-    if (c_wm_class) |cookie| if (findAdmissionRuleByClass(cookie)) |rule| {
-        discardProtocolCookie(cs.conn, c_net_wm_pid);
-        const ws = if (rule.workspace) |target|
-            clampToValidWorkspace(target, current_ws)
-        else
-            current_ws;
-        return .{ .workspace = ws, .float = rule.float };
-    };
-    if (c_net_wm_pid) |cookie| if (findSpawnQueueWorkspace(cookie)) |spawn_ws|
-        return .{
-            .workspace = clampToValidWorkspace(spawn_ws, current_ws),
-            .float = false,
-        };
-    return .{ .workspace = current_ws, .float = false };
-}
-
-pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
-    const alloc = state.?.alloc orelse return;
-    if (state.?.spawn_queue.items.len >= spawn_queue_capacity) {
-        log.warn(
-            "registerSpawn: spawn queue full ({d} entries); entry dropped",
-            .{spawn_queue_capacity},
-        );
-        return;
-    }
-    state.?.spawn_queue.append(alloc, .{ .workspace = workspace.index, .pid = pid }) catch |err| {
-        log.warn("registerSpawn: failed to queue spawn entry: {}", .{err});
-    };
-}
-
-/// The five property-query cookies fired for an admitted window. All are
-/// fired up-front (before any reply is drained) so the X server processes
-/// them in parallel; the callers differ only in how they drain the two
-/// workspace-resolution cookies (rules/spawn resolution vs. discard).
-const AdmissionCookies = struct {
-    c_wm_class: ?xcb.xcb_get_property_cookie_t,
-    c_net_wm_pid: ?xcb.xcb_get_property_cookie_t,
-    normal_hints_cookie: xcb.xcb_get_property_cookie_t,
-    protocols_cookie: xcb.xcb_get_property_cookie_t,
-    hints_cookie: xcb.xcb_get_property_cookie_t,
-    title_cookies: wincache.TitleCookies,
-};
-
-/// Fires all property-query cookies for an admitted window (WM_CLASS,
-/// _NET_WM_PID, WM_NORMAL_HINTS, WM_PROTOCOLS, WM_HINTS) before any reply is
-/// drained. Shared by handleMapRequest and adoptRootWindows; both are preceded
-/// by the change_window_attributes preamble and followed by the size-hints and
-/// focus-cache drains, but route the two conditional workspace cookies
-/// differently, so only the firing lives here.
-fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
-    const cs = core.getState();
-
-    // Workspace resolution cookies (conditional).
-    const wm_class_atom = atoms.getAtomOrZero("WM_CLASS");
-    const c_wm_class: ?xcb.xcb_get_property_cookie_t =
-        if (cs.config.workspaces.rules.items.len > 0 and wm_class_atom != 0)
-            icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, constants.property_max_length)
-        else
-            null;
-
-    const c_net_wm_pid: ?xcb.xcb_get_property_cookie_t =
-        if (state.?.spawn_queue.items.len > 0)
-            icccm.firePropQuery(conn, win, atoms.getAtomOrZero("_NET_WM_PID"), xcb.XCB_ATOM_CARDINAL, 1)
-        else
-            null;
-
-    // Property cookies (always fired).
-    const normal_hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, wm_normal_hints_long_length);
-    const protocols_cookie = icccm.fireWMProtocolsQuery(conn, win) orelse
-        icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, constants.property_max_length);
-    const hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, icccm.wm_hints_long_length);
-
-    return .{
-        .c_wm_class = c_wm_class,
-        .c_net_wm_pid = c_net_wm_pid,
-        .normal_hints_cookie = normal_hints_cookie,
-        .protocols_cookie = protocols_cookie,
-        .hints_cookie = hints_cookie,
-        .title_cookies = wincache.fireTitleCookies(conn, win),
-    };
-}
-
-/// Claims the management event mask so `win` delivers PropertyNotify/
-/// StructureNotify/FocusChange events (shared MapRequest/adoption preamble).
-fn claimManagedEventMask(conn: core.Connection, win: u32) void {
-    _ = xcb.xcb_change_window_attributes(
-        conn,
-        win,
-        xcb.XCB_CW_EVENT_MASK,
-        &[_]u32{masks.EventMasks.managed_window},
-    );
-}
-
-/// Drains the three unconditionally-fired admission cookies; with
-/// `discard_workspace` the two conditional workspace-resolution replies are
-/// discarded instead (adoption never resolves from them; the MapRequest path
-/// has already drained them via mapRequest).
-fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: AdmissionCookies, comptime discard_workspace: bool) void {
-    if (comptime discard_workspace) {
-        discardProtocolCookie(conn, cookies.c_wm_class);
-        discardProtocolCookie(conn, cookies.c_net_wm_pid);
-    }
-    parseSizeHintsIntoCache(win, cookies.normal_hints_cookie);
-    icccm.populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
-    wincache.collectTitleCookies(conn, win, cookies.title_cookies);
-}
-
-/// Discards every cookie in a fired AdmissionCookies batch without parsing it.
-/// adoptRootWindows fires admission cookies for ALL root children up-front, so
-/// a candidate that fails its attribute gate (vanished / override-redirect /
-/// unmapped-and-unparked) must still consume its own batch to keep the XCB
-/// reply stream from accumulating unconsumed results. Firing order is preserved
-/// so replies are read back in request order alongside the drain path.
-fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) void {
-    discardProtocolCookie(conn, cookies.c_wm_class);
-    discardProtocolCookie(conn, cookies.c_net_wm_pid);
-    wincache.discardTitleCookies(conn, cookies.title_cookies);
-    inline for (.{
-        cookies.normal_hints_cookie,
-        cookies.protocols_cookie,
-        cookies.hints_cookie,
-    }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
-}
-
-/// Snapshot the pointer's root position for spawn-crossing suppression.
-///
-/// Runs once per MapRequest, synchronously, right when the spawn's window is
-/// admitted. The pointer cannot have moved relative to the keypress that
-/// triggered the spawn between here and the reconcile's map (both happen in
-/// the same event-loop batch), so this position is exactly what the synthetic
-/// crossing the map generates will carry; a real hover from a moved pointer
-/// yields different coordinates and is never masked. On a failed query the
-/// record stays untouched (defaults to {0,0} at init) rather than poisoning
-/// an established spawn's suppression.
-fn snapshotSpawnCursor(conn: core.Connection) void {
-    const reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, core.getState().root), null);
-    defer if (reply) |r| std.c.free(r);
-    if (reply) |r| {
-        state.?.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
-    }
-}
+/// Workspace-rule resolution lives with the admission machinery
+/// (admission.zig); re-exported here so the window module stays the
+/// facade its callers route through.
+pub const clampToValidWorkspace = admission.clampToValidWorkspace;
 
 /// Handles a MapRequest by firing ALL property query cookies up-front, then
 /// draining replies sequentially. Firing all five cookies before draining any
@@ -655,10 +319,11 @@ fn snapshotSpawnCursor(conn: core.Connection) void {
 /// compared to the previous fire-then-drain-per-property approach.
 ///
 /// TIMING (gated by `-Dprofile-key`, mirroring actions.switchTo): measures
-/// MapRequest receipt -> the map queued by the reconcile inside admitWindow.
-/// `drain_us` is the dominant X round-trip (the reply to the first of the
-/// pipelined batch); `after_drain_us` is pure local work (workspace resolve,
-/// model register, reconcile/map). Both are logged once per spawn.
+/// MapRequest receipt -> the map queued by the reconcile inside
+/// admission.admitWindow. `drain_us` is the dominant X round-trip (the reply
+/// to the first of the pipelined batch); `after_drain_us` is pure local work
+/// (workspace resolve, model register, reconcile/map). Both are logged once
+/// per spawn.
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
@@ -667,34 +332,35 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     if (tracking.isManaged(win)) return; // double-manage guard, see tracking.isManaged
 
     // Snapshot the pointer position now so the crossing the map generates can
-    // be matched against it (see snapshotSpawnCursor / suppressSpawnCrossing).
-    snapshotSpawnCursor(conn);
+    // be matched against it (see admission.snapshotSpawnCursor /
+    // suppressSpawnCrossing).
+    admission.snapshotSpawnCursor(conn);
 
     // getCurrentWorkspace() returns ?u8; the value is already bounded to [0,255]
     // by the u8 return type, so no further clamping is needed.
     const current_ws = core.WorkspaceId.fromIndex(tracking.getCurrentWorkspace() orelse 0);
 
-    claimManagedEventMask(conn, win);
+    admission.claimManagedEventMask(conn, win);
 
     // Fire ALL property cookies before draining any reply
     // The server processes all five requests in parallel while we do pure
     // local bookkeeping below.
-    const cookies = fireAdmissionCookies(conn, win);
+    const cookies = admission.fireAdmissionCookies(conn, win);
     const t_fire: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Drain replies sequentially
-    const decision = resolveAdmissionDecision(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
+    const decision = admission.resolveAdmissionDecision(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
     const target_ws = decision.workspace;
     const on_current = target_ws.eql(current_ws);
 
-    drainAdmissionCookies(conn, win, cookies, false);
+    admission.drainAdmissionCookies(conn, win, cookies, false);
     const t_drain: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
     // model registration + grabs + child-cache seeding) is identical to the
-    // boot-time adoption path, so it lives in admitWindow.
-    admitWindow(win, target_ws.index, on_current, decision.float);
+    // boot-time adoption path, so it lives in admission.admitWindow.
+    admission.admitWindow(win, target_ws.index, on_current, decision.float);
 
     if (build_options.profile_key) {
         const t_map = time.monotonicNs();
@@ -705,117 +371,6 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
             @as(u64, @intCast(t_map - t_drain)) / 1000,
             @as(u64, @intCast(t_map - t0)) / 1000,
         });
-    }
-}
-
-/// Admission policy shared by the MapRequest path (handleMapRequest) and the
-/// boot-time adoption path (adoptRootWindows). Both sources fire and drain
-/// their property cookies and resolve the target workspace BEFORE calling
-/// here; this is the single place where a window is registered with the model
-/// and its keyboard grabs seeded. One map-request path, one adoption path, one
-/// admission policy.
-///
-fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool) void {
-    const cs = core.getState();
-    const float_rect: ?model_mod.Rect = if (float) getGeometry(cs.conn, win) else null;
-    actions.mapRequest(win, target_ws, on_current, float_rect);
-}
-
-/// Linear scan for a window's restore record. Restore files are small
-/// (bounded by the model's store_capacity), so a flat scan is cache-local and
-/// avoids allocating a lookup map just for adoption.
-fn findWindowRecord(windows: []const persist.WindowRecord, win: u32) ?*const persist.WindowRecord {
-    for (windows) |*r| {
-        if (r.win == win) return r;
-    }
-    return null;
-}
-
-/// Resolves only the float bit of a class rule (adoption never relocates a
-/// pre-existing window's workspace, so a workspace match is deliberately
-/// ignored here). Drains the WM_CLASS reply.
-fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
-    const c = cookie orelse return false;
-    const rule = findAdmissionRuleByClass(c) orelse return false;
-    return rule.float;
-}
-
-/// Target workspace for an adopted window: the restore record's home
-/// workspace (lowest set bit of its mask) when present, else the currently
-/// active workspace. Deliberately NOT the spawn-queue/rules resolution, which
-/// describes brand-new spawns rather than pre-existing windows.
-fn restoredOrCurrent(record: ?*const persist.WindowRecord) u8 {
-    if (record) |r| {
-        if (r.mask != 0) return @intCast((model_mod.lowestBit(r.mask) orelse unreachable).index);
-    }
-    return tracking.getCurrentWorkspace() orelse 0;
-}
-
-/// Re-applies a restore record's mask, anchor, and presence onto an
-/// already-registered model entry. Registration (admitWindow ->
-/// actions.mapRequest) creates the entry as a present tiled-anchored window on
-/// its target workspace; this overwrites the per-window state that survived
-/// the re-exec so the caller's reconcile can place it exactly as before.
-/// Presence bookkeeping that would otherwise drift is routed through the owning
-/// window module's deserialize hook rather than patched by hand.
-fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
-    const model = pipeline.mut(&gate);
-    const e = model.store.getPtr(win) orelse return;
-
-    e.mask = record.mask;
-
-    switch (record.anchor) {
-        .tiled => {},
-        .floating => |rect| {
-            // Mirror toggleFloating's floating storage: anchor + home_ws null
-            // (a floating window has no tiled slot). The caller's reconcile
-            // sizes the window from this rect.
-            e.anchor = .{ .floating = rect };
-            e.home_ws = null;
-        },
-    }
-
-    // Presence that was non-present at save time is re-asserted through the
-    // window-module registry's deserialize hook: the module that claims the
-    // opaque ext blob re-parks the window / resumes its coverage and restores
-    // its private record. Dispatch happens for ANY non-null ext (not only
-    // parked records): a covering (fullscreen) window advertises presence
-    // .covering + a fullscreen blob, and must route through the module in the
-    // same dispatch. When no module claims the blob (the feature was stripped, or
-    // the record carried no ext), the entry stays present and reconciles
-    // on-screen -- the graceful degrade.
-    //
-    // Claim resolution: the blob is stamped with the claiming module's NAME at
-    // save time (persist.ext_format_version). Adoption fast-paths on the name;
-    // when the name no longer resolves (the module was removed or renamed) or
-    // its hook declines, the magic-byte scan over every module's
-    // self-identifying format tag claims it instead. Blobs written by the
-    // pre-name format still resolve through their registry ordinal.
-    if (record.ext) |stored| {
-        // A recognised header narrows WHICH module is asked first; it never
-        // decides the outcome, because the payload's own magic bytes do that.
-        // Anything unrecognised (a foreign version, a truncated header) is
-        // passed through whole, exactly as an unstamped blob was.
-        const header = persist.decodeExt(stored);
-        const payload: []const u8 = header.payload;
-        if (header.claimed_name) |name| {
-            for (window_mods) |mod| {
-                if (!std.mem.eql(u8, mod.name, name)) continue;
-                if (mod.deserializeWindow) |f| {
-                    if (f(win, payload, model)) return;
-                }
-                break; // named claimant found; the scan below is the fallback
-            }
-        } else if (header.legacy_ordinal) |ordinal| {
-            if (ordinal < window_mods.len) {
-                if (window_mods[ordinal].deserializeWindow) |f| {
-                    if (f(win, payload, model)) return;
-                }
-            }
-        }
-        for (window_mods) |mod| if (mod.deserializeWindow) |f| {
-            if (f(win, payload, model)) return; // claimed
-        };
     }
 }
 
@@ -830,7 +385,8 @@ fn applyRestoredRecord(win: u32, record: *const persist.WindowRecord) void {
 ///   - unmapped windows are adopted ONLY when the restore file records them
 ///     as parked (a surviving hidden window must stay hidden); other unmapped
 ///     windows are likely withdrawn toplevels and are skipped;
-///   - each admitted window registers through the shared admitWindow path on
+///   - each admitted window registers through the shared
+///     admission.admitWindow path on
 ///     its restored-or-current workspace;
 ///   - a restore record (if any) then re-applies the window's mask, mode, and
 ///     presence directly on the model entry.
@@ -853,7 +409,7 @@ const AdoptionEntry = struct {
     win: u32,
     attr_cookie: xcb.xcb_get_window_attributes_cookie_t,
     record: ?*const persist.WindowRecord,
-    cookies: AdmissionCookies,
+    cookies: admission.AdmissionCookies,
 };
 
 pub fn adoptRootWindows() !usize {
@@ -899,13 +455,13 @@ pub fn adoptRootWindows() !usize {
 
         // The restore-record lookup is a local scan; carry the result into the
         // drain loop so it does no X work before consuming each batch.
-        const record = if (loaded) |f| findWindowRecord(f.windows, win) else null;
+        const record = if (loaded) |f| admission.findWindowRecord(f.windows, win) else null;
 
         entries.appendAssumeCapacity(.{
             .win = win,
             .attr_cookie = xcb.xcb_get_window_attributes(conn, win),
             .record = record,
-            .cookies = fireAdmissionCookies(conn, win),
+            .cookies = admission.fireAdmissionCookies(conn, win),
         });
     }
 
@@ -930,14 +486,14 @@ pub fn adoptRootWindows() !usize {
         else
             false;
         if (!adopt) {
-            discardAdmissionCookies(conn, entry.cookies);
+            admission.discardAdmissionCookies(conn, entry.cookies);
             continue;
         }
 
         // Claim the management event mask so the adopted window delivers the
         // PropertyNotify/StructureNotify/FocusChange events managed windows
         // rely on (mirror of handleMapRequest's preamble).
-        claimManagedEventMask(conn, win);
+        admission.claimManagedEventMask(conn, win);
 
         // Adoption never resolves the target workspace from these cookies
         // (restored-or-current wins, not spawn rules), so the two
@@ -946,16 +502,16 @@ pub fn adoptRootWindows() !usize {
         // wins over the float rule too (it carries the window's exact
         // pre-restart anchor); record-less windows still honor a class float
         // rule, matching the MapRequest admission policy.
-        const float = if (entry.record == null) resolveClassFloat(entry.cookies.c_wm_class) else false;
-        drainAdmissionCookies(conn, win, entry.cookies, true);
+        const float = if (entry.record == null) admission.resolveClassFloat(entry.cookies.c_wm_class) else false;
+        admission.drainAdmissionCookies(conn, win, entry.cookies, true);
 
         // Register on the restored-or-current workspace. on_current=false so
         // actions.mapRequest does NOT reconcile per-window (the caller owns
         // the single end-of-adoption reconcile) or steal model focus before
         // applyModelLevel restores the session's focus.
-        admitWindow(win, restoredOrCurrent(entry.record), false, float);
+        admission.admitWindow(win, admission.restoredOrCurrent(entry.record), false, float);
 
-        if (entry.record) |r| applyRestoredRecord(win, r);
+        if (entry.record) |r| admission.applyRestoredRecord(win, r);
 
         adopted += 1;
     }
@@ -1217,7 +773,8 @@ fn sendRequestedConfigure(
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     if (focus.getSuppressReason() != .window_spawn) return false;
-    // The spawn snapshot (state.spawn_cursor) is taken by handleMapRequest
+    // The spawn snapshot (admission.spawnCursor()) is taken by
+    // handleMapRequest
     // when the spawn's MapRequest arrives. Mapping a new window under the
     // stationary cursor produces a PAIR of synthetic crossings, both carrying
     // the spawn's root coordinates: the enter into the spawned window, and the
@@ -1231,7 +788,8 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     // clear it. A cursor parked where it was when the app launched can't hover
     // a different window at that same pixel until it moves, which is the
     // acceptable price for not stealing focus during the spawn's layout.
-    if (root_x == state.?.spawn_cursor.x and root_y == state.?.spawn_cursor.y) return true;
+    const cursor = admission.spawnCursor();
+    if (root_x == cursor.x and root_y == cursor.y) return true;
     focus.setSuppressReason(.none);
     return false;
 }
@@ -1314,35 +872,16 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     }
 }
 
-// Extract a pair of consecutive u16 fields when the flag is set and enough
-// fields are present. Shared by max_size and resize_inc extraction which
-// share the same 2-field pattern.
-const SizePair = struct { width: u16, height: u16 };
-
-fn extractFieldPair(
-    fields: [*]const u32,
-    field_count: u32,
-    want: bool,
-    comptime off: usize,
-) SizePair {
-    if (want and field_count >= off + 2) return .{
-        .width = scaling.clampToU16(fields[off]),
-        .height = scaling.clampToU16(fields[off + 1]),
-    };
-    return .{ .width = 0, .height = 0 };
-}
-
-/// Called whenever WM_NORMAL_HINTS changes post-map (see handlePropertyNotify).
-/// The map-time path no longer goes through here: handleMapRequest fires the
-/// WM_NORMAL_HINTS cookie together with its other property queries and drains
-/// via parseSizeHintsIntoCache, saving one round trip per spawn.
 fn refreshSizeHints(win: u32) void {
     const conn = core.getState().conn;
-    const cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, wm_normal_hints_long_length);
+    const cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, hints.wm_normal_hints_long_length);
     parseSizeHintsIntoCache(win, cookie);
 }
 
-fn parseSizeHintsIntoCache(
+/// Parses a WM_NORMAL_HINTS reply into the size-hints cache. Shared by the
+/// admission cookie drain (admission.zig, which bridges the reply into the
+/// model/wincache entry) and the property-refresh path below.
+pub fn parseSizeHintsIntoCache(
     win: u32,
     cookie: xcb.xcb_get_property_cookie_t,
 ) void {
@@ -1351,61 +890,18 @@ fn parseSizeHintsIntoCache(
     if (reply.*.format != 32 or reply.*.value_len < 5) return;
 
     const fields = icccm.u32Values(reply);
-    const field_count = reply.*.value_len;
-    const flags = fields[0];
-
-    // PMinSize/PBaseSize are cached for the floating drag-resize floor only:
-    // tiling ignores declared minimums outright (policy on model.SizeHints).
-    // The max/increment/aspect constraints are forwarded so hint-constrained
-    // windows behave correctly in both modes.
-    const want_min = flags & p_min_size != 0;
-    const want_base = flags & p_base_size != 0;
-    const want_max = flags & p_max_size != 0;
-    const want_inc = flags & p_resize_inc != 0;
-    const want_asp = flags & p_aspect != 0;
-
-    if (!want_min and !want_base and !want_max and !want_inc and !want_asp) return;
-
-    // PBaseSize (offset 15) is the increment base; when both are declared the
-    // effective floor is the larger, so a client can never be dragged smaller
-    // than either it or its base declares.
-    const min_pair = extractFieldPair(fields, field_count, want_min, 5);
-    const base_pair = extractFieldPair(fields, field_count, want_base, 15);
-    const max_pair = extractFieldPair(fields, field_count, want_max, 7);
-    const inc_pair = extractFieldPair(fields, field_count, want_inc, 9);
-
-    // PAspect: fields[11..14] = min_aspect.x/y, max_aspect.x/y.
-    // dwm convention: min_aspect = y/x (lower bound on h/w),
-    //                 max_aspect = x/y (upper bound on w/h).
-    const Aspect = struct { min: f32, max: f32 };
-    const aspect: Aspect = if (want_asp and field_count >= 15)
-        .{
-            .min = if (fields[11] > 0) @as(f32, @floatFromInt(fields[12])) / @as(f32, @floatFromInt(fields[11])) else 0.0,
-            .max = if (fields[14] > 0) @as(f32, @floatFromInt(fields[13])) / @as(f32, @floatFromInt(fields[14])) else 0.0,
-        }
-    else
-        .{ .min = 0.0, .max = 0.0 };
 
     // The MODEL copy of size hints must never go stale, since layouts read
     // Entry.size_hints via engine.HintsView. The wincache entry is only the
     // pre-registration staging area (actions.mapRequest bridges it into the
     // freshly created model entry); once registered, the model write below is
     // the only truth and the wincache copy is never read again.
-    const hints: model_mod.SizeHints = .{
-        .min_width = @max(min_pair.width, base_pair.width),
-        .min_height = @max(min_pair.height, base_pair.height),
-        .max_width = max_pair.width,
-        .max_height = max_pair.height,
-        .inc_width = inc_pair.width,
-        .inc_height = inc_pair.height,
-        .min_aspect = aspect.min,
-        .max_aspect = aspect.max,
-    };
+    const parsed = hints.parse(fields, reply.*.value_len) orelse return;
     if (pipeline.initialized()) if (pipeline.mut(&gate).store.getPtr(win)) |e| {
-        e.size_hints = hints;
+        e.size_hints = parsed;
         return;
     };
-    wincache.cacheSizeHints(win, hints); // pre-registration staging bridge only
+    wincache.cacheSizeHints(win, parsed); // pre-registration staging bridge only
 }
 
 /// Refresh border colors for all windows on the current workspace. Shared
@@ -1533,21 +1029,24 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     }
 
     const action = event.data.data32[0];
-    const is_fs = isCoveringMode(pipeline.model(), win);
-    // EWMH _NET_WM_STATE action codes, carried in data32[0].
+    // EWMH _NET_WM_STATE action codes, carried in data32[0]. `want` is
+    // the target state for the SET paths (add/remove); `toggle` is null
+    // -- a genuine flip, the keybind path's meaning.
     const ewmh_state_add: u32 = 1;
     const ewmh_state_remove: u32 = 0;
     const ewmh_state_toggle: u32 = 2;
-    const should_enter = switch (action) {
+    const want: ?bool = switch (action) {
         ewmh_state_add => true,
         ewmh_state_remove => false,
-        ewmh_state_toggle => !is_fs,
+        ewmh_state_toggle => null,
         else => return,
     };
-    if (should_enter == is_fs) return;
     // PIPELINE: model-path transition; the transition stays on the single
-    // source of truth.
-    actions.fullscreenToggleWindow(win);
+    // source of truth. `fullscreenSetWindow` re-checks want-vs-current
+    // itself (and computes the covering state inside the same grab), so
+    // the covering pre-scan and the explicit guard this arm used to make
+    // are gone -- one covering scan per request instead of two.
+    actions.fullscreenSetWindow(win, want);
 }
 
 /// Called on config reload.

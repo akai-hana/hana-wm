@@ -22,6 +22,7 @@ const model = @import("model");
 const pipeline = @import("pipeline");
 const tracking = @import("tracking");
 const helpers = @import("helpers");
+const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const ledger = @import("ledger");
@@ -31,7 +32,7 @@ const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else 
 const cfg_bw = helpers.cfg_bw;
 const testColor = helpers.testColor;
 
-const Recorder = helpers.TestSink(.record);
+const Recorder = test_sink.TestSink(.record);
 
 /// Test-owned transition-layer gate (same pattern as the shared fixture):
 /// gives the reset path a mutable handle to the pipeline global model.

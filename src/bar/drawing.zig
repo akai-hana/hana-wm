@@ -6,13 +6,12 @@ const std = @import("std");
 const core = @import("core");
 const log = @import("log");
 
-const xcb = core.xcb;
-const xcb_connection_t = xcb.xcb_connection_t;
-const xcb_pixmap_t = xcb.xcb_pixmap_t;
-const xcb_visualtype_t = xcb.xcb_visualtype_t;
-
 const types = @import("types");
 const bar_metrics = @import("metrics");
+// Cairo/Pango/GLib C bindings, in their own leaf file on the
+// core/x11/xcb.zig precedent (review 05-input round 2): drawing
+// is a layer of logic over them, not a C-header translation.
+const bindings = @import("bindings");
 
 /// The clock's display format: the configured value, or the built-in default
 /// when unset. Single accessor shared by the clock segment and the bar's
@@ -21,190 +20,9 @@ pub fn clockFormat(config: types.BarConfig) []const u8 {
     return config.clock_format orelse types.default_clock_format;
 }
 
-// Cairo, Pango, and GLib C bindings for bar rendering.
-// Declared as `pub extern fn` because library headers may not be present in
-// all build environments.
-
-// Cairo
-
-pub const cairo_surface_t = opaque {};
-pub const cairo_t = opaque {};
-
-/// Numeric values match the C ABI; do not change them.
-pub const cairo_format_t = enum(c_int) {
-    ARGB32 = 0,
-};
-
-/// Pixmap must outlive the surface; destroy the surface before freeing the pixmap.
-pub extern fn cairo_xcb_surface_create(
-    connection: *xcb_connection_t,
-    pixmap: xcb_pixmap_t,
-    visual: *xcb_visualtype_t,
-    width: c_int,
-    height: c_int,
-) ?*cairo_surface_t;
-
-/// Used for font measurement without an X connection.
-pub extern fn cairo_image_surface_create(
-    format: cairo_format_t,
-    width: c_int,
-    height: c_int,
-) ?*cairo_surface_t;
-
-pub extern fn cairo_surface_destroy(surface: *cairo_surface_t) void;
-pub extern fn cairo_surface_flush(surface: *cairo_surface_t) void;
-
-pub extern fn cairo_create(surface: *cairo_surface_t) ?*cairo_t;
-pub extern fn cairo_destroy(cr: *cairo_t) void;
-
-pub extern fn cairo_set_source_rgba(cr: *cairo_t, red: f64, green: f64, blue: f64, alpha: f64) void;
-pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
-
-// Clipping, for region-scoped text (title marquee).
-pub extern fn cairo_save(cr: *cairo_t) void;
-pub extern fn cairo_restore(cr: *cairo_t) void;
-pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
-pub extern fn cairo_clip(cr: *cairo_t) void;
-
-// Pango
-
-pub const PangoLayout = opaque {};
-pub const PangoContext = opaque {};
-pub const PangoFontDescription = opaque {};
-pub const PangoFontMetrics = opaque {};
-pub const PangoAttrList = opaque {};
-// (22.1) PangoAttribute was opaque, which was fine while every attribute was
-// created by Pango and only ever inserted whole. A foreground attribute over a
-// SUB-RANGE needs its start_index/end_index set by us, so the leading fields
-// (the type/kop and the two range fields) are now declared. Pango's own header
-// is the authority for this layout: PangoAttributeType type; PangoAttributeFlags
-// flags; guint32 start_index; guint32 end_index; -- and a color attribute's
-// payload is a 4-byte PangoColor we set through the constructor, never by hand.
-pub const PangoAttribute = extern struct {
-    /// PangoAttributeType; only used for debugging/logging, never compared.
-    attribute_type: c_int = 0,
-    /// PangoAttributeFlags bitfield.
-    flags: c_int = 0,
-    /// Byte range into the laid-out text this attribute applies to.
-    start_index: c_uint = 0,
-    end_index: c_uint = 0,
-};
-
-/// Divide Pango units by pango_scale to get pixels.
-pub const pango_scale: c_int = 1024;
-
-pub const PangoEllipsizeMode = enum(c_int) {
-    NONE = 0,
-    END = 3,
-};
-
-pub const PangoRectangle = extern struct {
-    x: c_int,
-    y: c_int,
-    width: c_int,
-    height: c_int,
-};
-
-pub extern fn pango_cairo_create_layout(cr: *cairo_t) ?*PangoLayout;
-pub extern fn pango_cairo_show_layout(cr: *cairo_t, layout: *PangoLayout) void;
-pub extern fn pango_cairo_context_set_resolution(context: *PangoContext, dpi: f64) void;
-
-pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
-pub extern fn pango_layout_set_font_description(
-    layout: *PangoLayout,
-    desc: ?*PangoFontDescription,
-) void;
-pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
-/// (22.7) Creates a fresh layout sharing `ctx`. This is what lets a text run
-/// own its own layout without building a cairo surface and context per run.
-pub extern fn pango_layout_new(ctx: *PangoContext) ?*PangoLayout;
-/// Pass null for either dimension if not needed.
-pub extern fn pango_layout_get_pixel_size(
-    layout: *PangoLayout,
-    width: ?*c_int,
-    height: ?*c_int,
-) void;
-pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
-pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: PangoEllipsizeMode) void;
-pub extern fn pango_layout_get_baseline(layout: *PangoLayout) c_int;
-
-/// Accepts strings like `"Sans Bold 12"`.
-pub extern fn pango_font_description_from_string(str: [*:0]const u8) ?*PangoFontDescription;
-pub extern fn pango_font_description_copy(desc: *PangoFontDescription) ?*PangoFontDescription;
-pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
-pub extern fn pango_font_description_set_absolute_size(desc: *PangoFontDescription, size: f64) void;
-
-/// Returns Pango units. Pass null for either rect if not needed.
-pub extern fn pango_layout_get_extents(
-    layout: *PangoLayout,
-    ink_rect: ?*PangoRectangle,
-    logical_rect: ?*PangoRectangle,
-) void;
-
-/// Pass null for `language` to use the default language.
-pub extern fn pango_context_get_metrics(
-    context: *PangoContext,
-    desc: ?*PangoFontDescription,
-    language: ?*anyopaque,
-) *PangoFontMetrics;
-
-pub extern fn pango_font_metrics_get_ascent(metrics: *PangoFontMetrics) c_int;
-pub extern fn pango_font_metrics_get_descent(metrics: *PangoFontMetrics) c_int;
-pub extern fn pango_font_metrics_unref(metrics: *PangoFontMetrics) void;
-
-/// Numeric values match the C ABI; do not change them.
-pub const pango_underline_t = enum(c_int) {
-    NONE = 0,
-    SINGLE = 1,
-    DOUBLE = 2,
-    LOW = 3,
-    ERROR = 4,
-};
-
-/// Numeric values match the C ABI; do not change them.
-pub const pango_weight_t = enum(c_int) {
-    THIN = 100,
-    LIGHT = 300,
-    NORMAL = 400,
-    MEDIUM = 500,
-    SEMIBOLD = 600,
-    BOLD = 700,
-    ULTRABOLD = 800,
-    HEAVY = 900,
-};
-
-/// Numeric values match the C ABI; do not change them.
-pub const pango_style_t = enum(c_int) {
-    NORMAL = 0,
-    OBLIQUE = 1,
-    ITALIC = 2,
-};
-
-pub extern fn pango_attr_underline_new(underline: pango_underline_t) ?*PangoAttribute;
-pub extern fn pango_attr_weight_new(weight: pango_weight_t) ?*PangoAttribute;
-pub extern fn pango_attr_style_new(style: pango_style_t) ?*PangoAttribute;
-
-/// An attribute list owns its attributes; every attribute `insert`-ed must
-/// NOT be freed by the caller.
-/// Creates a foreground-colour attribute. (22.1)
-/// Takes r/g/b in 0..65535 (Pango's scale) rather than hana's 0xRRGGBB.
-pub extern fn pango_attr_foreground_new(red: u16, green: u16, blue: u16) ?*PangoAttribute;
-pub extern fn pango_attr_list_new() ?*PangoAttrList;
-pub extern fn pango_attr_list_insert(list: *PangoAttrList, attr: *PangoAttribute) void;
-pub extern fn pango_attr_list_unref(list: *PangoAttrList) void;
-pub extern fn pango_layout_set_attributes(layout: *PangoLayout, attrs: ?*PangoAttrList) void;
-
-/// The Pango layout does NOT take ownership of the list; the list must stay
-/// alive while set, and be unref'd afterwards. (22.7) A `TextRun` now owns both
-/// the list and the layout it is attached to and unrefs them together in
-/// `deinit`, so that lifetime is structural rather than a pairing callers have
-/// to remember.
-
-// GLib / GObject
-
-/// Decrements the reference count. All GObject-based types in this file must
-/// be freed through this function.
-pub extern fn g_object_unref(object: *anyopaque) void;
+// Cairo, Pango, and GLib C bindings for bar rendering live in
+// bindings.zig (see the import above); every use below is
+// qualified through it.
 
 /// First visual on `screen` matching `depth`, or null.
 fn firstVisualOfDepth(screen: core.Screen, depth: u8) ?*core.xcb.xcb_visualtype_t {
@@ -259,48 +77,48 @@ const fallbackFont = bar_metrics.default_fallback_font;
 /// done anyway.
 pub const TextRun = struct {
     /// Null exactly when the run could not be built; every method tolerates it.
-    layout: ?*PangoLayout = null,
+    layout: ?*bindings.PangoLayout = null,
     /// The attribute list built for this run, owned by the run.
-    attrs: ?*PangoAttrList = null,
+    attrs: ?*bindings.PangoAttrList = null,
     /// Size-suffixed description this run uses, borrowed from the FontBook.
-    sized_font: ?*PangoFontDescription = null,
+    sized_font: ?*bindings.PangoFontDescription = null,
 
     /// Width in pixels of the run's text, 0 for an empty run.
     pub fn measure(self: *TextRun) u16 {
         const l = self.layout orelse return 0;
         var width: c_int = undefined;
-        pango_layout_get_pixel_size(l, &width, null);
+        bindings.pango_layout_get_pixel_size(l, &width, null);
         const w: c_int = std.math.clamp(width, 0, @as(c_int, std.math.maxInt(u16)));
         return @intCast(w);
     }
 
     pub fn deinit(self: *TextRun) void {
         if (self.attrs) |a| {
-            if (self.layout) |l| pango_layout_set_attributes(l, null);
-            pango_attr_list_unref(a);
+            if (self.layout) |l| bindings.pango_layout_set_attributes(l, null);
+            bindings.pango_attr_list_unref(a);
         }
-        if (self.layout) |l| g_object_unref(l);
+        if (self.layout) |l| bindings.g_object_unref(l);
         self.* = undefined;
     }
 };
 
 pub const FontBook = struct {
     allocator: std.mem.Allocator,
-    pango_layout: *PangoLayout,
-    current_font_desc: ?*PangoFontDescription = null,
+    pango_layout: *bindings.PangoLayout,
+    current_font_desc: ?*bindings.PangoFontDescription = null,
     /// Cached (ascent, descent) in pixels; invalidated by loadFont.
     cached_metrics: ?struct { i16, i16 } = null,
     /// Size-suffixed copy of `current_font_desc` for `drawTextSized`, rebuilt
     /// only when `sized_px` differs. Never outlives a base-description swap.
-    sized_desc: ?*PangoFontDescription = null,
+    sized_desc: ?*bindings.PangoFontDescription = null,
     sized_px: u16 = 0,
     /// The description the layout currently has set, so a sized draw can skip
     /// the set/restore pair when it is already the sized one.
-    layout_font: ?*PangoFontDescription = null,
+    layout_font: ?*bindings.PangoFontDescription = null,
 
     fn deinit(self: *FontBook) void {
-        if (self.sized_desc) |d| pango_font_description_free(d);
-        if (self.current_font_desc) |desc| pango_font_description_free(desc);
+        if (self.sized_desc) |d| bindings.pango_font_description_free(d);
+        if (self.current_font_desc) |desc| bindings.pango_font_description_free(desc);
     }
 
     fn loadFonts(self: *FontBook, font_names: []const []const u8) !void {
@@ -313,18 +131,18 @@ pub const FontBook = struct {
     fn loadFont(self: *FontBook, font_name: []const u8) !void {
         const pango_name_z = try convertFontName(self.allocator, font_name);
         defer self.allocator.free(pango_name_z);
-        const new_desc = pango_font_description_from_string(pango_name_z.ptr);
+        const new_desc = bindings.pango_font_description_from_string(pango_name_z.ptr);
         var desc = new_desc;
         if (desc == null) {
             log.warn("Failed to load font '{s}', using default", .{font_name});
-            desc = pango_font_description_from_string(fallbackFont);
+            desc = bindings.pango_font_description_from_string(fallbackFont);
         }
         // Install the new description only after it exists, so a failed
         // conversion cannot leave `current_font_desc` dangling. Free the old
         // one after the new one is in hand.
-        if (self.current_font_desc) |old| pango_font_description_free(old);
+        if (self.current_font_desc) |old| bindings.pango_font_description_free(old);
         self.current_font_desc = desc;
-        pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
+        bindings.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
         self.layout_font = self.current_font_desc;
         self.cached_metrics = null;
         self.invalidateSized();
@@ -334,26 +152,26 @@ pub const FontBook = struct {
     /// may still reference the freed sized description, so re-seat it on the
     /// base; the next sized draw sets its own before painting.
     fn invalidateSized(self: *FontBook) void {
-        if (self.sized_desc) |d| pango_font_description_free(d);
+        if (self.sized_desc) |d| bindings.pango_font_description_free(d);
         self.sized_desc = null;
         self.sized_px = 0;
         if (self.layout_font != self.current_font_desc) {
-            pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
+            bindings.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
             self.layout_font = self.current_font_desc;
         }
     }
 
     /// The base description scaled to `size_px`, cached by size alone. The only
     /// failure is having no base description to copy.
-    fn sizedDesc(self: *FontBook, size_px: u16) !*PangoFontDescription {
+    fn sizedDesc(self: *FontBook, size_px: u16) !*bindings.PangoFontDescription {
         const desc = self.current_font_desc orelse return error.NoFont;
         if (self.sized_desc == null or self.sized_px != size_px) {
             // Copy FIRST, then free the old descriptor: freeing before the copy
             // leaves a dangling `sized_desc` if the copy fails.
-            const temp = pango_font_description_copy(desc) orelse
+            const temp = bindings.pango_font_description_copy(desc) orelse
                 return error.PangoDescCopyFailed;
-            if (self.sized_desc) |old| pango_font_description_free(old);
-            pango_font_description_set_absolute_size(temp, pxToPango(size_px));
+            if (self.sized_desc) |old| bindings.pango_font_description_free(old);
+            bindings.pango_font_description_set_absolute_size(temp, pxToPango(size_px));
             self.sized_desc = temp;
             self.sized_px = size_px;
         }
@@ -364,14 +182,14 @@ pub const FontBook = struct {
     /// invalidated by loadFont.
     pub fn getMetrics(self: *FontBook) struct { i16, i16 } {
         if (self.cached_metrics) |m| return m;
-        const metrics = pango_context_get_metrics(
-            pango_layout_get_context(self.pango_layout),
+        const metrics = bindings.pango_context_get_metrics(
+            bindings.pango_layout_get_context(self.pango_layout),
             self.current_font_desc,
             null,
         );
-        defer pango_font_metrics_unref(metrics);
-        const ascent = pangoPxToI16(pango_font_metrics_get_ascent(metrics));
-        const descent = pangoPxToI16(pango_font_metrics_get_descent(metrics));
+        defer bindings.pango_font_metrics_unref(metrics);
+        const ascent = pangoPxToI16(bindings.pango_font_metrics_get_ascent(metrics));
+        const descent = pangoPxToI16(bindings.pango_font_metrics_get_descent(metrics));
         self.cached_metrics = .{ ascent, descent };
         return .{ ascent, descent };
     }
@@ -394,7 +212,7 @@ pub const FontBook = struct {
         props: types.SegmentProps,
         sized_px: ?u16,
     ) TextRun {
-        const l = pango_layout_new(pango_layout_get_context(self.pango_layout)) orelse
+        const l = bindings.pango_layout_new(bindings.pango_layout_get_context(self.pango_layout)) orelse
             return .{};
         var run = TextRun{ .layout = l };
         // Sized runs need a base description to copy. Unsized runs fall back to
@@ -406,13 +224,13 @@ pub const FontBook = struct {
                 return .{};
             };
             run.sized_font = sized;
-            pango_layout_set_font_description(l, sized);
+            bindings.pango_layout_set_font_description(l, sized);
         } else if (self.current_font_desc) |d| {
-            pango_layout_set_font_description(l, d);
+            bindings.pango_layout_set_font_description(l, d);
         }
         run.attrs = buildStyleAttrs(props);
-        if (run.attrs) |a| pango_layout_set_attributes(l, a);
-        pango_layout_set_text(l, text.ptr, @intCast(text.len));
+        if (run.attrs) |a| bindings.pango_layout_set_attributes(l, a);
+        bindings.pango_layout_set_text(l, text.ptr, @intCast(text.len));
         return run;
     }
 
@@ -420,7 +238,7 @@ pub const FontBook = struct {
     /// ONLY place a layout is created: the live context and the probe both go
     /// through it, so a change to layout setup cannot reach one path and miss
     /// the other.
-    fn initBook(allocator: std.mem.Allocator, ctx: *cairo_t, dpi: f32) !FontBook {
+    fn initBook(allocator: std.mem.Allocator, ctx: *bindings.cairo_t, dpi: f32) !FontBook {
         return .{
             .allocator = allocator,
             .pango_layout = try createPangoLayout(ctx, dpi),
@@ -436,13 +254,13 @@ pub const FontBook = struct {
         dpi: f32,
         font_names: []const []const u8,
     ) ?FontMetrics {
-        const surface = cairo_image_surface_create(.ARGB32, 1, 1) orelse return null;
-        defer cairo_surface_destroy(surface);
+        const surface = bindings.cairo_image_surface_create(.ARGB32, 1, 1) orelse return null;
+        defer bindings.cairo_surface_destroy(surface);
         // The cairo context exists only to obtain the Pango layout.
-        const ctx = cairo_create(surface) orelse return null;
-        defer cairo_destroy(ctx);
+        const ctx = bindings.cairo_create(surface) orelse return null;
+        defer bindings.cairo_destroy(ctx);
         var book = initBook(allocator, ctx, dpi) catch return null;
-        defer g_object_unref(book.pango_layout);
+        defer bindings.g_object_unref(book.pango_layout);
         defer book.deinit();
         if (font_names.len > 0) book.loadFonts(font_names) catch return null;
         const asc, const desc = book.getMetrics();
@@ -462,8 +280,8 @@ pub const Surface = struct {
     pixmap: u32,
     width: u16,
     height: u16,
-    cairo_surface: *cairo_surface_t,
-    ctx: *cairo_t,
+    cairo_surface: *bindings.cairo_surface_t,
+    ctx: *bindings.cairo_t,
     /// GC used by `fillRect` (xcb_poly_fill_rectangle).
     gc: u32,
     /// Separate GC used exclusively for the xcb_copy_area blit.
@@ -498,17 +316,17 @@ pub const Surface = struct {
         const pixmap = createXcbPixmap(conn, depth, window, width, height);
         errdefer _ = core.xcb.xcb_free_pixmap(conn, pixmap);
 
-        const cairo_surface = cairo_xcb_surface_create(
+        const cairo_surface = bindings.cairo_xcb_surface_create(
             conn,
             pixmap,
             visual_type,
             @intCast(width),
             @intCast(height),
         ) orelse return error.CairoSurfaceCreateFailed;
-        errdefer cairo_surface_destroy(cairo_surface);
+        errdefer bindings.cairo_surface_destroy(cairo_surface);
 
-        const ctx = cairo_create(cairo_surface) orelse return error.CairoCreateFailed;
-        errdefer cairo_destroy(ctx);
+        const ctx = bindings.cairo_create(cairo_surface) orelse return error.CairoCreateFailed;
+        errdefer bindings.cairo_destroy(ctx);
 
         // Fire both GC-create requests before blocking on either reply so both
         // land in the same TCP segment. The errdefers free both on any failure
@@ -549,9 +367,9 @@ pub const Surface = struct {
     fn deinit(self: *Surface) void {
         if (self.gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.gc);
         if (self.copy_gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.copy_gc);
-        cairo_destroy(self.ctx);
+        bindings.cairo_destroy(self.ctx);
         // Destroy surface before pixmap: Cairo holds a reference to the pixmap.
-        cairo_surface_destroy(self.cairo_surface);
+        bindings.cairo_surface_destroy(self.cairo_surface);
         if (self.pixmap != 0) _ = core.xcb.xcb_free_pixmap(self.conn, self.pixmap);
     }
 
@@ -587,7 +405,7 @@ pub const Surface = struct {
     pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         if (!self.xcb_filled_this_frame) {
             // Quiesce before the first wire write of the frame (22.5).
-            cairo_surface_flush(self.cairo_surface);
+            bindings.cairo_surface_flush(self.cairo_surface);
             self.xcb_filled_this_frame = true;
         }
         const packed_color: u32 = if (self.is_argb)
@@ -612,7 +430,7 @@ pub const Surface = struct {
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.pixmap, self.gc, 1, &rect);
     }
 
-    /// Shared blit body: cairo_surface_flush + xcb_copy_area of [x, x+w),
+    /// Shared blit body: bindings.cairo_surface_flush + xcb_copy_area of [x, x+w),
     /// plus an immediate xcb_flush only for `blitRegion`. `queueBlit` must NOT
     /// flush here: it is safe inside xcb_grab_server precisely because the copy
     /// is sent with the caller's batch end.
@@ -620,7 +438,7 @@ pub const Surface = struct {
         // The frame's glyphs go on the wire here, which is what puts them after
         // this frame's fills (22.5). Re-arms the one-shot quiesce for the next
         // frame.
-        cairo_surface_flush(self.cairo_surface);
+        bindings.cairo_surface_flush(self.cairo_surface);
         self.xcb_filled_this_frame = false;
         if (self.copy_gc == 0) return;
         _ = core.xcb.xcb_copy_area(
@@ -639,27 +457,27 @@ pub const Surface = struct {
     }
 };
 
-inline fn setCairoColor(ctx: *cairo_t, color: u32) void {
+inline fn setCairoColor(ctx: *bindings.cairo_t, color: u32) void {
     const r = @as(f64, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
     const g = @as(f64, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
     const b = @as(f64, @floatFromInt(color & 0xFF)) / 255.0;
-    cairo_set_source_rgba(ctx, r, g, b, 1.0);
+    bindings.cairo_set_source_rgba(ctx, r, g, b, 1.0);
 }
 
 inline fn pangoToF64(pango_units: c_int) f64 {
-    return @as(f64, @floatFromInt(pango_units)) / pango_scale;
+    return @as(f64, @floatFromInt(pango_units)) / bindings.pango_scale;
 }
 
 inline fn pangoPxToI16(val: c_int) i16 {
     return @intCast(std.math.clamp(
-        @divTrunc(val, pango_scale),
+        @divTrunc(val, bindings.pango_scale),
         std.math.minInt(i16),
         std.math.maxInt(i16),
     ));
 }
 
 inline fn pxToPango(px: u16) f64 {
-    return @as(f64, @floatFromInt(px)) * pango_scale;
+    return @as(f64, @floatFromInt(px)) * bindings.pango_scale;
 }
 
 inline fn createXcbPixmap(conn: core.Connection, depth: u8, drawable: u32, w: u16, h: u16) u32 {
@@ -669,14 +487,14 @@ inline fn createXcbPixmap(conn: core.Connection, depth: u8, drawable: u32, w: u1
 }
 
 inline fn showLayoutAtBaseline(
-    ctx: *cairo_t,
-    layout: *PangoLayout,
+    ctx: *bindings.cairo_t,
+    layout: *bindings.PangoLayout,
     x: f64,
     baseline: u16,
 ) void {
     const baseline_f: f64 = @floatFromInt(baseline);
-    cairo_move_to(ctx, x, baseline_f - pangoToF64(pango_layout_get_baseline(layout)));
-    pango_cairo_show_layout(ctx, layout);
+    bindings.cairo_move_to(ctx, x, baseline_f - pangoToF64(bindings.pango_layout_get_baseline(layout)));
+    bindings.pango_cairo_show_layout(ctx, layout);
 }
 
 /// The validated span `[start, start + len)` inside `text`, or null when the
@@ -718,52 +536,52 @@ pub fn valueRange(text: []const u8, start: usize, len: usize) ?ValueRange {
 /// byte range that splits a multi-byte character is not a caller error we can
 /// detect cheaply -- it degrades to whatever glyphs intersect the range. Every
 /// in-tree caller passes an ASCII numeral range, which is exact.
-fn foregroundAttr(list: *PangoAttrList, start: usize, len: usize, rgb: u32) void {
+fn foregroundAttr(list: *bindings.PangoAttrList, start: usize, len: usize, rgb: u32) void {
     // hana stores 0xRRGGBB; Pango wants each channel scaled to 0..65535.
     const scale8to16 = struct {
         fn f(c: u32) u16 {
             return @intCast((c * 0xFFFF) / 0xFF);
         }
     }.f;
-    const attr = pango_attr_foreground_new(
+    const attr = bindings.pango_attr_foreground_new(
         scale8to16((rgb >> 16) & 0xFF),
         scale8to16((rgb >> 8) & 0xFF),
         scale8to16(rgb & 0xFF),
     ) orelse return;
     attr.start_index = @intCast(start);
     attr.end_index = @intCast(start + len);
-    pango_attr_list_insert(list, attr);
+    bindings.pango_attr_list_insert(list, attr);
 }
 
 /// Builds a one-shot attribute list encoding the non-default flags of `props`
 /// (underline, bold, italic), or null when no flags are set. The caller owns
-/// the returned list and must unref it (pango_attr_list_unref) once detached
+/// the returned list and must unref it (bindings.pango_attr_list_unref) once detached
 /// from the layout.
-fn buildStyleAttrs(props: types.SegmentProps) ?*PangoAttrList {
+fn buildStyleAttrs(props: types.SegmentProps) ?*bindings.PangoAttrList {
     if (props.isDefault()) return null;
-    const list = pango_attr_list_new() orelse return null;
+    const list = bindings.pango_attr_list_new() orelse return null;
     // On a partial attribute-creation failure, unref the list (which frees
     // any attrs already inserted) and degrade to unstyled drawing.
     if (props.underline) {
-        const attr = pango_attr_underline_new(.SINGLE) orelse {
-            pango_attr_list_unref(list);
+        const attr = bindings.pango_attr_underline_new(.SINGLE) orelse {
+            bindings.pango_attr_list_unref(list);
             return null;
         };
-        pango_attr_list_insert(list, attr);
+        bindings.pango_attr_list_insert(list, attr);
     }
     if (props.bold) {
-        const attr = pango_attr_weight_new(.BOLD) orelse {
-            pango_attr_list_unref(list);
+        const attr = bindings.pango_attr_weight_new(.BOLD) orelse {
+            bindings.pango_attr_list_unref(list);
             return null;
         };
-        pango_attr_list_insert(list, attr);
+        bindings.pango_attr_list_insert(list, attr);
     }
     if (props.italic) {
-        const attr = pango_attr_style_new(.ITALIC) orelse {
-            pango_attr_list_unref(list);
+        const attr = bindings.pango_attr_style_new(.ITALIC) orelse {
+            bindings.pango_attr_list_unref(list);
             return null;
         };
-        pango_attr_list_insert(list, attr);
+        bindings.pango_attr_list_insert(list, attr);
     }
     return list;
 }
@@ -788,7 +606,7 @@ pub const DrawContext = struct {
         errdefer surface.deinit();
 
         const books = try FontBook.initBook(allocator, surface.ctx, dpi);
-        errdefer g_object_unref(books.pango_layout);
+        errdefer bindings.g_object_unref(books.pango_layout);
 
         const dc = try allocator.create(DrawContext);
         errdefer allocator.destroy(dc);
@@ -798,7 +616,7 @@ pub const DrawContext = struct {
 
     pub fn deinit(self: *DrawContext) void {
         self.fonts.deinit();
-        g_object_unref(self.fonts.pango_layout);
+        bindings.g_object_unref(self.fonts.pango_layout);
         self.surface.deinit();
         self.fonts.allocator.destroy(self);
     }
@@ -828,16 +646,16 @@ pub const DrawContext = struct {
         defer run.deinit();
         const l = run.layout orelse return error.NoFont;
 
-        var ink_rect: PangoRectangle = undefined;
-        pango_layout_get_extents(l, &ink_rect, null);
+        var ink_rect: bindings.PangoRectangle = undefined;
+        bindings.pango_layout_get_extents(l, &ink_rect, null);
 
         self.surface.setColor(color);
-        cairo_move_to(
+        bindings.cairo_move_to(
             self.surface.ctx,
             @floatFromInt(x),
             @as(f64, @floatFromInt(y_top)) - pangoToF64(ink_rect.y),
         );
-        pango_cairo_show_layout(self.surface.ctx, l);
+        bindings.pango_cairo_show_layout(self.surface.ctx, l);
     }
 
     /// Draws `text` with its left edge at `x` and baseline at `y`.
@@ -871,16 +689,16 @@ pub const DrawContext = struct {
         defer run.deinit();
         const l = run.layout orelse return;
         self.surface.setColor(color);
-        cairo_save(self.surface.ctx);
-        defer cairo_restore(self.surface.ctx);
-        cairo_rectangle(
+        bindings.cairo_save(self.surface.ctx);
+        defer bindings.cairo_restore(self.surface.ctx);
+        bindings.cairo_rectangle(
             self.surface.ctx,
             @floatFromInt(clip_x),
             0,
             @floatFromInt(clip_w),
             @floatFromInt(self.surface.height),
         );
-        cairo_clip(self.surface.ctx);
+        bindings.cairo_clip(self.surface.ctx);
         for (x_positions) |x| showLayoutAtBaseline(self.surface.ctx, l, x, y);
     }
 
@@ -913,8 +731,8 @@ pub const DrawContext = struct {
         defer run.deinit();
         if (max_width) |w| {
             if (run.layout) |l| {
-                pango_layout_set_width(l, @as(i32, w) * pango_scale);
-                pango_layout_set_ellipsize(l, PangoEllipsizeMode.END);
+                bindings.pango_layout_set_width(l, @as(i32, w) * bindings.pango_scale);
+                bindings.pango_layout_set_ellipsize(l, bindings.PangoEllipsizeMode.END);
             }
         }
         self.paintRun(&run, x, y, color);
@@ -1111,9 +929,9 @@ pub fn drawPaddedSegmentValue(
             foregroundAttr(a, r.start, r.len, value_fg);
         } else {
             // Default props built no list; make one so the range has a home.
-            const fresh = pango_attr_list_new() orelse return x;
+            const fresh = bindings.pango_attr_list_new() orelse return x;
             foregroundAttr(fresh, range.?.start, range.?.len, value_fg);
-            pango_layout_set_attributes(l, fresh);
+            bindings.pango_layout_set_attributes(l, fresh);
             run.attrs = fresh;
         }
     }
@@ -1155,18 +973,19 @@ pub fn probeFontMetrics(
 /// copies cost one small allocation per font on a path that runs once per
 /// DrawContext creation, which is not a hot path.
 ///
-/// `font_size` is the point size to build at, and it is REQUIRED rather than
-/// optional: it used to default to a module-level global that the bar set
-/// during height resolution, so drawing read the bar's font size out of
-/// process state that nothing in this signature mentioned (21.5). A caller
-/// measuring a trial size passes the trial; a caller drawing the bar passes
-/// the bar's resolved `Metrics`.
+/// `fonts` is the configured font family list, and `font_size` is
+/// the point size to build at; both are REQUIRED rather than
+/// optional: each used to be read out of process state that
+/// nothing in the signature mentioned (21.5) -- `font_size` from
+/// a module-level global the bar set during height resolution,
+/// `fonts` from `core.getState()` right here. A caller measuring
+/// a trial size passes the trial; a caller drawing the bar passes
+/// the bar's resolved `Metrics` and the live config's font list.
 pub const SizedFontList = struct {
     allocator: std.mem.Allocator,
     items: [][]const u8,
 
-    pub fn build(allocator: std.mem.Allocator, font_size: u16) !SizedFontList {
-        const fonts = core.getState().config.bar.fonts.items;
+    pub fn build(allocator: std.mem.Allocator, fonts: []const []const u8, font_size: u16) !SizedFontList {
         const items = try allocator.alloc([]const u8, fonts.len);
         errdefer allocator.free(items);
         for (fonts, items) |f, *out| {
@@ -1192,16 +1011,16 @@ pub const SizedFontList = struct {
 /// Loads the configured fonts into `dc`. Called once per DrawContext creation.
 pub fn loadBarFonts(dc: *DrawContext, font_size: u16) !void {
     const cs = core.getState();
-    var sized = try SizedFontList.build(cs.alloc, font_size);
+    var sized = try SizedFontList.build(cs.alloc, cs.config.bar.fonts.items, font_size);
     defer sized.deinit();
     if (sized.items.len == 0) return; // keep Pango default, matching probeFontMetrics
     try dc.fonts.loadFonts(sized.items);
     if (sized.items.len > 1) log.info("Loaded {} fonts with fallback support", .{sized.items.len});
 }
 
-fn createPangoLayout(ctx: *cairo_t, dpi: f32) !*PangoLayout {
-    const layout = pango_cairo_create_layout(ctx) orelse return error.PangoLayoutCreateFailed;
-    pango_cairo_context_set_resolution(pango_layout_get_context(layout), @floatCast(dpi));
+fn createPangoLayout(ctx: *bindings.cairo_t, dpi: f32) !*bindings.PangoLayout {
+    const layout = bindings.pango_cairo_create_layout(ctx) orelse return error.PangoLayoutCreateFailed;
+    bindings.pango_cairo_context_set_resolution(bindings.pango_layout_get_context(layout), @floatCast(dpi));
     return layout;
 }
 
