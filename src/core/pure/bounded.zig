@@ -104,9 +104,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// Inserts `item` at the FRONT, first evicting the tail (oldest) entry
         /// if the list is at `capacity`. This is the "newest N" pattern (an MRU
         /// list), and it is a container operation rather than a caller's
-        /// three-line dance: the old sequence was `if (len == cap) evict_tail`
-        /// then `insert(0, item)`, and getting that order wrong (inserting
-        /// first) silently drops a NEWER entry.
+        /// three-line dance: the hand-rolled `if (len == cap) evict_tail` then
+        /// `insert(0, item)` invites getting the order wrong (inserting first
+        /// silently drops a NEWER entry).
         ///
         /// Returns false only if `capacity` is 0, which no real caller sets.
         pub fn pushFrontEvictingTail(self: *Self, item: T) bool {
@@ -278,8 +278,8 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
         /// Empty map → row 0 of the fixed-capacity storage (always
         /// addressable, capacity >= 1).
         pub fn at(self: *const Self, seq: usize) Item {
-            // An empty map has no row to return; the old clamp handed back
-            // whatever sat in the fixed-capacity storage. Every caller already
+            // An empty map has no row to return: a clamp would hand back
+            // whatever sits in the fixed-capacity storage. Every caller already
             // checks len > 0, so make the precondition loud instead of
             // fabricating an entry.
             std.debug.assert(self.len > 0);

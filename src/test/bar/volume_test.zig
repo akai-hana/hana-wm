@@ -1,28 +1,12 @@
 //! Unit tests for the volume slider sub.
 //!
-//! volume.zig's pure helpers (the re-probe / negative-cache decision logic, plus
-//! the pre-existing `parsePercent`/`label` tests) used to be INLINE in
-//! volume.zig, with this file as a mere "reachability anchor" -- the belief
-//! being that importing a module runs its inline tests. IT DOES NOT: the
-//! `zig build test` harness executes test blocks in the test root only, so an
-//! inline test in an imported module is never even analyzed. A canary
-//! `expectEqual(1, 2)` appended to volume.zig does not fail; the same canary
-//! appended here does.
+//! The pure helpers (the re-probe / negative-cache decision logic, plus
+//! `parsePercent`/`label`) are `pub` and tested HERE: the `zig build test`
+//! harness executes test blocks in the test root only, so an inline test in
+//! an imported module is never even analyzed.
 //!
-//! The gap hid because the build still type-checks volume.zig, so a mutation
-//! there produced compile errors that read like test kills -- the first
-//! mutation pass reported M36-M48 as KILLED when M46-M48 were
-//! compile-error cascades and no assertion had ever run.
-//!
-//! All the helpers are `pub` and tested HERE. The two recovered `label` tests
-//! were still calling the old by-pointer signature, so they could not have
-//! compiled had they ever run; they are corrected below. `label` reads
-//! module-private display state, set up through the explicit
+//! `label` reads module-private display state, set up through the explicit
 //! `setDisplayForTest` seam.
-//
-//! (The same trap held brightness.zig's five tests, native_alsa.zig's five and
-//! native_pulse.zig's seven. All twenty were recovered the same way; a repo-wide
-//! sweep now reports zero dead inline tests.)
 
 // build-gate: volume
 
@@ -46,8 +30,7 @@ const yes = Probe{ .walk = true };
 const flip = Probe{ .walk = true };
 
 /// The span form: `Label` carries `value_start`/`value_len` rather than a
-/// subslice, so assertions spell the comparison out instead of relying on a
-/// `?[]const u8` field these tests used to have.
+/// subslice, so assertions spell the comparison out.
 fn valueSpan(l: drawing.Label) []const u8 {
     return l.text[l.value_start..][0..l.value_len];
 }
@@ -148,13 +131,6 @@ test "optimisticLevel echoes a committed level, but never invents one" {
     // to show. Echoing 40 here would display a level the sink never accepted.
     try std.testing.expectEqual(@as(?u8, null), optimisticLevel(.unknown, 40));
 }
-
-// ---------------------------------------------------------------------------
-// Recovered dead tests. These lived INLINE in volume.zig and had never once
-// executed: the harness runs tests from the test root, and nothing imported
-// volume.zig. The build still type-checked it, so a mutation there read as a
-// kill. They now run for the first time. `label` reads module-private display
-// state, so they set it through the explicit `setDisplayForTest` seam.
 
 test "parsePercent extracts first N%" {
     try std.testing.expectEqual(@as(?u8, 42), volume.parsePercent("Volume: 123456 / 42% / 6,56 dB"));

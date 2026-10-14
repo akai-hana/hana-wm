@@ -3,8 +3,8 @@
 //! and the fill/blit primitives with their paint-order rule (XCB fills land
 //! under cairo glyphs of the same frame).
 //!
-//! Split OUT of `drawing.zig` in Phase 4 (step 24): `DrawContext` composes
-//! this with the font book from `fonts.zig`.
+//! `DrawContext` in `drawing.zig` composes this with the font book from
+//! `fonts.zig`.
 
 const std = @import("std");
 const core = @import("core");
@@ -28,9 +28,8 @@ pub fn findVisualByDepth(screen: core.Screen, depth: u8) u32 {
 }
 
 /// Owns the off-screen X drawable and the XCB/cairo machinery that writes to
-/// it. Extracted from `DrawContext` so the display resources and the
-/// font resources have independent owners; `DrawContext` is the facade that
-/// composes them.
+/// it. The display resources and the font resources have independent owners;
+/// `DrawContext` is the facade that composes them.
 pub const Surface = struct {
     conn: core.Connection,
     /// The real X window, only used as the copy destination in `blit`.

@@ -2,17 +2,15 @@
 //! to describe or locate it -- the `Bar`/`gBar` handle, the segment-registry
 //! identity helpers, and the hook walkers.
 //!
-//! Split OUT of `bar.zig` to break the import cycles: `render` and
-//! `input_events` read this state on every batch, and importing
-//! `bar.zig` for it dragged them into a cycle with the file that also
-//! drives them (bar.zig imports both). With the state in its own leaf,
-//! those two import THIS file and nothing imports them back.
+//! The state lives in its own leaf so `render` and `input_events` -- both
+//! imported by `bar.zig`, both reading this state on every batch -- can reach
+//! it without importing `bar.zig` back and closing a cycle.
 //!
 //! Nothing here performs X work or decides anything: it is data plus
 //! `init`/`deinit`. Lifecycle (create/destroy/reload), polling, and the
 //! chrome stay in `bar.zig`; frame collection, the paint pass, and the
 //! State operations (damage, click bounds, clock scope, measurement) live
-//! in `render.zig` (Phase 4 step 23, unified in Phase 3).
+//! in `render.zig`.
 
 const std = @import("std");
 const core = @import("core");
@@ -59,13 +57,11 @@ const WindowCtx = struct {
     colormap: u32,
 
     /// Destroys the window AND frees its colormap, in that order, through
-    /// win.zig's single teardown. This used to free only the colormap,
-    /// so both real teardown paths -- shutdown and the reload-time recreate --
-    /// had to remember to call `xcb_destroy_window` themselves, and did, in
-    /// two places. The one that forgot would leak the window and keep the bar
-    /// on screen with no way back to it. win.zig owns both halves now, and
-    /// the errdefer on a half-built bar is the only place left that has to
-    /// reach past this.
+    /// win.zig's single teardown, so both real teardown paths -- shutdown and
+    /// the reload-time recreate -- cannot remember one half and forget the
+    /// other: a path that forgot `xcb_destroy_window` would leak the window
+    /// and keep the bar on screen with no way back to it. The errdefer on a
+    /// half-built bar is the only place that has to reach past this.
     pub fn deinit(self: *WindowCtx) void {
         barwin.destroyBarWindow(self.conn, self.win_id, self.colormap);
     }
@@ -143,8 +139,7 @@ const Visibility = struct {
 /// overlay-only prompt's bit is never cleared (it is never painted), so
 /// "any bit set" can never mean "a draw is owed". `pendingFullRedraw` takes
 /// the CONJUNCTION for exactly that reason: a partial wake must still
-/// region-scope its repaint. This pair already absorbed the older
-/// `gBar.force` flag (BARCR-09); re-collapsing it would re-open that ruling.
+/// region-scope its repaint.
 const Dirty = struct {
     /// Whole-bar redraw requested (a fact revision or forced draw).
     flag: bool = false,
@@ -206,8 +201,7 @@ const FrameState = struct {
     /// only holds the slice).
     ws_has_windows: [model.max_workspaces]bool = @splat(false),
     /// The current workspace's windows for the frame, one entry per window
-    /// (id only until fillDrawCtx annotates title + geom; the AoS record
-    /// replaces the separate `wins` / titles_buf / geoms_buf arrays).
+    /// (id only until fillDrawCtx annotates title + geom).
     entries: [max_frame_windows]vocab.TitleEntry = undefined,
     entries_len: usize = 0,
     /// Per-frame title rendering context from the last draw, reused for
@@ -236,15 +230,14 @@ const TitleScratch = struct {
     minimized_api: segmod.MinimizedApi = .{},
     /// Storage for the focused window's title. The per-window titles
     /// on `frame.entries` borrow straight from the title_cache (they are
-    /// refreshed every frame before the draw); the focused title used to be
-    /// a slice straight into the title_cache's per-window `title_buf`, so the
-    /// DrawCtx retained a borrowed pointer into a cache that a title change
-    /// overwrites in place. That is the same window as often as not -- the
-    /// focused window is usually also in the frame's entry list, whose title
-    /// is refreshed right beside this copy -- so the one field with the
-    /// widest lifetime needed the one byte copy. Copying costs one memcpy and
-    /// removes the question of which readers may hold the slice across a
-    /// cache write.
+    /// refreshed every frame before the draw); the focused title is copied
+    /// instead, because a borrowed slice would leave the DrawCtx pointing
+    /// into a cache that a title change overwrites in place. That is the
+    /// same window as often as not -- the focused window is usually also in
+    /// the frame's entry list, whose title is refreshed right beside this
+    /// copy -- so the one field with the widest lifetime needs the one byte
+    /// copy. Copying costs one memcpy and removes the question of which
+    /// readers may hold the slice across a cache write.
     focused_title_buf: [title_cache.max_title_len]u8 = undefined,
 };
 

@@ -78,9 +78,7 @@ pub inline fn getCurrentLayout() u8 {
 
 /// Returns the current workspace's active tiling variant index (see
 /// model.WSParams.variant_idx) from the live model state, checked at the one
-/// place that already owns the workspace-index rule. A bar module used to
-/// hand-walk `state().ws[state().current.index].params.variant_idx` itself,
-/// duplicating this lookup AND its unchecked @intCast; now it asks.
+/// place that already owns the workspace-index rule.
 pub inline fn getCurrentVariantIdx() usize {
     return @intCast(state().ws[state().current.index].params.variant_idx);
 }
@@ -99,9 +97,9 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
 var g_sink: xcb_sink.XcbSink = undefined;
 
 /// The shared XCB sink: inited once in init(), then free across every use.
-/// Public for the grab-free wire-write paths this pipeline no longer wraps
-/// (geometry's targeted drag tick, floating's drag raise): a raw request
-/// sequence with no model or grab involvement belongs at the call site.
+/// Public for the grab-free wire-write paths (geometry's targeted drag tick,
+/// floating's drag raise): a raw request sequence with no model or grab
+/// involvement belongs at the call site.
 pub inline fn syncSink() sink.Sink {
     return (&g_sink).sink();
 }
@@ -189,13 +187,13 @@ fn preReconcileDuties() void {
     // Internal choke point: touches the private `instance` directly (not via
     // state()/mut()) because this is the model owner applying the active
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
-    // module receives a mutable pointer into the model anymore).
+    // module receives a mutable pointer into the model).
     //
     // The WRITE goes through window_state_ops.applyParamsDelta rather than a
     // raw `*LayoutParams` taken from the model. The value-in/value-out shape
-    // already stopped layout modules from mutating; this closes the last
-    // un-gated channel, which was this pipeline function itself holding a
-    // mutable pointer into model state across a call into a layout module.
+    // keeps layout modules from mutating; this closes the last un-gated
+    // channel: this pipeline function itself holding a mutable pointer into
+    // model state across a call into a layout module.
     const ws = instance.current;
     const p = instance.ws[ws.index].params;
     const md = contract.moduleOf(p.kind) orelse return;
@@ -209,9 +207,8 @@ fn preReconcileDuties() void {
 /// duties run. Every reconcile-family entry point calls this exactly once,
 /// always before reading the ctx: the scroll layout's duty mutates the model
 /// (viewport clamp), so it has to be folded into the geometry that follows it
-/// rather than applied as a separate pass. Previously four entry points each
-/// paired `preReconcileDuties()` with their own `ctx()` call, which is what
-/// let a hook deep inside a grab ask for a second, divergent ctx.
+/// rather than applied as a separate pass -- pairing them per entry point
+/// would let a hook deep inside a grab ask for a second, divergent ctx.
 fn prepare() *reconcile.Ctx {
     preReconcileDuties();
     return ctx();
@@ -239,15 +236,14 @@ var grab_depth: u32 = 0;
 
 /// Server-grab ownership as a token: taking it grabs, dropping it ungrabs AND
 /// flushes. Every exit path releases it, including an early return or a failed
-/// reconcile inside the body -- which is precisely the failure mode the bar's
-/// hand-written `requests.grabServer` / `ungrabAndFlush` pairs had to repeat
-/// by hand at every early return (its re-anchor path had one).
+/// reconcile inside the body -- precisely the failure mode a hand-written
+/// `grabServer` / `ungrabAndFlush` pair invites at every early return.
 ///
 /// The ctx is built when the grab is TAKEN, not on demand, so every wire write
 /// and every reconcile inside the bracket is computed against one ctx. It
-/// carries its own `reconcileNow` for exactly that reason: a caller cannot
-/// reconcile against a different ctx than the one its geometry is bracketed
-/// by, and it cannot reach pipeline's flushless reconcile at all.
+    /// carries its own `reconcileNow` for exactly that reason: a caller cannot
+    /// reconcile against a different ctx than the one its geometry is bracketed
+    /// by.
 pub const ScopedGrab = struct {
     /// The ctx this bracket reconciles against, or null for a grab that was
     /// only ever for wire writes.
@@ -265,10 +261,9 @@ pub const ScopedGrab = struct {
     /// Flushless reconcile inside this bracket, against this token's ctx.
     /// `o` is passed through to `reconcile.run` (`.{}` for a plain retile;
     /// the fullscreen grab in manage passes `.force_restack`). Asserts the
-    /// token was taken with a ctx (grabScoped always is). This is the bar's
-    /// replacement for the old pub pipeline.reconcileNow(), which
-    /// let a grabbed caller reconcile against a ctx its geometry writes were
-    /// not bracketed by.
+    /// token was taken with a ctx (grabScoped always is), so a grabbed caller
+    /// cannot reconcile against a ctx its geometry writes are not bracketed
+    /// by.
     pub fn reconcileNow(self: ScopedGrab, o: reconcile.Opts) void {
         std.debug.assert(self.c != null);
         // Refresh the screen-derived fields from LIVE state immediately before
@@ -278,9 +273,10 @@ pub const ScopedGrab = struct {
         // that, unmapping itself and releasing its claim inside the same grab
         // that is about to re-tile the windows -- and a ctx snapshotted before
         // that change would tile into a work area the model had already
-        // invalidated. The visible symptom was leaving fullscreen and finding
-        // the bar back but the layout still sized as though no bar existed,
-        // until an unrelated event (a workspace switch) rebuilt the ctx.
+        // invalidated. The visible symptom would be leaving fullscreen and
+        // finding the bar back but the layout still sized as though no bar
+        // existed, until an unrelated event (a workspace switch) rebuilt the
+        // ctx.
         //
         // Only these two fields are refreshed, and deliberately NOT the whole
         // ctx: rebuilding under a grab would re-run the pre-reconcile duties
@@ -325,7 +321,6 @@ pub fn grabOnly() ScopedGrab {
 /// across a tiling op. Gated by `build_options.profile_key` (the same flag as
 /// the key-dispatch path) so release WMs compile it out.
 ///
-/// This lived in `reconcile` next to the grab bracket it instrumented
 /// The bracket belongs to the pipeline, so the measurement of the
 /// bracket belongs here with it.
 const retile_prof = profile.WindowedProfiler(
@@ -340,18 +335,16 @@ const retile_prof = profile.WindowedProfiler(
 /// the ledger says nothing moved. The retile profiler measures the whole
 /// bracket (ctx build through ungrabAndFlush).
 ///
-/// The bump lives HERE, not in each caller. Eight actions used to reconcile
-/// with no bump at all, so the bar could read a stale window fact after
-/// geometry moved -- the invariant was "remember to bump", held only by the
-/// actions that happened to route through a bumping wrapper. Making this the
-/// one path that bumps is what makes it impossible to forget. A bump is a
+/// The bump lives HERE, not in each caller. "Remember to bump" as a
+/// per-caller invariant is one an action can forget, leaving the bar to read
+/// a stale window fact after geometry moved; making this the one path that
+/// bumps is what makes it impossible to forget. A bump is a
 /// monotonic `rev +%= 1` compared once per tick, so a site that wants a bump
 /// for its own reasons may take a double bump here without a second work pass.
 ///
-/// Grab ownership lives at grabScoped and nowhere else: the reconcile-under-
-/// grab family this entry absorbed used to route through a second grab
-/// bracket inside `reconcile` whose nested ungrab would have released the
-/// outer grab. There is exactly one bracket now, and the profiler wraps it.
+/// Grab ownership lives at grabScoped and nowhere else: a second grab
+/// bracket inside `reconcile` would nest an ungrab that releases the outer
+/// grab. There is exactly one bracket, and the profiler wraps it.
 pub inline fn reconcileGrab(o: reconcile.Opts) void {
     core.window.bump();
     const t0: i128 = if (retile_prof.enabled) core.monotonicNs() else 0;
@@ -372,12 +365,12 @@ pub inline fn reconcileGrab(o: reconcile.Opts) void {
 /// model-derived adjustment that depends on the new focus (the viewport snap)
 /// into the same reconcile instead of opening a second grab.
 ///
-/// It runs ONLY on the `.before` leg, so a `.after` caller passing a
-/// duty had it dropped with no diagnostic -- the function returned normally
-/// and the caller reasonably believed its adjustment had been folded in.
-/// `assert`ed here rather than left to the doc, because the drop is silent and
-/// the symptom (a viewport that does not move, or geometry computed against a
-/// stale focus) points nowhere near this argument.
+/// It runs ONLY on the `.before` leg, so without the assert below a `.after`
+/// caller's duty would be dropped with no diagnostic -- the function would
+/// return normally and the caller would reasonably believe its adjustment had
+/// been folded in. `assert`ed here rather than left to the doc, because the
+/// drop is silent and the symptom (a viewport that does not move, or geometry
+/// computed against a stale focus) points nowhere near this argument.
 pub const FocusOrder = enum {
     before,
     after,

@@ -1,13 +1,12 @@
 //! The shared drawn-width rule (`segmod.widthState`).
 //!
-//! systatus and slider both reserve a row span, feed it the width they actually
-//! painted, and owe a redraw when that width changes. slider used to keep its
-//! own `slot_w` field for this, and the copy had already drifted once:
-//! the click hit-test read the raw painted width and so rejected every press
-//! while it was still 0 -- the first click on a freshly laid-out slider did
-//! nothing -- while the drag denominator and the row reservation fell back to
-//! different values in the same frame. These tests pin the one definition all
-//! three now share.
+//! systatus and slider both reserve a row span, feed it the width they
+//! actually painted, and owe a redraw when that width changes. A duplicated
+//! copy of this rule drifts: the click hit-test reading the raw painted width
+//! rejects every press while that width is still 0 -- the first click on a
+//! freshly laid-out slider does nothing -- while the drag denominator and the
+//! row reservation fall back to different values in the same frame. These
+//! tests pin the single definition all three share.
 
 const std = @import("std");
 const contract = @import("bar_contract");
@@ -84,11 +83,10 @@ test "each tag is its own state, so controls cannot overwrite each other" {
 }
 
 test "the bar's post-draw step hands the width back and reports a paint" {
-    // This is the handoff the whole item is about, and it lived inside the
-    // bar's draw loop -- which needs a live DrawContext and an X connection,
-    // so it had no test at all. `segmod.finishDraw` is that policy as a pure
-    // function over a Segment and a Painted, so both halves are checkable
-    // against a Segment built right here, with no server.
+    // This is the handoff the whole item is about. The bar's draw loop needs
+    // a live DrawContext and an X connection, so `segmod.finishDraw` is that
+    // policy as a pure function over a Segment and a Painted: both halves
+    // are checkable against a Segment built right here, with no server.
     //
     // The two directions of failure are both silent in production: no handback
     // locks a segment onto its startup width, and a bogus "it painted" answer

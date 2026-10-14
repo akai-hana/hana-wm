@@ -50,8 +50,8 @@ var g_has_value: bool = false;
 
 /// Negative cache for a ladder that found no working backend. Null
 /// until the first total failure. Without it every read against a dead daemon
-/// re-walked all four rungs -- up to three `popen`s, each blocking the WM
-/// loop -- and the poll, every press and every right-click paid it again.
+/// re-walks all four rungs -- up to three `popen`s, each blocking the WM
+/// loop -- and the poll, every press and every right-click pays it again.
 var g_ladder_failed_at_ms: ?i64 = null;
 
 /// Attached handles for the two in-process rungs. Non-null means the rung won

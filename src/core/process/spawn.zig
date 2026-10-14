@@ -90,10 +90,8 @@ fn execShell(cmd_z: [*:0]const u8) void {
 /// On success this function never returns far enough to write anything;
 /// pipe_write's O_CLOEXEC copy closes itself as part of the exec.
 fn execDetached(pipe_write: c_int, cmd_z: [*:0]const u8) noreturn {
-    // setsid() here also makes the child a session leader, so an `exec` of a
-    // terminal emulator can acquire a controlling terminal. The old
-    // double-fork put the real process one level further down, where it was
-    // never a session leader and TIOCSCTTY was unavailable.
+    // setsid() makes the child a session leader, so an `exec` of a terminal
+    // emulator can acquire a controlling terminal.
     _ = c.setsid();
     execShell(cmd_z);
     failWithTag(pipe_write);
@@ -128,10 +126,10 @@ fn resolveCmdZ(alloc: std.mem.Allocator, cmd: []const u8, buf: *[stack_cmd_capac
 /// Largest possible spawn-pipe conversation: a single tag_failed byte.
 const spawn_msg_max: usize = 1;
 
-/// Longest command text kept per pending spawn, for diagnostics. A failed
-/// spawn used to be reported as nothing at all (or, for a wedged pipe, as
-/// silence forever), so there was no way to tell "the command failed" from
-/// "hana lost track of the command".
+/// Longest command text kept per pending spawn, for diagnostics. Without it,
+/// a failed spawn would report nothing at all (or, for a wedged pipe,
+/// silence forever), leaving no way to tell "the command failed" from "hana
+/// lost track of the command".
 const cmd_report_max: usize = 96;
 
 /// How long a pending entry may stay unresolved before it is dropped as stuck
@@ -179,10 +177,9 @@ pub fn executeShellCommand(cmd: []const u8) !void {
     defer if (resolved.heap) |h| core.getState().alloc.free(h);
     const cmd_z = resolved.z.ptr;
 
-    // Refuse up front instead of fork-then-discover-the-table-is-full. The
-    // old path logged past the append and, once the table filled, fell back
-    // to a synchronous waitpid on the event loop and silently dropped
-    // workspace routing for the spawn.
+    // Refuse up front instead of fork-then-discover-the-table-is-full: forking
+    // first would fall back to a synchronous waitpid on the event loop and
+    // silently drop workspace routing for the spawn.
     if (g_pending.len >= max_pending_spawns) {
         log.err("spawn: pending spawn table full, rejecting '{s}'", .{cmd});
         return error.SpawnQueueFull;
@@ -238,13 +235,13 @@ pub const max_read_fds: usize = max_pending_spawns;
 /// many were written. Entries whose pipe is already closed (buffer full, or
 /// EOF already seen) are skipped, so the count can shrink between calls.
 ///
-/// The event loop polls exactly these fds, which is what removes the last
-/// unbounded-latency path in the spawn hand-off: a spawn whose output is ready
-/// but which produced no X event and no signal used to wait for the next
-/// unrelated wakeup, because the pipe was only drained from inside the X event
+/// The event loop polls exactly these fds, which is what keeps the spawn
+/// hand-off free of unbounded latency: without that, a spawn whose output is
+/// ready but which produced no X event and no signal would wait for the next
+/// unrelated wakeup, because the pipe is only drained from inside the X event
 /// batch (`drainPendingSpawns` at the end of `handleXcbEvents`) and from
 /// SIGCHLD. A command that prints and exits while the X socket stays silent
-/// therefore stalled until some other client happened to talk to the server.
+/// would then stall until some other client happens to talk to the server.
 pub fn readFds(buf: []std.posix.fd_t) []std.posix.fd_t {
     var n: usize = 0;
     for (g_pending.slice()) |*entry| {
@@ -257,8 +254,9 @@ pub fn readFds(buf: []std.posix.fd_t) []std.posix.fd_t {
 }
 
 /// Drains pending spawn entries non-blockingly (every event batch, on SIGCHLD,
-/// and now on spawn-pipe readiness), until EOF or a full buffer; a full buffer already holds both
-/// possible messages, so EOF needn't be awaited. finishSpawn() classifies.
+/// and on spawn-pipe readiness), until EOF or a full buffer; a full buffer
+/// already holds both possible messages, so EOF needn't be awaited.
+/// finishSpawn() classifies.
 pub fn drainPendingSpawns() void {
     if (g_pending.len == 0) return;
     var i: usize = 0;
@@ -286,8 +284,8 @@ pub fn drainPendingSpawns() void {
 
         // The pipe closing is not a deadline. A stuck entry (pipe open,
         // or closed with the child never reaped) is dropped once it is older
-        // than spawn_timeout_ms, so 16 stuck entries can no longer wedge
-        // `exec` forever behind SpawnQueueFull.
+        // than spawn_timeout_ms, so 16 stuck entries cannot wedge `exec`
+        // forever behind SpawnQueueFull.
         if (entry.started_ms != 0 and core.monotonicMs() - entry.started_ms > spawn_timeout_ms) {
             log.warn("spawn stuck for {d}ms, dropping: '{s}'", .{
                 spawn_timeout_ms,
@@ -340,16 +338,6 @@ pub fn drainPendingSpawns() void {
 ///
 /// Both writes are under PIPE_BUF, so a tag_failed byte is never torn or
 /// interleaved; `buf` is one byte, so at most one arrives.
-///
-/// This predicate was INVERTED, and inverted in the worst available direction.
-/// It read `data.len != 0 and data[0] != tag_failed`, so a genuine
-/// `tag_failed` compared unequal to itself and reported SUCCESS: every command
-/// whose execvp actually failed was registered for workspace routing as if it
-/// had launched, which routes a window focus to a process that does not exist.
-/// Meanwhile the only input that could mark a failure was a byte that was NOT
-/// the tag -- the one thing this protocol never sends. Nothing warned about it
-/// because the comment directly above the old predicate described the correct
-/// rule in detail while the code underneath implemented its negation.
 pub fn conversationFailed(data: []const u8) bool {
     return data.len != 0;
 }
@@ -360,9 +348,8 @@ fn finishSpawn(entry: *PendingSpawn, pid: i32) void {
     const data = entry.buf[0..entry.len];
 
     if (conversationFailed(data)) {
-        // A failed spawn used to be completely silent. `entry.cmd` is
-        // the truncated command, so this is now actionable: which command,
-        // and that execvp is what failed.
+        // `entry.cmd` is the truncated command, so the report is actionable:
+        // which command, and that execvp is what failed.
         log.warn("spawn failed: '{s}' (exec did not succeed)", .{entry.command()});
         return;
     }

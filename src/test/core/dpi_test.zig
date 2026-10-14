@@ -35,9 +35,9 @@ test "parseXftDpi rejects absent, empty and unparseable values" {
     try testing.expect(dpi.parseXftDpi("Xft.dpi:") == null);
     try testing.expect(dpi.parseXftDpi("Xft.dpi:\n") == null);
     try testing.expect(dpi.parseXftDpi("Xft.dpi:\tabc") == null);
-    // A DIFFERENT key whose name ends in "Xft.dpi:" is not hana's setting.
-    // This was a real bug: the old bare indexOf match returned 96 here, so a
-    // client's "NotXft.dpi" silently overrode the real resolution.
+    // A DIFFERENT key whose name ends in "Xft.dpi:" is not hana's setting: a
+    // plain substring match reads "NotXft.dpi" as hana's own setting and
+    // silently overrides the real resolution.
     try testing.expect(dpi.parseXftDpi("NotXft.dpi:\t96") == null);
     try testing.expect(dpi.parseXftDpi("MyXft.dpi:\t144") == null);
 }

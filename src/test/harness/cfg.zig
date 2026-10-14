@@ -1,12 +1,12 @@
 //! Shared arrange for the config section tests.
 //!
-//! The ownership rule every one of them used to restate by hand: the parsed
+//! The ownership rule every one of them follows: the parsed
 //! `Document` lives in a per-test arena (freed wholesale at test end), while
 //! the fragment `Config` and every action payload it owns use
 //! `testing.allocator`, so a leak fails the test rather than being swallowed
 //! by the arena.
 //!
-//! Encoded once here instead of the ~45 sites that re-stated it. `begin(T)`
+//! Encoded here once for every section test. `begin(T)`
 //! / `deinit()` own the arena+Config pair; `apply` parses a source string
 //! with `parser.parse` and hands the document to a section interpreter.
 //! Every fragment entry point that shares the `(allocator, *Document, *T)`

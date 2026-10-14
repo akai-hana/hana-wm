@@ -36,22 +36,11 @@ const inter_title_gap_px: u16 = 48;
 
 /// The motion clock.
 ///
-/// This USED to be an accumulator: `offset_px += speed * dt/1000` once per
-/// frame, with `last_frame_ms` remembered so the next frame could measure the
-/// gap. That made the position a function of the whole call HISTORY, which
-/// has three bad properties, all of them latent bugs rather than visible
-/// ones. A duplicated draw advanced the offset twice, so the marquee ran at
-/// double speed for that step. A late draw integrated the entire gap in one
-/// step, which is a jump rather than motion. And a frame whose `dt` was lost
-/// (a path that returned early without updating `last_frame_ms`) silently
-/// changed the scroll speed forever after, because every later `dt` was
-/// measured from a stale base.
-///
-/// Instead there is an ANCHOR and the position is a pure function of the
-/// frame time: `mod((now - anchor_ms) * speed / 1000, cycle)`. Frame-rate
-/// independence is then true by construction rather than by argument -- any
-/// number of draws at any times agree on the position, so a duplicate frame
-/// is a no-op and a late frame shows where the marquee actually is.
+/// There is an ANCHOR and the position is a pure function of the frame time:
+/// `mod((now - anchor_ms) * speed / 1000, cycle)`. Frame-rate independence is
+/// then true by construction rather than by argument -- any number of draws at
+/// any times agree on the position, so a duplicate frame is a no-op and a late
+/// frame shows where the marquee actually is.
 ///
 /// `shown_off_px` is NOT an accumulator: nothing adds to it. It remembers the
 /// last offset actually handed out, and its only use is the `pivot` rebase
@@ -86,9 +75,9 @@ var pivot_next_frame: bool = false;
 /// segments' natural widths)` -- so the slot wobbles by a few pixels whenever
 /// the clock or a systatus readout gains or loses a digit, with nothing to do
 /// with this window. Continuation is keyed on `scrolling`, so each of those
-/// frames turned a running marquee into a non-overflowing one and the next
-/// frame restarted it at the head: the marquee teleported back to the start
-/// mid-cycle, or collapsed to a truncated ellipsis. This is one character of
+/// frames turns a running marquee into a non-overflowing one and the next
+/// frame restarts it at the head: the marquee teleports back to the start
+/// mid-cycle, or collapses to a truncated ellipsis. This is one character of
 /// the bar font, the granularity at which those neighbours actually change
 /// width, so it absorbs their jitter while still stopping on a real resize.
 const scroll_exit_slack_px: u16 = 8;
@@ -111,10 +100,9 @@ pub fn offsetFor(
     speed_px_s: u16,
     now_ms: i64,
 ) title_mod.Scroll {
-    // Both of these are consumed on EVERY call -- each of the three exits below
-    // used to repeat them -- so they are stated once, here, rather than at each
-    // exit. `pivot_next_frame` needs a local because the pivot branch below
-    // reads the value it is clearing.
+    // Both of these are consumed on EVERY call, so they are stated once here
+    // rather than at each of the three exits below. `pivot_next_frame` needs a
+    // local because the pivot branch below reads the value it is clearing.
     last_drawn_ms = now_ms;
     const pivoting = pivot_next_frame;
     pivot_next_frame = false;
@@ -146,11 +134,11 @@ pub fn offsetFor(
     // retirement -- begins on the NEXT frame. Retiring the clock here is what
     // lets a later overflow start from the head instead of resuming mid-cycle.
     //
-    // The starting-over case reports `active = true`, not false. `false` made
-    // the renderer fall through to its static ellipsis path, so arriving at an
-    // overflowing workspace from a static-title one painted a frame of
-    // truncated "..." before the marquee appeared -- and because `continues`
-    // only becomes true on the NEXT poll, the marquee itself took a second
+    // The starting-over case reports `active = true`, not false: `false` sends
+    // the renderer through its static ellipsis path, so arriving at an
+    // overflowing workspace from a static-title one paints a frame of
+    // truncated "..." before the marquee appears -- and because `continues`
+    // only becomes true on the NEXT poll, the marquee itself takes a second
     // poll to activate. `off = 0` puts the head at exactly the resting position
     // the static path would have used, so claiming the segment here is
     // seamless rather than a visible change.
@@ -169,12 +157,11 @@ pub fn offsetFor(
         // to an arbitrary point of the NEW cycle. Re-anchor so the position at
         // `now` is the one still on screen: a continuation, not a jump.
         //
-        // Folding `shown_off_px` into the new cycle first was tried and is
-        // NOT an improvement: the rebase already evaluates to
-        // `mod(shown_off_px, cycle)`, because the anchor is derived from
-        // `shown_off_px` and the offset is then `mod`ded by that same cycle.
-        // Folding it in advance changes nothing but hides where the value
-        // comes from.
+        // Folding `shown_off_px` into the new cycle first is NOT an improvement:
+        // the rebase already evaluates to `mod(shown_off_px, cycle)`, because the
+        // anchor is derived from `shown_off_px` and the offset is then `mod`ded
+        // by that same cycle. Folding it in advance changes nothing but hides
+        // where the value comes from.
         //
         // Speed 0 has no inverse, and at 0 the offset is 0 regardless.
         anchor_ms = if (speed > 0)

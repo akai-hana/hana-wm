@@ -431,11 +431,9 @@ fn emitInOrder(v: *const View, scratch: *const List, out: *List) void {
 fn variantParse(comptime variants: []const Variant) fn ([]const u8) ?u8 {
     return struct {
         fn parse(str: []const u8) ?u8 {
-            // Reads the name column off the table itself rather than a
-            // pre-extracted []const []const u8: the extractor's only caller was
-            // this, and names[i] is defined as variants[i].name, so the
-            // candidate set and its order are the same either way -- including
-            // for an empty table, where both fall through to the same null.
+            // Reads the name column off the table itself: names[i] is defined
+            // as variants[i].name, so no separate names array has to be kept in
+            // sync with the variant rows; an empty table falls through to null.
             for (variants, 0..) |v, i| {
                 if (std.mem.eql(u8, str, v.name)) return @intCast(i);
             }
@@ -475,11 +473,11 @@ fn variantFifo(comptime variants: []const Variant) ?u8 {
     return null;
 }
 
-/// Ordinal of the named variant in a module's OWN table, at comptime.
-/// Replaces each module's hand-numbered constant (`const variant_gaps = 1`):
-/// inserting or reordering a row moved the constant out from under the code
-/// that compared against it, and nothing reported the shift -- the layout then
-/// computed the other variant's geometry under a test that still passed.
+/// Ordinal of the named variant in a module's OWN table, at comptime. A
+/// hand-numbered constant drifts when a row is inserted or reordered and
+/// nothing reports the shift -- the layout then computes the other variant's
+/// geometry under a test that still passes; a name lookup cannot drift, and a
+/// missing name is a compile error.
 pub fn variantIndex(comptime variants: []const Variant, comptime vname: []const u8) u8 {
     for (variants, 0..) |v, i| {
         if (comptime std.mem.eql(u8, v.name, vname)) return @intCast(i);
@@ -494,11 +492,11 @@ pub fn variantIndex(comptime variants: []const Variant, comptime vname: []const 
 ///
 /// The variant-derived contract fields (`variant_count`, `variant_parse`,
 /// `indicators`, `fifo_variant`) are NOT settable through `extra` and are
-/// computed from `variants` here. They were four hand-maintained parallel
-/// lists per module; they happened to agree, so nothing failed, and adding a
-/// variant row while forgetting `fifo_variant` would leave a layout whose
-/// cycle advertised a variant that the bar rendered as the empty-indicator
-/// sentinel. One table makes `indicators.len == variant_count` by construction.
+/// computed from `variants` here. As four hand-maintained parallel lists per
+/// module they would agree only by accident: adding a variant row while
+/// forgetting `fifo_variant` leaves a layout whose cycle advertises a variant
+/// that the bar renders as the empty-indicator sentinel. One table makes
+/// `indicators.len == variant_count` by construction.
 pub fn layoutModule(
     comptime name: []const u8,
     comptime icon: []const u8,
@@ -520,10 +518,10 @@ pub fn layoutModule(
     return m;
 }
 
-// Tiling-order transitions (moved from model.zig — Option A of the op
-// migration; the tiling engine owns layout-order mutations on the model).
-// Core/window call sites reach these through the build-generated `tiling_seam`
-// (which provides has_tiling-gated stubs), never by naming this module.
+// Tiling-order transitions: the tiling engine owns layout-order mutations on
+// the model. Core/window call sites reach these through the build-generated
+// `tiling_seam` (which provides has_tiling-gated stubs), never by naming this
+// module.
 
 /// Moves `win` within `list` from `from` to `to`. Shared by reorderTiled and
 /// stepTiled (who already resolved both indices) to keep the single mutation

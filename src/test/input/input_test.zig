@@ -268,11 +268,11 @@ test "tiling scaffold table matches the dispatcher's grafted set" {
 }
 
 // A mouse binding that can never fire is a config bug the user cannot see.
-// The keyboard table reported those; the mouse scan used to take the first
-// match in silence, so `Super+Button1` bound twice meant the second entry was
-// simply dead with no diagnostic, and the winning entry depended on file order
-// in one trigger path but not the other. This pins the unified policy: last
-// wins, and each shadowed entry says so through the shared reporter.
+// The keyboard table reports those; a mouse scan that takes the first match
+// in silence leaves the second of two `Super+Button1` entries dead with no
+// diagnostic, and makes the winner depend on file order in one trigger path
+// but not the other. This pins the unified policy: last wins, and each
+// shadowed entry says so through the shared reporter.
 test "mouse bind shadowing: last entry wins and every shadowed entry is reported" {
     const B1 = 1;
     const binds = [_]types.MouseBind{

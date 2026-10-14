@@ -6,7 +6,7 @@
 //! can type its frame parameter), `DrawCtx` (the per-frame scratch bar builds
 //! for each segment's draw), the shared title constants, and the prompt
 //! service-handle struct. The title render/snapshot TYPES live with the title
-//! module in `modules/title/vocab.zig` (Phase 4 step 25).
+//! module in `modules/title/vocab.zig`.
 //!
 //! It is also the bar's feature-probe surface: the registry-resolved
 //! capability helpers (`segId`, `isRole`, `roleIndexOf`,
@@ -22,13 +22,12 @@
 //! Rendering uses per-segment dirty tracking: only dirty segments are
 //! repainted on each frame, and the dirty set is registry-sized.
 //!
-//! It ALSO holds the segment-binding builder (the former scaffold.zig,
-//! merged back 2026-10-09): the width-state cache, the comptime `module`
-//! builder every registered segment constructs its `contract.Segment`
-//! through (the ONE binding style, structure audit step 28), and the
-//! pure `finishDraw`/`drawAndStore` helpers. The two halves are separated
-//! by a banner below; the vocabulary half stays first because the builder
-//! types its hooks against it.
+//! It ALSO holds the segment-binding builder: the width-state cache, the
+//! comptime `module` builder every registered segment constructs its
+//! `contract.Segment` through (the ONE binding style), and the pure
+//! `finishDraw`/`drawAndStore` helpers. The two halves are separated by a
+//! banner below; the vocabulary half stays first because the builder types
+//! its hooks against it.
 
 const std = @import("std");
 const core = @import("core");
@@ -144,8 +143,8 @@ pub const DrawCtx = struct {
     }
 };
 
-// Title render/snapshot machinery (moved here from the title module so the bar
-// can reach it without naming the title segment).
+// Title render/snapshot machinery, held here so the bar can reach it without
+// naming the title segment.
 
 /// Minimum reserved row width for the title segment.
 pub const title_min_width: u16 = 100;
@@ -184,10 +183,8 @@ fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
     return null;
 }
 
-/// The bar's own registry (the build-generated `bar_modules`
-/// array), named here once so the registry-index helpers below
-/// serve every consumer -- bar.zig and center_row.zig used to
-/// each carry a private copy (review 05-input round 2).
+/// The bar's own registry (the build-generated `bar_modules` array), named
+/// here once so the registry-index helpers below serve every consumer.
 const bar_mods = @import("bar_modules").modules;
 
 /// Registry index for `name` in the bar's own registry, or null
@@ -201,7 +198,7 @@ pub inline fn segId(name: []const u8) ?usize {
 /// in segment-less builds. Guards every registry index: indexing
 /// a zero-length array is a compile error even under a runtime
 /// guard, so the empty build drops the whole body before it is
-/// analyzed (the `segAt` pattern from bar.zig).
+/// analyzed.
 pub inline fn hasRegisteredSegments() bool {
     return comptime bar_mods.len != 0;
 }
@@ -213,9 +210,9 @@ pub inline fn hasRegisteredSegments() bool {
 ///
 /// `name` is a FIELD, not a string: it is typed `std.meta.FieldEnum(Segment)`
 /// so a renamed or removed capability is a compile error at every call site.
-/// The string form made a typo silently resolve the empty set, which is the
-/// same shape as "this role has no binders" -- the failure mode that reads as
-/// a working bar with one segment missing.
+/// A string form would let a typo silently resolve the empty set, which is
+/// the same shape as "this role has no binders" -- the failure mode that
+/// reads as a working bar with one segment missing.
 ///
 /// Comptime-friendly: when `modules` is comptime-known (a generated registry)
 /// the returned slice is a comptime value, so empty-set guards
@@ -236,8 +233,7 @@ pub fn findAllByCapability(
 /// Registry capability sets (comptime, from the generated registry): the
 /// center-slot segments that share the center-row budget, and the
 /// self-ticking segments whose merged display width IS that budget's clock
-/// reservation. The single home of the sets -- state.zig and center_row.zig
-/// each used to resolve their own copy.
+/// reservation. The single home of the sets.
 pub const center_slot_ids: []const usize = findAllByCapability(&bar_mods, .center_slot);
 pub const self_ticking_ids: []const usize = findAllByCapability(&bar_mods, .self_ticking);
 
@@ -273,8 +269,7 @@ pub fn naturalWidthOf(id: ?usize, frame: *const Frame, clock_width: u16) u16 {
 }
 /// The whole bar registry as a slice: the ONE way consumers reach the
 /// generated array. Every raw `bar_modules` import outside this file routes
-/// through here or the helpers above (Phase 4 step 26), so the registry has
-/// a single home.
+/// through here or the helpers above, so the registry has a single home.
 pub inline fn all() []const contract.Segment {
     return &bar_mods;
 }
@@ -302,13 +297,12 @@ pub fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: an
     return false;
 }
 
-/// Segment-binding builder (formerly scaffold.zig): width-state cache, the
-/// comptime `module` builder (the ONE binding style), finishDraw/drawAndStore.
-/// Per-module width cache: the ACTUAL drawn width from the last render, read
-/// by the default naturalWidth for the row reservation (0 until the first
-/// draw), invalidated on config reload. The comptime `tag` must differ per
-/// module so each call site gets its own instantiation (and thus its own
-/// state).
+/// Segment-binding builder: width-state cache, the comptime `module` builder
+/// (the ONE binding style), finishDraw/drawAndStore. Per-module width cache:
+/// the ACTUAL drawn width from the last render, read by the default
+/// naturalWidth for the row reservation (0 until the first draw), invalidated
+/// on config reload. The comptime `tag` must differ per module so each call
+/// site gets its own instantiation (and thus its own state).
 pub fn widthState(comptime tag: []const u8) type {
     return struct {
         var cached: u16 = 0;
@@ -336,14 +330,12 @@ pub fn widthState(comptime tag: []const u8) type {
         ///
         /// `cached == 0` means "never painted", not "zero pixels wide" -- a
         /// segment that has not drawn yet has no measured width, and reserving
-        /// 0 for it collapses the row on the very first layout pass. The
-        /// slider module had this rule hand-rolled against its own `slot_w`
-        /// and got it wrong once: the click hit-test rejected presses while
-        /// `slot_w` was 0, so the first click on a freshly laid-out slider did
-        /// nothing, while the drag denominator and the row reservation fell
-        /// back to DIFFERENT values in the same frame. One definition, used by
-        /// every consumer, is what keeps the hit-test, the drag range and the
-        /// reservation agreeing from frame one.
+        /// 0 for it collapses the row on the very first layout pass. One
+        /// definition, used by every consumer, is what keeps the hit-test, the
+        /// drag range and the reservation agreeing from frame one: a module
+        /// with a private zero-check can let the click hit-test reject presses
+        /// while its own `slot_w` is 0, while the drag denominator and the row
+        /// reservation fall back to DIFFERENT values in the same frame.
         pub fn resolved(probe: u16) u16 {
             return if (cached != 0) cached else probe;
         }
@@ -360,11 +352,10 @@ pub fn widthState(comptime tag: []const u8) type {
 /// whether the row advances by the paint or by the reservation.
 ///
 /// It lives here, not inline in the bar's draw loop, because the loop needs a
-/// live `DrawContext` and an X connection -- which is exactly why this policy
-/// went untested for so long. As a function over a `Segment` and a `Painted`,
-/// both halves are reachable from a unit test: a segment that forgets its own
-/// width, or a row that advances on a draw that painted nothing, are both
-/// silent in production and obvious here.
+/// live `DrawContext` and an X connection: as a function over a `Segment` and
+/// a `Painted`, both halves are reachable from a unit test. A segment that
+/// forgets its own width, or a row that advances on a draw that painted
+/// nothing, are both silent in production and obvious here.
 ///
 /// Returns true when the segment painted something. A zero width is a valid
 /// successful outcome (an absent readout) and, like a caught draw error, still

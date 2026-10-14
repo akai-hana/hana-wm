@@ -61,9 +61,9 @@ pub fn rawFromPct(comptime T: type, pct: u8, min: T, max: T) T {
 }
 
 /// The one clamp every level passes: 0-100 % is all the backend ever
-/// receives. Every commit/write mode MUST go through this function -- the
-/// modules used to clamp independently, and when the preview path forgot to,
-/// a scroll/drag motion could display a level the backend then refused.
+/// receives. Every commit/write mode MUST go through this function -- clamping
+/// in each module would let a preview path that forgets to clamp display a
+/// level the backend then refuses.
 pub fn clampPct(v: u8) u8 {
     return @min(v, 100);
 }

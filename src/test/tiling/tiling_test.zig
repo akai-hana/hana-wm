@@ -49,11 +49,10 @@ const K_LEAF: u8 = tiling.layoutByName("leaf") orelse @panic(kLayoutMissing);
 const K_SCROLL: u8 = tiling.layoutByName("scroll") orelse @panic(kLayoutMissing);
 
 /// The ordinal of `vname` in layout `kind`'s own variant table, read back
-/// through that module's `variant_parse`. The test constants used to be
-/// hardcoded 1s with the table spelled out in a comment; a row inserted above
-/// "relaxed" would have moved the real ordinal and left the test exercising
-/// the RIGID path while asserting RELAXED golden rects -- which is how this
-/// kind of constant rots. Asking the module is the only version that cannot.
+/// through that module's `variant_parse`. A hardcoded ordinal with the table
+/// spelled out in a comment rots: a row inserted above "relaxed" moves the
+/// real one and leaves the test exercising the RIGID path while asserting
+/// RELAXED golden rects. Asking the module is the only version that cannot.
 fn variantOrdinal(kind: u8, vname: []const u8) u8 {
     const parse = contract.tiling_mods[kind].variant_parse orelse
         @panic("tiling test: layout has no variant table");
@@ -190,8 +189,8 @@ test "grid 2x2" {
 
 // grid relaxed widens the partial last row: cells share the full
 // screen width AND the partial row is column-spaced by that wider cell, so
-// the wide relaxed cells do not overlap (previously the partial row kept the
-// narrow column stride, making neighbouring wide cells overlap each other).
+// the wide relaxed cells do not overlap (the rigid row's narrow column stride
+// would make neighbouring wide cells overlap each other).
 test "grid relaxed partial row" {
     var fx: Fixture = undefined;
     try fx.init(&.{ 11, 12, 13, 14, 15 });
@@ -266,11 +265,9 @@ test "fibonacci overflow fallback" {
     try testing.expectEqual(@as(usize, 6), visible_count);
     // The raised window sits in the leftover region, hint-free here.
     //
-    // Addressed BY WINDOW, not by index. This used to be `expectP(&out, 5, 75,
-    // ...)` -- position 5 -- which is exactly the property the fix had to remove:
-    // fibonacci emitted the raised window early, so the index that held it was
-    // a function of the traversal, not of the layout. The rect is the golden
-    // value; the slot it lands in is the engine's business.
+    // Addressed BY WINDOW, not by index: the slot that holds the raised
+    // window is a function of the traversal, not of the layout. The rect is
+    // the golden value; the slot it lands in is the engine's business.
     const r = raised orelse return error.RaisedWindowMissing;
     try testing.expectEqual(@as(i32, 128), @as(i32, r.rect.x));
     try testing.expectEqual(@as(i32, 104), @as(i32, r.rect.y));
@@ -338,7 +335,7 @@ test "monocle gaps variant" {
 
     try testing.expectEqual(@as(usize, 3), out.len);
     // Emission order is View.order for every layout, monocle included: the
-    // focused window's POSITION in the list no longer changes where it is
+    // focused window's POSITION in the list does not change where it is
     // emitted. Visibility is the separate axis -- 12 is focused, so it holds
     // the rect and its siblings are parked.
     // total_margin = model.doubledBorder(4) + inset*2 (16) = 20
@@ -386,7 +383,7 @@ test "applyHints ignores declared minimums" {
 // Horizontal geometry enforcement on the master-slave axis: a slave
 // that declares a small max_width (e.g. a dialog) shrinks the stack column to
 // its natural width and the master absorbs the freed horizontal space, so the
-// dialog no longer leaves a dead gap beside it. Mirrors tileColumn's vertical
+// dialog does not leave a dead gap beside it. Mirrors tileColumn's vertical
 // max_height capping, on the width axis.
 test "master swallows freed space from a narrow dialog slave" {
     var fx: Fixture = undefined;
@@ -434,8 +431,8 @@ test "deterministic and non-mutating" {
 }
 
 // empty order is a supported input for every layout: each
-// compute must emit nothing and must not trap. Grid previously divided by
-// calcGridShape(0).rows == 0 and monocle indexed order[len - 1].
+// compute must emit nothing and must not trap. Otherwise grid divides by
+// calcGridShape(0).rows == 0 and monocle indexes order[len - 1].
 test "n=0 emits nothing across all layouts" {
     var fx: Fixture = undefined;
     try fx.init(&.{});
@@ -452,12 +449,12 @@ test "n=0 emits nothing across all layouts" {
     }
 }
 
-// scroll orphan keep-last invariant. compute() now clamps
+// scroll orphan keep-last invariant. compute() clamps
 // viewport_offset internally, so even a stale over-max offset is safe: the
 // last window stays visible without requiring caller-side clamping.
 //   - a stale over-max offset is clamped, last window stays visible;
 //   - the documented caller clamp (pipeline.preReconcileDuties) is still
-//     correct but no longer required for correctness;
+//     correct but not required for correctness;
 //   - the shrink case (n drops, old offset exceeds the new max) clamps to 0.
 test "scroll orphan keep-last invariant" {
     if (!build_options.has_layout_scroll) return error.SkipZigTest;
@@ -532,8 +529,8 @@ test "emission order pin across layouts" {
 
 // layout cycling is registry-driven and config-order: the cycle
 // ring is the config layout-name list resolved by name (unresolvable names
-// are skipped); stepping wraps modulo the list. Replaces the removed
-// model.cycleLayout (kind is now an opaque u8, resolved at seed time).
+// are skipped); stepping wraps modulo the list. Kind is an opaque u8,
+// resolved at seed time.
 test "layout cycle is config-order and wraps" {
     const names = helpers.std_layout_names;
     var ring: [8]u8 = undefined;
@@ -680,8 +677,8 @@ test "Every layout satisfies the placement invariants at every size" {
 
 // The config-side layout-name grammar and the layout registry are kept in sync
 // here, in the test, because neither side may import the other: config sits
-// below tiling in the layer order. Both directions matter and each was a
-// silent failure. A spelling the registry no longer has is dropped from the
+// below tiling in the layer order. Both directions matter and each fails
+// silently. A spelling the registry no longer has is dropped from the
 // parse, so a user's config entry stops working with no diagnostic. A registry
 // layout the grammar omits is unselectable, and the seed-time resolver just
 // logs a warning naming a fallback the user never asked for.

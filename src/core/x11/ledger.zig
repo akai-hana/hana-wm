@@ -1,11 +1,10 @@
 //! The sent ledger: a write-only record of what was last sent per window.
 //!
-//! Split out of `reconcile.zig` so the DAG reads in one direction —
-//! `ledger` <- `reconcile` <- `loop/pipeline` — and so the records have a
-//! name of their own. This is a diff base, not a cache of server truth: the
-//! model stays authoritative (`reconcile.truthRect` derives geometry from
-//! the model first), and the ledger only exists so a reconcile can elide a
-//! request whose desired value matches the last one sent. That makes it
+//! The DAG reads in one direction: `ledger` <- `reconcile` <- `loop/pipeline`.
+//! This is a diff base, not a cache of server truth: the model stays
+//! authoritative (`reconcile.truthRect` derives geometry from the model
+//! first), and the ledger only exists so a reconcile can elide a request
+//! whose desired value matches the last one sent. That makes it
 //! wrong-by-design to consult from anywhere else, which is why the writes
 //! live here behind dedicated marks.
 //!
@@ -194,12 +193,11 @@ pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
 /// Record a border-pixel send unless that exact pixel is already recorded, and
 /// report whether the caller must actually send.
 ///
-/// This is the ONE border-pixel dedup. It was in `title_cache` (`border_color`)
-/// while the reconcile's own dedup read THIS record's `pixel` field, so the
-/// same fact was tracked in two places that could disagree: the reconcile sent
-/// a pixel through the sink without touching the cache, and the sweep sent
-/// through the cache without touching the ledger. Deriving both from one record
-/// is what removes the class of bug, not just the duplicate field.
+/// This is the ONE border-pixel dedup: the reconcile pass and the border
+/// sweep both derive from this record rather than from separate caches.
+/// Two copies of one fact can disagree (one send path updates one copy,
+/// the other send path updates the other); deriving both from one record
+/// removes the class of bug, not just the duplicate field.
 ///
 /// Two reasons the answer is not simply `pixel != new`:
 ///  * `has_rect` gates the comparison. A blank record's `pixel` is 0, and a
@@ -207,8 +205,7 @@ pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
 ///    first sweep would elide a real 0-pixel send. `has_rect` means "a visible
 ///    geometry was ever sent", i.e. "we know the server's current pixel".
 ///  * a full ledger returns TRUE (send anyway). A missed dedup costs one
-///    redundant ChangeWindowAttributes; a missed send leaves a wrong border,
-///    which is the same fallback the cache-full case used to have.
+///    redundant ChangeWindowAttributes; a missed send leaves a wrong border.
 pub fn markSentBorderPixelIfChanged(win: model.WindowId, pixel: u32) bool {
     const gop = sentGetOrPut(win) orelse return true;
     if (gop.has_rect and gop.pixel == pixel) return false;

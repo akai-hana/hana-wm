@@ -3,21 +3,15 @@
 //! The effective font point size and the bar's pixel height are not user
 //! input and not screen state: they are *derived* from (configured font size,
 //! configured height, screen) and, in two of the four cases, from a font
-//! measurement. They used to live in a module-level `var` written by
-//! `bar.calcBarHeightAndFontSize` and read back out of the global by
-//! `fonts.SizedFontList`, which made the bar's own font size reachable
-//! only through mutable process state that a half-finished reload could leave
-//! wrong -- and that a failed reload had to save and restore by hand.
+//! measurement.
 //!
 //! The whole resolution is one pure function here. Its only impure input is
 //! the font probe, passed in as a callback, so the rules are unit-testable
 //! without Pango, a screen, or a live config.
 //!
 //! The LIVE adapters -- reading the current config/screen and measuring the
-//! fonts through Pango's throwaway surface -- sit at the bottom of this
-//! file (they moved here from bar.zig, which used to own the "supply the
-//! live pieces" section). They are the impure half; `resolve` above stays
-//! exactly as testable as it was.
+//! fonts through Pango's throwaway surface -- sit at the bottom of this file.
+//! They are the impure half; `resolve` above stays exactly as testable.
 
 const std = @import("std");
 

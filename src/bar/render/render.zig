@@ -4,10 +4,9 @@
 //! region-scoped single-slot repaints (drag/scroll sweep, clock-tick
 //! reflow), the clock-only tick, the module redraw-request fold -- plus the
 //! frame's solve/paint halves (`drawAllInner`, `solveRowPlan`,
-//! `paintRowPlan` and friends, moved here from `state.zig` in Phase 4 step
-//! 23) and the per-frame live-state collection (`scanLiveFrame`/
-//! `fillDrawCtx`, folded in from `frame.zig` in Phase 3). This file decides
-//! WHEN to paint, collects the frame facts to paint, and then paints them.
+//! `paintRowPlan` and friends) and the per-frame live-state collection
+//! (`scanLiveFrame`/`fillDrawCtx`). This file decides WHEN to paint,
+//! collects the frame facts to paint, and then paints them.
 //!
 //! This file reads the state through `state.zig`, never through `bar.zig`.
 //! `bar.zig` imports this file to submit draws, so importing it back would
@@ -39,11 +38,11 @@ const self_ticking_ids = segmod.self_ticking_ids;
 
 // Live-state collection
 //
-// Folded in from `frame.zig` (Phase 3): reads the workspace/window model,
-// title cache and minimized set into the bar's frame scratch, plus the
-// hidden-set synthesis thunk. Pure model reads -- titles come from the
-// WM-owned cache, geoms from the sync truth-rect -- so no X11 and nothing
-// to prefetch; the paint pass below consumes what these fill.
+// Reads the workspace/window model, title cache and minimized set into the
+// bar's frame scratch, plus the hidden-set synthesis thunk. Pure model reads
+// -- titles come from the WM-owned cache, geoms from the sync truth-rect --
+// so no X11 and nothing to prefetch; the paint pass below consumes what
+// these fill.
 
 /// The hide-family provider bound to the generated window registry, resolved
 /// once at file scope: the hidden-set synthesis and its collect dispatch
@@ -144,8 +143,8 @@ pub fn scanLiveFrame(s: *State) void {
 /// Canonical title-slot geometry for `win`: the off-screen sentinel while
 /// minimized, else the sync truth-rect (floating anchor / last sent rect)
 /// with the off-screen sentinel for windows that have never been placed
-/// (parked/unsent). Mirrors the old batch behavior (truth-rect first,
-/// sentinel fallback) without the xcb_get_geometry round-trip.
+/// (parked/unsent) -- truth-rect first, sentinel fallback, with no
+/// xcb_get_geometry round-trip.
 fn titleGeom(win: u32, minimized: bool) ?model.Rect {
     if (minimized) return segmod.offscreen_rect;
     return reconcile.truthRect(pipeline.state(), win) orelse segmod.offscreen_rect;
@@ -165,12 +164,11 @@ fn minimizedCollect(
 
 // State operations
 //
-// The `State` methods, moved here from `state.zig` in Phase 3: damage
-// bookkeeping, click-bound recording, clock scope and measurement. `state.zig`
-// keeps only the data (plus `init`/`deinit`); these read and mutate it in
-// place. Zig defines methods in the struct's own file, so they are free
-// functions over `*State` here, and this file's call sites call them
-// unqualified.
+// The `State` methods: damage bookkeeping, click-bound recording, clock
+// scope and measurement. `state.zig` keeps only the data (plus
+// `init`/`deinit`); these read and mutate it in place. Zig defines methods
+// in the struct's own file, so they are free functions over `*State` here,
+// and this file's call sites call them unqualified.
 
 /// Dirty-bit read for a registry id (null: a name that does not resolve is
 /// never dirty). The null check precedes the comptime guard so an
@@ -345,8 +343,8 @@ pub fn recordSelfTickerScope(self: *State, id: ?usize, x: u16, w: u16) void {
     if (comptime self_ticking_ids.len == 0) return;
     if (selfTickerIndex(id)) |i| {
         // The solved slot width is threaded through (its naturalWidth hook
-        // ran during the layout pass) rather than re-measured here: the
-        // latter made every self-ticker's hook run twice per frame.
+        // ran during the layout pass) rather than re-measured here: that
+        // would run every self-ticker's hook twice per frame.
         self.clock.segs[i] = .{
             .x = x,
             .width = w,
@@ -559,10 +557,9 @@ pub fn redrawScopedSegment() void {
 
 // Row geometry and the paint pass
 //
-// Moved OUT of `state.zig` in Phase 4 step 23: `solveRowPlan` measures the
-// frame into a `RowPlan`, `paintRowPlan` walks it in paint order, and
-// `state.zig` keeps only the data (dirty bits, click bounds, clock scope)
-// those read through `s`.
+// `solveRowPlan` measures the frame into a `RowPlan`, `paintRowPlan` walks
+// it in paint order, and `state.zig` keeps only the data (dirty bits, click
+// bounds, clock scope) those read through `s`.
 
 /// Scratch bound for the per-draw right-cluster segment widths. Right segments
 /// are measured once into this buffer and reused for both the total-width
@@ -609,10 +606,10 @@ const RightCluster = struct {
 /// One solved row slot: the geometry and the flags the paint pass needs,
 /// with no draw call anywhere near it.
 ///
-/// The split exists because geometry, hit-testing and painting were one unit
-/// of change in drawAllInner: adding a segment meant editing a loop that
-/// measured it, recorded its click bound, scoped its ticker, cleared its
-/// region and drew it, all interleaved. Solve produces these; paint walks them.
+/// The split keeps geometry, hit-testing and painting apart: solve produces
+/// these, and paint walks them, so adding a segment does not mean editing
+/// one loop that measures it, records its click bound, scopes its ticker,
+/// clears its region and draws it, all interleaved.
 const RowSlot = struct {
     /// Registry id, resolved ONCE when the slot is pushed (the layout stores
     /// names; every downstream consumer -- measure, paint, click bound, dirty
@@ -649,9 +646,8 @@ const RowSlot = struct {
 ///
 /// Paint order is the order slots must be drawn, not solve order: the right
 /// cluster is measured forwards but painted right-to-left, so it is reversed
-/// into paint order here rather than at draw time. That reversal is the
-/// fiddly part the item warned about, and doing it once in solve is what lets
-/// paint be a single flat loop with no backward cursor.
+/// into paint order here rather than at draw time. Reversing once in solve is
+/// what lets paint be a single flat loop with no backward cursor.
 const RowPlan = struct {
     slots: [max_row_slots]RowSlot = undefined,
     len: usize = 0,
@@ -918,10 +914,9 @@ fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
     }
 }
 
-/// Walks the solved plan in paint order and draws it. The single flat loop
-/// replaces the old interleaved placement loop: the backward right-cluster
-/// cursor, which used to live in drawRightSegments, is already baked into
-/// the plan's slot positions.
+/// Walks the solved plan in paint order and draws it. The loop is flat: the
+/// backward right-cluster cursor is already baked into the plan's slot
+/// positions.
 fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_redraw: bool) void {
     const scaled_spacing = state.renderBar().scaledSpacing(s.render.height);
     // Left/center advance, threaded separately from the plan's right-cluster
@@ -945,11 +940,10 @@ fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_r
 
         if (!slot.repaintable) {
             // Not repaintable: the slot is reserved space only, and the
-            // cursor still has to move past it. Plain `+=` on purpose, to
-            // keep the wrap-in-debug arithmetic identical to the loop this
-            // replaced; a config that overflows u16 here is a config bug,
-            // and silently saturating would hide it behind a wrong layout
-            // instead of a loud failure.
+            // cursor still has to move past it. Plain `+=` on purpose: a
+            // config that overflows u16 here is a config bug, and silently
+            // saturating would hide it behind a wrong layout instead of a
+            // loud failure.
             if (!slot.is_right) {
                 x += slot.w;
                 if (!slot.omit_gap) x += scaled_spacing;
@@ -975,8 +969,7 @@ fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_r
             // Right cluster, already positioned backwards by solve. A new
             // layout starts a fresh gap run: layouts are spaced by
             // `right_total`, not by a painted gap, so inheriting the
-            // previous layout's pending gap would clear a second time
-            // where the old per-layout loop started clean.
+            // previous layout's pending gap would clear a second time.
             if (slot.right_layout_start) pending_gap = false;
             const drew = drawSegment(s, ctx, slot.id, slot.x, slot.w).drew;
             if (drew and pending_gap) paintGap(s, slot.x +| slot.w, scaled_spacing);

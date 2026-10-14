@@ -13,13 +13,13 @@
 // pass, then sends ONLY the deltas (map + borderPixel + borderWidth + geom
 // changed bits) the sync ledger recorded as last-sent -- which is what this
 // instrumentation quantifies as a function of window count. A reconcile that
-// re-sent the full desired state every pass (the invariant reconcile_test
-// pins against) was the cost center an earlier fix had to remove.
+// re-sent the full desired state every pass is the invariant reconcile_test
+// pins against.
 //
 // The Mod+k caller shape (`focus.cycleTarget` then
-// `focus.grabFocusWithDuty`) now runs the viewport snap as a duty INSIDE the
+// `focus.grabFocusWithDuty`) runs the viewport snap as a duty INSIDE the
 // focus transition's grab, so a cycle that scrolls the viewport is a single
-// grab+reconcile instead of the old focus-then-snap two.
+// grab+reconcile.
 
 const std = @import("std");
 const model = @import("model");
@@ -73,7 +73,7 @@ test "latency: reconcile cost + request count at focus change" {
         // changed since, and reconcile never flushes or grabs itself
         // ("DO NOT FLUSH HERE. Caller owns flushing"). This is the
         // delta-elision invariant asserted at every scale -- a full-state
-        // re-send (the cost center before the fix) fails here at each n.
+        // re-send fails here at each n.
         try std.testing.expectEqual(@as(usize, 0), probe.total);
 
         if (bench)
@@ -86,13 +86,9 @@ test "latency: reconcile cost + request count at focus change" {
 
 // Mod+k caller: `focus.grabFocusWithDuty` commits the focus protocol and the
 // viewport snap in ONE grab+reconcile (the snap runs as a duty between
-// applyPendingFocus and reconcile.run). Previously the cycle did a focus
-// transition (first reconcile) then snapViewportToFocused (a second
-// grab+reconcile whenever the viewport had to shift), plus a redundant second
-// reconcile even when the focused window was already on-screen.
-//
-// This test quantifies the single-reconcile cost the folded path now pays, so
-// the per-Mod+k compute is explicit and any regression to two reconciles shows up.
+// applyPendingFocus and reconcile.run). This test quantifies that
+// single-reconcile cost, so the per-Mod+k compute is explicit and any
+// regression to two reconciles shows up.
 test "latency: Mod+k folded focus + viewport-snap reconcile" {
     const n = 16;
     var m = makeModel();

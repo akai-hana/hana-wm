@@ -223,7 +223,7 @@ pub const FontBook = struct {
 
     /// Loads `font_names` into a throwaway detached book and returns its
     /// metrics. This is the single layout-bootstrap path: the probe and
-    /// the live context now share this construction instead of each building a
+    /// the live context share this construction instead of each building a
     /// surface/context/layout of its own.
     pub fn probe(
         allocator: std.mem.Allocator,
@@ -306,25 +306,17 @@ pub fn probeFontMetrics(
 
 /// Owned, size-suffixed copies of the configured font list.
 ///
-/// This is a VALUE that owns what it built. It used to be a bare
-/// `[][]const u8` plus a separate `freeSizedFontList`, and the free function
-/// re-read `core.getState().config.bar.fonts.items` to work out which entries
-/// it owned -- inferring ownership from POINTER IDENTITY against live config.
-/// A config swap between build and free (a reload mid-frame is exactly that)
-/// makes that inference wrong: a borrowed entry can be freed, and an owned one
-/// leaked. It also silently zipped to the shorter of the two lists.
+/// This is a VALUE that owns what it built: every entry is an owned copy, so
+/// deinit has nothing to infer. Ownership is never read back from the live
+/// config -- inferring it from POINTER IDENTITY against live config is wrong
+/// whenever a config swap between build and free (a reload mid-frame is
+/// exactly that) hands out a borrowed entry to free or an owned one to leak.
+/// The extra copies cost one small allocation per font on a path that runs
+/// once per DrawContext creation, which is not a hot path.
 ///
-/// Every entry is now an owned copy, so deinit has nothing to infer. The extra
-/// copies cost one small allocation per font on a path that runs once per
-/// DrawContext creation, which is not a hot path.
-///
-/// `fonts` is the configured font family list, and `font_size` is
-/// the point size to build at; both are REQUIRED rather than
-/// optional: each used to be read out of process state that
-/// nothing in the signature mentioned -- `font_size` from
-/// a module-level global the bar set during height resolution,
-/// `fonts` from `core.getState()` right here. A caller measuring
-/// a trial size passes the trial; a caller drawing the bar passes
+/// `fonts` is the configured font family list, and `font_size` is the point
+/// size to build at; both are REQUIRED rather than optional. A caller
+/// measuring a trial size passes the trial; a caller drawing the bar passes
 /// the bar's resolved `Metrics` and the live config's font list.
 pub const SizedFontList = struct {
     allocator: std.mem.Allocator,
@@ -334,10 +326,9 @@ pub const SizedFontList = struct {
         const items = try allocator.alloc([]const u8, fonts.len);
         errdefer allocator.free(items);
         for (fonts, items) |f, *out| {
-            // Even at font_size 0 this COPIES rather than borrowing: a
-            // borrowed entry is exactly what made deinit unsafe to reason
-            // about, and the string is handed straight to Pango which copies
-            // it again anyway.
+            // Even at font_size 0 this COPIES rather than borrowing: every
+            // entry must be owned for deinit to need no inference, and the
+            // string is handed straight to Pango which copies it again anyway.
             out.* = if (font_size > 0)
                 try std.fmt.allocPrint(allocator, "{s}:size={}", .{ f, font_size })
             else

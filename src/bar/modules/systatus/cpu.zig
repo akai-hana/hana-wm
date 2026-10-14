@@ -31,13 +31,13 @@ pub fn parseCpuLine(s: []const u8) ?Sample {
     //  - /proc/stat continues with one line PER logical CPU ("cpu0", "cpu1",
     //    ...), so tokenizing the whole buffer walks off the aggregate line
     //    into those. `tokenizeAny` splits on the newline too, so a kernel
-    //    reporting fewer aggregate counters than the array holds reached
-    //    "cpu0" and failed the whole parse on a non-numeric token -- the
-    //    readout silently vanished.
+    //    reporting fewer aggregate counters than the array holds reaches
+    //    "cpu0" and fails the whole parse on a non-numeric token -- the
+    //    readout silently vanishes.
     //  - The field count is not fixed: kernels report user nice system idle
     //    iowait irq softirq steal and MAY add guest/guest_nice (10 here). A
-    //    fixed array silently DROPPED the tail, so `total` under-counted and
-    //    every derived percentage was computed against the wrong denominator.
+    //    fixed array silently DROPS the tail, so `total` under-counts and
+    //    every derived percentage is computed against the wrong denominator.
     const line = s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
 
     var nums: [16]u64 = undefined;

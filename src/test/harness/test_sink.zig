@@ -4,13 +4,10 @@
 //! the full vtable and the `expect*` assertion family, so a
 //! fixture asserts on the ops the reconciler ISSUED (the ops
 //! are the wire contract, not an oracle re-running the
-//! engine). Extracted from helpers.zig (the shared test
-//! vocabulary) so the sink framework — its vtable and its
-//! assertion DSL — lives apart from the fixtures/goldens/bench
-//! plumbing that share that file. Counting modes are
-//! category/record/none: `category` (per-op fields + `total`)
-//! supersedes the old flat `count`, which could not answer any
-//! breakdown question.
+//! engine). The sink framework — its vtable and its assertion DSL — lives
+//! apart from the fixtures/goldens/bench plumbing in helpers.zig. Counting
+//! modes are category/record/none: `category` (per-op fields + `total`)
+//! answers any breakdown question a fixture asks.
 
 const std = @import("std");
 const model = @import("model");
@@ -27,10 +24,10 @@ pub const TestOp = union(enum) {
     pixel: struct { win: model.WindowId, p: u32 },
     park: model.WindowId,
     stack: struct { win: model.WindowId, s: sinkmod.Stack },
-    /// The four ops that used to be silent shims. Recording them is what
-    /// makes the fullscreen EWMH transition assertable at all: fullscreen.zig
-    /// asserts nothing observable about set_state_atom otherwise, because the
-    /// test sink swallowed every call.
+    /// Recording these payloads is what makes the fullscreen EWMH transition
+    /// assertable at all: fullscreen.zig asserts nothing observable about
+    /// set_state_atom without them, since a counting sink discards the
+    /// arguments.
     ewmh_fullscreen: struct { win: model.WindowId, state_atom: u32, atom: u32, add: bool },
     flush,
     grab_server,
@@ -91,9 +88,9 @@ pub fn TestSink(comptime mode: SinkMode) type {
         }
 
         // The three configure shapes (geom, geom+border, border-only) are one
-        // recorded op now, because at the sink they are one request. Asserting
+        // recorded op, because at the sink they are one request. Asserting
         // on `.geom` / `.geom_bw` / `.bw` separately would be asserting on an
-        // encoding the production shim no longer has.
+        // encoding the production shim does not have.
         fn configureShim(self_ptr: *anyopaque, win: model.WindowId, c: sinkmod.Configure) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
             self.bump(.configure, .{ .configure = .{ .win = win, .rect = c.rect, .bw = c.bw, .stack = c.stack } });
@@ -192,7 +189,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(w, c.rect.?.width);
             try std.testing.expectEqual(h, c.rect.?.height);
             // `bw` is deliberately NOT asserted null: geometry and border width
-            // are now one request, so a switch that changes both sends one
+            // are one request, so a switch that changes both sends one
             // configure carrying both, and this helper only promises the
             // geometry half.
             try self.expectStack(i, stack);
