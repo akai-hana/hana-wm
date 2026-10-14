@@ -5,7 +5,7 @@
 //! MODEL focus, width resolves the tiling border width against the screen
 //! height. Both run over the shared window fixture (real model state),
 //! self-skipping when no X display is reachable. The X-issuing half
-//! (`apply/applyWidth`, border cache) requires a live connection and is
+//! (`applyWith/applyWidth`, the sent ledger) requires a live connection and is
 //! covered by the integration layer instead.
 
 const std = @import("std");
@@ -60,8 +60,7 @@ test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
     fx.config.tiling.border_focused = 0x111111;
     fx.config.tiling.border_unfocused = 0x222222;
 
-    var gate: pipeline.Gate = .{};
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     try model.register(m, 1, model.WSId.fromIndex(0));
     try model.register(m, 2, model.WSId.fromIndex(0));
 
@@ -91,8 +90,7 @@ test "borders.resolveBorderColor is 0 for a screen-covering window" {
     fx.config.tiling.border_focused = 0x111111;
     fx.config.tiling.border_unfocused = 0x222222;
 
-    var gate: pipeline.Gate = .{};
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     try model.register(m, 1, model.WSId.fromIndex(0));
     // A covering capture makes the window borderless via the bw=0/pixel=0
     // policy, mirrored here for callers outside reconcile (fullscreen).

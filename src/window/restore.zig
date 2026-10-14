@@ -4,15 +4,15 @@
 //! hana never reparents, so clients stay direct root children across an execv
 //! and the successor can adopt them by scanning the root's children. main calls
 //! adoptSession exactly once -- after surfaces.init() (bar up so bar-aware work
-//! area is live) and before events.run() -- sequencing persist, window adoption,
+//! area is live) and before events.run() -- sequencing handoff, window adoption,
 //! and focus against each other. Pure subsystem ordering; no X requests, config,
 //! or dispatch of its own.
 
 const core = @import("core");
 const log = @import("log");
-const persist = @import("persist");
+const handoff = @import("handoff");
 const pipeline = @import("pipeline");
-const window = @import("window");
+const admission = @import("admission");
 const actions = @import("actions");
 
 /// Adopt the session described by `restore_path`, if there is one to adopt.
@@ -22,9 +22,9 @@ const actions = @import("actions");
 /// normal boot would use. A missing or unreadable restore file is not an
 /// error: that is an ordinary first boot.
 pub fn adoptSession(restore_path: []const u8) void {
-    if (!persist.loadToGlobal(core.getState().alloc, restore_path)) return;
+    if (!handoff.loadToGlobal(core.getState().alloc, restore_path)) return;
 
-    const n = window.adoptRootWindows() catch |err| blk: {
+    const n = admission.adoptRootWindows() catch |err| blk: {
         log.err("Window adoption failed: {}", .{err});
         break :blk 0;
     };

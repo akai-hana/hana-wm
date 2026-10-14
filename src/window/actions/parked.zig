@@ -1,4 +1,4 @@
-//! The hide/restore (unpark) actions: minimize parks a window
+//! The parked-window actions: minimize parks a window
 //! off-screen through the hide module; restore/restoreOrdered/
 //! restoreAll unpark. Each action is one model transition + one
 //! sync entry. The shared transition tails (retile, focusFallback,
@@ -20,7 +20,6 @@ const providerOf = actions.providerOf;
 
 const callHook = actions.callHook;
 const dispatchAll = actions.dispatchAll;
-const gate = actions.gate;
 
 // hide (window park)
 
@@ -39,7 +38,7 @@ const gate = actions.gate;
 pub fn minimize(focused: ?model_mod.WindowId) void {
     const wm = providerOf(.hideWindow) orelse return;
     const win = focused orelse return;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const was_focused = m.focused == win;
     const fs_ws_before =
         model_mod.coveringWsOf(m, win); // 12.4: model query
@@ -76,14 +75,14 @@ fn restoreTarget(m: *model_mod.Model, win: model_mod.WindowId) void {
 
 /// Restores a specific hidden window (title-bar click path).
 pub fn restore(win: model_mod.WindowId) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     if (!actions.isMinimizedOnAnyWs(m, win)) return;
     restoreTarget(m, win);
 }
 
 /// Slot-ordered single restore (LIFO/FIFO keybind paths).
 pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const win = (if (providerOf(.restoreCandidateOn)) |wm|
         wm.restoreCandidateOn.?(m, m.current, order)
     else
@@ -96,7 +95,7 @@ pub fn restoreOrdered(order: model_mod.RestoreOrder) void {
 /// through the same reconcile's covering branch, straight back into
 /// covering).
 pub fn restoreAll() void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const wm = providerOf(.latestHiddenOnWs) orelse return;
     const ws = m.current;
     const target = (wm.latestHiddenOnWs.?(m, ws) orelse return);

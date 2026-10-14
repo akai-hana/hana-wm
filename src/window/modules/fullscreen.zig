@@ -11,8 +11,8 @@ const xcb = core.xcb;
 const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
-// Peers reach each other's hooks through the generated window registry,
 const atoms = @import("atoms");
+// Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
 
@@ -225,7 +225,7 @@ pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) vo
 }
 
 /// Persistence needs no module blob: `anchor` and `covering_ws` are carried
-/// verbatim by `persist.WindowRecord`, so there is no serialize/deserialize
+/// verbatim by `handoff.WindowRecord`, so there is no serialize/deserialize
 /// seam here (minimize alone claims the `ext` slot for parked windows).
 
 // Protocol hooks (EWMH advertisement + deferred bar hide/show).
@@ -233,7 +233,7 @@ pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) vo
 // Sets or clears the EWMH _NET_WM_STATE_FULLSCREEN property on `win`. The
 // actual change_property write is routed through sync's sink (the ONLY writer
 // to X); the EWMH atoms stay resolved here and the write is queued inside the
-// enclosing grab (reconcileUnderGrabNowFullscreen), whose ungrabAndFlush lands
+// enclosing grab (the fullscreen grab in manage.fullscreenSetWindow), whose ungrabAndFlush lands
 // it atomically with geometry. Guards on both EWMH atoms being valid; pub for
 // actions.fullscreenToggleWindow, keeping the advertisement protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {

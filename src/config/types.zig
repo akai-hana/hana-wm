@@ -349,9 +349,9 @@ pub const TilingConfig = struct {
     /// Resolves the per-workspace master-count overrides into a fixed-size,
     /// workspace-indexed lookup with last-wins semantics (a duplicate entry
     /// for one workspace overrides its predecessor). `null` at an index means
-    /// no override for that workspace (use the global default). Shared by the
-    /// core seed path (actions.seedParamsFromConfig) and the workspaces addon
-    /// (applyWorkspaceOverrides) so the last-wins rule lives in one place.
+    /// no override for that workspace (use the global default). Consumed by
+    /// the core seed path (actions.seedParamsFromConfig), so the last-wins
+    /// rule lives in one place.
     pub fn masterCountLookup(self: *const TilingConfig) [constants.max_workspaces]?u8 {
         var lookup: [constants.max_workspaces]?u8 = .{null} ** constants.max_workspaces;
         for (self.workspace_master_count_overrides.items) |o| {
@@ -365,9 +365,9 @@ pub const TilingConfig = struct {
     /// Resolves the per-workspace layout overrides into a fixed-size,
     /// workspace-indexed lookup of override indices with last-wins semantics
     /// (a duplicate entry for one workspace overrides its predecessor).
-    /// `null` at an index means no override for that workspace. Shared by the
-    /// core seed path (actions.seedParamsFromConfig) and the workspaces addon
-    /// (applyWorkspaceOverrides) so the last-wins rule lives in one place.
+    /// `null` at an index means no override for that workspace. Consumed by
+    /// the core seed path (actions.seedParamsFromConfig), so the last-wins
+    /// rule lives in one place.
     pub fn workspaceLayoutLookup(self: *const TilingConfig) [constants.max_workspaces]?usize {
         var lookup: [constants.max_workspaces]?usize = .{null} ** constants.max_workspaces;
         for (self.workspace_layout_overrides.items, 0..) |o, oi| {

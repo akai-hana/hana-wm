@@ -14,7 +14,7 @@ const constants = @import("constants");
 const types = @import("types");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
-const persist = @import("persist");
+const handoff = @import("handoff");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const tiling = @import("tiling_seam").tiling;
@@ -22,10 +22,9 @@ const contract = @import("contract");
 const log = @import("log");
 
 const actions = @import("actions");
-const gate = actions.gate;
 
 pub fn cycleLayoutKind(dir: i32) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     cycleActiveLayout(m, dir);
     actions.retile(.{ .full_redraw = true }, null);
 }
@@ -44,7 +43,7 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
 
 pub fn stepVariantDir(dir: i32) void {
     if (!build_options.has_tiling) return;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
     const n = tiling.variantCount(p.kind);
     p.variant_idx = @intCast(model_mod.wrapIndex(p.variant_idx, dir, n));
@@ -52,9 +51,9 @@ pub fn stepVariantDir(dir: i32) void {
 }
 
 pub fn adjustPrimaryWidthAction(delta: f32) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     model_mod.adjustPrimaryWidth(m, delta);
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
 }
 
 pub fn adjustPrimaryCount(delta: i32) void {
@@ -62,17 +61,17 @@ pub fn adjustPrimaryCount(delta: i32) void {
     // of the managed-window ceiling so one workspace can't statically claim
     // the store.
     const max_primary_count = model_mod.store_capacity / 4;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
     p.primary_count = @intCast(std.math.clamp(@as(i32, p.primary_count) + delta, 1, @max(1, max_primary_count)));
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
 }
 
 pub fn adjustSecondaryBalance(delta: f32) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
     p.secondary_balance = std.math.clamp(p.secondary_balance + delta, -constants.max_primary_swing, constants.max_primary_swing);
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
 }
 
 /// swap_master: exchanges the focused window's tiled slot with the previously
@@ -81,7 +80,7 @@ pub fn adjustSecondaryBalance(delta: f32) void {
 /// variant moves focus to the previously focused window BEFORE the reconcile
 /// so the swapped-in window is focused on the first reconcile.
 pub fn swapPrimaryAction(focus_swap: bool) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const focused = m.focused orelse return;
     const mru = m.ws[m.current.index].focus_mru.constSlice();
     if (mru.len < 2 or mru[1] == focused) return;
@@ -99,12 +98,12 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
 
 /// Boot/restore seam: replay a persisted session's model level onto the
 /// live model. Sole authorized user is main.zig's re-exec restore path
-/// (persist.loadToGlobal + window.adoptRootWindows have already run);
+/// (handoff.loadToGlobal + admission.adoptRootWindows have already run);
 /// routing through this transition keeps the mutable handle out of boot code
 /// and inside the window layer. No reconcile: the caller reconciles once,
 /// placing every adopted window exactly as it was.
 pub fn applyRestoredLevel() void {
-    persist.applyModelLevel(pipeline.mut(&gate));
+    handoff.applyModelLevel(pipeline.mut());
 }
 
 /// Per-workspace seed overrides resolved from `cfg` (built via the shared
@@ -131,7 +130,7 @@ pub fn seedParamsFromConfig() void {
     // unresolvable names fall back loudly to the neutral default.
     const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, contract.default_kind);
 
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     // The config grammar lets master_count rise to its u8 ceiling, but the
     // runtime path caps primary_count at store_capacity/4. Seeding the raw
     // u8 here would slip those couple-dozen windows directly into compute's
@@ -150,9 +149,14 @@ pub fn seedParamsFromConfig() void {
         .secondary_balance = 0,
     });
 
+    // Both lookups resolve ONCE: they build a fixed-size workspace table per
+    // call, and this loop is their only consumer.
+    const layout_overrides = cfg.workspaceLayoutLookup();
+    const count_overrides = cfg.masterCountLookup();
+
     for (&m.ws, 0..) |*s, i| {
         const id: u8 = @intCast(i);
-        if (cfg.workspaceLayoutLookup()[id]) |oi| {
+        if (layout_overrides[id]) |oi| {
             const o = cfg.workspace_layout_overrides.items[oi];
             const kind = if (o.layout_idx < cfg.layouts.items.len)
                 tiling.layoutKindFallingBack(
@@ -167,7 +171,7 @@ pub fn seedParamsFromConfig() void {
             // string still applies to the active kind).
             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        if (cfg.masterCountLookup()[id]) |mc|
+        if (count_overrides[id]) |mc|
             s.params.primary_count = @min(mc, @as(u8, @intCast(@max(1, max_primary_count))));
     }
 }
@@ -206,5 +210,5 @@ fn resolveVariant(
 
 pub fn applyConfigReload() void {
     seedParamsFromConfig();
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
 }

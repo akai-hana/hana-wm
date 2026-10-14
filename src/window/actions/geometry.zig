@@ -16,11 +16,11 @@ const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const contract = @import("contract");
+const reconcile = @import("reconcile");
 const ledger = @import("ledger");
 const usable_area = @import("usable_area");
 
 const actions = @import("actions");
-const gate = actions.gate;
 
 /// Registry lookup for the hook `field` (see `contract.providerOf`), null when
 /// no module binds it; canonical scan lives in window.providerOf.
@@ -46,7 +46,7 @@ fn detachTiledToFloating(m: *model_mod.Model, e: *model_mod.Entry, win: model_mo
 /// current on-screen geometry (LastSent); floating->tiled re-enters the home
 /// list at the primary-column head via the ordinary tiling order.
 pub fn toggleFloating(win: model_mod.WindowId) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const e = m.store.getPtr(win) orelse return;
     // A window carrying a covering record keeps its anchor: the record owns
     // the screen while covering, and a ghost (parked) record must survive
@@ -93,20 +93,20 @@ fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.W
 /// from the drag provider's updateDrag on every motion event.
 pub fn dragRect(win: model_mod.WindowId, r: model_mod.Rect) void {
     const wm_prov = providerOf(.setFloatingRect) orelse return;
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     wm_prov.setFloatingRect.?(m, win, r);
-    pipeline.dragTick(win);
+    reconcile.reconcileDragTick(m, pipeline.syncSink(), win);
 }
 
 /// First motion of a drag on a tiled window detaches it to floating at its
 /// current geometry (pending-float detach + remove + retile).
 pub fn detachToFloating(win: model_mod.WindowId) bool {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const e = m.store.getPtr(win) orelse return false;
     if (isCoveringMode(m, win)) return false;
     if (e.anchor != .tiled) return false;
     if (!detachTiledToFloating(m, e, win)) return false;
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
     return true;
 }
 
@@ -158,12 +158,12 @@ pub fn cancelDragForWindow(win: model_mod.WindowId) void {
 }
 
 pub fn moveFocused(delta: i32) void {
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const win = m.focused orelse return;
     // Modulo wrap (dwm stack rotate): stepping past either edge of the home
     // list's tiled order cycles back around, matching the focus-step parity.
     model_mod.stepTiled(m, win, delta);
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
 }
 
 /// Clamp an updated viewport offset to the layout's content span and stamp
@@ -184,7 +184,7 @@ pub fn viewportStep(dir: i32) void {
     const p = vp.p;
     const sc = vp.sc;
     commitViewport(p, sc, p.viewport_offset + dir * sc.slot_w, sc.tiled_count);
-    pipeline.reconcileGrab();
+    pipeline.reconcileGrab(.{});
 }
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
@@ -271,7 +271,7 @@ fn activeViewport() ?struct {
     // No `has_bar` gate: the viewport clamps to `usable_area.workArea`,
     // which is the full screen without a bar, so a scroll layout works
     // headless too -- the clamp target is bar-independent.
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
     const sc = viewportContext(m);
     if (!sc.active) return null;

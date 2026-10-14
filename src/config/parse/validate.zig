@@ -36,10 +36,9 @@ pub fn validate(cfg: *const types.Config) !void {
 
 /// The warn-first half of validation: values that are legal but almost certainly
 /// not what the user meant, or that a subsystem will silently clamp. They must
-/// NOT fail the load -- the plan this comes from flagged that risk, and it is
-/// the right call: a config that boots with a loud warning is recoverable, and
-/// a config that refuses to boot over a cosmetic value is not. Every entry here
-/// is therefore `log.warn` with no effect on the returned Config.
+/// NOT fail the load: a config that boots with a loud warning is recoverable,
+/// and a config that refuses to boot over a cosmetic value is not. Every entry
+/// here is therefore `log.warn` with no effect on the returned Config.
 ///
 /// Kept separate from the failing checks above on purpose, so the line between
 /// "wrong config" and "odd config" is visible in the source rather than implied
