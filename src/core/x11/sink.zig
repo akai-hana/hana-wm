@@ -2,14 +2,13 @@
 //! through, and its one production implementation.
 //!
 //! `Sink` (the vtable) lives HERE, beside the shims that implement it, rather
-//! than in the reconciler that consumes it. It used to be declared in
-//! `sync.zig`, which made this low-level implementation import the high-level
-//! planner just to name the type it implements -- an inversion. Requests are
-//! planned in `reconcile.zig` and dispatched by the shims in this file (the
-//! sanctioned seam where raw XCB calls are allowed: a few shims stay inline
-//! rather than forcing every primitive through `requests.zig`, and the
-//! check-layers allowlist covers this file). Each shim wraps the exact request
-//! pattern it consolidates here:
+//! than in the reconciler that consumes it: this low-level implementation
+//! must not import the high-level planner just to name the type it
+//! implements. Requests are planned in `reconcile.zig` and dispatched by the
+//! shims in this file (the sanctioned seam where raw XCB calls are allowed: a
+//! few shims stay inline rather than forcing every primitive through
+//! `requests.zig`, and the check-layers allowlist covers this file). Each
+//! shim wraps the exact request pattern it consolidates here:
 //!   map           ~ xcb_map_window (fresh window before its park)
 //!   configure     ~ one xcb_configure_window; the mask is assembled from
 //!                   the Configure fields, with the stack mode merged into
@@ -28,11 +27,11 @@ const xcb = core.xcb;
 // being unmapped (unmapping causes some apps to pause).
 //
 // X11's ConfigureWindow encodes x/y as INT16 on the wire (hence Rect.x/y
-// being i16), so -32768 is the hard floor. The old -4000 only cleared a single
-// 3840px-wide display: on multi-monitor layouts with a display left of primary,
-// ultrawides, or 5K/6K panels, -4000 can land back inside real screen estate.
-// -30000 clears any realistic combined desktop while leaving headroom below
-// the INT16 floor.
+// being i16), so -32768 is the hard floor. -4000 would only clear a single
+// 3840px-wide display: on multi-monitor layouts with a display left of
+// primary, ultrawides, or 5K/6K panels, -4000 can land back inside real
+// screen estate. -30000 clears any realistic combined desktop while leaving
+// headroom below the INT16 floor.
 pub const offscreen_x_position: i32 = -30000;
 const log = @import("log");
 
@@ -49,10 +48,10 @@ pub const Stack = enum { above };
 /// slot order is positional magic and worth testing directly.
 const ConfigureWire = struct { mask: u16, values: [6]u32 };
 
-/// Assembles the configure request body. Split out of the shim so the slot
-/// order is assertable without an X connection: swapping slots 2 and 3 sends
-/// width as height, which X accepts and the WM discovers as every window
-/// rendered at the wrong aspect.
+/// Assembles the configure request body. Pure (no X connection), so the slot
+/// order is assertable directly: swapping slots 2 and 3 sends width as height,
+/// which X accepts and the WM discovers as every window rendered at the wrong
+/// aspect.
 pub fn configureWire(c: Configure) ConfigureWire {
     var mask: u16 = 0;
     var values = [_]u32{ 0, 0, 0, 0, 0, 0 };
@@ -107,10 +106,9 @@ pub const Sink = struct {
     pub inline fn map(self: Sink, win: model.WindowId) void {
         self.vt.map(self.ptr, win);
     }
-    /// Describe WHAT changed; the shim decides how many X bits that is. There
-    /// is no way for a caller to ask for "geometry and border width" as two
-    /// requests, which is the invariant the old `geom` + `geom_bordered` +
-    /// `border_width` trio had to be argued into at every call site.
+    /// Describe WHAT changed; the shim decides how many X bits that is. The
+    /// signature enforces it: a caller cannot ask for "geometry and border
+    /// width" as two separate requests.
     pub inline fn configure(self: Sink, win: model.WindowId, c: Configure) void {
         self.vt.configure(self.ptr, win, c);
     }
@@ -124,9 +122,8 @@ pub const Sink = struct {
         self.vt.stack_only(self.ptr, win, s);
     }
     /// Add (`add`) or remove (`!add`) one `_NET_WM_STATE` atom on `win`,
-    /// preserving every other atom in the list. Generalized from the
-    /// fullscreen-only shim: the read-merge-replace dance is list
-    /// editing, and nothing about it is specific to fullscreen.
+    /// preserving every other atom in the list. The read-merge-replace dance
+    /// is list editing, and nothing about it is specific to fullscreen.
     pub inline fn setStateAtom(self: Sink, win: model.WindowId, state_atom: u32, atom: u32, add: bool) void {
         self.vt.set_state_atom(self.ptr, win, state_atom, atom, add);
     }
@@ -173,7 +170,7 @@ pub const XcbSink = struct {
 
     /// Park = offscreen X + stack BELOW in ONE configure_window.
     ///
-    /// Deliberately NOT folded into `configure`, even though that is now a
+    /// Deliberately NOT folded into `configure`, even though that is already a
     /// general "one configure, any combination" slot. Park asserts X only:
     /// configure_window leaves unset mask bits alone, so sliding a window
     /// offscreen costs one coordinate, whereas a `Configure.rect` would assert
@@ -214,9 +211,9 @@ pub const XcbSink = struct {
 
     /// Set / clear `atom` on `_NET_WM_STATE` for `win`, preserving the rest of
     /// the list. A no-op (nothing is written) when the atom's presence already
-    /// matches the request -- a strictness the REPLACE path owed the client:
-    /// it unconditionally sent the merged list, firing a PropertyNotify with a
-    /// (possibly re-ordered) value for a semantically unchanged state.
+    /// matches the request: otherwise every unchanged toggle would send the
+    /// merged list and fire a PropertyNotify with a (possibly re-ordered)
+    /// value for a semantically unchanged state.
     fn setStateAtomShim(
         ptr: *anyopaque,
         win: u32,

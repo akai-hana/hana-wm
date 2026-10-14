@@ -495,7 +495,7 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectPark(0, 901);
 }
 
-// The border-pixel dedup the sweep and the reconcile now share.
+// The border-pixel dedup the sweep and the reconcile share.
 //
 // The subtle case is pixel 0. A blank ledger record's `pixel` field is 0, so a
 // comparison of `pixel != new` alone would elide the very first send for a
@@ -579,14 +579,12 @@ test "An inactive layout floats every window at the work area" {
     try testing.expectEqual(@as(usize, 2), seen);
 }
 
-// The four ops that used to be silent shims. Before this, 4 of the
-// sink's 11 vtable entries recorded nothing at all, so no test could assert
-// that hana grabbed the server before a fullscreen change, that it flushed,
-// or that the EWMH fullscreen atom was even set -- the shims discarded every
-// argument. These drive the vtable directly, which is what "assertable" means
-// here: the fullscreen.zig path itself still needs live X atoms (it returns
-// early when they are NONE), so the END-TO-END transition remains untested
-// headless and is not claimed to be.
+// These tests drive the sink's vtable directly, which is what "assertable"
+// means here: recording every argument is what lets a test assert that hana
+// grabbed the server before a fullscreen change, that it flushed, and that
+// the EWMH fullscreen atom was set. The fullscreen.zig path itself still
+// needs live X atoms (it returns early when they are NONE), so the
+// END-TO-END transition remains untested headless and is not claimed to be.
 
 test "record mode: EWMH set_state_atom records win, atom, and the add/remove sense" {
     var rec: Recorder = .{};
@@ -620,8 +618,8 @@ test "record mode: grab, flush, and ungrab_and_flush are recorded, not swallowed
 }
 
 test "record mode: a bare flush is distinguishable from a grab" {
-    // Both used to be no-op shims, so "hana flushed" and "hana grabbed" were
-    // the same unobservable event. They are separate ops and must stay so.
+    // Flush and grab are separate ops and must stay so: a sink that records
+    // neither op cannot tell "hana flushed" from "hana grabbed".
     var rec: Recorder = .{};
     defer rec.deinit();
     const s = rec.sink();

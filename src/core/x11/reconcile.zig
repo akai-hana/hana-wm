@@ -96,8 +96,9 @@ pub const Ctx = struct {
     /// bar-offset helper (workArea(ctx)). Used for tiled geometry.
     workarea: model.Rect,
     env: contract.Env = .{},
-    /// Focus/mode border color; ported from borders.resolveBorderColorWith minus
-    /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
+    /// Focus/mode border color; same resolution as borders.resolveBorderColorWith,
+    /// minus its fullscreen check (fullscreen zeroes via bw/pixel policy
+    /// instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
     /// Bar/top window raised by force_restack; null when no bar.
     bar_win: ?model.WindowId = null,
@@ -199,13 +200,13 @@ fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
 
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
-    // ONE activation gate, and it also SUPPLIES the geometry. This used
-    // to be `build_options.has_tiling` (a COMPILE-time fact) while the bar
-    // reported the active layout from `contract.activeLayoutKind` (enabled AND
-    // registered), so a runtime-disabled tiling made the bar show "no layout"
-    // and the geometry still tiled -- two answers to one question. Gating on
-    // the resolved kind also subsumes the no-tiling build (an empty registry
-    // resolves to null).
+    // ONE activation gate, and it also SUPPLIES the geometry. Gating on the
+    // resolved kind keeps geometry in step with what the bar reports as the
+    // active layout (`contract.activeLayoutKind`, enabled AND registered): a
+    // compile-time `has_tiling` gate would leave a runtime-disabled tiling
+    // showing "no layout" in the bar while the geometry still tiled -- two
+    // answers to one question. The resolved kind also subsumes the no-tiling
+    // build (an empty registry resolves to null).
     const params = &m.ws[m.current.index].params;
     if (plan.fs_win == null) {
         var n: usize = 0;
@@ -271,8 +272,8 @@ fn seedWinner(m: *const model.Model, plan: *const Plan) ?model.WindowId {
 }
 
 /// Phase 3: one fused loop over the store: compute a window's desire, then
-/// SEND it immediately. Ordering is via the Sink adapter (a widening PR
-/// proved the contract survives reordering), honoring two invariants here:
+/// SEND it immediately. Ordering is via the Sink adapter, honoring two
+/// invariants here:
 /// map precedes geometry so a first-show/unparking client exposes at its
 /// final rect, and border width is merged into the geometry configure when
 /// both change (parked windows emit ONE merged park request instead:
@@ -426,7 +427,7 @@ fn sendAll(
             }
             // One configure carrying everything that changed. Border width and
             // geometry travel together on the common switch/unpark shape, and
-            // this can no longer express them as two separate requests. The
+            // this cannot express them as two separate requests. The
             // trace prints exactly the fields the request below carries.
             if (need_bw or need_geom) {
                 if (tracing) trace.outbound(win, "configure", switch (need_geom) {

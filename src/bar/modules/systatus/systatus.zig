@@ -102,14 +102,14 @@ pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
 
 /// Consecutive failed reads tolerated before a readout collapses. One
 /// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must not
-/// blank the segment: collapsing the row on a single failure caused a visible
+/// blank the segment: collapsing the row on a single failure causes a visible
 /// blink plus a spurious re-lay on every hiccup. After this many consecutive
 /// misses the readout is treated as genuinely gone (battery removed, file
 /// deleted) and the slot collapses for real.
 const miss_tolerance: u8 = 3;
 
 /// How long a readout that has collapsed as ABSENT goes unprobed before it is
-/// given one more chance. Without this, a desktop with no battery paid eight
+/// given one more chance. Without this, a desktop with no battery pays eight
 /// futile /sys/class/power_supply opens every 2 s forever; with a plain
 /// one-way latch it would never notice a battery being hot-swapped in. The
 /// slow re-probe is the cost of not being wrong in either direction: the

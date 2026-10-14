@@ -232,16 +232,48 @@ run_scenario() {
 
 # Execute one recorded scenario. Writes its result to $RESULTS_DIR/<idx>.result
 # FIRST (one small file per scenario, so parallel workers never append through
-# each other), then prints its own result line. Cleanup follows the serial
-# version's rules: the copy is deleted on success and kept on failure only
-# under -k.
+# each other), then prints its own result line.
+#
+# The copy is kept on success: its path is stable per scenario, so the next
+# matrix reuses its .zig-cache instead of paying a cold build again (reclaim
+# the space with --clean). On failure it is kept only under -k, as before.
 execute_scenario() {
     local i="$1"
     local name="${REC_NAME[$i]}"
+    local dest="$TEMP_BASE/$name"
+    local lock_fd=""
+
+    # Two matrices running at once would rsync and rm -rf the same per-scenario
+    # copy under each other, so take the dest for the duration of the build.
+    # flock drops the lock in the kernel if this run dies mid-build, and the
+    # lock file itself is never deleted (only --clean removes it): a lock on a
+    # fresh inode would not exclude anybody.
+    if command -v flock &>/dev/null && exec {lock_fd}> "$dest.lock"; then
+        if ! flock -w 300 "$lock_fd"; then
+            printf "${YELLOW}warn:${RESET} %s: lock held >5 min, running unlocked (another matrix?)\n" "$name" >&2
+            exec {lock_fd}>&- 2>/dev/null || true
+            lock_fd=""
+        fi
+    else
+        lock_fd=""
+    fi
+
+    run_one_scenario "$i" "$dest"
+
+    if [[ -n "$lock_fd" ]]; then
+        flock -u "$lock_fd" 2>/dev/null || true
+        exec {lock_fd}>&- 2>/dev/null || true
+    fi
+}
+
+# The build itself: rsync the tree, apply the deletion, build, record.
+run_one_scenario() {
+    local i="$1"
+    local dest="$2"
+    local name="${REC_NAME[$i]}"
+    local out="$RESULTS_DIR/$i.result"
     local -a paths=()
     read -r -a paths <<< "${REC_PATHS[$i]}"
-    local dest="$TEMP_BASE/$name"
-    local out="$RESULTS_DIR/$i.result"
 
     setup_copy "$dest"
 
@@ -263,7 +295,6 @@ execute_scenario() {
     if [[ "$build_ok" -eq 1 ]]; then
         printf 'PASS\t%s\n' "$name" > "$out"
         printf "  %-55s ${GREEN}PASS${RESET}\n" "$name"
-        rm -rf "$dest"
     else
         printf 'FAIL\t%s\tbuild failed\n' "$name" > "$out"
         printf "  %-55s ${RED}FAIL${RESET}\n" "$name"

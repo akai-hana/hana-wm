@@ -68,7 +68,7 @@ const scroll_step: u8 = 2;
 const max_cadence_ms: i64 = 5000;
 
 /// Spawn-commit window DEFAULT for every control. A fork+exec+pipe+waitpid
-/// blocks the WM's event loop for ~1-5 ms, so a per-event spawn throttled the
+/// blocks the WM's event loop for ~1-5 ms, so a per-event spawn throttles the
 /// whole WM under a fast drag or scroll; coalescing onto the newest value
 /// keeps a sweep to at most one spawn per window. `immediate` commits ignore
 /// it, and a control whose spawn is cheaper than average can declare a

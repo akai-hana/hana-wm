@@ -8,12 +8,10 @@
 //! the module-held parse is then untracked by the per-test leak check (it is
 //! intentionally held for the whole process in production).
 //!
-//! `save` is called with the leak-checking `testing` allocator: the
-//! core/process/session.zig save path used to transfer the JSON buffer out of its
-//! Allocating writer and never free it (an S-F finding, surfaced as leaked
-//! bytes here), and the one-line fix that lands in core/process/session.zig frees it
-//! (`defer al.deinit()`), so the tracking allocator now doubles as a
-//! regression guard for that class of leak.
+//! `save` is called with the leak-checking `testing` allocator: the JSON
+//! buffer the core/process/session.zig save path allocates must be freed
+//! there, and a leak of it surfaces here as leaked bytes -- so the tracking
+//! allocator doubles as a regression guard for that class of leak.
 
 const std = @import("std");
 const testing = std.testing;
@@ -178,18 +176,16 @@ test "F10: applyModelLevel restores focus, workspace state and every membership"
     try testing.expect(model.visibleOn(&restored, 3, model.findHome(&restored, 3).?));
 }
 
-// The per-window blob header changed from a 2-byte REGISTRY ORDINAL to a
-// variable-length CLAIMANT NAME, because an ordinal is a position in a
-// build-generated list: deleting or reordering an unrelated module renumbers
-// everything after it, and a saved session's fast path then points at a
-// different module. These pin both halves of the migration -- the new name
-// header, and that an old ordinal-stamped blob is still read rather than
-// silently dropped.
+// The per-window blob header stamps a variable-length CLAIMANT NAME, not a
+// 2-byte REGISTRY ORDINAL: an ordinal is a position in a build-generated
+// list, so deleting or reordering an unrelated module renumbers everything
+// after it and a saved session's fast path then points at a different
+// module. Both formats are pinned here -- the name header, and that an
+// ordinal-stamped blob is still read rather than silently dropped.
 
-// DecodeExt is the ONE reader the header format has now -- the three
-// separate accessors it replaced are gone -- so every header fact is pinned
-// through it directly: claimant, payload offset, and legacy ordinal all come
-// from one parse and are asserted together.
+// DecodeExt is the ONE reader the header format has, so every header fact is
+// pinned through it directly: claimant, payload offset, and legacy ordinal
+// all come from one parse and are asserted together.
 
 test "ext header: a name-stamped blob round-trips claimant and payload" {
     const name = "minimize";
@@ -239,9 +235,8 @@ test "ext header: a legacy ordinal-stamped blob still resolves" {
     try testing.expectEqual(@as(?[]const u8, null), h_legacy.claimed_name);
     // A name-stamped blob must NOT be read as a legacy ordinal: byte 1 is the
     // name LENGTH there, so conflating the two would send "minimize" to
-    // registry slot 8. (An earlier draft of this test wrote 7 for a name that
-    // is 8 bytes long, and the reader correctly returned "minimiz" -- the
-    // length byte is authoritative, which is the property worth pinning.)
+    // registry slot 8. The length byte is authoritative, which is the
+    // property worth pinning.
     const modern = [_]u8{ session.ext_format_version, 8, 'm', 'i', 'n', 'i', 'm', 'i', 'z', 'e', 0x5A };
     const h_modern = session.decodeExt(&modern);
     try testing.expect(h_modern.legacy_ordinal == null);

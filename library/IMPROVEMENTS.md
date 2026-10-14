@@ -16,7 +16,7 @@ Status key used inline:
 - **DEFERRED** — intentionally not done; the tradeoff is documented (mostly structural "Phase 2" work, per the constraint that god-files are not to be split for size alone).
 - **OPEN** — still outstanding.
 
-Standing verification commands: `zig fmt --check .`, `zig build check`, `zig build test`, `dev/scripts/xtest.sh zig build test`, `zig build check-modularity` (or `./dev/scripts/check-before-commit.sh --modularity`). The modularity check is deliberately NOT a dependency of the default `check` (a ~25-cold-build cost); it is exposed as `check-modularity` / `check-all` and run in `check-before-commit.sh`.
+Standing verification commands: `zig fmt --check .`, `zig build check`, `zig build test`, `dev/scripts/xtest.sh zig build test`, `zig build check-modularity` (or `./dev/scripts/check-before-commit.sh --modularity`). The modularity check is deliberately NOT a dependency of the default `check`; it is exposed as `check-modularity` / `check-all` and run in `check-before-commit.sh --modularity`. (Since the gate rework: Debug scenario builds, `-P` parallelism and per-scenario caches kept between runs, so only the first run is cold.)
 
 ### Summary by section
 - **§I Correctness/memory** — every first-pass bug fixed; the config `include` depth-1 nit is now FIXED too (warn on unconsumed include), so §I has no remaining OPEN items.

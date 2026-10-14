@@ -46,8 +46,8 @@ pub const ext_format_version: u8 = 2;
 
 /// Header byte length for a name-stamped blob: version + name length + the
 /// name itself. The name is variable-length, so this is a function of the
-/// module name rather than a constant -- a fixed 2-byte ordinal header is
-/// what was removed. Shared by the writer (save path) and `decodeExt`.
+/// module name rather than a constant. Shared by the writer (save path) and
+/// `decodeExt`.
 fn extHeaderLen(name_len: usize) usize {
     return 2 + name_len;
 }
@@ -362,7 +362,6 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     // (allocator, partial-fill deinit), `StateFile` is the pure wire value --
     // merging them would hang an Allocator off the JSON type or hand the
     // parsed value an ownership-ful deinit that would free arena memory.
-    // `stringifySnapshot` (single caller) folded here with that in mind.
     const state = StateFile{
         .version = handoff_version,
         .current = @intCast(m.current.index),
@@ -447,9 +446,9 @@ fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: u
 /// are actually registered (closed or never adopted ones are dropped).
 /// Call AFTER the adoption phase registered the surviving windows.
 ///
-/// No feature counters live here anymore: extensions own all of their state
-/// (minimize maintains its sequence internally), so this phase only re-lists
-/// tiled membership and copies scalars.
+/// No feature counters live in this phase: extensions own all of their
+/// state (minimize maintains its sequence internally), so this phase only
+/// re-lists tiled membership and copies scalars.
 pub fn applyModelLevel(m: *model.Model) void {
     const f = loaded() orelse return;
 

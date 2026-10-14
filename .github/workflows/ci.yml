@@ -44,6 +44,19 @@ jobs:
         with:
           version: 0.16.0
 
+      # Content-addressed build cache: a warm run only recompiles what the
+      # diff touched. Keyed on the Zig sources (+ sha) so a source change saves
+      # a fresh cache, with prefix restore-keys falling back to the previous
+      # one. The modularity job has its own key (different cache path).
+      - name: Cache zig build cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-${{ runner.os }}-${{ hashFiles('**/*.zig', 'build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-${{ hashFiles('**/*.zig', 'build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-
+
       # Covers build.zig.zon's `.links` table. libxrandr-dev is X11's randr,
       # not xcb's — xcb-randr and xcb-keysyms need their own -dev packages.
       - name: Install X11 dev dependencies
@@ -54,18 +67,27 @@ jobs:
       - name: zig fmt --check
         run: zig fmt --check src
 
+      # `check` is a no-emit type-check + plugin-template gate + layer guards
+      # (build.zig wireCheckSteps): full Sema, no codegen. Checked before the
+      # tests because it is the cheaper signal. Debug keeps it identical to
+      # `check-before-commit.sh`.
+      - name: Type-check + plugin-template + layer guards
+        run: zig build check -Doptimize=Debug
+
+      # Debug: several times cheaper than the ReleaseFast default (resolveOptimize)
+      # and it also runs the std.debug.assert coverage ReleaseFast compiles out.
       - name: Unit tests (model / tiling / sync / config / workspaces / input)
-        run: zig build test
+        run: zig build test -Doptimize=Debug
 
-      - name: Layer guards (single-writer sync, xcb-free model/tiling)
-        run: zig build check
-
+      # Bare `zig build` = ReleaseFast (resolveOptimize): this is the codegen +
+      # link proof the no-emit check step deliberately does not do.
       - name: Build
         run: zig build
 
   # Feature-deletion matrix: each optional subsystem is removed and the tree
-  # must still compile. Heavy (cold build per scenario), so it is its own job
-  # rather than part of the default `check`. Skipped on docs-only changes.
+  # must still compile. Own job rather than part of the default `check`
+  # (independent of the test job, so both run in parallel). Skipped on
+  # docs-only changes.
   modularity:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -77,13 +99,31 @@ jobs:
         with:
           version: 0.16.0
 
+      # Each scenario builds in its own persistent copy under /tmp, and the
+      # script keeps each copy's .zig-cache between runs. Caching that directory
+      # turns the cold matrix (~30 Debug builds) into rsync + incremental zig
+      # build on the next run. Its own key because the path is different from
+      # the test job's .zig-cache.
+      - name: Cache modularity scenario caches
+        uses: actions/cache@v4
+        with:
+          path: /tmp/hana-modularity-test
+          key: mod-${{ runner.os }}-${{ hashFiles('**/*.zig', 'build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            mod-${{ runner.os }}-${{ hashFiles('**/*.zig', 'build.zig', 'build.zig.zon') }}-
+            mod-${{ runner.os }}-
+
       - name: Install X11 dev dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
 
+      # No -j: the script sizes zig -j itself as nproc / -P (4 scenarios at
+      # once by default, which fills a 4-core runner without oversubscribing).
+      # Scenario builds default to -O Debug; the test job's ReleaseFast
+      # `zig build` is the release-profile proof.
       - name: Feature-deletion modularity matrix
-        run: ./dev/scripts/check-modularity.sh -j 4
+        run: ./dev/scripts/check-modularity.sh
 
   # Behavioral parity harness: boots a private Xvfb and replays the scenarios
   # against recorded goldens. Runs on pushes to dev only (slow), and only when
