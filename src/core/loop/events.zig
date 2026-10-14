@@ -491,8 +491,7 @@ fn handleXcbEvents() void {
     // read-ahead buffer — the very stream that cap-exited the batch above —
     // collapses to its newest member instead of dispatching up to 256
     // individual reconciles); its terminating non-motion is stashed to
-    // `queued_pending` like the batch drain's -- one stash policy, no
-    // with_tail variant.
+    // `queued_pending` like the batch drain's -- one stash policy.
     var queued_pending: ?*xcb.xcb_generic_event_t = null;
     var extra: usize = 0;
     drainEvents(

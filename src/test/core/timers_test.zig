@@ -1,5 +1,4 @@
-//! Tests for the event loop's deadline reducer (`core/loop/events.zig`,
-//! former timers.zig, merged 2026-10-10).
+//! Tests for the event loop's deadline reducer (`core/loop/events.zig`).
 //!
 //! Pure arithmetic over a source list, so it runs headless: the reduction is
 //! what decides whether the loop blocks forever, and the cases that matter are

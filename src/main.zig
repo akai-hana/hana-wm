@@ -18,7 +18,7 @@ const log = @import("log");
 // through the core-owned `surfaces` composition root, never by importing the
 // bar module here.
 const surfaces = @import("surfaces").Surfaces;
-// The input subsystem is no longer one facade: the composition root names
+// The input subsystem has no facade here: the composition root names
 // exactly the three pieces it sequences at boot (XKB lifecycle, bind
 // compilation + root grabs, cursor theming).
 const xkb = @import("xkb");
@@ -26,8 +26,8 @@ const keybinds = @import("keybinds");
 const cursor = @import("cursor");
 
 /// The process allocator. One binding: a second `std.heap.c_allocator` spelling
-/// is a second place to change, and the two former sites disagreed about what
-/// they were even naming.
+/// is a second place to change, and two sites can disagree about what they
+/// are even naming.
 const alloc = std.heap.c_allocator;
 const window = @import("window");
 const seed = @import("model_config");
@@ -106,9 +106,9 @@ pub fn main(init: std.process.Init) !void {
     // winner is a config question: detection reads Xft.dpi and falls back to
     // a physical-size guess, so a nested-X or HiDPI panel the compositor has
     // not described yields a value that is merely plausible. A configured
-    // [display] dpi overrides it. Resolving after `config.load` is what makes
-    // the override possible; resolving before meant the config could not be
-    // consulted, which is why the override had to live in main anyway.
+    // [display] dpi overrides it. The override lives here because it needs
+    // the loaded config: resolution must come after `config.load`, and
+    // `scale.detectDpi` has no config to consult.
     const dpi = if (loaded_config.core.dpi) |configured|
         configured
     else
@@ -148,9 +148,7 @@ pub fn main(init: std.process.Init) !void {
     // Drop the Config internals and the heap box core owns. No identity guard:
     // a reload goes through core.replaceOwnedConfig, which releases the
     // displaced box there and leaves the new one to this defer, so exactly one
-    // call frees each box. (The guard this replaces existed because the reload
-    // path used to free the box itself while main also held a reference to it
-    // -- the GP fault seen in reload-then-quit runs.)
+    // call frees each box.
     defer core.deinitOwnedConfig();
     // Registered AFTER the config-deinit defer, so (LIFO) the resolver's map
     // is released before the keybindings its entries borrow are freed.
@@ -213,12 +211,12 @@ pub fn main(init: std.process.Init) !void {
     log.info("Shutting down gracefully...", .{});
 }
 
-/// The X connection, OWNING. `deinit` encodes the has-error rule that every
-/// call site used to have to remember: a connection that has errored was
-/// already torn down by the server, and `xcb_disconnect` on it can crash
-/// inside libxcb's teardown, while a LIVE connection must be disconnected or
-/// the process leaks the socket (and, for a WM, the root grab survives until
-/// the kernel reaps it). Both facts live in one method now.
+/// The X connection, OWNING. `deinit` encodes the has-error rule so no call
+/// site has to remember it: a connection that has errored was already torn
+/// down by the server, and `xcb_disconnect` on it can crash inside libxcb's
+/// teardown, while a LIVE connection must be disconnected or the process
+/// leaks the socket (and, for a WM, the root grab survives until the kernel
+/// reaps it). Both facts live in one method.
 const XSession = struct {
     conn: core.Connection,
     screen: core.Screen,
@@ -242,8 +240,8 @@ fn connectToX() !XSession {
     }
 
     // From here the connection is LIVE, so every remaining exit must release
-    // it. These two returns used to leak it: a null screen iterator, and a
-    // failed WM-role claim (which is the common one -- another WM holding
+    // it, including the two below: a null screen iterator, and a failed
+    // WM-role claim (which is the common one -- another WM holding
     // SubstructureRedirect means we exit right here).
     errdefer xcb.xcb_disconnect(conn);
 

@@ -26,7 +26,7 @@ fn testReset() void {
         @import("fullscreen").deinit();
         @import("fullscreen").init() catch unreachable;
     }
-    // Floating's drag state was never re-armed. It is a process-global
+    // Floating's drag state gets the same re-arm. It is a process-global
     // like the other two, and a left-active drag is not a cosmetic leak:
     // `startDrag` early-returns while `g_state.drag.active`, so one test that
     // did not end its drag silently disables dragging for every test after it.
@@ -38,12 +38,8 @@ fn testReset() void {
 /// The ONE fixture entry: a fresh model on deterministically re-armed
 /// process-global module stores.
 ///
-/// There used to be two entry points with different guarantees -- `makeModel`
-/// (bare) and `setUpModel` (reset first) -- and nothing in the type system said
-/// which one a given test needed. Worse, `model_test` had locally aliased
-/// `const makeModel = helpers.setUpModel`, so a reader scanning that file saw
-/// `makeModel()` and reasonably assumed no reset happened. Reset is now the
-/// default, so the bare path is the one you must ask for by name.
+/// Reset is the default; the bare path (`makeBareModel`) is the one a test
+/// must ask for by name.
 pub fn makeModel() model.Model {
     testReset();
     return .{};
@@ -153,13 +149,9 @@ pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibona
 /// Appends one bench timing line to `.zig-cache/bench/timings.txt`.
 ///
 /// Why a file and not `std.debug.print`: the Zig test protocol treats any
-/// stderr output as a failed command, so the printed numbers made
+/// stderr output as a failed command, so printing the numbers would make
 /// `zig build test -Dbench=true` -- the only way to compile bench mode -- exit
-/// non-zero on a fully passing suite. The documented invocation was therefore
-/// guaranteed to report failure, and the two bench-only `std.debug.print`
-/// sites had in fact gone stale enough to no longer compile (they read fields
-/// the test sink does not have, and one referenced a `sink` that was not in
-/// scope), which is exactly what happens to a code path nothing can run.
+/// non-zero on a fully passing suite.
 ///
 /// Writing here instead keeps the numbers, keeps the exit green, and makes the
 /// output land somewhere a reader looks for it. Best-effort by design: a
@@ -169,11 +161,11 @@ pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibona
 ///
 /// It has to be ONE handle, not one per call: `createFile` has no
 /// append mode, so every fresh handle starts writing at offset 0 and each
-/// record overwrote the head of the last one -- which showed up as timings
-/// truncated to their own tails ("...=130 (configure=50,map=40)" with the
-/// label and the numbers before it gone). Holding the handle for the run makes
-/// the position advance naturally, and the test runner executes a binary's
-/// tests sequentially, so there is no concurrent writer.
+/// record overwrites the head of the last one -- a timing truncated to its
+/// own tail ("...=130 (configure=50,map=40)" with the label and the numbers
+/// before it gone). Holding the handle for the run makes the position
+/// advance naturally, and the test runner executes a binary's tests
+/// sequentially, so there is no concurrent writer.
 ///
 /// The handle is intentionally never closed: this is a short-lived test
 /// process, and a close would need a teardown hook the test protocol does not
@@ -190,7 +182,7 @@ pub fn benchLog(comptime fmt: []const u8, args: anytype) void {
             .permissions = @enumFromInt(0o644),
         }) catch return;
         // createFile leaves the shared handle positioned at START OF FILE, so
-        // every new process run wrote from offset 0 and clobbered the tail of
+        // every new process run writes from offset 0 and clobbers the tail of
         // the previous one. Advance to EOF so this process appends after it.
         // std.os.linux wraps no lseek at 0.16, so we reach for it through the
         // fused built-in end endpoints; wrap the syscall for plain
@@ -200,8 +192,8 @@ pub fn benchLog(comptime fmt: []const u8, args: anytype) void {
         }
     }
     // Append a newline only if the caller's format does not already end in
-    // one -- the bench formats all do, and adding another left a blank line
-    // between every record.
+    // one -- the bench formats all do, and adding another would leave a blank
+    // line between every record.
     var buf: [512]u8 = undefined;
     const with_nl = comptime if (std.mem.endsWith(u8, fmt, "\n")) fmt else fmt ++ "\n";
     const line = std.fmt.bufPrint(&buf, with_nl, args) catch return;

@@ -3,9 +3,7 @@
 //! The forward table build and the readiness heuristic need a real `xkb_keymap`
 //! and stay untested here, but the REVERSE INDEX is a pure function of a
 //! 256-entry table of literals, and it is where the two rules that decide
-//! which physical key a binding actually grabs live. Both were unreachable
-//! from a test before the transform moved out of xkb.zig, so
-//! they are checked here for the first time.
+//! which physical key a binding actually grabs live.
 
 const std = @import("std");
 const keymap = @import("keymap");
@@ -21,9 +19,8 @@ fn tableOf(pairs: []const Pair) [keymap.x11_max_keycode]u32 {
     return t;
 }
 
-/// The production lookup. This used to be a hand-copied duplicate of the
-/// bisection in xkb.keysymToKeycode, so the tests below that pin the
-/// ordering rules were really pinning the copy rather than the code path.
+/// The production lookup itself, so the tests below exercise the code path a
+/// binding actually resolves through.
 const lookup = keymap.ReverseIndex.find;
 
 test "keymap: the reverse index is sorted by keysym and holds only real symbols" {
@@ -123,11 +120,10 @@ test "keymap: reverse_capacity matches the keycode range the index covers" {
 }
 
 // ---------------------------------------------------------------------------
-// Keysym-name parsing (merged from keysyms_test.zig). `keysymFromName` is a
-// pure libxkbcommon table lookup, so it runs without an X connection. Config
-// resolves every keybinding name through this path, so the stable
-// name->keysym mapping (and the NoSymbol sentinel for unknown names) is
-// load-bearing for the config tests too.
+// Keysym-name parsing. `keysymFromName` is a pure libxkbcommon table lookup,
+// so it runs without an X connection. Config resolves every keybinding name
+// through this path, so the stable name->keysym mapping (and the NoSymbol
+// sentinel for unknown names) is load-bearing for the config tests too.
 // ---------------------------------------------------------------------------
 
 test "keymap: well-known keysym names resolve to their stable ids" {

@@ -30,12 +30,6 @@ const core = @import("core");
 /// the contract, not in the extensor: this contract's shape must not depend on
 /// whether carousel.zig is present, which is the whole point of the addon
 /// registry.
-///
-/// The title used to call `offsetFor` for the offset and then separately ask
-/// `scrollingActive` whether the scroll was live and call `cyclePx` for its
-/// period -- three scroller calls whose agreement was a cross-member invariant
-/// nothing enforced, with `cyclePx` duplicated in the title so it could
-/// re-derive the period from a width it had measured itself.
 pub const Scroll = struct {
     /// Sub-pixel x offset for the title head (0 = resting position).
     off: f32,
@@ -50,10 +44,9 @@ pub const Scroll = struct {
 
 pub const Scroller = struct {
     /// The whole scroll decoration for one frame, in one call: offset, cycle
-    /// and the active bit. Three separate scroller queries (offsetFor /
-    /// scrollingActive / cyclePx) had to agree with each other across the
-    /// addon boundary, and the title carried its own copy of cyclePx to make
-    /// that possible.
+    /// and the active bit. The three must agree with each other across the
+    /// addon boundary, so they arrive together rather than as three separate
+    /// scroller queries.
     offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, now_ms: i64) Scroll,
     pivot: *const fn () void,
     pollDeadlineMs: *const fn (now_ms: i64, hz: f64) i32,
@@ -63,10 +56,10 @@ pub const Scroller = struct {
 /// generated `title_subs` array through it, so the generated module
 /// never names the concrete struct (`Scroller`) or a sibling's import alias.
 pub const Binding = Scroller;
-// The scroller is a SINGLETON slot, and taking `addons[0]` said nothing about
-// that: a second `Scroller` addon was silently dropped while the registry
-// kept looking like a registry. One decorator composes; two need the slot
-// to become a capability query.
+// The scroller is a SINGLETON slot, and taking `addons[0]` says nothing about
+// that: a second `Scroller` addon would be silently dropped while the
+// registry still looks like a registry. One decorator composes; two need the
+// slot to become a capability query.
 const subs = @import("title_subs").addons;
 comptime {
     if (subs.len > 1) @compileError("title: at most one Scroller addon");
@@ -116,8 +109,8 @@ fn drawInner(
 ) u16 {
     // No refresh-rate detection here: `bar.init` primes it once at startup, and
     // detection writes global state (the monitor's Hz memo every other segment
-    // reads), so calling it from a DRAW made a render mutate the state the next
-    // frame's pacing decision depends on. The field it needed is gone with it.
+    // reads), so calling it from a DRAW would make a render mutate the state the
+    // next frame's pacing decision depends on.
     const window_count = snapshot.entries.len;
     // Empty workspace: fill the background and fall through to the shared end.
     if (window_count == 0) {
@@ -398,12 +391,11 @@ fn needsRepaintHook() bool {
     return scroll_active;
 }
 
-/// The last frame's scroll-active bit, recorded from the single scroller call.
-/// This is the title's copy of what used to be an out-of-band `scrollingActive`
-/// QUERY on the scroller: the value now arrives together with the offset it
-/// describes, and the title remembers it for the one consumer that is not a
-/// draw (needsRepaintHook). Written by `drawFittedTitle`, the one place the
-/// scroller is called from either outcome.
+/// The last frame's scroll-active bit, recorded from the single scroller call:
+/// the value arrives together with the offset it describes, and the title
+/// remembers it for the one consumer that is not a draw (needsRepaintHook).
+/// Written by `drawFittedTitle`, the one place the scroller is called from
+/// either outcome.
 var scroll_active: bool = false;
 
 /// This module's bar-segment contribution (registry binding).
@@ -426,8 +418,8 @@ pub const module = segmod.module(
         // would land it mid-cycle). On reload: config is about to change the
         // scroller's own inputs (carousel speed, the bar's padding, the cell's
         // usable width), so the base is rebased instead of integrated across the
-        // change -- without it a reload mid-scroll produced one frame whose dt
-        // spanned the old and the new geometry at once.
+        // change -- without it a reload mid-scroll produces one frame whose dt
+        // spans the old and the new geometry at once.
         .onBarShown = pivot,
         .invalidateReloadCaches = pivot,
     },

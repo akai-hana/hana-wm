@@ -78,7 +78,7 @@ pub fn consumeReload() bool {
     return should_reload.swap(false, .acq_rel);
 }
 
-/// In-place exec coordinator (former restart.zig, merged 2026-10-10).
+/// In-place exec coordinator.
 
 // libc bindings for execv/setenv (no Zig stdlib wrappers exist for them, and
 // the executable links libc, so mirroring spawn.zig's pattern is the honest
@@ -114,8 +114,7 @@ pub fn init() void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
     // readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
-    // path fills the buffer -- truncated, no NUL. The old code then dupeZ'd
-    // the truncated bytes as the exec path. Treat a full buffer as
+    // path fills the buffer -- truncated, no NUL. Treat a full buffer as
     // unresolvable so a re-exec can never hand execv a cut-off path.
     if (std.posix.errno(n) != .SUCCESS or n == buf.len) {
         log.warn(
@@ -152,10 +151,9 @@ fn selfPathZ() ?[:0]const u8 {
 
 /// The environment variables that carry the re-exec hand-off. The WRITER
 /// (`execNext`) and the READER (boot, via `restorePathFromEnv`) have to agree
-/// exactly, and both sides used to spell the names as string literals at their
-/// own site. A typo on the reading side is the worst kind of bug here: the
-/// lookup simply returns null, so a re-exec'd instance boots as a COLD boot
-/// and silently adopts nothing, with no error anywhere.
+/// on these names exactly. A typo on the reading side is the worst kind of bug
+/// here: the lookup simply returns null, so a re-exec'd instance boots as a
+/// COLD boot and silently adopts nothing, with no error anywhere.
 pub const restore_env = "HANA_RESTORE";
 pub const config_dir_env = "HANA_CONFIG_DIR";
 
@@ -168,12 +166,10 @@ pub fn restorePathFromEnv() ?[*:0]const u8 {
 
 /// The complete re-exec hand-off, assembled once and owned by this module.
 ///
-/// These three values used to travel separately: the event loop held the exec
-/// path, built the restore path, and called into config for the snapshot path
-/// before handing each to `execNext` as loose arguments. Three sources of truth
-/// for one transition means the sequence has to be re-derived at every call
-/// site, and nothing can assert the set is complete. Naming the record makes
-/// "what crosses the hand-off" a single declaration.
+/// Three loose arguments for one transition would mean the sequence has to be
+/// re-derived at every call site, and nothing could assert the set is
+/// complete. Naming the record makes "what crosses the hand-off" a single
+/// declaration.
 pub const Handoff = struct {
     /// Sentinel-terminated (`selfPathZ()`); this process's own image.
     self_path: [:0]const u8,
@@ -213,9 +209,9 @@ pub fn currentHandoff(restore_path: []const u8, config_snapshot: ?[:0]const u8) 
 /// session client (xinit -> Xsession -> .xinitrc -> this process); replacing
 /// the image in place keeps that chain unbroken, so the successor boots into
 /// a live server and the session only ends when the new WM actually exits.
-/// (The original fork-then-exit design killed every supervised re-exec:
-/// the parent's exit made the session script return and xinit tore down
-/// Xorg mid-hand-off.)
+/// (A fork-then-exit design would kill every supervised re-exec: the
+/// parent's exit makes the session script return and xinit tears down Xorg
+/// mid-hand-off.)
 ///
 /// The restore path crosses the hand-off in `restore_env`: execv inherits
 /// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
@@ -237,7 +233,7 @@ pub fn execNext(handoff: Handoff) noreturn {
     std.process.exit(1);
 }
 
-/// Signal self-pipe and dispatch (former signals.zig, merged 2026-10-11):
+/// Signal self-pipe and dispatch:
 /// routes POSIX signals through a self-pipe so the event loop can dispatch
 /// them safely without signal-handler reentrancy.
 // End indices of the self-pipe: signal handlers write to pipe_write; the
@@ -259,13 +255,12 @@ var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 // kernel installs is ABI-aligned for a pushed frame.
 var alt_stack_mem: [64 * 1024]u8 align(16) = undefined;
 
-// Async-signal-safe pending-signal bitmap. The self-pipe byte is now only a
+// Async-signal-safe pending-signal bitmap. The self-pipe byte is only a
 // WAKE TOKEN: a full pipe forces the handler to drain its backlog, so a byte
 // can be discarded, and signal STATE must not ride on the byte. Instead the
 // handler sets a bit here with a lock-free atomic OR, and the event loop
 // consumes the whole word. A TERM/INT/reload delivered during a pipe-full
-// burst therefore can never be lost (previously it could: dispatchSignal -- the
-// only thing that sets the quit/reload flags -- ran solely off pipe bytes).
+// burst therefore can never be lost.
 var pending_signals: std.atomic.Value(u64) = .init(0);
 
 // Async-signal-safe handler: records the signal and wakes the loop.
@@ -282,9 +277,6 @@ fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
 /// The one byte written to the self-pipe. Its VALUE carries nothing: the
 /// reader (`drainAndDispatch`) drains whatever is there and then consumes the
 /// whole `pending_signals` bitmap, so the pipe is a wake token, not a queue.
-/// The handler used to write the signal number and, on EAGAIN, drain the
-/// backlog in the handler itself and retry -- which spent a read loop in
-/// async-signal context to preserve a value nothing read.
 const wake_token: u8 = 1;
 
 /// Async-signal-safe, non-blocking write of the single wake token.
@@ -295,7 +287,7 @@ const wake_token: u8 = 1;
 fn writeWakeToken() void {
     const wfd = signal_pipe[pipe_write];
     const rc: isize = @bitCast(std.os.linux.write(wfd, &[_]u8{wake_token}, 1));
-    if (rc <= 0) return; // pipe full (already awake) or closed fd: lossy, as before
+    if (rc <= 0) return; // pipe full (already awake) or closed fd: lossy
 }
 
 // Re-entry guard for the SIGUSR2 backtrace dump: a second USR2 arriving
