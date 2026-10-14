@@ -142,6 +142,24 @@ fn drawSingleWindow(
     // focus is the model's and not this window's) and in the scroll gate, so
     // they are not one `if/else` over a chosen title.
     if (is_minimized) {
+        // The minimized cell draws its title statically and never consults the
+        // scroll seam, but a marquee the pre-minimize focused frame left live
+        // would otherwise keep repainting (needsRepaintHook) and waking the
+        // bar on its pollDeadline. Hand the seam one retiring call (enabled=
+        // false) so the carousel stops scrolling and the poll deadline clears.
+        if (scroller) |s| {
+            const title_width = if (snapshot.minimized_title.len > 0) ctx.dc.measureTextWidth(snapshot.minimized_title) else 0;
+            _ = s.offsetFor(
+                single_win,
+                snapshot.minimized_title,
+                title_width,
+                text_geom.avail_w,
+                false,
+                0,
+                time.monotonicMs(),
+            );
+            scroll_active = false;
+        }
         if (snapshot.minimized_title.len > 0)
             drawFittedTitle(
                 ctx,

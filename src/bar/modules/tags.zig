@@ -23,6 +23,18 @@ const fallback_width: u16 = 270;
 var label_widths: [tracking.workspace_labels.len]u16 = [_]u16{0} ** tracking.workspace_labels.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
+// The ws_current/ws_all_active the cache was built for: the selected tag is
+// measured bold (wider), so a stale-key cache centers the newly selected tag
+// against the non-selected width after every switch.
+var cache_ws_current: u8 = 0;
+var cache_ws_all_active: bool = false;
+
+// Config + height captured at the last draw, so the natural-width path can
+// recompute the cell width before a full ensureCache pass has run on the
+// current (config, height) pair.
+var last_config: types.BarConfig = undefined;
+var last_height: u16 = 0;
+var last_geom_valid: bool = false;
 // All-view (all_workspaces / Mod+5) collapse: while the flag is active every
 // workspace tag is replaced by ONE cell labeled "花", so the whole segment
 // narrows to a single tag. The cell is at least the standard tag width,
@@ -56,7 +68,7 @@ fn ensureCache(
     ws_current: u8,
     ws_all_active: bool,
 ) void {
-    if (cache_valid) return;
+    if (cache_valid and cache_ws_current == ws_current and cache_ws_all_active == ws_all_active) return;
     const count = @min(tracking.getWorkspaceCount(), label_widths.len);
     // Measure each label with ITS per-state styling: the selected tag may
     // render bold (workspaces_selected), so its glyph is wider than its
@@ -72,6 +84,11 @@ fn ensureCache(
     all_view_label_width = dc.measureTextWidthStyled(all_view_label, config.workspaceIconProps(true));
     all_view_cell_width = @max(ws_width, all_view_label_width);
     cache_valid = true;
+    cache_ws_current = ws_current;
+    cache_ws_all_active = ws_all_active;
+    last_config = config;
+    last_height = height;
+    last_geom_valid = true;
 
     // All geometry inputs are constant between reloads, so the indicator
     // position holds until the next invalidate() + ensureCache() cycle.
@@ -232,8 +249,20 @@ fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
     if (comptime !build_options.has_workspaces) return 0;
     if (f.workspace_count > 0) {
         // All-view collapses 8 tags -> 1: the row reservation narrows with it.
-        if (f.is_all_view_active) return all_view_cell_width;
-        return @intCast(f.workspace_count * ws_width);
+        if (f.is_all_view_active) {
+            if (all_view_cell_width > 0) return all_view_cell_width;
+            if (last_geom_valid) return @max(last_config.scaledWorkspaceWidth(last_height), all_view_label_width);
+            return fallback_width;
+        }
+        // Hot cache wins; otherwise re-derive from the config captured at the
+        // last draw (covers the one-frame-after-config-change window, and the
+        // first frame where ensureCache has not run yet). If nothing has
+        // ever been drawn, reserve the same honest fallback the empty case
+        // uses rather than workspace_count * 0, which showed a visible
+        // zero-width tags slot on the very first layout.
+        const cell_w = if (ws_width > 0) ws_width else if (last_geom_valid) last_config.scaledWorkspaceWidth(last_height) else 0;
+        if (cell_w > 0) return @intCast(f.workspace_count * cell_w);
+        return fallback_width;
     }
     return fallback_width;
 }
@@ -242,7 +271,7 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
     // In all-view the single "花" cell represents every workspace at once; a
     // click cannot map onto one workspace, so it is a no-op.
     if (tracking.isAllViewActive()) return null;
-    const cell_w = ws_width;
+    const cell_w = if (ws_width > 0) ws_width else (if (last_geom_valid) last_config.scaledWorkspaceWidth(last_height) else 0);
     if (cell_w == 0) return null;
     if (!build_options.has_workspaces) return null;
     const idx: usize = @intCast(offset / cell_w);

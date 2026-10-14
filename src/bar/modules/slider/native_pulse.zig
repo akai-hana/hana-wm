@@ -332,6 +332,12 @@ fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, _: ?*anyopaqu
                 g_sink.muted = snap.muted;
                 g_sink.pct = p;
                 g_sink.found = true;
+                // by-name/by-index deliver exactly one entry then end without
+                // an eol callback, so nothing else would ever signal `done`:
+                // signaling here is what keeps the single-info queries from
+                // waiting out their full timeout. The list query ends the same
+                // way on its first usable entry instead of scanning on.
+                signalDone(&g_sink.done);
             }
         }
     }
@@ -468,7 +474,10 @@ pub const Backend = struct {
         g_op_index = self.index;
         g_sink = .{};
         _ = runOp(issueSetVolume, &g_sink.done, 100);
-        return g_sink.done;
+        // Return `found` (the daemon's verdict), not just `done`: successCb
+        // fires done with found=false when the daemon rejects the op, so a
+        // rejected commit used to be reported as applied.
+        return g_sink.done and g_sink.found;
     }
 
     /// In-process mute commit: one native-protocol round trip, the
@@ -480,7 +489,9 @@ pub const Backend = struct {
         g_op_mute = @intFromBool(muted);
         g_sink = .{};
         _ = runOp(issueSetMute, &g_sink.done, 100);
-        return g_sink.done;
+        // Return the daemon's verdict (`found`), not just completion: a
+        // rejected op fires done with found=false and must report failure.
+        return g_sink.done and g_sink.found;
     }
 
     /// Reads back the live sink state natively (volume + mute).

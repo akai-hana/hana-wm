@@ -50,6 +50,9 @@ pub fn parseCpuLine(s: []const u8) ?Sample {
         nums[count] = std.fmt.parseUnsigned(u64, tok, 10) catch return null;
     }
     if (count == 0) return null;
+    // Need at least user/nice/system/idle: below 4 fields `idle` (nums[3])
+    // would come from the undefined buffer slot.
+    if (count < 4) return null;
     // idle = idle + iowait (fields 4 and 5, one-based). Older kernels stop at
     // idle, hence the guard.
     const idle = if (count >= 5) nums[3] +| nums[4] else nums[3];
