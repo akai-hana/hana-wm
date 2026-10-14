@@ -81,7 +81,7 @@ pub fn parseTilingStructures(
     // fallback is (types.TilingConfig{}).layout, NOT cfg.tiling.layout (which
     // aliases layouts.items[0], freed below), so using it would read freed
     // memory when the key is absent.
-    if (section.getAs([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
+    if (section.getAsOrWarn([]const parser.Value, "layouts")) |arr| try parseLayoutsArray(allocator, arr, cfg) else {
         const layout_str = section.getAsOrWarn([]const u8, "layout") orelse types.canon_master_layout;
         try cfg.tiling.layouts.append(allocator, try allocator.dupe(u8, layout_names.canonicalLayoutName(layout_str)));
     }
@@ -337,7 +337,7 @@ fn appendDupedStrings(
 /// stays gated on the [bar] section existing.
 pub fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
     const section = doc.getSection(types.section_bar) orelse return;
-    if (section.getAs([]const parser.Value, "fonts")) |arr| {
+    if (section.getAsOrWarn([]const parser.Value, "fonts")) |arr| {
         types.freeStrings(&cfg.bar.fonts, allocator, types.keep_capacity);
         try appendDupedStrings(ignore_bad_font_entries, allocator, arr, &cfg.bar.fonts);
         log.info("Loaded {} fonts for bar", .{cfg.bar.fonts.items.len});
@@ -379,7 +379,7 @@ fn parseWorkspaceIcons(
             if (item.asScalar(i64)) |n|
                 try cfg.bar.workspace_icons.append(allocator, try dupeNum(allocator, n));
         }
-    } else if (section.getAs([]const u8, "icons")) |str| {
+    } else if (section.getAsOrWarn([]const u8, "icons")) |str| {
         var ch_buf: [1]u8 = undefined;
         for (str) |ch| {
             ch_buf[0] = ch;
