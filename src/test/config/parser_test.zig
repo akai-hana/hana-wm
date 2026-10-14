@@ -79,16 +79,18 @@ test "parseColor accepts forms and rejects out-of-range" {
     try testing.expectError(error.InvalidColor, parser.parseColor("zzz"));
 }
 
-test "colorFromValue: bare all-digit spellings are hex (6 or 8 digits), others invalid" {
-    // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA hex. Any
-    // other bare integral value in a color context is rejected instead of
-    // silently coerced to a decimal color.
+test "colorFromValue: bare all-digit spellings are 6-digit hex, others invalid" {
+    // A bare 6-digit number is #RRGGBB hex. Any other bare integral value in a
+    // color context is rejected instead of silently coerced: 8-digit spellings
+    // are out-of-range >24-bit values that do not fit the packed 0xRRGGBB a
+    // pixel field expects (parser.parseColor rejects them too), and 7-digit
+    // spellings are neither RGB nor RGBA.
     try testing.expectEqual(@as(u32, 0x112233), color.colorFromValue(.{ .integer = 112233 }).?);
-    try testing.expectEqual(@as(u32, 0x11223344), color.colorFromValue(.{ .integer = 11223344 }).?);
-    try testing.expectEqual(@as(u32, 0x99999999), color.colorFromValue(.{ .integer = 99999999 }).?);
-    try testing.expectEqual(@as(u32, 0x16777215), color.colorFromValue(.{ .integer = 16777215 }).?);
+    try testing.expectEqual(@as(u32, 0x999999), color.colorFromValue(.{ .integer = 999999 }).?);
     try testing.expect(color.colorFromValue(.{ .integer = 300 }) == null);
-    try testing.expect(color.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits: neither RGB nor RGBA
+    try testing.expect(color.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits
+    try testing.expect(color.colorFromValue(.{ .integer = 11223344 }) == null); // 8 digits: out of 24-bit range
+    try testing.expect(color.colorFromValue(.{ .integer = 99999999 }) == null); // 8 digits
     try testing.expect(color.colorFromValue(.{ .integer = -1 }) == null);
     // The .color and string forms are unchanged.
     try testing.expectEqual(@as(u32, 0x61AFEF), color.colorFromValue(.{ .color = 0x61AFEF }).?);
