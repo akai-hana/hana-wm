@@ -15,7 +15,9 @@ const core = @import("core");
 const pipeline = @import("pipeline");
 const borders = @import("borders");
 const fixture = @import("fixture");
-const model = @import("wm_state");
+const model = @import("model");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 const types = @import("types");
 const scaling = @import("scaling");
 
@@ -61,8 +63,8 @@ test "borders.resolveBorderColorWith resolves focused vs unfocused config colors
     fx.config.tiling.border_unfocused = 0x222222;
 
     const m = pipeline.mut();
-    try model.register(m, 1, model.WSId.fromIndex(0));
-    try model.register(m, 2, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 1, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 2, model.WSId.fromIndex(0));
 
     // The occupant table is cover-state-only, so one build per test covers
     // every focus step below (focus reads stay live inside the With-form).
@@ -74,11 +76,11 @@ test "borders.resolveBorderColorWith resolves focused vs unfocused config colors
     try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(2, &occupants));
 
     // Focus moves: the focused window flips color, the other stays unfocused.
-    model.setFocus(m, 1);
+    focus.setFocus(m, 1);
     try testing.expectEqual(@as(u32, 0x111111), borders.resolveBorderColorWith(1, &occupants));
     try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(2, &occupants));
 
-    model.setFocus(m, 2);
+    focus.setFocus(m, 2);
     try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(1, &occupants));
     try testing.expectEqual(@as(u32, 0x111111), borders.resolveBorderColorWith(2, &occupants));
 }
@@ -96,7 +98,7 @@ test "borders.resolveBorderColorWith is 0 for a screen-covering window" {
     fx.config.tiling.border_unfocused = 0x222222;
 
     const m = pipeline.mut();
-    try model.register(m, 1, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 1, model.WSId.fromIndex(0));
     // A covering capture makes the window borderless via the bw=0/pixel=0
     // policy, mirrored here for callers outside reconcile (fullscreen).
     m.store.getPtr(1).?.covering_ws = model.WSId.fromIndex(0);

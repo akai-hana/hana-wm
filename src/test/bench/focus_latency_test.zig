@@ -22,10 +22,11 @@
 // grab+reconcile instead of the old focus-then-snap two.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
+const focus = @import("focus");
 
 const core = @import("core");
 const ledger = @import("ledger");
@@ -109,10 +110,10 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     // Phase 1: the focus transition reconcile.
     var s1 = CountingSink{};
     var c1 = makeCtx(s1.sink(), colorOfFocused, helpers.std_wa);
-    model.setFocus(&m, 2);
+    focus.setFocus(&m, 2);
     const t0 = nowNs();
     for (0..iters) |_| {
-        model.setFocus(&m, 2);
+        focus.setFocus(&m, 2);
         reconcile.run(&m, &c1, .{});
     }
     const focus_ns = @as(f64, @floatFromInt(nowNs() - t0)) / @as(f64, @floatFromInt(iters));

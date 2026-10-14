@@ -9,7 +9,7 @@
 //! as a 9-byte blob (0x5A magic + slot + seq).
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const log = @import("log");
 const bounded = @import("bounded");
 const pipeline = @import("pipeline");
@@ -436,7 +436,7 @@ fn restoreAndFocus(m: *model.Model, win: model.WindowId) void {
 
 /// This module's window sub-system contribution: lifecycle + persistence
 /// hooks + record cleanup for torn-down windows.
-pub const module: @import("contract").WindowModule = .{
+pub const module: @import("window_contract").WindowModule = .{
     .name = "minimize",
     .init = init,
     .deinit = deinit,

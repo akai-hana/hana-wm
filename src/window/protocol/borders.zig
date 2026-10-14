@@ -9,7 +9,9 @@
 
 const core = @import("core");
 const xcb = core.xcb;
-const model = @import("wm_state");
+
+const model = @import("model");
+const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const requests = @import("requests");
@@ -58,7 +60,7 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
     if (isBehindCoveringWindowWith(m, win, m.current, build_options.has_fullscreen, occupants)) return 0;
     // The model is the focus source, so this cannot drift from the
     // pipeline's own pick (which used to be a second copy of this ternary).
-    return model.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
+    return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
 /// Applies the configured border width to `win`, skipping the configure when

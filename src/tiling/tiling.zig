@@ -2,10 +2,10 @@
 //! Reads model types and emits placements; no XCB and no allocation.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const log = @import("log");
 
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 
 const scaling = @import("scaling");
 /// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
@@ -79,7 +79,7 @@ inline fn snapDimToIncrement(dim: u16, inc: u16) u16 {
     return if (snapped == 0 and dim > 0) 1 else snapped;
 }
 
-// The layout interchange vocabulary lives on the tiling CONTRACT (contract.zig)
+// The layout interchange vocabulary lives on the tiling CONTRACT (tiling_contract.zig)
 // so the always-compiled reconciler can name it even without this tiling engine;
 // here we only re-export it so modules keep referring to `tiling.List` etc.
 pub const View = contract.View;
@@ -519,4 +519,81 @@ pub fn layoutModule(
     // stale value in an `extra` literal is overwritten rather than honored --
     // the table is the single source, which is the whole point.
     return m;
+}
+
+// Tiling-order transitions (moved from model.zig — Option A of the op
+// migration; the tiling engine owns layout-order mutations on the model).
+// Core/window call sites reach these through the build-generated `tiling_seam`
+// (which provides has_tiling-gated stubs), never by naming this module.
+
+/// Moves `win` within `list` from `from` to `to`. Shared by reorderTiled and
+/// stepTiled (who already resolved both indices) to keep the single mutation
+/// in one place.
+fn moveTiled(list: anytype, win: model.WindowId, from: usize, to: usize) void {
+    list.orderedRemove(from);
+    _ = list.insert(to, win); // cannot fail: removal freed a slot
+}
+
+/// Moves `win` to index `idx_in` within its home workspace's tiled order
+/// (clamped to the last slot). Unknown windows are no-ops.
+pub fn reorderTiled(m: *model.Model, win: model.WindowId, idx_in: usize) void {
+    const h = model.findHome(m, win) orelse return;
+    const list = &m.ws[h.index].tiled_order;
+    const from = list.indexOfScalar(win) orelse return;
+    moveTiled(list, win, from, @min(idx_in, list.len - 1));
+}
+
+/// Moves `win` one slot in `dir` within its home workspace's tiled order,
+/// wrapping around either edge (dwm-style stack rotate, mirroring the focus
+/// cycle's modulo wrap). Unknown windows and lone tiled windows are no-ops.
+pub fn stepTiled(m: *model.Model, win: model.WindowId, dir: i32) void {
+    const h = model.findHome(m, win) orelse return;
+    const list = &m.ws[h.index].tiled_order;
+    const len = list.len;
+    if (len < 2) return;
+    const from = list.indexOfScalar(win) orelse return;
+    moveTiled(list, win, from, model.wrapIndex(from, dir, len));
+}
+
+/// Slot swap: exchanges the first two tiled slots of the current workspace
+/// (primary head and the following slot). No-op with fewer than two tiled
+/// windows. Test seam: the actions layer transitions run
+/// `swapFocusedWithPrevious`; production never calls this.
+pub fn swapPrimary(m: *model.Model) void {
+    const list = &m.ws[m.current.index].tiled_order;
+    if (list.len < 2) return;
+    const tmp = list.items[0];
+    list.items[0] = list.items[1];
+    list.items[1] = tmp;
+}
+
+/// Exchanges the tiled slots of the currently focused window and the
+/// previously focused window (focus MRU, newest first), regardless of their
+/// positions -- the pair the swap_master actions advertise ("current and
+/// previous windows"). No-op when either window has no tiled slot here
+/// (floating or covering focus, a predecessor parked on another workspace,
+/// minimized) or when fewer than two distinct windows are focused.
+pub fn swapFocusedWithPrevious(m: *model.Model) void {
+    const focused = m.focused orelse return;
+    const ws = &m.ws[m.current.index];
+    const list = &ws.tiled_order;
+    const mru = ws.focus_mru.constSlice();
+    if (list.len < 2 or mru.len < 2) return;
+    const prev = mru[1];
+    if (prev == focused) return;
+    const i = list.indexOfScalar(focused) orelse return;
+    const j = list.indexOfScalar(prev) orelse return;
+    list.items[i] = prev;
+    list.items[j] = focused;
+}
+
+/// Steps the current workspace's primary-column width fraction by `delta`,
+/// clamped to the shared master-width bounds.
+pub fn adjustPrimaryWidth(m: *model.Model, delta: f32) void {
+    const p = &m.ws[m.current.index].params;
+    p.primary_width = std.math.clamp(
+        p.primary_width + delta,
+        model.min_master_width,
+        model.max_master_width,
+    );
 }

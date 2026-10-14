@@ -8,12 +8,14 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("wm_state");
+const model = @import("model");
 const sink = @import("sink");
 
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const ledger = @import("ledger");
@@ -104,7 +106,7 @@ test "spawn: first show replays map/pixel/bw/geom ABOVE; steady state delta-send
     defer fx.deinit();
 
     helpers.regCur(&fx.m, 101);
-    model.setFocus(&fx.m, 101);
+    focus.setFocus(&fx.m, 101);
 
     fx.reconcile(.{});
 
@@ -139,10 +141,10 @@ test "focus change: delta-sends ONLY the two border pixels, no raise" {
 
     helpers.regCur(&fx.m, 201);
     helpers.regCur(&fx.m, 202);
-    model.setFocus(&fx.m, 201);
+    focus.setFocus(&fx.m, 201);
     fx.reconcile(.{}); // baseline: 201 master (winner ABOVE), 202 stack
 
-    model.setFocus(&fx.m, 202);
+    focus.setFocus(&fx.m, 202);
     fx.rec.clear();
     fx.reconcile(.{});
 
@@ -162,7 +164,7 @@ test "fullscreen enter: winner fullscreened (rect=screen, bw=0), others parked; 
 
     helpers.regCur(&fx.m, 301);
     helpers.regCur(&fx.m, 302);
-    model.setFocus(&fx.m, 301);
+    focus.setFocus(&fx.m, 301);
     fx.reconcile(.{}); // baseline tiled
 
     _ = fullscreen.toggleFullscreen(&fx.m, 301);
@@ -196,7 +198,7 @@ test "fullscreen enter keeps sibling geometry, only repositions it off-screen" {
 
     helpers.regCur(&fx.m, 501);
     helpers.regCur(&fx.m, 502);
-    model.setFocus(&fx.m, 501);
+    focus.setFocus(&fx.m, 501);
     fx.reconcile(.{}); // baseline tiled
 
     // Baseline geometry (master 501 / stack 502) that the sibling must
@@ -236,7 +238,7 @@ test "minimize parks every pass; restore replays original slot geometry" {
 
     helpers.regCur(&fx.m, 401);
     helpers.regCur(&fx.m, 402);
-    model.setFocus(&fx.m, 401);
+    focus.setFocus(&fx.m, 401);
     fx.reconcile(.{}); // baseline
 
     try minimize.minimize(&fx.m, 402);
@@ -274,7 +276,7 @@ test "fs->min->restore->unfs retiles instead of stranding an orphan" {
 
     helpers.regCur(&fx.m, 601);
     helpers.regCur(&fx.m, 602);
-    model.setFocus(&fx.m, 601);
+    focus.setFocus(&fx.m, 601);
     fx.reconcile(.{}); // baseline tiled: both placed
 
     // Enter fullscreen: 601 takes the screen (bw=0, pixel=0, ABOVE), 602
@@ -333,9 +335,9 @@ test "workspace switch: leavers park, arrivers map + place ABOVE; return unpark 
     fx.init();
     defer fx.deinit();
 
-    try model.register(&fx.m, 501, model.WSId.fromIndex(0)); // stays here
-    try model.register(&fx.m, 502, model.WSId.fromIndex(1)); // arrives with the switch
-    model.setFocus(&fx.m, 501);
+    try window_state_ops.register(&fx.m, 501, model.WSId.fromIndex(0)); // stays here
+    try window_state_ops.register(&fx.m, 502, model.WSId.fromIndex(1)); // arrives with the switch
+    focus.setFocus(&fx.m, 501);
     fx.reconcile(.{}); // baseline: 501 placed, 502 parked
 
     fx.m.current = model.WSId.fromIndex(1);
@@ -373,7 +375,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     defer fx.deinit();
 
     helpers.regCur(&fx.m, 701); // home workspace 0
-    model.setFocus(&fx.m, 701);
+    focus.setFocus(&fx.m, 701);
     // multi-tag onto workspace 1
     fx.m.store.getPtr(701).?.mask |= model.bit(model.WSId.fromIndex(1));
     fx.reconcile(.{}); // baseline: placed at master slot on workspace 0
@@ -424,7 +426,7 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     defer fx.deinit();
 
     helpers.regCur(&fx.m, 801);
-    model.setFocus(&fx.m, 801);
+    focus.setFocus(&fx.m, 801);
     fx.reconcile(.{});
     try testing.expect(ledger.lastRectFor(801) != null);
 
@@ -461,9 +463,9 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     // the X value is this constant, the stack half is BELOW (requests.zig).
     try testing.expectEqual(@as(i32, -30000), sink.offscreen_x_position);
 
-    try model.register(&fx.m, 901, model.WSId.fromIndex(0));
-    try model.register(&fx.m, 902, model.WSId.fromIndex(1));
-    model.setFocus(&fx.m, 901);
+    try window_state_ops.register(&fx.m, 901, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 902, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 901);
     fx.reconcile(.{});
 
     // Baseline: 902 lives on another workspace with NO sent history - first sight is
@@ -533,7 +535,7 @@ test "An inactive layout floats every window at the work area" {
 
     helpers.regCur(&fx.m, 201);
     helpers.regCur(&fx.m, 202);
-    model.setFocus(&fx.m, 201);
+    focus.setFocus(&fx.m, 201);
 
     // Baseline: the layout is active, so the engine tiles and both windows get
     // their own cell. Recorded to prove the inactive path below is a real

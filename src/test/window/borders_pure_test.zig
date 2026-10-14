@@ -4,8 +4,10 @@
 //! their state as parameters so they run without a server.
 
 const std = @import("std");
-const model = @import("wm_state");
+const model = @import("model");
 const borders = @import("borders");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 const helpers = @import("helpers");
 
 const ws0 = model.WSId.fromIndex(0);
@@ -22,7 +24,7 @@ fn behind(m: *const model.Model, win: u32, current: model.WSId, comptime has_ful
 /// Registers `win` tiled on `ws` in a fresh model and returns the model.
 fn modelWithTiled(on_ws: model.WSId) !model.Model {
     var m = helpers.makeModel();
-    try model.register(&m, 10, on_ws);
+    try window_state_ops.register(&m, 10, on_ws);
     return m;
 }
 
@@ -51,14 +53,14 @@ test "member of a workspace without a covering occupant keeps its color" {
 
 test "member of a workspace with a covering occupant renders borderless" {
     var m = try modelWithTiled(ws1);
-    try model.register(&m, 20, ws1);
+    try window_state_ops.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
     try std.testing.expect(behind(&m, 10, ws0, true));
 }
 
 test "member is covered by an occupant anchored to its home over blended tags" {
     var m = try modelWithTiled(ws1);
-    try model.register(&m, 20, ws0);
+    try window_state_ops.register(&m, 20, ws0);
     // 20 is tagged on ws0 but covering-anchors to ws1 (a blended window):
     // the rule resolves WIN's home (ws1, where 10 lives) and sees the
     // anchored occupant there, going borderless -- it does not chase the
@@ -69,7 +71,7 @@ test "member is covered by an occupant anchored to its home over blended tags" {
 
 test "member of a workspace with only a foreign-anchored occupant keeps its color" {
     var m = try modelWithTiled(ws0);
-    try model.register(&m, 20, ws1);
+    try window_state_ops.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
     // 10 lives on ws0; the occupant is anchored to ws1, so nothing covers ws0.
     try std.testing.expect(!behind(&m, 10, ws0, true));
@@ -77,7 +79,7 @@ test "member of a workspace with only a foreign-anchored occupant keeps its colo
 
 test "an occupant anchored elsewhere still covers workspaces its mask shows" {
     var m = try modelWithTiled(ws0);
-    try model.register(&m, 20, ws1);
+    try window_state_ops.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
     // tagAdd's whole effect is the mask: 20 stays anchored to ws1 but becomes
     // visible on ws0 too. The table must flag both workspaces — the scan
@@ -95,12 +97,12 @@ test "window with no resolvable workspace falls back to the current workspace oc
     _ = m.store.put(30, .{ .mask = 0, .anchor = .tiled }) catch null;
     detach(&m, 30);
     try std.testing.expectEqual(null, model.findHome(&m, 30));
-    try model.register(&m, 40, ws0);
+    try window_state_ops.register(&m, 40, ws0);
     setCovering(&m, 40, ws0);
     // No home: the current-workspace fallback sees the occupant and goes borderless.
     try std.testing.expect(behind(&m, 30, ws0, true));
     // Without any occupant on the current workspace, the fallback keeps the color.
-    model.unregister(&m, 40);
+    window_state_ops.unregister(&m, 40);
     try std.testing.expect(!behind(&m, 30, ws0, true));
 }
 
@@ -109,7 +111,7 @@ test "fullscreen-absent build never resolves the current-workspace fallback" {
     _ = m.store.put(30, .{ .mask = 0, .anchor = .tiled }) catch null;
     detach(&m, 30);
     try std.testing.expectEqual(null, model.findHome(&m, 30));
-    try model.register(&m, 40, ws0);
+    try window_state_ops.register(&m, 40, ws0);
     setCovering(&m, 40, ws0);
     // No home, but has_fullscreen=false gates the whole covering resolution
     // off: the window keeps its color despite the current-workspace occupant.
@@ -159,17 +161,17 @@ test "focusedBorderColor reads the MODEL's focus, not a second copy" {
     // is what lets borders_test keep being a thin integration check instead of
     // the only place the color policy is exercised.
     var m = helpers.makeModel();
-    try model.register(&m, 1, ws0);
-    try model.register(&m, 2, ws0);
+    try window_state_ops.register(&m, 1, ws0);
+    try window_state_ops.register(&m, 2, ws0);
 
     // Nothing focused: the comparison is against m.focused, which is unset.
-    try std.testing.expectEqual(@as(u32, 0x222222), model.focusedBorderColor(&m, 1, 0x111111, 0x222222));
+    try std.testing.expectEqual(@as(u32, 0x222222), focus.focusedBorderColor(&m, 1, 0x111111, 0x222222));
 
-    model.setFocus(&m, 1);
-    try std.testing.expectEqual(@as(u32, 0x111111), model.focusedBorderColor(&m, 1, 0x111111, 0x222222));
-    try std.testing.expectEqual(@as(u32, 0x222222), model.focusedBorderColor(&m, 2, 0x111111, 0x222222));
+    focus.setFocus(&m, 1);
+    try std.testing.expectEqual(@as(u32, 0x111111), focus.focusedBorderColor(&m, 1, 0x111111, 0x222222));
+    try std.testing.expectEqual(@as(u32, 0x222222), focus.focusedBorderColor(&m, 2, 0x111111, 0x222222));
 
-    model.setFocus(&m, 2);
-    try std.testing.expectEqual(@as(u32, 0x222222), model.focusedBorderColor(&m, 1, 0x111111, 0x222222));
-    try std.testing.expectEqual(@as(u32, 0x111111), model.focusedBorderColor(&m, 2, 0x111111, 0x222222));
+    focus.setFocus(&m, 2);
+    try std.testing.expectEqual(@as(u32, 0x222222), focus.focusedBorderColor(&m, 1, 0x111111, 0x222222));
+    try std.testing.expectEqual(@as(u32, 0x111111), focus.focusedBorderColor(&m, 2, 0x111111, 0x222222));
 }

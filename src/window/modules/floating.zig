@@ -10,6 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const core = @import("core");
+const build_options = @import("build_options");
 
 const window = @import("window");
 const registry = @import("registry");
@@ -23,7 +24,7 @@ const ledger = @import("ledger");
 const usable_area = @import("usable_area");
 const reconcile_tails = @import("reconcile_tails");
 
-const model = @import("wm_state");
+const model = @import("model");
 const scaling = @import("scaling");
 const reconcile = @import("reconcile");
 
@@ -157,7 +158,7 @@ pub fn seedLeakedDragForTest(win: model.WindowId) void {
 /// No-op if a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
-    if (!cs.config.drag_enabled) return;
+    if (!build_options.has_floating) return;
     if (g_state.drag.active) return;
     if (usable_area.isSurfaceWindow(win)) return;
     if (model.isCovering(pipeline.state(), win)) return;
@@ -558,7 +559,7 @@ fn repairStrandedHome(m: *model.Model, e: *model.Entry, win: model.WindowId) boo
     return true;
 }
 
-pub const module: @import("contract").WindowModule = .{
+pub const module: @import("window_contract").WindowModule = .{
     .name = "floating",
     .startDrag = startDrag,
     .stopDrag = stopDrag,

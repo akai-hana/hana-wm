@@ -18,7 +18,7 @@
 const std = @import("std");
 
 const core = @import("core");
-const model = @import("wm_state");
+const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
 const workspaces = @import("workspaces");

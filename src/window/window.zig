@@ -36,15 +36,14 @@ const border_sweeps = @import("border_sweeps");
 const client_events = @import("client_events");
 const pipeline = @import("pipeline");
 const admission = @import("admission");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
+const window_state_ops = @import("window_state_ops");
 const idmap = @import("idmap");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
 const ledger = @import("ledger");
 const reconcile_tails = @import("reconcile_tails");
-// Layout-name resolution for the state dump, via the build-generated seam.
-const tiling = @import("tiling_seam").tiling;
 
 // Window-module hook dispatch lives in registry.zig (the binding layer);
 // window.zig re-exports the five wrappers so `window.*` stays the stable
@@ -333,7 +332,7 @@ pub fn unmanage(win: model_mod.WindowId) void {
     const was_fs_current = if (model_mod.coveringWsOf(m, win)) |ws_id| ws_id.eql(m.current) else false;
     const was_focused = m.focused == win;
 
-    model_mod.unregister(m, win);
+    window_state_ops.unregister(m, win);
     ledger.forget(win); // X ids recycle; stale LastSent must not survive
 
     // Closing the current workspace's covering occupant releases the area;
@@ -444,42 +443,4 @@ pub fn parseSizeHints(
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len < 5) return null;
     return reply_mod.parse(icccm.u32Values(reply), reply.*.value_len);
-}
-
-/// WM-wide state dump diagnostic: logs a live snapshot of model and subsystem
-/// state on demand (read-only); used by the dump-state command. A read-only
-/// log emitter, so it sits on the facade rather than in a subsystem.
-pub fn dumpState() void {
-    // A stack array is the right owner here (no State to hang it off), and it
-    // keeps `query` free of module-level scratch.
-    var scratch: [model_mod.store_capacity]query.Entry = undefined;
-    const all = query.allWindowsInto(&scratch);
-
-    log.info("========== STATE DUMP ==========", .{});
-    log.info("Focused:        {?x}", .{focus.getFocused()});
-    log.info("Total windows:  {}", .{all.len});
-    log.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
-
-    if (build_options.has_workspaces) {
-        const ws_count = query.getWorkspaceCount();
-        for (0..ws_count) |i| {
-            var n: usize = 0;
-            for (all) |e| {
-                if (model_mod.maskedOn(e.mask, model_mod.WSId.fromIndex(i))) n += 1;
-            }
-            log.info(
-                "  WS{}: {} windows",
-                .{ i + 1, n },
-            );
-        }
-    }
-
-    if (build_options.has_tiling and core.tilingEnabled()) {
-        const m = pipeline.state();
-        log.info("Tiling enabled: true", .{});
-        log.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
-        log.info("Tiled windows:  {}", .{model_mod.tiledCountOnWs(m, m.current)});
-    }
-
-    log.info("================================", .{});
 }

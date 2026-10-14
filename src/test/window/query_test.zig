@@ -18,12 +18,14 @@ const std = @import("std");
 const testing = std.testing;
 
 const core = @import("core");
-const model = @import("wm_state");
+const model = @import("model");
 const pipeline = @import("pipeline");
 const query = @import("query");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
+const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const ledger = @import("ledger");
 const recon = @import("reconcile");
@@ -63,7 +65,7 @@ fn reconcile(m: *model.Model, rec: *Recorder, opts: recon.Opts) void {
 }
 
 fn reg(m: *model.Model, win: model.WindowId, ws_idx: u8) !void {
-    try model.register(m, win, model.WSId.fromIndex(ws_idx));
+    try window_state_ops.register(m, win, model.WSId.fromIndex(ws_idx));
 }
 
 test "facade agrees with ledger on managed set, masks, and workspace visibility" {
@@ -75,7 +77,7 @@ test "facade agrees with ledger on managed set, masks, and workspace visibility"
     try reg(m, 101, 0);
     try reg(m, 102, 0);
     try reg(m, 201, 1);
-    model.setFocus(m, 101);
+    focus.setFocus(m, 101);
 
     // Ledger-first preconditions: nothing sent yet, nothing visible.
     try testing.expect(ledger.lastRectFor(101) == null);
@@ -118,7 +120,7 @@ test "facade tracks the workspace switch exactly like the ledger" {
 
     try reg(m, 101, 0);
     try reg(m, 201, 1);
-    model.setFocus(m, 101);
+    focus.setFocus(m, 101);
     reconcile(m, &rec, .{});
 
     // Baseline on ws0: 101 placed, 201 parked.
@@ -144,7 +146,7 @@ test "minimized windows are invisible to both facade and ledger" {
 
     try reg(m, 101, 0);
     try reg(m, 102, 0);
-    model.setFocus(m, 101);
+    focus.setFocus(m, 101);
     reconcile(m, &rec, .{}); // baseline: both placed
 
     // Minimize the stack: presence flips to .parked, reconcile parks it.
@@ -170,7 +172,7 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
 
     try reg(m, 101, 0);
     try reg(m, 102, 0);
-    model.setFocus(m, 101);
+    focus.setFocus(m, 101);
     reconcile(m, &rec, .{}); // baseline: both placed
 
     _ = fullscreen.toggleFullscreen(m, 101);

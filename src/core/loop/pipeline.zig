@@ -4,9 +4,10 @@
 //! model pipeline lives in architecture/model.zig and tiling/.
 
 const std = @import("std");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
 const core = @import("core");
 const focus = @import("focus");
+const window_state_ops = @import("window_state_ops");
 const xcb_sink = @import("sink");
 const usable_area = @import("usable_area");
 const build_options = @import("build_options");
@@ -16,7 +17,7 @@ const profile = @import("profile");
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile.
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 const tiling = @import("tiling_seam").tiling;
 const scaling = @import("scaling");
 
@@ -33,7 +34,7 @@ pub fn init() void {
 }
 
 /// Clear every workspace's focus MRU (index 0 = most recent; see
-/// model.setFocus's front-insert). Boot zeroing (init's `instance = .{}`)
+/// focus.setFocus's front-insert). Boot zeroing (init's `instance = .{}`)
 /// already clears it; this exists for the window layer's deinit/init reset
 /// discipline, which cycles WITHOUT a pipeline re-init — a harness restart
 /// must not inherit the previous cycle's MRU order. Gated so pre-model
@@ -168,7 +169,7 @@ fn ctx() *reconcile.Ctx {
 /// m.focused, so this is the same single source of truth.
 fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     const cfg = &core.getState().config.tiling;
-    return model_mod.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
+    return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke
@@ -182,8 +183,8 @@ fn preReconcileDuties() void {
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
     // module receives a mutable pointer into the model anymore).
     //
-    // The WRITE goes through model.applyParamsDelta rather than a raw
-    // `*LayoutParams` taken from the model. The value-in/value-out shape
+    // The WRITE goes through window_state_ops.applyParamsDelta rather than a
+    // raw `*LayoutParams` taken from the model. The value-in/value-out shape
     // already stopped layout modules from mutating; this closes the last
     // un-gated channel, which was this pipeline function itself holding a
     // mutable pointer into model state across a call into a layout module.
@@ -193,7 +194,7 @@ fn preReconcileDuties() void {
     if (md.preReconcile == null) return;
     const n = model_mod.tiledCountOnWs(&instance, ws);
     const wa = usable_area.workArea(core.getState().screen);
-    model_mod.applyParamsDelta(&instance, ws, md.preReconcile.?(p, n, wa.width));
+    window_state_ops.applyParamsDelta(&instance, ws, md.preReconcile.?(p, n, wa.width));
 }
 
 /// The ONE place a reconcile ctx is built and the one place pre-reconcile

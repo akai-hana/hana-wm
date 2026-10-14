@@ -8,7 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("wm_state");
+const model = @import("model");
 
 test "ids: fromIndex round-trips the index and eql compares it" {
     const a = model.WorkspaceId.fromIndex(3);

@@ -26,7 +26,7 @@ const icccm = @import("icccm");
 const query = @import("query");
 const log = @import("log");
 const pipeline = @import("pipeline");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
 const types = @import("types");
 const idmap = @import("idmap");
 const registry = @import("registry");
@@ -489,7 +489,7 @@ const CommitFlags = struct {
 //       WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, bar dirty flag
 //     - No round trips, no model updates
 //
-// The caller owns the model update (model.setFocus / model.clearFocus)
+// The caller owns the model update (setFocus / clearFocus, defined below)
 // and does it BEFORE the grab, so the model is consistent when the
 // reconcile runs inside the grab.
 
@@ -719,7 +719,7 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
 /// divergence. Only a live model.focused that disagrees with last_applied is
 /// worth a diagnostic; it still proceeds -- every clear caller nulls
 /// model.focused right after, and skipping would strand X input focus on a
-/// stale window the model no longer claims. Callers MUST run model.clearFocus
+/// stale window the model no longer claims. Callers MUST run clearFocus
 /// after this call.
 pub fn prepareClearFocus() FocusTransition {
     const applied = state.?.last_applied;
@@ -747,13 +747,13 @@ pub fn prepareClearFocus() FocusTransition {
 /// prepareFocus reason handed to the winner (the fallback's own
 /// `.tiling_operation`, or `.workspace_switch` on a workspace switch).
 pub fn focusFallback(m: *model_mod.Model, reason: Reason) FocusTransition {
-    // Tier policy lives in the model layer so tests can exercise it without
-    // linking the protocol side (see model.fallbackFocusCandidate). A
+    // Tier policy lives beside the focus protocol so tests can exercise it
+    // without linking the protocol side (see fallbackFocusCandidate below). A
     // no_input candidate can never hold X focus, so it is excluded and the
     // scan continues to the next focusable window; only when nothing
     // focusable remains is model focus cleared and X focus handed to root.
     var excluded: ?model_mod.WindowId = null;
-    while (model_mod.fallbackFocusCandidate(m, m.current, excluded)) |winner| {
+    while (fallbackFocusCandidate(m, m.current, excluded)) |winner| {
         const prep = prepareAndSetFocus(m, winner, reason);
         if (prep == .no_input) {
             excluded = winner;
@@ -764,7 +764,7 @@ pub fn focusFallback(m: *model_mod.Model, reason: Reason) FocusTransition {
     // prepareClearFocus reads MODEL focus as its decision source, so it
     // runs BEFORE the model clear.
     const prep = prepareClearFocus();
-    model_mod.clearFocus(m);
+    clearFocus(m);
     return prep;
 }
 
@@ -778,7 +778,7 @@ pub fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: 
     // `yieldsModelFocus`, not `!= .none`: `.no_input` is a refusal, not a
     // dedup, so the old test let a no_input window take model focus and
     // contradicted the rule written directly above this function.
-    if (yieldsModelFocus(prep)) model_mod.setFocus(m, win);
+    if (yieldsModelFocus(prep)) setFocus(m, win);
     return prep;
 }
 
@@ -916,7 +916,7 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) void {
     const ft = prepareFocus(win, reason);
     if (!yieldsModelFocus(ft)) return;
-    model_mod.setFocus(pipeline.mut(), win);
+    setFocus(pipeline.mut(), win);
     if (reason == .mouse_enter) {
         // Focus-only commit: nothing geometric changes, so skip the
         // reconcile (dwm's enternotify -> focus()). Borders repaint via the
@@ -977,12 +977,12 @@ pub fn cycleFocus(dir: types.Dir, duty: *const fn () void) void {
 pub fn cycleTarget(dir: types.Dir) ?u32 {
     const forward = dir == .forward;
     // Caller-owned scratch, like every other snapshot buffer in this layer
-    // (query.zig): the ordering itself comes from model.collectCyclePool,
+    // (query.zig): the ordering itself comes from collectCyclePool (below),
     // which anchors the cycle on the workspace's tiled_order -- so Mod+j/k
     // follows the arrangement and a move/swap reorders the cycle with it.
     var buf: [model_mod.store_capacity]u32 = undefined;
     const m = pipeline.state();
-    const len = model_mod.collectCyclePool(m, m.current, &buf);
+    const len = collectCyclePool(m, m.current, &buf);
     if (len == 0) return null;
     const wins = buf[0..len];
     // Single visible window: the only sensible cycle step is to focus it
@@ -1000,4 +1000,128 @@ pub fn cycleTarget(dir: types.Dir) ?u32 {
     else
         sentinel;
     return wins[model_mod.wrapIndex(idx, if (forward) 1 else -1, len)];
+}
+
+// Section: model focus operations (moved from model.zig — Option A of the op
+// migration; the focus protocol owns focus state transitions on the model).
+
+/// Writes `win` as the model's focused window and moves it to the front of
+/// the focus MRU. Unknown windows are ignored.
+pub fn setFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
+    if (!m.store.has(win)) return;
+    m.focused = win;
+    const list = &m.ws[m.current.index].focus_mru;
+    // Re-focusing an already-tracked window moves it to the front WITHOUT
+    // spending an eviction, so the newest `mru_capacity` DISTINCT windows are
+    // the ones retained. Then front-insert, evicting the oldest (tail) at
+    // capacity -- one call, so the order (evict, then insert) cannot be
+    // transposed at the call site.
+    const already = list.removeValue(win);
+    if (!already) _ = list.pushFrontEvictingTail(win) else _ = list.insert(0, win);
+}
+
+/// Model-side focus drop (minimize/close with no eligible successor).
+pub fn clearFocus(m: *model_mod.Model) void {
+    m.focused = null;
+}
+
+/// The ONE focused/unfocused border-pixel pick.
+///
+/// This lived as `borders.borderColorOf(focused, ...)` in the window layer
+/// while the core pipeline carried its own copy of the same ternary, so the
+/// two could drift and nothing would notice. It sits with focus because the
+/// focus state is what the pick reads.
+///
+/// `m` supplies the focus source so the caller does not have to pass a
+/// possibly-different answer (borders used `focus.getFocused()`, the pipeline
+/// read `m.focused`; those agree in production but nothing enforced it).
+pub inline fn focusedBorderColor(m: *const model_mod.Model, win: model_mod.WindowId, focused_px: u32, unfocused_px: u32) u32 {
+    return if (m.focused == win) focused_px else unfocused_px;
+}
+
+/// Whether `cand` is eligible as a focus-fallback candidate on `ws`: not the
+/// `excluded` window, and visible there (parked entries fail visibleOn). The
+/// tier-specific extra criteria (tiled membership, base mode) stay at each
+/// tier's call site.
+fn qualifies(m: *const model_mod.Model, cand: model_mod.WindowId, ws: model_mod.WSId, excluded: ?model_mod.WindowId) bool {
+    if (cand == excluded) return false;
+    return model_mod.visibleOn(m, cand, ws);
+}
+
+/// Minimize-fallback target policy. Tier order on workspace `ws`: focus MRU
+/// (newest first), reversed tiled_order, then any visible floating-base
+/// window not in tiled_order. First `visibleOn(ws)` candidate wins; null when
+/// nothing qualifies. `excluded` is a candidate the caller already rejected
+/// (e.g. a no_input window that can never hold X focus) — it is skipped
+/// across all tiers so the caller can re-scan for the next focusable window.
+pub fn fallbackFocusCandidate(m: *const model_mod.Model, ws: model_mod.WSId, excluded: ?model_mod.WindowId) ?model_mod.WindowId {
+    // 1. focus MRU, newest first (mru[0] is the MOST RECENT focus, so
+    //    minimizing the focused window falls back to the previously focused
+    //    one). visibleOn rejects parked entries, including the just-parked
+    //    window itself.
+    const mru = &m.ws[ws.index].focus_mru;
+    for (mru.constSlice()) |cand| {
+        if (qualifies(m, cand, ws, excluded)) return cand;
+    }
+    // 2. reversed tiled_order.
+    var j = m.ws[ws.index].tiled_order.len;
+    while (j > 0) {
+        j -= 1;
+        const cand = m.ws[ws.index].tiled_order.items[j];
+        if (qualifies(m, cand, ws, excluded)) return cand;
+    }
+    // 3. any floating window on the workspace (base geometry, not in
+    //    tiled_order). A covering window owns the screen, so it is not a
+    //    fallback target.
+    //    Linear membership check per floating entry against tiled_order;
+    //    adequate for <50 windows.
+    var it = m.store.iterator();
+    while (it.next()) |row| {
+        if (row.val.anchor != .floating or row.val.presence == .covering) continue;
+        if (row.key == excluded or !model_mod.visibleEntry(m, row.val, ws)) continue;
+        if (m.ws[ws.index].tiled_order.indexOfScalar(row.key) == null) return row.key;
+    }
+    return null;
+}
+
+/// The visible windows of `ws` in ON-SCREEN order, for focus cycling: writes
+/// them into `buf` and returns the count (0 when `buf` is empty). Ordered by
+/// layout, not by window id, because the cycle must follow the arrangement:
+/// `ws`'s tiled_order first (the same slice the layout engine tiles, so master
+/// slots lead and the stack follows), then the visible windows with no tiled
+/// slot here -- floating ones and multi-tagged windows homed on another
+/// workspace -- in store order. A covering occupant collapses the pool to
+/// that one window. `seen` is per-call stack scratch marking the store slots
+/// already admitted, so the two passes can't double-admit a window.
+pub fn collectCyclePool(m: *const model_mod.Model, ws: model_mod.WSId, buf: []model_mod.WindowId) usize {
+    if (model_mod.coveringOccupantOnWs(m, ws)) |occ| {
+        if (buf.len == 0) return 0;
+        buf[0] = occ;
+        return 1;
+    }
+    var seen: [model_mod.store_capacity]bool = [_]bool{false} ** model_mod.store_capacity;
+    var n: usize = 0;
+    // Pass 1: the shown workspace's tiled order == screen order. indexOf
+    // locates the store row, at() reads it -- one search per window, matching
+    // the reconciler's order build.
+    for (m.ws[ws.index].tiled_order.constSlice()) |w| {
+        if (n == buf.len) break;
+        const slot = m.store.indexOf(w) orelse continue;
+        const e = m.store.at(slot).val;
+        if (!model_mod.visibleEntry(m, e, ws)) continue;
+        seen[slot] = true;
+        buf[n] = w;
+        n += 1;
+    }
+    // Pass 2: the untiled tail, after the tiled run. Store order, so floating
+    // windows keep a stable order among themselves.
+    for (0..m.store.count()) |slot| {
+        if (n == buf.len) break;
+        if (seen[slot]) continue;
+        const row = m.store.at(slot);
+        if (!model_mod.visibleEntry(m, row.val, ws)) continue;
+        buf[n] = row.key;
+        n += 1;
+    }
+    return n;
 }

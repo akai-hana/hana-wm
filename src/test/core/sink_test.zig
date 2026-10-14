@@ -22,7 +22,7 @@ const xcb = @import("xcb").xcb;
 const rect = model_rect(11, 22, 33, 44);
 const bw: u16 = 55;
 
-fn model_rect(x: i32, y: i32, w: u16, h: u16) @import("wm_state").Rect {
+fn model_rect(x: i32, y: i32, w: u16, h: u16) @import("model").Rect {
     return .{ .x = x, .y = y, .width = w, .height = h };
 }
 
