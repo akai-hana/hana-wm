@@ -119,7 +119,7 @@ inline fn log(
 
 /// Test-only override for the silence-above rule (see `log`). False (the
 /// default) keeps every test binary silent.
-pub var test_emit: bool = false;
+var test_emit: bool = false;
 
 pub inline fn err(comptime fmt: []const u8, args: anytype) void {
     log(std.log.err, .err, fmt, moduleFromSrc(@src()), args);

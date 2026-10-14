@@ -24,8 +24,6 @@ const ws = @import("ws");
 const manage = @import("manage");
 const geometry = @import("geometry");
 
-/// Registry lookup for the hook `field` (see `contract.providerOf`), null when
-/// no module binds it; canonical scan lives in window.providerOf.
 pub const providerOf = window.providerOf;
 
 pub const callHook = window.callHook;

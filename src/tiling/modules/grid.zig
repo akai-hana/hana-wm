@@ -22,7 +22,7 @@ inline fn paneCell(total: u16, count: u16, gap: u16) u16 {
 
 /// Compute grid layout. Full gap between cells and at screen edges; u16
 /// integer-divided cells, last partial row wider in relaxed mode.
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
     const n = v.order.len;
 

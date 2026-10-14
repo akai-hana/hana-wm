@@ -25,7 +25,7 @@ const StackBoost = struct {
 /// half-gap between panes. Heights via cumulative integer division with
 /// max_height capping (water-filling). Requires the engine contract's
 /// non-empty `v.order`.
-pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     const n = windows.len;
     const ctx = tiling.LayoutCtx.init(v, out);

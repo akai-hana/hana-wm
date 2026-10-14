@@ -15,7 +15,6 @@
 
 const std = @import("std");
 
-const constants = @import("constants");
 const scale = @import("dpi");
 const types = @import("types");
 
