@@ -9,6 +9,8 @@ const log = @import("log");
 const parser = @import("parser");
 const types = @import("types");
 const scaling = @import("scaling");
+const color = @import("color");
+const bar_properties = @import("bar_properties");
 
 /// One accepted location for a knob: a section name and the key spelling
 /// used inside it.
@@ -35,15 +37,6 @@ fn knob(places: []const Placement, target: []const u8, kind: Kind) Knob {
 /// Knob gated on `requires` (whole knob skipped unless that section exists).
 fn knobGated(places: []const Placement, target: []const u8, kind: Kind, requires: []const u8) Knob {
     return .{ .places = places, .target = target, .kind = kind, .requires = requires };
-}
-
-/// The [tiling.aesthetics]/flat [tiling] quartet: same key spells both,
-/// target is tiling.<key>. UNGATED: the aesthetics are visual, so a theme
-/// file may carry only `[tiling.aesthetics]` (no `[tiling]` functional
-/// marker) and still apply border/gap styling. The place probe already
-/// no-ops when neither section exists.
-fn tilingAesthetics(key: []const u8, kind: Kind) Knob {
-    return .{ .places = &.{ place(types.section_tiling_aesthetics, key), place(types.section_tiling, key) }, .target = "tiling." ++ key, .kind = kind };
 }
 
 /// Master-stack trio: dedicated-section short spelling wins over the flat
@@ -113,19 +106,21 @@ pub const knobs = [_]Knob{
     knob(&.{ place(types.section_bar_modules_workspaces, "enabled"), place(types.section_workspaces, "enabled") }, "workspaces.enabled", .b),
 
     // [tiling]: functional knobs gated on the section exactly as
-    // parseTiling always was -- a lone [tiling.aesthetics] without [tiling]
-    // never fed these knobs. (The aesthetics quartet below is UNGATED: it's
-    // visual, so themes may ship it without the functional marker.)
+    // parseTiling always was -- a lone [tiling] carrying only the
+    // aesthetics quartet (a theme file's shape) never fed these
+    // knobs. (The aesthetics quartet below is UNGATED: it's
+    // visual, so themes may ship it without any functional key.)
     knobGated(&.{place(types.section_tiling, "enabled")}, "tiling.enabled", .b, types.section_tiling),
     knobGated(&.{place(types.section_tiling, "global_layout")}, "tiling.global_layout", .b, types.section_tiling),
     knobGated(&.{place(types.section_tiling, "min_window_dim")}, "tiling.min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, types.section_tiling),
 
-    // Aesthetics quartet: [tiling.aesthetics] preferred, flat [tiling]
-    // fallback (same key spellings in both).
-    tilingAesthetics("gap_width", .{ .scalable = 0.0 }),
-    tilingAesthetics("border_width", .{ .scalable = 0.0 }),
-    tilingAesthetics("border_focused", .color),
-    tilingAesthetics("border_unfocused", .color),
+    // Aesthetics quartet: flat [tiling] spellings. UNGATED --
+    // it's visual, so a theme file may ship only these in a
+    // lone [tiling] with no functional key.
+    knob(&.{place(types.section_tiling, "gap_width")}, "tiling.gap_width", .{ .scalable = 0.0 }),
+    knob(&.{place(types.section_tiling, "border_width")}, "tiling.border_width", .{ .scalable = 0.0 }),
+    knob(&.{place(types.section_tiling, "border_focused")}, "tiling.border_focused", .color),
+    knob(&.{place(types.section_tiling, "border_unfocused")}, "tiling.border_unfocused", .color),
 
     // Master-stack trio: the dedicated section's shorter spellings win;
     // flat [tiling] keeps the flat spellings.
@@ -139,8 +134,8 @@ pub const knobs = [_]Knob{
     barBool("vim_mode"),
     barBool("carousel_enabled"),
     barScalable("font_size", "bar.font_size"),
-    // segment_spacing feeds BarConfig.spacing.
-    barScalable("segment_spacing", "bar.spacing"),
+    // per_segment_padding feeds BarConfig.spacing.
+    barScalable("per_segment_padding", "bar.spacing"),
     barScalable("indicator_size", "bar.indicator_size"),
     barScalable("workspace_tag_width", "bar.workspace_tag_width"),
     // height: null = auto-calculate from font metrics alone.
@@ -172,7 +167,7 @@ pub const knobs = [_]Knob{
     knob(&.{place(types.section_bar, "brightness_device")}, "bar.brightness_device", .str),
     knob(&.{place(types.section_bar, "indicator_location")}, "bar.indicator_location", .{ .enum_read = .{ .T = types.IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
     knob(&.{place(types.section_bar, "indicator_padding")}, "bar.indicator_padding", .ratio),
-    knob(&.{place(types.section_bar, "transparency")}, "bar.transparency", .ratio),
+    knob(&.{place(types.section_bar, "transparency")}, "bar.transparency", .ratio_strict),
     // Falls back to the bar-wide fg (its historical default) -- but only
     // when the key is present; absent keeps the field null.
     barColorOpt(&.{place(types.section_bar, "indicator_color")}, "bar.indicator_color", "fg"),
@@ -368,20 +363,6 @@ comptime {
     }
 }
 
-/// True when `key` is one of the [bar.properties] scalar knobs; every OTHER
-/// key in that table is a bar segment name (a per-segment color + style
-/// override, see `applyBarProperties`). Scanned from `knobs` so a future
-/// [bar.properties] knob can never desync the map pass.
-fn isBarPropertiesKnobKey(key: []const u8) bool {
-    inline for (knobs) |k| {
-        for (k.places) |pl| {
-            if (std.mem.eql(u8, pl.section, types.section_bar_properties) and
-                std.mem.eql(u8, pl.key, key)) return true;
-        }
-    }
-    return false;
-}
-
 /// How an enum-valued knob is parsed.
 pub const EnumRead = struct {
     T: type,
@@ -421,6 +402,11 @@ pub const Kind = union(enum) {
     /// [0,1] ratio: bare integers are percentages, `1` resolves to 1% with
     /// a warning.
     ratio,
+    /// [0,1] ratio that rejects bare integers: only a decimal (0.0-1.0)
+    /// or a `%`-suffixed value parses; a bare integer warns and reverts
+    /// to the default. `transparency` uses this so `= 1` can never be
+    /// misread as 1% while `= 1.0` means 100%.
+    ratio_strict,
     /// Optional heap-dup'd string; absent leaves the field untouched.
     str,
     /// Optional float; absent leaves the field at null (meaning "auto").
@@ -542,51 +528,6 @@ fn getInRange(
     return val;
 }
 
-/// True when an accumulated value is (or contains) a `+`/weight color-mix
-/// attempt. Such an array that failed resolveColorExpr is an INVALID mix, and
-/// the last-scalar fallback below must not swallow it (descending to its
-/// final operand silently resolves the bad mix instead of reverting).
-fn isMixAttempt(val: parser.Value) bool {
-    if (val != .array) return false;
-    for (val.asArray().?) |item| {
-        if (item.asScalar([]const u8)) |s| {
-            if (std.mem.indexOfScalar(u8, s, '+') != null) return true;
-        }
-        if (parser.isWeightToken(item.asScalar([]const u8) orelse "")) return true;
-    }
-    return false;
-}
-
-/// Resolves a color from a pre-fetched Value, accepting `#RRGGBB`,
-/// `0xRRGGBB`, an integer, a full-name reference to a collected palette
-/// variable (e.g. `border_focused = primary_color`), or a `+` color-mix
-/// expression of any of those (e.g. `primary_color + (weight:75%)
-/// secondary_color`). The value-decoding forms share parser.colorFromValue
-/// (the single decoder); this layer adds the palette-reference lookup and the
-/// warn-and-default policy on top.
-fn getColorFromValue(
-    key: []const u8,
-    val: parser.Value,
-    default: u32,
-    palette: *const std.StringHashMap(u32),
-) u32 {
-    if (parser.colorFromValue(val)) |c| return c;
-    if (parser.resolveColorExpr(val, palette)) |c| return c;
-    if (isMixAttempt(val)) {
-        log.warn("Invalid color mix for '{s}': coalesced + weights may not exceed 100 and the head operand cannot carry a weight (using default)", .{key});
-        return default;
-    }
-    if (val.asScalar([]const u8)) |s| {
-        if (palette.get(s)) |c| return c;
-        log.warn("Invalid color for {s}: '{s}' (not a hex code, palette reference, or + mix)", .{ key, s });
-        return default;
-    }
-    // Unresolvable value (boolean, size, bare float, out-of-range int, ...)
-    // would otherwise silently use the default without a trace.
-    log.warn("Value for '{s}' is not a color (expected '#RRGGBB', '0xRRGGBB', a bare 6/8-digit hex number, a palette reference, or a + mix), using default", .{key});
-    return default;
-}
-
 /// Reads `section.key` as a ScalableValue, warn-and-return-`default` below
 /// `min`. `fallback_label` names the fallback in the warning ("default" for
 /// ordinary scalables, "auto" for bar.height); callers remap null to their
@@ -612,24 +553,35 @@ fn getScalableInRange(
 }
 
 /// Reads `section.key` into a [0.0, 1.0] ratio, falling back to `default`
-/// when the key is absent or out of range. Bare integers are always
-/// percentages (0-100, `= 1` resolving to 1% with a warning); decimals and
-/// `%`-suffixed values are ratios directly; quoted values fall to the
-/// default, warned.
-fn getRatio(section: *parser.Section, key: []const u8, default: f32) f32 {
+/// when the key is absent or out of range. Decimals and `%`-suffixed
+/// values are ratios directly; quoted values fall to the default, warned.
+///
+/// `ints_are_percent` selects the bare-integer policy. The legacy one
+/// (`.ratio`) reads a bare integer as a percentage 0-100 (`= 1`
+/// resolving to 1% with a warning). The strict one (`.ratio_strict`)
+/// rejects bare integers outright, so `transparency = 1` reverts to the
+/// default instead of being misread as 1% while `= 1.0` means 100%.
+fn getRatio(comptime ints_are_percent: bool, section: *parser.Section, key: []const u8, default: f32) f32 {
     const val = section.get(key) orelse return default;
     if (val.asScalar(i64)) |i| {
-        if (i == 0) return 0.0;
-        if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
-        if (i == 1) {
-            // `= 1` is ambiguous (1% or 1.0); per the "bare integers are
-            // percentages" rule it resolves to 1%, but we warn so a user who
-            // meant the full value writes `1.0` or `100%`.
-            log.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
-                "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
-            return 0.01;
+        if (comptime ints_are_percent) {
+            if (i == 0) return 0.0;
+            if (i >= 2 and i <= 100) return @as(f32, @floatFromInt(i)) / 100.0;
+            if (i == 1) {
+                // `= 1` is ambiguous (1% or 1.0); per the "bare integers are
+                // percentages" rule it resolves to 1%, but we warn so a user who
+                // meant the full value writes `1.0` or `100%`.
+                log.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
+                    "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
+                return 0.01;
+            }
+            log.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
+            return default;
         }
-        log.warn("Invalid {s} value {} (must be 0-100), using default", .{ key, i });
+        log.warn(
+            "{s} value {d} is a bare integer; write a ratio (0.0-1.0) or a percentage (0-100%), using default",
+            .{ key, i },
+        );
         return default;
     }
     if (val.asScalar(types.ScalableValue)) |s| {
@@ -674,7 +626,7 @@ pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const 
 pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types.Config) !void {
     // Resolve the document-global palette (four reserved variable names)
     // before the knobs read: color knobs may reference them by full name.
-    parser.collectPalette(doc);
+    color.collectPalette(doc);
     const palette: *const std.StringHashMap(u32) = &doc.palette;
     inline for (knobs) |k| knob: {
         if (comptime k.requires.len > 0) {
@@ -684,8 +636,8 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
         for (k.places) |pl| {
             // Places probe in order; the FIRST section present in the document
             // wins and only its paired key spelling is read. Presence of
-            // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]
-            // master_count` unrecognized, matching the old orelse chains.
+            // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]`
+            // master_count unrecognized, matching the old orelse chains.
             if (doc.getSection(pl.section)) |sec| {
                 hit = .{ .sec = sec, .key = pl.key };
                 break;
@@ -710,13 +662,13 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             },
             .color => if (hit) |h| {
                 if (h.sec.get(h.key)) |val|
-                    p.* = getColorFromValue(h.key, val, p.*, palette);
+                    p.* = color.getColorFromValue(h.key, val, p.*, palette);
             },
             .color_from => |sibling| {
                 const fallback = @field(cfg.bar, sibling);
                 if (hit) |h| {
                     p.* = if (h.sec.get(h.key)) |val|
-                        getColorFromValue(h.key, val, fallback, palette)
+                        color.getColorFromValue(h.key, val, fallback, palette)
                     else
                         fallback;
                 } else if (comptime k.copy_when_absent) {
@@ -725,10 +677,13 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             },
             .color_opt => |sibling| if (hit) |h| {
                 if (h.sec.get(h.key)) |val|
-                    p.* = getColorFromValue(h.key, val, @field(cfg.bar, sibling), palette);
+                    p.* = color.getColorFromValue(h.key, val, @field(cfg.bar, sibling), palette);
             },
             .ratio => if (hit) |h| {
-                p.* = getRatio(h.sec, h.key, p.*);
+                p.* = getRatio(true, h.sec, h.key, p.*);
+            },
+            .ratio_strict => if (hit) |h| {
+                p.* = getRatio(false, h.sec, h.key, p.*);
             },
             .str => if (hit) |h| {
                 if (h.sec.getAsOrWarn([]const u8, h.key)) |val| try assignStr(allocator, p, val);
@@ -763,216 +718,5 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             },
         }
     }
-    try applyBarProperties(allocator, doc, cfg);
-}
-
-/// Reads `[bar.properties]` segment-name entries (any key not owned by the
-/// scalar knobs above) into `cfg.bar.segment_fg` / `segment_value_fg` /
-/// `segment_props`.
-///
-/// A key with the `_value` suffix (`cpu_value`) is that segment's NUMBER
-/// color: the numeric readout ("42%" in "CPU 42%") is painted with it while
-/// the rest of the segment keeps the plain entry (`cpu`) -- see
-/// `segmentValueFg`. `_value` entries are color-only.
-///
-/// A plain `<segment>` entry is a composite: an optional color override plus
-/// optional style flags, either of which may stand alone. Accepted spellings
-/// for the flags are `underline=true|false`, space-separated `underline true`,
-/// integer `underline 1`, or a bare `underline` (meaning true). The color is
-/// the first color-carrying item (`#RRGGBB`, `0xRRGGBB`, integer, or a
-/// palette reference by full name); a whole-array `+` color-mix is resolved
-/// as a unit first; everything else must be a recognized style flag or it is
-/// warn-and-skipped. A style-only entry keeps the
-/// segment's default `fg` (no color map entry is added).
-///
-/// Runs after the knob loop so the known keys (title, run_*, ...) are
-/// distinguishable. Gated on [bar] exactly like the [bar.properties] chain;
-/// an absent table or section leaves the maps empty, so segment text falls
-/// back to `fg`. Keys are duped for the Config's lifetime.
-fn applyBarProperties(
-    allocator: std.mem.Allocator,
-    doc: *parser.Document,
-    cfg: *types.Config,
-) !void {
-    types.freeSegmentMap(types.Color, &cfg.bar.segment_fg, allocator);
-    types.freeSegmentMap(types.Color, &cfg.bar.segment_value_fg, allocator);
-    types.freeSegmentMap(types.SegmentProps, &cfg.bar.segment_props, allocator);
-    if (doc.getSection(types.section_bar) == null) return;
-    const sec = doc.getSection(types.section_bar_properties) orelse return;
-    var it = sec.orderedIterator();
-    while (it.next()) |pair| {
-        sec.markConsumed(pair.key);
-        if (isBarPropertiesKnobKey(pair.key)) continue;
-        const is_value = std.mem.endsWith(u8, pair.key, "_value");
-        const seg_key = if (is_value) pair.key[0 .. pair.key.len - "_value".len] else pair.key;
-        try applySegmentEntry(allocator, cfg, pair.key, seg_key, is_value, pair.value, &doc.palette);
-    }
-}
-
-/// Sets one style flag (`underline`/`bold`/`italic`) on `props`. Returns
-/// true when `name` was a recognized flag.
-fn setStyleFlag(props: *types.SegmentProps, name: []const u8, val: bool) bool {
-    inline for (std.meta.fields(types.SegmentProps)) |f| {
-        if (f.type != bool) continue;
-        if (std.mem.eql(u8, name, f.name)) {
-            @field(props, f.name) = val;
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Parses one `=value` bool spelling (`underline=true`, `underline=1`,
-/// `underline=false`), or null when `token` is not a `name=bool` form.
-fn boolFromEqualsToken(token: []const u8) ?struct { name: []const u8, value: bool } {
-    const eq = std.mem.indexOfScalar(u8, token, '=') orelse return null;
-    const name = token[0..eq];
-    const raw = token[eq + 1 ..];
-    if (std.mem.eql(u8, raw, "true") or std.mem.eql(u8, raw, "1"))
-        return .{ .name = name, .value = true };
-    if (std.mem.eql(u8, raw, "false") or std.mem.eql(u8, raw, "0"))
-        return .{ .name = name, .value = false };
-    return null;
-}
-
-/// The first color-carrying item of a composite `[bar.properties]` array
-/// value (`#RRGGBB`, `0xRRGGBB`, integer, or palette reference by full name).
-fn firstColorInItems(
-    items: []const parser.Value,
-    palette: *const std.StringHashMap(u32),
-) ?struct { color: u32, consumed: usize } {
-    for (items, 0..) |item, i| {
-        if (parser.colorFromValue(item)) |c| return .{ .color = c, .consumed = i };
-        if (item.asScalar([]const u8)) |s| {
-            if (palette.get(s)) |c| return .{ .color = c, .consumed = i };
-        }
-    }
-    return null;
-}
-
-/// Inserts one segment-keyed entry: dupes `seg_key`, hands ownership to `map`
-/// on success, and rolls the key back on OOM so the map never holds a
-/// dangling key. The six put sites in `applySegmentEntry` share this exact
-/// contract.
-fn putSegmentEntry(
-    comptime V: type,
-    allocator: std.mem.Allocator,
-    map: *std.StringHashMapUnmanaged(V),
-    seg_key: []const u8,
-    item: V,
-) !void {
-    const k = try allocator.dupe(u8, seg_key);
-    errdefer allocator.free(k);
-    try map.put(allocator, k, item);
-}
-
-/// The color map a segment entry writes to: `_value` keys own the segment's
-/// number color, everything else the plain color override.
-inline fn segmentColorMap(cfg: *types.Config, is_value: bool) *std.StringHashMapUnmanaged(types.Color) {
-    return if (is_value) &cfg.bar.segment_value_fg else &cfg.bar.segment_fg;
-}
-
-/// Applies one [bar.properties] segment entry: `_value` keys are color-only
-/// (unchanged decoding); base keys take the composite color+style decoding.
-fn applySegmentEntry(
-    allocator: std.mem.Allocator,
-    cfg: *types.Config,
-    key: []const u8,
-    seg_key: []const u8,
-    is_value: bool,
-    raw: parser.Value,
-    palette: *const std.StringHashMap(u32),
-) !void {
-    if (raw != .array) {
-        // Style-only single-token spellings: `<flag>` (true) and
-        // `<flag>=<bool>`. A non-default result is stored; a cleared flag
-        // (all-false props) is a no-op, exactly as an absent entry.
-        if (raw == .string) {
-            const s = raw.asScalar([]const u8).?;
-            var props = types.SegmentProps{};
-            var recognized = false;
-            if (!is_value) {
-                if (boolFromEqualsToken(s)) |eq| {
-                    if (setStyleFlag(&props, eq.name, eq.value)) recognized = true;
-                } else if (setStyleFlag(&props, s, true)) {
-                    recognized = true;
-                }
-            }
-            if (recognized) {
-                if (!props.isDefault()) {
-                    try putSegmentEntry(types.SegmentProps, allocator, &cfg.bar.segment_props, seg_key, props);
-                }
-                return;
-            }
-        }
-        // Plain scalar: color only, exactly as the pre-properties behavior.
-        const map = segmentColorMap(cfg, is_value);
-        const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
-        try putSegmentEntry(types.Color, allocator, map, seg_key, color);
-        return;
-    }
-
-    const items = raw.asArray().?;
-    // A satisfying color-mix expression spans the whole array; resolve it as a
-    // unit first, so `a + (weight:40%) b` compounds aren't misread as stray
-    // tokens (the per-item scan below would grab just the head operand).
-    // Pure mixes are color-only, exactly as the pre-properties decoding.
-    if (parser.resolveColorExpr(raw, palette)) |mix| {
-        try putSegmentEntry(types.Color, allocator, segmentColorMap(cfg, is_value), seg_key, mix);
-        return;
-    }
-
-    var props = types.SegmentProps{};
-    const found = firstColorInItems(items, palette);
-    if (!is_value) {
-        var i: usize = 0;
-        while (i < items.len) {
-            if (found) |f| if (i == f.consumed) {
-                i += 1;
-                continue;
-            };
-            const token = items[i].asScalar([]const u8) orelse {
-                log.warn("Invalid token for '{s}': expected a color or underline/bold/italic flag, skipping", .{key});
-                i += 1;
-                continue;
-            };
-            // `name=true|false`, `name true`, `name 1|0`, or bare `name`
-            // (true by default). Unified so the invalid-style warning lives once.
-            const eq = boolFromEqualsToken(token);
-            var set: bool = if (eq) |e| e.value else true;
-            var consumed_next = false;
-            if (eq == null and i + 1 < items.len) {
-                if (items[i + 1].asScalar(bool)) |b| {
-                    set = b;
-                    consumed_next = true;
-                } else if (items[i + 1].asScalar(i64)) |iv| {
-                    if (iv == 0 or iv == 1) {
-                        set = iv == 1;
-                        consumed_next = true;
-                    }
-                }
-            }
-            const flag = if (eq) |e| e.name else token;
-            if (setStyleFlag(&props, flag, set)) {
-                if (consumed_next) i += 1;
-            } else {
-                log.warn("Invalid style for '{s}': '{s}' is not underline/bold/italic, skipping", .{ key, token });
-            }
-            i += 1;
-        }
-    }
-
-    if (found) |f| {
-        try putSegmentEntry(types.Color, allocator, segmentColorMap(cfg, is_value), seg_key, f.color);
-    } else if (is_value) {
-        // A `_value` key is color-only: an array with no color is invalid.
-        const color = getColorFromValue(key, raw, cfg.bar.fg, palette);
-        try putSegmentEntry(types.Color, allocator, &cfg.bar.segment_value_fg, seg_key, color);
-    }
-    // Else: style-only base entry; the segment color stays default fg (no
-    // map entry), so segmentFg's orelse fallback yields exactly that.
-
-    if (!is_value and !props.isDefault()) {
-        try putSegmentEntry(types.SegmentProps, allocator, &cfg.bar.segment_props, seg_key, props);
-    }
+    try bar_properties.applyBarProperties(knobs, allocator, doc, cfg);
 }

@@ -1,88 +1,103 @@
-### akai: hana WM default theme ###
+#<!--*~># akai #<~~*|=>#
+# hana's default theme #
 
-# - HEX color code values can be set to either of the following formats:
-#   "#RRGGBB" / RRGGBB / 0xRRGGBB
-# - Any color knob also accepts a "mix" combining other colors: join them
-#   with '+', optionally tagging each later operand with a percentage:
-#     primary_color +(weight:25%) secondary_color     => 75% / 25%
-#   The FIRST operand absorbs the remainder; a plain '+' is an even split.
-#   Operands may be hex values or palette variable names. Use the 0xRRGGBB
-#   (or quoted "#RRGGBB") spelling for a hex operand after the first, since a
-#   bare '#' there starts a comment.
+# This is the theme I personally use on hana.
+# It's commented with useful tips across, if you want to make your own theme. :)
 
-[tiling.aesthetics]
-# Sizes take exact pixels (N / Npx) or a percentage (N%); the reversed '%N'
-# spelling is not supported yet. A percentage resolves against HALF the screen
-# height, because gaps and borders inset a window on two sides: e.g. 100% =
-# half the display height, 0% = disabled. Use a bare number of pixels for
-# absolute control.
-gap_width      = 2%
-border_width   = 1%
+# ------------------------------------------------------------------------------
 
-# Borders follow the focus palette variables (from [bar] below)
+# Color code values can be set to either of the following formats:
+# ("#RRGGBB" / RRGGBB / 0xRRGGBB)
+
+# Color palette knobs 
+# (purely convenience aliases. you can do wtv u want.)
+primary_color     = "#ac3232"
+secondary_color   = "#52263e"
+alternative_color = "#007373"
+
+# Color knobs can also be mixed together by "adding" them up together, using the
+# following syntax: `thing = <color_1> +(weight:N%) <color_2>`   # 75%-25% split
+
+# The parentheses attached to the '+' determine the properties of the sum, so
+# `+(weight:25%)` would mean 25% of <color_2> is mixed with 75% of <color_1>.
+
+# ------------------------------------------------------------------------------
+
+[tiling]
+
+# Sizes can take exact pixels (N / Npx) or a percentage (N% / %N).
+# Percentages are measured against the total display screen space.
+
+# Since percentages ratio against your screen's resolution, they'll
+# dynamically adapt to the display's resolution, occupying the same
+# perceived space under different resolutions and aspect ratios.
+
+border_width = 1%
+gap_width    = 2%
+
 border_focused   = primary_color
 border_unfocused = secondary_color
 
+# ------------------------------------------------------------------------------
+
 [bar]
-# Font
-## First value is the default font used
-## Subsequent values render in characters not included by first value (ej. non-ASCII)
-fonts = [
-    "FiraCode Nerd Font Propo Ret",
-    "Noto Sans CJK JP", # japanese characters
-]
 
-# Bar height
-## Auto-adapts to font size by default.
-height = 3.5%
+bg = "#0d0d14"
+fg = text_color
+text_color = "#ebd9bc"
 
-## Font size as a percentage of the bar's height (70% = glyphs occupy 70% of
-## the bar's vertical space); the activity indicator scales the same way.
-font_size      = 70%
-indicator_size = 25%
-
-# Workspace labels/icons (1-N)
-icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
-
-segment_spacing    = 5%
-indicator_padding  = 40%
-
-# Activity glyph drawn in each tag that has windows. The two keys are optional
-# glyph overrides; unset uses the defaults shown below. indicator_location
-# anchors the glyph inside the tag (up-left suits a bottom bar).
-# indicator_focused   = "■"
-# indicator_unfocused = "□"
-indicator_location = "up-left"
-
-# Workspace tag width as a percentage of the bar's height (100% = the bar's
-# full height) or exact pixels
-workspace_tag_width = 100%
-
-# Bar transparency. Bare integers are percentages: 0% = fully transparent,
-# 100% / 1.0 = fully opaque, 50% / 0.5 = half. (A bare `1` means 1% opacity,
-# not 1.0; write `1.0` or `100%` for fully opaque.)
+# 100% / 1.0 = fully opaque, 0% / 0 = fully transparent.
+# (Bare integers are not accepted here: write `1.0` or `100%`
+# for fully opaque, `0.0` or `0%` for fully transparent.)
 # With picom's gaussian blur, the bar will show blurred content behind it
 transparency = 0% # [0.0 - 1.0] / [0% - 100%]
 
-# drun command runner prompt string (default: "run: ")
+height = 3.25% #TODO: rename to bar_height
+segment_spacing = 5%
+
+# Fonts are prioritized in array order; first value is the default font used.
+# Following fonts fill characters missing from previous ones (e.g. non-ASCII)
+fonts = [
+    "FiraCode Nerd Font Propo Ret",
+    "Noto Sans CJK JP", # japanese workspace icons support
+]
+
+# When set as a percentage, this'll be the font's size in respect to bar height.
+# e.g. `100%` => font is as big as it could be, without spilling out of the bar. 
+font_size = 77.5%
+
+# Basically, any value under 100% effectively acts as padding between the text
+# and the bar's dimensions, and anything above 100% will overflow outside of it.
+
+# ------------------------------------------------------------------------------
+
+#TODO: add "[bar.workspace]" section, remove "workspace_" appending to variables
+
+# Workspace labels/icons [1-N)
+icons = ["あ", "か", "い", "は", "な", "つ", "ん", "で"]
+
+indicator_focused   = "■"
+indicator_unfocused = "□"
+
+indicator_location = "up-left"
+indicator_size     = 25%
+indicator_padding  = 35%
+
+# Percentage -> bar width in respect to height. 100% => squared workspace tags.
+# You can go above 100% for rectangled tags.
+workspace_tag_width = 100% #TODO: separate this knob into two: one for focused
+                           # workspaces and another one for unfocused.
+
+# drun command runner prompt string #TODO: make the default "$: "
 drun_prompt = "$ "
 
-#  Carousel (scrolling title)
 # carousel_enabled: set to false to disable scrolling entirely and use a
 #   static ellipsis when the title overflows.
 carousel_enabled = true
 
-# Main color palette
-## Core palette: the editable colors. Every accent below inherits from
-## these four; change one here and the whole bar follows.
-primary_color     = "#ac3232" # focused title / selected workspace / active border
-secondary_color   = "#52263e" # unfocused title / inactive border
-alternative_color = "#007373" # minimized title
-text_color        = "#ebd9bc" # bar text (matches fg)
 
-# Bar
-bg = "#0d0d14"
-fg = text_color
+
+
 
 ## Workspace tag indicators
 # The selected tag's icon TEXT and INDICATOR colors are set individually:

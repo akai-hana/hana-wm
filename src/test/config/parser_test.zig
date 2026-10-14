@@ -11,6 +11,7 @@ const testing = std.testing;
 // warn-level diagnostics; src/core/pure/log.zig silences all std.log
 // diagnostics in test binaries, so this stays quiet on success.
 const parser = @import("parser");
+const color = @import("color");
 const types = @import("types");
 
 /// Parses into the caller's arena (like the load-scoped arena the real config
@@ -82,17 +83,17 @@ test "colorFromValue: bare all-digit spellings are hex (6 or 8 digits), others i
     // A bare 6-digit number is #RRGGBB hex; 8 digits are #RRGGBBAA hex. Any
     // other bare integral value in a color context is rejected instead of
     // silently coerced to a decimal color.
-    try testing.expectEqual(@as(u32, 0x112233), parser.colorFromValue(.{ .integer = 112233 }).?);
-    try testing.expectEqual(@as(u32, 0x11223344), parser.colorFromValue(.{ .integer = 11223344 }).?);
-    try testing.expectEqual(@as(u32, 0x99999999), parser.colorFromValue(.{ .integer = 99999999 }).?);
-    try testing.expectEqual(@as(u32, 0x16777215), parser.colorFromValue(.{ .integer = 16777215 }).?);
-    try testing.expect(parser.colorFromValue(.{ .integer = 300 }) == null);
-    try testing.expect(parser.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits: neither RGB nor RGBA
-    try testing.expect(parser.colorFromValue(.{ .integer = -1 }) == null);
+    try testing.expectEqual(@as(u32, 0x112233), color.colorFromValue(.{ .integer = 112233 }).?);
+    try testing.expectEqual(@as(u32, 0x11223344), color.colorFromValue(.{ .integer = 11223344 }).?);
+    try testing.expectEqual(@as(u32, 0x99999999), color.colorFromValue(.{ .integer = 99999999 }).?);
+    try testing.expectEqual(@as(u32, 0x16777215), color.colorFromValue(.{ .integer = 16777215 }).?);
+    try testing.expect(color.colorFromValue(.{ .integer = 300 }) == null);
+    try testing.expect(color.colorFromValue(.{ .integer = 1677721 }) == null); // 7 digits: neither RGB nor RGBA
+    try testing.expect(color.colorFromValue(.{ .integer = -1 }) == null);
     // The .color and string forms are unchanged.
-    try testing.expectEqual(@as(u32, 0x61AFEF), parser.colorFromValue(.{ .color = 0x61AFEF }).?);
-    try testing.expectEqual(@as(u32, 0x112233), parser.colorFromValue(.{ .string = "112233" }).?);
-    try testing.expectEqual(@as(u32, 0x61AFEF), parser.colorFromValue(.{ .string = "#61AFEF" }).?);
+    try testing.expectEqual(@as(u32, 0x61AFEF), color.colorFromValue(.{ .color = 0x61AFEF }).?);
+    try testing.expectEqual(@as(u32, 0x112233), color.colorFromValue(.{ .string = "112233" }).?);
+    try testing.expectEqual(@as(u32, 0x61AFEF), color.colorFromValue(.{ .string = "#61AFEF" }).?);
 }
 
 test "mergeDocumentsInto: later document wins for scalars" {
@@ -275,7 +276,7 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try palette.put("pb", 0x802000);
 
     // Plain midpoint (unspaced string spelling).
-    try testing.expectEqual(@as(u32, 0x901000), parser.resolveColorExpr(.{ .string = "pa+pb" }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x901000), color.resolveColorExpr(.{ .string = "pa+pb" }, &palette).?);
     // Spaced array spelling with a weight on the second operand: b = 25%.
     var spaced = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 4);
     defer spaced.deinit(testing.allocator);
@@ -283,7 +284,7 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try spaced.append(testing.allocator, .{ .string = "+" });
     try spaced.append(testing.allocator, .{ .string = "(weight:25%)" });
     try spaced.append(testing.allocator, .{ .string = "pb" });
-    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = .{ .list = spaced } }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x980800), color.resolveColorExpr(.{ .array = .{ .list = spaced } }, &palette).?);
 
     // Combined "+(weight:N%)" token (no space after the plus) is equivalent.
     var compact = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 3);
@@ -291,17 +292,17 @@ test "color-mix: resolveColorExpr averages channels across spellings and weights
     try compact.append(testing.allocator, .{ .string = "pa" });
     try compact.append(testing.allocator, .{ .string = "+(weight:25%)" });
     try compact.append(testing.allocator, .{ .string = "pb" });
-    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .array = .{ .list = compact } }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x980800), color.resolveColorExpr(.{ .array = .{ .list = compact } }, &palette).?);
     // Reversed weight: b = 75%.
-    try testing.expectEqual(@as(u32, 0x881800), parser.resolveColorExpr(.{ .string = "pa+(weight:75%)pb" }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x881800), color.resolveColorExpr(.{ .string = "pa+(weight:75%)pb" }, &palette).?);
 
     // A chain: a stays the head, later operands take their annotation
     // (a=50%, b=25%, a=25%).
-    try testing.expectEqual(@as(u32, 0x980800), parser.resolveColorExpr(.{ .string = "pa+(weight:25%)pb+(weight:25%)pa" }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x980800), color.resolveColorExpr(.{ .string = "pa+(weight:25%)pb+(weight:25%)pa" }, &palette).?);
 
     // Equal weights beyond two operands share evenly (a=160/0/0,
     // b=128/32/0: r=(160+128+128)/3=139, g=(32+32)/3=21).
-    try testing.expectEqual(@as(u32, 0x8B1500), parser.resolveColorExpr(.{ .string = "pa+pb+pb" }, &palette).?);
+    try testing.expectEqual(@as(u32, 0x8B1500), color.resolveColorExpr(.{ .string = "pa+pb+pb" }, &palette).?);
 }
 
 test "color-mix: malformed expressions resolve to null, not garbage" {
@@ -311,21 +312,21 @@ test "color-mix: malformed expressions resolve to null, not garbage" {
     try palette.put("b", 0x802000);
 
     // No '+': not a mix (plain aliases live in getColorFromValue).
-    try testing.expect(parser.resolveColorExpr(.{ .string = "pa" }, &palette) == null);
+    try testing.expect(color.resolveColorExpr(.{ .string = "pa" }, &palette) == null);
     // A weight above 100 is invalid.
-    try testing.expect(parser.resolveColorExpr(.{ .string = "pa+(weight:150%)pb" }, &palette) == null);
+    try testing.expect(color.resolveColorExpr(.{ .string = "pa+(weight:150%)pb" }, &palette) == null);
     // An unknown operand is invalid.
-    try testing.expect(parser.resolveColorExpr(.{ .string = "pa+nope" }, &palette) == null);
+    try testing.expect(color.resolveColorExpr(.{ .string = "pa+nope" }, &palette) == null);
     // Stray structure in the array spelling.
     const cases = [_][]const parser.Value{ &.{ .{ .string = "+" }, .{ .string = "pa" }, .{ .string = "pb" } }, &.{ .{ .string = "pa" }, .{ .string = "+" } }, &.{ .{ .string = "pa" }, .{ .string = "+" }, .{ .string = "pb" }, .{ .string = "c" } } };
     for (cases) |cs| {
         var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, cs.len);
         defer arr.deinit(testing.allocator);
         try arr.appendSlice(testing.allocator, cs);
-        try testing.expect(parser.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) == null);
+        try testing.expect(color.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) == null);
     }
     // The head operand may never carry a weight.
-    try testing.expect(parser.resolveColorExpr(.{ .string = "(weight:50%)pa+pb" }, &palette) == null);
+    try testing.expect(color.resolveColorExpr(.{ .string = "(weight:50%)pa+pb" }, &palette) == null);
 }
 
 test "color-mix: a bare operand list mixes equally" {
@@ -338,13 +339,13 @@ test "color-mix: a bare operand list mixes equally" {
     var arr = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 2);
     defer arr.deinit(testing.allocator);
     try arr.appendSlice(testing.allocator, &.{ .{ .string = "pa" }, .{ .string = "pb" } });
-    const mixed = parser.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) orelse return error.TestUnexpectedResult;
+    const mixed = color.resolveColorExpr(.{ .array = .{ .list = arr } }, &palette) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u32, 0x901000), mixed);
     // A single-element list is not a mix; the alias fallback handles it.
     var one = try std.ArrayList(parser.Value).initCapacity(testing.allocator, 1);
     defer one.deinit(testing.allocator);
     try one.append(testing.allocator, .{ .string = "pa" });
-    try testing.expect(parser.resolveColorExpr(.{ .array = .{ .list = one } }, &palette) == null);
+    try testing.expect(color.resolveColorExpr(.{ .array = .{ .list = one } }, &palette) == null);
 }
 
 test "collectPalette: aliases and + mixes resolve through a fixpoint" {
@@ -357,7 +358,7 @@ test "collectPalette: aliases and + mixes resolve through a fixpoint" {
         \\alternative_color = "#000000"
         \\text_color        = "#ffffff"
     );
-    parser.collectPalette(&doc);
+    color.collectPalette(&doc);
     try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("primary_color").?);
     try testing.expectEqual(@as(u32, 0xFFFFFF), doc.palette.get("secondary_color").?);
     try testing.expectEqual(@as(u32, 0x000000), doc.palette.get("alternative_color").?);
@@ -373,7 +374,7 @@ test "collectPalette: a cyclic mix is skipped, not infinite-looped" {
         \\secondary_color = primary_color
         \\text_color      = "#ffffff"
     );
-    parser.collectPalette(&doc);
+    color.collectPalette(&doc);
     try testing.expect(doc.palette.contains("text_color"));
     try testing.expect(!doc.palette.contains("primary_color"));
     try testing.expect(!doc.palette.contains("secondary_color"));
@@ -387,10 +388,10 @@ test "color-mix: literal arrays parse with accumulated=false, mixing stays intac
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const doc0 = try parse(arena.allocator(),
-        \\[tiling.aesthetics]
+        \\[tiling]
         \\x = [1, 2]
     );
-    const x = doc0.sections.getPtr("tiling.aesthetics").?.get("x").?;
+    const x = doc0.sections.getPtr("tiling").?.get("x").?;
     try testing.expect(x == .array);
     try testing.expect(!x.array.accumulated);
     try testing.expectEqual(@as(usize, 2), x.array.list.items.len);
