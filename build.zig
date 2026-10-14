@@ -102,6 +102,129 @@ pub fn build(b: *std.Build) !void {
     // filesystem.
     var discovery = try Module.DiscoveryContext.run(b, target, optimize, source_root, entry_point_path);
 
+    const features = probeFeatures(&discovery, build_opts);
+
+    // Restrict the run to one *_test file. A BUILD-side filter, not
+    // just a pass-through: see the filter_matched check in wireUnitTests.
+    const test_filter = b.option([]const u8, "test-filter", "Run only this *_test file (e.g. model_test)");
+
+    // `zig build modules`: the discovered stem table, answerable without
+    // reading discovery code. The walk already ran, so the output is baked
+    // into a printf command at configure time — no custom step machinery.
+    {
+        var keys: std.ArrayList([]const u8) = .empty;
+        defer keys.deinit(b.allocator);
+        var mit = discovery.modules.keyIterator();
+        while (mit.next()) |k| try keys.append(b.allocator, k.*);
+        std.mem.sort([]const u8, keys.items, {}, lessStrings);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(b.allocator);
+        for (keys.items) |k| try buf.print(b.allocator, "{s}\n", .{k});
+        const modules_step = b.step("modules", "Print the discovered module stem table (sorted)");
+        modules_step.dependOn(&b.addSystemCommand(&.{ "printf", "%s", buf.items }).step);
+    }
+
+    const gen = try buildGeneratedModules(b, &discovery, build_opts, target, optimize);
+    const build_opts_mod = gen.build_opts_mod;
+    const surfaces_mod = gen.surfaces_mod;
+    const has_usr = gen.has_usr;
+    const owner_modules = gen.owner_modules;
+
+    const shared_ctx: SharedBuildContext = .{
+        .build_opts = build_opts_mod,
+        .fallback_toml = fallback_toml_mod,
+        .surfaces = surfaces_mod,
+        .owner_modules = owner_modules,
+    };
+
+    const root_mod = try wireRootModule(b, target, optimize, has_usr, shared_ctx, &discovery);
+    const unit_test_step = try wireUnitTests(b, &discovery, features, test_filter);
+    const exe_step = buildExeAndRunStep(b, root_mod);
+    wireBenchStep(b, bench_enabled, unit_test_step);
+    try wireCheckSteps(b, exe_step, &discovery, features, shared_ctx, has_usr, target, optimize);
+}
+
+// Shared context
+
+/// Names claimed by `injectShared` that would collide with the generated
+/// import every module receives. `surfaces` is reserved for the chrome-surface
+/// registration module; no `src/surfaces.zig` may exist.
+const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml", "surfaces" };
+
+/// Shared artefacts injected into every module, root and discovered alike.
+const SharedBuildContext = struct {
+    build_opts: *std.Build.Module,
+    fallback_toml: *std.Build.Module,
+    /// The build-generated chrome-surface registration module created by
+    /// `buildSurfacesModule` (exports `Surfaces`). Injected into every module
+    /// so core source can `@import("surfaces").Surfaces` without ever naming
+    /// the bar. Kept separate from the per-owner `modules` registries so the
+    /// bar family stays byte-identical.
+    surfaces: *std.Build.Module,
+    /// The build-generated per-owner `modules` registries created by
+    /// `buildOwnerRegistries`, keyed by their injectable import name
+    /// (`<owner>_modules`, e.g. `window_modules`). Injected into every module
+    /// so core source can `@import("window_modules").modules` to iterate an
+    /// owner's auto-discovered sub-system set with uniform loops.
+    owner_modules: std.StringHashMapUnmanaged(*std.Build.Module),
+};
+
+// Helpers
+
+/// Every feature/segment presence flag derived from the discovered module
+/// set, in one value. The has_* flags are published as build options inside
+/// `probeFeatures`; the seg/level/volume flags are consumed only by the test
+/// gate table and the plugin-template specs, so they are NOT published.
+const FeatureSet = struct {
+    has_tiling: bool,
+    has_floating: bool,
+    has_minimize: bool,
+    has_fullscreen: bool,
+    has_workspaces: bool,
+    has_bar: bool,
+    has_vim: bool,
+    has_seg_clock: bool,
+    has_seg_carousel: bool,
+    has_seg_prompt: bool,
+    has_seg_systatus: bool,
+    has_seg_brightness: bool,
+    has_seg_slider: bool,
+    has_seg_title: bool,
+    has_level: bool,
+    has_volume: bool,
+
+    /// Feature name -> is-it-built bool, for `readTestGate`. A gate a test
+    /// declares in its own source resolves through this; naming a feature
+    /// that does not exist is a hard error in the reader, not a silent skip.
+    fn featureFlags(self: FeatureSet) [16]FeatureFlag {
+        return [_]FeatureFlag{
+            .{ .name = "tiling", .on = self.has_tiling },
+            .{ .name = "floating", .on = self.has_floating },
+            .{ .name = "minimize", .on = self.has_minimize },
+            .{ .name = "fullscreen", .on = self.has_fullscreen },
+            .{ .name = "workspaces", .on = self.has_workspaces },
+            .{ .name = "bar", .on = self.has_bar },
+            .{ .name = "vim", .on = self.has_vim },
+            .{ .name = "seg_clock", .on = self.has_seg_clock },
+            .{ .name = "seg_carousel", .on = self.has_seg_carousel },
+            .{ .name = "seg_prompt", .on = self.has_seg_prompt },
+            .{ .name = "seg_systatus", .on = self.has_seg_systatus },
+            .{ .name = "seg_brightness", .on = self.has_seg_brightness },
+            .{ .name = "seg_slider", .on = self.has_seg_slider },
+            .{ .name = "seg_title", .on = self.has_seg_title },
+            .{ .name = "level", .on = self.has_level },
+            .{ .name = "volume", .on = self.has_volume },
+        };
+    }
+};
+
+/// Optional-module detection: every has_* flag is derived from
+/// discovery.modules (the single src/ walk) rather than re-probing the
+/// filesystem, so a flag can never disagree with what was actually
+/// discovered. Returns the full set; the has_* build options are published
+/// inside. The /usr probes below keep pathExists because they are about
+/// host tooling, not discovered sources.
+fn probeFeatures(discovery: *const Module.DiscoveryContext, build_opts: *std.Build.Step.Options) FeatureSet {
     // Optional module detection — every has_* flag is derived from
     // discovery.modules (which already walked src/) rather than re-probing the
     // filesystem, so a flag can never disagree with what was actually
@@ -157,7 +280,43 @@ pub fn build(b: *std.Build) !void {
     for (optional_features) |feature| {
         build_opts.addOption(bool, feature.option, discovery.modules.contains(feature.stem));
     }
+    return .{
+        .has_tiling = has_tiling,
+        .has_floating = has_floating,
+        .has_minimize = has_minimize,
+        .has_fullscreen = has_fullscreen,
+        .has_workspaces = has_workspaces,
+        .has_bar = has_bar,
+        .has_vim = has_vim,
+        .has_seg_clock = has_seg_clock,
+        .has_seg_carousel = has_seg_carousel,
+        .has_seg_prompt = has_seg_prompt,
+        .has_seg_systatus = has_seg_systatus,
+        .has_seg_brightness = has_seg_brightness,
+        .has_seg_slider = has_seg_slider,
+        .has_seg_title = has_seg_title,
+        .has_level = has_level,
+        .has_volume = has_volume,
+    };
+}
 
+/// Generated registration modules: the /usr probe memo, the chrome-surface
+/// module, the per-owner registries (plus their package sub-addon registries)
+/// and the tiling seam, all finalized with the shared system paths.
+const GeneratedModules = struct {
+    build_opts_mod: *std.Build.Module,
+    surfaces_mod: *std.Build.Module,
+    owner_modules: std.StringHashMapUnmanaged(*std.Build.Module),
+    has_usr: UsrDirs,
+};
+
+fn buildGeneratedModules(
+    b: *std.Build,
+    discovery: *Module.DiscoveryContext,
+    build_opts: *std.Build.Step.Options,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) !GeneratedModules {
     // Generated registration modules. Built after discovery (the contract-bound
     // modules must exist to be imported by name) but before injectShared
     // wires root + every discovered module with the generated imports: a
@@ -180,13 +339,13 @@ pub fn build(b: *std.Build) !void {
     // deterministic dispatch order. The registry must be fully populated
     // BEFORE `buildOwnerRegistries` is called (DFS visit order satisfies
     // this: the single src/ walk above completes discovery before the call).
-    var registry = try OwnerRegistry.run(&discovery);
+    var registry = try OwnerRegistry.run(discovery);
     try validateRegistryNames(b, &registry, &discovery.modules);
     // Contract names are read from the modules' own `pub const module`
-    // declarations (typed or via scaffold), never from a hand-written table.
+    // declarations (typed or via the segment builder), never from a hand-written table.
     // The classification is single-read memoized during discovery, so this
     // pass adds no source re-reads.
-    try deriveOwnerContracts(b, &discovery, &registry);
+    try deriveOwnerContracts(b, discovery, &registry);
     // Precompute each package's bound-sub list (siblings self-declaring the
     // binding, sorted alphabetically) BEFORE either consumer needs it: every
     // generated `<package>_subs` registry is one such list, and the
@@ -195,7 +354,7 @@ pub fn build(b: *std.Build) !void {
     // orderings can never drift from each other.
     var bound_subs = std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)){};
     for (sub_registry_specs) |spec| {
-        _ = try boundSubStems(b, &discovery, spec, &bound_subs);
+        _ = try boundSubStems(b, discovery, spec, &bound_subs);
     }
     var owner_modules = try buildOwnerRegistries(b, &discovery.modules, target, optimize, &registry, &bound_subs);
     // Package sub-addon registries (`<package>_subs`), generated from file
@@ -236,15 +395,19 @@ pub fn build(b: *std.Build) !void {
     while (oms_it.next()) |m| {
         finalizeModule(m.*, optimize, has_usr);
     }
+    return .{ .build_opts_mod = build_opts_mod, .surfaces_mod = surfaces_mod, .owner_modules = owner_modules, .has_usr = has_usr };
+}
 
-    // Root module
-    const shared_ctx: SharedBuildContext = .{
-        .build_opts = build_opts_mod,
-        .fallback_toml = fallback_toml_mod,
-        .surfaces = surfaces_mod,
-        .owner_modules = owner_modules,
-    };
-
+/// Root module: created, finalized with the shared system paths, cross-wired
+/// with every discovered module, and linked against the system libraries.
+fn wireRootModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    has_usr: UsrDirs,
+    shared_ctx: SharedBuildContext,
+    discovery: *Module.DiscoveryContext,
+) !*std.Build.Module {
     const root_mod = b.createModule(.{
         .root_source_file = b.path(entry_point_path),
 
@@ -268,48 +431,35 @@ pub fn build(b: *std.Build) !void {
     var mod_it = discovery.modules.valueIterator();
     while (mod_it.next()) |mod| {
         // All discovered modules are compiled into the libc-linked `hana`
-        // binary, and several of them call libc directly (fallback.zig's
-        // getenv, window/floating's free). Precise-edge wiring no longer drags
-        // in a link_libc test root, so declare libc explicitly per module.
-        mod.*.link_libc = true;
-        finalizeModule(mod.*, optimize, has_usr);
+        // binary; see finalizeModuleLinked for why libc is declared per module.
+        finalizeModuleLinked(mod.*, optimize, has_usr);
     }
+    return root_mod;
+}
 
+/// Unit-test wiring (src/test/**): every discovered *_test module becomes a
+/// `zig build test` run (and a `zig build test.<stem>` single-file step),
+/// gated by its own `// build-gate:` line; X-gated tests are serialized on
+/// one $DISPLAY. Returns the aggregate `test` step.
+fn wireUnitTests(
+    b: *std.Build,
+    discovery: *Module.DiscoveryContext,
+    features: FeatureSet,
+    test_filter: ?[]const u8,
+) !*std.Build.Step {
     // Unit tests for the reworked architecture layers (src/test/**, grouped
-    // by category: core/, window/, bar/, config/, input/, latency/, tiling/,
-    // x11/): every discovered module named *_test.zig becomes a `zig build test`
+    // by category: core/, window/, bar/, config/, input/, bench/, tiling/,
+    // harness/): every discovered module named *_test.zig becomes a `zig build test`
     // run. Discovered modules are cross-wired with all others, so a test
     // file's named imports
     // (e.g. model, helpers) resolve exactly as they do in production builds --
     // standalone `zig test <file>` cannot resolve them (module-root escape),
     // which is why tests go through the build system.
     const unit_test_step = b.step("test", "Run unit tests");
-    // Feature name -> is-it-built bool. The gate a test declares in its
-    // own source resolves through this, so the two sides can only disagree by
-    // naming a feature that does not exist -- which is a hard error below, not
-    // a silent wrong answer.
-    const feature_flags = [_]FeatureFlag{
-        .{ .name = "tiling", .on = has_tiling },
-        .{ .name = "floating", .on = has_floating },
-        .{ .name = "minimize", .on = has_minimize },
-        .{ .name = "fullscreen", .on = has_fullscreen },
-        .{ .name = "workspaces", .on = has_workspaces },
-        .{ .name = "bar", .on = has_bar },
-        .{ .name = "vim", .on = has_vim },
-        .{ .name = "seg_clock", .on = has_seg_clock },
-        .{ .name = "seg_carousel", .on = has_seg_carousel },
-        .{ .name = "seg_prompt", .on = has_seg_prompt },
-        .{ .name = "seg_systatus", .on = has_seg_systatus },
-        .{ .name = "seg_brightness", .on = has_seg_brightness },
-        .{ .name = "seg_slider", .on = has_seg_slider },
-        .{ .name = "seg_title", .on = has_seg_title },
-        .{ .name = "level", .on = has_level },
-        .{ .name = "volume", .on = has_volume },
-    };
+    // Feature gates, derived: the table lives with FeatureSet so the test
+    // reader and the plugin specs cannot disagree about what exists.
+    const feature_flags = features.featureFlags();
 
-    // Restrict the run to one *_test file. A BUILD-side filter, not
-    // just a pass-through: see the filter_matched check in the loop below.
-    const test_filter = b.option([]const u8, "test-filter", "Run only this *_test file (e.g. model_test)");
     // X-gated integration tests connect to the same $DISPLAY; chain their run
     // steps so server-global input-focus assertions cannot race across the
     // parallel test processes.
@@ -418,7 +568,11 @@ pub fn build(b: *std.Build) !void {
             return error.NoSuchTestFilter;
         }
     }
+    return unit_test_step;
+}
 
+/// The hana executable + the `run` step.
+fn buildExeAndRunStep(b: *std.Build, root_mod: *std.Build.Module) *std.Build.Step {
     // Artifact & steps
     const exe = b.addExecutable(.{ .name = "hana", .root_module = root_mod });
     b.installArtifact(exe);
@@ -427,7 +581,11 @@ pub fn build(b: *std.Build) !void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
+    return &exe.step;
+}
 
+/// The `bench` step: full-iteration latency/benchmark runs under -Dbench.
+fn wireBenchStep(b: *std.Build, bench_enabled: bool, unit_test_step: *std.Build.Step) void {
     // `zig build bench -Dbench=true` runs the latency/benchmark tests
     // with their full iteration counts and records the timings.
     //
@@ -444,32 +602,45 @@ pub fn build(b: *std.Build) !void {
     } else {
         bench_step.dependOn(&b.addFail("zig build bench requires -Dbench=true; without it the bench tests are smoke runs and the step would silently do nothing useful").step);
     }
+}
 
+/// Plugin-template compile gate + the `check` / `check-modularity` /
+/// `check-all` steps.
+fn wireCheckSteps(
+    b: *std.Build,
+    exe_step: *std.Build.Step,
+    discovery: *Module.DiscoveryContext,
+    features: FeatureSet,
+    shared_ctx: SharedBuildContext,
+    has_usr: UsrDirs,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) !void {
     // Plugin-template compile gate: dev/plugin-template/** is compiled against
     // the real discovered modules (cross-wired like an in-tree module), so the
     // drop-in templates can't drift from current contracts without
     // `zig build check-plugin-template` (and by extension `zig build check`)
     // failing. Each template is only compiled when its imports are present.
     const plugin_template_specs = [_]PluginTemplateSpec{
-        .{ .path = "dev/plugin-template/layout.zig", .import = "layout", .present = has_tiling },
+        .{ .path = "dev/plugin-template/layout.zig", .import = "layout", .present = features.has_tiling },
         .{ .path = "dev/plugin-template/provider.zig", .import = "provider", .present = true },
-        .{ .path = "dev/plugin-template/segment.zig", .import = "segment", .present = has_bar },
+        .{ .path = "dev/plugin-template/segment.zig", .import = "segment", .present = features.has_bar },
         // Sub-addon templates: each imports its package core's
         // contract type, so it is compiled only while that core
         // is discovered (a removed package would otherwise fail
         // the template's import).
-        .{ .path = "dev/plugin-template/readout.zig", .import = "readout", .decl = "sub", .present = has_seg_systatus },
-        .{ .path = "dev/plugin-template/control.zig", .import = "control", .decl = "sub", .present = has_seg_slider },
-        .{ .path = "dev/plugin-template/title-addon.zig", .import = "title_addon", .decl = "addon", .present = has_seg_title },
-        .{ .path = "dev/plugin-template/prompt-addon.zig", .import = "prompt_addon", .decl = "addon", .present = has_seg_prompt },
+        .{ .path = "dev/plugin-template/readout.zig", .import = "readout", .decl = "sub", .present = features.has_seg_systatus },
+        .{ .path = "dev/plugin-template/control.zig", .import = "control", .decl = "sub", .present = features.has_seg_slider },
+        .{ .path = "dev/plugin-template/title-addon.zig", .import = "title_addon", .decl = "addon", .present = features.has_seg_title },
+        .{ .path = "dev/plugin-template/prompt-addon.zig", .import = "prompt_addon", .decl = "addon", .present = features.has_seg_prompt },
     };
     const plugin_template_check = try buildPluginTemplateCheck(b, &discovery.modules, shared_ctx, has_usr, target, optimize, &plugin_template_specs);
     // Layer guards: `zig build check` type-checks AND enforces the
     // sync-owned wire rules.
     const check_step = b.step("check", "Type-check + layer guards");
-    check_step.dependOn(&exe.step);
+    check_step.dependOn(exe_step);
     const layers = b.addSystemCommand(&.{"./dev/scripts/check-layers.sh"});
-    layers.step.dependOn(&exe.step);
+    layers.step.dependOn(exe_step);
     check_step.dependOn(&layers.step);
     check_step.dependOn(plugin_template_check);
 
@@ -484,33 +655,6 @@ pub fn build(b: *std.Build) !void {
     check_all.dependOn(check_step);
     check_all.dependOn(check_modularity);
 }
-
-// Shared context
-
-/// Names claimed by `injectShared` that would collide with the generated
-/// import every module receives. `surfaces` is reserved for the chrome-surface
-/// registration module; no `src/surfaces.zig` may exist.
-const reserved_module_names = [_][]const u8{ "build_options", "fallback_toml", "surfaces" };
-
-/// Shared artefacts injected into every module, root and discovered alike.
-const SharedBuildContext = struct {
-    build_opts: *std.Build.Module,
-    fallback_toml: *std.Build.Module,
-    /// The build-generated chrome-surface registration module created by
-    /// `buildSurfacesModule` (exports `Surfaces`). Injected into every module
-    /// so core source can `@import("surfaces").Surfaces` without ever naming
-    /// the bar. Kept separate from the per-owner `modules` registries so the
-    /// bar family stays byte-identical.
-    surfaces: *std.Build.Module,
-    /// The build-generated per-owner `modules` registries created by
-    /// `buildOwnerRegistries`, keyed by their injectable import name
-    /// (`<owner>_modules`, e.g. `window_modules`). Injected into every module
-    /// so core source can `@import("window_modules").modules` to iterate an
-    /// owner's auto-discovered sub-system set with uniform loops.
-    owner_modules: std.StringHashMapUnmanaged(*std.Build.Module),
-};
-
-// Helpers
 
 /// Reads the fallback TOML config (`fallback_toml_path`) from the build root.
 ///
@@ -888,11 +1032,14 @@ const LineIterator = struct {
 ///      form used by the window/tiling sub-systems (floating, fullscreen,
 ///      minimize, workspaces, the tiling layouts) and by the explicitly
 ///      typed bar segments (prompt, systatus, tags, title, slider).
-///   2. `pub const module = scaffold.module(...)` — the bar-core convenience
-///      shim (clock, layout, variants); `scaffold.module` returns
-///      `contract.Segment` by construction, so the contract is the same name.
-///   3. `pub const module = tiling.layoutModule(...)` — the tiling layouts;
-///      `layoutModule` returns `contract.Layout` by construction.
+///   2. `pub const module = <alias>.module(...)` — the segment-binding
+///      builder shim (clock, layout, variants); `<alias>.module` returns
+///      `contract.Segment` by construction, so the contract is the same
+///      name. The alias is whatever the file binds the segment module to
+///      (in-tree: `segmod`), so the check matches any local identifier.
+///   3. `pub const module = <alias>.layoutModule(...)` — the tiling
+///      layouts; `<alias>.layoutModule` returns `contract.Layout` by
+///      construction.
 ///
 /// A module file declaring `pub const module` in ANOTHER shape (a bare alias
 /// or a foreign shim) is a LOUD build error — the generated registry would
@@ -902,8 +1049,7 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
     defer scan.close();
 
     const typed_needle = "pub const module: @import(\"contract\").";
-    const scaffold_needle = "pub const module = scaffold.module(";
-    const layout_needle = "pub const module = tiling.layoutModule(";
+    const shim_prefix = "pub const module = ";
     // Any `pub const module` declaration in an unrecognized spelling.
     const module_needle = "pub const module";
     var saw_unrecognized: bool = false;
@@ -930,16 +1076,36 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
             }
             return .{ .pub_module = true, .contract = try b.allocator.dupe(u8, rest[0..n]) };
         }
-        if (std.mem.indexOf(u8, trimmed, scaffold_needle) != null)
-            return .{ .pub_module = true, .contract = "Segment" };
-        if (std.mem.indexOf(u8, trimmed, layout_needle) != null)
-            return .{ .pub_module = true, .contract = "Layout" };
+        // Shim forms: `pub const module = <alias>.module(...)` (Segment) or
+        // `<alias>.layoutModule(...)` (Layout). The alias is file-local
+        // (whichever name the file binds the builder module to), so parse
+        // the identifier and match the call it dispatches to.
+        if (std.mem.startsWith(u8, trimmed, shim_prefix)) {
+            const rest = trimmed[shim_prefix.len..];
+            var n: usize = 0;
+            while (n < rest.len) : (n += 1) {
+                const c = rest[n];
+                const is_name_char = (c >= 'a' and c <= 'z') or
+                    (c >= 'A' and c <= 'Z') or
+                    (c >= '0' and c <= '9');
+                if (!is_name_char) break;
+            }
+            if (n > 0) {
+                const after = rest[n..];
+                if (std.mem.startsWith(u8, after, ".module("))
+                    return .{ .pub_module = true, .contract = "Segment" };
+                if (std.mem.startsWith(u8, after, ".layoutModule("))
+                    return .{ .pub_module = true, .contract = "Layout" };
+            }
+            saw_unrecognized = true;
+            continue;
+        }
         if (std.mem.indexOf(u8, trimmed, module_needle) != null)
             saw_unrecognized = true;
     }
     if (saw_unrecognized) {
         std.debug.print(
-            "Error: module '{s}' declares `pub const module` in an unrecognized shape; bind one of the typed forms (`pub const module: @import(\"contract\").<Contract> = ...`, `pub const module = scaffold.module(...)`, or `pub const module = tiling.layoutModule(...)`).\n",
+            "Error: module '{s}' declares `pub const module` in an unrecognized shape; bind one of the typed forms (`pub const module: @import(\"contract\").<Contract> = ...`, `pub const module = <alias>.module(...)`, or `pub const module = <alias>.layoutModule(...)`).\n",
             .{rel_path},
         );
         return error.UnrecognizedModuleSpelling;
@@ -1525,8 +1691,7 @@ fn buildPluginTemplateCheck(
             .target = target,
             .optimize = optimize,
         });
-        mod.link_libc = true; // satisfy @cImport in imported core modules
-        finalizeModule(mod, optimize, has_usr);
+        finalizeModuleLinked(mod, optimize, has_usr); // libc for @cImport in imported core modules
         injectShared(mod, ctx);
         var it = discovered.iterator();
         while (it.next()) |entry| {
@@ -1553,8 +1718,7 @@ fn buildPluginTemplateCheck(
     try src.appendSlice(b.allocator, "}\n");
 
     const wrapper = makeGeneratedModule(b, target, optimize, "plugin_templates.zig", src.items, &.{});
-    wrapper.link_libc = true;
-    finalizeModule(wrapper, optimize, has_usr);
+    finalizeModuleLinked(wrapper, optimize, has_usr);
     for (specs) |spec| {
         if (template_mods.get(spec.import)) |m| wrapper.addImport(spec.import, m);
     }
@@ -1612,6 +1776,17 @@ fn finalizeModule(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode, ha
     stripIfRelease(mod, optimize);
     if (has_usr.lib) mod.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
     if (has_usr.include) mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
+}
+
+/// The standard "this module joins the libc-linked build graph" finalization:
+/// declare libc (several modules call it directly — fallback's getenv,
+/// window/floating's free, every @cImport — and precise-edge wiring no longer
+/// drags it in through a blanket test root) and apply `finalizeModule`.
+/// Mirrors `injectShared` as the single call every module builder that needs
+/// libc routes through, so the pair can never drift apart again.
+fn finalizeModuleLinked(mod: *std.Build.Module, optimize: std.builtin.OptimizeMode, has_usr: UsrDirs) void {
+    mod.link_libc = true;
+    finalizeModule(mod, optimize, has_usr);
 }
 
 // Module namespace discovery & wiring
@@ -1970,7 +2145,7 @@ const Module = struct {
     /// (Rect/Margins) that the state holds. A pure layer's OWN siblings are
     /// derived from the discovery walk (`source_paths`), not hand-listed —
     /// the previous static list went stale the moment config split into
-    /// grammar/parse/reload/source and the guard (already inert on a
+    /// sections/vocab/parse/persist/source and the guard (already inert on a
     /// double-slash path bug) could never have caught it. The per-layer
     /// extras are the pure neighborhoods each layer legitimately reaches
     /// outside its own directory: tiling's `contract` decls; config's pure
