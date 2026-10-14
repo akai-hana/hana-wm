@@ -3,9 +3,8 @@
 //! growth path is exercised via /proc (stat.size == 0 but non-empty
 //! content) - linux-only by nature, like the WM itself.
 //!
-//! Scratch files live in a per-process, uniquely-named directory under the
-//! system temp area (see scratch.zig); each test uses a unique name and
-//! cleans up after itself.
+//! Scratch files use per-call `std.testing.tmpDir` (see scratch.zig); each
+//! test gets its own directory and cleans up after itself.
 //!
 //! The re-exec snapshot block (Sandbox + the refreshSnapshot/unchanged/
 //! renamed/single-file tests) lives in snapshot_test.zig; the tests that
@@ -384,7 +383,7 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
 // cross-file, which the single-file schema tests cannot pin.
 test "theme quartet: a [tiling] theme merges over a functional [tiling] config" {
     const alloc = testing.allocator;
-    const box = try snapshot_test.Sandbox.init(alloc, "theme-quartet");
+    var box = try snapshot_test.Sandbox.init(alloc, "theme-quartet");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);
@@ -431,7 +430,7 @@ test "theme quartet: a [tiling] theme merges over a functional [tiling] config" 
 
 test "15.1: a config that parses but fails validate falls back at BOOT" {
     const alloc = testing.allocator;
-    const box = try snapshot_test.Sandbox.init(alloc, "invalid-boot");
+    var box = try snapshot_test.Sandbox.init(alloc, "invalid-boot");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);
@@ -490,7 +489,7 @@ test "15.6: an EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
 
 test "15.12: a config tree over the file ceiling is refused, not partially loaded" {
     const alloc = testing.allocator;
-    const box = try snapshot_test.Sandbox.init(alloc, "toomany");
+    var box = try snapshot_test.Sandbox.init(alloc, "toomany");
     defer box.deinit(alloc);
     const env = try box.redirectEnv(alloc);
     defer alloc.free(env[0]);

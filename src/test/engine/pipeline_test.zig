@@ -6,7 +6,7 @@
 
 // (28.6) Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
-// build-gate: tiling
+// build-gate: tiling, fullscreen
 
 const std = @import("std");
 
@@ -327,7 +327,6 @@ test "pipeline: an explicit fullscreen SET is a no-op, not a toggle" {
     // A genuine leave still works, and the occupant is cleared.
     actions.fullscreenSetWindow(w2, false);
     fx.flush();
-    try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
     try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
 }
 

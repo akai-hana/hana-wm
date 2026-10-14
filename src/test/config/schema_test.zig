@@ -13,9 +13,8 @@
 //!      (legacy bare-integer percentages for indicator_padding; the
 //!      strict no-bare-integers rule for transparency).
 //!
-//! Scratch files are created by src/test/config/scratch.zig in a per-process
-//! uniquely-named directory under the system temp area; each test cleans up
-//! after itself.
+//! Scratch files come from src/test/config/scratch.zig, built on per-call
+//! `std.testing.tmpDir`; each test cleans up after itself.
 
 const std = @import("std");
 const testing = std.testing;
@@ -636,11 +635,26 @@ test "getRatio strict: transparency rejects bare integers" {
     try testing.expectEqual(@as(f32, 0.5), pct.bar.transparency);
 }
 
+test "validate rejects off-range ratio master_width" {
+    // These used to be unchecked locally on the grounds that a failing
+    // validate logs an err-level diagnostic and the test runner would flag a
+    // noisy test. That guard is severed: src/core/pure/log.zig silences
+    // std.log in test binaries, and validate() surfaces InvalidConfig on its
+    // own error return, so the negatives are directly assertable -- and are
+    // covered in config_test by the 15.1 / 15.12 cases too.
+    var out_of_band = try loadToml(testing.allocator, "mw-big", "[tiling]\nmaster_width = 99%\n");
+    defer out_of_band.deinit(testing.allocator);
+    try testing.expectError(error.InvalidConfig, config.validate(&out_of_band));
+
+    var negative_pixels = try loadToml(testing.allocator, "mw-neg", "[tiling]\nmaster_width = -50\n");
+    defer negative_pixels.deinit(testing.allocator);
+    try testing.expectError(error.InvalidConfig, config.validate(&negative_pixels));
+}
+
 test "validate accepts pixel master_width above the ratio ceiling" {
-    // Negative cases (99% ratio, negative pixels) are pinned by the manual
-    // spot-check against a live WM: the stock test runner fails ANY test
-    // whose code path emits an err-level log, and validate()'s rejection
-    // path is exactly such a log ("Invalid config: ... keeping old").
+    // The live-WM spot-check for the negative branch lives above now that
+    // the err-log path is assertable directly (see the rejection test above):
+    // 99% ratio and negative pixels are both pinned at the error level.
     var px = try loadToml(testing.allocator, "mw-px",
         \\[tiling]
         \\master_width = 600

@@ -34,8 +34,16 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const screen_h = v.workarea.height;
     // Floored at 1 (except for the empty case, which must not underflow the
     // stack subtraction below): a primary_count of 0 sized the master pane to
-    // zero width, leaving a dead strip instead of a full-width master.
-    const master_n: u16 = if (n == 0) 0 else @intCast(@max(1, @min(v.params.primary_count, n)));
+    // zero width, leaving a dead strip instead of a full-width master. The
+    // COUNT is also capped to what the master column can actually fit for
+    // screen_h, so surplus windows fall through to the stack path (tileStack),
+    // which carries its own overflow/park guard -- a master column without
+    // the cap overflowed its rows below the workarea.
+    const master_n: u16 = blk: {
+        if (n == 0) break :blk 0;
+        const fits: u16 = @intCast(@max(1, (@as(u32, screen_h) -| @as(u32, m.gap)) / @max(1, @as(u32, ctx.min_dim +| rowPitch(ctx.m)))));
+        break :blk @intCast(@max(1, @min(@min(v.params.primary_count, n), fits)));
+    };
     const stack_n: u16 = @intCast(n - master_n);
     const stack_windows = windows[master_n..];
     const y = tiling.waY(v);

@@ -204,6 +204,15 @@ pub fn benchLog(comptime fmt: []const u8, args: anytype) void {
             .truncate = false,
             .permissions = @enumFromInt(0o644),
         }) catch return;
+        // createFile leaves the shared handle positioned at START OF FILE, so
+        // every new process run wrote from offset 0 and clobbered the tail of
+        // the previous one. Advance to EOF so this process appends after it.
+        // std.os.linux wraps no lseek at 0.16, so we reach for it through the
+        // fused built-in end endpoints; wrap the syscall for plain
+        // portability to our Linux-only test harness.
+        if (@import("builtin").os.tag == .linux) {
+            _ = std.os.linux.lseek(bench_file.?.handle, 0, std.os.linux.SEEK.END);
+        }
     }
     // Append a newline only if the caller's format does not already end in
     // one -- the bench formats all do, and adding another left a blank line

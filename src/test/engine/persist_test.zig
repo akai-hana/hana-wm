@@ -111,13 +111,21 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
     defer bad.deinit();
     try bad.write("not json at all");
 
+    // Failure path must not touch the retained parse: the global before each
+    // rejected attempt is the state the WM keeps. Asserting against persist.loaded()
+    // here makes "a failed load leaves the last good state intact" an actual
+    // invariant rather than a hope.
+    const retained = persist.loaded();
+
     try testing.expect(!persist.loadToGlobal(page_alloc, bad.path()));
+    try testing.expect(persist.loaded() == retained);
 
     var wrong_version = try scratch.TmpFile.init("wrong_version");
     defer wrong_version.deinit();
     try wrong_version.write("{ \"version\": 9999, \"current\": 0, \"windows\": [] }");
 
     try testing.expect(!persist.loadToGlobal(page_alloc, wrong_version.path()));
+    try testing.expect(persist.loaded() == retained);
 
     // A missing path is not an error, just a clean "nothing to restore". The
     // path sits inside a real (merely unwritten) temp dir, so "missing" is
@@ -126,6 +134,7 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
     defer missing.deinit();
 
     try testing.expect(!persist.loadToGlobal(page_alloc, missing.path()));
+    try testing.expect(persist.loaded() == retained);
 }
 
 test "F10: applyModelLevel restores focus, ws state and every membership" {
