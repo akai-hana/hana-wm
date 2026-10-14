@@ -1,12 +1,5 @@
-//! The `dump_state` diagnostic: a WM-wide snapshot, logged on demand.
-//!
-//! Moved out of `input/input.zig` because the state dump is not input. It
-//! reached into `model` (workspace masks, the tile count), the tiling seam (the
-//! layout name) and `pipeline` (the live model) purely to print a report, and
-//! those imports are what made the input layer look like it depended on the
-//! whole compositor: it meant adding a field to the dump could pull a new
-//! module into every event handler's compile graph. `input` now calls
-//! `diag.dumpState()` for the one action that needs it and imports none of it.
+//! WM-wide state dump diagnostic: logs a live snapshot of model and subsystem
+//! state on demand (read-only); used by the dump-state action.
 
 const std = @import("std");
 const core = @import("core");
