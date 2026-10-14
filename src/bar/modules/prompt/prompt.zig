@@ -9,13 +9,12 @@ const log = @import("log");
 
 const types = @import("types");
 const contract = @import("contract");
-const contract_x11 = @import("contract_x11");
 
 const masks = @import("masks");
 const segmod = @import("segment");
 const editor = @import("editor");
 const completion = @import("completion");
-const render = @import("render");
+const render = @import("overlay");
 // The vim modal-editing engine is a prompt addon: its lifecycle (and mode
 // UI) rides the generated `prompt_subs` registry, so this module never names
 // it. Dropping vim.zig just shortens the `addons` array and leaves the basic
@@ -209,9 +208,9 @@ fn closeWindowOrPromptUnderCursor() bool {
     return child == 0 or child == cs.root;
 }
 
-/// Complete key-event routing entry point called by `input.zig`.
+/// Complete key-event routing entry point called by `core/input/keys.zig`.
 ///
-/// Keeps all prompt-specific routing out of `input.zig`: returns false
+/// Keeps all prompt-specific routing out of the key handler: returns false
 /// immediately when inactive (normal keybind dispatch), routes `close_window`
 /// by cursor position (bar -> kill prompt, window -> WM close, desktop ->
 /// swallow), and otherwise delegates to `handleKeyPress`.
@@ -224,9 +223,9 @@ fn handlePromptKeypress(
 ) bool {
     if (!g.is_active) return false;
     // The hook receives the opaque event (contract is X-free); the fields are
-    // read here, on the X side, via `contract_x11`'s concrete type. The only
-    // producer is the bar's chrome keypress route.
-    const xevent: *const contract_x11.KeyPressEvent = @ptrCast(@alignCast(event));
+    // read here, on the X side, via the concrete xcb type. The only producer
+    // is the bar's chrome keypress route.
+    const xevent: *const core.xcb.xcb_key_press_event_t = @ptrCast(@alignCast(event));
 
     // When the mod key (Super) is held and a WM action is bound to this key,
     // let the normal dispatcher run so WM operations don't cancel the prompt;

@@ -2,24 +2,24 @@
 //! to describe or locate it -- the `Bar`/`gBar` handle, the segment-registry
 //! identity helpers, and the hook walkers.
 //!
-//! Split OUT of `bar.zig` to break three import cycles: `repaint`,
-//! `visibility`, and `input_events` all read this state on every batch,
-//! and importing `bar.zig` for it dragged them into a cycle with the file
-//! that also drives them (bar.zig imports all three). With the state in its
-//! own leaf, those three import THIS file and nothing imports them back.
+//! Split OUT of `bar.zig` to break the import cycles: `render` and
+//! `input_events` read this state on every batch, and importing
+//! `bar.zig` for it dragged them into a cycle with the file that also
+//! drives them (bar.zig imports both). With the state in its own leaf,
+//! those two import THIS file and nothing imports them back.
 //!
-//! Nothing here performs X work or decides anything: it is data plus the
-//! accessors over it. Lifecycle (create/destroy/reload), polling, and the
-//! chrome stay in `bar.zig`; frame collection lives in `frame.zig` and the
-//! paint pass in `repaint.zig` (Phase 4 step 23).
+//! Nothing here performs X work or decides anything: it is data plus
+//! `init`/`deinit`. Lifecycle (create/destroy/reload), polling, and the
+//! chrome stay in `bar.zig`; frame collection, the paint pass, and the
+//! State operations (damage, click bounds, clock scope, measurement) live
+//! in `render.zig` (Phase 4 step 23, unified in Phase 3).
 
 const std = @import("std");
 const core = @import("core");
-const constants = @import("constants");
 const types = @import("types");
 const query = @import("query");
-const model = @import("model");
-const wincache = @import("wincache");
+const model = @import("wm_state");
+const title_cache = @import("title_cache");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const vocab = @import("vocab");
@@ -28,7 +28,7 @@ const center_row = @import("center_row");
 const contract = @import("contract");
 
 // The capability sets live in segment.zig (their one home); these aliases
-// keep state's internal readers (`title_id`, `selfTickerIndex`) unqualified.
+// keep state's remaining reader (`title_id`) unqualified.
 const self_ticking_ids = segmod.self_ticking_ids;
 const center_slot_ids = segmod.center_slot_ids;
 
@@ -38,31 +38,16 @@ const center_slot_ids = segmod.center_slot_ids;
 /// binder this is exactly the title, with several it is the leftmost one.
 pub const title_id: ?usize = if (center_slot_ids.len != 0) center_slot_ids[0] else null;
 
-/// Dirty-bit read for a registry id (null: a name that does not resolve is
-/// never dirty). The null check precedes the comptime guard so an
-/// empty-registry build never reaches `unreachable`.
-inline fn segDirty(self: *const State, id: ?usize) bool {
-    const i = id orelse return false;
-    if (comptime !segmod.hasRegisteredSegments()) unreachable;
-    return self.dirty.segments[i];
-}
-
-/// Position of `id` within `self_ticking_ids` (the key into
-/// `Clock.segs`), or null when it is not a self-ticking segment.
-fn selfTickerIndex(id: ?usize) ?usize {
-    return segmod.roleIndexOf(id, self_ticking_ids);
-}
-
 /// Global bar coordination flags. Read and written exclusively on the main
 /// thread; no mutex protection required.
 pub const Bar = struct {
     state: ?*State = null,
-    /// True when visibility.presentForPrompt() had to map an
+    /// True when `presentForPrompt` (bar.zig) had to map an
     /// otherwise-hidden bar (e.g. hidden by a fullscreen window, or by the
     /// user toggling it off) purely so the inline prompt would be visible.
-    /// visibility.dismissAfterPrompt() checks this to know whether
-    /// hiding the bar again is part of "returning to normal" -- the flag's
-    /// whole lifecycle (set, cleared, guarded against) lives in that file.
+    /// `dismissAfterPrompt` checks this to know whether hiding the bar
+    /// again is part of "returning to normal" -- the flag's whole
+    /// lifecycle (set, cleared, guarded against) lives in `bar.zig`.
     prompt_forced_visible: bool = false,
 };
 
@@ -107,7 +92,7 @@ pub const max_frame_windows: usize = segmod.max_visible_windows;
 /// Upper bound on recorded click bounds: one slot per clickable segment in
 /// the configured layout. Configs with more clickable segments than this
 /// simply lose clickability on the extras (rendering is unaffected).
-const max_click_bounds: usize = segmod.all().len;
+pub const max_click_bounds: usize = segmod.all().len;
 
 /// Cap on updateIfDirty's re-request redraw loop: a module that keeps
 /// re-requesting a full redraw past this many iterations is treated as a
@@ -211,7 +196,7 @@ const Clicks = struct {
     len: usize = 0,
 };
 
-/// Live frame state (recollected on every draw; see frame.scanLiveFrame). Holds
+/// Live frame state (recollected on every draw; see scanLiveFrame). Holds
 /// the shared `segmod.Frame` directly (workspace_count/current_workspace/
 /// is_all_view_active) plus the bar-local backing array it slices, so the
 /// segment-visible struct stays the single source instead of a mirror.
@@ -219,9 +204,9 @@ const FrameState = struct {
     frame: segmod.Frame = .{},
     /// Backing array for `frame.workspace_has_windows` (the shared struct
     /// only holds the slice).
-    ws_has_windows: [constants.max_workspaces]bool = @splat(false),
+    ws_has_windows: [model.max_workspaces]bool = @splat(false),
     /// The current workspace's windows for the frame, one entry per window
-    /// (id only until frame.fillDrawCtx annotates title + geom; the AoS record
+    /// (id only until fillDrawCtx annotates title + geom; the AoS record
     /// replaces the separate `wins` / titles_buf / geoms_buf arrays).
     entries: [max_frame_windows]vocab.TitleEntry = undefined,
     entries_len: usize = 0,
@@ -230,7 +215,7 @@ const FrameState = struct {
     /// of the event-loop batch: they live on State, and nothing reallocates
     /// them between draws).
     last_ctx: segmod.DrawCtx = undefined,
-    /// Whether a full scan+fill pass (frame.scanLiveFrame, frame.fillDrawCtx) has ever
+    /// Whether a full scan+fill pass (scanLiveFrame, fillDrawCtx) has ever
     /// populated `last_ctx`. Guards the marquee-only fast path, which reuses
     /// the cached snapshot in place of re-scanning the live frame: until the
     /// first full draw, last_ctx is undefined and must not be copied.
@@ -240,19 +225,19 @@ const FrameState = struct {
 /// Title-data scratch: the minimized-set service plus the focused-title
 /// copy. The per-window title/geom annotations are NOT here: they live on
 /// `frame.entries` (one record per window, id + title + geom), filled by
-/// frame.fillDrawCtx from the WM-owned title cache (wincache.peekTitle) and the
+/// fillDrawCtx from the WM-owned title cache (title_cache.peekTitle) and the
 /// sync truth-rect -- never the wire, so no async fetch, no positional slot,
 /// no X11 in the draw path.
 const TitleScratch = struct {
     minimized: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Title addon's minimized-state service, cached from the DrawCtx after
-    /// the first draw so frame.scanLiveFrame can synthesize the set each frame
+    /// the first draw so scanLiveFrame can synthesize the set each frame
     /// without bar.zig naming the minimize addon.
     minimized_api: segmod.MinimizedApi = .{},
     /// Storage for the focused window's title. The per-window titles
-    /// on `frame.entries` borrow straight from the wincache (they are
+    /// on `frame.entries` borrow straight from the title_cache (they are
     /// refreshed every frame before the draw); the focused title used to be
-    /// a slice straight into the wincache's per-window `title_buf`, so the
+    /// a slice straight into the title_cache's per-window `title_buf`, so the
     /// DrawCtx retained a borrowed pointer into a cache that a title change
     /// overwrites in place. That is the same window as often as not -- the
     /// focused window is usually also in the frame's entry list, whose title
@@ -260,7 +245,7 @@ const TitleScratch = struct {
     /// widest lifetime needed the one byte copy. Copying costs one memcpy and
     /// removes the question of which readers may hold the slice across a
     /// cache write.
-    focused_title_buf: [wincache.max_title_len]u8 = undefined,
+    focused_title_buf: [title_cache.max_title_len]u8 = undefined,
 };
 
 /// Last-seen core fact revisions (see core.Facts). Each is diffed against the
@@ -286,7 +271,9 @@ const Facts = struct {
 ///
 /// State is plain data owned by this file alone: the poll-driven loop reads
 /// and mutates it directly, and segments receive only per-segment sub-views
-/// (via the DrawCtx), never State itself.
+/// (via the DrawCtx), never State itself. Its operations (damage, click
+/// bounds, clock scope, measurement) live beside the paint pass in
+/// `render.zig`; this file keeps `init`/`deinit`.
 pub const State = struct {
     win: WindowCtx,
     render: RenderCtx,
@@ -365,185 +352,5 @@ pub const State = struct {
         const alloc = self.render.allocator;
         self.title_data.minimized.deinit(alloc);
         alloc.destroy(self);
-    }
-
-    /// Flags a full redraw: dirty flag + every segment slot (the
-    /// background-clear trigger).
-    pub fn markDirty(self: *State) void {
-        self.dirty.flag = true;
-        @memset(&self.dirty.segments, true);
-    }
-
-    /// Clears the dirty bit of the segment at registry id `id`; a null id
-    /// (a name that no longer resolves) has no bit to clear.
-    pub fn clearSegmentDirty(self: *State, id: ?usize) void {
-        const i = id orelse return;
-        if (comptime !segmod.hasRegisteredSegments()) unreachable;
-        self.dirty.segments[i] = false;
-    }
-
-    /// Extends the current draw's dirty span to cover [x, x + w).
-    /// Called for every repainted segment + gap so the blit copies only
-    /// the region that actually changed.
-    pub inline fn extendDirtySpan(self: *State, x: u16, w: u16) void {
-        if (w == 0) return;
-        // Accumulate the span arithmetic in u32 so a large segment stack can't
-        // wrap span_x/span_w past 65535; clamp on the way back into the u16
-        // fields. Identical results for sane values.
-        const x32: u32 = x;
-        const w32: u32 = w;
-        if (self.dirty.span_w == 0) {
-            self.dirty.span_x = x;
-            self.dirty.span_w = w;
-        } else {
-            const end: u32 = @as(u32, self.dirty.span_x) + self.dirty.span_w;
-            const new_end: u32 = x32 + w32;
-            if (x < self.dirty.span_x) self.dirty.span_x = x;
-            if (new_end > end) {
-                const new_w: u32 = new_end - @as(u32, self.dirty.span_x);
-                self.dirty.span_w = @intCast(@min(new_w, std.math.maxInt(u16)));
-            }
-        }
-    }
-
-    /// Clears a horizontal region to the bar background and extends the dirty
-    /// span to cover it: the shared repaint idiom for every segment region
-    /// (including the full-redraw path, where `x = 0, w = width`).
-    pub fn clearRegion(self: *State, x: u16, w: u16) void {
-        self.render.dc.fillRect(x, 0, w, self.render.height, renderBar().bg);
-        self.extendDirtySpan(x, w);
-    }
-
-    /// Marks dirty every segment whose declared `dirty_sources` has bit
-    /// `source` set, and flags the bar dirty. Name-free: the bit masks are a
-    /// declared contract capability, not a name-keyed lookup.
-    pub fn markDirtySource(self: *State, source: segmod.DirtySourcesSource) void {
-        self.dirty.flag = true;
-        for (segmod.all(), 0..) |m, i| {
-            if (segmod.hasSource(m.dirty_sources, source)) self.dirty.segments[i] = true;
-        }
-    }
-
-    /// True when the segment must be repainted on this draw: its dirty bit
-    /// is set, or it declares the self-animated repaint capability and its
-    /// runtime query reports active (e.g. a scrolling marquee: the motion
-    /// only advances while the segment is drawn, so change detection must
-    /// not skip it). Uniform: resolved by registry, never by segment name.
-    /// A name that does not resolve (null) is never repaintable.
-    pub fn isSegmentRepaintable(self: *const State, id: ?usize) bool {
-        const i = id orelse return false;
-        if (segDirty(self, id)) return true;
-        if (segmod.segmentAt(i).needsRepaint) |q| return q();
-        return false;
-    }
-
-    /// True when every registry slot is dirty (the complete-background-clear
-    /// trigger). Non-configured segments (e.g. the prompt overlay) are never
-    /// drawn and never cleared, so an all-dirty set only occurs on a folded
-    /// full-redraw request.
-    pub fn isFullDirty(self: *const State) bool {
-        for (self.dirty.segments) |d| {
-            if (!d) return false;
-        }
-        return true;
-    }
-
-    /// True when a full redraw (every segment) is pending: the whole-bar flag
-    /// AND every slot dirty. A partial wake (a markDirtySource subset or the
-    /// drag hold) sets the flag without the full set, so a region-scoped
-    /// repaint can still run; only genuine full requests pass this.
-    pub fn pendingFullRedraw(self: *const State) bool {
-        return self.dirty.flag and self.isFullDirty();
-    }
-
-    /// Scans the configured layout tree, returning true as soon as a segment
-    /// matches `pred`. Layout-rendered segments only: the overlay-only prompt
-    /// slot is excluded (its dirty flag is never cleared, so a registry-wide
-    /// scan would always match and defeat the fast-path early-exit). The
-    /// layout stores names; the predicate takes a resolved id, so each name
-    /// is resolved exactly once here instead of once per predicate.
-    inline fn anyLayoutSegment(self: *const State, comptime pred: anytype) bool {
-        for (renderBar().layout.items) |lay| {
-            for (lay.segments.items) |seg| {
-                if (pred(self, segmod.segId(seg))) return true;
-            }
-        }
-        return false;
-    }
-
-    /// True when the next draw would repaint at least one layout-rendered
-    /// segment: a dirty flag or a live needsRepaint hook (the title marquee).
-    pub fn hasPendingRepaintWork(self: *const State) bool {
-        return self.anyLayoutSegment(State.isSegmentRepaintable);
-    }
-
-    /// True when any layout-rendered segment carries a set dirty bit (as
-    /// opposed to only a self-animated needsRepaint hook). A dirty bit means
-    /// the facts backing the drawn content changed, so the frame must be
-    /// rescanned and the DrawCtx refilled before drawing; when no dirty bit is
-    /// set and !dirty.flag, the only pending work is a marquee/overlay
-    /// needsRepaint hook and the cached last_ctx snapshot is still accurate.
-    pub fn hasLayoutSegmentDirty(self: *const State) bool {
-        return self.anyLayoutSegment(segDirty);
-    }
-
-    /// Records the on-screen bounds of a clickable segment as the layout pass
-    /// positions it, so handleButtonPress can hit-test against them without
-    /// redoing the layout. Called unconditionally for every slot; a segment
-    /// whose module declares `clickable == false`, or whose name does not
-    /// resolve (null), is skipped.
-    pub fn recordClickBound(self: *State, id: ?usize, x: u16, w: u16) void {
-        const i = id orelse return;
-        if (!segmod.segmentAt(i).clickable) return;
-        if (self.clicks.len >= max_click_bounds) return;
-        self.clicks.bounds[self.clicks.len] = .{ .id = i, .x = x, .w = w };
-        self.clicks.len += 1;
-    }
-
-    pub fn recordedBound(self: *const State, id: usize) ?SegBound {
-        for (self.clicks.bounds[0..self.clicks.len]) |b| {
-            if (b.id == id) return b;
-        }
-        return null;
-    }
-
-    /// Measures a segment's natural (reserved) width via its uniform
-    /// naturalWidth hook, or 0 for an unknown/removed segment name (null id).
-    pub fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, id: ?usize) u16 {
-        return segmod.naturalWidthOf(id, frame, self.clock.width);
-    }
-
-    /// Records the last layout-pass bound of a self-ticking segment so its
-    /// end-of-batch tick can region-scope a repaint (drawClockOnly). Written
-    /// for every configured self-ticker in ANY cluster (left/center/right);
-    /// unconfigured self-tickers stay invalid and are never repainted.
-    pub fn recordSelfTickerScope(self: *State, id: ?usize, x: u16, w: u16) void {
-        // `comptime` on the length: with no self-ticking segment compiled in,
-        // `Clock.segs` is a zero-length array and the indexed store below is
-        // still analyzed, which is a compile error. The length is a comptime
-        // constant, so this drops the whole body before it is analyzed.
-        if (comptime self_ticking_ids.len == 0) return;
-        if (selfTickerIndex(id)) |i| {
-            // The solved slot width is threaded through (its naturalWidth hook
-            // ran during the layout pass) rather than re-measured here: the
-            // latter made every self-ticker's hook run twice per frame.
-            self.clock.segs[i] = .{
-                .x = x,
-                .width = w,
-                .valid = true,
-            };
-        }
-    }
-
-    /// Re-derives the merged clock display width from the live width probes and
-    /// adopts it, reporting whether it moved. Driven by a display-mode cycle:
-    /// the next row layout must reserve the incoming mode's span, and the
-    /// region-scoped tick blit cannot deliver that (it paints inside the
-    /// previously laid-out slot).
-    pub fn adoptFreshClockWidth(self: *State) bool {
-        const fresh = center_row.mergedClockWidth(self.render.dc, renderBar(), self.render.height, drawing.DrawContext.measureTextWidthStyled);
-        if (fresh == self.clock.width) return false;
-        self.clock.width = fresh;
-        return true;
     }
 };

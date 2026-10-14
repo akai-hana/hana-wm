@@ -15,15 +15,15 @@
 
 const std = @import("std");
 const xcb = @import("core").xcb;
-const actions = @import("actions");
+const window = @import("window");
 const focus = @import("focus");
-const constants = @import("constants");
+const masks = @import("masks");
 const title_geom = @import("geom");
 const contract = @import("contract");
 const segmod = @import("segment");
 
 const state = @import("state");
-const repaint = @import("repaint");
+const render = @import("render");
 const State = state.State;
 const SegBound = state.SegBound;
 
@@ -33,7 +33,7 @@ const SegBound = state.SegBound;
 /// title id/name/bound resolution lives in one place.
 pub fn titleIdBound(s: *State) ?SegBound {
     const center_id = state.title_id orelse return null;
-    return s.recordedBound(center_id);
+    return render.recordedBound(s, center_id);
 }
 
 /// Routes one click at `offset` pixels into segment `id` to its onClick hook
@@ -53,7 +53,7 @@ pub fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right:
             .is_right = is_right,
             .state = s,
             .title_click = titleClickTrampoline,
-            .redraw = repaint.redrawInsideGrab,
+            .redraw = render.redrawInsideGrab,
         };
         _ = oc(&ctx);
     }
@@ -67,14 +67,14 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
         // repainting entirely, and clear the flag again -- the exposed region
         // is never redrawn. The drag itself defers its own per-tick blit, so
         // the expose deserves a full performDraw here.
-        repaint.performDraw();
+        render.performDraw();
     };
 }
 
 // Mouse click handling
 
 /// Routes a ButtonPress on the bar window to whichever segment was clicked.
-/// Called from input.zig before its managed-window click path: the bar is
+/// Called from core/input/mouse.zig before its managed-window click path: the bar is
 /// never a managed window, so that path would just replay and swallow it.
 ///
 /// Hit-testing walks the bounds RECORDED DURING THE LAST LAYOUT PASS in
@@ -106,12 +106,12 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     const id = h.id;
 
     const detail = event.detail;
-    if (detail == constants.mouse_button_left) {
+    if (detail == masks.mouse_button_left) {
         s.drag_segment = id;
         dispatchClick(s, id, x - h.x, true, false);
         return;
     }
-    if (detail == constants.mouse_button_right) {
+    if (detail == masks.mouse_button_right) {
         dispatchClick(s, id, x - h.x, false, true);
         return;
     }
@@ -123,13 +123,13 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // a button-1 drag currently in flight has its anchor here, and clearing
     // it would lose the anchor, so handleButtonRelease's `orelse return`
     // drops onDragEnd (throttled commit unflushed, drag render mode stuck).
-    if (detail == constants.mouse_button_scroll_up or
-        detail == constants.mouse_button_scroll_down)
+    if (detail == masks.mouse_button_scroll_up or
+        detail == masks.mouse_button_scroll_down)
     {
         if (segmod.segmentAt(id).onScroll) |scroll| {
-            const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
+            const dir: i8 = if (detail == masks.mouse_button_scroll_up) 1 else -1;
             s.scroll_segment = id;
-            _ = scroll(dir, repaint.redrawScopedSegment);
+            _ = scroll(dir, render.redrawScopedSegment);
             s.scroll_segment = null;
             return;
         }
@@ -146,13 +146,13 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
     const id = s.drag_segment orelse return;
     if (!s.vis.shown) return;
     if (segmod.segmentAt(id).onDragMotion) |drag| {
-        const tb = s.recordedBound(id) orelse return;
+        const tb = render.recordedBound(s, id) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
         const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
         // Scoped repaint, not redrawInsideGrab: a scrub only mutates the
         // dragged segment's slot, and a full-bar redraw per motion is the
         // frame-rate killer for subprocess-bound segments.
-        _ = drag(offset, repaint.redrawScopedSegment);
+        _ = drag(offset, render.redrawScopedSegment);
     }
 }
 
@@ -162,7 +162,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
     const s = state.gBar.state orelse return;
     const id = s.drag_segment orelse return;
     s.drag_segment = null;
-    if (segmod.segmentAt(id).onDragEnd) |end| end(repaint.redrawInsideGrab);
+    if (segmod.segmentAt(id).onDragEnd) |end| end(render.redrawInsideGrab);
 }
 
 /// `offset` is the click position relative to the title segment's start.
@@ -183,9 +183,9 @@ fn handleTitleClick(s: *State, offset: u16) void {
     // `target.minimized` comes from the title snapshot's minimized set, which
     // the title addon synthesizes fresh; bar.zig never names minimize.
     if (target.minimized)
-        actions.restore(target.window)
+        window.callHook(.unminimize, .{target.window})
     else if (focus.getFocused() == target.window)
-        actions.minimize(target.window)
+        window.callHook(.minimizeWindow, .{target.window})
     else
         focus.grabFocus(target.window, .mouse_click);
 }

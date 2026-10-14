@@ -24,7 +24,7 @@ const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
 
-const time = @import("time");
+const core = @import("core");
 const read_interval_ms: i64 = 2000;
 
 /// Length of the per-segment rendered-text buffers: room for "<label> <pct>%"
@@ -256,7 +256,7 @@ fn pollDeadlineMsFor(comptime idx: usize) i32 {
     // re-probe cadence: stopping entirely would make a hot-swapped battery or
     // a since-boot /sysfs file invisible forever.
     const interval: i64 = if (st.absent) absent_reprobe_ms else read_interval_ms;
-    const left = st.next_read_ms - time.realtimeMs();
+    const left = st.next_read_ms - core.realtimeMs();
     if (left <= 0) return 0;
     return @intCast(@min(left, interval));
 }
@@ -264,10 +264,10 @@ fn pollDeadlineMsFor(comptime idx: usize) i32 {
 fn onPollWakeupFor(comptime idx: usize) void {
     const st = &g_readouts[idx];
     if (!st.armed) return;
-    if (time.realtimeMs() < st.next_read_ms) return;
+    if (core.realtimeMs() < st.next_read_ms) return;
     // The next deadline is set from the same absent/present decision the poll
     // itself makes, so the backing-off and the wakeup cannot disagree.
-    st.next_read_ms = time.realtimeMs() +
+    st.next_read_ms = core.realtimeMs() +
         (if (st.absent) absent_reprobe_ms else read_interval_ms);
     if (refresh(idx)) st.pending_redraw = true;
 }
@@ -288,7 +288,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     const st = &g_readouts[idx];
     if (!st.armed) {
         st.armed = true;
-        st.next_read_ms = time.realtimeMs() + read_interval_ms;
+        st.next_read_ms = core.realtimeMs() + read_interval_ms;
         _ = refresh(idx); // prime the text so the first draw isn't empty
     }
 

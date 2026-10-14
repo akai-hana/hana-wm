@@ -3,7 +3,7 @@
 
 const types = @import("types");
 const drawing = @import("drawing");
-const actions = @import("actions");
+const window = @import("window");
 const pipeline = @import("pipeline");
 const contract = @import("contract");
 const core = @import("core");
@@ -43,4 +43,4 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     return segmod.drawAndStore("layout", dc, config, height, start_x, getIcon());
 }
 
-pub const module = segmod.module("layout", draw, actions.cycleLayoutKind, .{ .mode = .measured_no_relayout });
+pub const module = segmod.module("layout", draw, window.cycleLayoutKind, .{ .mode = .measured_no_relayout });

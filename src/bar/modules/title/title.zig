@@ -23,7 +23,7 @@ const contract = @import("contract");
 // `title_subs` registry is driven by file presence alone, so this module
 // never names it. Dropping carousel.zig just shortens `addons` and the title
 // falls back to its real built-in static (ellipsis) rendering -- no stub.
-const time = @import("time");
+const core = @import("core");
 /// The whole scroll decoration for one frame, as ONE value. Declared HERE, in
 /// the contract, not in the extensor: this contract's shape must not depend on
 /// whether carousel.zig is present, which is the whole point of the addon
@@ -162,7 +162,7 @@ fn drawSingleWindow(
                 text_geom.avail_w,
                 false,
                 0,
-                time.monotonicMs(),
+                core.monotonicMs(),
             );
             scroll_active = false;
         }
@@ -207,7 +207,7 @@ fn drawFittedTitle(
     scroll_enabled: bool,
 ) void {
     const text_w = ctx.dc.measureTextWidth(title);
-    const now = time.monotonicMs();
+    const now = core.monotonicMs();
 
     // Unfocused cells never touch the carousel: it tracks exactly one cell per
     // frame, the focused one. For the focused cell the scroller is consulted on
@@ -379,7 +379,7 @@ fn pollTimeoutMsHook() i32 {
     // re-arms motion via offsetFor. The title owns this decision, so the
     // overlay never reaches into the scroller to pause it.
     if (overlayActive()) return -1;
-    if (scroller) |s| return s.pollDeadlineMs(time.monotonicMs(), hz.detectedHz());
+    if (scroller) |s| return s.pollDeadlineMs(core.monotonicMs(), hz.detectedHz());
     return -1;
 }
 

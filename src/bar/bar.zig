@@ -4,9 +4,9 @@
 //! Rendering uses per-segment dirty tracking: the dirty set is registry-sized
 //! (one bool per bar_modules entry); only dirty segments are repainted on
 //! each draw. The whole-bar flag alongside an all-dirty set (the folded "full
-//! redraw" request) triggers a complete background clear + repaint.
+//! redraw" request) triggers a complete background clear + render.
 //! Coalescing happens in the batch: every module request queued during a
-//! batch folds into ONE full redraw (`repaint.foldModuleRedraw`), and
+//! batch folds into ONE full redraw (`render.foldModuleRedraw`), and
 //! `updateIfDirty`'s re-request loop is capped by `max_batched_redraws` so a
 //! module that keeps re-asking cannot busy-spin the batch.
 //!
@@ -29,7 +29,8 @@ const types = @import("types");
 
 const focus = @import("focus");
 const pipeline = @import("pipeline");
-const model = @import("model");
+const model = @import("wm_state");
+const query = @import("query");
 
 const window = @import("window");
 
@@ -39,11 +40,12 @@ const Metrics = metrics.Metrics;
 const segmod = @import("segment");
 const barwin = @import("win");
 
-// Bar visibility: policy (pure decisions) + the apply* wire family
-// (map/unmap + screen-claim publish + reconcile), one file with two sections.
+// Bar visibility: the pure policy (desired show/hide decisions over the
+// model). The apply* wire family lives in this file, in the visibility
+// wire section below.
 const visibility = @import("visibility");
 const input_events = @import("input_events");
-const repaint = @import("repaint");
+const render = @import("render");
 
 // Window-addon registry (generated): the hidden-set synthesis is routed
 // through the collectHiddenSet hook instead of naming the minimize or
@@ -51,9 +53,9 @@ const repaint = @import("repaint");
 const contract = @import("contract");
 
 const state = @import("state");
-// The state itself now lives in state.zig (a leaf, so the repaint /
-// visibility / input_events satellites can read it without
-// importing this file back -- that import was the cycle). Aliased here
+// The state itself now lives in state.zig (a leaf, so the render /
+// input_events satellites can read it without importing this file back
+// -- that import was the cycle). Aliased here
 // so this file's own call sites keep their vocabulary; `gBar` is a
 // POINTER to the shared handle, because a struct-by-value alias would
 // silently copy it.
@@ -82,8 +84,8 @@ pub fn onPollWakeup() void {
     // (updateIfDirty) does, so the animation is visible even when the loop is
     // waking only on the poll timer with no X traffic to trigger that path.
     // performDraw consumes the redraw request itself; no consume here.
-    _ = repaint.foldModuleRedraw(s);
-    repaint.performDraw();
+    _ = render.foldModuleRedraw(s);
+    render.performDraw();
 }
 
 /// Combines every module's poll deadline (clock tick, prompt caret blink,
@@ -196,7 +198,7 @@ pub fn init() !void {
     // an unmapped window is discarded, and compositors start remapped windows
     // blank until first damage).
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
-    repaint.performDraw();
+    render.performDraw();
     _ = xcb.xcb_flush(cs.conn);
     // Uniform lifecycle: every registered mechanism segment (incl. the prompt,
     // whose init owns the vim addon lifecycle) is initialised with the
@@ -205,12 +207,12 @@ pub fn init() !void {
     // dangle as soon as this init returns, and the prompt calls back through
     // it on the first toggle.
     g_bar_handlers = .{
-        .presentForPrompt = visibility.presentForPrompt,
-        .dismissAfterPrompt = visibility.dismissAfterPrompt,
+        .presentForPrompt = presentForPrompt,
+        .dismissAfterPrompt = dismissAfterPrompt,
         .isBarWindow = isBarWindow,
     };
     for (segmod.all()) |seg| if (seg.init) |f| try f(cs.alloc, cs.conn, &g_bar_handlers);
-    visibility.syncScreenClaim();
+    syncScreenClaim();
 }
 
 pub fn deinit() void {
@@ -301,12 +303,220 @@ fn applyReload(old: *State, m: Metrics) !void {
     new_state.vis.preferred = old.vis.preferred;
     gBar.state = new_state;
     usable_area.setSurfaceWindow(new_bar.setup.win_id);
-    visibility.syncScreenClaim();
-    repaint.submitDrawBlockingFull();
+    syncScreenClaim();
+    render.submitDrawBlockingFull();
     if (new_state.vis.shown) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
     // No explicit destroy: `deinit` now owns the window and its colormap.
     old.render.dc.deinit();
     old.deinit();
+}
+
+// Bar visibility wire glue
+//
+// The apply* family plus the prompt's present/dismiss pair: these turn the
+// policy's decisions (visibility.zig) into X11 map/unmap + screen-claim
+// writes, and the reconcile that reacts to a claim change. Moved here from
+// `wire/visibility.zig` in Phase 3 of the bar refactor: they are bar
+// self-management, bar.zig was already the Rule-1 allowlisted home for it,
+// and the policy half stays pure in `visibility.zig`.
+
+/// Pushes the bar's current screen-space claim to core.screen. Called
+/// at each point where the bar's occupancy of the screen changes
+/// (visibility toggle, edge/position change) immediately before the
+/// reconcile that re-derives window placement from the new usable
+/// area. Core owns the area math; the bar only contributes "I take
+/// this many pixels from this edge."
+fn syncScreenClaim() void {
+    const s = gBar.state orelse return;
+    const cs = core.getState();
+    const edge: usable_area.Edge = if (cs.config.bar.bar_position == .bottom) .bottom else .top;
+    const px: u16 = if (s.vis.shown) s.render.height else 0;
+    usable_area.setClaim(edge, px);
+}
+
+fn raiseBar() void {
+    if (gBar.state) |s|
+        _ = xcb.xcb_configure_window(
+            s.win.conn,
+            s.win.win_id,
+            xcb.XCB_CONFIG_WINDOW_STACK_MODE,
+            &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
+        );
+}
+
+/// Forces the bar to the absolute top of the stacking order and guarantees it
+/// is mapped, overriding whatever would normally keep it hidden or covered:
+/// a fullscreen window, the user toggling the bar off, or another window
+/// raised above it. Used by the inline prompt (prompt.zig) so it is always
+/// visible and reachable while active.
+///
+/// Never touches window geometry or retiles: the bar overlays whatever is
+/// already there (fullscreen included), the way a dock/OSD overlays fullscreen
+/// video. Pair with `dismissAfterPrompt` so the bar returns to its prior state.
+fn presentForPrompt() void {
+    const s = gBar.state orelse return;
+    if (!s.vis.shown) {
+        // The bar is hidden; map it before drawing so the blit lands in a
+        // mapped window (a draw queued while unmapped is discarded by the
+        // server, leaving a blank bar until the next unrelated redraw) and a
+        // compositor never presents an empty frame.
+        gBar.prompt_forced_visible = true;
+        s.vis.shown = true;
+        runVoidHook(.onBarShown);
+        _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
+        render.submitDrawBlockingFull();
+    }
+    raiseBar();
+    _ = xcb.xcb_flush(s.win.conn);
+}
+
+/// Undoes `presentForPrompt` once the prompt exits (entered or cancelled).
+///
+/// If the bar was shown solely to make the prompt visible, hides it again,
+/// but only if it *should still* be hidden. The prompt can outlive the state
+/// that justified the override (e.g. the fullscreen window closes on its own),
+/// so this recomputes the bar's natural visibility at exit time rather than
+/// trusting the decision made at activation.
+///
+/// If the bar was already visible, this leaves it as-is: the forced
+/// top-of-stack position needs no explicit undo, since focusing any other
+/// window already raises it above the bar again (see focus.zig).
+fn dismissAfterPrompt() void {
+    const s = gBar.state orelse return;
+    if (!gBar.prompt_forced_visible) return;
+    gBar.prompt_forced_visible = false;
+    const current_ws = query.getCurrentWorkspace() orelse 0;
+    const should_show = visibility.keepPromptOverride(pipeline.state(), current_ws, s.vis.preferred);
+    if (should_show) return; // conditions changed while the prompt was open; stay visible
+    s.vis.shown = false;
+    _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
+    _ = xcb.xcb_flush(s.win.conn);
+}
+
+/// Applies a decided visibility change: updates `vis.shown`, draws when
+/// shown, maps/unmaps, and re-derives the screen claim. `do_reconcile`
+/// additionally grabs the server, reconciles (the usable area changed with
+/// the claim) and flushes -- used by the fullscreen-fact reaction path, not
+/// by the workspace-switch path whose caller runs its own reconcile. The
+/// reconcile-show path also re-raises the bar LAST (inside the same flush,
+/// after the reconcile's geometry sends), so a moved winner that got raised
+/// above it (sync raises a placing winner on motion even without
+/// force_restack) cannot leave a freshly shown bar buried under the window
+/// it just stopped covering.
+fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
+    s.vis.shown = should_be_visible;
+    const conn = core.getState().conn;
+    // Optional token: the workspace-switch path (do_reconcile false) must NOT
+    // grab, and the conditional used to be two hand-matched sites (grab here,
+    // ungrabAndFlush at the bottom) that a new early return could unpair.
+    // Publish the claim BEFORE the grab, because `grabScoped` snapshots the
+    // reconcile ctx and the ctx carries `usable_area.workArea`. Claiming after
+    // the snapshot meant the reconcile that reacted to the claim change
+    // re-derived geometry from the workarea it was about to invalidate: on
+    // fullscreen exit the bar came back and took its pixels while the windows
+    // were re-tiled against the FULL screen -- "the bar is back but the layout
+    // still ignores it" -- and the next workspace switch, which rebuilds the
+    // ctx from scratch, was what finally corrected the geometry.
+    //
+    // `syncScreenClaim` is a pure in-memory write (no wire traffic), so moving
+    // it above the grab costs nothing and does not reorder any X request: the
+    // map/unmap below is still queued before the geometry sends.
+    syncScreenClaim();
+    var grab: ?pipeline.ScopedGrab = null;
+    if (do_reconcile) grab = pipeline.grabScoped();
+    defer if (grab) |g| g.deinit();
+    _ = if (should_be_visible) xcb.xcb_map_window(conn, s.win.win_id) else xcb.xcb_unmap_window(conn, s.win.win_id);
+    // Draw AFTER the map request so the blit lands in an already-mapped
+    // window. A copy queued to an unmapped window is discarded by the server
+    // (and, under a compositor, the view of a freshly remapped window starts
+    // blank until the first damage), which is what left the bar invisible --
+    // a bare gap in the shelf -- until an unrelated later redraw happened to
+    // repaint it. Ordering the map before the draw in this same flush closes
+    // that gap on every show (boot, workspace switch, fullscreen exit, Mod+B).
+    if (should_be_visible) {
+        // Tell continuous-motion segments the bar is (re)appearing, so the
+        // title marquee resumes from its last shown offset instead of
+        // teleporting across the whole hidden gap on this first frame.
+        runVoidHook(.onBarShown);
+        if (do_reconcile) {
+            // Fullscreen toggle path: render to the off-screen pixmap inside
+            // the grab so the caller's single ungrabAndFlush ships geometry +
+            // blit as exactly one compositor frame.
+            render.submitDrawBlockingFull();
+        } else {
+            // Workspace-switch path: skip the redundant inline render. The
+            // switch already bumped the window fact, so updateIfDirty repaints
+            // this bar once at end-of-batch (within the same batch as the
+            // switch); an inline draw here would be a full duplicate render AND
+            // would paint the stale pre-switch focused-title (model.focused has
+            // not landed on the new workspace yet).
+            render.requestFullRedraw();
+        }
+    }
+    if (grab) |g| {
+        g.reconcileNow(.{});
+        if (should_be_visible) raiseBar();
+    }
+}
+
+/// Pre-computes and applies the bar's visibility state for `ws` (X11
+/// map/unmap + screen claim) WITHOUT triggering a reconcile. Used by the
+/// workspace-switch path so the bar's screen claim (and thus the workarea
+/// used by the FIRST reconcile on the new workspace) is correct from the
+/// start, preventing the two-reconcile flicker caused by a deferred
+/// visibility update. The reconcile comes from the caller's own switch
+/// reconcile; the bar merely updates its occupancy state here.
+fn updateBarVisibilityForWorkspace(ws: u8) void {
+    applyVisibilityDecision(ws, false);
+}
+
+/// Immediately unmaps the bar and updates the screen claim, without a
+/// separate reconcile. Called from the fullscreen-enter grab so the bar
+/// disappears atomically with the fullscreen geometry. No-ops when the bar
+/// is already hidden or not initialised.
+fn hideBarForFullscreen() void {
+    const s = gBar.state orelse return;
+    if (!s.vis.shown) return;
+    // The prompt overlay is a use-case for being on-top: a fullscreen enter
+    // while the inline prompt is open must not yank the workspace switch,
+    // since the user is typing into a chrome state that expects the overlay.
+    // dismissAfterPrompt recomputes the natural decision at exit.
+    if (gBar.prompt_forced_visible) return;
+    applyVisibility(s, false, false);
+}
+
+/// Reacts to a change in core's fullscreen-occupancy fact: recomputes whether
+/// the bar must be hidden to share the screen with a fullscreen window on the
+/// current workspace, then maps/unmaps and updates the screen claim. Core owns
+/// the fact revision; the bar merely reads the model & screen facts it already
+/// consumes. Calls `reconcileNow` after a visibility claim change because the
+/// usable area geometry changed (a write-path side effect from a rendering
+/// module: documented in the check-layers.sh allowlist).
+fn applyFullscreenVisibility() void {
+    applyVisibilityDecision(query.getCurrentWorkspace() orelse 0, true);
+}
+
+/// Computes the desired visibility for `ws` via the shared visibility policy
+/// and, when it differs from current state, applies the change. `do_reconcile`
+/// selects the workspace-switch flavor (no reconcile; the caller reconciles)
+/// vs the fullscreen-fact reaction (reconciles inside the claim).
+fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
+    const s = gBar.state orelse return;
+    // While the inline prompt has forced the bar above everything, any
+    // natural-visibility recompute (workspace switch, fullscreen fact tick)
+    // must not unmap it below the prompt; dismissAfterPrompt recomputes the
+    // natural decision when the prompt exits.
+    if (gBar.prompt_forced_visible) return;
+    const decision = visibility.desiredVisibility(pipeline.state(), ws, s.vis.preferred);
+    // The comparison against the bar's mapped state is the ORCHESTRATOR's, not
+    // the policy's: the policy returns the target and why, and deciding whether
+    // to touch the wire stays here.
+    if (decision.should_be_visible == s.vis.shown) return;
+    applyVisibility(s, decision.should_be_visible, do_reconcile);
+    log.info(
+        "Bar {s} for workspace {d} ({s})",
+        .{ if (decision.should_be_visible) "shown" else "hidden", ws, @tagName(decision.reason) },
+    );
 }
 
 // Public event handlers & queries
@@ -326,7 +536,7 @@ fn applyBarScreenPosition() i16 {
     const cs = core.getState();
     const new_y = barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, s.render.height);
     barwin.setWindowProperties(s.win.win_id, s.render.height);
-    repaint.requestFullRedraw();
+    render.requestFullRedraw();
     // The shared bar window is being re-anchored; drop every recorded
     // self-ticker bound so a stale tick cannot region-scope a repaint before
     // the layout pass re-records them.
@@ -346,13 +556,13 @@ fn applyBarScreenPosition() i16 {
     // publishes the new edge to core BEFORE the caller's reconcile re-derives
     // any placement from it. Core owns the area math; the bar only
     // contributes "I take this many pixels from this edge."
-    visibility.syncScreenClaim();
+    syncScreenClaim();
     return new_y;
 }
 
 /// The surface hook for the toggle-bar-position action: ask core to flip the
 /// edge, then re-anchor. The reconcile that follows is the caller's (see
-/// input.zig's `.toggle_bar_position` action), because it is a layout
+/// core/input/dispatch.zig's `.toggle_bar_position` action), because it is a layout
 /// decision made outside the renderer.
 pub fn toggleBarSegmentAnchor() void {
     _ = core.toggleBarScreenPosition();
@@ -370,7 +580,7 @@ pub fn isBarWindow(win: u32) bool {
 pub fn setBarState(action: types.Action) void {
     const s = gBar.state orelse return;
     if (action == .toggle_bar_visibility) s.vis.preferred = !s.vis.preferred;
-    visibility.applyFullscreenVisibility();
+    applyFullscreenVisibility();
 }
 
 pub fn updateIfDirty() void {
@@ -383,7 +593,7 @@ pub fn updateIfDirty() void {
     const fullscreen_rev = core.fullscreen.rev();
     if (s.facts.fullscreen_rev != fullscreen_rev) {
         s.facts.fullscreen_rev = fullscreen_rev;
-        visibility.applyFullscreenVisibility();
+        applyFullscreenVisibility();
     }
     if (!s.vis.shown) return;
 
@@ -396,14 +606,14 @@ pub fn updateIfDirty() void {
     const focus_rev = core.focus.rev();
     const window_rev = core.window.rev();
     const layout_rev = core.layout.rev();
-    if (s.facts.focus_rev != focus_rev) s.markDirtySource(.focus);
+    if (s.facts.focus_rev != focus_rev) render.markDirtySource(s, .focus);
     // window_rev previously skipped through blanket `markDirty()` even though
     // title and tags declare they want `.frame` dirtying; using the frame
     // source keeps the non-frame segments (clock, carousel, systatus) from
     // being swept along on every window churn fact bump.
-    if (s.facts.window_rev != window_rev) s.markDirtySource(.frame);
+    if (s.facts.window_rev != window_rev) render.markDirtySource(s, .frame);
     if (s.facts.layout_rev != layout_rev) {
-        repaint.requestFullRedraw();
+        render.requestFullRedraw();
     }
     s.facts.focus_rev = focus_rev;
     s.facts.window_rev = window_rev;
@@ -420,9 +630,9 @@ pub fn updateIfDirty() void {
     // can't busy-spin this batch.
     var redraw_iter: u8 = 0;
     while (redraw_iter < max_batched_redraws) : (redraw_iter += 1) {
-        _ = repaint.foldModuleRedraw(s);
+        _ = render.foldModuleRedraw(s);
         if (!s.dirty.flag) break;
-        repaint.performDraw();
+        render.performDraw();
     }
     if (redraw_iter == max_batched_redraws)
         log.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
@@ -446,7 +656,7 @@ pub fn updateClock() void {
     const fmt = drawing.clockFormat(core.getState().config.bar);
     if (!anyBoolHook(.secondsElapsed, .{fmt})) return;
 
-    if (s.adoptFreshClockWidth()) {
+    if (render.adoptFreshClockWidth(s)) {
         // Re-lay and repaint the row in this same call, then ship it. updateClock
         // is the last statement of the event loop body, i.e. it runs AFTER the
         // end-of-batch flush and after the batch's own updateIfDirty, so merely
@@ -454,22 +664,77 @@ pub fn updateClock() void {
         // up to a whole second on an idle bar, which is exactly the stale-length
         // window this path exists to close. performDraw queues its blit, so the
         // flush is ours to make.
-        repaint.requestFullRedraw();
-        repaint.performDraw();
+        render.requestFullRedraw();
+        render.performDraw();
         _ = xcb.xcb_flush(core.getState().conn);
         return;
     }
-    repaint.drawClockOnly(s);
+    render.drawClockOnly(s);
 }
+
+/// The chrome-surface hook set a surface module binds to. The bar binds its
+/// `surfaces` value to this; when no surface is compiled in, the generated
+/// `surfaces.Surfaces` is a full set of no-op hooks (see build.zig), so this is
+/// ONE type in every build and call sites never test a build flag.
+pub const Surfaces = struct {
+    // Boot lifecycle, invoked from startup through surfaces.Surfaces so the
+    // boot sequence never needs to name the bar module directly.
+    init: *const fn () anyerror!void,
+    deinit: *const fn () void,
+    // Event-loop hooks.
+    handleExpose: *const fn (*const xcb.xcb_expose_event_t) void,
+    /// No error union: the bar records its own failures (module draw errors
+    /// are logged and leave the segment dirty) rather than propagating, and an
+    /// `anyerror!void` here forced every call site to write a `catch` arm that
+    /// could only ever log the same thing.
+    updateIfDirty: *const fn () void,
+    /// The nearest wakeup this surface wants, or null for "block until an
+    /// fd is ready". The loop reduces this over its own `Timers` list, so the
+    /// surface reports ONE answer and does not re-state the min/absence rule.
+    pollTimeoutMs: *const fn () ?i32,
+    onPollWakeup: *const fn () void,
+    updateClock: *const fn () void,
+    onReload: *const fn () void,
+    // Input routing. The chrome overlay pre-empts key handling (returns true
+    // when it consumed the key), button presses on the surface window are
+    // routed to it, and the three surface config actions mutate chrome state.
+    chromeHandleKeypress: *const fn (*const xcb.xcb_key_press_event_t, ?*const types.Action) bool,
+    isBarWindow: *const fn (u32) bool,
+    handleButtonPress: *const fn (*const xcb.xcb_button_press_event_t) void,
+    /// Press-hold motion over the surface: X's implicit grab keeps delivering
+    /// motion to the surface window while a button is held, so a scrub-drag
+    /// (e.g. a slider sub, volume) can track the pointer even past the bar's
+    /// edge. The surface decides whether a segment drag is live and routes it.
+    handleButtonMotion: *const fn (*const xcb.xcb_motion_notify_event_t) void,
+    /// Releases end a press-hold scrub on the surface; the surface clears its
+    /// drag anchor here.
+    handleButtonRelease: *const fn (*const xcb.xcb_button_release_event_t) void,
+    setBarState: *const fn (types.Action) void,
+    /// Pre-computes and applies bar visibility for `ws` (X-free, no
+    /// reconcile) so the workspace-switch path gets the correct workarea on
+    /// the first reconcile.
+    updateBarVisibilityForWorkspace: *const fn (u8) void,
+    /// Immediately unmaps the bar and updates the screen claim, without a
+    /// separate reconcile. Called from the fullscreen-enter grab so the bar
+    /// disappears atomically with the fullscreen geometry — no deferred
+    /// ConfigureNotify wait. No-ops when the bar is already hidden.
+    hideBarForFullscreen: *const fn () void,
+    toggleBarSegmentAnchor: *const fn () void,
+    /// True when fullscreen currently forces the bar hidden. The action layer
+    /// needs this to decide whether a re-anchor's reconcile is meaningful
+    /// The predicate is the bar's, so it is reached through the same
+    /// hook table as the re-anchor itself rather than imported directly.
+    barForcedHiddenByFullscreen: ?*const fn (*const model.Model, u8) bool,
+    chromeToggleOverlay: *const fn () void,
+};
 
 /// Comptime-registered UI-surface hooks for core's event loop (comptime
 /// reference point: the one place the loop knows the bar exists). Core calls
 /// these through a single `surfaces.Surfaces` alias; when the bar is absent the
 /// whole set is `null` and every such call site compiles away. The emitter
 /// lives in this module, so detaching the bar detaches its handlers. The hook
-/// types themselves live in the core-owned `contract_x11` interface contract,
-/// not here: this module only binds its functions to that contract.
-pub const surfaces = @import("contract_x11").Surfaces{
+/// types are `Surfaces`, directly above: this module defines and binds them.
+pub const surfaces = Surfaces{
     .init = init,
     .deinit = deinit,
     .handleExpose = input_events.handleExpose,
@@ -484,8 +749,8 @@ pub const surfaces = @import("contract_x11").Surfaces{
     .handleButtonMotion = input_events.handleButtonMotion,
     .handleButtonRelease = input_events.handleButtonRelease,
     .setBarState = setBarState,
-    .hideBarForFullscreen = visibility.hideBarForFullscreen,
-    .updateBarVisibilityForWorkspace = visibility.updateBarVisibilityForWorkspace,
+    .hideBarForFullscreen = hideBarForFullscreen,
+    .updateBarVisibilityForWorkspace = updateBarVisibilityForWorkspace,
     .toggleBarSegmentAnchor = toggleBarSegmentAnchor,
     .barForcedHiddenByFullscreen = visibility.barForcedHiddenByFullscreen,
     .chromeToggleOverlay = chromeToggleOverlay,

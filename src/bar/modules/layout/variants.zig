@@ -4,7 +4,7 @@
 const types = @import("types");
 const drawing = @import("drawing");
 const pipeline = @import("pipeline");
-const actions = @import("actions");
+const window = @import("window");
 const contract = @import("contract");
 const core = @import("core");
 const segmod = @import("segment");
@@ -51,4 +51,4 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
     return segmod.drawAndStore("variants", dc, config, height, start_x, getIndicator());
 }
 
-pub const module = segmod.module("variants", draw, actions.stepVariantDir, .{ .mode = .measured_relayout });
+pub const module = segmod.module("variants", draw, window.stepVariantDir, .{ .mode = .measured_relayout });

@@ -8,7 +8,10 @@
 
 const std = @import("std");
 
-const paths = @import("paths");
+const log = @import("log");
+const spawn = @import("spawn");
+const fallback = @import("fallback");
+const snapshot = @import("snapshot");
 const editor = @import("editor");
 
 const c = @cImport({
@@ -93,7 +96,7 @@ pub fn loadCompletions() void {
 
     var dir_buf: [std.fs.max_path_bytes:0]u8 = undefined;
 
-    var dir_it = paths.dirIterator(path_env);
+    var dir_it = fallback.dirIterator(path_env);
     outer: while (dir_it.next()) |dir_path| {
         if (dir_path.len >= dir_buf.len) continue;
         @memcpy(dir_buf[0..dir_path.len], dir_path);
@@ -131,7 +134,7 @@ fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
     if (name[0] == '.') return false;
 
     var full_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    return paths.exeInDir(&full_path_buf, dir_path, name);
+    return fallback.exeInDir(&full_path_buf, dir_path, name);
 }
 
 /// Stores `name` into the next completion slot.  Returns true when the table is
@@ -324,7 +327,7 @@ fn histAppendToFile(cmd: []const u8) void {
     _ = c.mkdir(@ptrCast(&path_buf), 0o700);
     path_buf[last_sep] = '/';
 
-    const fd = c.open(@ptrCast(&path_buf), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, @intCast(paths.restricted_file_mode)));
+    const fd = c.open(@ptrCast(&path_buf), c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_int, @intCast(snapshot.restricted_file_mode)));
     if (fd < 0) return;
     defer _ = c.close(fd);
     _ = c.write(fd, cmd.ptr, cmd.len);
@@ -456,31 +459,18 @@ pub fn loadHistory(allocator: std.mem.Allocator) void {
     }
 }
 
+/// Records the command in the run-history ring, then hands the exec to the
+/// global spawn facility (core/proc/spawn.zig). The prompt used to double-fork
+/// here itself; the fold keeps only the prompt-specific duties (history) and
+/// delegates detach/exec to `spawn`, which does it better: WM-as-subreaper
+/// with a spawn-report pipe instead of an untracked double-fork, and
+/// workspace routing for any window the command opens (spawn-crossing
+/// suppression, so it lands on the workspace the prompt was invoked from).
 pub fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToFile(cmd);
 
-    // cmd.len <= default_max_input - 1 (enforced by the vim buffer
-    // insert clamp), so buf always has room for the null terminator.
-    var buf: [editor.default_max_input]u8 = undefined;
-    @memcpy(buf[0..cmd.len], cmd);
-    buf[cmd.len] = 0;
-    const cmd_z: [*:0]const u8 = buf[0..cmd.len :0];
-
-    const pid = c.fork();
-    if (pid == 0) {
-        // Double-fork detaches the grandchild from this process so the bar
-        // does not wait on it when it exits.
-        const pid2 = c.fork();
-        if (pid2 == 0) {
-            _ = c.setsid();
-            const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
-            _ = c.execvp("/bin/sh", @ptrCast(&argv));
-            std.process.exit(1);
-        }
-        std.process.exit(0);
-    } else if (pid > 0) {
-        var status: c_int = 0;
-        _ = c.waitpid(pid, &status, 0);
-    }
+    spawn.executeShellCommand(cmd) catch |err| {
+        log.err("prompt: spawn failed ({s}): {s}", .{ @errorName(err), cmd });
+    };
 }

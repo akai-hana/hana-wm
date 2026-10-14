@@ -19,7 +19,7 @@ const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("contract");
 
-const time = @import("time");
+const core = @import("core");
 const c = @cImport(@cInclude("time.h"));
 
 const ns_per_s = std.time.ns_per_s;
@@ -173,7 +173,7 @@ pub fn deadlineFromMs(now_ms: i64) i32 {
 
 /// ms until the next whole-second boundary, contributed via bar.pollTimeoutMs().
 fn tickDeadlineMs() i32 {
-    return deadlineFromMs(time.realtimeMs());
+    return deadlineFromMs(core.realtimeMs());
 }
 
 // Drawing
@@ -215,7 +215,7 @@ fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x:
 }
 
 fn currentEpochSeconds() i64 {
-    return @intCast(time.realtimeNs() / ns_per_s);
+    return @intCast(core.realtimeNs() / ns_per_s);
 }
 
 /// Formats `sec` (seconds since the Unix epoch) into `buf` using `fmt` as a

@@ -32,13 +32,12 @@
 
 const std = @import("std");
 const core = @import("core");
-const constants = @import("constants");
 
 const drawing = @import("drawing");
 const vocab = @import("vocab");
 const types = @import("types");
 const contract = @import("contract");
-const model = @import("model");
+const model = @import("wm_state");
 
 /// Service handles the bar passes into mechanism segments (the prompt) at
 /// init. Passed once so segments never import the bar orchestrator;
@@ -151,7 +150,7 @@ pub const title_min_width: u16 = 100;
 
 /// Maximum number of windows rendered in split-view; the single bar-wide cap
 /// (whole batch, per-window scratch, and title gather all bound to it).
-pub const max_visible_windows = constants.max_tiled_windows;
+pub const max_visible_windows = model.max_tiled_windows;
 
 /// Off-screen sentinel: sorts last in position, drawing is skipped.
 pub const offscreen_rect: model.Rect = .{

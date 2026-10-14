@@ -40,7 +40,7 @@
 //! parameterised contract surface for little net body. See systatus.zig.
 
 const std = @import("std");
-const time = @import("time");
+const core = @import("core");
 const level = @import("level");
 const drawing = @import("drawing");
 const segmod = @import("segment");
@@ -131,14 +131,14 @@ pub const Throttle = struct {
     /// drag-end release.
     fn land(self: *Throttle, pct: u8) void {
         self.write(.commit, pct);
-        self.last_ms = time.realtimeMs();
+        self.last_ms = core.realtimeMs();
         self.pending = false;
     }
 
     /// Decides one event. `cost` is the control's own latency class: an
     /// in-process write lands every time, a spawn waits for its window.
     pub fn apply(self: *Throttle, cost: CommitCost, pct: u8) void {
-        if (cost == .immediate or time.realtimeMs() -| self.last_ms >= self.interval_ms) {
+        if (cost == .immediate or core.realtimeMs() -| self.last_ms >= self.interval_ms) {
             self.land(pct);
         } else {
             self.pending = true;
@@ -149,14 +149,14 @@ pub const Throttle = struct {
     /// one-shot commit (the press that enters drag mode) so the first motion
     /// does not double-send.
     pub fn reset(self: *Throttle) void {
-        self.last_ms = time.realtimeMs();
+        self.last_ms = core.realtimeMs();
         self.pending = false;
     }
 
     /// The poll-loop sweep: flushes an owed commit whose window has elapsed
     /// (the newest value lands exactly once per window).
     pub fn flushOwed(self: *Throttle, pct: u8) void {
-        if (self.pending and time.realtimeMs() -| self.last_ms >= self.interval_ms) {
+        if (self.pending and core.realtimeMs() -| self.last_ms >= self.interval_ms) {
             self.land(pct);
         }
     }
@@ -290,7 +290,7 @@ pub fn pollDeadlineMsFor(idx: usize) i32 {
         const flush_at = st.throttle.last_ms + st.throttle.interval_ms;
         if (flush_at < deadline) deadline = flush_at;
     }
-    const left = deadline - time.realtimeMs();
+    const left = deadline - core.realtimeMs();
     if (left <= 0) return 0;
     return @intCast(@min(left, max_cadence_ms));
 }
@@ -302,8 +302,8 @@ pub fn onPollWakeupFor(idx: usize) void {
     // (the read cadence below stays gated: this wake exists purely to land
     // the newest value the backend hasn't seen yet).
     st.throttle.flushOwed(subLevelOrZero(subs[idx]));
-    if (time.realtimeMs() < st.next_read_ms) return;
-    st.next_read_ms = time.realtimeMs() + subs[idx].read_interval_ms;
+    if (core.realtimeMs() < st.next_read_ms) return;
+    st.next_read_ms = core.realtimeMs() + subs[idx].read_interval_ms;
     if (subs[idx].read()) st.pending_redraw = true;
 }
 
@@ -350,7 +350,7 @@ pub fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     if (!st.armed) {
         _ = sub.read();
         st.armed = true;
-        st.next_read_ms = time.realtimeMs() + sub.read_interval_ms;
+        st.next_read_ms = core.realtimeMs() + sub.read_interval_ms;
         applyCommitWindow(idx);
     }
     // Absent backend: nothing to show (a zero-width slot, unclickable, never
