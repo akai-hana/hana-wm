@@ -32,16 +32,12 @@ const requests = @import("requests");
 /// the WM emits.
 pub const Stack = enum { above };
 
-/// Request sink: the output port every placement decision writes through.
-/// Production wires `XcbSink`; tests wire a recorder, which is the whole point
-/// of the vtable. One batch = everything queued between caller flushes (xcb
-/// buffers requests; the CALLER decides when to flush).
 /// The X11 wire form of one configure: a value array whose slots are ordered
 /// by the protocol (X, Y, WIDTH, HEIGHT, BORDER_WIDTH, STACK_MODE) plus the
 /// mask naming the live ones. X consumes value slots by mask bit, so the array
 /// is always full width and only the mask varies -- which is exactly why the
 /// slot order is positional magic and worth testing directly.
-pub const ConfigureWire = struct { mask: u16, values: [6]u32 };
+const ConfigureWire = struct { mask: u16, values: [6]u32 };
 
 /// Assembles the configure request body. Split out of the shim so the slot
 /// order is assertable without an X connection: swapping slots 2 and 3 sends
@@ -78,6 +74,10 @@ pub const Configure = struct {
     stack: ?Stack = null,
 };
 
+/// Request sink: the output port every placement decision writes through.
+/// Production wires `XcbSink`; tests wire a recorder, which is the whole point
+/// of the vtable. One batch = everything queued between caller flushes (xcb
+/// buffers requests; the CALLER decides when to flush).
 pub const Sink = struct {
     ptr: *anyopaque,
     vt: *const VTable,

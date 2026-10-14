@@ -193,27 +193,17 @@ const handled_signals = [_]std.posix.SIG{
 
 /// What `setup` installs, as DATA, with no side effects.
 ///
-/// The disposition table used to live inline in `setup` as an `inline for` over
-/// an anonymous tuple plus three loose statements, so the only way to ask
-/// "which signals does hana take over, and in what order?" was to read the body
-/// of a function that also opens a pipe and calls sigaction. Naming the policy
-/// as a value separates the question from the effects: `plan` is pure and
-/// testable, `install` is the only thing that touches process state. That is
-/// what lets a test assert the table directly -- installing the real
-/// dispositions from a test binary would clobber the runner's own SIGINT/SIGTERM
-/// handling, so a side-effecting `setup` was untestable by construction.
-pub const Plan = struct {
+/// Naming the policy as a value separates the question from the effects:
+/// `plan` is pure and testable, `install` is the only thing that touches
+/// process state -- which is what lets a test assert the table directly,
+/// since installing the real dispositions from a test binary would clobber
+/// the runner's own SIGINT/SIGTERM handling.
+const Plan = struct {
     /// Signals that get the self-pipe handler, in install order.
     handled: []const std.posix.SIG,
     /// The one signal ignored outright. Kept out of `handled` because its
     /// disposition is SIG_IGN, not a handler.
     ignored: std.posix.SIG,
-    // install always installs the alternate signal stack and always arms the
-    // backtrace handler. These were Plan fields once, but plan() hardcoded both
-    // to true and its only production consumer is install(plan()), so the flags
-    // could never be false -- a test could only assert true against true. The
-    // behaviour is unconditional and stays; only the unexercised knob goes.
-    //
     // Order matters and is why this is not reordered: the alternate stack MUST
     // be installed before any ONSTACK handler is armed, because the backtrace
     // handler runs on it, and without one it would run on the (possibly

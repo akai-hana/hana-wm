@@ -80,7 +80,7 @@ pub fn extPayload(header: []const u8) ?[]const u8 {
 /// times and has to know they agree. This is the one answer: `claimed` is a
 /// name, an ordinal, or neither, and a foreign or truncated header yields
 /// `payload = blob` -- passed through WHOLE, exactly as an unstamped blob was.
-pub const ExtHeader = struct {
+const ExtHeader = struct {
     /// Bytes after the header. Equals `blob` verbatim when the header is not
     /// recognized, so the payload is always usable.
     payload: []const u8,
@@ -120,7 +120,7 @@ pub fn extLegacyOrdinal(header: []const u8) ?usize {
 }
 
 /// Longest module name a blob header can carry in its one length byte.
-pub const max_stamped_name_len: usize = 255;
+const max_stamped_name_len: usize = 255;
 
 /// The pre-name blob format: `[version=1][registry ordinal]`. Still READ (see
 /// `extPayload`) so a v5 session file keeps its parked windows, never written.
@@ -150,14 +150,14 @@ pub const WindowRecord = struct {
 };
 
 /// Per-workspace record: layout params + membership lists (ids, not entries).
-pub const WsRecord = struct {
+const WsRecord = struct {
     params: model.LayoutParams,
     tiled: []const u32,
     mru: []const u32,
 };
 
 /// Top-level serialized state file.
-pub const StateFile = struct {
+const StateFile = struct {
     version: u32 = handoff_version,
     current: u8,
     focused: ?u32,

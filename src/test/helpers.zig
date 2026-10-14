@@ -3,10 +3,10 @@ const model = @import("model");
 const build_options = @import("build_options");
 
 const time = @import("time");
-/// Standard 800x600 test geometry (screen == workarea), shared by the sync
 const reconcile = @import("reconcile");
 const sinkmod = @import("sink");
 const test_sink = @import("test_sink");
+/// Standard 800x600 test geometry (screen == workarea), shared by the sync
 /// and tiling fixtures so no caller threads it through every init.
 pub const std_wa: model.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 600 };
 

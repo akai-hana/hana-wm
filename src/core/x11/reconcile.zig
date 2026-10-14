@@ -242,7 +242,10 @@ fn seedWinner(m: *const model.Model, plan: *const Plan) ?model.WindowId {
     if (winner == null) if (m.focused) |f| blk: {
         const slot = m.store.indexOf(f) orelse break :blk;
         const fe = m.store.at(slot).val.*;
-        if (fe.presence == .present and desireIsNonParked(fe, plan.fs_win, placementOfSlot(&plan.placements, &plan.pl_of_slot, slot), false, model.visibleEntry(m, &fe, m.current))) winner = f;
+        const placement = placementOfSlot(&plan.placements, &plan.pl_of_slot, slot);
+        const on_cur = model.visibleEntry(m, &fe, m.current);
+        if (fe.presence == .present and desireIsNonParked(fe, plan.fs_win, placement, false, on_cur))
+            winner = f;
     };
     return winner;
 }
@@ -376,11 +379,15 @@ fn sendAll(
             }
             // One configure carrying everything that changed. Border width and
             // geometry travel together on the common switch/unpark shape, and
-            // this can no longer express them as two separate requests.
+            // this can no longer express them as two separate requests. The
+            // trace prints exactly the fields the request below carries.
             if (need_bw or need_geom) {
                 if (tracing) xtrace.outbound(win, "configure", switch (need_geom) {
-                    true => std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
+                    true => if (need_bw) std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
                         rect.width,                         rect.height, rect.x, rect.y, bw,
+                        if (raise_winner) "above" else "-",
+                    }) catch "rect" else std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} stack={s}", .{
+                        rect.width,                         rect.height, rect.x, rect.y,
                         if (raise_winner) "above" else "-",
                     }) catch "rect",
                     false => std.fmt.bufPrint(&trace_buf, "bw={d} stack={s}", .{

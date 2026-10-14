@@ -7,11 +7,11 @@ const std = @import("std");
 /// Values outside this range (or non-finite) are rejected as misconfiguration
 /// rather than being fed straight into Pango, where 0/negative/NaN DPI would
 /// produce divide-by-zero or garbage font metrics.
-pub const min_reasonable_dpi: f32 = 50.0;
-pub const max_reasonable_dpi: f32 = 300.0;
+const min_reasonable_dpi: f32 = 50.0;
+const max_reasonable_dpi: f32 = 300.0;
 
 /// Inches per meter, i.e. mm per inch: converts screen mm to pixels-per-inch.
-pub const mm_per_inch: f32 = 25.4;
+const mm_per_inch: f32 = 25.4;
 
 /// Geometry inputs to the DPI formula, in the units X reports them. A struct
 /// so the formula cannot be called with the four values in the wrong order.

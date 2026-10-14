@@ -14,40 +14,38 @@ const core = @import("core");
 const xcb = core.xcb;
 const log = @import("log");
 
-pub const Cursor = struct {
-    const Context = opaque {};
+const Context = opaque {};
 
-    extern fn xcb_cursor_context_new(
-        conn: core.Connection,
-        screen: *xcb.xcb_screen_t,
-        ctx: *?*Context,
-    ) c_int;
-    extern fn xcb_cursor_load_cursor(ctx: *Context, name: [*:0]const u8) u32;
-    extern fn xcb_cursor_context_free(ctx: ?*Context) void;
+extern fn xcb_cursor_context_new(
+    conn: core.Connection,
+    screen: *xcb.xcb_screen_t,
+    ctx: *?*Context,
+) c_int;
+extern fn xcb_cursor_load_cursor(ctx: *Context, name: [*:0]const u8) u32;
+extern fn xcb_cursor_context_free(ctx: ?*Context) void;
 
-    /// Applies the user's cursor theme to the root window. Falls back silently
-    /// if xcb-cursor is unavailable or the cursor cannot be loaded.
-    pub fn setupRoot(conn: core.Connection, screen: core.Screen) void {
-        var cursor_ctx: ?*Context = null;
-        if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0) return;
-        defer xcb_cursor_context_free(cursor_ctx);
+/// Applies the user's cursor theme to the root window. Falls back silently
+/// if xcb-cursor is unavailable or the cursor cannot be loaded.
+pub fn setupRoot(conn: core.Connection, screen: core.Screen) void {
+    var cursor_ctx: ?*Context = null;
+    if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0) return;
+    defer xcb_cursor_context_free(cursor_ctx);
 
-        const cursor = xcb_cursor_load_cursor(cursor_ctx.?, "left_ptr");
-        if (cursor == xcb.XCB_NONE) return;
+    const cursor = xcb_cursor_load_cursor(cursor_ctx.?, "left_ptr");
+    if (cursor == xcb.XCB_NONE) return;
 
-        const cookie = xcb.xcb_change_window_attributes_checked(
-            conn,
-            screen.root,
-            xcb.XCB_CW_CURSOR,
-            &[_]u32{cursor},
-        );
-        if (xcb.xcb_request_check(conn, cookie)) |err| {
-            log.err("Failed to set root cursor: error_code={}", .{err.*.error_code});
-            std.c.free(err);
-        }
-
-        // The server reference-counts cursors; freeing our handle is safe;
-        // it stays alive as long as the root window holds a reference.
-        _ = xcb.xcb_free_cursor(conn, cursor);
+    const cookie = xcb.xcb_change_window_attributes_checked(
+        conn,
+        screen.root,
+        xcb.XCB_CW_CURSOR,
+        &[_]u32{cursor},
+    );
+    if (xcb.xcb_request_check(conn, cookie)) |err| {
+        log.err("Failed to set root cursor: error_code={}", .{err.*.error_code});
+        std.c.free(err);
     }
-};
+
+    // The server reference-counts cursors; freeing our handle is safe;
+    // it stays alive as long as the root window holds a reference.
+    _ = xcb.xcb_free_cursor(conn, cursor);
+}
