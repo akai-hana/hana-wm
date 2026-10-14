@@ -1,7 +1,7 @@
 //! The parked-window actions: the minimize module parks a window
 //! off-screen; restore/restoreOrdered/
 //! restoreAll unpark. Each action is one model transition + one
-//! sync entry. The shared transition tails (retile, focusFallback,
+//! reconcile entry. The shared transition tails (retile, focusFallback,
 //! prepareAndSetFocus, the covering-occupant queries) live in
 //! `actions.zig`, the hub this file imports: the two files form
 //! the window layer's intentional runtime-only import cycle (the

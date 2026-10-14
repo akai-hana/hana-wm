@@ -2,7 +2,7 @@
 //! the drag commands (registry dispatch loops), the
 //! focus-step, and the viewport family (step, focus-snap
 //! duty, the layout-metadata viewport context). Each
-//! action is one model transition + one sync entry. The
+//! action is one model transition + one reconcile entry. The
 //! shared transition tails (retile, the covering-mode
 //! query) live in `actions.zig`, the hub this file
 //! imports: the two files form the window layer's

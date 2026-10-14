@@ -1,7 +1,7 @@
 //! The window-manager lifecycle actions: the map-request tail,
 //! the post-geometry focus handoff, and the unmanage
 //! tail. Each action is one model transition + one
-//! sync entry. The fullscreen/covering orchestration
+//! reconcile entry. The fullscreen/covering orchestration
 //! lives beside this file in covering.zig; the shared
 //! transition tails (retile,
 //! focusFallback, prepareAndSetFocus, the
@@ -29,7 +29,7 @@ const actions = @import("actions");
 /// MapRequest tail. The caller's front-end (event masks, property queries)
 /// has already run; this registers the window in
 /// the model and lets ONE reconcile do map+pixel+bw+geom(+ABOVE winner) for
-/// on-current spawns. Off-current spawns park by construction; sync sends
+/// on-current spawns. Off-current spawns park by construction; the reconciler sends
 /// their border width at first show instead of immediately (invisible either
 /// way; one less request).
 ///
@@ -74,11 +74,7 @@ pub fn mapRequest(
     // floating window). The anchor/home_ws state mirrors toggleFloating's
     // detach, and the reconcile tail applies the rect in the same reconcile.
     if (float_rect) |rect| {
-        if (e) |ep| {
-            if (ep.home_ws) |home| model_mod.removeValue(&m.ws[home.index].tiled_order, win);
-            ep.anchor = .{ .floating = rect };
-            ep.home_ws = null;
-        }
+        if (e) |ep| model_mod.detachTiledToFloating(m, ep, win, rect);
     } else {
         // Primary-fifo variant spawn placement (moved out of model.register;
         // it is SPAWN policy, not membership policy): a new window takes the
