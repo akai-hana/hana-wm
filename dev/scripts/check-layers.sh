@@ -43,7 +43,7 @@ wire_allowed() {
         # surface.zig holds the bar frame's wire traffic (the xcb_flush that
         # orders fills under glyphs, moved here from drawing.zig with the
         # Surface in Phase 4 step 24); drawing.zig no longer sends wire.
-        src/bar/bar.zig|src/bar/visibility.zig|src/bar/surface.zig|src/bar/win.zig) ;;
+        src/bar/bar.zig|src/bar/wire/visibility.zig|src/bar/render/surface.zig|src/bar/wire/win.zig) ;;
 
         # Window event handlers (merged client_events.zig): ConfigureRequest
         # compliance (client-requested geometry honored for floating windows
@@ -54,7 +54,7 @@ wire_allowed() {
         # itself); window.zig re-exports the handlers as the dispatch
         # surface. Merged back from configure/client_message/crossing.zig
         # 2026-10-09.
-        src/window/client_events.zig) ;;
+        src/window/protocol/client_events.zig) ;;
 
         # Admission preamble: claimManagedEventMask sets the management
         # event mask (PropertyNotify / StructureNotify / FocusChange
@@ -108,12 +108,15 @@ wire_allowed() {
         # core/x11/requests.zig (claimWindowManagerRole + flush), so the
         # composition root no longer names xcb.
         #
-        # input.zig carried this entry until the action dispatcher
-        # (executeAction/grafted/closeWindow/toggleBarPosition/dirSign)
-        # moved to input/dispatch.zig (review 05-input round 2); the
-        # wire traffic moved with it and is allowlisted there, so
-        # input.zig itself no longer sends any.
-        src/input/dispatch.zig) ;;
+        # input.zig carries this entry for TWO pieces of wire traffic that
+        # live here by role: the action dispatcher (executeAction/grafted/
+        # closeWindow/toggleBarPosition/dirSign — re-merged from
+        # input/dispatch.zig 2026-10-10; it rode its own allowlist entry
+        # while split) and the one-shot root-cursor theming call (setupRoot,
+        # merged from core/x11/cursor.zig — decoration, not per-window
+        # mutation, same "startup, not mutation" warrant as
+        # enableDetectableAutoRepeat).
+        src/input/input.zig) ;;
 
         # Wire PRIMITIVES: core/x11/requests.zig hosts configureWindow /
         # raiseWindow / setBorderPixel / grabServer, and core/x11/atoms.zig

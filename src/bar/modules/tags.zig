@@ -11,7 +11,6 @@
 //! never on the file stem.
 
 const types = @import("types");
-const defaults = @import("defaults");
 const drawing = @import("drawing");
 const query = @import("query");
 const actions = @import("actions");
@@ -176,9 +175,9 @@ fn drawCell(
 
     if (has_windows) {
         const glyph = if (is_current)
-            config.indicator_focused orelse defaults.default_indicator_focused
+            config.indicator_focused orelse types.default_indicator_focused
         else
-            config.indicator_unfocused orelse defaults.default_indicator_unfocused;
+            config.indicator_unfocused orelse types.default_indicator_unfocused;
         const color = config.workspaceIndicatorColor(is_current);
         // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
         try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, config.scaledIndicatorSize(height), color);

@@ -339,11 +339,11 @@ run_scenarios() {
 
     run_scenario \
         "bar internal: -drawing" \
-        "src/bar/drawing.zig"
+        "src/bar/render/drawing.zig"
 
     run_scenario \
         "bar internal: -win" \
-        "src/bar/win.zig"
+        "src/bar/wire/win.zig"
 
     run_scenario \
         "bar internal: -segment dispatch" \
