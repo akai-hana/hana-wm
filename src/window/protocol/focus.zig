@@ -127,10 +127,8 @@ pub fn snapshotSpawnCursor(conn: core.Connection) void {
 /// legitimately differ only while a two-phase prepare/apply is in flight
 /// (apply updates the cache before the caller's model write lands). Before
 /// pipeline.init there is no model truth, so the cache is the only record and
-/// the invariant is vacuously true.
-/// Test-only invariant check: the focus cache must mirror the model's last
-/// assigned focus. Lives in-module (not the test) because it reads the
-/// private `state`.
+/// the invariant is vacuously true. Lives in-module (not the test) because it
+/// reads the private `state`.
 pub fn protocolParityHolds() bool {
     return getFocused() == state.?.last_applied;
 }

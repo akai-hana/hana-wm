@@ -127,14 +127,10 @@ pub const Value = union(enum) {
 
 pub const Section = struct {
     /// One entry per declared key, in document order. This array IS the
-    /// section: it replaces a `pairs` hashmap plus five parallel structures
-    /// (`keys_in_order`, `lines_in_order`, `consumed`, `duplicated_keys`,
-    /// `scalar_dup_warned`), each answering a question about the same keys
-    /// whose agreement was an invariant nothing could see. A section holds
-    /// tens of keys and is read only during a config load, so the linear scan
-    /// below costs a comparison or two where the hashmap cost a hash -- and
-    /// iteration is document order for free (the hashmap's was per-process
-    /// random, which is why `orderedIterator` existed at all).
+    /// section: one place per key, so there is no second copy to keep in
+    /// step. A section holds tens of keys and is read only during a config
+    /// load, so the linear scan below costs a comparison or two, and
+    /// iteration is document order for free.
     /// Nothing to allocate up front: the array grows as keys are inserted,
     /// and a section is never read before parsing has finished.
     entries: std.ArrayListUnmanaged(Entry) = .empty,
@@ -176,8 +172,8 @@ pub const Section = struct {
         return null;
     }
 
-    // Iterates pairs in document (insertion) order; deterministic, unlike
-    // `pairs.iterator()`. Values are the live (possibly accumulated) values.
+    // Iterates pairs in document (insertion) order; deterministic.
+    // Values are the live (possibly accumulated) values.
     // Every key the walk visits is marked consumed, so a section read this way
     // needs no separate markConsumed prologue: the walk itself is the read.
     pub fn orderedIterator(self: *Section) OrderedIterator {
@@ -531,7 +527,7 @@ pub fn mergeDocumentsInto(
     }
 }
 
-pub const ParseError = error{
+const ParseError = error{
     InvalidSyntax,
     InvalidSection,
     InvalidValue,

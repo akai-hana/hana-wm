@@ -24,8 +24,8 @@ const font_baseline_height: f32 = 1080.0;
 /// against the min and forgetting the cap. Grouping them makes "the policy"
 /// a thing you can pass, not a convention you have to remember.
 const BarHeightPolicy = struct {
-    /// Minimum bar height in pixels. Callers validate config values against
-    /// this before calling scaleBarHeight.
+    /// Minimum bar height in pixels. `scaleBarHeight` clamps an explicit
+    /// `height` up to this floor.
     min_px: u16 = 20,
     /// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured
     /// bar derives its height from font metrics, and this bounds that
@@ -173,8 +173,8 @@ pub fn scaleFontSizeForHeight(value: types.ScalableValue, screen_height_px: u16)
 pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = scaling.scaleToPixels(value, screen_height_f);
-    // clampBarHeight, not a bare @max: the bare floor honored
-    // bar_min_height_px but silently ignored bar_max_height_px, so a large
-    // `height` could hand the bar more of the screen than the policy allows.
+    // clampBarHeight, not a bare @max: the floor and the cap are one policy
+    // value to apply together, so a large `height` can't hand the bar more of
+    // the screen than the policy allows.
     return clampBarHeight(@intFromFloat(scaled_px));
 }

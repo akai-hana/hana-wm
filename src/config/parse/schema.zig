@@ -86,8 +86,8 @@ fn barColorOpt(places: []const Placement, target: []const u8, sibling: []const u
 }
 
 /// Every scalar knob, exactly once. ORDER MATTERS in two places, and only one
-/// of them is checked: workspaces.count precedes icon-padding (config.zig pads
-/// icons to the count) is a comment-only convention, while the base-bar-colors
+/// of them is checked: workspaces.count precedes icon-padding (bar_sections
+/// pads icons to the count) is a comment-only convention, while the base-bar-colors
 /// precede the color_from chain ordering is ENFORCED below by each knob's
 /// `needs` list.
 pub const knobs = [_]Knob{
@@ -105,8 +105,8 @@ pub const knobs = [_]Knob{
     knob(&.{ place(types.section_bar_modules_workspaces, "count"), place(types.section_workspaces, "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
     knob(&.{ place(types.section_bar_modules_workspaces, "enabled"), place(types.section_workspaces, "enabled") }, "workspaces.enabled", .b),
 
-    // [tiling]: functional knobs gated on the section exactly as
-    // parseTiling always was -- a lone [tiling] carrying only the
+    // [tiling]: functional knobs gated on the section itself -- a lone
+    // [tiling] carrying only the
     // aesthetics quartet (a theme file's shape) never fed these
     // knobs. (The aesthetics quartet below is UNGATED: it's
     // visual, so themes may ship it without any functional key.)
@@ -261,8 +261,8 @@ fn resolveTarget(comptime target: []const u8) ?type {
 fn isScalarLeaf(comptime t: type) bool {
     if (t == types.ScalableValue or t == types.Color) return true;
     return switch (@typeInfo(t)) {
-        // Owned string leaves: the shape that leaks (see
-        // types.bar_owned_str_fields) and that `copy_when_absent` knobs set.
+        // Owned string leaves: `[]const u8` slices (and their optionals)
+        // count as scalars a knob may own.
         .optional => |o| o.child == []const u8,
         .pointer => |p| p.size == .slice and p.child == u8,
         // Enums are config-visible leaves too: a layout/gap enum nobody parses
@@ -379,7 +379,7 @@ const EnumRead = struct {
 /// three color variants, `ratio`/`ratio_strict`, `scalable`/`scalable_free`)
 /// would trade those arms for a flag apiece and push the branching back
 /// inside them -- more to read at the call site, not less.
-pub const Kind = union(enum) {
+const Kind = union(enum) {
     /// Plain boolean flag.
     b,
     /// Integer with optional inclusive bounds (warn-and-revert outside).
@@ -424,8 +424,8 @@ pub const Knob = struct {
     target: []const u8,
     kind: Kind,
     /// When non-empty the whole knob is skipped unless this section exists
-    /// (the [bar]-colors gates mirror parseBar's old early return; the
-    /// tiling family mirrors parseTiling's).
+    /// (the gates mirror the parsers' own missing-section returns: parseBar
+    /// for [bar], parseTilingStructures for [tiling]).
     requires: []const u8 = "",
     /// Assign the fallback default even when no placement matched.
     copy_when_absent: bool = false,
@@ -445,9 +445,7 @@ pub const Knob = struct {
 //
 // `fieldTypeAt` is the one TYPE walk; these walk the VALUE the same way, one
 // segment per recursion step, so a path of any depth resolves identically on
-// both sides. (The previous pair of accessors hard-coded "groups are exactly
-// one level deep" and re-implemented the split -- a second algorithm that had
-// to be kept in agreement with the first.)
+// both sides.
 
 /// The field type at the dotted `path`, or a build failure when it names
 /// nothing: the mirror of `fieldTypeAt` for a path whose validity the knob
@@ -635,10 +633,8 @@ pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const 
     view.* = copy;
 }
 
-/// Applies every knob from a parsed Document: the schema-driven replacement
-/// for the hand-written per-section scalar interpreters (parseDrag,
-/// parseWorkspaces, parseEnabledFlag, parseTiling's scalar reads,
-/// parseBar's scalar reads, parseBarColors). OOM from string dupes
+/// Applies every knob from a parsed Document: the single schema-driven scalar
+/// pass over the document. OOM from string dupes
 /// propagates; everything else warns-and-reverts in place.
 pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types.Config) !void {
     // Resolve the document-global palette (four reserved variable names)
@@ -654,7 +650,7 @@ pub fn applyAll(doc: *parser.Document, allocator: std.mem.Allocator, cfg: *types
             // Places probe in order; the FIRST section present in the document
             // wins and only its paired key spelling is read. Presence of
             // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]`
-            // master_count unrecognized, matching the old orelse chains.
+            // master_count unrecognized.
             if (doc.getSection(pl.section)) |sec| {
                 hit = .{ .sec = sec, .key = pl.key };
                 break;

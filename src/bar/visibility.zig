@@ -39,15 +39,7 @@ pub fn shouldBeVisible(is_globally_visible: bool, forced_hidden_by_fullscreen: b
     return !forced_hidden_by_fullscreen and is_globally_visible;
 }
 
-/// The pre-computed show/hide decision shared by the workspace-switch path
-/// (`updateBarVisibilityForWorkspace`) and the fullscreen-fact reaction
-/// (`applyFullscreenVisibility`): recompute the desired visibility from the
-/// workspace + user level, folded with the bar's present mapped state so the
-/// caller can return without touching the wire when nothing changes.
-/// Why the bar wants the visibility it wants. The POLICY states the target and
-/// why; COMPARING that target against the bar's currently mapped state belongs
-/// to the orchestrator, because that comparison reads live window state and is
-/// the thing that decides whether any wire request happens.
+/// Why the bar wants the visibility it wants.
 pub const Reason = enum {
     /// The user toggle and the current workspace both want the bar shown.
     user_and_workspace,
@@ -62,6 +54,14 @@ pub const DesiredVisibility = struct {
     reason: Reason,
 };
 
+/// The pre-computed show/hide decision shared by the workspace-switch path
+/// (`updateBarVisibilityForWorkspace`) and the fullscreen-fact reaction
+/// (`applyFullscreenVisibility`): recompute the desired visibility from the
+/// workspace + user level. The POLICY states the target and why; COMPARING
+/// that target against the bar's currently mapped state belongs to the
+/// orchestrator, because that comparison reads live window state and is
+/// the thing that decides whether any wire request happens.
+///
 /// `is_visible` (the bar's mapped state) is deliberately NOT a parameter.
 /// `desiredVisibility` used to take it and return `needs_change`, making one
 /// function both the policy and the comparator, so the bar then early-returned

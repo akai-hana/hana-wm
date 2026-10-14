@@ -122,9 +122,9 @@ const max_window_tree_depth = constants.max_window_tree_depth;
 // All mutable window-module state is grouped into a single State struct
 // (mirroring the pattern focus.zig uses) so init()/deinit() each reset
 // everything in one assignment, and a deinit()+init() cycle can't leave a
-// stale field behind. The admission sub-state (spawn queue, rules maps,
-// spawn-cursor snapshot) lives in admission.zig beside the policy that
-// reads it. Still exactly one context per process, this is for
+// stale field behind. The admission sub-state (spawn queue, rules maps)
+// lives in admission.zig beside the policy that reads it. Still exactly one
+// context per process, this is for
 // reset discipline, not multi-context support.
 const State = struct {
     /// Caller-owned scratch for tracking.allWindowsInto (border sweeps).
@@ -265,9 +265,8 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // callAll, per the 6->2 collapse).
     for (window_mods) |wm| if (wm.init) |f| try f();
     icccm.reset();
-    // Admission sub-state (spawn queue, rules maps, spawn-cursor
-    // snapshot): reset and rules-map rebuild live with the admission
-    // policy in admission.zig.
+    // Admission sub-state (spawn queue, rules maps): reset and rules-map
+    // rebuild live with the admission policy in admission.zig.
     admission.init(alloc);
 }
 
@@ -874,9 +873,9 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     };
     // PIPELINE: model-path transition; the transition stays on the single
     // source of truth. `fullscreenSetWindow` re-checks want-vs-current
-    // itself (and computes the covering state inside the same grab), so
-    // the covering pre-scan and the explicit guard this arm used to make
-    // are gone -- one covering scan per request instead of two.
+    // itself and computes the covering state inside the same grab, so no
+    // covering pre-scan or explicit guard is needed here -- one covering
+    // scan per request instead of two.
     actions.fullscreenSetWindow(win, want);
 }
 

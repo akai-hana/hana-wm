@@ -25,12 +25,11 @@ pub fn usedPct(total: u64, avail: u64) ?u8 {
     return @intCast(@min((used * 100) / total, 100));
 }
 
-/// Used memory %, or null when meminfo is unreadable or -- because the read is
-/// truncation-aware -- too large to trust whole. A meminfo past the buffer
-/// used to look exactly like one with no `MemAvailable`, i.e. "no RAM" instead
-/// of the I/O problem it is.
 var g_num: [16]u8 = undefined;
 
+/// Used memory %, or null when meminfo is unreadable or -- because the read is
+/// truncation-aware -- too large to trust whole: a meminfo past the buffer is
+/// an I/O problem, not "no RAM".
 fn read() ?systatus.Sample {
     var buf: [4096]u8 = undefined;
     const r = systatus.readFileChecked("/proc/meminfo", &buf) orelse return null;

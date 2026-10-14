@@ -168,7 +168,7 @@ fn redrawSegmentScoped(s: *State, id: usize) void {
 
 /// Shared region-scoped single-slot repaint skeleton: clear the reserved
 /// slot, re-draw the segment, then blit at least what was painted
-/// (`drawn_end` can exceed the reserved width after font fallback or
+/// (`drawn_w` can exceed the reserved width after font fallback or
 /// digit-width drift: blitting only the cached width would clip digits)
 /// while covering the full reserved slot so stale pixels from a wider
 /// earlier frame get overwritten with the clean background just painted.

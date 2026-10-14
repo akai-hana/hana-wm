@@ -33,8 +33,8 @@ pub const Screen = xcbmod.Screen;
 
 /// Narrows a queued `*anyopaque` event to its concrete xcb event type. Lives in
 /// the x11 leaf beside the cImport; re-exported here because the event loop
-/// and the bar's refresh path are its only callers and both already speak
-/// through `core`.
+/// and display/hz.zig's randr notify handler are its callers and both already
+/// speak through `core`.
 pub const eventCast = xcbmod.eventCast;
 
 /// Alias of the canonical @import("ids").WindowId (xcb_window_t); see the
@@ -142,15 +142,12 @@ pub inline fn borderWidth() u16 {
 
 var state: ?State = null;
 
-/// How far boot has progressed. ONE answer to "is it safe to touch the model
-/// yet?". Phase is monotone: init() advances it, and every consumer reads
-/// this one.
+/// How far boot has progressed toward a usable model. Independent of `state`
+/// by design: a headless fixture can have a model with no X connection, so
+/// "is State live" (isReady) and "is the model live" (this) are two facts.
 const Phase = enum {
-    /// Nothing initialized: getState() would panic, no model exists.
+    /// No model yet: model()/mut() would panic.
     uninit,
-    /// core.init() has run: State is live, so config/conn/screen are safe to
-    /// read. The model may not exist yet.
-    core_ready,
     /// pipeline.init() has run: the model instance and its sink exist, so
     /// model()/mut() are safe to call. Terminal.
     model_ready,
@@ -158,16 +155,8 @@ const Phase = enum {
 
 var phase: Phase = .uninit;
 
-/// Records that core.init() has run, i.e. State is live. Asserts boot starts
-/// clean: a second core.init() would silently orphan the first State and the
-/// config box it owns.
-inline fn markCoreReady() void {
-    std.debug.assert(phase == .uninit);
-    phase = .core_ready;
-}
-
 /// Records that the model pipeline is live. Deliberately does NOT require
-/// .core_ready first: a headless unit-test fixture has no X connection and so
+/// core.init() first: a headless unit-test fixture has no X connection and so
 /// can never establish State, yet still needs a model. In production the
 /// order is core.init() then pipeline.init(), fixed by main's call sequence.
 pub inline fn markModelReady() void {
@@ -207,6 +196,9 @@ pub fn init(
     config: *types.Config,
     initial_dpi: f32,
 ) void {
+    // Asserts boot starts clean: a second core.init() would silently orphan
+    // the first State and the config box it owns.
+    std.debug.assert(state == null);
     state = .{
         .conn = conn,
         .screen = screen,
@@ -215,7 +207,6 @@ pub fn init(
         .config = config,
         .dpi_info = initial_dpi,
     };
-    markCoreReady();
 }
 
 /// Flips the bar between the top and bottom edge and returns the new position.
@@ -301,9 +292,6 @@ pub fn replaceOwnedConfig(new_config: *types.Config) void {
     config_rev.bump();
 }
 
-/// Stays outside State: unlike State's fields it has a safe default
-/// (96.0 DPI, no scaling), and is set once during scale detection, never
-/// reassigned afterward.
 /// Display DPI in use, as a fact on `State` rather than a bare global.
 ///
 /// It was a `pub var` outside `State`, which meant the value that scales every
@@ -314,9 +302,8 @@ pub fn replaceOwnedConfig(new_config: *types.Config) void {
 /// that the real value had not arrived yet. As a field it is covered by the
 /// same "uninitialized access panics cleanly" rule as everything else.
 ///
-/// `setDpi` is the only writer: the config override and the detected value are
-/// both decisions made once, in `main`, and the RandR path that re-derives it
-/// on a size change.
+/// Two writers only: `init` seeds it (a config override beats detection), and
+/// `setDpi` re-derives it on the RandR size-change path.
 pub fn dpi() f32 {
     return getState().dpi_info;
 }

@@ -1,4 +1,4 @@
-//! X-gated integration tests for the actions layer (src/window/actions.zig):
+//! X-gated integration tests for the actions layer (src/window/actions/actions.zig):
 //! every scenario runs against a live X server through the real
 //! mapRequest/reconcile pipeline. When no server is present the tests print
 //! SKIP and pass, keeping `zig build test` green headless. The model-side

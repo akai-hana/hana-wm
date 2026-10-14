@@ -261,7 +261,7 @@ pub const MouseBind = struct {
 
 /// Maximum bytes any lowered config name (layout names, string_map keys) may
 /// occupy. Single home for the 32-byte buffers that config lookups lower into;
-/// config.zig's layout-name parser derives from this so the two can't drift.
+/// grammar/layout_names.zig derives its bound from this so the two can't drift.
 pub const max_config_name = 32;
 
 /// Lowercases `str` into a `max_len`-byte stack buffer if it fits; returns
@@ -295,10 +295,6 @@ pub const MasterSide = enum {
     });
 };
 
-/// Window placement policy for the master-stack layout is now expressed as
-/// VALUE-STRINGS in the registry-driven `variants` map (see TilingConfig).
-/// Each layout module binds its own `variant_parse` to interpret those
-/// strings; there are no closed per-layout variant enums here.
 /// Per-workspace startup layout assignment, overriding the global default.
 /// variant is null -> use the per-layout map default ([tiling].variants).
 pub const WorkspaceLayoutOverride = struct {
@@ -331,8 +327,10 @@ pub const TilingConfig = struct {
     /// resize) is allowed to reach, in pixels.
     min_window_dim: u16 = constants.min_window_dim,
 
-    // Per-layout variant preferences, stored generically as a canonical
-    // layout-name -> VALUE-STRING map. Both the key and the value-string are
+    // Per-layout variant preferences: window placement policy expressed as
+    // value-strings in this canonical layout-name -> VALUE-STRING map (no
+    // closed per-layout variant enums; each module interprets its strings via
+    // its `variant_parse` hook). Both the key and the value-string are
     // heap-duped at parse time (setTilingVariant) so they outlive the parsed
     // document; deinit frees every key and value via freeStringMap.
     variants: std.StringHashMapUnmanaged([]const u8) = .empty,
@@ -364,13 +362,13 @@ pub const TilingConfig = struct {
         return lookup;
     }
 
-    /// Resolves the per-workspace layout overrides into a fixed-size,
     /// The default layout name: the first entry of the layout cycle, or
     /// `canon_master_layout` when the cycle is empty. Derived, never stored.
     pub fn defaultLayout(self: *const TilingConfig) []const u8 {
         return if (self.layouts.items.len > 0) self.layouts.items[0] else canon_master_layout;
     }
 
+    /// Resolves the per-workspace layout overrides into a fixed-size,
     /// workspace-indexed lookup of override indices with last-wins semantics
     /// (a duplicate entry for one workspace overrides its predecessor).
     /// `null` at an index means no override for that workspace. Consumed by
@@ -569,10 +567,9 @@ pub const BarConfig = struct {
     selected_bg: Color = default_bar_selected_bg,
     selected_fg: Color = default_bar_selected_fg,
 
-    // Palette canon (the former `accent_color` renamed primary). Declared in
-    // the theme's palette section; the other three exist so the palette is
-    // first-class config even though rendering consumes them through the
-    // title/run chains below.
+    // Palette canon, declared in the theme's palette section; the other three
+    // exist so the palette is first-class config even though rendering
+    // consumes them through the title/run chains below.
     primary_color: Color = default_accent,
     secondary_color: Color = default_accent,
     alternative_color: Color = default_accent,

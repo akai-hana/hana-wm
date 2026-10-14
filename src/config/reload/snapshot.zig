@@ -23,13 +23,9 @@ pub const DefaultSource = enum {
     fallback,
 };
 
-/// Re-exec config hand-off: on every successful load/reload the winning user
-/// config source is frozen into a snapshot dir, and a re-exec (`reload_hana`)
-/// boots from that snapshot via `HANA_CONFIG_DIR`. A re-exec therefore swaps
-/// ONLY the binary; config file edits land exclusively through
-/// `reload_config`. Because the snapshot is refreshed only on *successful*
-/// loads, it is the last-known-good config: a mid-edit (or outright broken)
-/// config tree at re-exec time cannot take the successor down with it.
+/// The winning user config source of a load: its location plus the files it
+/// read, recorded at the end of a winning load so the snapshot can freeze
+/// exactly what the successor should boot from.
 const GoodSource = struct {
     /// Heap-allocated copy of the winning search location (a dir or a file).
     path: []u8,
@@ -42,9 +38,9 @@ const GoodSource = struct {
     /// it turned a three-file config into a thousands-of-files tmpfs copy on
     /// every boot. Each entry carries its own size/mtime stamp (null when the
     /// snapshot is not known to mirror the source): the stamp rides beside
-    /// the path it describes instead of living in a second slice that had to
-    /// stay index-for-index in step, which also removed the special case of
-    /// transferring ownership of that slice across a no-op reload.
+    /// the path it describes, so there is no second slice to keep
+    /// index-for-index in step and no ownership transfer across a no-op
+    /// reload.
     files: []SourceFile,
 };
 
@@ -68,8 +64,8 @@ const FileStamp = struct { size: u64, mtime: i96 };
 /// after the load has returned), and because discarding it wholesale is then
 /// one arena reset instead of per-path free bookkeeping. `publishReadFiles`
 /// installs a FRESH pair per load and frees the previous one, so a set is
-/// never released by a different load's allocator, and the two halves can
-/// never move in step. Read (never owned) by `rememberGoodSource` at the end
+/// never released by a different load's allocator and the two halves can
+/// never move out of step. Read (never owned) by `rememberGoodSource` at the end
 /// of a winning load.
 var read_files: ?struct {
     arena: std.heap.ArenaAllocator,
@@ -201,17 +197,15 @@ fn deleteTreeAbsolute(io: std.Io, abs_path: []const u8) void {
 }
 
 /// One resolved config file paired with the path it takes inside the snapshot
-/// and the stat taken when the freeze reached it. The AoS record for the
-/// separate `files`/`stamps` parallel arrays this replaces: both were built
-/// over the same list in the same loop order, so the stamp now travels with
-/// the entry it describes.
+/// and the stat taken when the freeze reached it. AoS so the stamp travels
+/// with the entry it describes -- no parallel arrays to keep index-for-index
+/// in step.
 const SnapFile = struct { rel: []const u8, stamp: FileStamp };
 
 /// `path` relative to `root`, or null when it does not live under it. An
 /// `include` may point outside the config dir (`../shared.toml`), and such a
-/// file is deliberately not snapshotted: the tree walk this replaced never
-/// copied it either, so the successor resolves it the same way the original
-/// load did.
+/// file is deliberately not snapshotted, so the successor resolves it the
+/// same way the original load did.
 fn relativeTo(allocator: std.mem.Allocator, root: []const u8, path: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, path, root)) return null;
     var rel = path[root.len..];
@@ -321,8 +315,7 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
 
     // Remember what was frozen so the next unchanged reload can skip all of
     // it. `g.files` shares its backing with `last_good_source`, so stamping
-    // through it records the freeze without a second allocation (the old
-    // dupe-and-replace of a parallel stamps slice is gone with the slice).
+    // through it records the freeze without a second allocation.
     for (g.files, files.items) |*sf, f| sf.stamp = f.stamp;
 }
 

@@ -64,24 +64,6 @@ pub const BarOverlay = struct {
 /// which is the correct place for that requirement to live.
 pub const KeyPressEvent = opaque {};
 
-/// Everything a segment's click hook needs, by name.
-///
-/// This was six positional parameters -- offset, two direction bools, the bar
-/// state, and two bar-provided fn pointers -- and every implementation had to
-/// restate the whole list to ignore most of it: the clock's hook discarded four
-/// of six, the tags hook three. Positionally, `offset: u16` and the two bools
-/// are indistinguishable at the call site, so a transposed pair type-checked.
-/// One named struct makes the ignored fields `_ = ctx.redraw` instead of six
-/// `_:` parameters, and leaves room to add a field (a timestamp, a modifier
-/// mask) without touching any implementation's signature.
-/// Live workspace facts every segment's hooks may read. Pure data, no bar
-/// types, so it lives HERE rather than in bar/segment.zig: the `naturalWidth`
-/// hook below takes it as a real `*const Frame`, and a hook signature cannot
-/// name a type the contract may not import. bar/segment.zig re-exports this
-/// (`pub const Frame = contract.Frame`), so every existing reader is
-/// unaffected -- and the hook no longer has to be documented as "the caller
-/// promises this is a Frame", which is a promise `*const anyopaque` cannot
-/// check.
 /// What a segment actually painted, returned rather than inferred.
 ///
 /// `draw` used to return only the advanced `x`, and the bar decided whether a
@@ -112,6 +94,14 @@ pub const Painted = struct {
     }
 };
 
+/// Live workspace facts every segment's hooks may read. Pure data, no bar
+/// types, so it lives HERE rather than in bar/segment.zig: the `naturalWidth`
+/// hook takes it as a real `*const Frame`, and a hook signature cannot
+/// name a type the contract may not import. bar/segment.zig re-exports this
+/// (`pub const Frame = contract.Frame`), so every existing reader is
+/// unaffected -- and the hook no longer has to be documented as "the caller
+/// promises this is a Frame", which is a promise `*const anyopaque` cannot
+/// check.
 pub const Frame = struct {
     workspace_count: u32 = 0,
     current_workspace: u8 = 0,
@@ -119,6 +109,16 @@ pub const Frame = struct {
     workspace_has_windows: []const bool = &.{},
 };
 
+/// Everything a segment's click hook needs, by name.
+///
+/// This was six positional parameters -- offset, two direction bools, the bar
+/// state, and two bar-provided fn pointers -- and every implementation had to
+/// restate the whole list to ignore most of it: the clock's hook discarded four
+/// of six, the tags hook three. Positionally, `offset: u16` and the two bools
+/// are indistinguishable at the call site, so a transposed pair type-checked.
+/// One named struct makes the ignored fields `_ = ctx.redraw` instead of six
+/// `_:` parameters, and leaves room to add a field (a timestamp, a modifier
+/// mask) without touching any implementation's signature.
 pub const ClickCtx = struct {
     /// Pixels from the segment's recorded left edge. Compare against the width
     /// the row reserved (`naturalWidth`), not the last painted width.

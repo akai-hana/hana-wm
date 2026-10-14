@@ -1,6 +1,6 @@
 //! The `[bar.properties]` table: per-segment color and style
 //! overrides (`segment_fg` / `segment_value_fg` / `segment_props`),
-//! split out of schema.zig (round-2 review). The table's keys are
+//! split out of schema.zig. The table's keys are
 //! segment NAMES -- any key the scalar knobs do not own -- so this
 //! file owns the segment-entry decoding; the scalar knob loop stays
 //! in schema, which calls `applyBarProperties` after its knob pass

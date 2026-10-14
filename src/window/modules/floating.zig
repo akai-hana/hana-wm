@@ -23,11 +23,8 @@ const actions = @import("actions");
 const usable_area = @import("usable_area");
 
 const model = @import("model");
-// Peers reach each other's hooks through the generated window registry,
 const scaling = @import("scaling");
-// never by naming a sibling module: deleting a sibling only shortens the
 const reconcile = @import("reconcile");
-// registry, and capabilities stay provider-agnostic.
 
 const DragMode = enum { move, resize };
 

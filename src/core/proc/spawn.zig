@@ -299,15 +299,12 @@ pub fn drainPendingSpawns() void {
         // until SIGCHLD is next delivered. Same WNOHANG/WNOHANG-only policy
         // as reapPendingChildren: never blocks the event loop.
         //
-        // 4.2: clear `pid` ONLY when waitpid actually reaped. This used to be
-        // unconditional, which was the bug: a WNOHANG that returned 0 (the
-        // child had closed its fd but not yet exited) disarmed the only
-        // reaper for that pid, and the entry is removed below -- so the
-        // intermediate child became a permanent zombie. `spawn_is_closed`
-        // keeps the entry in the table until the reap really happened.
-        // `drained_pid` keeps the real pid alive for finishSpawn: clearing
-        // `entry.pid` here must not turn the @intCast in registerSpawn into a
-        // -1 cast.
+        // 4.2: `drained_pid` captures the real pid before any clearing --
+        // finishSpawn passes it to registerSpawn, where a -1 would @intCast
+        // into a huge u32. `pid` is cleared only when waitpid actually reaped
+        // it: a WNOHANG that returns 0 (the child closed its fd but has not
+        // exited yet) is not a reap. Zombies are collected by the
+        // waitpid(-1) sweep in reapPendingChildren, never by bookkeeping here.
         const drained_pid = entry.pid;
         if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
             entry.pid = -1;
