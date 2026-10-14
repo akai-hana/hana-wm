@@ -1,3 +1,12 @@
+> **SUPERSEDED (2026-10-08).** Several files referenced here no longer exist
+> under these names (the X-half contract file settled as `contract_x11.zig`
+> after a brief `seams.zig`; `persist.zig` is now `proc/lifecycle.zig`; loop's
+> `diag.zig` moved to `window/actions/diag.zig`;
+> loop's `grabs.zig` moved to `input/grabs.zig`). The structural evaluation
+> that answered these concerns, plus the follow-up plan now being implemented,
+> lives in the 2026-10-08 structure work; see `library/ARCHITECTURE.md` for the
+> current map. Kept as history.
+
 Hello reader.
 
 In this markdown note I'll write all my concerns about the current file/dir structure of hana's src/ codebase.
