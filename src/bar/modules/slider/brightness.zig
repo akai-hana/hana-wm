@@ -317,9 +317,6 @@ pub fn clampPct(v: u8) u8 {
 fn commitPct(v: u8) void {
     const pct = clampPct(v);
     const direct = g_backend == .sysfs;
-    // A usable device may still deny the write (root-only node, no udev
-    // rule): fall back to the spawn, and remember the flip so every later
-    // commit spawns and stays rate-limited (once per window, not per event).
     const wrote: WriteResult = if (direct) applyPctTo("", g_class, g_dev[0..g_dev_len], pct) else .transient;
     var ok = wrote == .ok;
     if (!ok) {

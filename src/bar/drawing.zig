@@ -1009,9 +1009,12 @@ pub const SizedFontList = struct {
 };
 
 /// Loads the configured fonts into `dc`. Called once per DrawContext creation.
-pub fn loadBarFonts(dc: *DrawContext, font_size: u16) !void {
-    const cs = core.getState();
-    var sized = try SizedFontList.build(cs.alloc, cs.config.bar.fonts.items, font_size);
+/// `allocator` and `fonts` are passed in rather than read out of
+/// `core.getState()`: the caller that already holds cs does not want a hidden
+/// second source of truth here (the SizedFontList doc above names exactly
+/// that bug class for `freeSizedFontList`, and 21.5 fixed it for `build`).
+pub fn loadBarFonts(dc: *DrawContext, allocator: std.mem.Allocator, fonts: []const []const u8, font_size: u16) !void {
+    var sized = try SizedFontList.build(allocator, fonts, font_size);
     defer sized.deinit();
     if (sized.items.len == 0) return; // keep Pango default, matching probeFontMetrics
     try dc.fonts.loadFonts(sized.items);

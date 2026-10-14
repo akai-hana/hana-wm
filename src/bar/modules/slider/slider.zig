@@ -191,6 +191,14 @@ fn spawnCapture(cmd: []const u8, sink: []u8) ?struct { bytes: usize, exit_ok: bo
     cmd_buf[cmd.len] = 0;
     const f = c.popen(&cmd_buf, "r") orelse return null;
     const bytes = c.fread(sink.ptr, 1, sink.len, f);
+    // fread's single pass is what stalled: an output larger than sink stopped
+    // after one partial read, the child then blocked on the full pipe, and
+    // pclose blocked on that child. Drain the remainder into a scratch so the
+    // child can finish writing and pclose never waits for a blocked writer.
+    if (bytes == sink.len) {
+        var scratch: [256]u8 = undefined;
+        while (c.fread(&scratch, 1, scratch.len, f) > 0) {}
+    }
     return .{ .bytes = bytes, .exit_ok = c.pclose(f) == 0 };
 }
 

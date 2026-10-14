@@ -196,6 +196,6 @@ pub fn createDrawContext(setup: BarWindowSetup, height: u16, font_size: u16) !*d
         cs.config.bar.transparency,
     );
     errdefer dc.deinit();
-    try drawing.loadBarFonts(dc, font_size);
+    try drawing.loadBarFonts(dc, cs.alloc, cs.config.bar.fonts.items, font_size);
     return dc;
 }

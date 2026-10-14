@@ -133,6 +133,11 @@ pub fn updateBarVisibilityForWorkspace(ws: u8) void {
 pub fn hideBarForFullscreen() void {
     const s = bar.gBar.state orelse return;
     if (!s.vis.shown) return;
+    // The prompt overlay is a use-case for being on-top: a fullscreen enter
+    // while the inline prompt is open must not yank the workspace switch,
+    // since the user is typing into a chrome state that expects the overlay.
+    // dismissAfterPrompt recomputes the natural decision at exit.
+    if (bar.gBar.prompt_forced_visible) return;
     applyVisibility(s, false, false);
 }
 
@@ -153,6 +158,11 @@ pub fn applyFullscreenVisibility() void {
 /// vs the fullscreen-fact reaction (reconciles inside the claim).
 fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
     const s = bar.gBar.state orelse return;
+    // While the inline prompt has forced the bar above everything, any
+    // natural-visibility recompute (workspace switch, fullscreen fact tick)
+    // must not unmap it below the prompt; dismissAfterPrompt recomputes the
+    // natural decision when the prompt exits.
+    if (bar.gBar.prompt_forced_visible) return;
     const decision = visibility.desiredVisibility(pipeline.model(), ws, s.vis.preferred);
     // The comparison against the bar's mapped state is the ORCHESTRATOR's, not
     // the policy's: the policy returns the target and why, and deciding whether

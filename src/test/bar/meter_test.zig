@@ -7,7 +7,7 @@
 //! from where the test claims to be checking it. Testing `meter` directly is
 //! what makes the move real rather than a rename.
 
-// build-gate: seg_brightness
+// build-gate: meter
 
 const std = @import("std");
 const meter = @import("meter");

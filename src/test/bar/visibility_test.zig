@@ -37,7 +37,11 @@ test "F03: fullscreen occupancy forces the bar hidden" {
         // absent-module branch is comptime-pruned to `false`, which is exactly
         // the "no fullscreen module => never force-hidden" claim, and
         // `desiredVisibility` therefore collapses to the user toggle.
-        try testing.expect(!visibility.shouldBeVisible(true, false));
+        // In a build WITHOUT fullscreen, nothing can force-hide the bar:
+        // the occupant read folds to `false` at comptime, so a globally
+        // visible, not-silenced bar is shown -- the exact same fold the live
+        // truth table at the top of this file pins.
+        try testing.expect(visibility.shouldBeVisible(true, false));
         try testing.expect(!visibility.shouldBeVisible(false, false));
         return;
     }
