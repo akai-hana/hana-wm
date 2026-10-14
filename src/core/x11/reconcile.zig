@@ -81,12 +81,12 @@ pub const Ctx = struct {
     /// bar-offset helper (workArea(ctx)). Used for tiled geometry.
     workarea: model.Rect,
     env: contract.Env = .{},
-    /// Focus/mode border color; ported from borders.resolveBorderColor minus
+    /// Focus/mode border color; ported from borders.resolveBorderColorWith minus
     /// its fullscreen check (fullscreen zeroes via bw/pixel policy instead).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
     /// Bar/top window raised by force_restack; null when no bar.
     bar_win: ?model.WindowId = null,
-    /// Whether a layout module may place windows (13.6). The CALLER resolves
+    /// Whether a layout module may place windows. The CALLER resolves
     /// it -- normally `contract.activeLayoutKind(kind) != null` -- so this file
     /// asks the same question the bar asks without reading core config state
     /// itself, and so the reconcile stays drivable with a bare model.
@@ -178,7 +178,7 @@ fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
 
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
-    // 13.6: ONE activation gate, and it also SUPPLIES the geometry. This used
+    // ONE activation gate, and it also SUPPLIES the geometry. This used
     // to be `build_options.has_tiling` (a COMPILE-time fact) while the bar
     // reported the active layout from `contract.activeLayoutKind` (enabled AND
     // registered), so with `tiling.enabled = false` the bar showed "no layout"

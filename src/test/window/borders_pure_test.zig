@@ -5,11 +5,20 @@
 
 const std = @import("std");
 const model = @import("model");
+const constants = @import("constants");
 const borders = @import("borders");
 const helpers = @import("helpers");
 
 const ws0 = model.WSId.fromIndex(0);
 const ws1 = model.WSId.fromIndex(1);
+
+/// The rule as production evaluates it: build the per-workspace occupant
+/// table (one store pass), then ask the With-form against it.
+fn behind(m: *const model.Model, win: u32, current: model.WSId, comptime has_fullscreen: bool) bool {
+    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    model.coveringOccupants(m, &occupants);
+    return borders.isBehindCoveringWindowWith(m, win, current, has_fullscreen, &occupants);
+}
 
 /// Registers `win` tiled on `ws` in a fresh model and returns the model.
 fn modelWithTiled(on_ws: model.WSId) !model.Model {
@@ -38,14 +47,14 @@ fn detach(m: *model.Model, win: model.WindowId) void {
 
 test "member of a workspace without a covering occupant keeps its color" {
     var m = try modelWithTiled(ws0);
-    try std.testing.expect(!borders.isBehindCoveringWindow(&m, 10, ws0, true));
+    try std.testing.expect(!behind(&m, 10, ws0, true));
 }
 
 test "member of a workspace with a covering occupant renders borderless" {
     var m = try modelWithTiled(ws1);
     try model.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
-    try std.testing.expect(borders.isBehindCoveringWindow(&m, 10, ws0, true));
+    try std.testing.expect(behind(&m, 10, ws0, true));
 }
 
 test "member is covered by an occupant anchored to its home over blended tags" {
@@ -56,7 +65,7 @@ test "member is covered by an occupant anchored to its home over blended tags" {
     // anchored occupant there, going borderless -- it does not chase the
     // occupant's tag-mask home.
     setCovering(&m, 20, ws1);
-    try std.testing.expect(borders.isBehindCoveringWindow(&m, 10, ws0, true));
+    try std.testing.expect(behind(&m, 10, ws0, true));
 }
 
 test "member of a workspace with only a foreign-anchored occupant keeps its color" {
@@ -64,7 +73,22 @@ test "member of a workspace with only a foreign-anchored occupant keeps its colo
     try model.register(&m, 20, ws1);
     setCovering(&m, 20, ws1);
     // 10 lives on ws0; the occupant is anchored to ws1, so nothing covers ws0.
-    try std.testing.expect(!borders.isBehindCoveringWindow(&m, 10, ws0, true));
+    try std.testing.expect(!behind(&m, 10, ws0, true));
+}
+
+test "an occupant anchored elsewhere still covers workspaces its mask shows" {
+    var m = try modelWithTiled(ws0);
+    try model.register(&m, 20, ws1);
+    setCovering(&m, 20, ws1);
+    // tagAdd's whole effect is the mask: 20 stays anchored to ws1 but becomes
+    // visible on ws0 too. The table must flag both workspaces — the scan
+    // form's (anchored or visible) rule — not just the anchor slot.
+    m.store.getPtr(20).?.mask |= model.bit(ws0);
+    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    model.coveringOccupants(&m, &occupants);
+    try std.testing.expectEqual(@as(?model.WindowId, 20), occupants[ws0.index]);
+    try std.testing.expectEqual(@as(?model.WindowId, 20), occupants[ws1.index]);
+    try std.testing.expect(behind(&m, 10, ws0, true));
 }
 
 test "window with no resolvable workspace falls back to the current ws occupant" {
@@ -75,10 +99,10 @@ test "window with no resolvable workspace falls back to the current ws occupant"
     try model.register(&m, 40, ws0);
     setCovering(&m, 40, ws0);
     // No home: the current-ws fallback sees the occupant and goes borderless.
-    try std.testing.expect(borders.isBehindCoveringWindow(&m, 30, ws0, true));
+    try std.testing.expect(behind(&m, 30, ws0, true));
     // Without any occupant on the current ws, the fallback keeps the color.
     model.unregister(&m, 40);
-    try std.testing.expect(!borders.isBehindCoveringWindow(&m, 30, ws0, true));
+    try std.testing.expect(!behind(&m, 30, ws0, true));
 }
 
 test "fullscreen-absent build never resolves the current-ws fallback" {
@@ -90,18 +114,18 @@ test "fullscreen-absent build never resolves the current-ws fallback" {
     setCovering(&m, 40, ws0);
     // No home, but has_fullscreen=false gates the whole covering resolution
     // off: the window keeps its color despite the current-ws occupant.
-    try std.testing.expect(!borders.isBehindCoveringWindow(&m, 30, ws0, false));
+    try std.testing.expect(!behind(&m, 30, ws0, false));
 }
 
-// (28.4) The PURE CORES of the two live reads borders_test covers. The item
-// asked for the borders_test assertions to move here headless; taken literally
-// that is impossible, because `core.borderWidth()` and
-// `borders.resolveBorderColor()` both read `core.getState()` -- process-global
-// live state that does not exist without a server. What IS movable, and was
-// genuinely uncovered, is the pure decision each one delegates to: borders_test
-// used `scaling.scaleBorderWidth` as its ORACLE while never testing it, so a
-// regression in the scaling rule would have quietly changed both sides of its
-// own assertion at the same time.
+// The pure cores of the two live reads borders_test covers. The item asked
+// for the borders_test assertions to move here headless; taken literally that
+// is impossible, because `core.borderWidth()` and
+// `borders.resolveBorderColorWith()` both read `core.getState()` --
+// process-global live state that does not exist without a server. What IS
+// movable, and was genuinely uncovered, is the pure decision each one
+// delegates to: borders_test used `scaling.scaleBorderWidth` as its ORACLE
+// while never testing it, so a regression in the scaling rule would have
+// quietly changed both sides of its own assertion at the same time.
 
 test "scaleBorderWidth: absolute passes through, percentage is half the reference" {
     const scaling = @import("scaling");
@@ -132,7 +156,7 @@ test "scaleBorderWidth: rounds half away from zero and clamps negatives" {
 }
 
 test "focusedBorderColor reads the MODEL's focus, not a second copy" {
-    // (9.6) the single decision behind resolveBorderColor. Testing it headless
+    // The single decision behind resolveBorderColorWith. Testing it headless
     // is what lets borders_test keep being a thin integration check instead of
     // the only place the color policy is exercised.
     var m = helpers.makeModel();
