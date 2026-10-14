@@ -198,7 +198,7 @@ const handled_signals = [_]std.posix.SIG{
 /// process state -- which is what lets a test assert the table directly,
 /// since installing the real dispositions from a test binary would clobber
 /// the runner's own SIGINT/SIGTERM handling.
-const Plan = struct {
+pub const Plan = struct {
     /// Signals that get the self-pipe handler, in install order.
     handled: []const std.posix.SIG,
     /// The one signal ignored outright. Kept out of `handled` because its

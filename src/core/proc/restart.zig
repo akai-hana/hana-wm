@@ -101,7 +101,7 @@ pub fn restorePathFromEnv() ?[*:0]const u8 {
 /// for one transition means the sequence has to be re-derived at every call
 /// site, and nothing can assert the set is complete. Naming the record makes
 /// "what crosses the hand-off" a single declaration.
-const Handoff = struct {
+pub const Handoff = struct {
     /// Sentinel-terminated (`selfPathZ()`); this process's own image.
     self_path: [:0]const u8,
     /// The session state file. Not sentinel-terminated: the only copy is made
