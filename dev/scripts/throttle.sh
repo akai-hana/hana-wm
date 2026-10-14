@@ -6,8 +6,8 @@
 # unthrottled unless explicitly asked otherwise. "Otherwise" goes through
 # this script, two ways:
 #
-#   dev/scripts/zbuild.sh [args...]     `zig build`, throttled
-#   dev/scripts/zbuild.sh -- <cmd...>   ANY command, throttled (runs in the
+#   dev/scripts/throttle.sh [args...]     `zig build`, throttled
+#   dev/scripts/throttle.sh -- <cmd...>   ANY command, throttled (runs in the
 #                                       caller's cwd; e.g. gate scripts that
 #                                       need their own working directory)
 #   ZBUILD_THROTTLE=1 <gate script>     the gate routes every zig build / fmt

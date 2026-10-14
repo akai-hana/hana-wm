@@ -176,18 +176,10 @@ test "bench: reconcile pass (50 windows)" {
     try fill(&m, 50);
     model.setFocus(&m, 25);
 
-    var recorder = test_sink.TestSink(.none){};
-
     ledger.init();
     defer ledger.init();
 
-    var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
-
-    const iterations: usize = if (bench) 1_000 else 1;
-    const t0 = nowNs();
-    for (0..iterations) |_| reconcile.run(&m, &ctx, .{});
-    const elapsed_ns = nowNs() - t0;
-    const per_pass_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
+    const per_pass_ns = helpers.benchReconcile(&m, if (bench) 1_000 else 1);
     if (bench) helpers.benchLog("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
 }
 

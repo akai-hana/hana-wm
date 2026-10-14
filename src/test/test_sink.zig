@@ -7,7 +7,10 @@
 //! engine). Extracted from helpers.zig (the shared test
 //! vocabulary) so the sink framework — its vtable and its
 //! assertion DSL — lives apart from the fixtures/goldens/bench
-//! plumbing that share that file.
+//! plumbing that share that file. Counting modes are
+//! category/record/none: `category` (per-op fields + `total`)
+//! supersedes the old flat `count`, which could not answer any
+//! breakdown question.
 
 const std = @import("std");
 const model = @import("model");
@@ -35,7 +38,6 @@ pub const TestOp = union(enum) {
 };
 
 pub const SinkMode = enum {
-    count,
     category,
     record,
     none,
@@ -45,25 +47,42 @@ pub fn TestSink(comptime mode: SinkMode) type {
     return struct {
         const Self = @This();
 
-        count: usize = 0,
         map: usize = 0,
         park: usize = 0,
         configure: usize = 0,
         pixel: usize = 0,
         stack: usize = 0,
+        ewmh_fullscreen: usize = 0,
+        flush: usize = 0,
+        grab_server: usize = 0,
+        ungrab_and_flush: usize = 0,
         total: usize = 0,
         ops: std.ArrayList(TestOp) = .empty,
 
+        /// The ONE counting/recording funnel every shim goes through, so all
+        /// ops count in category mode, all ops record in record mode, and
+        /// there is exactly one OOM policy (a test-sink append failing is a
+        /// test-harness bug worth a named panic, not an unreachables).
         fn bump(self: *Self, comptime tag: std.meta.Tag(TestOp), payload: TestOp) void {
             switch (mode) {
-                .record => self.ops.append(std.testing.allocator, payload) catch unreachable,
-                .count => self.count += 1,
+                .record => self.ops.append(std.testing.allocator, payload) catch @panic("test sink: out of memory recording op"),
                 .category => {
                     @field(self, @tagName(tag)) += 1;
                     self.total += 1;
                 },
                 .none => {},
             }
+        }
+
+        /// The three unit-payload shims (flush/grab/ungrab): one comptime
+        /// factory instead of three copy-pasted bodies.
+        fn unitShim(comptime t: std.meta.Tag(TestOp)) fn (*anyopaque) void {
+            return struct {
+                fn shim(self_ptr: *anyopaque) void {
+                    const self: *Self = @ptrCast(@alignCast(self_ptr));
+                    self.bump(t, @unionInit(TestOp, @tagName(t), {}));
+                }
+            }.shim;
         }
 
         fn mapShim(self_ptr: *anyopaque, win: model.WindowId) void {
@@ -103,38 +122,12 @@ pub fn TestSink(comptime mode: SinkMode) type {
             add: bool,
         ) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            if (mode == .record) {
-                self.ops.append(
-                    std.testing.allocator,
-                    .{ .ewmh_fullscreen = .{
-                        .win = win,
-                        .state_atom = state_atom,
-                        .atom = atom,
-                        .add = add,
-                    } },
-                ) catch @panic("test sink: out of memory recording op");
-            }
-        }
-
-        fn flushShim(self_ptr: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
-            if (mode == .record) {
-                self.ops.append(std.testing.allocator, .flush) catch @panic("test sink: out of memory recording op");
-            }
-        }
-
-        fn grabShim(self_ptr: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
-            if (mode == .record) {
-                self.ops.append(std.testing.allocator, .grab_server) catch @panic("test sink: out of memory recording op");
-            }
-        }
-
-        fn ungrabShim(self_ptr: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(self_ptr));
-            if (mode == .record) {
-                self.ops.append(std.testing.allocator, .ungrab_and_flush) catch @panic("test sink: out of memory recording op");
-            }
+            self.bump(.ewmh_fullscreen, .{ .ewmh_fullscreen = .{
+                .win = win,
+                .state_atom = state_atom,
+                .atom = atom,
+                .add = add,
+            } });
         }
 
         pub fn sink(self: *Self) sinkmod.Sink {
@@ -147,9 +140,9 @@ pub fn TestSink(comptime mode: SinkMode) type {
                     .park = parkShim,
                     .stack_only = stackShim,
                     .set_state_atom = ewmhShim,
-                    .flush = flushShim,
-                    .grab_server = grabShim,
-                    .ungrab_and_flush = ungrabShim,
+                    .flush = unitShim(.flush),
+                    .grab_server = unitShim(.grab_server),
+                    .ungrab_and_flush = unitShim(.ungrab_and_flush),
                 },
             };
         }

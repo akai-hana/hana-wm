@@ -82,10 +82,6 @@ inline fn snapDimToIncrement(dim: u16, inc: u16) u16 {
 // The layout interchange vocabulary lives on the tiling CONTRACT (contract.zig)
 // so the always-compiled reconciler can name it even without this tiling engine;
 // here we only re-export it so modules keep referring to `tiling.List` etc.
-pub const Placement = contract.Placement;
-pub const parked_rect = contract.parked_rect;
-pub const HintsView = contract.HintsView;
-pub const Env = contract.Env;
 pub const View = contract.View;
 pub const List = contract.List;
 /// Working context for a layout module pass: the input view and output list,
@@ -130,6 +126,15 @@ pub inline fn seamGap(m: model.Margins) u16 {
 /// never hands a client a zero or negative size.
 pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
+}
+
+/// `shrinkClamped` additionally capped at the space left after the margin,
+/// then floored at 1: the min_dim floor alone can flare a window past its
+/// own cell/strip in a congested layout (overlapping neighbours), and the
+/// emission needs at least one pixel. The single spelling of the
+/// `@max(@min(shrinkClamped(dim, margin, min_dim), dim -| margin), 1)` idiom.
+pub inline fn shrinkCapped(dim: u16, margin: u16, min_dim: u16) u16 {
+    return @max(@min(shrinkClamped(dim, margin, min_dim), dim -| margin), 1);
 }
 
 /// Full-rect inset by `margin` (shrinkClamped width/height at fixed origin).
@@ -221,7 +226,7 @@ pub inline fn emitRect(v: *const View, out: *List, win: model.WindowId, x: i32, 
 
 /// Emit a parked placement (the parked position sync applies via Sink.park).
 pub inline fn emitHidden(out: *List, win: model.WindowId) void {
-    appendPlacement(out, win, parked_rect, false);
+    appendPlacement(out, win, contract.parked_rect, false);
 }
 
 /// Region too small to subdivide (overflow share): place the focused window —
@@ -337,14 +342,10 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
     const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
-    const f = m.compute orelse {
-        // A null compute can only come from a misbuilt registry entry. Park
-        // everything ourselves and say it, so the screen isn't an untestable
-        // all-blank state and the reason is actionable.
-        log.warn("tiling: layout model has a null compute hook; parking {} window(s) for kind {}", .{ v.order.len, kind });
-        for (v.order) |win| emitHidden(out, win);
-        return;
-    };
+    // layoutModule assigns `compute` unconditionally, so null can only come
+    // from a misbuilt registry entry — panic loudly instead of silently
+    // parking the whole workspace.
+    const f = m.compute.?;
     {
         // The layout writes into SCRATCH and the engine emits into `out` in
         // `v.order` position (14.9). The order is a property of the SINK
@@ -421,7 +422,7 @@ fn emitInOrder(v: *const View, scratch: *const List, out: *List) void {
 /// Parses a layout variant VALUE-STRING into its ordinal slot: the index of
 /// the first exact-case match in `names`, or null when unmatched. Shared by
 /// every layout module that exposes named variants.
-pub fn variantParse(comptime variants: []const Variant) fn ([]const u8) ?u8 {
+fn variantParse(comptime variants: []const Variant) fn ([]const u8) ?u8 {
     return struct {
         fn parse(str: []const u8) ?u8 {
             // Reads the name column off the table itself rather than a

@@ -409,8 +409,10 @@ fn deactivate() void {
 }
 
 /// This module's bar-segment contribution. The prompt is a runtime overlay
-/// on the title slot: it never appears in a config's `[bar] segments` list
-/// but still joins the bar's uniform lifecycle/poll loops.
+/// on the title slot, so a config's `[bar] segments` list does not carry it
+/// by default -- but `prompt` IS a valid entry (listing it renders the
+/// segment inline; the SEGMENT draw hook below is bound for that path), and
+/// it joins the bar's uniform lifecycle/poll loops either way.
 /// The SEGMENT draw. The prompt paints the full slot it was reserved, so its
 /// width is the reserved width; the report is what the row advances by, and
 /// `Painted.span` states that rather than leaving it implied.

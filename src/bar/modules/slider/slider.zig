@@ -167,8 +167,16 @@ pub const Throttle = struct {
 pub fn rawFromPct(comptime T: type, pct: u8, min: T, max: T) T {
     if (max <= min) return min;
     const span: i128 = @as(i128, max) - @as(i128, min);
-    const lead: i128 = @min(@divTrunc(@as(i128, @min(pct, 100)) * span + 50, 100), span);
+    const lead: i128 = @min(@divTrunc(@as(i128, clampPct(pct)) * span + 50, 100), span);
     return @intCast(@as(i128, min) + lead);
+}
+
+/// The one clamp every level passes: 0-100 % is all the backend ever
+/// receives. Every commit/write mode MUST go through this function -- the
+/// modules used to clamp independently, and when the preview path forgot to,
+/// a scroll/drag motion could display a level the backend then refused.
+pub fn clampPct(v: u8) u8 {
+    return @min(v, 100);
 }
 
 /// Inverse of `rawFromPct` (the shared map): raw value onto the 0-100 scale.
@@ -227,8 +235,7 @@ pub fn runOk(cmd: []const u8) bool {
 pub const Label = struct {
     text: []const u8,
     /// (25.3) The numeric value's span as EXPLICIT offsets, with `value_len ==
-    /// 0` meaning "no value". This used to be a subslice of `text`, which
-    /// forced the painter to recover the offset by subtracting pointers.
+    /// 0` meaning "no value".
     value_start: usize = 0,
     value_len: usize = 0,
 };
@@ -542,7 +549,7 @@ fn drawDragBar(dc: *segmod.DrawCtx, x: u16, slot: u16, pct: u8) u16 {
     const pad = @max(@as(u16, 1), dc.config.scaledSegmentPadding(height) / 2);
     const inner_w = slot -| pad * 2;
     const inner_h = height -| pad * 2;
-    const fill_w: u16 = @intCast(@as(u32, inner_w) * pct / 100);
+    const fill_w = level.offsetFromPct(0, inner_w, pct);
     if (fill_w != 0 and inner_h != 0)
         dc.dc.fillRect(x + pad, pad, fill_w, inner_h, dc.config.title_minimized_accent);
 

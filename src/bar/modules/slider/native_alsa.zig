@@ -232,7 +232,7 @@ pub const Master = struct {
 
     /// Applies a 0-100 level to every channel of the volume control.
     pub fn setVolumePct(self: *const Master, pct: u8) bool {
-        const target = rawFromPct(@min(pct, 100), self.min, self.max);
+        const target = rawFromPct(slider.clampPct(pct), self.min, self.max);
         const n = @min(@as(usize, self.count), 128);
         var values: [128]c_long = undefined;
         for (0..n) |i| values[i] = target;

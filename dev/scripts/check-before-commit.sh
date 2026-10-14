@@ -36,13 +36,13 @@ done
 
 # Speed policy: FULL SPEED BY DEFAULT. With ZBUILD_THROTTLE=1 every step
 # below (fmt, build check, modularity, tests) routes through the throttle
-# wrapper dev/scripts/zbuild.sh (nice + pinned cores + -j2), and the flag
+# wrapper dev/scripts/throttle.sh (nice + pinned cores + -j2), and the flag
 # propagates to nested gates such as check-layers. Plain runs are untouched.
 zb=(zig build)
 fmt_cmd=(zig fmt --check .)
 if [ "${ZBUILD_THROTTLE:-0}" = "1" ]; then
-    zb=(dev/scripts/zbuild.sh)
-    fmt_cmd=(dev/scripts/zbuild.sh -- zig fmt --check .)
+    zb=(dev/scripts/throttle.sh)
+    fmt_cmd=(dev/scripts/throttle.sh -- zig fmt --check .)
 fi
 
 echo "[check-before-commit] fmt check..."

@@ -112,13 +112,6 @@ const OnClick = *const fn (*const contract.ClickCtx) bool;
 
 /// How one slot's WIDTH behaves over its lifetime -- the shapes a bar segment
 /// can actually have, named (21.8).
-///
-/// This used to be two overlapping descriptions of the same lifecycle: a
-/// `with_collapse` bool that only decided whether a re-layout request was
-/// wired, and (from 21.7) a report option saying where the painted width went.
-/// Two knobs for one axis, so a module could ask for a width report and still
-/// get no re-layout request without anyone noticing that was unusual. The
-/// combinations that actually exist are enumerated instead.
 pub const SlotMode = enum {
     /// Measured width reported to the width state, and a width change raises a
     /// re-layout request. For a segment that can change shape DURING a frame:

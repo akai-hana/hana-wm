@@ -23,9 +23,10 @@ inline fn paneCell(total: u16, count: u16, gap: u16) u16 {
 /// Compute grid layout. Full gap between cells and at screen edges; u16
 /// integer-divided cells, last partial row wider in relaxed mode.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+    const ctx = tiling.LayoutCtx.init(v, out);
     const n = v.order.len;
 
-    const m = v.env.margins;
+    const m = ctx.m;
     const grid = calcGridShape(n);
     // Both sides of each window's border, used to shrink usable cell dimensions.
     const bm = model.doubledBorder(m);
@@ -35,11 +36,8 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const cell_w = paneCell(screen_w, grid.cols, m.gap);
     const cell_h = paneCell(screen_h, grid.rows, m.gap);
-    // Window content area within a cell, never exceeding the cell: the
-    // shrinkClamped min_dim floor used to flare a window past its own cell in
-    // a congested grid, overlapping the neighbours.
-    const win_h = @max(@min(tiling.shrinkClamped(cell_h, bm, v.env.min_dim), cell_h -| bm), 1);
-    const win_w = @max(@min(tiling.shrinkClamped(cell_w, bm, v.env.min_dim), cell_w -| bm), 1);
+    const win_h = tiling.shrinkCapped(cell_h, bm, ctx.min_dim);
+    const win_w = tiling.shrinkCapped(cell_w, bm, ctx.min_dim);
     const wa_y = tiling.waY(v);
 
     // In relaxed mode a partial last row shares the full screen width.
@@ -48,7 +46,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         paneCell(screen_w, @intCast(last_row_count), m.gap)
     else
         cell_w;
-    const partial_win_w: u16 = @max(@min(tiling.shrinkClamped(partial_cell_w, bm, v.env.min_dim), partial_cell_w -| bm), 1);
+    const partial_win_w: u16 = tiling.shrinkCapped(partial_cell_w, bm, ctx.min_dim);
 
     for (v.order, 0..) |win, i| {
         const col: u16 = @intCast(i % grid.cols);
