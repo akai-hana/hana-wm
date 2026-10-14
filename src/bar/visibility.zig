@@ -5,10 +5,10 @@
 //! recomputation, prompt forced-show/undo, and the shared-screen predicate
 //! behind them -- lives here as pure computations over the core model.
 //!
-//! This partition issues NO X11 requests. `visibility_glue` (and `bar.zig`
-//! for the prompt-exit decision) import it one-way, apply the decision, and
-//! perform the map/unmap + screen-claim + reconcile glue; visibility.zig
-//! never imports either, so every wire token stays with the orchestrators.
+//! This partition issues NO X11 requests. `visibility_glue` imports it
+//! one-way (the prompt-exit decision included), applies the decision, and
+//! performs the map/unmap + screen-claim + reconcile glue; visibility.zig
+//! never imports it back, so every wire token stays in the glue.
 //! It also does not import the pipeline: the model is a parameter, so every
 //! decision is a pure function of what the caller handed in.
 

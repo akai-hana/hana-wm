@@ -1,7 +1,7 @@
 //! The center-row layout math (bar/center_row.zig), lifted out of
 //! bar.zig so the budget/share derivation is unit-testable without a
 //! live bar, a DrawContext, or Pango -- the metrics.zig pattern: pure
-//! policy over injected seams.
+//! policy over injected inputs.
 
 // Declared here, next to the imports that make it necessary,
 // rather than in a build.zig table that had to be kept in agreement
@@ -15,12 +15,10 @@ const center_row = @import("center_row");
 const segmod = @import("segment");
 const types = @import("types");
 
-const bar_mods = @import("bar_modules").modules;
-
 /// The registry's self-ticking set, resolved at comptime exactly as
 /// the bar resolves its role sets (the capability query is
 /// comptime-only: it concatenates into a comptime-known slice).
-const self_ticking_ids = segmod.findAllByCapability(&bar_mods, .self_ticking);
+const self_ticking_ids = segmod.self_ticking_ids;
 
 test "centerShare splits evenly, leftmost slots carry the remainder" {
     // 100 across 3: 34/33/33 -- the leading slot carries the extra
@@ -114,8 +112,8 @@ test "mergedClockWidth is the max self-ticker span plus double padding" {
     const padding = config.scaledSegmentPadding(height);
     var expected: u16 = 0;
     for (self_ticking_ids) |cid| {
-        if (bar_mods[cid].measureString) |ms|
-            expected = @max(expected, stubWidth({}, ms(), config.segmentProps(bar_mods[cid].name)) + 2 * padding);
+        if (segmod.segmentAt(cid).measureString) |ms|
+            expected = @max(expected, stubWidth({}, ms(), config.segmentProps(segmod.segmentAt(cid).name)) + 2 * padding);
     }
     try testing.expectEqual(expected, center_row.mergedClockWidth({}, config, height, stubWidth));
 }

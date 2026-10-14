@@ -32,6 +32,8 @@
 const std = @import("std");
 const types = @import("types");
 const slider = @import("slider");
+const drawing = @import("drawing");
+const spawn_capture = @import("spawn_capture");
 
 const c = @cImport({
     @cInclude("fcntl.h");
@@ -274,9 +276,9 @@ fn readBrightness() bool {
 /// (`get` + `max` both parse and max is positive).
 fn brightnessctlRead() ?u8 {
     var buf: [64]u8 = undefined;
-    const raw_s = slider.runOut(bt_get_cmd, &buf);
+    const raw_s = spawn_capture.runOut(bt_get_cmd, &buf);
     if (std.fmt.parseUnsigned(u32, std.mem.trim(u8, raw_s, " \n\r"), 10)) |raw| {
-        const max_s = slider.runOut(bt_max_cmd, &buf);
+        const max_s = spawn_capture.runOut(bt_max_cmd, &buf);
         return pctFromRaw(
             raw,
             std.fmt.parseUnsigned(u32, std.mem.trim(u8, max_s, " \n\r"), 10) catch return null,
@@ -289,7 +291,7 @@ fn brightnessctlRead() ?u8 {
 fn brightnessctlApply(pct: u8) bool {
     var buf: [64]u8 = undefined;
     const cmd = std.fmt.bufPrint(&buf, "brightnessctl set {d}%", .{slider.clampPct(pct)}) catch return false;
-    return slider.runOk(cmd);
+    return spawn_capture.runOk(cmd);
 }
 
 /// The latency class of one commit on the live backend: a direct sysfs write
@@ -358,9 +360,9 @@ fn write(w: slider.Write, v: u8) void {
 /// Renders the display string into `buf`, substituting every `{pct}`
 /// placeholder, and returns the text (plus the numeric region); a truncated
 /// tail is still a complete, scan-safe string.
-fn renderDisplay(config: types.BarConfig, pct: u8, buf: []u8) slider.Label {
+fn renderDisplay(config: types.BarConfig, pct: u8, buf: []u8) drawing.Label {
     const fmt = config.brightness_format orelse default_format;
-    return slider.renderLineValue(fmt, pct, null, buf);
+    return drawing.renderLineValue(fmt, pct, null, buf);
 }
 
 /// Copies the config's `brightness_device` pin into the owned buffer (config
@@ -382,7 +384,7 @@ pub fn setDisplayForTest(pct: u8) void {
     g_pct = pct;
 }
 
-pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
+pub fn label(config: types.BarConfig, buf: []u8) drawing.Label {
     cacheConfigPin(config);
     return renderDisplay(config, g_pct, buf);
 }

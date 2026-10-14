@@ -20,6 +20,7 @@ const focus = @import("focus");
 const constants = @import("constants");
 const title_geom = @import("geom");
 const contract = @import("contract");
+const segmod = @import("segment");
 
 const state = @import("state");
 const repaint = @import("repaint");
@@ -41,7 +42,7 @@ pub fn titleIdBound(s: *State) ?SegBound {
 /// focus for the title). Exported as a `BarHandlers.dispatchClick`-shaped
 /// trampoline (see titleClickTrampoline).
 pub fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right: bool) void {
-    if (state.segAt(id).onClick) |oc| {
+    if (segmod.segmentAt(id).onClick) |oc| {
         // Named, not inline `&.{}`: the temporary is only guaranteed to live
         // to the end of the call expression, and a `ctx` that outlived it (a
         // module storing the pointer) would be a silent lifetime bug. This
@@ -125,7 +126,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     if (detail == constants.mouse_button_scroll_up or
         detail == constants.mouse_button_scroll_down)
     {
-        if (state.segAt(id).onScroll) |scroll| {
+        if (segmod.segmentAt(id).onScroll) |scroll| {
             const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
             s.scroll_segment = id;
             _ = scroll(dir, repaint.redrawScopedSegment);
@@ -144,7 +145,7 @@ pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
     const s = state.gBar.state orelse return;
     const id = s.drag_segment orelse return;
     if (!s.vis.shown) return;
-    if (state.segAt(id).onDragMotion) |drag| {
+    if (segmod.segmentAt(id).onDragMotion) |drag| {
         const tb = s.recordedBound(id) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
         const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
@@ -161,7 +162,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
     const s = state.gBar.state orelse return;
     const id = s.drag_segment orelse return;
     s.drag_segment = null;
-    if (state.segAt(id).onDragEnd) |end| end(repaint.redrawInsideGrab);
+    if (segmod.segmentAt(id).onDragEnd) |end| end(repaint.redrawInsideGrab);
 }
 
 /// `offset` is the click position relative to the title segment's start.

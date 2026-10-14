@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const brightness = @import("brightness");
-const slider = @import("slider");
+const drawing = @import("drawing");
 const types = @import("types");
 
 const io = std.testing.io;
@@ -28,7 +28,7 @@ fn writeAttr(root: std.Io.Dir, comptime class: []const u8, dev: []const u8, comp
 /// The span form: `Label` carries `value_start`/`value_len` rather than a
 /// subslice, so assertions spell the comparison out instead of relying on a
 /// `?[]const u8` field these tests used to have.
-fn valueSpan(l: slider.Label) []const u8 {
+fn valueSpan(l: drawing.Label) []const u8 {
     return l.text[l.value_start..][0..l.value_len];
 }
 

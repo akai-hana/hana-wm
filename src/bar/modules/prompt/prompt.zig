@@ -9,10 +9,11 @@ const log = @import("log");
 
 const types = @import("types");
 const contract = @import("contract");
-const seams = @import("seams");
+const contract_x11 = @import("contract_x11");
 
 const masks = @import("masks");
 const segmod = @import("segment");
+const scaffold = @import("scaffold");
 const editor = @import("editor");
 const completion = @import("completion");
 const render = @import("render");
@@ -47,7 +48,7 @@ pub const deleteRange = editor.deleteRange;
 pub const overwriteAt = editor.overwriteAt;
 pub const isPrintableAscii = editor.isPrintableAscii;
 pub const registerHandlers = editor.registerHandlers;
-// Completion seam re-exports: `wordAtCursor` is the pure
+// Completion re-exports: `wordAtCursor` is the pure
 // token-under-cursor split, pinned by completion_test.zig through
 // the package core like the editor contract above.
 pub const wordAtCursor = completion.wordAtCursor;
@@ -219,9 +220,9 @@ fn handlePromptKeypress(
 ) bool {
     if (!g.is_active) return false;
     // The hook receives the opaque event (contract is X-free); the fields are
-    // read here, on the X side, via `seams`'s concrete type. The only
+    // read here, on the X side, via `contract_x11`'s concrete type. The only
     // producer is the bar's chrome keypress route.
-    const xevent: *const seams.KeyPressEvent = @ptrCast(@alignCast(event));
+    const xevent: *const contract_x11.KeyPressEvent = @ptrCast(@alignCast(event));
 
     // When the mod key (Super) is held and a WM action is bound to this key,
     // let the normal dispatcher run so WM operations don't cancel the prompt;
@@ -429,20 +430,24 @@ fn overlayDrawHook(ctx: *anyopaque, x: u16) !u16 {
     return draw(dc, x);
 }
 
-pub const module: @import("contract").Segment = .{
-    .name = "prompt",
-    .init = init,
-    .deinit = deinit,
-    .pollTimeoutMs = blinkPollTimeoutMs,
-    .onPollWakeup = blinkTick,
-    .draw = drawHook,
-    .handleKeypress = handlePromptKeypress,
-    .consumeRedrawRequest = consumeRedrawRequest,
-    .invalidateReloadCaches = invalidateReloadCaches,
-    .overlay = .{
-        .is_active = isActive,
-        .toggle = toggle,
-        .draw = overlayDrawHook,
-        .needsRepaint = overlayNeedsRepaint,
+pub const module = scaffold.module(
+    "prompt",
+    drawHook,
+    null,
+    .{
+        .mode = .unmeasured,
+        .init = init,
+        .deinit = deinit,
+        .pollTimeoutMs = blinkPollTimeoutMs,
+        .onPollWakeup = blinkTick,
+        .handleKeypress = handlePromptKeypress,
+        .consumeRedrawRequest = consumeRedrawRequest,
+        .invalidateReloadCaches = invalidateReloadCaches,
+        .overlay = .{
+            .is_active = isActive,
+            .toggle = toggle,
+            .draw = overlayDrawHook,
+            .needsRepaint = overlayNeedsRepaint,
+        },
     },
-};
+);

@@ -1,6 +1,6 @@
 //! The bar's live state: the `State` value and everything that only exists
 //! to describe or locate it -- the `Bar`/`gBar` handle, the segment-registry
-//! identity helpers, the per-frame scratch types, and the hook walkers.
+//! identity helpers, and the hook walkers.
 //!
 //! Split OUT of `bar.zig` to break three import cycles: `repaint`,
 //! `visibility_glue`, and `input_events` all read this state on every batch,
@@ -10,46 +10,26 @@
 //!
 //! Nothing here performs X work or decides anything: it is data plus the
 //! accessors over it. Lifecycle (create/destroy/reload), polling, and the
-//! chrome stay in `bar.zig`.
+//! chrome stay in `bar.zig`; frame collection lives in `frame.zig` and the
+//! paint pass in `repaint.zig` (Phase 4 step 23).
 
 const std = @import("std");
-const build_options = @import("build_options");
 const core = @import("core");
 const constants = @import("constants");
-const log = @import("log");
 const types = @import("types");
-const tracking = @import("tracking");
-const focus = @import("focus");
-const pipeline = @import("pipeline");
+const query = @import("query");
 const model = @import("model");
-const reconcile = @import("reconcile");
 const wincache = @import("wincache");
-const window = @import("window");
 const drawing = @import("drawing");
 const segmod = @import("segment");
-const scaffold = @import("scaffold");
+const vocab = @import("vocab");
 const barwin = @import("win");
 const center_row = @import("center_row");
 const contract = @import("contract");
 
-/// The hide-family provider bound to the generated window registry, resolved
-/// once at file scope: the hidden-set synthesis and its collect dispatch
-/// share one lookup (no module is ever named by the bar).
-const collect_hidden_set = window.providerOf(.collectHiddenSet);
-
-// Registry-resolved segment identity (comptime): the bar locates modules by
-// name through the generated registry instead of importing them directly.
-// Role/named lookups return null on an absent (even empty) registry, so the
-// bar still compiles and no-ops when ALL segments are removed.
-// File-local: consumers raw-import `@import("X_modules").modules` at their
-// point of use (the window-layer spelling); contract's `tiling_mods` is the
-// one documented facade exception.
-const bar_mods = @import("bar_modules").modules;
-
 // The capability sets live in segment.zig (their one home); these aliases
 // keep state's internal readers (`title_id`, `selfTickerIndex`) unqualified.
-// `self_ticking_ids` stays pub for repaint.zig and bar.zig.
-pub const self_ticking_ids = segmod.self_ticking_ids;
+const self_ticking_ids = segmod.self_ticking_ids;
 const center_slot_ids = segmod.center_slot_ids;
 
 /// Primary center-slot segment: the FIRST center-slot binder in registry
@@ -57,14 +37,6 @@ const center_slot_ids = segmod.center_slot_ids;
 /// (click-to-focus, chrome-overlay toggle) route through it; with a single
 /// binder this is exactly the title, with several it is the leftmost one.
 pub const title_id: ?usize = if (center_slot_ids.len != 0) center_slot_ids[0] else null;
-
-/// Registry entry at a resolved `id`. Callers reach this only after a
-/// registry capability/role lookup matched a name; a match is
-/// impossible when the registry is empty.
-pub inline fn segAt(id: usize) *const contract.Segment {
-    if (comptime !segmod.hasRegisteredSegments()) unreachable;
-    return &bar_mods[id];
-}
 
 /// Dirty-bit read for a registry id (null: a name that does not resolve is
 /// never dirty). The null check precedes the comptime guard so an
@@ -81,23 +53,16 @@ fn selfTickerIndex(id: ?usize) ?usize {
     return segmod.roleIndexOf(id, self_ticking_ids);
 }
 
-pub fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
-    contract.callAll(contract.Segment, bar_mods[0..], hook, .{});
-}
-
-pub fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytype) bool {
-    for (bar_mods) |seg| if (@field(seg, @tagName(hook))) |f| if (@call(.auto, f, args)) return true;
-    return false;
-}
-
 /// Global bar coordination flags. Read and written exclusively on the main
 /// thread; no mutex protection required.
 pub const Bar = struct {
     state: ?*State = null,
-    /// True when presentForPrompt() had to map an otherwise-hidden bar (e.g.
-    /// hidden by a fullscreen window, or by the user toggling it off) purely
-    /// so the inline prompt would be visible. dismissAfterPrompt() checks this
-    /// to know whether hiding the bar again is part of "returning to normal".
+    /// True when visibility_glue.presentForPrompt() had to map an
+    /// otherwise-hidden bar (e.g. hidden by a fullscreen window, or by the
+    /// user toggling it off) purely so the inline prompt would be visible.
+    /// visibility_glue.dismissAfterPrompt() checks this to know whether
+    /// hiding the bar again is part of "returning to normal" -- the flag's
+    /// whole lifecycle (set, cleared, guarded against) lives in that file.
     prompt_forced_visible: bool = false,
 };
 
@@ -137,136 +102,17 @@ const RenderCtx = struct {
 
 /// Per-frame window-count bound for the title scratch buffers; shares the
 /// single bar-wide cap in segment.zig.
-const max_frame_windows: usize = segmod.max_visible_windows;
+pub const max_frame_windows: usize = segmod.max_visible_windows;
 
 /// Upper bound on recorded click bounds: one slot per clickable segment in
 /// the configured layout. Configs with more clickable segments than this
 /// simply lose clickability on the extras (rendering is unaffected).
-const max_click_bounds: usize = bar_mods.len;
-
-/// Scratch bound for the per-draw right-cluster segment widths. Right segments
-/// are measured once into this buffer and reused for both the total-width
-/// calculation and the draw; a config with more than this many right segments
-/// falls back to re-measuring at draw time (layout math identical, no win).
-const max_right_segments: usize = 16;
-
-/// Cap on solved row slots in one frame.
-///
-/// The layout is RUNTIME config (`BarLayout.segments` is an ArrayList) and a
-/// config may list the same segment in several layouts, so there is no
-/// comptime ceiling to derive: this is a generous fixed bound, and overflow is
-/// handled rather than trusted (see RowPlan.push). Generous on purpose -- the
-/// alternative, a cap that silently dropped slots, would drop click bounds and
-/// paints with no trace, and `plan.slots[0..len]` past the end is a panic in
-/// Debug and out-of-bounds reads in ReleaseFast.
-const max_row_slots: usize = 64;
+const max_click_bounds: usize = segmod.all().len;
 
 /// Cap on updateIfDirty's re-request redraw loop: a module that keeps
 /// re-requesting a full redraw past this many iterations is treated as a
 /// stall (logged), keeping a rogue module from busy-spinning the batch.
 pub const max_batched_redraws: u8 = 4;
-
-/// Right-aligned cluster bookkeeping for one draw frame. Measures every
-/// right-position segment once up front, deriving both the reserved width
-/// (which left/center placement shrinks around) and the per-segment widths
-/// the draw consumes. Falls back to measure-at-draw when the segment count
-/// overflows `max_right_segments`.
-const RightCluster = struct {
-    /// Measured widths by position in the right cluster (concatenated right
-    /// layouts, in order). Only the first `max_right_segments` are recorded.
-    widths: [max_right_segments]u16 = undefined,
-    /// Number of right segments encountered this frame.
-    count: usize = 0,
-    /// Running solve index, advanced per right layout so each layout reads
-    /// its own slice of `widths`.
-    ridx: usize = 0,
-    /// u32 accumulator for `right_total`; saturates into the u16 on conversion.
-    total_raw: u32 = 0,
-    /// Scaled inter-segment spacing, cached by solve so the backward pass
-    /// does not re-derive it per layout.
-    scaled_spacing: u16 = 0,
-    /// Continuation cursor across right layouts, so they lay out back-to-back
-    /// rather than each restarting from the bar's right edge and overlapping
-    /// the previous layout's pixels.
-    right_x: u16 = 0,
-};
-
-/// One solved row slot: the geometry and the flags the paint pass needs,
-/// with no draw call anywhere near it.
-///
-/// The split exists because geometry, hit-testing and painting were one unit
-/// of change in drawAllInner: adding a segment meant editing a loop that
-/// measured it, recorded its click bound, scoped its ticker, cleared its
-/// region and drew it, all interleaved. Solve produces these; paint walks them.
-const RowSlot = struct {
-    /// Registry id, resolved ONCE when the slot is pushed (the layout stores
-    /// names; every downstream consumer -- measure, paint, click bound, dirty
-    /// clear -- works on the id, so a name is never resolved twice in one
-    /// frame). Null when the configured name does not resolve: an unknown or
-    /// removed segment, reserved as a zero-width slot.
-    id: ?usize = null,
-    /// Reserved width, from the measure pass (or the center share).
-    w: u16,
-    /// Left edge of the reservation, SOLVED. Only set for right-cluster slots,
-    /// where placement is purely measurement-derived and therefore final.
-    /// Left/center slots deliberately leave it 0 and let paint thread its own
-    /// cursor: their advance depends on the width a segment actually PAINTS,
-    /// which is only known once it has been drawn (see paintRowPlan).
-    x: u16 = 0,
-    /// Center-slot segments carry no trailing gap.
-    omit_gap: bool = false,
-    /// Center-slot index, for the share arithmetic in the paint advance.
-    center_idx: u16 = 0,
-    /// Segment owns its pixels this frame (dirty or full redraw).
-    repaintable: bool = false,
-    /// Self-ticker: needs a scope recorded in whichever cluster it lands.
-    self_ticking: bool = false,
-    /// Right cluster (solved backwards), vs left/center (solved forwards).
-    is_right: bool = false,
-    /// First slot of its right LAYOUT. Right layouts butt against each other
-    /// with no inter-layout gap, so the first slot of each one starts a fresh
-    /// gap run: the slot to its left is in a different layout, and the
-    /// inter-layout space is already accounted for in `right_total`.
-    right_layout_start: bool = false,
-};
-
-/// The whole row's solved geometry for one frame, in PAINT order.
-///
-/// Paint order is the order slots must be drawn, not solve order: the right
-/// cluster is measured forwards but painted right-to-left, so it is reversed
-/// into paint order here rather than at draw time. That reversal is the
-/// fiddly part the item warned about, and doing it once in solve is what lets
-/// paint be a single flat loop with no backward cursor.
-const RowPlan = struct {
-    slots: [max_row_slots]RowSlot = undefined,
-    len: usize = 0,
-    /// The right cluster's reserved width, subtracted from left/center budgets.
-    right_total: u16 = 0,
-    /// Where the right cluster's left edge ended up; the continuation cursor
-    /// shared across right layouts so they butt against each other.
-    right_x: u16 = 0,
-    /// Scratch for the right-cluster measure pass.
-    cluster: RightCluster = .{},
-    /// Latched once a slot was dropped, so the log is one line per frame
-    /// instead of one per segment.
-    overflowed: bool = false,
-
-    /// Appends a solved slot. On overflow the slot is DROPPED and `len` is left
-    /// alone, so `slots[0..len]` can never index past the array. Dropping is
-    /// still wrong (that segment loses its paint and its click bound), so it is
-    /// logged once per frame rather than swallowed.
-    inline fn push(self: *RowPlan, slot: RowSlot) void {
-        if (self.len >= max_row_slots) {
-            if (!self.overflowed) {
-                self.overflowed = true;
-                log.warnOnErr(error.RowPlanOverflow, "bar solveRowPlan");
-            }
-            return;
-        }
-        self.slots[self.len] = slot;
-        self.len += 1;
-    }
-};
 
 /// On-screen hit-test bound of one segment, recorded by recordClickBound
 /// during the layout pass. THE click-bound storage: hit-testing iterates
@@ -287,8 +133,8 @@ pub const SegBound = struct {
 
 const Visibility = struct {
     /// Whether the bar window is currently mapped (the wire state). Written
-    /// only by the paths that actually issue map/unmap: the visibility glue's
-    /// decision apply, the prompt present/dismiss pair, and the reload swap
+    /// only by the paths that actually issue map/unmap: the visibility glue
+    /// (decision apply + the prompt present/dismiss pair), and the reload swap
     /// (which carries it over). Pure policy (`visibility.zig`) never touches
     /// it -- it compares its decision against this and the caller applies.
     shown: bool = true,
@@ -321,7 +167,7 @@ const Dirty = struct {
     /// registry. When set, the segment is repainted on the next draw;
     /// cleared after painting. Every segment starts dirty so the first draw
     /// is a full redraw.
-    segments: [bar_mods.len]bool = @splat(true),
+    segments: [segmod.all().len]bool = @splat(true),
     /// Left edge (inclusive) of the current draw's dirty span: the bounding
     /// x/w of every repainted segment + gap, tracked by extendDirtySpan so
     /// flushRender copies only the changed region.
@@ -365,7 +211,7 @@ const Clicks = struct {
     len: usize = 0,
 };
 
-/// Live frame state (recollected on every draw; see scanLiveFrame). Holds
+/// Live frame state (recollected on every draw; see frame.scanLiveFrame). Holds
 /// the shared `segmod.Frame` directly (workspace_count/current_workspace/
 /// is_all_view_active) plus the bar-local backing array it slices, so the
 /// segment-visible struct stays the single source instead of a mirror.
@@ -375,16 +221,16 @@ const FrameState = struct {
     /// only holds the slice).
     ws_has_windows: [constants.max_workspaces]bool = @splat(false),
     /// The current workspace's windows for the frame, one entry per window
-    /// (id only until fillDrawCtx annotates title + geom; the AoS record
+    /// (id only until frame.fillDrawCtx annotates title + geom; the AoS record
     /// replaces the separate `wins` / titles_buf / geoms_buf arrays).
-    entries: [max_frame_windows]segmod.TitleEntry = undefined,
+    entries: [max_frame_windows]vocab.TitleEntry = undefined,
     entries_len: usize = 0,
     /// Per-frame title rendering context from the last draw, reused for
     /// post-draw click hit-testing (backing buffers are stable for the rest
     /// of the event-loop batch: they live on State, and nothing reallocates
     /// them between draws).
     last_ctx: segmod.DrawCtx = undefined,
-    /// Whether a full scan+fill pass (scanLiveFrame, fillDrawCtx) has ever
+    /// Whether a full scan+fill pass (frame.scanLiveFrame, frame.fillDrawCtx) has ever
     /// populated `last_ctx`. Guards the marquee-only fast path, which reuses
     /// the cached snapshot in place of re-scanning the live frame: until the
     /// first full draw, last_ctx is undefined and must not be copied.
@@ -394,13 +240,13 @@ const FrameState = struct {
 /// Title-data scratch: the minimized-set service plus the focused-title
 /// copy. The per-window title/geom annotations are NOT here: they live on
 /// `frame.entries` (one record per window, id + title + geom), filled by
-/// fillDrawCtx from the WM-owned title cache (wincache.peekTitle) and the
+/// frame.fillDrawCtx from the WM-owned title cache (wincache.peekTitle) and the
 /// sync truth-rect -- never the wire, so no async fetch, no positional slot,
 /// no X11 in the draw path.
 const TitleScratch = struct {
     minimized: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Title addon's minimized-state service, cached from the DrawCtx after
-    /// the first draw so scanLiveFrame can synthesize the set each frame
+    /// the first draw so frame.scanLiveFrame can synthesize the set each frame
     /// without bar.zig naming the minimize addon.
     minimized_api: segmod.MinimizedApi = .{},
     /// Storage for the focused window's title. The per-window titles
@@ -445,9 +291,9 @@ pub const State = struct {
     win: WindowCtx,
     render: RenderCtx,
 
-    /// Caller-owned scratch for tracking.allWindowsInto (window walks during
+    /// Caller-owned scratch for query.allWindowsInto (window walks during
     /// a frame build). State-local so two walks cannot share one buffer.
-    snapshot: [model.store_capacity]tracking.Entry = undefined,
+    snapshot: [model.store_capacity]query.Entry = undefined,
 
     vis: Visibility = .{},
     dirty: Dirty = .{},
@@ -510,7 +356,7 @@ pub const State = struct {
         // variants deliberately bind none, keeping their last measured width
         // so a re-measure never reserves a 0-width slot for a frame (see
         // scaffold.Opts.invalidate).
-        runVoidHook(.invalidate);
+        segmod.runVoidHook(.invalidate);
         return s;
     }
 
@@ -539,7 +385,7 @@ pub const State = struct {
     /// Extends the current draw's dirty span to cover [x, x + w).
     /// Called for every repainted segment + gap so the blit copies only
     /// the region that actually changed.
-    inline fn extendDirtySpan(self: *State, x: u16, w: u16) void {
+    pub inline fn extendDirtySpan(self: *State, x: u16, w: u16) void {
         if (w == 0) return;
         // Accumulate the span arithmetic in u32 so a large segment stack can't
         // wrap span_x/span_w past 65535; clamp on the way back into the u16
@@ -573,7 +419,7 @@ pub const State = struct {
     /// declared contract capability, not a name-keyed lookup.
     pub fn markDirtySource(self: *State, source: segmod.DirtySourcesSource) void {
         self.dirty.flag = true;
-        for (bar_mods, 0..) |m, i| {
+        for (segmod.all(), 0..) |m, i| {
             if (segmod.hasSource(m.dirty_sources, source)) self.dirty.segments[i] = true;
         }
     }
@@ -584,10 +430,10 @@ pub const State = struct {
     /// only advances while the segment is drawn, so change detection must
     /// not skip it). Uniform: resolved by registry, never by segment name.
     /// A name that does not resolve (null) is never repaintable.
-    fn isSegmentRepaintable(self: *const State, id: ?usize) bool {
+    pub fn isSegmentRepaintable(self: *const State, id: ?usize) bool {
         const i = id orelse return false;
         if (segDirty(self, id)) return true;
-        if (segAt(i).needsRepaint) |q| return q();
+        if (segmod.segmentAt(i).needsRepaint) |q| return q();
         return false;
     }
 
@@ -595,7 +441,7 @@ pub const State = struct {
     /// trigger). Non-configured segments (e.g. the prompt overlay) are never
     /// drawn and never cleared, so an all-dirty set only occurs on a folded
     /// full-redraw request.
-    fn isFullDirty(self: *const State) bool {
+    pub fn isFullDirty(self: *const State) bool {
         for (self.dirty.segments) |d| {
             if (!d) return false;
         }
@@ -646,9 +492,9 @@ pub const State = struct {
     /// redoing the layout. Called unconditionally for every slot; a segment
     /// whose module declares `clickable == false`, or whose name does not
     /// resolve (null), is skipped.
-    fn recordClickBound(self: *State, id: ?usize, x: u16, w: u16) void {
+    pub fn recordClickBound(self: *State, id: ?usize, x: u16, w: u16) void {
         const i = id orelse return;
-        if (!segAt(i).clickable) return;
+        if (!segmod.segmentAt(i).clickable) return;
         if (self.clicks.len >= max_click_bounds) return;
         self.clicks.bounds[self.clicks.len] = .{ .id = i, .x = x, .w = w };
         self.clicks.len += 1;
@@ -663,7 +509,7 @@ pub const State = struct {
 
     /// Measures a segment's natural (reserved) width via its uniform
     /// naturalWidth hook, or 0 for an unknown/removed segment name (null id).
-    fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, id: ?usize) u16 {
+    pub fn measureSegmentWidth(self: *State, frame: *const segmod.Frame, id: ?usize) u16 {
         return segmod.naturalWidthOf(id, frame, self.clock.width);
     }
 
@@ -671,7 +517,7 @@ pub const State = struct {
     /// end-of-batch tick can region-scope a repaint (drawClockOnly). Written
     /// for every configured self-ticker in ANY cluster (left/center/right);
     /// unconfigured self-tickers stay invalid and are never repainted.
-    fn recordSelfTickerScope(self: *State, id: ?usize, x: u16, w: u16) void {
+    pub fn recordSelfTickerScope(self: *State, id: ?usize, x: u16, w: u16) void {
         // `comptime` on the length: with no self-ticking segment compiled in,
         // `Clock.segs` is a zero-length array and the indexed store below is
         // still analyzed, which is a compile error. The length is a comptime
@@ -689,419 +535,6 @@ pub const State = struct {
         }
     }
 
-    /// Fills the shared per-frame DrawCtx the bar hands to every segment's
-    /// draw hook, including the title snapshot slots.
-    pub fn fillDrawCtx(self: *State, ctx: *segmod.DrawCtx) void {
-        ctx.frame = self.frame.frame;
-        ctx.frame.workspace_has_windows = self.frame.ws_has_windows[0..self.frame.frame.workspace_count];
-        // The minimized-state service is drawn from the window module registry
-        // here (upfront, per frame) so the title segment need not name the
-        // addon that owns it. No provider compiled in => empty api =>
-        // scanLiveFrame no-ops, matching prior boot ordering.
-        var minimized_api: segmod.MinimizedApi = .{};
-        if (collect_hidden_set != null)
-            minimized_api.collect = minimizedCollect;
-        ctx.minimized_api = minimized_api;
-        // Titles/geoms below come from the WM-owned title cache and the sync
-        // truth-rect -- neither performs X11 work, so the draw path is
-        // non-blocking and no positional batch exists to scramble. The backing
-        // entries live on State, valid for the rest of the frame AND for
-        // post-draw click handling through the cached `frame.last_ctx`.
-        const entries = self.frame.entries[0..self.frame.entries_len];
-        for (entries) |*e| {
-            e.title = wincache.peekTitle(e.window);
-            e.geom = titleGeom(e.window, self.title_data.minimized.contains(e.window));
-        }
-        // Title of the minimized window, used in the single-window title case.
-        var minimized_title: []const u8 = "";
-        if (entries.len > 0 and self.title_data.minimized.contains(entries[0].window))
-            minimized_title = entries[0].title;
-        ctx.focused_window = focus.getFocused();
-        // Copy, do not borrow: `peekTitle` returns a slice of the
-        // cache's own storage, and this ctx outlives the draw through
-        // `frame.last_ctx`. See focused_title_buf.
-        if (ctx.focused_window) |fw| {
-            const src = wincache.peekTitle(fw);
-            @memcpy(self.title_data.focused_title_buf[0..src.len], src);
-            ctx.focused_title = self.title_data.focused_title_buf[0..src.len];
-        } else {
-            ctx.focused_title = "";
-        }
-        ctx.minimized_title = minimized_title;
-        ctx.current_ws_entries = entries;
-        ctx.minimized_set = &self.title_data.minimized;
-    }
-
-    // Live-state collection
-
-    /// Reads workspace/window state into the frame fields. Pure model reads:
-    /// no X11. The per-window titles/geoms are filled later (fillDrawCtx)
-    /// straight from the WM-owned title cache and the sync truth-rect, so
-    /// there is no fetch key to diff and nothing to prefetch.
-    pub fn scanLiveFrame(self: *State) void {
-        const m = pipeline.model();
-        // The minimized set feeds the title snapshot; the title addon owns the
-        // synthesis, exposed through the cached DrawCtx api. Synthesizing
-        // fresh each scan makes set membership equivalent to a live
-        // per-window query.
-        if (build_options.has_minimize) {
-            if (self.title_data.minimized_api.collect) |f| f(m, &self.title_data.minimized, self.render.allocator);
-        }
-        if (build_options.has_workspaces) {
-            self.frame.frame.workspace_count = @intCast(tracking.getWorkspaceCount());
-            self.frame.frame.current_workspace = @intCast(m.current.index);
-            self.frame.frame.is_all_view_active = m.all_view_active;
-            @memset(&self.frame.ws_has_windows, false);
-            self.frame.entries_len = 0;
-            const cur_ws: model.WSId = model.WSId.fromIndex(self.frame.frame.current_workspace);
-            const cur_bit: u64 = if (self.frame.frame.current_workspace < self.frame.frame.workspace_count)
-                model.bit(cur_ws)
-            else
-                0;
-            // OR-accumulate all window masks in a single pass, collecting the
-            // current workspace's windows on the way.
-            var combined_mask: u64 = 0;
-            for (tracking.allWindowsInto(&self.snapshot)) |entry| {
-                combined_mask |= entry.mask;
-                if (cur_bit != 0 and model.maskedOn(entry.mask, cur_ws) and
-                    self.frame.entries_len < max_frame_windows)
-                {
-                    // Id only: fillDrawCtx annotates title + geom before any
-                    // draw reads the entry.
-                    self.frame.entries[self.frame.entries_len] = .{
-                        .window = entry.win,
-                        .title = "",
-                        .geom = null,
-                    };
-                    self.frame.entries_len += 1;
-                }
-            }
-            for (0..self.frame.frame.workspace_count) |i| {
-                self.frame.ws_has_windows[i] = model.maskedOn(combined_mask, model.WSId.fromIndex(i));
-            }
-        }
-    }
-
-    /// Canonical title-slot geometry for `win`: the off-screen sentinel while
-    /// minimized, else the sync truth-rect (floating anchor / last sent rect)
-    /// with the off-screen sentinel for windows that have never been placed
-    /// (parked/unsent). Mirrors the old batch behavior (truth-rect first,
-    /// sentinel fallback) without the xcb_get_geometry round-trip.
-    fn titleGeom(win: u32, minimized: bool) ?model.Rect {
-        if (minimized) return segmod.offscreen_rect;
-        return reconcile.truthRect(pipeline.model(), win) orelse segmod.offscreen_rect;
-    }
-
-    // Drawing
-
-    /// Warns on a draw failure and reports the position unchanged, so a broken
-    /// segment can't corrupt the layout.
-    /// One segment's draw result: what it painted, and whether that counts as
-    /// a paint. They differ only in the zero-width case, which is the whole
-    /// point of returning both (see contract.Painted).
-    const Drawn = struct {
-        painted: contract.Painted,
-        drew: bool,
-    };
-
-    /// An unknown or draw-less segment name: nothing was painted, and the
-    /// row falls back to the reservation.
-    inline fn reportDrewNothing(x: u16) contract.Painted {
-        log.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
-        return contract.Painted.nothing(x);
-    }
-
-    /// Draws a segment by registry dispatch, catching and logging errors
-    /// instead of propagating them, and reports the width it actually painted
-    /// back to the segment.
-    ///
-    /// The width handback and the painted/nothing decision live in
-    /// `scaffold.finishDraw` rather than inline here: they are the
-    /// bar's post-draw policy, but testing them through this loop would need a
-    /// live DrawContext and an X connection, so in practice they would go
-    /// untested -- and a segment that forgets to record its own drawn width
-    /// stays locked onto its startup width with its neighbours overlapping it
-    /// forever, with no symptom but a bar that looks wrong.
-    /// `id` is the resolved registry index the layout pass already holds; a
-    /// null (a name that no longer resolves) paints nothing and reports the
-    /// fallback the row reserves.
-    pub fn drawSegment(self: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16) Drawn {
-        const i = id orelse return .{ .painted = reportDrewNothing(x), .drew = false };
-        if (segAt(i).draw == null) return .{ .painted = reportDrewNothing(x), .drew = false };
-        // The DrawCtx is shared mutable scratch: pin the reserved width into it
-        // immediately before the draw so width-reading renderers (the title)
-        // advance correctly. The name goes in the same way, so a module can
-        // resolve its own themed colors (the slider's fill reads
-        // segmentValueFg(name)) without the draw hook carrying a per-segment
-        // argument.
-        ctx.name = segAt(i).name;
-        ctx.width = width orelse self.measureSegmentWidth(&ctx.frame, id);
-        const painted = segAt(i).draw.?(ctx, x) catch |e| {
-            log.warnOnErr(e, "bar drawSegment");
-            // A caught error is a broken segment, not a segment with nothing
-            // to show: it painted nothing either way, but reporting it as a
-            // zero-width PAINT would let the next layout collapse a slot that
-            // only failed this once.
-            return .{ .painted = contract.Painted.nothing(x), .drew = false };
-        };
-        return .{
-            .painted = painted,
-            .drew = scaffold.finishDraw(segAt(i), painted),
-        };
-    }
-
-    /// Draws one segment of a left-to-right row, painting the inter-segment gap
-    /// and advancing `x`. `w` is the reserved width; `omit_gap` suppresses the
-    /// gap after a title so the next segment sits flush (center layout).
-    /// Returns the new `x`.
-    fn drawRowSegment(
-        self: *State,
-        ctx: *segmod.DrawCtx,
-        id: ?usize,
-        x: u16,
-        w: u16,
-        omit_gap: bool,
-        scaled_spacing: u16,
-    ) u16 {
-        const x_before = x;
-        const drawn = self.drawSegment(ctx, id, x, w);
-        const painted = drawn.painted;
-        // The segment says whether it painted, instead of the bar guessing it
-        // from "did you move x?". A successful zero-width draw (an absent
-        // readout) and a caught error both end up here with width == 0, and
-        // both correctly consume the whole reserved `w` so the next segment
-        // leftward starts where the layout pass expects -- leaving x unchanged
-        // would let it paint over this slot and desync the cluster.
-        const drew = drawn.drew;
-        // A real draw paints its trailing gap (omitted after the title so the
-        // next center segment sits flush).
-        if (drew and !omit_gap) self.paintGap(painted.end_x, scaled_spacing);
-        return if (drew)
-            painted.end_x + (if (omit_gap) 0 else scaled_spacing)
-        else
-            x_before + w;
-    }
-
-    fn paintGap(self: *State, gap_x: u16, scaled_spacing: u16) void {
-        self.clearRegion(gap_x, scaled_spacing);
-    }
-
-    /// Repaints the bar into the off-screen pixmap. When every segment is
-    /// dirty (full redraw) the whole background is cleared once;
-    /// otherwise only the dirty segments' regions are repainted, leaving
-    /// unchanged pixels from the previous frame untouched.
-    /// Solves the frame's row geometry and paints it. The two halves talk
-    /// through one `RowPlan`: solve measures and pins every slot, paint
-    /// walks the plan in paint order. Nothing in solve draws, and nothing in
-    /// paint measures.
-    pub fn drawAllInner(self: *State, ctx: *segmod.DrawCtx) void {
-        const r = &self.render;
-        const is_full_redraw = self.isFullDirty();
-        self.dirty.span_x = 0;
-        self.dirty.span_w = 0;
-
-        if (is_full_redraw) {
-            self.clearRegion(0, r.width);
-        }
-
-        var plan: RowPlan = .{ .right_x = r.width };
-        self.solveRowPlan(ctx, &plan);
-        self.paintRowPlan(ctx, &plan, is_full_redraw);
-    }
-
-    /// Measures the frame into `plan`: right-cluster widths and their backward
-    /// positions first (so left/center know how much room is gone), then the
-    /// left/center rows forwards. Records nothing on `self` -- the click and
-    /// ticker-scope bookkeeping belongs to paint, which is the only half that
-    /// knows a slot actually got drawn.
-    fn solveRowPlan(self: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
-        const r = &self.render;
-        const frame = &ctx.frame;
-        const scaled_spacing = renderBar().scaledSpacing(r.height);
-        plan.cluster.scaled_spacing = scaled_spacing;
-        plan.cluster.right_x = r.width;
-
-        // Right cluster: measure once, up front, for two reasons. Left/center
-        // placement must shrink around the space it will occupy, and the draw
-        // must not re-measure what solve already knows.
-        for (renderBar().layout.items) |lay| {
-            if (lay.position != .right) continue;
-            for (lay.segments.items) |seg| {
-                const w = self.measureSegmentWidth(frame, segmod.segId(seg));
-                if (plan.cluster.count < max_right_segments) {
-                    plan.cluster.widths[plan.cluster.count] = w;
-                }
-                plan.cluster.count += 1;
-                // u32: segment widths plus gaps can exceed u16 on a very wide
-                // desktop, and this feeds a u16 field.
-                plan.cluster.total_raw += @as(u32, w) + scaled_spacing;
-            }
-            if (lay.segments.items.len > 0) plan.cluster.total_raw -= scaled_spacing;
-        }
-        plan.right_total = @intCast(@min(plan.cluster.total_raw, std.math.maxInt(u16)));
-
-        // Left/center rows, forwards. The center share is computed here because
-        // it is geometry, not painting: the budget is `avail` minus whatever
-        // the right cluster reserved AND whatever the preceding left/center
-        // layouts will claim. This cursor tracks the CLAIM (reserved width plus
-        // gap), which is what the next row's budget has to shrink around; the
-        // painted cursor paint threads separately can differ by a segment that
-        // over- or under-ran its reservation, and deliberately so, since a
-        // click bound has to match the pixels rather than the plan.
-        var claimed: u16 = 0;
-        for (renderBar().layout.items) |lay| {
-            switch (lay.position) {
-                .left, .center => {
-                    // Space before the right cluster; saturating because a
-                    // pathological reservation must clamp at 0, not wrap.
-                    const avail = r.width -| claimed -| plan.right_total;
-                    const budget = center_row.centerRowBudget(lay, avail, scaled_spacing, frame, self.clock.width);
-                    const remaining = budget.remaining;
-                    const center_count = budget.center_count;
-                    var center_idx: u16 = 0;
-                    for (lay.segments.items) |seg| {
-                        // One name -> id resolution per segment per frame;
-                        // everything below (and in paint) reads the id.
-                        const id = segmod.segId(seg);
-                        const is_center = (lay.position == .center) and segmod.isRole(id, center_slot_ids);
-                        // Center slots split the whole remaining budget evenly,
-                        // left-to-right in config order, and stay contiguous
-                        // (no gap) so duplicates cannot reach the right cluster.
-                        const w: u16 = if (is_center)
-                            center_row.centerShare(remaining, center_count, center_idx)
-                        else
-                            self.measureSegmentWidth(frame, id);
-                        // Center slots are contiguous, so neither the claim
-                        // nor the paint cursor adds a gap after one.
-                        claimed = claimed +% w +% (if (is_center) 0 else scaled_spacing);
-                        plan.push(.{
-                            .id = id,
-                            .w = w,
-                            .omit_gap = is_center,
-                            .center_idx = center_idx,
-                            .repaintable = self.isSegmentRepaintable(id),
-                            .self_ticking = segmod.isRole(id, self_ticking_ids),
-                        });
-                        if (is_center) center_idx += 1;
-                    }
-                },
-                .right => {
-                    // Backward layout, measured widths, across ALL right
-                    // layouts so they butt together with no inter-layout gap
-                    // (matching `right_total` above). Reversed into paint order
-                    // here so paint is a single forward loop.
-                    const start = plan.cluster.ridx;
-                    plan.cluster.ridx += lay.segments.items.len;
-                    const widths: ?[]const u16 = if (plan.cluster.count > max_right_segments)
-                        null // overflowed the scratch: fall back to measure-at-draw
-                    else
-                        plan.cluster.widths[start..][0..lay.segments.items.len];
-                    const n = lay.segments.items.len;
-                    var cur_x = plan.cluster.right_x;
-                    var pending_gap = false;
-                    var i = n;
-                    while (i > 0) {
-                        i -= 1;
-                        const id = segmod.segId(lay.segments.items[i]);
-                        const seg_w = if (widths) |ws| ws[i] else self.measureSegmentWidth(frame, id);
-                        // Saturating: a pathological width sum clamps at 0
-                        // instead of wrapping into a rightward paint.
-                        cur_x = cur_x -| seg_w;
-                        if (pending_gap) cur_x = cur_x -| scaled_spacing;
-                        plan.push(.{
-                            .id = id,
-                            .w = seg_w,
-                            .x = cur_x,
-                            .repaintable = self.isSegmentRepaintable(id),
-                            .self_ticking = segmod.isRole(id, self_ticking_ids),
-                            .is_right = true,
-                            // Reverse order means the LAST index pushed is the
-                            // leftmost, i.e. the one that starts the layout.
-                            .right_layout_start = i == n - 1,
-                        });
-                        pending_gap = true;
-                    }
-                    plan.cluster.right_x = cur_x;
-                },
-            }
-        }
-    }
-
-    /// Walks the solved plan in paint order and draws it. The single flat loop
-    /// replaces the old interleaved placement loop: the backward right-cluster
-    /// cursor, which used to live in drawRightSegments, is already baked into
-    /// the plan's slot positions.
-    fn paintRowPlan(self: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_redraw: bool) void {
-        const scaled_spacing = renderBar().scaledSpacing(self.render.height);
-        // Left/center advance, threaded separately from the plan's right-cluster
-        // positions: a right slot's `x` is final, but a left/center slot's is
-        // only where it started, because the draw can move the cursor.
-        var x: u16 = 0;
-        var pending_gap = false;
-
-        self.clicks.len = 0;
-        for (plan.slots[0..plan.len]) |slot| {
-            // Right slots carry a solved x; left/center slots take the live
-            // cursor. Both feed the same two recordings, which is why this is
-            // the only place they are made: a self-ticker's scope and a
-            // segment's click bound must agree with where the paint landed.
-            //
-            // Self-ticker scope is recorded in ANY cluster: drawClockOnly
-            // depends on it regardless of where the clock is laid out.
-            const slot_x = if (slot.is_right) slot.x else x;
-            if (slot.self_ticking) self.recordSelfTickerScope(slot.id, slot_x, slot.w);
-            self.recordClickBound(slot.id, slot_x, slot.w);
-
-            if (!slot.repaintable) {
-                // Not repaintable: the slot is reserved space only, and the
-                // cursor still has to move past it. Plain `+=` on purpose, to
-                // keep the wrap-in-debug arithmetic identical to the loop this
-                // replaced; a config that overflows u16 here is a config bug,
-                // and silently saturating would hide it behind a wrong layout
-                // instead of a loud failure.
-                if (!slot.is_right) {
-                    x += slot.w;
-                    if (!slot.omit_gap) x += scaled_spacing;
-                } else {
-                    pending_gap = true;
-                }
-                continue;
-            }
-
-            if (!is_full_redraw) {
-                // The right cluster clears per segment; a left/center clear
-                // also covers the trailing gap it is about to advance past.
-                const clear_w = if (slot.is_right)
-                    slot.w
-                else if (slot.omit_gap)
-                    slot.w
-                else
-                    slot.w +| scaled_spacing;
-                self.clearRegion(slot_x, clear_w);
-            }
-
-            if (slot.is_right) {
-                // Right cluster, already positioned backwards by solve. A new
-                // layout starts a fresh gap run: layouts are spaced by
-                // `right_total`, not by a painted gap, so inheriting the
-                // previous layout's pending gap would clear a second time
-                // where the old per-layout loop started clean.
-                if (slot.right_layout_start) pending_gap = false;
-                const drew = self.drawSegment(ctx, slot.id, slot.x, slot.w).drew;
-                if (drew and pending_gap) self.paintGap(slot.x +| slot.w, scaled_spacing);
-                // A failed draw still occupies its slot as empty space, so the
-                // next leftward segment gets the same gap solve computed. That
-                // uniformity is what keeps placement from desyncing next frame.
-                pending_gap = true;
-            } else {
-                const x_before = x;
-                x = self.drawRowSegment(ctx, slot.id, x, slot.w, slot.omit_gap, scaled_spacing);
-                if (x != x_before) self.extendDirtySpan(x_before, x - x_before);
-            }
-            self.clearSegmentDirty(slot.id);
-        }
-    }
-
     /// Re-derives the merged clock display width from the live width probes and
     /// adopts it, reporting whether it moved. Driven by a display-mode cycle:
     /// the next row layout must reserve the incoming mode's span, and the
@@ -1114,14 +547,3 @@ pub const State = struct {
         return true;
     }
 };
-/// Full hidden-set synthesis forwarded to the hide-family provider
-/// (DrawCtx api signature).
-fn minimizedCollect(
-    m: *const anyopaque,
-    set: *std.AutoHashMapUnmanaged(u32, void),
-    allocator: std.mem.Allocator,
-) void {
-    const mm: *const model.Model = @ptrCast(@alignCast(m));
-    if (collect_hidden_set) |wm|
-        wm.collectHiddenSet.?(mm, set, allocator);
-}

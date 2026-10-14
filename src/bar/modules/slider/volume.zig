@@ -31,6 +31,9 @@ const std = @import("std");
 const log = @import("log");
 const types = @import("types");
 const slider = @import("slider");
+const drawing = @import("drawing");
+const spawn_capture = @import("spawn_capture");
+const time = @import("time");
 const native_pulse = @import("native_pulse");
 const native_alsa = @import("native_alsa");
 
@@ -107,7 +110,7 @@ pub fn probeDecision(
 /// Whether the ladder may be walked now. `probeDecision`'s clock and IO
 /// edge, and the only place that mutates the cache's own bookkeeping.
 fn probeDue() bool {
-    const now = slider.nowMs();
+    const now = time.realtimeMs();
     const recheck_window = now >= g_pulse_recheck_at_ms;
     const reachable = if (recheck_window) native_pulse.pulseReachable() else false;
     const probe = probeDecision(
@@ -236,14 +239,14 @@ fn readLatched() ?bool {
         },
         .pactl => {
             var buf: [1024]u8 = undefined;
-            const out = slider.runOut(pactl_vol_cmd, &buf);
+            const out = spawn_capture.runOut(pactl_vol_cmd, &buf);
             g_pct = parsePercent(out) orelse return null;
-            const out2 = slider.runOut(pactl_mute_cmd, &buf);
+            const out2 = spawn_capture.runOut(pactl_mute_cmd, &buf);
             g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
         },
         .amixer => {
             var buf: [1024]u8 = undefined;
-            const out = slider.runOut(amixer_vol_cmd, &buf);
+            const out = spawn_capture.runOut(amixer_vol_cmd, &buf);
             g_pct = parsePercent(out) orelse return null;
             g_muted = std.mem.indexOf(u8, out, "[off]") != null;
         },
@@ -306,7 +309,7 @@ fn runLadder() bool {
         g_backend = .unknown;
     }
 
-    g_ladder_failed_at_ms = noteLadderResult(ok, slider.nowMs());
+    g_ladder_failed_at_ms = noteLadderResult(ok, time.realtimeMs());
     if (!ok) {
         logNoBackend();
         return false;
@@ -326,12 +329,12 @@ var g_alsa_muted: bool = false;
 /// (`amixer` reports both in one line).
 fn tryRung(backend: Backend, vol_cmd: []const u8, mute_cmd: []const u8, on_token: []const u8) ?u8 {
     var buf: [1024]u8 = undefined;
-    const out = slider.runOut(vol_cmd, &buf);
+    const out = spawn_capture.runOut(vol_cmd, &buf);
     const pct = parsePercent(out) orelse return null;
     const muted = if (mute_cmd.len == 0)
         std.mem.indexOf(u8, out, on_token) != null
     else blk: {
-        const m = slider.runOut(mute_cmd, &buf);
+        const m = spawn_capture.runOut(mute_cmd, &buf);
         break :blk std.mem.indexOf(u8, m, on_token) != null;
     };
     switch (backend) {
@@ -391,12 +394,12 @@ fn commitPct(v: u8) void {
         .pactl => {
             var buf: [64]u8 = undefined;
             const cmd = std.fmt.bufPrint(&buf, "pactl set-sink-volume @DEFAULT_SINK@ {d}%", .{pct}) catch return;
-            _ = slider.runOk(cmd);
+            _ = spawn_capture.runOk(cmd);
         },
         .amixer => {
             var buf: [64]u8 = undefined;
             const cmd = std.fmt.bufPrint(&buf, "amixer set Master {d}%", .{pct}) catch return;
-            _ = slider.runOk(cmd);
+            _ = spawn_capture.runOk(cmd);
         },
         .native_alsa => {
             _ = g_native_alsa.?.setVolumePct(pct);
@@ -438,14 +441,14 @@ fn write(w: slider.Write, v: u8) void {
 /// from a sink when no sink was ever reached -- and it is also the one string
 /// that reads as "muted" to a user while inviting a pointless volume-up scroll.
 /// MUTE is the honest terminal state and matches what the user asked for.
-fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) slider.Label {
+fn renderDisplay(config: types.BarConfig, muted: bool, buf: []u8) drawing.Label {
     const effective_mute = muted or !g_has_value;
     const fmt = if (effective_mute)
         (config.volume_muted_format orelse default_muted_format)
     else
         (config.volume_format orelse default_format);
     const state: []const u8 = if (effective_mute) "mute" else "unmute";
-    return slider.renderLineValue(fmt, g_pct, state, buf);
+    return drawing.renderLineValue(fmt, g_pct, state, buf);
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
@@ -481,7 +484,7 @@ pub fn clearNativeBackendForTest() void {
     g_native_alsa = null;
 }
 
-pub fn label(config: types.BarConfig, buf: []u8) slider.Label {
+pub fn label(config: types.BarConfig, buf: []u8) drawing.Label {
     return renderDisplay(config, g_muted, buf);
 }
 
@@ -500,8 +503,8 @@ fn toggleMute() void {
         .native_alsa => {
             if (g_native_alsa) |*na| _ = na.setMuted(!g_muted);
         },
-        .pactl => _ = slider.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle"),
-        .amixer => _ = slider.runOk("amixer set Master toggle"),
+        .pactl => _ = spawn_capture.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle"),
+        .amixer => _ = spawn_capture.runOk("amixer set Master toggle"),
         .none => return,
     }
     _ = readVolume();

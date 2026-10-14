@@ -1,17 +1,15 @@
 //! Center-row layout math: the budget and share derivation for the
 //! bar's center row, plus the merged clock width that sizes it.
 //!
-//! The policy is pure over injected seams, following the metrics.zig
-//! pattern: the segment registry is resolved here (comptime, from the
-//! generated `bar_modules`), the clock budget arrives as a value, and
+//! The policy is pure over injected inputs, following the metrics.zig
+//! pattern: the segment registry arrives through segment.zig's comptime
+//! helpers, the clock budget arrives as a value, and
 //! the one Pango-dependent input (a string's pixel width) is a probe
 //! parameter -- so every derivation is unit-testable without a
 //! DrawContext or a live bar.
 
 const types = @import("types");
 const segmod = @import("segment");
-
-const bar_mods = @import("bar_modules").modules;
 
 /// Even split of `remaining` among `count` center slots, distributed
 /// left to right in config order: every slot gets `remaining / count`,
@@ -94,8 +92,8 @@ pub fn mergedClockWidth(
     const self_ticking_ids = segmod.self_ticking_ids;
     if (comptime self_ticking_ids.len == 0) return width;
     for (self_ticking_ids) |cid| {
-        if (bar_mods[cid].measureString) |ms|
-            width = @max(width, measure(ctx, ms(), config.segmentProps(bar_mods[cid].name)) +
+        if (segmod.segmentAt(cid).measureString) |ms|
+            width = @max(width, measure(ctx, ms(), config.segmentProps(segmod.segmentAt(cid).name)) +
                 2 * config.scaledSegmentPadding(height));
     }
     return width;

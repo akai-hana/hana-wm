@@ -1,14 +1,24 @@
 //! Workspace tag indicator.
 //! Renders workspace labels and activity glyphs on the status bar.
+//!
+//! Naming, decided (structure audit step 27): the registered segment -- and
+//! the config-visible `segments` name -- is "workspaces"; this FILE is
+//! `tags.zig` (the dwm-lineage term for the same concept). Renaming the file
+//! to `workspaces.zig` would collide with `window/modules/workspaces.zig` in
+//! the global stem namespace (a hard build error), and renaming the segment
+//! would break every config that says `segments = ["workspaces", ...]`.
+//! The mismatch is deliberate: config and registry key on the segment name,
+//! never on the file stem.
 
 const types = @import("types");
 const drawing = @import("drawing");
-const tracking = @import("tracking");
+const query = @import("query");
 const actions = @import("actions");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
 const contract = @import("contract");
+const scaffold = @import("scaffold");
 
 /// Reserved row width when the workspaces module is compiled in but reports
 /// zero workspaces (moved here from bar.zig: width policy belongs to the
@@ -18,9 +28,9 @@ const contract = @import("contract");
 const fallback_width: u16 = 270;
 
 // Sized to workspace_labels, the largest label source. Every workspace index
-// is bounded by tracking.getWorkspaceCount() (<= max_workspaces), so no
+// is bounded by query.getWorkspaceCount() (<= max_workspaces), so no
 // fallback path exists.
-var label_widths: [tracking.workspace_labels.len]u16 = [_]u16{0} ** tracking.workspace_labels.len;
+var label_widths: [query.workspace_labels.len]u16 = [_]u16{0} ** query.workspace_labels.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
 // The ws_current/ws_all_active the cache was built for: the selected tag is
@@ -51,7 +61,7 @@ var cached_ind_y: u16 = 0;
 /// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
 inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
-    if (i < tracking.workspace_labels.len) return tracking.workspace_labels[i];
+    if (i < query.workspace_labels.len) return query.workspace_labels[i];
     return "?";
 }
 
@@ -69,7 +79,7 @@ fn ensureCache(
     ws_all_active: bool,
 ) void {
     if (cache_valid and cache_ws_current == ws_current and cache_ws_all_active == ws_all_active) return;
-    const count = @min(tracking.getWorkspaceCount(), label_widths.len);
+    const count = @min(query.getWorkspaceCount(), label_widths.len);
     // Measure each label with ITS per-state styling: the selected tag may
     // render bold (workspaces_selected), so its glyph is wider than its
     // neighbors.
@@ -280,12 +290,12 @@ fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
 fn resolveWorkspaceClick(offset: u16) ?usize {
     // In all-view the single "花" cell represents every workspace at once; a
     // click cannot map onto one workspace, so it is a no-op.
-    if (tracking.isAllViewActive()) return null;
+    if (query.isAllViewActive()) return null;
     const cell_w = cellWidth();
     if (cell_w == 0) return null;
     if (!build_options.has_workspaces) return null;
     const idx: usize = @intCast(offset / cell_w);
-    if (idx >= tracking.getWorkspaceCount()) return null;
+    if (idx >= query.getWorkspaceCount()) return null;
     return idx;
 }
 
@@ -300,16 +310,10 @@ fn onClickHook(ctx: *const contract.ClickCtx) bool {
     return true;
 }
 
-fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
-    return draw(segmod.castDraw(ctx), x);
-}
-
-pub const module: @import("contract").Segment = .{
-    .name = "workspaces",
-    .clickable = true,
+pub const module = scaffold.module("workspaces", draw, null, .{
+    .mode = .self_measured,
     .dirty_sources = .{ .frame = true },
     .invalidate = invalidate,
-    .naturalWidth = naturalWidthHook,
-    .draw = drawHook,
-    .onClick = onClickHook,
-};
+    .natural_width = naturalWidthHook,
+    .on_click = onClickHook,
+});

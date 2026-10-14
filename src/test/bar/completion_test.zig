@@ -1,4 +1,4 @@
-//! Word-at-cursor completion seam.
+//! Word-at-cursor completion logic.
 //!
 //! `updateGhost` used to bail on ANY space in the buffer, so the second and
 //! later words of a command could never be completed: typing "git ch" showed no
