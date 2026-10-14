@@ -360,7 +360,7 @@ fn sendAll(
             const need_pixel = !last.has_rect or last.pixel != pixel;
             const need_geom = moved or unpark_transition or raise_winner;
 
-            // Opt-in X trace (see core/loop/xtrace.zig). Each line is guarded
+            // Opt-in X trace (see core/pure/xtrace.zig). Each line is guarded
             // by the SAME condition as the send it describes, so the log can
             // never claim a request that did not happen -- a trace that
             // over-reports is worse than no trace. Recorded before the send so
