@@ -9,6 +9,7 @@
 //! DrawContext or a live bar.
 
 const types = @import("types");
+const bar_config = @import("bar_config");
 const segmod = @import("segment");
 
 /// Even split of `remaining` among `count` center slots, distributed
@@ -32,7 +33,7 @@ pub fn centerShare(remaining: u16, count: u16, idx: u16) u16 {
 /// was a closure over -- the frame and the merged clock width -- so
 /// the derivation has no dependency on the bar's State.
 pub fn centerRowBudget(
-    lay: types.BarLayout,
+    lay: bar_config.BarLayout,
     avail: u16,
     scaled_spacing: u16,
     frame: *const segmod.Frame,
@@ -81,9 +82,9 @@ pub fn centerRowBudget(
 /// so styled costs nothing on an unstyled bar.
 pub fn mergedClockWidth(
     ctx: anytype,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
-    measure: *const fn (@TypeOf(ctx), []const u8, types.SegmentProps) u16,
+    measure: *const fn (@TypeOf(ctx), []const u8, bar_config.SegmentProps) u16,
 ) u16 {
     var width: u16 = 0;
     // Comptime guard: with no self-ticking segment compiled in the

@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const contract = @import("bar_contract");
@@ -183,7 +184,7 @@ fn tickDeadlineMs() i32 {
 /// here on the main thread. Covers the reserved slot with the active mode's
 /// own probe so a region-scoped repaint (mode cycle) leaves no stale pixels
 /// from the previous wider view.
-fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
+fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_x: u16) !contract.Painted {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(drawing.clockFormat(config), mode);

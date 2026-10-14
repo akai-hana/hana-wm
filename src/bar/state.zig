@@ -17,6 +17,7 @@
 const std = @import("std");
 const core = @import("core");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const query = @import("query");
 const model = @import("model");
 const title_cache = @import("title_cache");
@@ -73,7 +74,7 @@ const WindowCtx = struct {
 /// The live bar configuration, read straight from core rather than copied:
 /// a copy would borrow slices from a config the caller frees, and need a
 /// re-point on every reload path -- nothing to re-point, nothing to forget.
-pub inline fn renderBar() types.BarConfig {
+pub inline fn renderBar() bar_config.Config {
     return core.getState().config.bar;
 }
 
@@ -309,7 +310,7 @@ pub const State = struct {
         width: u16,
         height: u16,
         dc: *drawing.DrawContext,
-        config: types.BarConfig,
+        config: bar_config.Config,
     ) !*State {
         const s = try allocator.create(State);
         // The merged clock display width comes from the self-ticking segments'

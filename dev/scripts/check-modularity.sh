@@ -207,9 +207,13 @@ run_scenarios() {
         "tiling (entire subsystem)" \
         "src/tiling"
 
+    # Each behavior's `*_config.zig` fragment is part of the subsystem: the
+    # build fails loudly (OrphanConfigFragment) if a fragment outlives its
+    # owner, so every removal path takes the pair.
     run_scenario \
         "floating (behavior module)" \
-        "src/window/modules/floating.zig"
+        "src/window/modules/floating.zig" \
+        "src/window/modules/floating_config.zig"
 
     run_scenario \
         "vim (removable)" \
@@ -223,7 +227,8 @@ run_scenarios() {
     run_scenario \
         "bar + floating" \
         "src/bar" \
-        "src/window/modules/floating.zig"
+        "src/window/modules/floating.zig" \
+        "src/window/modules/floating_config.zig"
 
     # NOTE: no "both paradigms removed" scenario: build.zig rejects a tree
     # without at least one of src/tiling/ or floating.zig (a WM must manage
@@ -243,14 +248,17 @@ run_scenarios() {
 
     run_scenario \
         "workspaces (behavior module)" \
-        "src/window/modules/workspaces.zig"
+        "src/window/modules/workspaces.zig" \
+        "src/window/modules/workspaces_config.zig"
 
     run_scenario \
         "all behaviors" \
         "src/window/modules/floating.zig" \
+        "src/window/modules/floating_config.zig" \
         "src/window/modules/fullscreen.zig" \
         "src/window/modules/minimize.zig" \
-        "src/window/modules/workspaces.zig"
+        "src/window/modules/workspaces.zig" \
+        "src/window/modules/workspaces_config.zig"
 
     # Tier 3: Individual tiling layouts
     echo ""

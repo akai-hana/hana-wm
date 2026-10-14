@@ -91,8 +91,9 @@ pub fn handleConfigReload() !void {
         return;
     }
 
-    try config.validate(new_ptr);
-
+    // Domain invariants and the warn-only checks run INSIDE composed.parse
+    // (each fragment's validate follows its parse), so a config that loaded
+    // here is already validated -- there is no separate validate step.
     // Keys change detection, BEFORE the swap: it reads both boxes, and the
     // swap below releases the old one. Detecting first is what lets the
     // hand-off be a single core call instead of a pointer swap that leaves two
@@ -111,7 +112,7 @@ pub fn handleConfigReload() !void {
     // matches the rev the swap just bumped (see the ordering doc). XKB exists
     // for the whole process lifetime (init at boot, deinit only at shutdown),
     // so this reload never sees a null state.
-    keybinds.buildKeybinds(new_ptr.keybindings.items);
+    keybinds.buildKeybinds(new_ptr.core.keybindings.items);
 
     // Freeze the now-live config as the re-exec source: a later reload_hana
     // (binary-only reload) boots from this snapshot rather than from the

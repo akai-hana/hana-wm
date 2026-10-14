@@ -10,6 +10,7 @@ const xcb = core.xcb;
 const events = @import("events");
 const config = @import("config");
 const types = @import("types");
+const composed = @import("composed");
 const scale = @import("dpi");
 const hz = @import("hz");
 const log = @import("log");
@@ -108,14 +109,14 @@ pub fn main(init: std.process.Init) !void {
     // [display] dpi overrides it. Resolving after `config.load` is what makes
     // the override possible; resolving before meant the config could not be
     // consulted, which is why the override had to live in main anyway.
-    const dpi = if (loaded_config.dpi) |configured|
+    const dpi = if (loaded_config.core.dpi) |configured|
         configured
     else
         scale.detectDpi(x.conn, x.screen);
 
     // Heap-allocate config so core.State holds a pointer; this allows
     // atomic pointer-swap on reload instead of by-value copy aliasing.
-    const config_ptr = try alloc.create(types.Config);
+    const config_ptr = try alloc.create(composed.Config);
     config_ptr.* = loaded_config;
 
     // core.init() takes ownership of config_ptr; must run before any
@@ -138,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
     // Build the key dispatch map now that both the live config and the XKB
     // state exist. Owned by core/input/keybinds.zig; rebuilt on every
     // reload. Its entries borrow Actions from the live config.
-    keybinds.buildKeybinds(config_ptr.keybindings.items);
+    keybinds.buildKeybinds(config_ptr.core.keybindings.items);
 
     // Arm the unified reload: resolve the exec path before any reload/reexec
     // request can arrive (process.init).

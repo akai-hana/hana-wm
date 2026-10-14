@@ -36,6 +36,7 @@ const core = @import("core");
 const drawing = @import("drawing");
 const vocab = @import("vocab");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const contract = @import("bar_contract");
 const dispatch = @import("contract_dispatch");
 const model = @import("model");
@@ -90,7 +91,7 @@ pub inline fn castDraw(ctx: *anyopaque) *DrawCtx {
 /// caches.
 pub const DrawCtx = struct {
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     conn: core.Connection,
     allocator: std.mem.Allocator,
@@ -391,7 +392,7 @@ pub fn finishDraw(seg: *const contract.Segment, painted: contract.Painted) bool 
 pub fn drawAndStore(
     comptime name: []const u8,
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     start_x: u16,
     text: []const u8,

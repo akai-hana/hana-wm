@@ -13,6 +13,7 @@ const std = @import("std");
 const brightness = @import("brightness");
 const drawing = @import("drawing");
 const types = @import("types");
+const bar_config = @import("bar_config");
 
 const io = std.testing.io;
 
@@ -237,7 +238,7 @@ test "rawFromPct round-trips through pctFromRaw" {
 }
 
 test "label honors configuration" {
-    var cfg = types.BarConfig{};
+    var cfg = bar_config.Config{};
     cfg.brightness_format = "Level {pct}";
     var buf: [128]u8 = undefined;
     brightness.setDisplayForTest(42);
@@ -252,6 +253,6 @@ test "label default format" {
     var buf: [128]u8 = undefined;
     brightness.setDisplayForTest(33);
     defer brightness.setDisplayForTest(0);
-    try std.testing.expectEqualStrings("BRT 33%", brightness.label(types.BarConfig{}, &buf).text);
-    try std.testing.expectEqualStrings("33%", valueSpan(brightness.label(types.BarConfig{}, &buf)));
+    try std.testing.expectEqualStrings("BRT 33%", brightness.label(bar_config.Config{}, &buf).text);
+    try std.testing.expectEqualStrings("33%", valueSpan(brightness.label(bar_config.Config{}, &buf)));
 }

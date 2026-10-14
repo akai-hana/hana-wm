@@ -2,20 +2,14 @@
 //! Loads, parses, and validates TOML config files.
 
 const std = @import("std");
-const model = @import("model");
 const fallback = @import("fallback");
 const log = @import("log");
-const scaling = @import("scaling");
 const parser = @import("parser");
-const schema = @import("schema");
+const composed = @import("composed");
 const types = @import("types");
 const layout_names = @import("layout_names");
 const snapshot_mod = @import("snapshot");
 const discover = @import("discover");
-const binds = @import("binds");
-const tiling_sections = @import("tiling_sections");
-const bar_sections = @import("bar_sections");
-const rules = @import("rules");
 
 // Re-exports: `config` stays the single import surface for callers
 // (main.zig, events.zig, session.zig, the tests); the re-exports below
@@ -40,7 +34,7 @@ const max_section_name_bytes = 64;
 /// subdirectories only via explicit `include`).  Later files win on scalar conflicts;
 /// arrays accumulate (enforced by the parser's Value getters: scalar reads resolve to
 /// the last declaration, array reads see every one).
-fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.Config {
+fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !composed.Config {
     var names = try discover.discoverDirNames(allocator, dir_path);
     defer {
         for (names.items) |n| allocator.free(n);
@@ -62,7 +56,7 @@ fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.
 /// the process lifetime after the first re-exec, so honoring it there would
 /// re-read the frozen snapshot instead of the user's live config files, and
 /// bind/theme edits would never hot-reload.
-pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, allow_pinned_snapshot: bool) !types.Config {
+pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, allow_pinned_snapshot: bool) !composed.Config {
     const paths = try discover.searchPaths(allocator);
     defer paths.deinit(allocator);
 
@@ -121,7 +115,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
 }
 
 /// Reads, parses, and returns the config at `path` (single-file entry point).
-pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config {
+pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !composed.Config {
     const cfg = parseAndBuild(allocator, parseFileDoc, FileInput{ .path = path, .base_dir = std.fs.path.dirname(path) orelse "." }) catch |err| switch (err) {
         error.ConfigEmpty => {
             log.info("Empty config file: {s}, using fallback", .{path});
@@ -175,7 +169,7 @@ fn parseAndBuild(
     allocator: std.mem.Allocator,
     comptime parse: anytype,
     in: anytype,
-) !types.Config {
+) !composed.Config {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -189,18 +183,21 @@ fn parseAndBuild(
     return cfg;
 }
 
-fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
+fn loadFallbackConfig(allocator: std.mem.Allocator) !composed.Config {
     // The embedded fallback is the FLOOR, not a dependency: if it is somehow
     // absent (a build that did not embed it, a truncated binary), returning a
     // boot-fatal error here made a missing convenience file take the WM down
-    // with it. `getDefaultConfig` is the same defaults the embedded TOML
-    // encodes -- it seeds every scalar from `types.Config`'s field
-    // initializers -- so the floor holds even with nothing embedded. The only
-    // thing lost is the fallback's own tuned values, and that is reported
-    // rather than hidden.
+    // with it. `composed.parse` on an EMPTY document is the same defaults the
+    // embedded TOML encodes -- every fragment self-seeds its owned non-scalars
+    // and its scalars come from field initializers -- so the floor holds even
+    // with nothing embedded. The only thing lost is the fallback's own tuned
+    // values, and that is reported rather than hidden.
     const fallback_toml = fallback.getFallbackToml() orelse {
         log.warn("Embedded fallback config missing; using the code defaults instead", .{});
-        return getDefaultConfig(allocator);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        var empty = parser.Document.init(arena.allocator());
+        return try composed.parse(allocator, &empty);
     };
     // The auto_terminal substitution happens in parseAction, so the embedded
     // fallback and a user config go through the identical path.
@@ -210,43 +207,18 @@ fn loadFallbackConfig(allocator: std.mem.Allocator) !types.Config {
     return cfg;
 }
 
-/// Builds the built-in default Config: every scalar knob seeds from
-/// types.Config's field initializers (the single source of truth), plus
-/// heap-dup'd non-scalar seed data so deinit can free every owned field
-/// unconditionally, and one `layouts` entry so the layout cycle always has
-/// something to rotate. OOM propagates; the errdefer tears down the partial
-/// Config, never leaving string literals for deinit to free.
-fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
-    var cfg: types.Config = .{};
-    errdefer cfg.deinit(allocator);
-    // Canonical default name: it resolves to the canonical master module at
-    // seed time; every stored name is canonical.
-    try tiling_sections.seedDefaultLayout(allocator, &cfg, types.canon_master_layout);
-    try bar_sections.padWorkspaceIcons(allocator, &cfg);
-    try bar_sections.initDefaultBarLayout(allocator, &cfg);
-    return cfg;
-}
-
-fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !types.Config {
+fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !composed.Config {
     // A broken TOML (warn-and-skipped line, or a whole file skipped during
     // the merge) must not silently produce a partially-applied config: fail
     // the load so reload keeps the live config. Boot falls through to
     // the embedded fallback via loadConfigDefault's warn-and-skip.
     if (doc.had_errors) return error.ConfigParseFailed;
-    var cfg = try getDefaultConfig(allocator);
-    // If any parse step below errors (OOM), free the partial Config so the
-    // half-applied section doesn't leak. Only armed after getDefaultConfig
-    // succeeded, so its own errdefer handled the earlier failure.
-    errdefer cfg.deinit(allocator);
-    try binds.parseKeybindings(allocator, doc, &cfg);
-    try tiling_sections.parseTilingStructures(allocator, doc, &cfg);
-    // Every scalar knob ([drag], [fullscreen], [workspaces], [tiling]
-    // flags/aesthetics/master trio, all of [bar] incl. [bar.properties])
-    // in one table-driven pass; must precede bar_sections.parseBar so icon padding sees
-    // the freshly parsed workspaces.count.
-    try schema.applyAll(doc, allocator, &cfg);
-    try bar_sections.parseBar(allocator, doc, &cfg);
-    try rules.parseRules(allocator, doc, &cfg);
+    // The composed facade assembles core + every discovered fragment (each
+    // self-seeding its defaults); a fragment's `validate` may fail the load
+    // with error.InvalidConfig, which loadFor and isFatalLoadError treat like
+    // a parse failure (boot falls back; reload keeps live). The lint tail
+    // below is read-only, so it runs on the finished document either way.
+    const cfg = try composed.parse(allocator, doc);
     lintDocument(doc);
     return cfg;
 }
@@ -324,7 +296,7 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
         log.warn("[bar.properties] present but [bar] is missing; its knobs are inert", .{});
 }
 
-/// Canonical startup entry point: load, validate. Re-exec successors find
+/// Canonical startup entry point: load. Re-exec successors find
 /// their pinned config snapshot via `loadConfigDefault(true)`; the in-place
 /// reload path (reload.handleConfigReload) loads live configs itself instead.
 ///
@@ -332,6 +304,11 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
 /// concern and happens separately via `keybinds.buildKeybinds` once the config
 /// is live; see `core/input/keybinds.zig`. DPI-scaled bar metrics are derived by the
 /// bar itself (see bar/metrics.zig) rather than stored on the config.
+/// Domain invariants (master_width's ratio band) and the warn-only checks
+/// (bar.font_size) live with their fragments -- `composed.parse` runs each
+/// fragment's `validate` right after its `parse`, and error.InvalidConfig
+/// degrades exactly like a parse failure (see `loadFor` / `isFatalLoadError`).
+///
 /// Loads the default config with every warn/err diagnostic CAPTURED into
 /// `collector` instead of only reaching stderr, then throws the config away.
 ///
@@ -358,63 +335,7 @@ pub fn checkConfig(allocator: std.mem.Allocator, collector: *log.Collector) !voi
     cfg.deinit(allocator);
 }
 
-/// Validates domain invariants on a freshly loaded config.
-fn invalid(comptime fmt: []const u8, args: anytype) error{InvalidConfig} {
-    log.err("Invalid config: " ++ fmt ++ ", keeping old", args);
-    return error.InvalidConfig;
-}
-
-pub fn validate(cfg: *const types.Config) !void {
-    // master_width is a ScalableValue: percentages validate as a
-    // [min_master_width, max_master_width] ratio; pixels only as >= 0, since
-    // the screen width for a ratio isn't available here and the runtime clamps:
-    // a pixel-vs-ratio check would wrongly refuse `master_width = 600`.
-    const mw = cfg.tiling.master_width;
-    if (mw.is_percentage) {
-        const mw_ratio: f32 = scaling.asRatio(mw);
-        if (mw_ratio < model.min_master_width or mw_ratio > model.max_master_width)
-            return invalid("master_width {d:.0}% out of [{d:.0}%, {d:.0}%]", .{
-                mw_ratio * 100.0,
-                model.min_master_width * 100.0,
-                model.max_master_width * 100.0,
-            });
-    } else if (mw.value < 0.0) {
-        return invalid("master_width {d}px must be >= 0", .{mw.value});
-    }
-    warnOnly(cfg);
-}
-
-/// The warn-first half of validation: values that are legal but almost certainly
-/// not what the user meant, or that a subsystem will silently clamp. They must
-/// NOT fail the load: a config that boots with a loud warning is recoverable,
-/// and a config that refuses to boot over a cosmetic value is not. Every entry
-/// here is therefore `log.warn` with no effect on the returned Config.
-///
-/// Kept separate from the failing checks above on purpose, so the line between
-/// "wrong config" and "odd config" is visible in the source rather than implied
-/// by whether a given `return invalid(...)` happens to be present.
-///
-/// NOT here, on purpose: bar segment names and layout names are validated
-/// against the `bar_modules` / `tiling_mods` registries, and those live in
-/// their own modules -- config is below both in the dependency graph, so
-/// importing them to check names would invert it and break the no-bar and
-/// no-tiling builds the modularity matrix exists to prove. The name checks
-/// therefore sit with their owners (see `bar.warnUnknownSegments` and
-/// `tiling`'s registry resolution), which is the only place they can see the
-/// registry.
-fn warnOnly(cfg: *const types.Config) void {
-    // A font size of 0 is a typo, not a design: the bar's text metrics then
-    // compute a zero height and the bar draws as a bare strip. (A NEGATIVE
-    // size is impossible: the schema's barScalable floor is 0.)
-    if (cfg.bar.font_size.is_percentage) {
-        if (scaling.asRatio(cfg.bar.font_size) == 0.0)
-            log.warn("bar.font_size is 0%; the bar will have no readable text", .{});
-    } else if (cfg.bar.font_size.value == 0.0) {
-        log.warn("bar.font_size is {d}px; the bar will have no readable text", .{cfg.bar.font_size.value});
-    }
-}
-
-pub fn load(allocator: std.mem.Allocator) !types.Config {
+pub fn load(allocator: std.mem.Allocator) !composed.Config {
     return loadFor(allocator, true);
 }
 
@@ -422,40 +343,23 @@ pub fn load(allocator: std.mem.Allocator) !types.Config {
 /// for read-only callers (`checkConfig`), which want the identical load
 /// decision -- same search order, same fallback, same warn-and-continue -- with
 /// none of the writes.
-fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !types.Config {
+fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !composed.Config {
     var source: DefaultSource = .fallback;
-    // A user config that will not START is one the WM must not die on, and
-    // `validate` failing is exactly that condition -- so it degrades the same
-    // way a parse error already does. It used to propagate, which made the two
-    // failure classes behave differently for no defensible reason: a typo'd
-    // key survived boot and a semantically impossible value did not, even
-    // though the second is the one the user cannot see without reading the
-    // log. Both are now "this config is not usable, fall back".
-    //
-    // `validate` below is the block's last fallible step: its exhaustive
-    // InvalidConfig arm is the single owner of `loaded` (deinit there, then
-    // yield the replacement), and nothing after it can error — so each
-    // `loaded` is released exactly once with no errdefer/flag pair.
-    const cfg = blk: {
-        var loaded = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
-            // A config that is broken, out of range, or over a load ceiling is
-            // not usable, so boot falls back to the embedded config (the WM must
-            // still start). On reload the same errors propagate instead, so the
-            // live config is kept -- `isFatalLoadError` is the shared list.
-            error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes => blk2: {
-                log.warn("Unusable config at startup ({s}); using the embedded fallback", .{@errorName(err)});
-                break :blk2 try loadFallbackConfig(allocator);
-            },
-            else => return err,
-        };
-        validate(&loaded) catch |err| switch (err) {
-            error.InvalidConfig => {
-                log.warn("Config failed validation at startup; using the embedded fallback", .{});
-                loaded.deinit(allocator);
-                break :blk try loadFallbackConfig(allocator);
-            },
-        };
-        break :blk loaded;
+    // A user config that will not START is one the WM must not die on. A
+    // parse error, a load ceiling, and a fragment's InvalidConfig all mean
+    // "this config is not usable", so boot degrades the same way for all
+    // three: the embedded fallback. (InvalidConfig used to be a separate
+    // post-load `validate` step whose failure behaved differently from a
+    // parse error for no defensible reason; it now fails inside
+    // `composed.parse`, so the two classes share one path.)
+    const cfg = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
+        // On reload the same errors propagate instead, so the live config is
+        // kept -- `isFatalLoadError` in discover.zig is the shared list.
+        error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes, error.InvalidConfig => blk2: {
+            log.warn("Unusable config at startup ({s}); using the embedded fallback", .{@errorName(err)});
+            break :blk2 try loadFallbackConfig(allocator);
+        },
+        else => return err,
     };
     // A successful boot config becomes the re-exec hand-off snapshot (binary-
     // only reload). Guarded to a valid config so a parse-error or
@@ -481,13 +385,13 @@ pub const ConfigChanges = struct {
 /// binding and (modifiers, button) per mouse binding. Action is deliberately
 /// excluded: two keybindings that differ only in their action (e.g. a changed
 /// command string) still share a pair, so no regrab is needed.
-fn keysChanged(old: *const types.Config, new: *const types.Config) bool {
-    if (old.keybindings.items.len != new.keybindings.items.len) return true;
-    for (old.keybindings.items, new.keybindings.items) |a, b| {
+fn keysChanged(old: *const composed.Config, new: *const composed.Config) bool {
+    if (old.core.keybindings.items.len != new.core.keybindings.items.len) return true;
+    for (old.core.keybindings.items, new.core.keybindings.items) |a, b| {
         if (a.modifiers != b.modifiers or a.keysym != b.keysym) return true;
     }
-    if (old.mouse_bindings.items.len != new.mouse_bindings.items.len) return true;
-    for (old.mouse_bindings.items, new.mouse_bindings.items) |a, b| {
+    if (old.core.mouse_bindings.items.len != new.core.mouse_bindings.items.len) return true;
+    for (old.core.mouse_bindings.items, new.core.mouse_bindings.items) |a, b| {
         if (a.modifiers != b.modifiers or a.button != b.button) return true;
     }
     return false;
@@ -496,6 +400,6 @@ fn keysChanged(old: *const types.Config, new: *const types.Config) bool {
 /// Compares old and new configs for the one subsystem whose rebuild is
 /// skipped on an unchanged pair layout (the regrab). Gate the regrab on
 /// `.keys`; everything else rebuilds unconditionally.
-pub fn detectChanges(old: *const types.Config, new: *const types.Config) ConfigChanges {
+pub fn detectChanges(old: *const composed.Config, new: *const composed.Config) ConfigChanges {
     return .{ .keys = keysChanged(old, new) };
 }

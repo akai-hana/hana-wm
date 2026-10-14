@@ -1,10 +1,15 @@
-//! Config type definitions
-//! Defines all types used to represent the WM configuration schema.
+//! Config type definitions: the SHARED config vocabulary only.
+//!
+//! Everything here is cross-cutting vocabulary -- value types, section-name
+//! constants, enum helpers, the always-present `CoreConfig`, and the generic
+//! ownership helpers. The per-subsystem structs (`tiling_config.Config`,
+//! `bar_config.Config`, `workspaces_config.Config`, `floating_config.Config`)
+//! live BESIDE their subsystem as discovered `*_config.zig` fragments, and the
+//! composed top-level Config is the build-generated `composed` module, so
+//! deleting an optional subsystem leaves zero config trace.
 
 const std = @import("std");
 const action = @import("action");
-const model = @import("model");
-const scaling = @import("scaling");
 
 /// Largest 1-based workspace number accepted when parsing a workspace
 /// reference from config. 1-based values range 1..=255 (matching a u8
@@ -14,9 +19,14 @@ pub const max_workspace_number_1based: usize = 255;
 
 /// Smallest on-screen width/height a tiled window (and floating drag
 /// resize) is allowed to reach, in pixels. The default for the
-/// `tiling.min_window_dim` config field; config validation is the only
-/// consumer of the floor itself.
-const min_window_dim: u16 = 50;
+/// `tiling.min_window_dim` config field and the floating drag resize
+/// fallback when no tiling fragment is compiled in.
+pub const default_min_window_dim: u16 = 50;
+
+/// Default workspace count (the `workspaces.count` field initializer and the
+/// bar's icon-padding self-seed). Shared here so the bar fragment can pad
+/// without importing the optional workspaces fragment.
+pub const default_workspace_count: u8 = 9;
 
 /// A value that can be expressed as either an absolute pixel count or a
 /// percentage of some reference dimension. Defined here (not in the parser)
@@ -51,22 +61,12 @@ pub fn workspaceInRange(ws_1based: usize, max: usize) bool {
         ws_1based <= max;
 }
 
-/// Per-segment text style flags, settable in `[bar.properties].<segment>`
-/// alongside (or without) a color override. Painted via Pango text attributes
-/// (underline / bold weight / italic style); all default to false.
-pub const SegmentProps = struct {
-    underline: bool = false,
-    bold: bool = false,
-    italic: bool = false,
-
-    pub fn isDefault(self: SegmentProps) bool {
-        return std.meta.eql(self, .{});
-    }
-};
-
-/// Config-file section names shared by the parser, the schema's placement
-/// tables, and the config interpreter's sweeps. Single-sourced so a spelling
-/// change (and the case-typo sweep that keys on these) updates one place.
+/// Config-file section names shared by the parser, the knob tables, and the
+/// config interpreter's sweeps. Single-sourced so a spelling change (and the
+/// case-typo sweep that keys on these) updates one place. Every name stays
+/// here even when its owning fragment is optional: the mis-case lint is a
+/// pure string table and must keep recognizing a section of an absent module
+/// (it warns and ignores, exactly like any unknown section).
 pub const section_tiling = "tiling";
 pub const section_bar = "bar";
 pub const section_bar_properties = "bar.properties";
@@ -81,14 +81,6 @@ pub const section_fullscreen = "fullscreen";
 pub const section_workspaces = "workspaces";
 pub const section_bar_modules_workspaces = "bar.modules.workspaces";
 
-/// Composite `[bar.properties]` keys for the workspaces segment's icon text:
-/// a base entry styling every tag and a `_selected` overlay applying only to
-/// the CURRENT (selected) tag, each decoded by the same color+underline/
-/// bold/italic composite path as any segment (`workspaces_selected = bold`).
-/// The tags module reads them through `workspaceTextFg`/`workspaceIconProps`.
-pub const seg_workspaces = "workspaces";
-pub const seg_workspaces_selected = "workspaces_selected";
-
 /// Section-name prefixes for the family sweeps (inert-family warnings,
 /// numbered-rule sections, tiling layout subtables).
 pub const section_prefix_tiling = "tiling.";
@@ -98,7 +90,7 @@ pub const section_prefix_rules = "rules.";
 pub const section_prefix_bar_layout = "bar.layout.";
 
 /// Document-global color-palette variable names declared once and referenced
-/// by any color knob (schema's color_from chain and the parser's collectPalette).
+/// by any color knob (the color_from chains and the parser's collectPalette).
 pub const palette_primary_color = "primary_color";
 pub const palette_secondary_color = "secondary_color";
 pub const palette_alternative_color = "alternative_color";
@@ -137,7 +129,7 @@ pub const MouseBind = struct {
 // on. Keeping it out of this file also breaks the types -> keybinds -> core
 // -> types import cycle.
 
-// Tiling layout types
+// Layout-name vocabulary
 
 /// Maximum bytes any lowered config name (layout names, string_map keys) may
 /// occupy. Single home for the 32-byte buffers that config lookups lower into;
@@ -163,178 +155,13 @@ pub fn enumFromString(comptime T: type, str: []const u8) ?T {
     return map.get(lowerSlice(max_config_name, &buf, str) orelse return null);
 }
 
-pub const MasterSide = enum {
-    left,
-    right,
-
-    const string_map = std.StaticStringMap(MasterSide).initComptime(.{
-        .{ "l", .left },
-        .{ "left", .left },
-        .{ "r", .right },
-        .{ "right", .right },
-    });
-};
-
-/// Per-workspace startup layout assignment, overriding the global default.
-/// variant is null -> use the per-layout map default ([tiling].variants).
-pub const WorkspaceLayoutOverride = struct {
-    workspace_idx: model.WorkspaceId,
-    layout_idx: u8, // index into TilingConfig.layouts
-    variant: ?[]const u8, // null = use per-layout variants-map default
-};
-
-/// Per-workspace master count override, parsed from [tiling.layouts.master-stack.counts].
-pub const WorkspaceMasterCountOverride = struct {
-    workspace_idx: model.WorkspaceId,
-    count: u8,
-};
-
 /// Canonical name of the master layout module. Every "master-stack"/
-/// "master_stack" alias folds onto this at the config boundary.
+/// "master_stack" alias folds onto this at the config boundary. Shared
+/// vocab: layout_names.zig (config layer) resolves names through it and must
+/// not import the tiling layer.
 pub const canon_master_layout = "master";
 
-pub const TilingConfig = struct {
-    layouts: std.ArrayList([]const u8) = .empty, // Available layouts in cycle order
-    master_side: MasterSide = .left,
-    master_width: ScalableValue = ScalableValue.percentage(50.0),
-    master_count: u8 = 1,
-    gap_width: ScalableValue = ScalableValue.absolute(10.0),
-    border_width: ScalableValue = ScalableValue.absolute(2.0),
-    border_focused: Color = default_focused_border,
-    border_unfocused: Color = default_unfocused_border,
-    /// Smallest on-screen width/height a tiled window (and floating drag
-    /// resize) is allowed to reach, in pixels.
-    min_window_dim: u16 = min_window_dim,
-
-    // Per-layout variant preferences: window placement policy expressed as
-    // value-strings in this canonical layout-name -> VALUE-STRING map (no
-    // closed per-layout variant enums; each module interprets its strings via
-    // its `variant_parse` hook). Both the key and the value-string are
-    // heap-duped at parse time (setTilingVariant) so they outlive the parsed
-    // document; deinit frees every key and value via freeStringMap.
-    variants: std.StringHashMapUnmanaged([]const u8) = .empty,
-
-    /// Per-workspace layout assignments parsed from the layouts array.
-    workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
-
-    /// Per-workspace master count overrides parsed from [tiling.layouts.master-stack.counts].
-    /// Only applied when global_layout = false.
-    workspace_master_count_overrides: std.ArrayList(WorkspaceMasterCountOverride) = .empty,
-
-    /// When true, layout changes apply globally across all workspaces instead
-    /// of per workspace.
-    global_layout: bool = false,
-
-    /// Resolves the per-workspace master-count overrides into a fixed-size,
-    /// workspace-indexed lookup with last-wins semantics (a duplicate entry
-    /// for one workspace overrides its predecessor). `null` at an index means
-    /// no override for that workspace (use the global default). Consumed by
-    /// the core seed path (seed.seedParamsFromConfig), so the last-wins
-    /// rule lives in one place.
-    pub fn masterCountLookup(self: *const TilingConfig) [model.max_workspaces]?u8 {
-        var lookup: [model.max_workspaces]?u8 = .{null} ** model.max_workspaces;
-        for (self.workspace_master_count_overrides.items) |o| {
-            // One validity notion, not a second inline range test.
-            if (o.workspace_idx.isValid())
-                lookup[o.workspace_idx.index] = o.count;
-        }
-        return lookup;
-    }
-
-    /// The default layout name: the first entry of the layout cycle, or
-    /// `canon_master_layout` when the cycle is empty. Derived, never stored.
-    pub fn defaultLayout(self: *const TilingConfig) []const u8 {
-        return if (self.layouts.items.len > 0) self.layouts.items[0] else canon_master_layout;
-    }
-
-    /// Resolves the per-workspace layout overrides into a fixed-size,
-    /// workspace-indexed lookup of override indices with last-wins semantics
-    /// (a duplicate entry for one workspace overrides its predecessor).
-    /// `null` at an index means no override for that workspace. Consumed by
-    /// the core seed path (seed.seedParamsFromConfig), so the last-wins
-    /// rule lives in one place.
-    pub fn workspaceLayoutLookup(self: *const TilingConfig) [model.max_workspaces]?usize {
-        var lookup: [model.max_workspaces]?usize = .{null} ** model.max_workspaces;
-        for (self.workspace_layout_overrides.items, 0..) |o, oi| {
-            if (o.workspace_idx.isValid())
-                lookup[o.workspace_idx.index] = oi;
-        }
-        return lookup;
-    }
-
-    pub fn deinit(self: *TilingConfig, allocator: std.mem.Allocator) void {
-        for (self.layouts.items) |layout| allocator.free(layout);
-        self.layouts.deinit(allocator);
-        freeStringMap(&self.variants, allocator, free_storage);
-        for (self.workspace_layout_overrides.items) |o| {
-            if (o.variant) |v| allocator.free(v);
-        }
-        self.workspace_layout_overrides.deinit(allocator);
-        self.workspace_master_count_overrides.deinit(allocator);
-    }
-};
-
-// Bar types
-
-/// Where in the workspace cell the activity indicator is drawn. The `string_map`
-/// below is the accepted TOML spelling: cardinal names verbatim; diagonal names
-/// with hyphens or underscores in either axis order ("left-up" == "up_left").
-pub const IndicatorLocation = enum {
-    up,
-    down,
-    left,
-    right,
-    up_left,
-    up_right,
-    down_left,
-    down_right,
-
-    const string_map = std.StaticStringMap(IndicatorLocation).initComptime(.{
-        .{ "up", .up },                 .{ "down", .down },
-        .{ "left", .left },             .{ "right", .right },
-        .{ "up-left", .up_left },       .{ "up_left", .up_left },
-        .{ "left-up", .up_left },       .{ "left_up", .up_left },
-        .{ "up-right", .up_right },     .{ "up_right", .up_right },
-        .{ "right-up", .up_right },     .{ "right_up", .up_right },
-        .{ "down-left", .down_left },   .{ "down_left", .down_left },
-        .{ "left-down", .down_left },   .{ "left_down", .down_left },
-        .{ "down-right", .down_right }, .{ "down_right", .down_right },
-        .{ "right-down", .down_right }, .{ "right_down", .down_right },
-    });
-};
-
-/// Vertical placement of the bar on screen: top or bottom edge.
-pub const BarScreenPosition = enum {
-    top,
-    bottom,
-
-    // Case-insensitive alias map for types.enumFromString, so `bar.position`
-    // accepts any-case "top"/"bottom".
-    const string_map = std.StaticStringMap(BarScreenPosition).initComptime(.{
-        .{ "top", .top },
-        .{ "bottom", .bottom },
-    });
-};
-
-/// Horizontal anchor for a BarLayout column within the bar.
-pub const BarSegmentAnchor = enum {
-    left,
-    center,
-    right,
-};
-
-/// One column of the bar: an anchor position and an ordered list of segment
-/// names (registry names) to display. Names are resolved against the generated
-/// `bar_modules` registry at layout time; unknown/removed names draw nothing.
-pub const BarLayout = struct {
-    position: BarSegmentAnchor,
-    segments: std.ArrayList([]const u8),
-
-    pub inline fn deinit(self: *BarLayout, allocator: std.mem.Allocator) void {
-        for (self.segments.items) |s| allocator.free(s);
-        self.segments.deinit(allocator);
-    }
-};
+// Ownership helpers
 
 /// Meanings for the free helpers' `retain_capacity` argument: `keep_capacity`
 /// reuses backing storage (a config reload repopulates the same lists), while
@@ -344,7 +171,7 @@ pub const keep_capacity = true;
 pub const free_storage = false;
 
 /// Frees every owned string in `list`, then either deinits or clears the
-/// list depending on `retain_capacity`. Shared by `BarConfig.deinit`
+/// list depending on `retain_capacity`. Shared by the fragment deinits
 /// (full teardown) and config reload (reuse backing storage).
 pub inline fn freeStrings(
     list: *std.ArrayList([]const u8),
@@ -355,8 +182,8 @@ pub inline fn freeStrings(
     if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
 }
 
-/// Frees every heap-dup'd key/value in a tiling.variants-style string map,
-/// then either deinits or clears it depending on `retain_capacity`.
+/// Frees every heap-dup'd key/value in a variants-style string map, then
+/// either deinits or clears it depending on `retain_capacity`.
 pub fn freeStringMap(
     map: *std.StringHashMapUnmanaged([]const u8),
     allocator: std.mem.Allocator,
@@ -370,310 +197,13 @@ pub fn freeStringMap(
     if (retain_capacity) map.clearRetainingCapacity() else map.deinit(allocator);
 }
 
-pub inline fn freeBarLayouts(
-    list: *std.ArrayList(BarLayout),
-    allocator: std.mem.Allocator,
-    retain_capacity: bool,
-) void {
-    for (list.items) |*item| item.deinit(allocator);
-    if (retain_capacity) list.clearRetainingCapacity() else list.deinit(allocator);
-}
+// ---------------------------------------------------------------------------
+// The always-present core config: keybindings, mouse bindings, DPI override.
+// ---------------------------------------------------------------------------
 
-/// Frees the owned segment-name keys of a [bar.properties] segment map, then
-/// deinits the map itself. Values are scalars (Color / SegmentProps); only
-/// the keys need freeing. Zig 0.16's HashMapUnmanaged.deinit leaves the struct
-/// `undefined` rather than reusable, so reset to `.empty` — the config reload
-/// reuses the field.
-pub fn freeSegmentMap(comptime V: type, map: *std.StringHashMapUnmanaged(V), allocator: std.mem.Allocator) void {
-    var it = map.iterator();
-    while (it.next()) |e| allocator.free(e.key_ptr.*);
-    map.deinit(allocator);
-    map.* = .empty;
-}
-
-/// Frees every `?[]const u8` field of `BarConfig`. The TYPE is the whole
-/// ownership rule: there is no list to fall out of sync with the struct. A
-/// new `?[]const u8` field is freed with no edit here, and a renamed or
-/// removed one cannot produce a confusing "not a field of BarConfig" error,
-/// because no name is written down at all.
-inline fn freeOwnedStrings(self: *BarConfig, allocator: std.mem.Allocator) void {
-    inline for (std.meta.fields(BarConfig)) |f| {
-        if (f.type != ?[]const u8) continue;
-        if (@field(self, f.name)) |s| allocator.free(s);
-    }
-}
-
-pub const BarConfig = struct {
-    enabled: bool = true,
-
-    /// true = full vim modal editing in the prompt; false = basic
-    /// single-line editing (arrows, Home/End, Backspace/Delete) via the
-    /// existing fallback path.
-    vim_mode: bool = true,
-
-    bar_position: BarScreenPosition = .top,
-    // Configured bar height: absolute pixel value or percentage of screen height.
-    // null = auto-calculate from font metrics alone.
-    height: ?ScalableValue = null,
-    fonts: std.ArrayList([]const u8) = .empty,
-    font_size: ScalableValue = ScalableValue.percentage(10.0),
-    spacing: ScalableValue = ScalableValue.absolute(12.0),
-
-    // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
-    bg: Color = default_bar_bg,
-    fg: Color = default_bar_fg,
-    selected_bg: Color = default_bar_selected_bg,
-    selected_fg: Color = default_bar_selected_fg,
-
-    // Palette canon, declared in the theme's palette section; the other three
-    // exist so the palette is first-class config even though rendering
-    // consumes them through the title/run chains below.
-    primary_color: Color = default_accent,
-    secondary_color: Color = default_accent,
-    alternative_color: Color = default_accent,
-    text_color: Color = default_accent,
-    title_accent_color: Color = default_accent,
-    title_unfocused_accent: Color = default_bar_bg,
-    title_minimized_accent: Color = default_accent,
-
-    workspace_icons: std.ArrayList([]const u8) = .empty,
-    indicator_size: ScalableValue = ScalableValue.percentage(30.0),
-    workspace_tag_width: ScalableValue = ScalableValue.percentage(100.0),
-
-    indicator_location: IndicatorLocation = .up_left,
-    indicator_padding: f32 = 0.1,
-    indicator_focused: ?[]const u8 = null,
-    indicator_unfocused: ?[]const u8 = null,
-    indicator_color: ?Color = null,
-    /// Indicator glyph color when its workspace tag is the CURRENT (selected)
-    /// one -- set independently of the icon text color. Unset follows
-    /// `indicator_color`, then the tag's text color (see
-    /// `workspaceIndicatorColor`).
-    selected_indicator_color: ?Color = null,
-
-    clock_format: ?[]const u8 = null,
-
-    /// Volume slider sub display templates (bar.modules... the volume sub
-    /// falls back to its built-in strings when null). `{pct}` is replaced by
-    /// the 0-100 level; `{state}` by the mute glyph ("mute"/"unmute" words by
-    /// default -- override just the format to restyle). When the sink is
-    /// muted the volume_muted_format wins.
-    volume_format: ?[]const u8 = null,
-    volume_muted_format: ?[]const u8 = null,
-    /// Brightness slider sub display template (bar.modules... falls back to
-    /// "BRT {pct}%" when null). `{pct}` is replaced by the 0-100 level; there
-    /// is no muted-style second state so no `{state}`.
-    brightness_format: ?[]const u8 = null,
-    /// Brightness slider sub device pin: names a `/sys/class/backlight/*`
-    /// device, or -- with a `led:` prefix -- an LED-class device under
-    /// `/sys/class/leds/*`. Absent ("") = auto-discovery picks the first
-    /// usable backlight.
-    brightness_device: ?[]const u8 = null,
-
-    /// Scroll the focused window's title through its slot when it overflows
-    /// (marquee) instead of truncating it with an ellipsis.
-    carousel_enabled: bool = true,
-    /// Marquee scroll speed in pixels per second.
-    carousel_speed_px_s: u16 = 125,
-
-    // run segment colors and prompt; all nullable, falling back to bar-wide
-    run_bg: ?Color = null, // Background; falls back to bg
-    run_fg: ?Color = null, // Typed text color; falls back to fg
-    run_prompt_color: ?Color = null, // Prompt text color; falls back to primary_color
-    run_prompt: ?[]const u8 = null, // Prefix rendered left of the text input cursor
-
-    /// Per-segment text-color overrides, keyed by bar segment registry name
-    /// ("cpu", "ram", "volume", "brightness", ...). Populated from
-    /// `[bar.properties].<segment>` entries; a segment with no entry paints its
-    /// text in `fg` (see `segmentFg`). Colors for absent segments are
-    /// tolerated and simply never match a live segment, so a theme may carry
-    /// a full readout palette up front. Keys are owned (duped) once; freed
-    /// in deinit.
-    segment_fg: std.StringHashMapUnmanaged(Color) = .empty,
-    /// Per-segment NUMBER-color overrides, keyed by bar segment registry
-    /// name. Populated from `[bar.properties].<segment>_value` entries; a
-    /// segment with no entry paints its number in the segment color
-    /// (`segmentValueFg` falls back to `segmentFg`), so the
-    /// readout/slider label-vs-number split is opt-in per theme. Keys are
-    /// owned (duped) once; freed in deinit.
-    segment_value_fg: std.StringHashMapUnmanaged(Color) = .empty,
-    /// Per-segment style flags (underline/bold/italic), keyed by bar segment
-    /// registry name. Populated from the `[bar.properties].<segment>` entry
-    /// (the same entry that may carry the color override); a segment with no
-    /// entry draws plain text (see `segmentProps`). The flags apply to the
-    /// whole segment, label and number alike. Keys are owned (duped) once;
-    /// freed in deinit.
-    segment_props: std.StringHashMapUnmanaged(SegmentProps) = .empty,
-
-    layout: std.ArrayList(BarLayout) = .empty,
-
-    transparency: f32 = 1.0,
-
-    // NOTE: indicator_focused/unfocused are always independently owned
-    // (each set via schema.assignStr which always dupes). If one mirrors
-    // the other, both point to separate allocations. Do not bypass assignStr.
-    pub fn deinit(self: *BarConfig, allocator: std.mem.Allocator) void {
-        freeStrings(&self.workspace_icons, allocator, free_storage);
-        freeStrings(&self.fonts, allocator, free_storage);
-        freeBarLayouts(&self.layout, allocator, free_storage);
-        freeSegmentMap(Color, &self.segment_fg, allocator);
-        freeSegmentMap(Color, &self.segment_value_fg, allocator);
-        freeSegmentMap(SegmentProps, &self.segment_props, allocator);
-        freeOwnedStrings(self, allocator);
-    }
-
-    pub inline fn runBg(self: *const BarConfig) Color {
-        return self.run_bg orelse self.bg;
-    }
-    pub inline fn runFg(self: *const BarConfig) Color {
-        return self.run_fg orelse self.fg;
-    }
-    pub inline fn runPromptColor(self: *const BarConfig) Color {
-        return self.run_prompt_color orelse self.primary_color;
-    }
-
-    /// Text color for bar segment `name`: its [bar.properties] override, or
-    /// the bar-wide `fg` when none is set.
-    pub inline fn segmentFg(self: *const BarConfig, name: []const u8) Color {
-        return self.segment_fg.get(name) orelse self.fg;
-    }
-
-    /// Number text color for bar segment `name`: its [bar.properties]
-    /// `<name>_value` override, else the segment color (`segmentFg`) so a
-    /// segment without a `_value` entry colors its number like its label.
-    pub inline fn segmentValueFg(self: *const BarConfig, name: []const u8) Color {
-        return self.segment_value_fg.get(name) orelse self.segmentFg(name);
-    }
-
-    /// Style flags for bar segment `name`: its [bar.properties] underline/
-    /// bold/italic overrides, or all-false plain text when none is set.
-    pub inline fn segmentProps(self: *const BarConfig, name: []const u8) SegmentProps {
-        return self.segment_props.get(name) orelse .{};
-    }
-
-    /// Indicator glyph color for workspace tag `is_current`: the selected-state
-    /// override when set (current tag only), else the shared `indicator_color`,
-    /// else the tag's text color (`workspaceTextFg`).
-    pub inline fn workspaceIndicatorColor(self: *const BarConfig, is_current: bool) Color {
-        if (is_current) {
-            if (self.selected_indicator_color) |c| return c;
-            if (self.indicator_color) |c| return c;
-            return self.workspaceTextFg(true);
-        }
-        if (self.indicator_color) |c| return c;
-        return self.workspaceTextFg(false);
-    }
-
-    /// Text color for workspace icon label `is_current`: the per-state
-    /// `[bar.properties]` composite entry -- `workspaces_selected` on the
-    /// current tag, the base `workspaces` entry elsewhere -- or the tag's
-    /// default (selected_fg on the current tag, the bar-wide fg otherwise).
-    /// The base entry colors every tag; the selected overlay recolors the
-    /// current one on top of it.
-    pub inline fn workspaceTextFg(self: *const BarConfig, is_current: bool) Color {
-        if (is_current)
-            return self.segment_fg.get(seg_workspaces_selected) orelse self.segment_fg.get(seg_workspaces) orelse self.selected_fg;
-        return self.segment_fg.get(seg_workspaces) orelse self.fg;
-    }
-
-    /// Pango style flags for workspace icon label `is_current`: the base
-    /// `[bar.properties] "workspaces"` entry for every tag, overlaid with any
-    /// non-default flags of the `workspaces_selected` entry on the current tag
-    /// (so the selected icon may render bold/italic/underlined on top of the
-    /// shared styling, without new knob shapes).
-    pub inline fn workspaceIconProps(self: *const BarConfig, is_current: bool) SegmentProps {
-        var props = self.segmentProps(seg_workspaces);
-        if (!is_current) return props;
-        const sel = self.segmentProps(seg_workspaces_selected);
-        inline for (std.meta.fields(SegmentProps)) |f| {
-            if (f.type != bool) continue;
-            @field(props, f.name) = @field(props, f.name) or @field(sel, f.name);
-        }
-        return props;
-    }
-
-    /// Derives horizontal segment padding from font_size.
-    /// Percentage path: margin = (bar_height - font_height) / 2, scaled.
-    /// Absolute path:   margin = (bar_height - font_px) / 2.
-    pub inline fn scaledSegmentPadding(self: *const BarConfig, bar_height: u16) u16 {
-        const h: f32 = @floatFromInt(bar_height);
-        if (self.font_size.is_percentage) {
-            const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
-            return scaleToU16(h * margin_ratio);
-        }
-        const font_px = self.font_size.value;
-        return scaleToU16((h - font_px) / 2.0);
-    }
-
-    /// Resolves a ScalableValue to pixels: the percentage path multiplies the
-    /// reference dimension by `factor`, the absolute path is used verbatim
-    /// (canonical formula lives in `core/display/scaling`).
-    inline fn scaleValue(sv: ScalableValue, bar_height: u16, factor: f32) f32 {
-        return scaling.scaleToPixels(sv, @as(f32, @floatFromInt(bar_height)) * factor);
-    }
-
-    inline fn scaleToU16(val: f32) u16 {
-        return scaling.roundToU16(val, 0.0);
-    }
-    /// Scale factor applied to the spacing percentage path (`spacing` widens
-    /// with the bar); the absolute-px path is used verbatim.
-    const spacing_scale_factor: f32 = 5.0;
-    pub inline fn scaledSpacing(self: *const BarConfig, bar_height: u16) u16 {
-        return scaleToU16(scaleValue(self.spacing, bar_height, spacing_scale_factor));
-    }
-    /// Scales one size ScalableValue against the bar height, floor 1.
-    inline fn scaledUnit(sv: ScalableValue, bar_height: u16) u16 {
-        return @max(1, scaleToU16(scaleValue(sv, bar_height, 1.0)));
-    }
-    pub inline fn scaledIndicatorSize(self: *const BarConfig, bar_height: u16) u16 {
-        return scaledUnit(self.indicator_size, bar_height);
-    }
-    pub inline fn scaledWorkspaceWidth(self: *const BarConfig, bar_height: u16) u16 {
-        return scaledUnit(self.workspace_tag_width, bar_height);
-    }
-
-    /// The 16-bit alpha ceiling: `transparency` (0.0-1.0) maps into 0x0000-0xFFFF.
-    const alpha16_ceiling: f32 = 0xFFFF;
-
-    /// Returns the bar's alpha in 16-bit format (0x0000-0xFFFF).
-    pub inline fn getAlpha16(self: *const BarConfig) u16 {
-        return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * alpha16_ceiling));
-    }
-};
-
-// Workspace types
-
-pub const Rule = struct {
-    class_name: []const u8,
-    /// Target workspace (0-based) for workspace rules; unused when `float`.
-    workspace: u8,
-    /// "float" class rules: windows matching `class_name` are admitted
-    /// floating on the current workspace instead of being tiled on `workspace`.
-    float: bool = false,
-};
-
-pub const WorkspaceConfig = struct {
-    count: u8 = 9,
-    rules: std.ArrayList(Rule) = .empty,
-
-    pub fn deinit(self: *WorkspaceConfig, allocator: std.mem.Allocator) void {
-        for (self.rules.items) |rule| allocator.free(rule.class_name);
-        self.rules.deinit(allocator);
-    }
-};
-
-// Top-level config
-
-pub const Config = struct {
+pub const CoreConfig = struct {
     keybindings: std.ArrayList(Keybind) = .empty,
     mouse_bindings: std.ArrayList(MouseBind) = .empty,
-    tiling: TilingConfig = .{},
-    workspaces: WorkspaceConfig = .{},
-    bar: BarConfig = .{},
-
-    /// How close (in px or %) a window edge must be to a monitor/bar boundary
-    /// before it snaps. Set to 0 to disable. Percentage is relative to screen width.
-    snap_distance: ScalableValue = ScalableValue.absolute(8.0),
 
     /// Overrides detected display DPI. null = detect (Xft.dpi, then geometry).
     ///
@@ -686,25 +216,35 @@ pub const Config = struct {
     /// detected one, so a typo cannot buy a font the size of a billboard.
     dpi: ?f32 = null,
 
-    pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *CoreConfig, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(allocator);
         self.keybindings.deinit(allocator);
 
         for (self.mouse_bindings.items) |*mb| mb.action.deinit(allocator);
         self.mouse_bindings.deinit(allocator);
-
-        self.workspaces.deinit(allocator);
-
-        self.bar.deinit(allocator);
-        self.tiling.deinit(allocator);
     }
 };
 
 // ---------------------------------------------------------------------------
-// Config defaults (former defaults.zig, merged 2026-10-10): the scheme
-// colors (tiling borders, accent, bar palette) and the read-time fallback
-// strings for optional `BarConfig` fields. Typed `u32` — the value of
-// `Color` — as the field initializers above use them.
+// Shared class-rule vocabulary: the workspace admission rules live with the
+// always-compiled admission layer's signatures (which take `[]const Rule`
+// even when the workspaces fragment is absent), while the LIST owner
+// (`WorkspaceConfig`) is the optional workspaces fragment.
+// ---------------------------------------------------------------------------
+
+pub const Rule = struct {
+    class_name: []const u8,
+    /// Target workspace (0-based) for workspace rules; unused when `float`.
+    workspace: u8,
+    /// "float" class rules: windows matching `class_name` are admitted
+    /// floating on the current workspace instead of being tiled on `workspace`.
+    float: bool = false,
+};
+
+// ---------------------------------------------------------------------------
+// Default colors (kept as shared literals: they seed fragment field
+// initializers and read-time fallbacks without coupling the fragments to
+// each other).
 // ---------------------------------------------------------------------------
 
 /// Default color scheme for the focused/unfocused tiling borders.
@@ -721,7 +261,7 @@ pub const default_bar_fg: u32 = 0xBBBBBB;
 pub const default_bar_selected_bg: u32 = 0x005577;
 pub const default_bar_selected_fg: u32 = 0xEEEEEE;
 
-/// Type-level defaults for optional string fields in BarConfig.
+/// Type-level defaults for optional string fields in the bar config.
 /// When a field is `null`, the corresponding default is used at read time.
 pub const default_clock_format: []const u8 = "%Y-%m-%d %H:%M:%S";
 pub const default_run_prompt: []const u8 = "run: ";

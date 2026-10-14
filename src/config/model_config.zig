@@ -10,6 +10,7 @@
 
 const core = @import("core");
 const types = @import("types");
+const tiling_config = @import("tiling_config");
 const model_mod = @import("model");
 const domain = @import("domain");
 const pipeline = @import("pipeline");
@@ -25,7 +26,7 @@ const build_options = @import("build_options");
 ///
 /// `primary_width`/`secondary_balance` are runtime-only (no config
 /// representation) and reset to their defaults here.
-pub fn templateFrom(cfg: *const types.TilingConfig) model_mod.LayoutParams {
+pub fn templateFrom(cfg: *const tiling_config.Config) model_mod.LayoutParams {
     // Config layout names resolve to registry ids here, once per seed;
     // unresolvable names fall back loudly to the neutral default.
     const default_kind: u8 = tiling.layoutKindFallingBack(cfg.defaultLayout(), contract.default_kind);
@@ -49,7 +50,7 @@ pub fn templateFrom(cfg: *const types.TilingConfig) model_mod.LayoutParams {
 /// rule without a boot sequence.
 pub fn applyOverrides(
     m: *model_mod.Model,
-    cfg: *const types.TilingConfig,
+    cfg: *const tiling_config.Config,
     default_kind: u8,
 ) void {
     // Both lookups resolve ONCE: they build a fixed-size workspace table per
@@ -122,7 +123,7 @@ pub fn applyConfigReload(m: *model_mod.Model, tpl: model_mod.LayoutParams) void 
 /// own variant_parse hook interprets the string; an unparseable/unknown
 /// string warns (Stage-1 style) and uses 0.
 fn resolveVariant(
-    cfg: *const types.TilingConfig,
+    cfg: *const tiling_config.Config,
     kind: u8,
     override_variant: ?[]const u8,
 ) u8 {

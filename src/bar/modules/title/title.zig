@@ -13,6 +13,7 @@
 const hz = @import("hz");
 
 const types = @import("types");
+const bar_config = @import("bar_config");
 
 const segmod = @import("segment");
 const geom = @import("geom");
@@ -256,7 +257,7 @@ fn drawFittedTitle(
 /// Accent colour for a title segment: focused wins, then minimized, then the
 /// unfocused fallback.
 inline fn accentFor(
-    config: types.BarConfig,
+    config: bar_config.Config,
     is_focused: bool,
     is_minimized: bool,
     unfocused_fallback: u32,

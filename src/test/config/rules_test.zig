@@ -9,22 +9,22 @@ const std = @import("std");
 const testing = std.testing;
 
 const parser = @import("parser");
-const rules = @import("rules");
+const workspaces_config = @import("workspaces_config");
 const types = @import("types");
 
-fn load(a: std.mem.Allocator, cfg: *types.Config, src: []const u8) !void {
+fn load(a: std.mem.Allocator, cfg: *workspaces_config.Config, src: []const u8) !void {
     var doc = try parser.parse(a, src, "<rules-test>");
-    try rules.parseRules(testing.allocator, &doc, cfg);
+    try workspaces_config.parseRules(testing.allocator, &doc, cfg);
 }
 
-fn findRule(cfg: *types.Config, class: []const u8) ?types.Rule {
-    for (cfg.workspaces.rules.items) |r|
+fn findRule(cfg: *workspaces_config.Config, class: []const u8) ?types.Rule {
+    for (cfg.rules.items) |r|
         if (std.mem.eql(u8, r.class_name, class)) return r;
     return null;
 }
 
 fn expectRule(
-    cfg: *types.Config,
+    cfg: *workspaces_config.Config,
     class: []const u8,
     workspace_0based: u8,
     is_float: bool,
@@ -37,7 +37,7 @@ fn expectRule(
 test "[rules]: int and float rules land; bad values skip" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     // Default WorkspaceConfig.count is 9, so 10 is out of range; 0 is below
     // the 1-based minimum; the non-float string is unsupported.
@@ -50,18 +50,18 @@ test "[rules]: int and float rules land; bad values skip" {
         \\discord = 10
     );
 
-    try testing.expectEqual(@as(usize, 2), cfg.workspaces.rules.items.len);
+    try testing.expectEqual(@as(usize, 2), cfg.rules.items.len);
     // Append order follows document order.
-    try testing.expectEqualStrings("Firefox", cfg.workspaces.rules.items[0].class_name);
-    try testing.expectEqual(@as(u8, 1), cfg.workspaces.rules.items[0].workspace);
-    try testing.expectEqualStrings("foot", cfg.workspaces.rules.items[1].class_name);
-    try testing.expect(cfg.workspaces.rules.items[1].float);
+    try testing.expectEqualStrings("Firefox", cfg.rules.items[0].class_name);
+    try testing.expectEqual(@as(u8, 1), cfg.rules.items[0].workspace);
+    try testing.expectEqualStrings("foot", cfg.rules.items[1].class_name);
+    try testing.expect(cfg.rules.items[1].float);
 }
 
 test "[workspace.rules]: array direction and class direction interleave in order" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[workspace.rules]
@@ -69,19 +69,19 @@ test "[workspace.rules]: array direction and class direction interleave in order
         \\Alacritty = 3
     );
 
-    try testing.expectEqual(@as(usize, 3), cfg.workspaces.rules.items.len);
-    try testing.expectEqualStrings("Firefox", cfg.workspaces.rules.items[0].class_name);
-    try testing.expectEqual(@as(u8, 0), cfg.workspaces.rules.items[0].workspace);
-    try testing.expectEqualStrings("Slack", cfg.workspaces.rules.items[1].class_name);
-    try testing.expectEqual(@as(u8, 0), cfg.workspaces.rules.items[1].workspace);
-    try testing.expectEqualStrings("Alacritty", cfg.workspaces.rules.items[2].class_name);
-    try testing.expectEqual(@as(u8, 2), cfg.workspaces.rules.items[2].workspace);
+    try testing.expectEqual(@as(usize, 3), cfg.rules.items.len);
+    try testing.expectEqualStrings("Firefox", cfg.rules.items[0].class_name);
+    try testing.expectEqual(@as(u8, 0), cfg.rules.items[0].workspace);
+    try testing.expectEqualStrings("Slack", cfg.rules.items[1].class_name);
+    try testing.expectEqual(@as(u8, 0), cfg.rules.items[1].workspace);
+    try testing.expectEqualStrings("Alacritty", cfg.rules.items[2].class_name);
+    try testing.expectEqual(@as(u8, 2), cfg.rules.items[2].workspace);
 }
 
 test "digit-prefixed class keys stay class rules, never coerce" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     // "12x" starts with digits but is not all-digits: a class rule (the
     // leading-digit warning path), with the value read as an integer.
@@ -90,14 +90,14 @@ test "digit-prefixed class keys stay class rules, never coerce" {
         \\12x = 4
     );
 
-    try testing.expectEqual(@as(usize, 1), cfg.workspaces.rules.items.len);
+    try testing.expectEqual(@as(usize, 1), cfg.rules.items.len);
     try expectRule(&cfg, "12x", 3, false);
 }
 
 test "oversized digit keys, non-array values, and out-of-range workspaces all skip" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[workspace.rules]
@@ -106,13 +106,13 @@ test "oversized digit keys, non-array values, and out-of-range workspaces all sk
         \\0 = ["Y"]
     );
 
-    try testing.expectEqual(@as(usize, 0), cfg.workspaces.rules.items.len);
+    try testing.expectEqual(@as(usize, 0), cfg.rules.items.len);
 }
 
 test "numbered sections: suffix is the workspace, member values are ignored" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[rules.2]
@@ -132,7 +132,7 @@ test "numbered sections: suffix is the workspace, member values are ignored" {
     // Only [rules.2] parses (suffix 2, in range 1..9): its member VALUES
     // never matter -- the section name carries the workspace. Non-numeric,
     // zero, and over-count suffixes warn and skip.
-    try testing.expectEqual(@as(usize, 2), cfg.workspaces.rules.items.len);
+    try testing.expectEqual(@as(usize, 2), cfg.rules.items.len);
     try expectRule(&cfg, "Foo", 1, false);
     try expectRule(&cfg, "Bar", 1, false);
 }
@@ -140,21 +140,21 @@ test "numbered sections: suffix is the workspace, member values are ignored" {
 test "the workspace.rules numbered prefix behaves identically" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     try load(arena.allocator(), &cfg,
         \\[workspace.rules.3]
         \\One = "ignored"
     );
 
-    try testing.expectEqual(@as(usize, 1), cfg.workspaces.rules.items.len);
+    try testing.expectEqual(@as(usize, 1), cfg.rules.items.len);
     try expectRule(&cfg, "One", 2, false);
 }
 
 test "a class name equal to a workspace number in [rules] still binds" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var cfg: types.Config = .{};
+    var cfg: workspaces_config.Config = .{};
     defer cfg.deinit(testing.allocator);
     // [rules] is always class-keyed: the key is never workspace-disambiguated,
     // so class "1" with value 2 is a class rule (unlike [workspace.rules]).
@@ -163,6 +163,6 @@ test "a class name equal to a workspace number in [rules] still binds" {
         \\1 = 2
     );
 
-    try testing.expectEqual(@as(usize, 1), cfg.workspaces.rules.items.len);
+    try testing.expectEqual(@as(usize, 1), cfg.rules.items.len);
     try expectRule(&cfg, "1", 1, false);
 }

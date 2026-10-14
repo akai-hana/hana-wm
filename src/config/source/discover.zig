@@ -9,7 +9,7 @@
 const std = @import("std");
 const log = @import("log");
 const parser = @import("parser");
-const types = @import("types");
+const composed = @import("composed");
 
 pub const max_file_bytes = 1024 * 1024;
 
@@ -290,7 +290,12 @@ const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
 /// same policy, spelled twice, and the ceilings joined both.
 fn isFatalLoadError(err: anyerror) bool {
     return switch (err) {
-        error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes => true,
+        // InvalidConfig joins the list: a fragment's validate now fails
+        // inside composed.parse, so an out-of-range value must propagate
+        // out of the search exactly like a TOML parse failure (boot falls
+        // back; reload keeps live) rather than warn-and-skip to the next
+        // search path.
+        error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes, error.InvalidConfig => true,
         else => false,
     };
 }
@@ -300,7 +305,7 @@ pub fn tryLoadOrWarn(
     allocator: std.mem.Allocator,
     path: []const u8,
     comptime err_msg: []const u8,
-) !?types.Config {
+) !?composed.Config {
     return loader(allocator, path) catch |err| {
         // A parse error must reach the caller. On reload it makes the
         // swap fail so the live config is kept (see reload.handleConfigReload);
@@ -335,7 +340,7 @@ pub const SearchPaths = struct {
 
 /// The shape every search location's loader has: both the dir loader and the
 /// single-file loader take exactly (allocator, path).
-pub const LoadFn = *const fn (std.mem.Allocator, []const u8) anyerror!types.Config;
+pub const LoadFn = *const fn (std.mem.Allocator, []const u8) anyerror!composed.Config;
 
 /// The user-config search order, declared ONCE. Adding a location (a second
 /// per-user dir, a system-wide `/etc/hana`) is a new enum tag plus one line in

@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const types = @import("types");
+const composed = @import("composed");
 const scaling = @import("scaling");
 const build_options = @import("build_options");
 
@@ -72,7 +73,7 @@ pub const State = struct {
     /// the baseline so a build that somehow never sets it still reads a
     /// defined value; `main` always sets it before any surface exists.
     dpi_info: f32 = baseline_dpi,
-    config: *types.Config,
+    config: *composed.Config,
     /// Monotonic fact revisions, bumped by the module owning each fact (see
     /// Facts); consumers diff against their last-seen value to decide what
     /// to redraw.
@@ -134,6 +135,7 @@ pub inline fn tilingEnabled() bool {
 
 /// Scaled tiling border width in pixels (config fact).
 pub inline fn borderWidth() u16 {
+    if (comptime !build_options.has_tiling) return 0; // neutral: no tiled chrome
     const cs = getState();
     return scaling.scaleBorderWidth(
         cs.config.tiling.border_width,
@@ -194,7 +196,7 @@ pub fn init(
     screen: Screen,
     root: WindowId,
     alloc: std.mem.Allocator,
-    config: *types.Config,
+    config: *composed.Config,
     initial_dpi: f32,
 ) void {
     // Asserts boot starts clean: a second core.init() would silently orphan
@@ -266,7 +268,7 @@ pub fn deinitOwnedConfig() void {
 /// Ownership moves with the pointer, which is what makes the two call sites
 /// (shutdown and reload) able to share this one call: neither has to reason
 /// about whether the box it is holding is still the live one.
-pub fn replaceOwnedConfig(new_config: *types.Config) void {
+pub fn replaceOwnedConfig(new_config: *composed.Config) void {
     deinitOwnedConfig();
     state.?.config = new_config;
     // Bumped AFTER the swap and after the old box is freed: every consumer

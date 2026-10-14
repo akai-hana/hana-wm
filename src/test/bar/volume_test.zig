@@ -30,6 +30,7 @@ const std = @import("std");
 const volume = @import("volume");
 const drawing = @import("drawing");
 const types = @import("types");
+const bar_config = @import("bar_config");
 
 const Probe = volume.Probe;
 const Rung = volume.Rung;
@@ -164,7 +165,7 @@ test "parsePercent extracts first N%" {
 }
 
 test "label honors configuration" {
-    var cfg = types.BarConfig{};
+    var cfg = bar_config.Config{};
     cfg.volume_format = "Level {pct}";
     cfg.volume_muted_format = "Silenced {state}";
     var buf: [128]u8 = undefined;
@@ -180,10 +181,10 @@ test "label honors configuration" {
 test "label default formats" {
     var buf: [128]u8 = undefined;
     volume.setDisplayForTest(33, false);
-    try std.testing.expectEqualStrings("VOL 33%", volume.label(types.BarConfig{}, &buf).text);
-    try std.testing.expectEqualStrings("33%", valueSpan(volume.label(types.BarConfig{}, &buf)));
+    try std.testing.expectEqualStrings("VOL 33%", volume.label(bar_config.Config{}, &buf).text);
+    try std.testing.expectEqualStrings("33%", valueSpan(volume.label(bar_config.Config{}, &buf)));
     volume.setDisplayForTest(33, true);
-    try std.testing.expectEqualStrings("MUTE", volume.label(types.BarConfig{}, &buf).text);
+    try std.testing.expectEqualStrings("MUTE", volume.label(bar_config.Config{}, &buf).text);
     volume.setDisplayForTest(33, false);
 }
 
@@ -192,7 +193,7 @@ test "label default formats" {
 // have muted anything, so the segment must not claim `VOL 0%`.
 
 test "no backend renders MUTE rather than VOL 0%" {
-    var cfg = types.BarConfig{};
+    var cfg = bar_config.Config{};
     cfg.volume_format = "VOL {pct}%";
     cfg.volume_muted_format = "MUTE";
     var buf: [128]u8 = undefined;
@@ -205,7 +206,7 @@ test "no backend renders MUTE rather than VOL 0%" {
 }
 
 test "a read value un-mutes the display again" {
-    var cfg = types.BarConfig{};
+    var cfg = bar_config.Config{};
     cfg.volume_format = "VOL {pct}%";
     cfg.volume_muted_format = "MUTE";
     var buf: [128]u8 = undefined;

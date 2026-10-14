@@ -11,6 +11,7 @@
 const std = @import("std");
 const drawing = @import("drawing");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const model = @import("model");
 
 // The title segment's geometry -- its window list, the pixel-perfect tiling
@@ -24,7 +25,7 @@ const model = @import("model");
 /// a render that mutates global detection state is a phase violation.
 pub const TitleRenderContext = struct {
     dc: *drawing.DrawContext,
-    config: types.BarConfig,
+    config: bar_config.Config,
     height: u16,
     start_x: u16,
     width: u16,

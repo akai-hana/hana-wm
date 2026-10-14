@@ -19,6 +19,7 @@ const seed = @import("model_config");
 const model = @import("model");
 const helpers = @import("helpers");
 const types = @import("types");
+const tiling_config = @import("tiling_config");
 const tiling = @import("tiling");
 const contract = @import("tiling_contract");
 
@@ -26,12 +27,12 @@ const alloc = testing.allocator;
 
 /// Append a layout-cycle name the way the parser hands it over: an
 /// allocator-owned string (TilingConfig.deinit frees every entry).
-fn addLayout(cfg: *types.TilingConfig, name: []const u8) !void {
+fn addLayout(cfg: *tiling_config.Config, name: []const u8) !void {
     try cfg.layouts.append(alloc, try alloc.dupe(u8, name));
 }
 
 test "templateFrom resolves the default layout and stamps the model defaults" {
-    var cfg = types.TilingConfig{};
+    var cfg = tiling_config.Config{};
     defer cfg.deinit(alloc);
 
     const tpl = seed.templateFrom(&cfg);
@@ -47,7 +48,7 @@ test "templateFrom resolves the default layout and stamps the model defaults" {
 }
 
 test "templateFrom clamps master_count to the primary-column ceiling" {
-    var cfg = types.TilingConfig{};
+    var cfg = tiling_config.Config{};
     defer cfg.deinit(alloc);
     // The grammar admits the whole u8 range for the global count; 255 would
     // otherwise reach compute's master_n as a 255-column primary pane.
@@ -59,7 +60,7 @@ test "templateFrom clamps master_count to the primary-column ceiling" {
 }
 
 test "templateFrom falls back to the neutral default for an unresolvable layout" {
-    var cfg = types.TilingConfig{};
+    var cfg = tiling_config.Config{};
     defer cfg.deinit(alloc);
     try addLayout(&cfg, "no-such-layout");
 
@@ -70,7 +71,7 @@ test "templateFrom falls back to the neutral default for an unresolvable layout"
 }
 
 test "templateFrom reads the per-layout variants map" {
-    var cfg = types.TilingConfig{};
+    var cfg = tiling_config.Config{};
     defer cfg.deinit(alloc);
     try addLayout(&cfg, "master");
     // Key and value are both heap-duped by the parser (deinit frees both).
@@ -83,7 +84,7 @@ test "templateFrom reads the per-layout variants map" {
 }
 
 test "templateFrom ignores an unknown variants value-string" {
-    var cfg = types.TilingConfig{};
+    var cfg = tiling_config.Config{};
     defer cfg.deinit(alloc);
     try addLayout(&cfg, "master");
     try cfg.variants.put(alloc, try alloc.dupe(u8, "master"), try alloc.dupe(u8, "bogus"));
@@ -95,7 +96,7 @@ test "templateFrom ignores an unknown variants value-string" {
 }
 
 test "applyOverrides applies last-wins layout/count overrides on top of the template" {
-    var cfg = types.TilingConfig{};
+    var cfg = tiling_config.Config{};
     defer cfg.deinit(alloc);
     try addLayout(&cfg, "master");
     try addLayout(&cfg, "grid");

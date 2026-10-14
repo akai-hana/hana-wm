@@ -7,6 +7,7 @@
 //! which owns activation and key routing.
 
 const types = @import("types");
+const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const editor = @import("editor");
 const completion = @import("completion");
@@ -429,7 +430,7 @@ pub fn drawActive(
     dc: *drawing.DrawContext,
     // By pointer, not by value: this is a per-frame draw that only READS
     // config, and a full `BarConfig` struct copy per frame bought nothing.
-    config: *const types.BarConfig,
+    config: *const bar_config.Config,
     height: u16,
     start_x: u16,
     width: u16,

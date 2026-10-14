@@ -23,6 +23,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const build_options = @import("build_options");
 const types = @import("types");
+const composed = @import("composed");
 const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
@@ -146,7 +147,7 @@ pub const Fx = struct {
     scr: *xcb.xcb_screen_t,
     root: u32,
     alloc: std.mem.Allocator,
-    config: types.Config,
+    config: composed.Config,
     /// Every id created through createWindow(): the model only ADMITS a
     /// fraction of them, and a stray far-from-admission one would otherwise
     /// stay internal-invisible to the model-drain loop in reset().
@@ -205,7 +206,7 @@ pub const Fx = struct {
         const fx = std.heap.page_allocator.create(Fx) catch {
             return null;
         };
-        fx.* = .{ .conn = conn, .scr = scr, .root = scr.*.root, .alloc = alloc, .config = types.Config{} };
+        fx.* = .{ .conn = conn, .scr = scr, .root = scr.*.root, .alloc = alloc, .config = composed.Config{} };
 
         // The baseline is what main would pass if the config had no [display]
         // dpi override: these tests are about window plumbing, not scaling.
@@ -217,7 +218,7 @@ pub const Fx = struct {
         pipeline.init();
         // Seed the config layout cycle in canonical order with the modules
         // actually compiled in — `cycleLayoutKind` cycles this list (a real
-        // boot's parser seeds it from config; `types.Config{}` leaves it
+        // boot's parser seeds it from config; `composed.Config{}` leaves it
         // empty). page_allocator: process-lifetime config, not leak-tracked.
         if (build_options.has_tiling) {
             inline for (helpers.std_layout_names) |c| {
