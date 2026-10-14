@@ -30,3 +30,6 @@ __pycache__/
 # harness run artifacts (regenerated locally; only golden/ is tracked)
 dev/harness/out/
 dev/harness/.cache/
+
+# any new .mds
+*.md

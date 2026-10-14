@@ -1,285 +1,179 @@
-# Hana `src/core` Simplification Audit
+# Core/Hub simplification audit — `src/core/*`
 
-Date: 2026-09-20
-Method: full read of all 24 files in `src/core/` (~5,480 LOC), caller verification by
-`rg` across `src/`, `src/test/`, `dev/plugin-template/`, `build.zig`,
-`dev/scripts/check-layers.sh`. Baseline gates: `zig build check` and `zig build test` both
-pass. Every proposal below was checked against `check-layers.sh` rules 1-4 (wire sends /
-server grabs / pure-layer xcb / fmt); none violates them.
-
-## Constraint acknowledgements
-
-- **Sync boundary is sacred.** Raw wire-mutating sends must stay behind `src/core/sync/`
-  (sink) plus the documented allowlist. No proposal here moves a wire send across it.
-- **Pure layers** (model/tiling/config) must stay xcb-free and core must never name an
-  optional module by import (deletion-modularity). Nothing below touches that.
-- #3 alters a contract signature; it is mechanically verified by the `check-plugin-template`
-  step inside `zig build check`, so drift self-fails.
-
-## Verified: not dead (checked so the report's claim is precise)
-
-- Every `WindowModule` hook (40 fields across 6 families) is bound by exactly one module
-  and dispatched somewhere (events/persist/pipeline/window/bar). No dead hooks.
-- `masks.*` modifier constants, `constants.*` limits, `screen.*` API, `scale.*`, `refresh.*`
-  are all consumed.
-- `WindowedProfiler` has exactly two instantiations (key-dispatch in input, retile in sync).
-- Both `sync.Stack` values and the ledger's three contract reads (orphan keep-last, winner
-  raise, lastRectFor/truthRect) are live.
+**Date:** 2026-09-21
+**Scope:** `src/core/{core,events,pipeline,plugin,persist,restart,screen,scale,signals,spawn}.zig` (the closed core / hub). `src/core/sync/`, `src/core/x11/`, `src/core/utils/` belong to the CORE-PLUMBING agent and are read only as seams.
+**Method:** full re-read of all 10 hub files (5,020 LOC across `src/core`), grep/caller tracing for every hook, import, and `pub` surface; cross-checks against `SIMPLIFICATION_PLAN_v3.md` (the baseline), `dev/scripts/check-layers.sh`, and build-generated registries.
+**Baseline (v3):** 16,553 code LOC, `zig fmt` clean, `zig build check` exit 0. This report is additive to v3: same constraints, do-not-re-read v3 items except as zero-risk re-opens.
 
 ---
 
-## Findings by file
+## Verified v3 claims that bound this audit
 
-### `src/core/sync/sync.zig`
-
-- **Location**: `sync.zig:137-355` (SentEntry/SentIndex + sentIndexInsert/Remove/Move/
-  Rebuild, sentGetOrPut/sentSwapRemove/sentGet/forget/sentFind/sentIndexOf/sentHash)
-- **Category**: DUPLICATION / CONSOLIDATION
-- **Issue**: A second open-addressed window-ID hash map is hand-rolled here (tombstones,
-  power-of-two slots, rebuild-on-tombstone-full, mask wrap) next to the identical shape in
-  `utils/idmap.zig` (`IdMap(V, capacity)`: same probe, tombstones, rehash, fixed capacity).
-  `st.sent` (BoundedList) + `st.sent_index` together are exactly `utils.IdMap(SentEntry,
-  model.store_capacity)` — `SentEntry.id` even duplicates the map key. sync.zig uses low-bit
-  hashing (`win & (cap-1)`), notably weaker than IdMap's Fibonacci mixing for arbitrary XIDs.
-- **Proposal**: delete `sent` + `sent_index` + all `SentIndex*`/`sentIndex*` helpers; back
-  `State.sent` with `utils.IdMap(SentEntry, model.store_capacity)` and keep the same public
-  API names (`sentGet`, `sentGetOrPut`, `forget`, `sentSwapRemove`, `markSentBorderWidth`).
-  Rehash leaves the in-flight `gop` pointer stable (rehash happens inside `put`, before the
-  pointer is handed out; per-iteration writes are done before the next window's insert).
-  Drop `SentEntry.id` (key carries it).
-- **Effect**: -~150 LOC in core; one hash implementation instead of two; stronger hash;
-  swap-remove/move relocation machinery disappears entirely.
-- **Confidence**: MEDIUM-HIGH (hot path; the "exactly one get-or-put per window per pass"
-  perf contract in `test/latency/perf_test.zig` survives; `test/engine/sync_test.zig`,
-  `tracking_test.zig`, `pipeline_test.zig` re-verify ledger semantics)
-- **Constraint risk**: none.
-
-- **Location**: `sync.zig:190-196` (`init`/`deinit`)
-- **Category**: DEAD CODE (production) / API ERGONOMICS
-- **Issue**: `pub fn deinit()` is invoked nowhere in production (no reconnect path exists);
-  it is purely a test convenience that calls `init()`. `init()` is called from
-  `pipeline.init` and `sync_test/latency` tests.
-- **Proposal**: drop `sync.deinit` (tests call `sync.init()` between cases, as several already
-  do), or mark it `/// test-only remap of init()`.
-- **Effect**: -2 LOC; removes a misleading re-init/undo pairing.
-- **Confidence**: HIGH
-- **Constraint risk**: none.
-
-### `src/core/sync/sink.zig` + wire boundary
-
-- **Location**: `sink.zig:1-11` vs `wire.zig:1-5` vs `sync.zig:1-4`
-- **Category**: COMMENT QUALITY / READABILITY
-- **Issue**: Three headers each claim to describe "the sanctioned boundary" with three
-  different topologies: sync.zig says "every raw XCB request lives in the sink file";
-  sink.zig lists its shims as "~ utils.configureWindow / borders.applyWidth / raiseWindow";
-  wire.zig says it is "the ONLY xcb-dependent half". The truth is a split primitive home
-  (raw `xcb_configure_window`/`change_attributes`/flush in wire.zig; raw
-  `xcb_map_window`/`change_property`/`get_property` in sink.zig; both allowlisted). A reader
-  cannot tell which file is the seam and which is the primitive home.
-- **Proposal**: adopt one sentence everywhere: "the sanctioned seam is src/core/sync/
-  (dispatch), whose raw XCB shims live in src/core/x11/wire.zig (primitive home, also
-  allowlisted for ConfigureRequest/borders/icccm)."
-- **Effect**: 0 LOC; removes a three-way contradiction.
-- **Confidence**: HIGH (comment-only)
-- **Constraint risk**: none.
-
-### `src/core/utils/utils.zig`
-
-- **Location**: `utils.zig:120` (`pub const ungrabServer = x11wire.ungrabServer;`)
-- **Category**: DEAD CODE
-- **Issue**: Zero callers of `utils.ungrabServer` anywhere in the tree (verified: only
-  wire.zig's own `ungrabAndFlush` uses the primitive; bar.zig grabs via
-  `utils.grabServer`; everyone ungrasps through `ungrabAndFlush`). The export exists only
-  because `check-layers.sh` pat2 scans the name.
-- **Proposal**: remove the re-export; make wire.zig `ungrabServer` private (or leave it pub
-  with a note). The pat2 regex simply stops matching — no guard change needed.
-- **Effect**: -1 LOC export surface; removes a misleading primitive (ungrabbing without
-  flush is never wanted by anyone).
-- **Confidence**: HIGH
-- **Constraint risk**: none (Rule 2 unaffected; the scan name disappears).
-
-- **Location**: `utils.zig:71-103` (`WindowedProfiler`), call sites `sync.zig:367`,
-  `input.zig:key_profile`
-- **Category**: DEAD CODE (param) / minor
-- **Issue**: The `tag` parameter is discarded (`_ = tag;`); only `enabled`/`fmt`/`logFn` are
-  used.
-- **Proposal**: drop the `tag` param from the factory; update the two call sites.
-- **Effect**: -2 LOC; honest signature.
-- **Confidence**: HIGH
-- **Constraint risk**: none.
-
-### `src/core/x11/wire.zig`
-
-- **Location**: `wire.zig:349-386` (`fetchPropertyToBuffer`), re-export at `utils.zig:114`
-- **Category**: DEAD CODE
-- **Issue**: No caller anywhere. The window layer fetches properties through its own
-  `icccm.firePropQuery` / `wincache.zig` paths (which use `collectPropertyReply` +
-  `constants.property_max_length`/`property_no_delete` directly). `wincache.zig` references
-  the function only in a comment.
-- **Proposal**: delete `fetchPropertyToBuffer` and its `utils` re-export. Keep
-  `collectPropertyReply` (live) and the constants (live in window layer).
-- **Effect**: -35 LOC; removes a second, unused 8-bit fetch vocabulary.
-- **Confidence**: HIGH (if it is intended future abstraction for a property fetch, the
-  window layer's existing firePropQuery already covers it)
-- **Constraint risk**: none.
-
-### `src/core/pipeline.zig`
-
-- **Location**: `pipeline.zig:154-314` (nine public seams)
-- **Category**: API ERGONOMICS / DUPLICATION
-- **Issue**: The grab/reconcile seam zoo. Four public wrappers
-  (`reconcileUnderGrabNow`, `reconcileGrabFocus` pair, `reconcileUnderGrabNowWithFocusDuty`,
-  `focusOnlyCommit`) plus `reconcileUnderGrabNow`, `reconcileUnderGrabNowFullscreen`,
-  `reconcileNow`, `grabCtx`, `reconcileUnderGrabNowWithFocusAfter` repeat the same
-  `grabServer()` / `defer ungrabAndFlush()` body with different (focus_before, duty,
-  fullscreen) decorations. `reconcileUnderGrabNowWithFocus`,
-  `...WithFocusAfter`, and `...WithFocusDuty` differ only by two booleans.
-- **Proposal**: keep one general seam `reconcileUnderGrab(o, t: focus.FocusTransition,
-  focus_before: bool, duty: ?*const fn() void)` behind the existing named wrappers, or a
-  private `fn withGrab(f: *const fn (*sync.Ctx) void) void` for the shared body. The
-  fullscreen variant is genuinely special (EWMH writes + bar hide inside the grab) and
-  stays as-is.
-- **Effect**: -40-60 LOC of duplicated grab plumbing; preserves named readability if thin
-  wrappers remain.
-- **Confidence**: MEDIUM (the ordering comments are subtle; do it with the latency tests on)
-- **Constraint risk**: none (grabs continue via `sink.grabServer`).
-
-### `src/core/plugin.zig`
-
-- **Location**: `plugin.zig:41-44` (`modelPtrOf`), `plugin.zig:124`
-  (`deserializeWindow (u32, []const u8, *anyopaque)`), `window.zig:771-772`,
-  `fullscreen.zig:328`
-- **Category**: API ERGONOMICS / OVER-ENGINEERING
-- **Issue**: The deserialize seam round-trips a *known* type through `*anyopaque`: window.zig
-  already holds `*model.Model` and does `@ptrCast(model)`; fullscreen.zig undoes it with
-  `plugin.modelPtrOf(ptr)`. `plugin.zig` already imports `model`, so the contract can name
-  the type. Nothing about "may WRITE model state" (the stated rationale) requires opacity —
-  the serialize side already passes a typed `*const model.Model`.
-- **Proposal**: type `deserializeWindow` as `fn (u32, []const u8, *model.Model) bool`; delete
-  `modelPtrOf`; drop the casts in window.zig and fullscreen.zig.
-- **Effect**: -5 LOC; kills two casts; the opaque-value seam survives only where the type is
-  genuinely cross-layer (`Segment.draw` ctx, `Frame`/`Env`).
-- **Confidence**: HIGH (type-checked by the `check-plugin-template` build gate)
-- **Constraint risk**: none (contract stays inside the window hub; model stays pure).
-
-- **Location**: `plugin.zig:106-219` (WindowModule overload, 40 nullable hooks)
-- **Category**: OVER-ENGINEERING (judgment)
-- **Issue**: The flat all-optional-hook contract is large. Verified: every hook is bound and
-  dispatched — none is dead, and it is the mechanism that keeps core free of optional
-  imports. The cost is a long null-for-declaration ceremony per module.
-- **Proposal**: keep as-is (architecture-correct); optionally tighten the family grouping
-  comments (Lifecycle/Persistence/Fullscreen/Hide-Restore/Covering/Workspaces/Floating)
-  into one banner so scanning is cheap. Document rather than refactor.
-- **Effect**: 0 LOC or -0; maintainability note.
-- **Confidence**: HIGH (this is a "do not touch" verification)
-- **Constraint risk**: none.
-
-### `src/core/events.zig`
-
-- **Location**: `events.zig:449-569` (`handleXcbEvents`)
-- **Category**: READABILITY
-- **Issue**: Two near-identical drain loops (batch via `xcb_poll_for_event`,
-  `events.zig:473-495`; queued drain via `xcb_poll_for_queued_event`, `events.zig:518-539`)
-  share `collapseMotionRun` but differ in budget charging (`charge_tail`), and the
-  `pending` stashing semantics are subtle (C15 traps). This is the single densest
-  scheduling code in core.
-- **Proposal**: leave the semantics, but add a short banner comment stating the two-loop
-  structure (socket read-ahead vs XCB internal queue) and why they cannot be one pull; this
-  is the same "document, don't refactor" treatment as the fullscreen grab paths.
-- **Effect**: 0 LOC; the riskiest touch is the queue-drain boundary, so no merge is
-  recommended.
-- **Confidence**: HIGH (comment-only); MEDIUM that any unify is worthwhile
-- **Constraint risk**: none.
-
-- **Location**: `events.zig:268-369` (`handleConfigReload`)
-- **Category**: COMMENT QUALITY
-- **Issue**: The C1/C2/C3 ordering markers + `committed` flag are dense but load-bearing
-  (documented use-after-free history). This is *good* documentation; only the bare codes
-  are opaque. See the cross-cutting comment finding below.
-
-### `src/core/persist.zig`
-
-- **Location**: `persist.zig:111-216` (`save`)
-- **Category**: ALLOCATION (cold path, LOW priority)
-- **Issue**: Several transient allocations on the re-exec hand-off: `windows` record array,
-  per-window `ext` blob dupes, per-workspace `tiled`/`mru` dupes, then `std.json` stringify
-  into an `Allocating` writer + `toArrayList()` in RAM, then one `writeStreamingAll` to the
-  file. The whole serialized session sits in memory once (plus the indent_2 expansion).
-- **Proposal**: stream the JSON to the file fd (a `std.Io.Writer` over the temp file)
-  instead of buffering the entire dump; the temp-file+rename safety already exists in the
-  create/rename dance, so partial-write safety is preserved.
-- **Effect**: ~halves peak memory during a save; save happens once per re-exec, so this is
-  polish.
-- **Confidence**: LOW-MEDIUM (Zig 0.16 streaming-JSON ergonomics + the blob lifetime
-  dance make this the most fiddly of the bunch for the least payoff)
-- **Constraint risk**: none.
-
-### `src/core/core.zig`
-
-- **Location**: `core.zig:87-101` (`factAccessors` comptime generator)
-- **Category**: OVER-ENGINEERING (micro)
-- **Issue**: A comptime `factAccessors("focus_rev")` factory generates `rev()`/`bump()` for
-  four counters. The generator (12 LOC) is about as long as four hand-written fn pairs and
-  indirection is net-negative at this size.
-- **Proposal**: replace with four plain `pub inline fn` pairs (or a 4-entry shared helper).
-- **Effect**: -0 to -5 LOC; removes one indent of metaprogramming for negligible gain.
-- **Confidence**: MEDIUM (subjective; the generator also enforces the `+%= 1` wrap policy
-  in one place)
-- **Constraint risk**: none.
-
-### Cross-cutting
-
-- **Location**: markers `C1`..`C15`, `P1`, `P5`, `W3`, `Gap 2` across events.zig,
-  sync.zig, sink.zig, signals.zig, restart.zig, refresh.zig, persist.zig, spawn.zig,
-  wire.zig, scale.zig, pipeline.zig
-- **Category**: COMMENT QUALITY
-- **Issue**: ~25 bare change-note codes with no index anywhere in the tree; a new reader
-  can't resolve "C15"/"Gap 2" to anything. The explanatory prose attached to each is
-  valuable and must stay.
-- **Proposal**: either (a) replace the code prefixes with the prose already present
-  ("C15:" → "batch-budget:", "P5:" → "border-sweep:", "Gap 2:" → "fullscreen-grab:"), or
-  (b) keep the codes but add one indexed legend to src/core/README or the first header.
-  Prose-only (a) is the higher yield; it touches comment lines only.
-- **Effect**: 0 LOC; readability gain across every core file.
-- **Confidence**: HIGH it is safe (comment-only); MEDIUM that the project wants the codes
-  dropped vs indexed.
-- **Constraint risk**: none.
-
-### Clean (no findings warranted)
-
-`screen.zig`, `scale.zig`, `refresh.zig`, `signals.zig`, `spawn.zig`, `restart.zig`,
-`x11/masks.zig`, `x11/xcb.zig`, `utils/bounded.zig`, `utils/constants.zig`,
-`utils/debug.zig`, `utils/ids.zig`, `utils/paths.zig`, `utils/proc.zig` — read in full;
-small, single-purpose, their constants/APIs all verified live. Two one-line nits kept out
-of ranking: `xcb.xcb` names the cImport decl after its own module (spawn/restart use `c`,
-which reads better), and `sync.Stack` naming for a single-value enum is tie to the
-`geom`/`stack_only` signatures (fine as-is).
-
-Note (outside src/core scope, for awareness): `build.zig.zon` carries a `// TODO` about the
-`.links` mirror not being enforced, while `SystemLibraries.comptime` block in build.zig
-*does* mechanically enforce it — the TODO may already be stale, and a TODO in the repo is
-in tension with the documented "no TODO by design" posture.
+| v3 item | Finding |
+|---|---|
+| CORE-1 unified event drain | Landed. One comptime-parameterized `drainEvents` (events.zig:420) shared by batch + queued drains; motion collapse shared via `collapseMotionRun` (events.zig:474). No parallel loops remain. |
+| CORE-2 canonical seam headers | Landed. x11/wire.zig and other seam headers carry the shared "no code beyond this point" sentence. |
+| CORE-6 marker removal | Landed **in core scope**: no `C#`/`P#`/`Gap N`/`W#` marker remains in `src/core/` (only false positives: idmap.zig's hash constant `0x9E3779B97F4A7C15` and utils.zig prose "Gap and border widths"). NOTE: `(Gap 1/2/3/4 atomicity fix)` markers still live in `src/window/actions.zig:282,869,965,992` and `src/window/focus.zig:262` — window-layer remit, not reported here. |
+| Contract is real, not a mandated no-op | Confirmed FALSE-to-claim. Every `Surfaces` hook has ≥1 consumer (grep-verified, e.g. `updateBarVisibilityForWorkspace` at window/actions.zig:839); every `WindowModule` field has ≥1 binder AND ≥1 consumer. |
+| Closed-core holds structurally | Confirmed. events.zig/pipeline.zig reach optional subsystems ONLY via generated `Surfaces`, `window_modules`, `tiling_seam` (build.zig:163-182, generated, collision-guarded at build.zig:590). Core never names an optional subsystem by module. |
+| No TODO/FIXME in src/ | Confirmed (rg, exit 0). |
+| fmt clean | Confirmed baseline; no formatting-only edits proposed. |
 
 ---
 
-## Top 10 highest-yield simplifications (ranked)
+## Findings — core/hub scope
 
-| # | File:Line | Category | Proposal | Effect | Conf. |
-|---|-----------|----------|----------|--------|-------|
-| 1 | sync/sync.zig:146-355 | DUPLICATION/CONSOLIDATION | Rebuild the sent-ledger on `utils.IdMap(SentEntry, store_capacity)`; delete `sent`+`SentIndex`+7 helpers | -~150 LOC, one hash map instead of two, better hash | MED-HIGH |
-| 2 | x11/wire.zig:349-386 | DEAD CODE | Delete `fetchPropertyToBuffer` + its utils re-export (zero callers) | -35 LOC | HIGH |
-| 3 | plugin.zig:124 + window.zig:772 + fullscreen.zig:328 | API ERGONOMICS | Type `deserializeWindow` as `*model.Model`; drop `modelPtrOf` and both casts | -5 LOC, two casts gone, gate-verified | HIGH |
-| 4 | utils/utils.zig:120 | DEAD CODE | Delete dead `utils.ungrabServer` re-export; privatize/annotate wire primitive | -1 LOC, honest surface | HIGH |
-| 5 | pipeline.zig:154-314 | API ERGONOMICS/DUPLICATION | Collapse the 4 grab-wrappers onto one `withGrab`/duty-carrying seam | -40-60 LOC | MED |
-| 6 | sync.zig:1-4 vs sink.zig:1-11 vs wire.zig:1-5 | COMMENTS | One canonical "sanctioned seam vs primitive home" statement | 0 LOC, resolves contradiction | HIGH |
-| 7 | events.zig, sync.zig, persist.zig, signals.zig, ... (C1-C15, P*, W3, Gap N) | COMMENT QUALITY | Replace opaque marker codes with the prose already attached, or add one legend | 0 LOC, whole-file readability | HIGH |
-| 8 | utils/utils.zig:71-103 | DEAD CODE (param) | Drop the unused `tag` param of `WindowedProfiler` | -2 LOC | HIGH |
-| 9 | persist.zig:111-216 | ALLOCATION | Stream JSON to the temp file instead of buffering the full dump | ~50% save-path peak memory | LOW-MED |
-| 10 | core/core.zig:87-101 | OVER-ENGINEERING | Replace the `factAccessors` comptime generator with 4 plain fn pairs | -0-5 LOC, one less indirection | MED |
+Format: `ID (COREH-NN)` · location · axis · issue · fix · est LOC delta · confidence. No finding below is `[DEF]` (each is provably behavior-preserving after re-verification inside its own file).
 
-Constraint check for every entry: none moves a wire send or server grab across the sync
-boundary, none touches model/tiling/config purity, and #3's signature change is
-self-verifying via the `check-plugin-template` step inside `zig build check`.
+### COREH-01 — dead import `constants` in events.zig
+- **Location:** `src/core/events.zig:9` (`const constants = @import("constants");`)
+- **Axis:** Dead code
+- **Issue:** Zero `constants.` references in the file (rg-verified). v3 moved config constants into file-local consts (events.zig:37-53) and the import was left behind.
+- **Fix:** Delete line 9.
+- **LOC delta:** −1 · **Confidence:** H
 
-Estimated total: ~230-270 LOC removed from src/core (~5,480 LOC, ~4-5%), concentrated in
-the sync layer, plus a contract that is easier to read at every call site.
+### COREH-02 — dead import `wincache` in pipeline.zig (plus stale doc)
+- **Location:** `src/core/pipeline.zig:14` (`const wincache = @import("wincache");`); stale refs at `:124-125` ("border width from wincache.width()") and `:148` ("Ported from wincache.color")
+- **Axis:** Dead code / doc drift
+- **Issue:** The only `wincache.` mentions in the file are comments. Border width now comes from `core.borderWidth()` (pipeline.zig:129) and colors from `colorOf` (pipeline.zig:152-155). The import also leaves a now-pointless core→window compile edge.
+- **Fix:** Delete line 14; update the `ctx()` doc comment at :124-125 to name `core.borderWidth()`. Keep the :148 historical note (it explains intent).
+- **LOC delta:** −1 · **Confidence:** H
+
+### COREH-03 — dead import `types` in pipeline.zig
+- **Location:** `src/core/pipeline.zig:18` (`const types = @import("types");`)
+- **Axis:** Dead code
+- **Issue:** Zero `types.` references in the file (rg-verified). Leftover from an earlier take on `ReconcileOpts` parameterization.
+- **Fix:** Delete line 18.
+- **LOC delta:** −1 · **Confidence:** H
+
+### COREH-04 — `loadToGlobal` returns `!bool` but cannot error
+- **Location:** `src/core/persist.zig:256-287`
+- **Axis:** API ergonomics
+- **Issue:** Signature `pub fn loadToGlobal(allocator, path) !bool`. Line-by-line the body cannot return an error: `readFileAlloc` failure → `catch` → `return false` (:263-266); `parseFromSlice` failure → `catch` → `return false` (:269-272); version mismatch → `return false` (:273-278). There is not a single `try` in the body and every potential `!` path is converted to a value. Consumers are forced into ceremonial `try`: `main.zig:135` (`if (try persist.loadToGlobal(...))`).
+- **Fix:** Declare `bool` (drop `!`); drop the `try` at main.zig:135. Both call sites and persist_test are unaffected otherwise.
+- **LOC delta:** −1 · **Confidence:** H
+
+### COREH-05 — `pub const max_claims` with no external consumers
+- **Location:** `src/core/screen.zig:33` (`pub const max_claims = if (build_options.has_bar) 1 else 0;`)
+- **Axis:** Naming / API surface
+- **Issue:** Zero consumers outside screen.zig (rg-verified); it sizes the private `claims` ledger (:38). The only claimer id is exposed correctly via `bar_id` (:36), which the bar uses; `max_claims` is internal plumbing that leaked `pub`.
+- **Fix:** De-publish (drop `pub`).
+- **LOC delta:** 0 (keyword drop) · **Confidence:** H
+
+### COREH-06 — dead `binary_path_override` parameter in restart.init
+- **Location:** `src/core/restart.zig:61-81`
+- **Axis:** Dead code
+- **Issue:** `pub fn init(alloc, binary_path_override: ?[]const u8)`. Sole caller is `main.zig:79` (`restart.init(alloc, null)`); no test calls it (rg over src/test). The override branch (:62-65) is unreachable in every build, yet the doc (restart.zig:58-60) still justifies it "(e.g. tests)".
+- **Fix:** `pub fn init(alloc: std.mem.Allocator) void`; delete the branch and trim the doc.
+- **LOC delta:** −8 (incl. doc) · **Confidence:** H (removing a pub parameter is an API change, but the only caller and zero tests pass `null`; behavior is identical)
+
+### COREH-07 — stale header mention of `count_minimized`
+- **Location:** `src/core/persist.zig:8` ("home_ws and count_minimized are derived and NOT serialized.")
+- **Axis:** Doc drift
+- **Issue:** `count_minimized` exists nowhere in `src/` (rg-verified); persist.zig's own header at :322-324 documents that "no feature counters live here anymore" and minimize maintains its sequence internally. The surviving mention contradicts the same file.
+- **Fix:** Delete "and count_minimized".
+- **LOC delta:** 0 (in-line reword) · **Confidence:** H
+
+### COREH-08 — stale "DPI scaling run pre-swap" in reload doc
+- **Location:** `src/core/events.zig:276` ("Keybind resolution and DPI scaling run pre-swap on the new config.")
+- **Axis:** Doc drift
+- **Issue:** The config-reload path performs no DPI work: events.zig has zero `scale.`/`detectDpi` references (rg-verified) and `scale.detectDpi` runs once at boot (`main.zig:54`). The comment over-claims step 1.
+- **Fix:** Reword to "Keybind resolution runs pre-swap…".
+- **LOC delta:** 0 (reword) · **Confidence:** M (verified by absence of any DPI code in the reload path)
+
+### COREH-09 — bare `bool` focus-ordering argument at 6 call sites
+- **Location:** `src/core/pipeline.zig:202-218` (`reconcileGrabFocus(o, t, focus_before: bool)`); call sites main.zig:147 `false`; window/actions.zig:101,187,360,563 `true`; :967 `false`
+- **Axis:** Readability
+- **Issue:** The focus-before-geometry ordering decision is a naked literal at every call site; the meaning of `true`/`false` is only recoverable from pipeline.zig:199-201.
+- **Fix:** A small `enum { before, after }` (or labelled-struct arg). Mechanical rename at 7 sites; the branching body at :213-215 is untouched.
+- **LOC delta:** 0 (net) · **Confidence:** M (style-level; deliberate omission if the codebase prefers plain bools — see "avoidance of findings" below)
+
+### COREH-10 — `core.borderWidth()` computed twice per ctx() build
+- **Location:** `src/core/pipeline.zig:110` (`tilingEnv` → `.border = core.borderWidth()`) plus `:129` (`ctx()` → `const border_width = core.borderWidth()`); same scan base `screen_h` (:106/:128)
+- **Axis:** Duplication (repeated fact computation)
+- **Issue:** Every reconcile-candidate build calls `core.borderWidth()` twice (each: `getState()` + `scaleBorderWidth`) and scales `gap_width` alongside with the same `screen_h`. Both results are identical.
+- **Fix:** Compute `border_width` once in `ctx()` and feed it into `tilingEnv`'s margins, or have `tilingEnv` take the precomputed border. Micro-opt; output byte-for-byte identical.
+- **LOC delta:** −1 · **Confidence:** H (behavior-preserving)
+
+### COREH-11 — header claims a marker convention that no longer exists
+- **Location:** `src/core/pipeline.zig:5-8` ("Call sites (all marked `// PIPELINE:`):")
+- **Axis:** Doc drift
+- **Issue:** v3's marker pass (CORE-6) stripped the `// PIPELINE:` call-site markers; only one survives, in window-layer code (`src/window/window.zig:1465`, out of scope). The header's "all marked" promise is now unverifiable at the sites it lists.
+- **Fix:** Reword to describe the call sites directly, or drop the marker note.
+- **LOC delta:** 0 (reword) · **Confidence:** H
+
+---
+
+## Per-file walkthrough
+
+### `src/core/core.zig` (148) — clean
+`XK`/`Connection`/`Screen`/`WindowId`/`WorkspaceId`/`FocusSuppressReason` types; single optional `State` (5 fields, finally-named, comment explains why not five `undefined` globals); `Facts` + comptime `factAccessors` (focus/window/fullscreen/layout revs) — the sole remaining indirect-consumption seam and it is tight; `tilingEnabled`/`borderWidth` config-fact accessors (the "core reads tiling facts so the layout stays a plugin" move); `getState`/`init` panic-guarded; `dpi_info` atomic kept outside `State` with a safe default. Consumers of every export verified. **No findings.**
+
+### `src/core/events.zig` (665) — 2 findings
+Dead import `constants` (COREH-01); stale "DPI scaling" doc (COREH-08). Everything else reviewed line-by-line:
+- `asHandler` comptime shape-check guard (events.zig:62-77) — justified safety, keeps the generic table sound.
+- `dispatch_table` (36 slots, masks.synthetic_event_mask strip, bounds guard at :188-195), type-0 error pseudo-event branch (:166-174) — documented, handling real diagnostic value.
+- `isRandrEvent` raw-compare-before-mask (events.zig:157-163) with a first-class rationale comment — this is the "subtle semantics" that must NOT be compressed.
+- `fillGrabCookies`/`checkGrabCookies` pairing, `grabKeybindings` — fire-all-then-check-all cookie batching is legitimate, single-owner.
+- `handleConfigReload` ordering (1-4) + pointer-swap + `committed` defer + source-vs-fallback distinction + `detectChanges` gating — every step is commented with the load-bearing reason (including the historical use-after-free it prevents).
+- `handleReexec` persist-before-disconnect-before-exec sequence — sound.
+- `drainEvents`/`collapseMotionRun` budget + `charge_tail` + pending-token semantics — dense but precisely documented ordering-preserving logic; the shared drain is exactly what CORE-1 built and further unification would erase the comments, not the code.
+- `run()` poll loop with signals-before-flags ordering rationale, `std.os.linux.poll` manual errno idiom (consistent with spawn/scale usage elsewhere), timeout only reaching into the bar via `surfaces.pollTimeoutMs()`. Not over-engineered: the load-bearing comment per branch earns its place.
+
+### `src/core/pipeline.zig` (330) — 4 findings
+Dead imports `wincache` (COREH-02) and `types` (COREH-03); double `borderWidth()` (COREH-10); marker-convention doc (COREH-11); plus COREH-09 (bool ordering arg). Structure verified:
+- `model()`/`mut()`/`Gate` capability gate with compile-time `*const` tripwire and panic-guarded pre-init access — idiomatic and used exactly as documented (transition-layer modules declare private Gates).
+- `ctx()`/`tilingEnv()` shared with the test fixture so fixture mirrors production env resolution.
+- The "closure idiom" `withServerGrab` + value-capturing struct bodies; all five reconcile-slot entry points have ≥1 real caller (main.zig:147; actions.zig:101/187/360/563/967; focus.zig:565/568), `reconcileUnderGrabNowFullscreen`'s EWMH/bar-arm loops route through the `window_mods` registry uniformly.
+- `preReconcileDuties` direct-`instance` touch documented with the value-in/value-out rationale.
+- `grabCtx()` manual-grab seam consumed at actions.zig:871, floating.zig:208, fullscreen.zig:381.
+
+### `src/core/plugin.zig` (481) — no findings
+The open-contract file. Verified every `Surfaces` (24 hooks) and `WindowModule` field (29 hooks) against its binders and consumers — not a mandated no-op. `providerOf` registry-first lookup with the "registry passed in, not captured" import-edge note; `DirtySources`/`bar_id`-style comptime `null` channels; `View`/`List`/`HintsView`/`Env` vocabulary moved onto the contract so `sync` + layout modules share one definition. Long, but every field carries a binding-rule comment ("at most one module binds this"). This is the intended cost of deletion-modularity, not bloat.
+
+### `src/core/persist.zig` (385) — 2 findings
+Dead `!` on `loadToGlobal` (COREH-04); stale `count_minimized` header mention (COREH-07). Structure: shadow-record wire format with `presence`/`ext` seam, version stream (persist_version=4), `max_restore_bytes` 1 MiB cap, atomic write (temp+fsync+rename), adoption loop and `applyModelLevel` covering-intent restore + registry-kind degradation fallback (`resumableDefaultKind`, single in-file caller — kept, it carries the degraded-restore rationale), shared `restoreMembers` helper (genuine dedupe across tiled_order + focus_mru). `save`/`loaded`/`applyModelLevel` consumers verified (events.zig:407, main.zig:135, window.zig:826, actions.zig:688, window.zig:791).
+
+### `src/core/restart.zig` (136) — 1 finding
+Dead `binary_path_override` param (COREH-06). Otherwise clean: pure flag surface mirroring proc.zig's reload flag; unconditional-reexec rationale; readlink `/proc/self/exe` truncation guard (:72-77); deliberates `execv` (not execvp, no PATH lookup) inheriting environ/DISPLAY/HANA_RESTORE; no-fork rationale for xinit session liveness; double-`mustDupeZ` + setenv + execv with `noreturn`; comment chain explains the "close X before exec or BadAccess" ordering it enforces.
+
+### `src/core/screen.zig` (111) — 1 finding
+`max_claims` de-pub (COREH-05). The claim ledger is genuinely minimal and well-named: `Edge`/`Claim`/`claims` comptime-sized, `workArea` saturating subtraction, surface-window registration + `isSurfaceWindow`/`mappedSurfaceWindow` recognition used by management/focus/drag (floating.zig:160, window.zig:337, pipeline.zig:143). No dead code, no magic numbers (all named per-v3 hygiene).
+
+### `src/core/scale.zig` (169) — no findings
+Named consts with units (min/max reasonable DPI, 4 KB/16 KB probe windows, mm_per_inch, font_baseline_height); `XftProbe` result struct that distinguishes got_string / dpi / possibly_truncated; two-stage RESOURCE_MANAGER probe with the truncation subtlety documented; geometry fallback + reasonability band; `scaleFontSize`/`scaleBarHeight` consumed by bar (bar/metrics.zig:43, bar/bar.zig:99/144) and `bar_min_height_px` exposed for config validation. Clean.
+
+### `src/core/signals.zig` (284) — no findings
+The notable design — pipe byte is only a WAKE TOKEN, signal state lives in an async-signal-safe bitmap (`pending_signals`, atomics) so a pipe-full burst can never lose TERM/INT/reload — is correct and fully documented. `writeSignalByte` full-pipe recovery loop; SIGUSR2 out-of-band backtrace handler with frame-pointer walk bounded to `rsp..rsp+8MiB`; per-signal `pending_signals` bit consumption via `ctz`; `else => {}` arm is strictly defensive (only the 5 installed handlers ever set bits) — benign, left alone. clean.
+
+### `src/core/spawn.zig` (264) — no findings
+Double-fork with a single O_CLOEXEC pipe; two independently-scheduled writers (tag_pid / tag_failed) with order-independent `finishSpawn` classification under PIPE_BUF-atomicity; "buffer full ⇒ both messages present, EOF not needed" drain shortcut; capacity pre-check before fork (rejects instead of silently dropping routing); EAGAIN retry semantics; `reapPendingChildren` WNOHANG-only policy; workspace snapshot before fork for `[exec, switch_workspace]` sequences. The 16-entry `BoundedList` buffer with `swapRemove` is the right shape. Clean.
+
+---
+
+## Re-opens (zero-risk, v3-item re-checks that now hold in the current tree)
+
+- **RE-OPEN CORE-1 (drain unification)** — holds; see table above.
+- **RE-OPEN CORE-2 (seam headers)** — holds; wire.zig + sync seam headers consistent.
+- **RE-OPEN CORE-6 (marker strips)** — holds for `src/core/`; the window-layer `(Gap 1..4)` markers remain (out of scope; flag for the window agent).
+- **RE-OPEN MODEL-1 (config-reload defaulting consolidation)** — holds; `model.applyConfigReload` at model.zig:509 + `actions.applyConfigReload` routing (events.zig:368), single template seed (main.zig:116).
+
+## Avoidance of findings (checked-and-clean, deliberately not raised)
+
+- **Helper split `dispatch`/`dispatchOwned`** — one-liner but the ownership distinction is load-bearing (owned vs borrowed event); merging would bury it.
+- **`if (build_options.has_bar)` gate sites in events.zig** — each is required for comptime compile-out; that is the feature, not repetition.
+- **Repeated `catch |err| debug.err(...)` chains in handleConfigReload/run** — mirror-site-error handling for distinct subsystems; consolidating would couple them.
+- **The grab-bracket asymmetry** (`withServerGrab` in pipeline vs `sync.reconcileUnderGrab`'s profiler-armed grab in sync/): reconcileUnderGrabNow now routes through sync's own grab; unifying fully would move the profiler responsibility across the sync boundary. Coordination note for CORE-PLUMBING only — not filed as core finding.
+- **The `else => {}` in `dispatchSignal`** and the 1024-cookie scratch buffer = 16 KB stack — bounded, documented, defensive by design.
+
+## Ranked top simplifications
+
+1. **COREH-01 + COREH-02 + COREH-03 — delete the three dead imports.** −3 LOC, zero risk, also removes the last core→wincache import edge. *H.*
+2. **COREH-06 — drop the always-null `binary_path_override`.** −8 LOC incl. doc, removes a dead branch and dead parameter; only caller passes null. *H.*
+3. **COREH-04 — `loadToGlobal: !bool → bool`.** −1 LOC + `main.zig:135` loses a ceremonial `try`. *H.*
+4. **COREH-05 — de-pub `max_claims`.** *H.*
+5. **COREH-10 — hoist the double `borderWidth()`.** *H.*
+6. **COREH-07 + COREH-08 + COREH-11 — three stale/doc-drift rewords.** *H/M.*
+7. **COREH-09 — labelled focus-ordering arg.** Style-only; the biggest *design* change of the set and the only judgment call.
+
+**Net:** ≈ −13 lines in core scope plus three doc rewords; none `[DEF]`. The deliverable conclusion: after v3, the hub is in high-quality shape — remaining complexity is concentrated in single-owner, heavily-commented subtle paths (asHandler guard, isRandrEvent masking semantics, drain budget semantics, signal pipe-token design, spawn message classification) whose compression would trade away the comments that make them correct. The highest-value reduction is the dead-import/ded-entry trio plus the restart override, which together leave the hub fully self-consistent with its own documentation.
