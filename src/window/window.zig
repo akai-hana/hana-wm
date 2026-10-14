@@ -8,9 +8,9 @@
 //! root children live in admission.zig.
 //!
 //! The event handlers themselves are split by concern beside this file --
-//! configure.zig (ConfigureRequest compliance), client_message.zig (EWMH
-//! ClientMessage), crossing.zig (Enter/Leave) -- and the per-batch border
-//! sweeps live in protocol/borders.zig; window.zig re-exports all of them so
+//! client_events.zig (ConfigureRequest compliance, EWMH ClientMessage,
+//! Enter/Leave) -- and the per-batch border sweeps live in
+//! protocol/borders.zig; window.zig re-exports all of them so
 //! `window.*` remains the single dispatch surface. Also this layer's stable
 //! facade: window.zig re-exports the icccm protocol surface and the
 //! window-module hook dispatch from registry.zig (providerOf, callHook*,
@@ -34,9 +34,7 @@ const props = @import("props");
 const wincache = @import("wincache");
 const borders = @import("borders");
 const child_cache = @import("child_cache");
-const configure = @import("configure");
-const crossing = @import("crossing");
-const client_message = @import("client_message");
+const client_events = @import("client_events");
 const pipeline = @import("pipeline");
 const admission = @import("admission");
 const actions = @import("actions");
@@ -63,15 +61,15 @@ pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
 pub const sendWMTakeFocusKnown = icccm.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
-// Event handlers and border sweeps split out of this file: configure.zig
-// (ConfigureRequest compliance), client_message.zig (EWMH ClientMessage),
-// crossing.zig (Enter/Leave), protocol/borders.zig (per-batch sweeps).
+// Event handlers and border sweeps split out of this file:
+// client_events.zig (ConfigureRequest, EWMH ClientMessage, Enter/Leave),
+// protocol/borders.zig (per-batch sweeps).
 // window.* stays the dispatch surface events.zig, input, reload and the
 // tests import, so their call sites are untouched.
-pub const handleConfigureRequest = configure.handleConfigureRequest;
-pub const handleEnterNotify = crossing.handleEnterNotify;
-pub const handleLeaveNotify = crossing.handleLeaveNotify;
-pub const handleClientMessage = client_message.handleClientMessage;
+pub const handleConfigureRequest = client_events.handleConfigureRequest;
+pub const handleEnterNotify = client_events.handleEnterNotify;
+pub const handleLeaveNotify = client_events.handleLeaveNotify;
+pub const handleClientMessage = client_events.handleClientMessage;
 pub const updateWorkspaceBorders = borders.updateWorkspaceBorders;
 pub const updateFloatingWindowBorders = borders.updateFloatingWindowBorders;
 pub const reloadBorders = borders.reloadBorders;
@@ -130,7 +128,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // init() cycle (session restart, test harness) starts from a clean slate
     // rather than carrying over whatever the previous cycle left behind.
     // Admission sub-state and the other reset disciplines live beside their
-    // owners (admission.init, props.reset, client_message.reset, ...).
+    // owners (admission.init, props.reset, client_events.reset, ...).
     child_cache.reset();
     query.init();
     focus.init();
@@ -145,9 +143,9 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // Admission sub-state (spawn queue, rules maps): reset and rules-map
     // rebuild live with the admission policy in admission.zig.
     admission.init(alloc);
-    // Client-message warn latches live in client_message.zig; re-arm them
+    // Client-message warn latches live in client_events.zig; re-arm them
     // with the rest of the reset discipline.
-    client_message.reset();
+    client_events.reset();
 }
 
 pub fn deinit() void {
