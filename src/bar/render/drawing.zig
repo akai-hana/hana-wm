@@ -11,7 +11,6 @@ const std = @import("std");
 const core = @import("core");
 const log = @import("log");
 const types = @import("types");
-const defaults = @import("defaults");
 const fonts = @import("fonts");
 const surface = @import("surface");
 const bindings = @import("bindings");
@@ -20,7 +19,7 @@ const bindings = @import("bindings");
 /// when unset. Single accessor shared by the clock segment and the bar's
 /// updateClock (each previously re-derived the same fallback).
 pub fn clockFormat(config: types.BarConfig) []const u8 {
-    return config.clock_format orelse defaults.default_clock_format;
+    return config.clock_format orelse types.default_clock_format;
 }
 
 // Cairo, Pango, and GLib C bindings for bar rendering live in
