@@ -25,6 +25,12 @@ fn tileRegion(
 ) void {
     const n = windows.len;
 
+    if (n == 0) return;
+    // Splitting a gap-less pane yields overlapping children that the parent
+    // then re-splits forever: an Env with min_dim==0 and gap==0 passed the
+    // min-dim gate and never terminated (zero-Env default was a live hazard).
+    if (r.w == 0 or r.h == 0) return;
+
     if (n == 1) {
         // All leaf placements are visible; hints applied by tiling.emitView.
         const border2: u16 = model.doubledBorder(ctx.m);
