@@ -54,7 +54,6 @@ fn pipelineModel() *model.Model {
     const m = pipeline.mut();
     m.* = helpers.makeModel(); // makeModel already re-arms the module stores
     ledger.init();
-    query.init();
     return m;
 }
 

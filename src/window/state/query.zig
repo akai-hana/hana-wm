@@ -1,16 +1,18 @@
-//! Read-only query facade over the model singleton (the single source of truth
+//! Read-only accessors over the model singleton (the single source of truth
 //! for windows and workspaces): is a window managed/tiled/on the current
 //! workspace, is the all-view active, plus a caller-owned snapshot of the
 //! registry for callers that sweep it and the comptime workspace label table
 //! the bar renders.
 //!
-//! Writes are deliberately confined here: init/deinit latch the workspace
-//! count from config (clamped to max_workspaces, 1 when workspaces are off)
-//! and clear the per-workspace focus MRU, both through a file-private gate.
-//! Every other model mutation belongs to its transition owner (actions/window/
-//! focus); no shared writable token escapes this read facade. All model reads
-//! go through core.isModelReady() (the one spelling), so boot order never
-//! touches an undefined instance.
+//! This file holds NO state and NO lifecycle: the workspace count is derived
+//! from the live config on read, and the focus-MRU clear belongs to the model
+//! owner (pipeline.clearFocusMru, invoked by the window layer's reset
+//! discipline). Every model mutation belongs to its transition owner
+//! (actions/window/focus); all model reads go through core.isModelReady()
+//! (the one spelling), so boot order never touches an undefined instance.
+//! It exists as a LIGHT read surface: core/loop, core/proc, input and bar
+//! readers must not import window.zig (drags focus/admission/actions) or
+//! pipeline's reconcile chain for a predicate.
 
 const std = @import("std");
 
@@ -81,51 +83,8 @@ pub fn allWindowsInto(buf: []Entry) []const Entry {
     return buf[0..n];
 }
 
-// Per-workspace focus MRU (facade over model.ws[ws].focus_mru)
-//
-// Order convention: index 0 = most recent (matches model.setFocus's
-// front-insert). Fallback selection reads the MRU through
-// model.fallbackFocusCandidate.
-
-fn clearFocusMru() void {
-    if (!core.isModelReady()) return;
-    const mm = pipeline.mut();
-    for (&mm.ws) |*s| s.focus_mru.clear();
-}
-
-// Lifecycle / workspace count (latched from config at init)
-
-var workspace_count: usize = 1;
-
-/// Latch the workspace count directly from the live config, collapsing to a
-/// single implicit workspace when the workspaces feature is disabled. The
-/// u64 workspace bitmask caps the count; clamp (never crash) so a corrupt
-/// config count can't overflow the mask in ReleaseFast. Callers before
-/// core.init (headless test harnesses) keep the default.
-fn latchWorkspaceCount() void {
-    if (core.isReady()) {
-        const cs = core.getState().config.workspaces;
-        workspace_count = if (cs.enabled) @min(@as(usize, cs.count), constants.max_workspaces) else 1;
-    }
-}
-
-pub fn init() void {
-    latchWorkspaceCount();
-    clearFocusMru();
-}
-
-/// Re-latch the workspace count after a config swap. The count is config-derived
-/// and the `[workspaces] count`/`enabled` knobs are reloadable, but it used to
-/// be read only at init: a hot reload kept the boot value for admission
-/// clamping, the bar frame, and tag rendering until the next full restart.
-pub fn reLatchWorkspaceCount() void {
-    latchWorkspaceCount();
-}
-
-pub fn deinit() void {
-    workspace_count = 1;
-    clearFocusMru();
-}
+// Lifecycle / workspace count: derived on read from the live config (no
+// latch, no re-latch on reload — see getWorkspaceCount).
 
 /// Read-through facade over `model.current`, the single source of truth:
 /// every write path (actions.switchTo) mutates the model directly, so a
@@ -138,8 +97,17 @@ pub inline fn getCurrentWorkspace() ?u8 {
     return pipeline.model().current.index;
 }
 
+/// The workspace count from the live config, derived on read: collapses to a
+/// single implicit workspace when the workspaces feature is disabled. The
+/// u64 workspace bitmask caps the count; clamp (never crash) so a corrupt
+/// config count can't overflow the mask in ReleaseFast. Callers before
+/// core.init (headless test harnesses) get the default of 1. A hot reload
+/// that edits `[workspaces] count`/`enabled` is picked up by the next read —
+/// no latch to re-arm.
 pub inline fn getWorkspaceCount() usize {
-    return workspace_count;
+    if (!core.isReady()) return 1;
+    const cs = core.getState().config.workspaces;
+    return if (cs.enabled) @min(@as(usize, cs.count), constants.max_workspaces) else 1;
 }
 
 /// True while the all_workspaces (Mod+5) all-view flag is active: every

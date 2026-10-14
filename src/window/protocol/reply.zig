@@ -1,16 +1,49 @@
-//! WM_NORMAL_HINTS / WM_SIZE_HINTS parsing (pure).
-//!
-//! The ICCCM size-hint reply is a u32 array: flags word followed by
-//! up to 17 fields (through base_size/win_gravity). This file owns the
-//! flags -> field-offset -> model.SizeHints derivation and nothing else:
-//! no X round trips, no cache writes. The caller owns where the result
-//! lands -- the model entry, threaded as a parameter at admission time
-//! (see manage.mapRequest; no model entry exists when the reply drains).
-//! Pure by construction, so the derivation is unit-testable without a
-//! connection (hints_test.zig).
+//! Pure ICCCM property-reply parsing: the WM_CLASS split (identity) and
+//! the WM_NORMAL_HINTS / WM_SIZE_HINTS field walk (size hints). Both take
+//! the reply BYTES/fields and derive model values; no X round trips, no
+//! cache writes. The caller owns the wire read (icccm.firePropQuery +
+//! reply drain) and where the result lands -- the model entry, threaded
+//! as a parameter at admission time (see manage.mapRequest). Pure by
+//! construction, so both derivations are unit-testable without a
+//! connection (reply_test.zig). Former identity.zig + hints.zig, merged
+//! 2026-10-10; the X-wired query/refresh half stays in icccm.zig.
 
+const std = @import("std");
 const model = @import("model");
 const scaling = @import("scaling");
+
+// ---------------------------------------------------------------------------
+// WM_CLASS split (former identity.zig).
+// ---------------------------------------------------------------------------
+
+/// The two WM_CLASS components: `instance` (the res_name,
+/// e.g. "alacritty") and `class` (the res_class, e.g.
+/// "Alacritty").
+pub const WmClass = struct {
+    instance: []const u8,
+    class: []const u8,
+};
+
+/// Splits a WM_CLASS property value: two consecutive
+/// null-terminated strings, "instance\x00class\x00". Trailing
+/// nulls are trimmed per component, not on the whole
+/// buffer: trimming the whole buffer first turns
+/// "instance\x00\x00" (empty class) into "instance" with no
+/// separator, silently skipping the instance lookup.
+/// Returns null when no separator is present at all.
+pub fn parseWmClass(data: []const u8) ?WmClass {
+    const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
+    const instance = data[0..sep];
+
+    const class_start = sep + 1;
+    const class_raw = if (class_start < data.len) data[class_start..] else "";
+    const class_end = std.mem.indexOfScalar(u8, class_raw, 0) orelse class_raw.len;
+    return .{ .instance = instance, .class = class_raw[0..class_end] };
+}
+
+// ---------------------------------------------------------------------------
+// WM_NORMAL_HINTS field walk (former hints.zig).
+// ---------------------------------------------------------------------------
 
 /// ICCCM flag bits (the PMinSize/PMaxSize/... word of the reply).
 const p_min_size: u32 = 0x10;

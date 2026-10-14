@@ -7,11 +7,11 @@
 //! the five-cookie admission pipeline) and boot-time adoption of pre-existing
 //! root children live in admission.zig.
 //!
-//! The event handlers themselves are split by concern beside this file --
+//! The event handlers themselves live in protocol/ beside this file --
 //! client_events.zig (ConfigureRequest compliance, EWMH ClientMessage,
-//! Enter/Leave) -- and the per-batch border sweeps live in
-//! protocol/borders.zig; window.zig re-exports all of them so
-//! `window.*` remains the single dispatch surface. Also this layer's stable
+//! Enter/Leave) -- and the per-batch border sweeps in protocol/borders.zig;
+//! window.zig re-exports all of them so `window.*` remains the single
+//! dispatch surface. Also this layer's stable
 //! facade: window.zig re-exports the icccm protocol surface and the
 //! window-module hook dispatch from registry.zig (providerOf, callHook*,
 //! etc.) so `window.*` is the import surface instead of
@@ -26,19 +26,18 @@ const log = @import("log");
 const query = @import("query");
 const focus = @import("focus");
 const icccm = @import("icccm");
-const hints = @import("hints");
+const reply_mod = @import("reply");
 const build_options = @import("build_options");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
-const props = @import("props");
 const wincache = @import("wincache");
 const borders = @import("borders");
-const child_cache = @import("child_cache");
 const client_events = @import("client_events");
 const pipeline = @import("pipeline");
 const admission = @import("admission");
 const actions = @import("actions");
 const model_mod = @import("model");
+const idmap = @import("idmap");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
@@ -88,19 +87,69 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?model_mod.Rect {
     return requests.rectFromXcb(reply);
 }
 
+// ---------------------------------------------------------------------------
+// Child XID -> managed toplevel cache (former child_cache.zig, merged
+// 2026-10-10), backing findManagedWindow's fast path below. A fixed flat
+// array (Electron nests at most 3-5 children per app); keyed storage makes
+// the hit O(1) with no capacity cliff, since the lookup sits on the slow
+// path of a BLOCKING xcb_query_tree round trip.
+// ---------------------------------------------------------------------------
+
+/// Child-window cache ceiling: bounds findManagedWindow's child->toplevel
+/// rows (a flat array; Electron/Qt nest at most a handful of children per app).
+const capacity: usize = 64;
+
+/// child XID -> managed toplevel (IdMap, not a BoundedList).
+var cache: idmap.IdMap(u32, capacity) = .{};
+
+/// Re-arm for a deinit()+init() cycle (window.init's reset discipline).
+pub fn reset() void {
+    cache = .{};
+}
+
+/// Record that `child` resolves to `managed` so future tree walks are skipped.
+pub fn put(child: u32, managed: u32) void {
+    if (child == managed) return; // direct hit, not a child, nothing to cache
+    // At cap, put returns false and the entry is dropped; the tree walk
+    // fallback is always correct, so a miss only costs the walk it would have
+    // paid anyway.
+    _ = cache.put(child, managed);
+}
+
+/// Cached child->toplevel resolution; null on miss (fresh tree walk).
+pub fn get(child: u32) ?u32 {
+    return cache.get(child);
+}
+
+/// Called from unmanageWindow so stale child entries don't linger.
+///
+/// A value-keyed sweep, which is the one thing keyed storage does NOT make
+/// O(1): collect first, then remove. Removing inside the iteration would
+/// tombstone slots the live iterator is walking over.
+pub fn evictFor(managed_win: u32) void {
+    var stale: [capacity]u32 = undefined;
+    var n: usize = 0;
+    var it = cache.iterator();
+    while (it.next()) |item| {
+        if (item.val.* != managed_win) continue;
+        stale[n] = item.key;
+        n += 1;
+    }
+    for (stale[0..n]) |child| _ = cache.remove(child);
+}
+
 /// Walks up the X11 window tree from `win` to find the managed toplevel.
 ///
 /// Fast paths: direct managed window (most common), then the child-window
-/// cache (common for Electron/Qt after the first hover, zero XCB calls) --
-/// the cache itself lives in state/child_cache.zig. Slow path: one blocking
-/// xcb_query_tree round-trip per level (2-3 for Electron), only on the first
-/// hover over a new child window.
+/// cache above (common for Electron/Qt after the first hover, zero XCB
+/// calls). Slow path: one blocking xcb_query_tree round-trip per level
+/// (2-3 for Electron), only on the first hover over a new child window.
 pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn (u32) bool) u32 {
     if (is_managed(win)) return win;
 
     // Cache hit; validate the cached toplevel is still managed (it may have
     // been unmanaged since the entry was written), else fall through.
-    if (child_cache.get(win)) |managed| {
+    if (get(win)) |managed| {
         if (is_managed(managed)) return managed;
     }
 
@@ -116,7 +165,7 @@ pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn 
         if (tree_reply.*.parent == tree_reply.*.root or tree_reply.*.parent == 0) return win;
         current = tree_reply.*.parent;
         if (is_managed(current)) {
-            child_cache.put(win, current);
+            put(win, current);
             return current;
         }
     }
@@ -128,9 +177,9 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // init() cycle (session restart, test harness) starts from a clean slate
     // rather than carrying over whatever the previous cycle left behind.
     // Admission sub-state and the other reset disciplines live beside their
-    // owners (admission.init, props.reset, client_events.reset, ...).
-    child_cache.reset();
-    query.init();
+    // owners (admission.init, icccm.reset, client_events.reset, ...).
+    reset();
+    pipeline.clearFocusMru();
     focus.init();
     wincache.init(alloc);
     // Uniform lifecycle dispatch: each compiled-in sub-system's init
@@ -139,7 +188,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // only user; contract's two dispatch primitives are providerOf +
     // callAll, per the 6->2 collapse).
     for (window_mods) |wm| if (wm.init) |f| try f();
-    props.reset();
+    icccm.reset();
     // Admission sub-state (spawn queue, rules maps): reset and rules-map
     // rebuild live with the admission policy in admission.zig.
     admission.init(alloc);
@@ -156,15 +205,15 @@ pub fn deinit() void {
     // Free the admission sub-state's heap-backed memory (spawn queue,
     // rules maps) before its reset wipes the struct.
     admission.deinit();
-    // Clear the focus-property cache before focus/query deinit,
+    // Clear the focus-property cache before focus deinit,
     // whose managed-window sweeps must not encounter a partially-valid
     // cache.
-    props.reset();
+    icccm.reset();
     focus.deinit();
-    query.deinit();
+    pipeline.clearFocusMru();
     // Empty the child cache so accidental post-deinit lookups MISS instead
     // of silently serving stale child->toplevel rows. init() re-arms it.
-    child_cache.reset();
+    reset();
 }
 
 // Window predicates
@@ -247,12 +296,12 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
 fn unmanageWindow(win: u32) void {
     // Covering truth is model-side (actions.unmanage reads it); the module
     // store is queried through the registry below.
-    props.evict(win);
+    icccm.evict(win);
 
     // Evict child-cache entries pointing at this toplevel, so a new window
     // reusing the same XID can't be mis-identified as its child on the next
     // hover.
-    child_cache.evictFor(win);
+    evictFor(win);
 
     // Local bookkeeping, before the grab
     // wincache.removeWindow unconditionally evicts the combined cache entry
@@ -321,7 +370,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 
 fn refreshSizeHints(win: u32) void {
     const conn = core.getState().conn;
-    const cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, hints.wm_normal_hints_long_length);
+    const cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, reply_mod.wm_normal_hints_long_length);
     // Always drain the reply (parseSizeHints consumes and frees it), then
     // apply: PropertyNotify refresh, post-registration -- the model entry is
     // the one store (layouts read Entry.size_hints via contract's HintsView).
@@ -346,5 +395,5 @@ pub fn parseSizeHints(
     const reply = xcb.xcb_get_property_reply(core.getState().conn, cookie, null) orelse return null;
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len < 5) return null;
-    return hints.parse(icccm.u32Values(reply), reply.*.value_len);
+    return reply_mod.parse(icccm.u32Values(reply), reply.*.value_len);
 }
