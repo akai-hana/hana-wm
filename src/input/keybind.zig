@@ -10,13 +10,15 @@ const types = @import("types");
 const keysyms = @import("keysyms");
 const xkbcommon = @import("xkbcommon");
 const masks = @import("masks");
+const constants = @import("constants");
 
 /// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
 /// config's keybindings, plus the keycode-resolution step that feeds it.
 /// Module-owned by `input` (not embedded in Config) so the config layer stays
 /// X-free; `input.deinitKeybinds` tears it down before the Actions its entries
 /// point into are freed.
-/// Orders the dispatch table by packed key. The key is a u64 built as
+/// Orders the dispatch table by packed key, applied ONCE after the table is
+/// built (see rebuildDispatchMap). The key is a u64 built as
 /// (modifiers << 32) | keysym, so this is also a plain numeric order on the
 /// whole entry.
 fn entryLessThan(_: void, a: DispatchEntry, b: DispatchEntry) bool {
@@ -115,28 +117,33 @@ pub const KeybindResolver = struct {
             log.warnOnErr(e, "keybind dispatch table build");
             return;
         };
+        // Dedup FIRST, in config order (so each shadowed binding is reported
+        // once, where the reader of the config sees it), then sort ONCE. The
+        // scan is O(n^2) over a slice that holds tens of bindings, and it
+        // replaces the old append-then-re-sort-per-entry, which re-ordered the
+        // half-built table on every insert.
         for (keybindings, 0..) |*kb, i| {
             const entry: DispatchEntry = .{
                 .key = dispatchKey(kb.modifiers, kb.keysym),
                 .action = &kb.action,
             };
-            // Deduplicate on insert: a later binding with the same effective
-            // key wins, which is what replacing the existing entry does. Done
-            // on the (still short) slice rather than after sorting, so the
-            // warning is reported once per shadowed binding in config order.
-            if (self.find(entry.key)) |idx| {
+            // A later binding with the same effective key wins, which is what
+            // replacing the existing entry does.
+            var shadowed: ?usize = null;
+            for (self.entries.items, 0..) |e, j| {
+                if (e.key == entry.key) {
+                    shadowed = j;
+                    break;
+                }
+            }
+            if (shadowed) |idx| {
                 logShadowConflict("Keybinding", i, kb.modifiers, "keysym", kb.keysym);
                 self.entries.items[idx] = entry;
                 continue;
             }
             self.entries.appendAssumeCapacity(entry);
-            std.sort.heap(
-                DispatchEntry,
-                self.entries.items,
-                {},
-                entryLessThan,
-            );
         }
+        std.sort.heap(DispatchEntry, self.entries.items, {}, entryLessThan);
     }
 
     /// O(log n) keybinding lookup for use on the hot key-press path.
@@ -227,10 +234,6 @@ pub fn resolveKeycodes(
     return out[0..keybindings.len];
 }
 
-/// Log the bindings that resolved to nothing, ONCE per resolve rather than once
-/// per binding. A config with a whole keyboard's worth of shifted-symbol
-/// bindings used to produce one warning line per binding, which buries the one
-/// line that matters.
 /// The root-window mouse grab, as data. `input.zig` builds this from the very
 /// tables `setupGrabs` iterates, so the grab and the reachability rule cannot
 /// drift apart. Passed IN rather than imported so this module stays free of X
@@ -244,6 +247,19 @@ pub const MouseGrabSpec = struct {
     /// `normalizeModifiers` masks off before dispatch -- so they can neither
     /// make a bind reachable nor unreachable.
     lock_bits: u16,
+};
+
+/// The buttons the root mouse grab covers, in grab order. Lives with the spec
+/// it fills (both ends of `undeliverableMouseBindReason`'s argument), not in
+/// `grabs`: the grab layer reads this module's resolved keybind list, so a
+/// reference back from there would be a second import cycle beside the one
+/// that already ties grabs to input.
+pub const mouse_grab_buttons = [_]u8{
+    constants.mouse_button_left,
+    constants.mouse_button_middle,
+    constants.mouse_button_right,
+    constants.mouse_button_scroll_up,
+    constants.mouse_button_scroll_down,
 };
 
 /// Why `mb` can never be delivered by `grab`, or null when it can.
@@ -266,6 +282,10 @@ pub fn undeliverableMouseBindReason(mb: types.MouseBind, grab: MouseGrabSpec) ?[
     return null;
 }
 
+/// Log the bindings that resolved to nothing, ONCE per resolve rather than once
+/// per binding. A config with a whole keyboard's worth of shifted-symbol
+/// bindings used to produce one warning line per binding, which buries the one
+/// line that matters.
 pub fn reportUnresolved(resolved: []const ResolvedBind) void {
     var count: usize = 0;
     for (resolved) |r| {

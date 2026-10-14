@@ -14,7 +14,6 @@ const keymap = @import("keymap");
 const xkb = keymap.xkb;
 
 const xkb_context = keymap.xkb_context;
-const xkb_keymap = keymap.xkb_keymap;
 
 /// The XKB setup requests are sent once after setup; these retries cover the
 /// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,

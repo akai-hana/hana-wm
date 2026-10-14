@@ -4,14 +4,16 @@
 //! 05-input round 2). Both are lifecycle concerns -- installed
 //! once at boot, reinstalled on config reload and on a
 //! keyboard-mapping change -- not per-event path work, so they
-//! live apart from the event loop.
+//! live apart from the event loop, beside the input layer whose
+//! resolved keybind list they read (and, for the button set, beside the
+//! reachability rule in keybind.zig that judges against it).
 
 const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
 const masks = @import("masks");
-const constants = @import("constants");
+const keybind = @import("keybind");
 const log = @import("log");
 const input = @import("input");
 
@@ -72,16 +74,17 @@ fn checkGrabCookies(cookies: []const CookieEntry) usize {
     return failed;
 }
 
-/// The buttons the root mouse grab covers, in grab order. Published because
-/// `input.undeliverableMouseBindReason` has to judge reachability against the
-/// very set that is grabbed here; one list, so the grab and the check cannot
-/// disagree about which buttons can ever arrive.
-pub const mouse_grab_buttons = [_]u8{
-    constants.mouse_button_left,
-    constants.mouse_button_middle,
-    constants.mouse_button_right,
-    constants.mouse_button_scroll_up,
-    constants.mouse_button_scroll_down,
+/// The label that names a mouse grab in a failure message.
+const MouseGrabLabel = struct { button: u8, lock: u16 };
+
+/// One fired mouse-grab request with its failure label. The AoS pair for the
+/// two parallel arrays (cookies + labels, same length, same index) this
+/// replaces -- the key path already stored its cookie with its keycode the
+/// same way (`CookieEntry`), and a label that travelled separately could
+/// desynchronize from its cookie only by a range-slice typo.
+const MouseGrab = struct {
+    cookie: xcb.xcb_void_cookie_t,
+    label: MouseGrabLabel,
 };
 
 /// Grabs Super+Button{1,2,3,4,5} (including the scroll buttons) on the root
@@ -96,48 +99,47 @@ pub const mouse_grab_buttons = [_]u8{
 /// not take.
 pub fn grabMouseButtons() void {
     const cs = core.getState();
-    var cookies: [mouse_grab_buttons.len * masks.lock_modifiers.len]xcb.xcb_void_cookie_t = undefined;
-    var labels: [mouse_grab_buttons.len * masks.lock_modifiers.len]MouseGrabLabel = undefined;
+    var grabs: [keybind.mouse_grab_buttons.len * masks.lock_modifiers.len]MouseGrab = undefined;
     var n: usize = 0;
-    for (mouse_grab_buttons) |button| {
+    for (keybind.mouse_grab_buttons) |button| {
         for (masks.lock_modifiers) |lock| {
-            cookies[n] = xcb.xcb_grab_button(
-                cs.conn,
-                0,
-                cs.root,
-                xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-                    xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
-                    xcb.XCB_EVENT_MASK_POINTER_MOTION,
-                xcb.XCB_GRAB_MODE_SYNC,
-                xcb.XCB_GRAB_MODE_SYNC,
-                cs.root,
-                xcb.XCB_NONE,
-                button,
-                @intCast(masks.mod_super | lock),
-            );
-            labels[n] = .{ .button = button, .lock = lock };
+            grabs[n] = .{
+                .cookie = xcb.xcb_grab_button(
+                    cs.conn,
+                    0,
+                    cs.root,
+                    xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+                        xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
+                        xcb.XCB_EVENT_MASK_POINTER_MOTION,
+                    xcb.XCB_GRAB_MODE_SYNC,
+                    xcb.XCB_GRAB_MODE_SYNC,
+                    cs.root,
+                    xcb.XCB_NONE,
+                    button,
+                    @intCast(masks.mod_super | lock),
+                ),
+                .label = .{ .button = button, .lock = lock },
+            };
             n += 1;
         }
     }
     // Fire every cookie before reading any reply, the same round-trip
     // discipline as the key grabs.
     var failed: usize = 0;
-    for (cookies[0..n], labels[0..n]) |cookie, label| {
-        if (xcb.xcb_request_check(cs.conn, cookie)) |err| {
+    for (grabs[0..n]) |grab| {
+        if (xcb.xcb_request_check(cs.conn, grab.cookie)) |err| {
             std.c.free(err);
             failed += 1;
             if (failed <= 4) log.warn(
                 "Failed to grab Super+Button{d}{s} on the root window; " ++
                     "another client is holding it, so that mouse binding will not fire",
-                .{ label.button, if (label.lock == 0) "" else " (with a lock modifier held)" },
+                .{ grab.label.button, if (grab.label.lock == 0) "" else " (with a lock modifier held)" },
             );
         }
     }
     if (failed > 4) log.warn("{} further mouse grab(s) failed", .{failed - 4});
     _ = xcb.xcb_flush(cs.conn);
 }
-
-const MouseGrabLabel = struct { button: u8, lock: u16 };
 
 /// Ungrabs all keys, then re-grabs every configured keybinding across all
 /// lock modifier combinations. Fires all grab cookies before reading any

@@ -16,9 +16,7 @@ const window = @import("window");
 const tracking = @import("tracking");
 const focus = @import("focus");
 const keybind = @import("keybind");
-const build_options = @import("build_options");
 const actions = @import("actions");
-const grabs = @import("grabs");
 const surfaces = @import("surfaces").Surfaces;
 // The action dispatcher and its scaffold graft live in
 // dispatch.zig (split out of input.zig): mouse binds dispatch
@@ -151,7 +149,7 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
         // The bind dispatch already released the grab.
         .bound_action => {},
         .start_drag => {
-            if (build_options.has_floating) actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
+            actions.startDrag(managed_window, event.detail, event.root_x, event.root_y);
             keepDragGrab(event.time);
         },
     }
@@ -165,7 +163,7 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     // drag state latches and later un-pressed motions keep moving the window
     // via the still-active updateDrag path. Route to the bar only when no
     // floating drag is in flight.
-    if (build_options.has_floating and actions.isDragging()) {
+    if (actions.isDragging()) {
         actions.stopDrag();
         return;
     }
@@ -187,7 +185,7 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     // window: routing to the bar first would freeze updateDrag (the drag stops
     // moving over the bar) and feed spurious scrub motion. Route to the bar
     // only when no floating drag is in flight.
-    if (build_options.has_floating and actions.isDragging()) {
+    if (actions.isDragging()) {
         actions.updateDrag(event.root_x, event.root_y);
         return;
     }
@@ -213,10 +211,11 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
 /// order so it can be found.
 pub fn reportUndeliverableMouseBinds() void {
     const binds = core.getState().config.mouse_bindings.items;
-    // The grab as `setupGrabs` actually makes it, handed to the pure rule so
-    // that rule needs no knowledge of the X layer and stays unit-testable.
+    // The grab as `grabs.grabMouseButtons` actually makes it, handed to the
+    // pure rule so that rule needs no knowledge of the X layer and stays
+    // unit-testable.
     const grab: keybind.MouseGrabSpec = .{
-        .buttons = &grabs.mouse_grab_buttons,
+        .buttons = &keybind.mouse_grab_buttons,
         .modifiers = masks.mod_super,
         .lock_bits = masks.lock_bits,
     };
