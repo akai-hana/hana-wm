@@ -98,11 +98,8 @@ pub fn retileWithFallback(m: *model_mod.Model, fs_current: bool, was_focused: bo
     retile(.{ .mode = .focus_restack, .bump_fullscreen = fs_current }, ft);
 }
 
-// ---------------------------------------------------------------------------
-// Layout-parameter transitions: one model transition + one reconcile entry,
-// over the active workspace's `LayoutParams`.
-// ---------------------------------------------------------------------------
-
+/// Layout-parameter transitions: one model transition + one reconcile entry,
+/// over the active workspace's `LayoutParams`.
 /// Secondary-column balance swing cap for grow_stack adjustments (see
 /// StackBoost.fromBalance).
 const max_primary_swing: f32 = 6.0;
@@ -186,12 +183,9 @@ pub fn moveFocused(delta: i32) void {
     pipeline.reconcileGrab(.{});
 }
 
-// ---------------------------------------------------------------------------
-// Viewport transitions (scrollable-tile viewport over the layout params).
-// The viewport is resolved through the layout METADATA (slotWidth/maxOffset
-// hooks), so it rides the same `tiling_seam` reach as the cycles above.
-// ---------------------------------------------------------------------------
-
+/// Viewport transitions (scrollable-tile viewport over the layout params).
+/// The viewport is resolved through the layout METADATA (slotWidth/maxOffset
+/// hooks), so it rides the same `tiling_seam` reach as the cycles above.
 const ViewportContext = struct {
     active: bool,
     tiled_count: usize,

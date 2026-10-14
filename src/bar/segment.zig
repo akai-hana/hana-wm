@@ -302,11 +302,8 @@ pub fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: an
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Segment-binding builder (formerly scaffold.zig): width-state cache, the
-// comptime `module` builder (the ONE binding style), finishDraw/drawAndStore.
-// ---------------------------------------------------------------------------
-
+/// Segment-binding builder (formerly scaffold.zig): width-state cache, the
+/// comptime `module` builder (the ONE binding style), finishDraw/drawAndStore.
 /// Per-module width cache: the ACTUAL drawn width from the last render, read
 /// by the default naturalWidth for the row reservation (0 until the first
 /// draw), invalidated on config reload. The comptime `tag` must differ per

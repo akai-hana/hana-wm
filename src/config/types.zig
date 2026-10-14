@@ -197,10 +197,7 @@ pub fn freeStringMap(
     if (retain_capacity) map.clearRetainingCapacity() else map.deinit(allocator);
 }
 
-// ---------------------------------------------------------------------------
-// The always-present core config: keybindings, mouse bindings, DPI override.
-// ---------------------------------------------------------------------------
-
+/// The always-present core config: keybindings, mouse bindings, DPI override.
 pub const CoreConfig = struct {
     keybindings: std.ArrayList(Keybind) = .empty,
     mouse_bindings: std.ArrayList(MouseBind) = .empty,
@@ -225,13 +222,10 @@ pub const CoreConfig = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Shared class-rule vocabulary: the workspace admission rules live with the
-// always-compiled admission layer's signatures (which take `[]const Rule`
-// even when the workspaces fragment is absent), while the LIST owner
-// (`WorkspaceConfig`) is the optional workspaces fragment.
-// ---------------------------------------------------------------------------
-
+/// Shared class-rule vocabulary: the workspace admission rules live with the
+/// always-compiled admission layer's signatures (which take `[]const Rule`
+/// even when the workspaces fragment is absent), while the LIST owner
+/// (`WorkspaceConfig`) is the optional workspaces fragment.
 pub const Rule = struct {
     class_name: []const u8,
     /// Target workspace (0-based) for workspace rules; unused when `float`.
@@ -241,12 +235,9 @@ pub const Rule = struct {
     float: bool = false,
 };
 
-// ---------------------------------------------------------------------------
-// Default colors (kept as shared literals: they seed fragment field
-// initializers and read-time fallbacks without coupling the fragments to
-// each other).
-// ---------------------------------------------------------------------------
-
+/// Default colors (kept as shared literals: they seed fragment field
+/// initializers and read-time fallbacks without coupling the fragments to
+/// each other).
 /// Default color scheme for the focused/unfocused tiling borders.
 pub const default_focused_border: u32 = 0x5294E2;
 pub const default_unfocused_border: u32 = 0x383C4A;

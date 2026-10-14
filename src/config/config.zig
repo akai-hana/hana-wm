@@ -12,8 +12,8 @@ const snapshot_mod = @import("snapshot");
 const discover = @import("discover");
 
 // Re-exports: `config` stays the single import surface for callers
-// (main.zig, events.zig, session.zig, the tests); the re-exports below
-// are where the code now lives.
+// (main.zig, events.zig, session.zig, the tests); each symbol below is
+// defined in the module named by its initializer.
 pub const canonicalLayoutName = layout_names.canonicalLayoutName;
 pub const isLayoutName = layout_names.isLayoutName;
 pub const layout_name_grammar = layout_names.layout_name_grammar;
@@ -185,9 +185,9 @@ fn parseAndBuild(
 
 fn loadFallbackConfig(allocator: std.mem.Allocator) !composed.Config {
     // The embedded fallback is the FLOOR, not a dependency: if it is somehow
-    // absent (a build that did not embed it, a truncated binary), returning a
-    // boot-fatal error here made a missing convenience file take the WM down
-    // with it. `composed.parse` on an EMPTY document is the same defaults the
+    // absent (a build that did not embed it, a truncated binary), a boot-fatal
+    // error here would take the WM down over a missing convenience file.
+    // `composed.parse` on an EMPTY document is the same defaults the
     // embedded TOML encodes -- every fragment self-seeds its owned non-scalars
     // and its scalars come from field initializers -- so the floor holds even
     // with nothing embedded. The only thing lost is the fallback's own tuned
@@ -348,9 +348,7 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !composed.Config {
     // A user config that will not START is one the WM must not die on. A
     // parse error, a load ceiling, and a fragment's InvalidConfig all mean
     // "this config is not usable", so boot degrades the same way for all
-    // three: the embedded fallback. (InvalidConfig used to be a separate
-    // post-load `validate` step whose failure behaved differently from a
-    // parse error for no defensible reason; it now fails inside
+    // three: the embedded fallback. (InvalidConfig fails inside
     // `composed.parse`, so the two classes share one path.)
     const cfg = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
         // On reload the same errors propagate instead, so the live config is
@@ -364,19 +362,16 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !composed.Config {
     // A successful boot config becomes the re-exec hand-off snapshot (binary-
     // only reload). Guarded to a valid config so a parse-error or
     // validation-error fallback never overwrites the previous good snapshot
-    // (both now reach here through the same path, see above).
+    // (both reach here through the same path, see above).
     if (snapshot) refreshSnapshot(allocator);
     return cfg;
 }
 
-// ---------------------------------------------------------------------------
-// Reload change detection (former persist/diff.zig, merged 2026-10-10):
-// whether the key PAIR layout changed, so an unchanged reload can skip the
-// regrab. Bar and tiling deliberately have NO detector -- their rebuilds run
-// on every reload; a skip would leave borrowed state pointing at the box the
-// swap is about to release, and the rebuilds are idempotent.
-// ---------------------------------------------------------------------------
-
+/// Reload change detection: whether the key PAIR layout changed, so an
+/// unchanged reload can skip the regrab. Bar and tiling deliberately have NO
+/// detector -- their rebuilds run on every reload; a skip would leave borrowed
+/// state pointing at the box the swap is about to release, and the rebuilds
+/// are idempotent.
 pub const ConfigChanges = struct {
     keys: bool = false,
 };

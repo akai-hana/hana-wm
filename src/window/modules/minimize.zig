@@ -336,13 +336,10 @@ pub fn onWindowGone(win: u32) void {
     _ = g_recs.removeById(.win, win);
 }
 
-// ---------------------------------------------------------------------------
-// Parked-window commands: the old `src/actions/parked.zig` group, moved
-// beside the record table it fills. Each is one model transition plus one
-// reconcile entry, bound on `module` so the core reaches it through the
-// registry. Deleting this file drops hide/restore along with the records.
-// ---------------------------------------------------------------------------
-
+/// Parked-window commands: the old `src/actions/parked.zig` group, moved
+/// beside the record table it fills. Each is one model transition plus one
+/// reconcile entry, bound on `module` so the core reaches it through the
+/// registry. Deleting this file drops hide/restore along with the records.
 /// Atomicity: hide + fallback-focus + retile land under one grab.
 ///
 /// Focus policy reads MODEL truth (`m.focused`): hiding the focused

@@ -407,13 +407,10 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
     }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
 }
 
-// ---------------------------------------------------------------------------
-// The map-request tail and the post-geometry focus handoff (the old
-// `src/actions/manage.zig` group). Both end in ONE model transition plus ONE
-// reconcile, and both sit here because admission is what knows whether a
-// window has been registered at all.
-// ---------------------------------------------------------------------------
-
+/// The map-request tail and the post-geometry focus handoff (the old
+/// `src/actions/manage.zig` group). Both end in ONE model transition plus ONE
+/// reconcile, and both sit here because admission is what knows whether a
+/// window has been registered at all.
 /// MapRequest tail. The caller's front-end (event masks, property queries)
 /// has already run; this registers the window in
 /// the model and lets ONE reconcile do map+pixel+bw+geom(+ABOVE winner) for
@@ -544,14 +541,11 @@ pub fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
     return rule.float;
 }
 
-// ---------------------------------------------------------------------------
-// Session adoption (former restore.zig, merged 2026-10-10): the re-exec-
-// only path where a successor WM takes over the X clients a predecessor
-// left behind. main calls adoptSession exactly once -- after surfaces.init()
-// (bar up so bar-aware work area is live) and before events.run() --
-// sequencing handoff, window adoption, and focus against each other.
-// ---------------------------------------------------------------------------
-
+/// Session adoption (former restore.zig, merged 2026-10-10): the re-exec-
+/// only path where a successor WM takes over the X clients a predecessor
+/// left behind. main calls adoptSession exactly once -- after surfaces.init()
+/// (bar up so bar-aware work area is live) and before events.run() --
+/// sequencing handoff, window adoption, and focus against each other.
 /// Adopt the session described by `restore_path`, if there is one to adopt.
 ///
 /// Called after the bar is up, so the bar-aware work area is already live and

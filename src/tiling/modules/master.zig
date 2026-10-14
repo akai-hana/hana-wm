@@ -38,10 +38,10 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // division panic; floor it to 1 so the degenerate case can't (the fit
     // count then becomes available/1 = huge, which the stack/clamp handle).
     // The same row_fit caps the master COUNT below (floored at 1: a
-    // primary_count of 0 sized the master pane to zero width, leaving a
+    // primary_count of 0 would size the master pane to zero width, leaving a
     // dead strip instead of a full-width master), so surplus windows fall
     // through to the stack path (tileStack), which carries its own
-    // overflow/park guard -- a master column without the cap overflowed its
+    // overflow/park guard -- without the cap a master column overflows its
     // rows below the workarea.
     const space_per_window: u16 = ctx.min_dim +| rowPitch(ctx.m);
     const available: u32 = @as(u32, screen_h) -| @as(u32, m.gap);
@@ -136,9 +136,8 @@ fn tileColumn(
 }
 
 /// Per-window state for the water-fill: the snapshot `max_height` and the
-/// pinned (capped) flag. The AoS slot for the two parallel arrays this
-/// replaces -- both were indexed only by position in the column and consulted
-/// together on every pinning pass.
+/// pinned (capped) flag, packed in one AoS slot -- both are indexed only by
+/// position in the column and consulted together on every pinning pass.
 const FillSlot = struct {
     max_h: u16 = 0,
     capped: bool = false,
@@ -152,11 +151,10 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     const zero_boost = boost.isZero();
 
     // Per-window fill state as one AoS slot: the snapshot max_height AND the
-    // pinned (capped) flag, replacing two parallel arrays indexed only by
-    // window position. Snapshot each window's max_height ONCE: the water-fill
-    // below re-reads the hint inside its pinning passes, and hoisting it keeps
-    // those passes O(n) plain u16 compares instead of re-resolving the hint
-    // each time.
+    // pinned (capped) flag, indexed by window position. Snapshot each
+    // window's max_height ONCE: the water-fill below re-reads the hint inside
+    // its pinning passes, and hoisting it keeps those passes O(n) plain u16
+    // compares instead of re-resolving the hint each time.
     var slots_buf: [model.max_tiled_windows]FillSlot = @splat(.{});
     const slots = slots_buf[0..windows.len];
     for (windows, 0..) |win, i| slots[i].max_h = ctx.v.hintsFor(win).max_height;

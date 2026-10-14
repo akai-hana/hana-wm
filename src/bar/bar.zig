@@ -56,7 +56,7 @@ const dispatch = @import("contract_dispatch");
 const state = @import("state");
 // The state itself now lives in state.zig (a leaf, so the render /
 // input_events satellites can read it without importing this file back
-// -- that import was the cycle). Aliased here
+// that import was the cycle). Aliased here
 // so this file's own call sites keep their vocabulary; `gBar` is a
 // POINTER to the shared handle, because a struct-by-value alias would
 // silently copy it.

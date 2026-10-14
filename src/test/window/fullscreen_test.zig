@@ -3,15 +3,13 @@
 //! mutates (toggle round-trips, minimize-from-fullscreen restore,
 //! covering_ws intent, occupant scans, parked-ghost exclusion) and
 //! the module's own PendingBarTable (the deferred-bar intents).
-//! Extracted from model_test.zig; same makeModel fixture and
-//! fullscreen discipline as the parent file.
 
 // build-gate: fullscreen, minimize, workspaces
 const std = @import("std");
 const testing = std.testing;
 
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
-// warn-level overflow diagnostic; src/core/pure/log.zig silences all
+// warn-level overflow diagnostic; src/core/debug/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
 const model = @import("model");
 const helpers = @import("helpers");
@@ -32,7 +30,7 @@ const unknown_win: WindowId = 999;
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel;
 
 const regCur = helpers.regCur;
 const expectOrder = helpers.expectOrder;
@@ -110,8 +108,8 @@ test "fullscreen toggling and minimize-from-fullscreen" {
     try testing.expect(r.eql(e.anchor.floating));
 }
 
-// fullscreen -> minimize -> restore -> un-fullscreen
-// used to strand the window base-tiled but HOME-LESS.
+// fullscreen -> minimize -> restore -> un-fullscreen must not strand the
+// window base-tiled but HOME-LESS.
 test "fullscreen-prev restore re-adds slot; exit-fullscreen retiles" {
     var m = makeModel();
 

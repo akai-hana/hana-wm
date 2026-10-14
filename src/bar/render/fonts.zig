@@ -2,10 +2,9 @@
 //! target (`FontBook`), the one-shot text run, the metric probe, the
 //! sized-font list, and the Xft->Pango name conversion.
 //!
-//! Split OUT of `drawing.zig` in Phase 4 (step 24): font state has one
-//! owner (`FontBook`, composed into `DrawContext` in `drawing.zig` beside
-//! the surface from `surface.zig`), so the font lifecycle can change
-//! without touching the painters.
+//! Font state has one owner (`FontBook`, composed into `DrawContext` in
+//! `drawing.zig` beside the surface from `surface.zig`), so the font
+//! lifecycle can change without touching the painters.
 
 const std = @import("std");
 const log = @import("log");
@@ -15,9 +14,9 @@ const bindings = @import("bindings");
 
 /// Default point size for scaled metrics; also the size embedded in the
 /// fallback font description below, so the last-resort font and the metric
-/// probe always agree. It lives HERE (it was metrics.zig's) so this file
-/// needs no metrics import: metrics.zig's live probe adapters import this
-/// file, and the shared number must not force a fonts<->metrics cycle.
+/// probe always agree. It lives HERE so this file needs no metrics import:
+/// metrics.zig's live probe adapters import this file, and the shared number
+/// must not force a fonts<->metrics cycle.
 pub const default_scaled_font_size: u16 = 10;
 
 /// Fallback Pango font description used when no configured font loads:
@@ -33,22 +32,17 @@ const fallbackFont = default_fallback_font;
 /// and painted with: its own layout, its own attribute list, and its own font
 /// description.
 ///
-/// Previously a single layout was shared by every measure and every draw, and
-/// correctness depended on a caller pairing apply/restore correctly. Two
-/// things went wrong with that. A measure is a SIDE EFFECT -- it sets the
-/// shared layout's text -- so measuring a string and then painting something
-/// else paints the measurement unless the text is reset. And the style
-/// attributes had to be attached before a draw and detached after, so any
-/// unbalanced apply left bold/italic/colour on the layout and silently changed
-/// every LATER draw in the frame. Both were invisible in review because each
-/// helper looked correct in isolation.
+/// The point is that the state is not shared. A measure is a SIDE EFFECT -- it
+/// sets the layout's text -- so on one shared layout, measuring a string and
+/// then painting something else paints the measurement unless the text is
+/// reset; and style attributes attached for one draw and not detached change
+/// every LATER draw in the frame. A run's layout is private, so measuring it
+/// cannot disturb a draw, and its attributes die with it rather than needing
+/// a restore.
 ///
-/// A run removes the shared mutable state instead of policing it. The run's
-/// layout is private, so measuring it cannot disturb a draw, and its attributes
-/// die with it rather than needing a restore. The draw helpers are infallible
-/// A run that could not be built degrades to an empty run that measures
-/// zero and paints nothing, which is what a zero-length text draw would have
-/// done anyway.
+/// The draw helpers are infallible: a run that could not be built degrades to
+/// an empty run that measures zero and paints nothing, which is what a
+/// zero-length text draw would do anyway.
 pub const TextRun = struct {
     /// Null exactly when the run could not be built; every method tolerates it.
     layout: ?*bindings.PangoLayout = null,
@@ -80,12 +74,10 @@ pub const TextRun = struct {
 /// base font description, its cached metrics, and the size-suffixed description
 /// the indicator-glyph path needs.
 ///
-/// Extracted from `DrawContext` so the font lifecycle has one owner. The sized
-/// description used to be keyed by POINTER IDENTITY against the base
-/// description (`sized_font_base`), a key that only existed because a failed
-/// reload could swap the base underneath a long-lived context. `loadFont` is
-/// the only thing that swaps the base, so it invalidates the sized copy
-/// directly and the cache key is just `sized_px` -- no pointer comparison.
+/// The font lifecycle has one owner here. `loadFont` is the only thing that
+/// swaps the base description, so it invalidates the sized copy directly and
+/// the sized cache key is just `sized_px` -- no pointer comparison against the
+/// base.
 pub const FontBook = struct {
     allocator: std.mem.Allocator,
     pango_layout: *bindings.PangoLayout,

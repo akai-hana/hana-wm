@@ -522,12 +522,11 @@ test "ledger: the border-pixel dedup does not swallow a real black border" {
 }
 
 // Layout activation is ONE question, and "no active layout" still has to
-// produce a screen. Before this, the geometry path was gated on the COMPILE-time
-// `has_tiling` while the bar reported the active layout from
-// `contract.activeLayoutKind` (enabled AND registered). Gating on the resolved
-// kind alone is not enough: a `.tiled` entry with no placement is parked on
-// first sight (invisible) and frozen at its last rect afterwards (piled up), so
-// the inactive path must supply geometry rather than none.
+// produce a screen. The resolved kind (enabled AND registered, as the bar's
+// `contract.activeLayoutKind`) is not enough on its own: a `.tiled` entry with
+// no placement is parked on first sight (invisible) and frozen at its last
+// rect afterwards (piled up), so the inactive path must supply geometry
+// rather than none.
 test "An inactive layout floats every window at the work area" {
     var fx: Fixture = undefined;
     fx.init();
@@ -551,7 +550,7 @@ test "An inactive layout floats every window at the work area" {
         else => {},
     };
     // If production ever regressed to NOT emitting a configure for 201 on the
-    // inactive path, `tiled_rect` stays null and the force-unwrap used to
+    // inactive path, `tiled_rect` stays null and a force-unwrap there would
     // panic the whole test binary; assert the presence explicitly instead.
     const tiled_rect_val = tiled_rect orelse return error.MissingConfigure;
     try testing.expect(!tiled_rect_val.eql(helpers.std_wa));

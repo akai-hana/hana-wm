@@ -15,16 +15,6 @@ const bar_config = @import("bar_config");
 const drawing = @import("drawing");
 const testing = std.testing;
 
-// A test-local `Slot` + `slotAt` hit-test used to live here, with two
-// tests covering them. Deleted, because they tested NOTHING in hana: `Slot`
-// existed only in this file, `slotAt` was never called by production, and the
-// caller that IS real (`slider.pctFromSlot`) takes the already-resolved
-// (slot_x, slot_w) rather than a slot list. So the oracle was a second
-// implementation of a concept the test invented, and it could only ever
-// confirm that the test agreed with itself. The production behaviour those
-// tests appeared to cover -- a zero-width slot mapping an offset rather than
-// dividing by zero -- is asserted directly against pctFromSlot just below.
-
 test "a zero-width slot still maps an offset instead of dividing by zero" {
     // The first-click case: before the segment's first draw there is
     // no painted width, so the mapping must still be defined and monotonic.
@@ -86,11 +76,11 @@ test "a slider's reservation follows the width the bar reports" {
 
 // The value span the painter is handed. The paint that consumes
 // it cannot run headlessly (Pango + cairo + a display), so the boundary
-// arithmetic -- the part where an off-by-one hides -- is pure and tested here.
-// M13 shrinks the PAINTED range by one byte and passes the whole suite,
-// so these cases are what make the DECISION checkable even though the paint is
-// not. The span is explicit offsets, not a subslice, so the tests say
-// "at 4, length 2" instead of handing over a slice.
+// arithmetic -- the part where an off-by-one hides -- is pure and tested here:
+// without these cases a mutation shrinking the PAINTED range by one byte would
+// pass the whole suite, so they are what make the DECISION checkable even
+// though the paint is not. The span is explicit offsets, not a subslice, so
+// the tests say "at 4, length 2" instead of handing over a slice.
 
 test "valueRange accepts an explicit span" {
     const t = "CPU 42%";
@@ -114,9 +104,8 @@ test "valueRange is positional, so a repeated numeral resolves independently" {
 }
 
 test "valueRange rejects an out-of-range span rather than clamping it" {
-    // A bad span used to be a subslice check; it is now offsets, and an offset
-    // past the end must be refused rather than trimmed, or the painter would
-    // colour the wrong characters.
+    // The span is explicit offsets, so an offset past the end must be refused
+    // rather than trimmed, or the painter would colour the wrong characters.
     const t = "CPU 42%";
     try std.testing.expect(drawing.valueRange(t, 6, 4) == null); // past the end
     try std.testing.expect(drawing.valueRange(t, 99, 1) == null); // start past the end
@@ -126,9 +115,8 @@ test "valueRange rejects an out-of-range span rather than clamping it" {
 test "valueRange rejects an empty span but accepts a whole-string one" {
     // An empty span would colour nothing, so it collapses to the single-colour
     // path. A whole-string span is legal: a value-only display (a slider whose
-    // format is just "{pct}") wants its number tinted. That case was rejected
-    // before 25.3, when the span was a subslice and a caller handing over the
-    // whole text by accident looked identical to one meaning it.
+    // format is just "{pct}") wants its number tinted; with explicit offsets
+    // a deliberate whole-text span no longer looks like an accident.
     const t = "CPU 42%";
     try std.testing.expect(drawing.valueRange(t, 2, 0) == null);
     const all = drawing.valueRange(t, 0, t.len).?;
@@ -243,7 +231,7 @@ test "a control with no level hook is always present at 0" {
 }
 
 test "the slider re-export of the level mapping is the same function" {
-    // slider.pctFromSlot is now an alias for level.pctFromSlot. A test of the
+    // slider.pctFromSlot is an alias for level.pctFromSlot. A test of the
     // level alone would not notice if the core's alias pointed somewhere else,
     // so check the alias against the real thing across both edge cases.
     const cases = [_][3]u16{

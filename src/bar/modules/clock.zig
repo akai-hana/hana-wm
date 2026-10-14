@@ -192,12 +192,8 @@ fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_
     // fonts unavailable) must degrade to one retry per boundary -- the
     // second-boundary cadence -- never to a per-event-batch retry storm, and
     // only an assignment placed ahead of the fallible call can promise that.
-    // (Placed after, as this once was, a failing formatTime left the record
-    // untouched and every event batch retried -- the exact storm the comment
-    // promised to prevent. A >=128-byte clock_format made it permanent, since
-    // the stack buffer could never be large enough.) A genuine transient miss
-    // simply shows the previous second for up to one extra second, exactly as
-    // the cadence design intends.
+    // A genuine transient miss simply shows the previous second for up to one
+    // extra second, exactly as the cadence design intends.
     recordRendered(sec, mode, fmt);
     // Propagation is fine: the record above is already written, so a failure
     // still leaves the next retry one boundary away rather than one event

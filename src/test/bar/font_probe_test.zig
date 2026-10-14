@@ -9,15 +9,14 @@
 //! rather than assumed: removing `defer font.deinit()` leaves this file green.
 //!
 //! What they do buy is the half that IS observable. `probeFontMetrics`
-//! constructs a `FontState` and a Pango layout per call, and the fix added a
-//! `defer font.deinit()` to a function with a `catch return null` on the line
-//! after the state is built. A `defer` placed before the last read of the
-//! description -- the natural-looking refactor -- is a use-after-free, not a
-//! clean miss, and this is the only place the ordering gets exercised. So:
-//! repeated invocation, both font-name branches, and no crash.
+//! constructs a `FontState` and a Pango layout per call and has a
+//! `catch return null` on the line after the state is built. A `defer` placed
+//! before the last read of the description -- the natural-looking refactor --
+//! is a use-after-free, not a clean miss, and this is the only place the
+//! ordering gets exercised. So: repeated invocation, both font-name branches,
+//! and no crash.
 //!
-//! The leak fix itself is recorded in the ledger with this same
-//! limitation. Detecting it would need a GLib-level allocation counter or an
+//! Detecting the leak itself would need a GLib-level allocation counter or an
 //! RSS-delta test, both of which are environment-fragile enough that they
 //! would flake more often than the leak they watch.
 

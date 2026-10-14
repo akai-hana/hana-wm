@@ -1,18 +1,17 @@
 //! Word-at-cursor completion logic.
 //!
-//! `updateGhost` used to bail on ANY space in the buffer, so the second and
-//! later words of a command could never be completed: typing "git ch" showed no
-//! ghost even with "checkout" sitting in the executable table. The fix is to
-//! match the token under the CURSOR rather than a prefix of the line.
+//! `updateGhost` matches the token under the CURSOR rather than a prefix of
+//! the line: a prefix match bails on ANY space in the buffer, so the second
+//! and later words of a command never complete -- typing "git ch" shows no
+//! ghost even with "checkout" sitting in the executable table.
 //!
-//! `wordAtCursor` is the whole fix in one pure function, and it is public
+//! `wordAtCursor` is the whole policy in one pure function, and it is public
 //! precisely so it can be pinned here without the module's global state -- the
 //! ghost itself lives in `g`, which no test can seed. What is pinned is the
-//! behavior change: a token after a space is found, and the reported offset
-//! points at the token's first byte.
+//! behavior: a token after a space is found, and the reported offset points at
+//! the token's first byte.
 
-// Declared here, next to the imports that make it necessary, rather than in a
-// build.zig table that had to be kept in agreement with them by hand.
+// Declared here, next to the imports that make it necessary.
 // build-gate: vim, seg_prompt
 
 const std = @import("std");
@@ -28,8 +27,8 @@ test "a single-word buffer is one token at offset 0" {
 }
 
 test "the token under the cursor is the LAST word, not the first" {
-    // The regression this fixes: with a space present, the old code gave up
-    // entirely, so nothing here completed at all.
+    // Regression: with a space present, completion must not give up entirely --
+    // the token under the cursor is still found.
     const w = wordAtCursor("git ch", 6);
     try testing.expectEqualStrings("ch", w.token);
     try testing.expectEqual(@as(usize, 4), w.start);

@@ -144,9 +144,9 @@ pub fn build(b: *std.Build) !void {
 
     const root_mod = try wireRootModule(b, target, optimize, has_usr, shared_ctx, &discovery);
     const unit_test_step = try wireUnitTests(b, &discovery, features, test_filter);
-    const exe_step = buildExeAndRunStep(b, root_mod);
+    buildExeAndRunStep(b, root_mod);
     wireBenchStep(b, bench_enabled, unit_test_step);
-    try wireCheckSteps(b, exe_step, &discovery, features, shared_ctx, has_usr, target, optimize);
+    try wireCheckSteps(b, root_mod, &discovery, features, shared_ctx, has_usr, target, optimize);
 }
 
 // Shared context
@@ -571,7 +571,7 @@ fn wireUnitTests(
 }
 
 /// The hana executable + the `run` step.
-fn buildExeAndRunStep(b: *std.Build, root_mod: *std.Build.Module) *std.Build.Step {
+fn buildExeAndRunStep(b: *std.Build, root_mod: *std.Build.Module) void {
     const exe = b.addExecutable(.{ .name = "hana", .root_module = root_mod });
     b.installArtifact(exe);
 
@@ -579,7 +579,6 @@ fn buildExeAndRunStep(b: *std.Build, root_mod: *std.Build.Module) *std.Build.Ste
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run hana").dependOn(&run_cmd.step);
-    return &exe.step;
 }
 
 /// The `bench` step: full-iteration latency/benchmark runs under -Dbench.
@@ -602,7 +601,7 @@ fn wireBenchStep(b: *std.Build, bench_enabled: bool, unit_test_step: *std.Build.
 /// `check-all` steps.
 fn wireCheckSteps(
     b: *std.Build,
-    exe_step: *std.Build.Step,
+    root_mod: *std.Build.Module,
     discovery: *Module.DiscoveryContext,
     features: FeatureSet,
     shared_ctx: SharedBuildContext,
@@ -632,10 +631,24 @@ fn wireCheckSteps(
     // `zig build check` type-checks the exe AND runs the layer guards
     // (check-layers.sh): the pure layers stay xcb-free and wire-mutating
     // requests stay behind the reconcile boundary.
+    //
+    // The type-check half is a CHECK-ONLY compile: a second root on the SAME
+    // module graph whose emitted bin is never requested. The build system
+    // passes -fno-emit-bin whenever no step asked for the binary
+    // (std.Build.Step.Compile), so full Sema runs -- every reachable function
+    // body, comptime block, @cImport and generated registry -- while LLVM
+    // codegen and the link are skipped. That is what keeps a cold
+    // `zig build check` in seconds instead of paying the ~45s ReleaseFast
+    // codegen that `zig build` (install/run, and CI's Build step) already
+    // proves on its own. This step's job is analysis + policy, not emission.
+    const check_exe = b.addExecutable(.{ .name = "hana-check", .root_module = root_mod });
     const check_step = b.step("check", "Type-check + layer guards");
-    check_step.dependOn(exe_step);
+    check_step.dependOn(&check_exe.step);
+    // The guard script is a pure grep/awk/fmt pass (~0.4s) with no need for
+    // the compile result: it no longer waits behind it, so a layer violation
+    // reports in the first few hundred milliseconds of a run instead of after
+    // the type-check finishes.
     const layers = b.addSystemCommand(&.{"./dev/scripts/check-layers.sh"});
-    layers.step.dependOn(exe_step);
     check_step.dependOn(&layers.step);
     check_step.dependOn(plugin_template_check);
 

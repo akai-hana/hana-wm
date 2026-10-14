@@ -12,10 +12,7 @@ const std = @import("std");
 const model = @import("model");
 const scaling = @import("scaling");
 
-// ---------------------------------------------------------------------------
-// WM_CLASS split (former identity.zig).
-// ---------------------------------------------------------------------------
-
+/// WM_CLASS split (former identity.zig).
 /// The two WM_CLASS components: `instance` (the res_name,
 /// e.g. "alacritty") and `class` (the res_class, e.g.
 /// "Alacritty").
@@ -41,10 +38,7 @@ pub fn parseWmClass(data: []const u8) ?WmClass {
     return .{ .instance = instance, .class = class_raw[0..class_end] };
 }
 
-// ---------------------------------------------------------------------------
-// WM_NORMAL_HINTS field walk (former hints.zig).
-// ---------------------------------------------------------------------------
-
+/// WM_NORMAL_HINTS field walk (former hints.zig).
 /// ICCCM flag bits (the PMinSize/PMaxSize/... word of the reply).
 const p_min_size: u32 = 0x10;
 const p_max_size: u32 = 0x20;

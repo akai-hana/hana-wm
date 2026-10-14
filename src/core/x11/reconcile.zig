@@ -30,6 +30,21 @@
 //! full desired state on change is still drift-proofing; we only avoid
 //! replaying what the server already has.
 //!
+//! FLOAT-ABOVE-TILED STACKING. The winner raise alone cannot uphold the
+//! invariant that floating windows always overlap tiled ones — a raised
+//! tiled window (winner on motion, unpark, or force_restack) rides to the
+//! absolute top and would bury the floating layer — so any pass that raises
+//! or newly sends a TILED window, or shows a FLOATING window (first-send /
+//! unpark), arms a final RE-ASSERT phase. That phase replays the ledger's
+//! float raise order (bottom first) over the tiled layer, so overlapping
+//! floats keep their exact click/drag order; the replay never rewrites the
+//! order (floatRaise at the raise sites does), a listed window that has
+//! since detached to tiled is skipped by the anchor filter, and floats not
+//! yet listed (fresh spawn, session adoption) are adopted at the top. The
+//! phase runs before the force_restack bar raise so chrome stays topmost,
+//! and is elided entirely when no floating window is present — steady-state
+//! and float-free reconciles still send nothing.
+//!
 //! The SENT LEDGER is a write-only record of what was actually sent (field
 //! semantics: `ledger.SentEntry`). Exactly five reads of it are behavioral
 //! contract:
@@ -149,16 +164,22 @@ const Plan = struct {
 };
 
 /// One full reconcile: plan (work area + coverage winner + layout compute),
-/// seed the raise winner, fuse-compute-and-send every stored window, then the
-/// force_restack bar raise. Split into phases for readability; the fused
-/// per-window loop stays whole because that fusion IS the algorithm.
+/// seed the raise winner, fuse-compute-and-send every stored window, the
+/// conditional float re-assert, then the force_restack bar raise. Split into
+/// phases for readability; the fused per-window loop stays whole because
+/// that fusion IS the algorithm.
 pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
     var plan: Plan = .{};
     computeLayout(m, ctx, &plan);
     var winner = seedWinner(m, &plan);
-    sendAll(m, ctx, opts, &plan, &winner);
+    // sendAll reports whether this pass disturbed stacking in a way that
+    // could bury the floating layer (or show a floating window): the one
+    // condition that arms the re-assert below.
+    const reassert = sendAll(m, ctx, opts, &plan, &winner);
+    if (reassert) reassertFloats(m, ctx, &plan);
 
-    // force_restack additionally raises bar/top.
+    // force_restack additionally raises bar/top. Always AFTER the float
+    // re-assert, so a replayed float can never bury the bar.
     if (opts.force_restack) {
         if (ctx.bar_win) |bar| ctx.sink.stackOnly(bar, .above);
     }
@@ -263,13 +284,18 @@ fn seedWinner(m: *const model.Model, plan: *const Plan) ?model.WindowId {
 /// lastRectFor/truthRect (read 3). Sends never consult the ledger to SKIP
 /// anything. `winner` arrives seeded and is still mutable here: the first
 /// non-parked desire in store order elects itself (fallback election).
+///
+/// Returns whether the float re-assert must run after this pass: true when
+/// the pass raised or newly sent a tiled window (either could sit above the
+/// floating layer), showed a floating window (it must come back above the
+/// tiled layer), AND at least one floating window is present to re-assert.
 fn sendAll(
     m: *const model.Model,
     ctx: *Ctx,
     opts: Opts,
     plan: *const Plan,
     winner: *?model.WindowId,
-) void {
+) bool {
     const fs_win = plan.fs_win;
     const placements = &plan.placements;
     const pl_of_slot = &plan.pl_of_slot;
@@ -279,6 +305,12 @@ fn sendAll(
     // per window: the condition is structural (ledger at store_capacity), so
     // a full reconcile would otherwise log per window.
     var ledger_overflow = false;
+    // Re-assert arming (file header, FLOAT-ABOVE-TILED STACKING): `reassert`
+    // latches when this pass could have stacked a tiled window above the
+    // floating layer or showed a floating window; `saw_visible_float` keeps
+    // the whole phase free when no float is on screen.
+    var reassert = false;
+    var saw_visible_float = false;
     for (0..count) |i| {
         const it = m.store.at(i);
         const win = it.key;
@@ -303,6 +335,11 @@ fn sendAll(
         // parked=true.
         const is_fs = win == fs_win;
         const on_current = model.visibleEntry(m, e, m.current);
+        // A floating window that will be on screen this pass: the one fact
+        // that makes the re-assert worth running (see reassertFloats, which
+        // re-derives the same eligibility per window when it replays).
+        if (e.presence == .present and e.anchor == .floating and on_current)
+            saw_visible_float = true;
         const definitely_parked_desire = e.presence == .parked or !on_current;
         // `parked_dirty` means the client moved this parked window behind our
         // back, so the elision below would strand it on screen; recompute and
@@ -354,6 +391,17 @@ fn sendAll(
             const moved = first_send or !last.rect.eqlGeom(rect);
             const unpark_transition = last.parked;
             const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
+
+            // Raise bookkeeping for the float re-assert (file header):
+            // a raised FLOAT records its new top slot in the ledger; a
+            // raised TILED window, a newly sent tiled frame (X-default
+            // stack position may sit above everything), or a floating
+            // window coming back on screen all arm the re-assert.
+            if (raise_winner) {
+                if (e.anchor == .floating) ledger.floatRaise(win) else reassert = true;
+            }
+            if (first_send and e.anchor == .tiled) reassert = true;
+            if (e.anchor == .floating and (first_send or unpark_transition)) reassert = true;
 
             const need_map = first_send or unpark_transition;
             const need_bw = !last.has_rect or last.bw != bw;
@@ -412,6 +460,42 @@ fn sendAll(
         } else ledger_overflow = true;
     }
     if (ledger_overflow) log.err("reconcile: ledger full; some sends applied, records lost", .{});
+    return reassert and saw_visible_float;
+}
+
+/// Phase 4 (conditional): re-assert the floating layer above every tiled
+/// window by replaying the ledger's float raise order bottom-first, so
+/// overlapping floats keep their exact click/drag order. Armed by sendAll
+/// (see the file header's FLOAT-ABOVE-TILED STACKING paragraph). Covered
+/// siblings park offscreen under a fullscreen winner, so there is nothing
+/// to re-assert there. Floats not yet in the order (fresh spawn, session
+/// adoption) are adopted at the top before the replay; the replay filters
+/// present + floating + on-current, which skips a listed window that has
+/// since detached to tiled (its stale slot is re-entered by its next float
+/// raise) and parks of other workspaces (their slots are kept, so an unpark
+/// replays them into their old position).
+fn reassertFloats(m: *const model.Model, ctx: *Ctx, plan: *const Plan) void {
+    if (plan.fs_win != null) return;
+
+    // Adopt: every visible float holds a slot before the replay reads the
+    // order (one pass; no wire traffic of its own).
+    const count = m.store.count();
+    for (0..count) |i| {
+        const it = m.store.at(i);
+        const e: *const model.Entry = it.val;
+        if (e.presence != .present or e.anchor != .floating) continue;
+        if (!model.visibleEntry(m, e, m.current)) continue;
+        if (!ledger.floatContains(it.key)) ledger.floatRaise(it.key);
+    }
+
+    // Replay bottom -> top: each stackOnly(above) lands the window one step
+    // higher, so the order list's last entry ends topmost.
+    for (ledger.floatOrder()) |win| {
+        const e = m.store.get(win) orelse continue;
+        if (e.presence != .present or e.anchor != .floating) continue;
+        if (!model.visibleEntry(m, &e, m.current)) continue;
+        ctx.sink.stackOnly(win, .above);
+    }
 }
 
 /// Best known live geometry for `win` without a server round trip:

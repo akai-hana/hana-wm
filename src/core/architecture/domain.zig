@@ -115,7 +115,7 @@ pub const min_master_width: f32 = 0.05;
 /// Primary-column width is capped at 95% so the secondary column always keeps
 /// some screen. Single-sourced: config validation, the runtime pixel->ratio
 /// conversion, and the primary-width adjustment action all clamp to this same
-/// bound (tiling.zig's local `max_master_width_ratio` used to duplicate it).
+/// bound.
 pub const max_master_width: f32 = 0.95;
 
 /// Position and dimensions of a managed window, relative to the root window
@@ -204,8 +204,7 @@ pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
 /// Single canonical size-hints record AND the only store: admission threads
 /// the parsed WM_NORMAL_HINTS to mapRequest as a parameter (there is no
-/// staging copy anywhere -- title_cache used to hold a pre-registration bridge,
-/// deleted as double bookkeeping). Do NOT import layouts from here (layer rule).
+/// staging copy anywhere). Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
     /// PMinSize / PBaseSize floor. Policy: TILING deliberately ignores
     /// declared minimums -- the layout engine owns tiled dimensions, and
@@ -267,7 +266,7 @@ pub const BaseMode = union(enum) {
 /// PATTERNS, not features; a parked/covering window keeps its `anchor`/`mask`.
 pub const Presence = enum { present, parked, covering };
 
-// Shared vocabulary types (folded in from the former feature module files).
+// Shared vocabulary types.
 // Pure vocabulary consumed by both the wire-side feature plugins and wire
 // callers; they live in core so nothing needs to import a feature file just
 // to reference them.

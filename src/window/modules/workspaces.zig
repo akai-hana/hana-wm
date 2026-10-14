@@ -151,14 +151,11 @@ pub fn allViewToggle(m: *model.Model) bool {
     return m.all_view_active;
 }
 
-// ---------------------------------------------------------------------------
-// Workspace commands: one model transition + one reconcile entry each. These
-// are the old `src/actions/ws.zig` group, moved beside the state they write.
-// The core reaches them through the `switchWorkspace`/`moveToWorkspace`/
-// `toggleTag`/`pinWindow`/`allWorkspaces` hooks on `module`, so a tree
-// without this file compiles with no binder rather than a dangling import.
-// ---------------------------------------------------------------------------
-
+/// Workspace commands: one model transition + one reconcile entry each. These
+/// are the old `src/actions/ws.zig` group, moved beside the state they write.
+/// The core reaches them through the `switchWorkspace`/`moveToWorkspace`/
+/// `toggleTag`/`pinWindow`/`allWorkspaces` hooks on `module`, so a tree
+/// without this file compiles with no binder rather than a dangling import.
 /// Shared change guard for the tag/pin commands: the window must be present
 /// in the model and not hidden.
 fn canTagChange(m: *const model.Model, win: model.WindowId) bool {
