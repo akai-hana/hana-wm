@@ -40,7 +40,7 @@ pub const TmpFile = struct {
         };
         errdefer self.tmp.cleanup();
 
-        // The production config/persist entry points take absolute paths, so
+        // The production config/handoff entry points take absolute paths, so
         // realPath is required rather than optional -- the point of the tmp dir
         // is the unique parent, not a relative name.
         // realPath fills the buffer and returns its LENGTH, not a slice.

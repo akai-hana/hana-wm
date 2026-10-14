@@ -204,7 +204,7 @@ inline fn appendPlacement(out: *List, win: model.WindowId, rect: model.Rect, vis
 
 /// Emit a visible placement with the window's size hints applied to `rect`.
 pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: model.Rect) void {
-    appendPlacement(out, win, applyHints(rect, v.hints.forWin(win)), true);
+    appendPlacement(out, win, applyHints(rect, v.hintsFor(win)), true);
 }
 
 /// Emit a visible placement built from integer tiling coordinates, narrowing
