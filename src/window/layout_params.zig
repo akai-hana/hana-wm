@@ -132,13 +132,20 @@ pub fn seedParamsFromConfig() void {
     const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, contract.default_kind);
 
     const m = pipeline.mut(&gate);
+    // The config grammar lets master_count rise to its u8 ceiling, but the
+    // runtime path caps primary_count at store_capacity/4. Seeding the raw
+    // u8 here would slip those couple-dozen windows directly into compute's
+    // master_n, where the master-column fit gate then has to reject them;
+    // clamp at seed time instead.
+    const max_primary_count = model_mod.store_capacity / 4;
+    const primary_count = @min(cfg.master_count, @as(u8, @intCast(@max(1, max_primary_count))));
     // Global default template, stamped across every workspace by
     // applyConfigReload (preserves viewport runtime state). Per-workspace
     // overrides are re-stamped in the loop below.
     model_mod.applyConfigReload(m, .{
         .kind = default_kind,
         .variant_idx = resolveVariant(cfg, default_kind, null),
-        .primary_count = cfg.master_count,
+        .primary_count = primary_count,
         .primary_width = 0.5, // runtime-only; reset to the model default (LayoutParams.primary_width)
         .secondary_balance = 0,
     });

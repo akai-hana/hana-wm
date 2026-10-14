@@ -169,7 +169,11 @@ pub fn moveFocused(delta: i32) void {
 /// Clamp an updated viewport offset to the layout's content span and stamp
 /// the tiled-count snapshot the prefetch expects after a step.
 fn commitViewport(p: *model_mod.LayoutParams, sc: ViewportContext, offset: i64, count: usize) void {
-    p.viewport_offset = @intCast(std.math.clamp(offset, 0, sc.max_off));
+    // maxOffset can legitimately return negative (content narrower than the
+    // workarea math still leaves a negative scroll bound), and clamp asserts
+    // lower<=upper in safe builds. Floor the upper bound at 0 so an unusable
+    // negative range collapses to the single offset 0 instead of panicking.
+    p.viewport_offset = @intCast(std.math.clamp(offset, 0, @max(0, sc.max_off)));
     p.viewport_prev_count = @intCast(count);
 }
 
