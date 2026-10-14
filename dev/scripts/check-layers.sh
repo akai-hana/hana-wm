@@ -148,12 +148,12 @@ wire_allowed() {
         # Same test-double carve-out as fixture.zig; never routes through sync.
         src/test/window/focus_test.zig) ;;
 
-        # src/test/engine/pipeline_test.zig is a TEST DOUBLE: it maps two
+        # src/test/core/pipeline_test.zig is a TEST DOUBLE: it maps two
         # synthetic override-redirect windows through the X-gated harness's
         # real connection so it can assert the pipeline's window-enter /
         # map-request path. Test setup is not WM wire traffic and never routes
         # through the reconciler. Same carve-out as fixture.zig.
-        src/test/engine/pipeline_test.zig) ;;
+        src/test/core/pipeline_test.zig) ;;
 
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
@@ -271,10 +271,10 @@ if [ -n "$hits" ]; then
 fi
 
 # Rule 4: formatting. Full speed by default; with ZBUILD_THROTTLE=1 the
-# pass routes through dev/scripts/zbuild.sh like every other gate step.
+# pass routes through dev/scripts/throttle.sh like every other gate step.
 fmt_cmd=(zig fmt --check .)
 if [ "${ZBUILD_THROTTLE:-0}" = "1" ]; then
-    fmt_cmd=(dev/scripts/zbuild.sh -- zig fmt --check .)
+    fmt_cmd=(dev/scripts/throttle.sh -- zig fmt --check .)
 fi
 if ! "${fmt_cmd[@]}" >/dev/null 2>&1; then
     viol "rule 4 (zig fmt --check)"

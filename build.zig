@@ -270,7 +270,7 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Unit tests for the reworked architecture layers (src/test/**, grouped
-    // by category: engine/, window/, bar/, config/, latency/):
+    // by category: core/, window/, bar/, config/, latency/, tiling/, x11/):
     // every discovered module named *_test.zig becomes a `zig build test`
     // run. Discovered modules are cross-wired with all others, so a test
     // file's named imports

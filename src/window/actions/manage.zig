@@ -38,8 +38,6 @@ const FullscreenKind = enum { enter, exit, switch_ };
 /// no module binds it; canonical scan lives in window.providerOf.
 const providerOf = actions.providerOf;
 
-const Ctx = actions.Ctx;
-
 // covering (screen claim)
 
 /// Covering enter/exit/switch for an arbitrary window in ONE model
@@ -313,15 +311,15 @@ pub fn focusAfterGeometry() void {
 /// bookkeeping (covering record, caches, sub-system removes) has already
 /// run; this drops the model entry and re-focuses. Inactive-workspace
 /// geometry repairs ride the same global LastSent diff.
-pub fn unmanage(ctx: *Ctx, win: model_mod.WindowId) void {
+pub fn unmanage(win: model_mod.WindowId) void {
     const m = pipeline.mut();
-    // Covering and focus truth arrive via ctx because THIS action drops the
-    // model entry (unregister below): window.unmanageWindow captures both
-    // facts before calling in, so closing the covering occupant still
-    // restores the bar and the withdrawn window's focus ownership is known
-    // rather than unreadable from a store that no longer holds the window.
-    const was_fs_current = if (ctx.withdrawn_fullscreen_ws) |ws_id| ws_id.eql(m.current) else false;
-    const was_focused = ctx.withdrawn_was_focused;
+    // Covering and focus truth must be read BEFORE the unregister below
+    // drops the model entry (after which no store query could recover it):
+    // an onWindowGone binder mutating model focus or the covering record
+    // would make them unreadable. The hooks that fire on this path touch
+    // module-local stores only.
+    const was_fs_current = if (model_mod.coveringWsOf(m, win)) |ws_id| ws_id.eql(m.current) else false;
+    const was_focused = m.focused == win;
 
     model_mod.unregister(m, win);
     ledger.forget(win); // X ids recycle; stale LastSent must not survive

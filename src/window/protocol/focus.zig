@@ -20,6 +20,13 @@ const model_mod = @import("model");
 const atoms = @import("atoms");
 const requests = @import("requests");
 
+/// Pointer root position snapshot at spawn-admission time. The first
+/// crossing event armed by a `.window_spawn` suppress compares against
+/// this to tell a synthetic crossing (the new window mapping under a
+/// parked cursor) apart from a real hover that must refocus. Recorded
+/// in handleMapRequest; consumed by window's suppressSpawnCrossing.
+const SpawnCursor = struct { x: i16 = 0, y: i16 = 0 };
+
 // Module state
 //
 // Grouped into a single State struct so init() resets everything in one
@@ -50,6 +57,11 @@ const State = struct {
     // tiling_op_cookie: "has the server caught up" round trip from
     //   beginTilingOpSettle() (see its doc comment).
     tiling_op_cookie: ?xcb.xcb_get_input_focus_cookie_t = null,
+
+    /// Pointer root position snapshot at spawn-admission time (see
+    /// SpawnCursor). Recorded in handleMapRequest; consumed by the
+    /// window module's spawn-crossing suppression.
+    spawn_cursor: SpawnCursor = .{},
 };
 
 // PATTERN: module-global state with explicit init/deinit lifecycle (called
@@ -84,6 +96,30 @@ pub inline fn getFocused() ?u32 {
 
 pub inline fn getSuppressReason() core.FocusSuppressReason {
     return state.?.suppress_reason;
+}
+
+/// Pointer root position snapshot (see State.spawn_cursor). Read by the
+/// window module's spawn-crossing suppression.
+pub fn spawnCursor() SpawnCursor {
+    return state.?.spawn_cursor;
+}
+
+/// Snapshot the pointer's root position for spawn-crossing suppression.
+///
+/// Runs once per MapRequest, synchronously, right when the spawn's window is
+/// admitted. The pointer cannot have moved relative to the keypress that
+/// triggered the spawn between here and the reconcile's map (both happen in
+/// the same event-loop batch), so this position is exactly what the synthetic
+/// crossing the map generates will carry; a real hover from a moved pointer
+/// yields different coordinates and is never masked. On a failed query the
+/// record stays untouched (defaults to {0,0} at init) rather than poisoning
+/// an established spawn's suppression.
+pub fn snapshotSpawnCursor(conn: core.Connection) void {
+    const reply = xcb.xcb_query_pointer_reply(conn, xcb.xcb_query_pointer(conn, core.getState().root), null);
+    defer if (reply) |r| std.c.free(r);
+    if (reply) |r| {
+        state.?.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
+    }
 }
 
 /// Debug/test invariant: the private protocol cache (`last_applied`) must
@@ -235,8 +271,9 @@ const CommitFlags = struct {
     /// input focus is ours, advertise it".
     take_focus_known: bool,
 
-    /// New suppress_reason. setFocus derives it via suppressionFor(); direct
-    /// callers hardcode `.none`.
+    /// New suppress_reason. prepareFocus derives it from the etiquette table
+    /// (inheriting the current reason when the table records no opinion);
+    /// direct callers hardcode `.none`.
     new_suppress: core.FocusSuppressReason,
 };
 
@@ -310,7 +347,7 @@ const Etiquette = struct {
     /// here because it is a property of the window, not of the reason: sync's
     /// raise-the-winner pass owns a tiled window's stacking, and a pre-raise
     /// would be a redundant request creating an intermediate compositor
-    /// frame. `shouldRaise` applies it.
+    /// frame. `prepareFocus` narrows it with that exclusion.
     raise: bool,
     /// The crossing-suppression reason to set, or null to LEAVE THE CURRENT
     /// ONE ALONE. Null is the honest encoding for "this reason has no opinion"
@@ -355,39 +392,6 @@ fn etiquetteFor(reason: Reason) Etiquette {
     };
 }
 
-/// Phase 1: resolve input model (cache-only, never blocking).
-/// Returns a FocusTransition that can be committed inside the grab.
-/// Returns .none when focus should not change (invalid window, same window,
-/// unmapped liveness guard, or no_input model).
-///
-/// The input model comes strictly from the focus-property cache; a miss
-/// resolves provisionally (dwm's XSetInputFocus model) instead of a blocking
-/// live query, so this hot path has zero round trips.
-///
-/// Build a `.set` FocusTransition from a resolved input model.
-fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
-    raise: bool,
-    new_suppress: core.FocusSuppressReason,
-    /// Force xcb_set_input_focus even for globally_active input models.
-    /// Workspace switch is an explicit user action: the WM must land X focus
-    /// on the target window rather than relying on the app to self-focus via
-    /// WM_TAKE_FOCUS.  Parked windows on the departing workspace may not
-    /// respond to the protocol message, leaving X focus stranded on the old
-    /// workspace's window.
-    force_set_input_focus: bool = false,
-}) FocusTransition {
-    return .{ .set = .{
-        .win = win,
-        .old = old,
-        .flags = .{
-            .set_input_focus = opts.force_set_input_focus or resolved.model != .globally_active,
-            .raise = opts.raise,
-            .take_focus_known = resolved.take_focus,
-            .new_suppress = opts.new_suppress,
-        },
-    } };
-}
-
 /// The ONE destroyed-window guard for a focus target (10.6). False when `win`
 /// may not take focus or be raised.
 ///
@@ -416,6 +420,14 @@ fn resolveFocusTarget(win: u32, reason: Reason) bool {
     return true;
 }
 
+/// Phase 1: resolve input model (cache-only, never blocking).
+/// Returns a FocusTransition that can be committed inside the grab.
+/// Returns .none when focus should not change (invalid window, same window,
+/// unmapped liveness guard, or no_input model).
+///
+/// The input model comes strictly from the focus-property cache; a miss
+/// resolves provisionally (dwm's XSetInputFocus model) instead of a blocking
+/// live query, so this hot path has zero round trips.
 pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     if (!resolveFocusTarget(win, reason)) return .none;
 
@@ -433,17 +445,21 @@ pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     // so an already-focused window re-raises instead of being swallowed by
     // the dedup. `old = null` lets applyPendingFocus skip the ungrab/
     // re-grab of that same window's buttons (a button-regrab flash).
-    const force = etiquetteFor(reason).force_set_input_focus;
-    const raise = shouldRaise(reason, win);
+    const et = etiquetteFor(reason);
+    const raise = et.raise and !tracking.isTiledMode(win);
     const same_applied = state.?.last_applied == win;
     if (same_applied and !raise) return .none;
     const old: ?u32 = if (same_applied) null else state.?.last_applied;
-    const out = setIntent(win, old, resolved, .{
-        .raise = raise,
-        .new_suppress = suppressionFor(reason, state.?.suppress_reason),
-        .force_set_input_focus = force,
-    });
-    return out;
+    return .{ .set = .{
+        .win = win,
+        .old = old,
+        .flags = .{
+            .set_input_focus = et.force_set_input_focus or resolved.model != .globally_active,
+            .raise = raise,
+            .take_focus_known = resolved.take_focus,
+            .new_suppress = et.suppress orelse state.?.suppress_reason,
+        },
+    } };
 }
 
 /// Phase 1: prepare a focus-clear transition (outside grab).
@@ -537,22 +553,6 @@ fn advertiseActiveWindow(win: u32) void {
     _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.?.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
 
-/// True when `reason` should raise `win` to the top of the stacking order:
-/// the table's `raise`, narrowed by the tiled exclusion (the retile owns a
-/// tiled window's stacking order).
-inline fn shouldRaise(reason: Reason, win: u32) bool {
-    return etiquetteFor(reason).raise and !tracking.isTiledMode(win);
-}
-
-/// The suppression reason to apply for `reason`, or keep `current` when the
-/// table records no opinion.
-inline fn suppressionFor(
-    reason: Reason,
-    current: core.FocusSuppressReason,
-) core.FocusSuppressReason {
-    return etiquetteFor(reason).suppress orelse current;
-}
-
 // Grab-wrapped focus operations (full atomicity)
 //
 // These wrap the two-phase protocol (prepare + apply) in a server grab
@@ -596,14 +596,7 @@ pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) voi
     }
     // A null duty is a first-class case, not a contract violation: `grabFocus`
     // passes one, and `reconcileGrabFocus` guards the call
-    // (`if (self.duty) |d| d();`). The assert that used to stand here claimed
-    // "reaching here means this is that call site", which was false -- a
-    // `.user_command` focus of a window that is NOT already focused prepares a
-    // real transition and lands exactly here, so focusing a floating window
-    // (floating.zig's `grabFocus(win, .user_command)`) tripped it. That
-    // aborted the process in any build with live asserts, including this
-    // project's test builds; ReleaseFast merely stripped it and hid the bug.
-    // The type and the callee were always right; only the assert was wrong.
+    // (`if (self.duty) |d| d();`).
     pipeline.reconcileGrabFocus(.{}, ft, .before, duty);
 }
 

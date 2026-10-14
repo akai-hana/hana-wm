@@ -14,7 +14,6 @@ const constants = @import("constants");
 const types = @import("types");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
-const handoff = @import("handoff");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const tiling = @import("tiling_seam").tiling;
@@ -104,16 +103,6 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
 
 // config reload
 
-/// Boot/restore seam: replay a persisted session's model level onto the
-/// live model. Sole authorized user is main.zig's re-exec restore path
-/// (handoff.loadToGlobal + admission.adoptRootWindows have already run);
-/// routing through this transition keeps the mutable handle out of boot code
-/// and inside the window layer. No reconcile: the caller reconciles once,
-/// placing every adopted window exactly as it was.
-pub fn applyRestoredLevel() void {
-    handoff.applyModelLevel(pipeline.mut());
-}
-
 /// Per-workspace seed overrides resolved from `cfg` (built via the shared
 /// last-wins lookup rules on TilingConfig). The one labeled bundle driving
 /// per-workspace param seeding here (the separate workspaces override store
@@ -136,7 +125,7 @@ pub fn seedParamsFromConfig() void {
 
     // Config layout names resolve to registry ids here, once per seed;
     // unresolvable names fall back loudly to the neutral default.
-    const default_kind: u8 = tiling.layoutKindFallingBack(cfg.layout, contract.default_kind);
+    const default_kind: u8 = tiling.layoutKindFallingBack(cfg.defaultLayout(), contract.default_kind);
 
     const m = pipeline.mut();
     // The config grammar lets master_count rise to its u8 ceiling; seeding

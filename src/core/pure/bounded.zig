@@ -40,8 +40,8 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         }
 
         /// A plain (non-capturing) `item.field_name == key` predicate for
-        /// `indexOf`/`removeWhere`/`removeAllWhere`. Shared by the three
-        /// id-keyed methods below instead of restating the match struct.
+        /// `indexOf`/`removeWhere`. Shared by the two id-keyed methods below
+        /// instead of restating the match struct.
         fn fieldEq(comptime field_name: std.meta.FieldEnum(T)) type {
             return struct {
                 fn match(key: u32, item: T) bool {
@@ -83,19 +83,6 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             self.items[self.len] = item;
             self.len += 1;
             return true;
-        }
-
-        pub fn upsertById(
-            self: *Self,
-            comptime field_name: std.meta.FieldEnum(T),
-            key: u32,
-            item: T,
-        ) bool {
-            if (self.indexOfByIdField(field_name, key)) |i| {
-                self.items[i] = item;
-                return true;
-            }
-            return self.append(item);
         }
 
         /// O(1) removal that does *not* preserve the relative order of the
@@ -144,16 +131,12 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             return false;
         }
 
-        /// Removes the first item whose `field_name` equals `id` (order-
-        /// preserving). The id-keyed form of `removeWhere` the record stores
-        /// used to hand-roll via `item.win == key` match structs.
+        /// Removes the first item whose `field_name` equals `id` (order-preserving).
         pub fn removeById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) bool {
             return self.removeWhere(id, fieldEq(field_name).match);
         }
 
-        /// Removes every item whose `field_name` equals `id`, compacting in
-        /// place (unordered). Used when several entries share one key (e.g.
-        /// every child-window cache row pointing at the same toplevel).
+        /// Removes the first item equal to `scalar` (order-preserving).
         /// First-class scalar removal: the find-then-remove pair is the shape
         /// half the tree wants, so give it one name instead of every caller
         /// spelling it out. Returns whether anything was removed.
@@ -161,28 +144,6 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             const i = self.indexOfScalar(v) orelse return false;
             self.orderedRemove(i);
             return true;
-        }
-
-        pub fn removeAllById(self: *Self, comptime field_name: std.meta.FieldEnum(T), id: u32) usize {
-            return self.removeAllWhere(id, fieldEq(field_name).match);
-        }
-
-        fn removeAllWhere(
-            self: *Self,
-            context: anytype,
-            comptime match: fn (@TypeOf(context), T) bool,
-        ) usize {
-            var removed: usize = 0;
-            var i: usize = 0;
-            while (i < self.len) {
-                if (match(context, self.items[i])) {
-                    self.swapRemove(i);
-                    removed += 1;
-                } else {
-                    i += 1;
-                }
-            }
-            return removed;
         }
 
         /// Inserts `item` at index `i` (clamped to len), shifting the tail

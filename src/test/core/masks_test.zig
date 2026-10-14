@@ -1,15 +1,53 @@
-//! XCB modifier/mask constant tests (pure, headless).
+//! Modifier/mask constant tests (pure, headless).
 //!
-//! masks.zig is the single place the WM folds the raw XCB modifier masks into
+//! masks.zig is the single place the WM folds the X protocol modifier and
+//! event masks (spelled as literals, so the pure shelf stays xcb-free) into
 //! the binding mask, the lock-key subset table, and the modifier-keysym band;
 //! these tests pin the derived values so an accidental bit change (a keybind
 //! that would fire through CapsLock, a dropped lock combo from the grab set)
-//! fails loudly instead of changing grab/input behavior silently.
+//! fails loudly instead of changing grab/input behavior silently. The first
+//! two tests additionally pin every literal against its XCB name -- the
+//! reason the literals are trustworthy at all.
 
 const std = @import("std");
 const testing = std.testing;
 
 const masks = @import("masks");
+const xcb = @import("xcb").xcb;
+
+test "modifier literals match the XCB protocol names" {
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_SHIFT), masks.mod_shift);
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_LOCK), masks.mod_capslock);
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_CONTROL), masks.mod_control);
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_1), masks.mod_alt);
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_2), masks.mod_numlock);
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_3), masks.mod_scrolllock);
+    try testing.expectEqual(@as(u16, xcb.XCB_MOD_MASK_4), masks.mod_super);
+}
+
+test "event-mask literals match the XCB protocol names" {
+    try testing.expectEqual(
+        @as(u32, xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+            xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+            xcb.XCB_EVENT_MASK_KEY_PRESS |
+            xcb.XCB_EVENT_MASK_KEY_RELEASE |
+            xcb.XCB_EVENT_MASK_BUTTON_PRESS |
+            xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
+            xcb.XCB_EVENT_MASK_POINTER_MOTION |
+            xcb.XCB_EVENT_MASK_ENTER_WINDOW |
+            xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
+            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+            xcb.XCB_EVENT_MASK_PROPERTY_CHANGE),
+        masks.EventMasks.root_window,
+    );
+    try testing.expectEqual(
+        @as(u32, xcb.XCB_EVENT_MASK_ENTER_WINDOW |
+            xcb.XCB_EVENT_MASK_FOCUS_CHANGE |
+            xcb.XCB_EVENT_MASK_PROPERTY_CHANGE |
+            xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY),
+        masks.EventMasks.managed_window,
+    );
+}
 
 test "binding mask is exactly the four non-lock modifiers" {
     // normalizeModifiers is the live producer of the binding mask (the u16

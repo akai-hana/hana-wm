@@ -32,6 +32,9 @@ pub fn adoptSession(restore_path: []const u8) void {
     // there is no level to re-apply and nothing to focus.
     if (n == 0) return;
 
-    actions.applyRestoredLevel();
+    // Re-play the persisted level now that every window is registered; no
+    // reconcile here — the single reconcile after adoptSession places every
+    // adopted window exactly as it was.
+    handoff.applyModelLevel(pipeline.mut());
     actions.focusAfterGeometry();
 }
