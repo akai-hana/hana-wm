@@ -54,7 +54,7 @@ pub const FocusSuppressReason = enum {
 
 // conn, screen, root, and alloc are written once during startup.
 // config is a heap-allocated pointer swapped atomically on reload
-// (see events.zig handleConfigReload). Bundled into one optional State,
+// (see reload.zig handleConfigReload). Bundled into one optional State,
 // rather than five `undefined` globals, so any access before init()
 // panics cleanly instead of reading undefined memory.
 pub const State = struct {
@@ -332,4 +332,3 @@ pub fn dpi() f32 {
 pub fn setDpi(v: f32) void {
     getState().dpi_info = v;
 }
-pub const hz = @import("hz.zig");

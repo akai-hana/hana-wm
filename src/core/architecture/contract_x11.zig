@@ -1,16 +1,6 @@
-//! The X-aware half of the window/segment contract.
-//!
-//! `contract.zig` is the pure vocabulary: hook shapes, registries, geometry
-//! value objects, and nothing that names an X type. Everything here needs X,
-//! so it lives on the other side of the seam and is imported ONLY by the
-//! composition roots that already talk to the server (the bar's hook
-//! construction, and a module that must read the fields of an event it
-//! receives).
-//!
-//! The split exists so the contract can be described without X: a headless
-//! consumer -- a config-only tool, a test that never opens a display -- can
-//! import `contract` and get the whole hook surface without dragging in a
-//! connection type it has no way to produce.
+//! X-aware half of the contract: extends contract.zig with XCB-typed seams
+//! (BarHandlers, TitleRender, DrawCtx) for wire-touching modules; vocabulary
+//! only, includes core.xcb types.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -42,13 +32,6 @@ pub const Surfaces = struct {
     pollTimeoutMs: *const fn () ?i32,
     onPollWakeup: *const fn () void,
     updateClock: *const fn () void,
-    // RandR hooks (refresh-rate detection). The engine lives with the bar
-    // (render pacing is its only consumer); core's event loop forwards
-    // extension events and defers re-detection through these when a bar is
-    // compiled in, and drops the machinery entirely when it is not.
-    randrFirstEvent: *const fn () u8,
-    handleRandrEvent: *const fn (*anyopaque) void,
-    runPendingRedetect: *const fn (core.Connection) void,
     onReload: *const fn () void,
     // Input routing. The chrome overlay pre-empts key handling (returns true
     // when it consumed the key), button presses on the surface window are

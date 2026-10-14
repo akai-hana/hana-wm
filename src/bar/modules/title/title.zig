@@ -10,7 +10,7 @@
 // render context, and even the refresh rate is only *read* (the hz memo
 // `bar.init` primes). A DRAW must not detect a refresh rate, because
 // detection writes that shared memo.
-const hz = @import("core").hz;
+const hz = @import("hz");
 
 const types = @import("types");
 

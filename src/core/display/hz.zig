@@ -1,29 +1,64 @@
-//! Refresh-rate detection via RandR.
-//! Publishes the monitor refresh rate lock-free for bar render pacing.
-//! A bar feature by construction: the only consumer of the detected rate is
-//! bar segment drawing (title/carousel pacing). Lives under src/bar so a
-//! bar-less tree drops the whole RandR probe/subscribe machinery with the
-//! directory; core's event loop reaches it only through the `Surfaces` seam.
+//! Refresh-rate detection via RandR -- the display's refresh rate:
+//! both the VALUE (`detectedHz`) and the PROBE that discovers it
+//! (the RandR query, the mode cache, and the notify handling). One
+//! file, one purpose: everything a consumer needs to pace against
+//! the real refresh rate, and nothing else.
+//!
+//! A display feature, not a bar one. The rate is read by bar segment
+//! pacing (title/carousel poll deadlines) AND by the floating
+//! module's drag throttle, so detection is compiled into every tree
+//! and armed once at boot (main.zig); the event loop forwards RandR
+//! extension events to the probe directly. The value starts at the
+//! 60 Hz default and is replaced by the first sane reading.
+//!
+//! Main thread only: the sole writer is the probe (boot arming plus
+//! RandR notify, both on the event-loop thread) and the sole readers
+//! are the pacing consumers -- so a plain f64, not an atomic, is the
+//! honest type (there is no second thread for an atomic to guard
+//! against, and one would only imply a guarantee the code does not
+//! make).
 
 const std = @import("std");
 
-const core = @import("./core.zig");
+const core = @import("core");
 const xcb = core.xcb;
 const log = @import("log");
-const time = @import("pure/time.zig");
+const time = @import("time");
 
 /// Fallback used when RandR is unavailable or returns an invalid value.
 const default_hz: f64 = 60.0;
 
-/// Bar render pacing uses 1e9/rate; a value outside this band would
-/// either spin the wake loop (huge rates) or starve the refresh cadence
-/// (tiny rates), so such readings are rejected rather than fed into the
-/// interval math.
+/// Pacing uses 1e9/rate; a value outside this band would either
+/// spin the wake loop (huge rates) or starve the refresh cadence
+/// (tiny rates), so such readings are rejected rather than fed into
+/// the interval math.
 const min_sane_hz: f64 = 10.0;
 const max_sane_hz: f64 = 1000.0;
 
-/// A single mode switch emits a burst of RandR notify events (screen + CRTC
-/// + output change) that all describe the same configuration; the debounce
+/// Latest detected monitor refresh rate in Hz; `default_hz` until a
+/// probe publishes a sane reading. Main thread only.
+var detected_rate_hz: f64 = default_hz;
+
+/// Latest detected monitor refresh rate in Hz.
+pub fn detectedHz() f64 {
+    return detected_rate_hz;
+}
+
+/// Publish a probed rate. The sanity band is the VALUE's own
+/// invariant -- a reading outside it is not a usable pacing rate for
+/// any consumer -- so it is enforced here, once, rather than
+/// re-derived (and risked disagreeing) at each call site.
+pub fn publishDetectedRate(rate: f64) void {
+    if (std.math.isFinite(rate) and rate >= min_sane_hz and rate <= max_sane_hz) {
+        detected_rate_hz = rate;
+        log.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
+    } else {
+        log.warn("Detected invalid refresh rate {d:.2} Hz, keeping fallback", .{rate});
+    }
+}
+
+/// A single mode switch emits a burst of RandR notify events (screen + CRTC +
+/// output change) that all describe the same configuration; the debounce
 /// collapses the burst into one query.
 const min_redetect_interval_ns: u64 = 100 * std.time.ns_per_ms;
 
@@ -39,44 +74,27 @@ const max_cached_modes = 256;
 /// only recognise them once the extension has been queried.
 var randr_first_event: u8 = 0;
 
-/// Detected monitor refresh rate in Hz.
-///
-/// A plain f64, not an atomic: the only reader is the title's poll deadline
-/// (title.zig), and that runs on the main thread inside the same loop that
-/// writes this value on detection and on RandR notify. The previous
-/// `std.atomic.Value` and its "read lock-free by render pacing" comment
-/// described a second reader that never existed -- there is no second thread
-/// here -- so the atomic bought nothing but implied a guarantee the code did
-/// not make.
-var detected_rate_hz: f64 = default_hz;
-
-/// Latest detected monitor refresh rate in Hz; `default_hz` until RandR
-/// provides a sane reading, re-detected automatically on monitor
-/// reconfiguration. Main thread only.
-pub fn detectedHz() f64 {
-    return detected_rate_hz;
-}
-
-/// Only ever touched by the main thread (bar.init / title draws / config
-/// reload), so a plain bool is race-free.
+/// Only ever touched by the main thread (boot primes it once), so a plain
+/// bool is race-free.
 var detection_initialized: bool = false;
 
 /// Monotonic timestamp of the most recent re-detection.
 var last_redetect_ns: u64 = 0;
 
-/// Perform one-time refresh-rate detection and subscribe to RandR notify
-/// events so later monitor re-configurations re-detect. Idempotent; safe to
-/// call from the main thread on every draw; the actual setup runs once and
-/// subsequent calls return immediately.
+/// Perform one-time refresh-rate detection and subscribe to RandR
+/// notify events so later monitor re-configurations re-detect.
+/// Idempotent; safe to call from the main thread on every event; the
+/// actual setup runs once and subsequent calls return immediately.
 ///
 /// The one-shot is unconditional and that is deliberate, not an oversight:
-/// re-querying the extension on every draw would put an X round-trip in the
-/// draw path. So a machine where the query itself fails (no RandR at all) is
-/// detected once, never retried, and renders at `default_hz` for the rest of
-/// the session -- there would be no RandR events to wake a retry anyway. A
-/// failed *detection* after a successful query is different: the subscription
-/// is already in place, so RandR events keep arriving and each one drives
-/// `runPendingRedetect`, which is where a real retry happens.
+/// re-querying the extension on every event would put an X round-trip in
+/// the event path. So a machine where the query itself fails (no RandR at
+/// all) is detected once, never retried, and renders at the default rate
+/// for the rest of the session -- there would be no RandR events to wake a
+/// retry anyway. A failed *detection* after a successful query is
+/// different: the subscription is already in place, so RandR events keep
+/// arriving and each one drives `runPendingRedetect`, which is where a
+/// real retry happens.
 pub fn ensureRefreshRateDetected(conn: core.Connection) void {
     if (detection_initialized) return;
     detection_initialized = true;
@@ -334,15 +352,6 @@ fn pipelinedRefreshRateFromOutputs(
         if (rateForModeId(mode_id)) |rate| return rate;
     }
     return null;
-}
-
-fn publishDetectedRate(rate: f64) void {
-    if (std.math.isFinite(rate) and rate >= min_sane_hz and rate <= max_sane_hz) {
-        detected_rate_hz = rate;
-        log.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
-    } else {
-        log.warn("Detected invalid refresh rate {d:.2} Hz, keeping fallback", .{rate});
-    }
 }
 
 fn subscribeRandrNotify(conn: core.Connection, root: xcb.xcb_window_t) void {

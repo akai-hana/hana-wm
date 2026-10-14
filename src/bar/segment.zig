@@ -157,8 +157,8 @@ pub const offscreen_rect: model.Rect = .{
 
 /// Stable per-call rendering context: geometry and draw state. It carries no
 /// X connection: the title draw had one only to call
-/// `hz.ensureRefreshRateDetected`, which `bar.init` primes at startup, and a
-/// render that mutates global detection state is a phase violation.
+/// `hz.ensureRefreshRateDetected`, which boot (`main`) primes at startup, and
+/// a render that mutates global detection state is a phase violation.
 pub const TitleRenderContext = struct {
     dc: *drawing.DrawContext,
     config: types.BarConfig,
@@ -199,6 +199,28 @@ pub fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
         if (std.mem.eql(u8, m.name, name)) return i;
     }
     return null;
+}
+
+/// The bar's own registry (the build-generated `bar_modules`
+/// array), named here once so the registry-index helpers below
+/// serve every consumer -- bar.zig and center_row.zig used to
+/// each carry a private copy (review 05-input round 2).
+const bar_mods = @import("bar_modules").modules;
+
+/// Registry index for `name` in the bar's own registry, or null
+/// when absent (also when the registry is empty: `bar_mods` is
+/// then a zero-length array and idByName finds nothing).
+pub inline fn segId(name: []const u8) ?usize {
+    return idByName(&bar_mods, name);
+}
+
+/// True in builds with at least one registered bar segment, false
+/// in segment-less builds. Guards every registry index: indexing
+/// a zero-length array is a compile error even under a runtime
+/// guard, so the empty build drops the whole body before it is
+/// analyzed (the `segAt` pattern from bar.zig).
+pub inline fn hasRegisteredSegments() bool {
+    return comptime bar_mods.len != 0;
 }
 
 /// Resolves the registry index of every module whose capability field `name`
