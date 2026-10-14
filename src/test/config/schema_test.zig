@@ -23,7 +23,6 @@ const testing = std.testing;
 // diagnostics; src/core/pure/log.zig silences all std.log diagnostics in
 // test binaries, so this stays quiet on success.
 const config = @import("config");
-const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
 const scratch = @import("scratch");

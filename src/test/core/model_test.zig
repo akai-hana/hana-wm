@@ -96,7 +96,7 @@ fn eqModel(a: *const Model, b: *const Model) bool {
     return true;
 }
 
-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE ws
+/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
 /// list; every listed id exists in the store (single-membership invariant).
 /// Floating and parked (minimized) windows are home-free.
 fn assertSingleMembership(m: *const Model) !void {
@@ -127,7 +127,7 @@ fn assertSingleMembership(m: *const Model) !void {
     }
 }
 
-test "register tiles on current ws, sets mask, is idempotent" {
+test "register tiles on current workspace, sets mask, is idempotent" {
     var m = makeModel();
 
     regCur(&m, 1);
@@ -142,7 +142,7 @@ test "register tiles on current ws, sets mask, is idempotent" {
     try testing.expectEqual(@as(usize, 2), m.store.count());
 }
 
-// register with hint_ws -> mask bit of hinted ws.
+// register with hint_ws -> mask bit of hinted workspace.
 test "register honors hinted workspace" {
     var m = makeModel();
 
@@ -199,7 +199,7 @@ test "moveWindowToWs for tiled, minimized, and pinned" {
     try expectOrder(&m, WSId.fromIndex(2), &.{1});
     try testing.expectEqual(WSId.fromIndex(2), model.findHome(&m, 1).?);
 
-    // Minimized: only the record moves; restore lands on the new ws.
+    // Minimized: only the record moves; restore lands on the new workspace.
     minimize.restore(&m, 1);
     workspaces.moveWindowToWs(&m, 1, WSId.fromIndex(2));
     try minimize.minimize(&m, 1);
@@ -421,9 +421,9 @@ test "cycle pool appends untiled windows and honors visibility" {
 
     regCur(&m, 1);
     regCur(&m, 2);
-    // Floating on ws 0: no tiled slot, so it trails the tiled run.
+    // Floating on workspace 0: no tiled slot, so it trails the tiled run.
     try addFloating(&m, 5, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
-    // Tiled on ws 1 but ALSO tagged on ws 0: visible here, no slot here.
+    // Tiled on workspace 1 but ALSO tagged on workspace 0: visible here, no slot here.
     try model.register(&m, 3, WSId.fromIndex(1));
     if (m.store.getPtr(3)) |e| e.mask = model.bit(ws) | model.bit(WSId.fromIndex(1));
 
@@ -692,7 +692,7 @@ test "capacity refusals happen before any mutation" {
     }
 
     // register refusal: the home-list bound is the defined overflow and
-    // refuses before mutation. Fill ws 0's tiled list to capacity.
+    // refuses before mutation. Fill workspace 0's tiled list to capacity.
     var fm = Model{};
     var i: WindowId = 500;
     while (fm.ws[0].tiled_order.len < model.max_tiled_per_ws) : (i += 1) {
@@ -749,13 +749,13 @@ test "identical operation sequences produce identical models" {
     try testing.expect(!eqModel(&a, &c));
 }
 
-test "home_ws: register sets cache to current ws" {
+test "home_ws: register sets cache to current workspace" {
     var m = makeModel();
-    regCur(&m, 1); // register on ws 0
+    regCur(&m, 1); // register on workspace 0
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(1).?.home_ws);
 }
 
-test "home_ws: register on non-zero ws" {
+test "home_ws: register on non-zero workspace" {
     var m = makeModel();
     try model.register(&m, 1, WSId.fromIndex(3));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(3)), m.store.get(1).?.home_ws);
@@ -808,7 +808,7 @@ test "home_ws: moveWindowToWs uses cache" {
     // moveWindowToWs reads the cached home rather than scanning.
     workspaces.moveWindowToWs(&m, 1, WSId.fromIndex(5));
     // home_ws tracks the original home, not the current workspace, so it
-    // stays 0 while the window lands on ws 5.
+    // stays 0 while the window lands on workspace 5.
     try expectOrder(&m, WSId.fromIndex(5), &.{1});
 }
 
@@ -836,7 +836,7 @@ test "adjustPrimaryWidth clamps" {
 }
 
 // Spawn path: on-current spawn tiles+focuses; off-current spawn tiles
-// on its target ws but does NOT take focus (mirrors actions.mapRequest).
+// on its target workspace but does NOT take focus (mirrors actions.mapRequest).
 test "spawn admission tiles (on-current focused; off-current target-only)" {
     var m = makeModel();
 
@@ -850,7 +850,7 @@ test "spawn admission tiles (on-current focused; off-current target-only)" {
     try expectOrder(&m, WSId.fromIndex(0), &.{1});
     try testing.expectEqual(@as(?WindowId, 1), m.focused);
 
-    // Off-current spawn: current moves away, a new window targets ws 0.
+    // Off-current spawn: current moves away, a new window targets workspace 0.
     // register(m, win, 0) tiles it there; mapRequest's on_current=false early
     // return means it must NOT steal model focus.
     workspaces.switchTo(&m, WSId.fromIndex(2));
@@ -896,7 +896,7 @@ test "border-width honor leaves tiled membership intact across a retile" {
 // so a later
 // restore lands on the NEW workspace while the old workspace's stack is left
 // undisturbed.
-test "tag-move of a minimized window moves the record; restore lands on the new ws" {
+test "tag-move of a minimized window moves the record; restore lands on the new workspace" {
     var m = makeModel();
 
     try minimize.init();
@@ -907,7 +907,7 @@ test "tag-move of a minimized window moves the record; restore lands on the new 
     try minimize.minimize(&m, 30);
     try testing.expect(minimize.isMinimized(&m, 30));
 
-    // Move the parked window to ws 2: only the record moves (the tag mask
+    // Move the parked window to workspace 2: only the record moves (the tag mask
     // follows per workspaces.moveWindowToWs); it stays minimized, and the old
     // stack keeps only 31.
     workspaces.moveWindowToWs(&m, 30, WSId.fromIndex(2));

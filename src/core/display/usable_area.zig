@@ -126,7 +126,7 @@ fn inset(edge: Edge) u32 {
 /// zero-sized area rather than wrapping to a huge one and handing the layouts
 /// a rect off the end of the display. That behavior is load-bearing and was
 /// previously only reachable through a live screen, which is why it now has
-/// this seam.
+/// this public entry.
 ///
 /// A zero-sized result is a DEGENERATE CONFIGURATION, not a normal state and
 /// not a fullscreen encoding: it is reachable only when the sum of claims on

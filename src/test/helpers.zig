@@ -92,7 +92,7 @@ pub fn colorOfFocused(win: model.WindowId, m: *const model.Model) u32 {
     return if (m.focused == win) 1 else 0;
 }
 
-/// Shared golden-sequence border-pixel convention: the sync and tracking
+/// Shared golden-sequence border-pixel convention: the sync and query
 /// fixtures assert these exact focused/unfocused values, so they live here
 /// as the single source instead of a per-file duplicate.
 pub const focused_pixel: u32 = 100;
@@ -102,7 +102,7 @@ pub const unfocused_pixel: u32 = 200;
 pub const cfg_bw: u16 = 2;
 
 /// Golden-sequence border-color callback: bright border when focused, dim
-/// otherwise. Shared by the sync/tracking fixtures (latency benches use the
+/// otherwise. Shared by the sync/query fixtures (latency benches use the
 /// cheaper colorOfFocused instead).
 pub fn testColor(win: model.WindowId, m: *const model.Model) u32 {
     return if (m.focused == win) focused_pixel else unfocused_pixel;

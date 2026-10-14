@@ -15,7 +15,6 @@ const types = @import("types");
 const scale = @import("dpi");
 const hz = @import("hz");
 const log = @import("log");
-const build_options = @import("build_options");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
 // through the core-owned `surfaces` composition root, never by importing the
 // bar module here.

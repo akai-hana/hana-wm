@@ -109,8 +109,8 @@ pub fn swapPrimaryAction(focus_swap: bool) void {
 /// boot-time initialization (without this the config's tiling
 /// params/workspace overrides stay inert until the first explicit reload)
 /// and post-reload re-seeding; mirrors the per-workspace override model:
-/// per-ws layout/variant/master-count overrides, global defaults otherwise;
-/// primary_width/secondary_balance are runtime-only (no config
+/// per-workspace layout/variant/master-count overrides, global defaults
+/// otherwise; primary_width/secondary_balance are runtime-only (no config
 /// representation) and reset to their defaults.
 /// No reconcile: callers decide when to push state to X.
 ///

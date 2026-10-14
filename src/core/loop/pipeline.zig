@@ -1,5 +1,7 @@
 //! Model-pipeline glue: owns the global Model, builds reconcile.Ctx per tick,
-//! exposes slot entry points and reconcile hooks; X-free.
+//! exposes slot entry points and reconcile hooks. X-aware (it dispatches
+//! through the sink and consults the display facts); the X-free half of the
+//! model pipeline lives in architecture/model.zig and tiling/.
 
 const std = @import("std");
 const model_mod = @import("model");
@@ -88,7 +90,7 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
 var g_sink: xcb_sink.XcbSink = undefined;
 
 /// The shared XCB sink: inited once in init(), then free across every use.
-/// Public for the grab-free wire-write seams this pipeline no longer wraps
+/// Public for the grab-free wire-write paths this pipeline no longer wraps
 /// (geometry's targeted drag tick, floating's drag raise): a raw request
 /// sequence with no model or grab involvement belongs at the call site.
 pub inline fn syncSink() sink.Sink {
@@ -216,7 +218,7 @@ pub fn currentCtx() *reconcile.Ctx {
 /// release the OUTER grab too, so the rest of the session would run ungrabbed
 /// while believing it holds the lock -- the exact class of bug that produces
 /// "a request failed for no visible reason" reports hours later. One counter
-/// at the single seam every grab goes through turns that into an assert at the
+/// at the single choke point every grab goes through turns that into an assert at the
 /// point of the mistake.
 var grab_depth: u32 = 0;
 

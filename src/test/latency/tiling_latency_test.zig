@@ -45,7 +45,7 @@ const makeCtx = helpers.makeCtx;
 
 // Reconcile CPU cost + request count scaling with window count, all windows
 // on ONE workspace (the realistic many-window tiling case).
-test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
+test "tiling: reconcile CPU cost + request count, all-on-1-workspace, 1..50 win" {
     inline for (.{ 1, 8, 20, 35, 50 }) |n| {
         var m = makeModel();
         for (0..n) |i| regCur(&m, @intCast(i + 1));
@@ -111,7 +111,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-ws, 1..50 win" {
 // Same, but windows SPREAD across workspaces: total count grows but the
 // current workspace has a fixed small window set. Exposes how much of a
 // retile cost is attributable to OFF-workspace (parked) windows.
-test "tiling: reconcile cost with windows spread across 10 ws" {
+test "tiling: reconcile cost with windows spread across 10 workspaces" {
     inline for (.{ 10, 30, 50 }) |total| {
         const per_ws = total / 10 + 1;
         var m = makeModel();
@@ -133,7 +133,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
         // Off-workspace windows are in the ledger too: the warm pass walked
         // every window on every workspace, so a fresh reconcile must send
         // nothing ANYWHERE -- parked windows included, which is the claim
-        // that off-ws windows cost compute but no wire.
+        // that windows on other workspaces cost compute but no wire.
         var probe = CountingSink{};
         var probe_ctx = makeCtx(probe.sink(), colorOfFocused, helpers.std_wa);
         reconcile.run(&m, &probe_ctx, .{});
@@ -141,7 +141,7 @@ test "tiling: reconcile cost with windows spread across 10 ws" {
 
         if (bench)
             helpers.benchLog(
-                "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass (current ws has only {d} windows)\n",
+                "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass (current workspace: {d} windows)\n",
                 .{ total, per_ws, per_pass_ns, per_ws },
             );
     }

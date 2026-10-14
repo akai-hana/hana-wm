@@ -1,4 +1,4 @@
-//! Keybinding resolution: keysym → keycode via live XKB state and
+//! Keybind resolution: keysym → keycode via live XKB state and
 //! (modifiers, keysym) → Action dispatch map consumed on the hot key path.
 //! Config owns parsed bindings (pure data, no X); keycode resolution requires
 //! live XkbState, keeping the resolver in the input layer breaks the
@@ -145,7 +145,7 @@ pub const KeybindResolver = struct {
         std.sort.heap(DispatchEntry, self.entries.items, {}, entryLessThan);
     }
 
-    /// O(log n) keybinding lookup for use on the hot key-press path.
+    /// O(log n) keybind lookup for use on the hot key-press path.
     /// Returns a pointer into the current config's keybindings slice, or null.
     /// `mods` is a `BindingMods`, not a raw X modifier state: the table is
     /// keyed by masked masks, so an unmasked value would be a silent

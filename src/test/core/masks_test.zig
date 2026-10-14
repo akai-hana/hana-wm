@@ -3,7 +3,7 @@
 //! masks.zig is the single place the WM folds the X protocol modifier and
 //! event masks (spelled as literals, so the pure shelf stays xcb-free) into
 //! the binding mask, the lock-key subset table, and the modifier-keysym band;
-//! these tests pin the derived values so an accidental bit change (a keybind
+//! these tests pin the derived values so an accidental bit change (a keybinding
 //! that would fire through CapsLock, a dropped lock combo from the grab set)
 //! fails loudly instead of changing grab/input behavior silently. The first
 //! two tests additionally pin every literal against its XCB name -- the

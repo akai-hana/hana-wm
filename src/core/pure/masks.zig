@@ -63,7 +63,7 @@ pub const EventMasks = struct {
     // PointerMotion, Enter/LeaveWindow, StructureNotify, PropertyChange.
     //
     // Three deliberate deviations, all because this WM differs from DWM:
-    //  - KEY_PRESS: our keybinding grabs land on root via xcb_grab_key.
+    //  - KEY_PRESS: our keybind grabs land on root via xcb_grab_key.
     //  - POINTER_MOTION (raw): the server reports every pointer move; raw
     //    volume is bounded by motion coalescing in events.handleXcbEvents,
     //    which collapses runs to the last event per poll wakeup (replaces
@@ -140,7 +140,7 @@ pub const BindingMods = packed struct(u4) {
 };
 
 /// Strips lock-key and pointer-button bits from a raw event modifier state,
-/// leaving only the modifier bits the WM uses for keybinding matching.
+/// leaving only the modifier bits the WM uses for keybind matching.
 ///
 /// A mask operation, so it lives with the masks it filters: the input layer
 /// is the only caller and needed it from a general-purpose utility module
