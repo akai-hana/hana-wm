@@ -38,7 +38,6 @@ const window = @import("window");
 const pipeline = @import("pipeline");
 const actions = @import("actions");
 const spawn = @import("spawn");
-const diag = @import("diag");
 const atoms = @import("atoms");
 const query = @import("query");
 const lifecycle = @import("lifecycle");
@@ -401,7 +400,7 @@ pub fn executeAction(action: *const types.Action) void {
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => lifecycle.reload(),
         .reload_hana => lifecycle.requestReexec(),
-        .dump_state => diag.dumpState(),
+        .dump_state => actions.dumpState(),
         .exec => |cmd| spawn.executeShellCommand(cmd) catch |err|
             log.err("exec failed: {}", .{err}),
         // A `+` batch is fire-and-forget: members are launched together, no

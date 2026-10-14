@@ -1,7 +1,7 @@
 //! Fullscreen/covering orchestration: the enter/exit/switch transition for an
 //! arbitrary window in ONE model transition + ONE reconcile.
 //!
-//! Each action is one model transition + one sync entry; the covering winner
+//! Each action is one model transition + one reconcile entry; the covering winner
 //! renders edge-to-edge while everyone else parks off-screen in the same
 //! transition. Bar hide/show deferral and the EWMH state writes stay
 //! protocol-side, driven through the window_modules registry's pending

@@ -7,7 +7,7 @@
 //! destination already has an owner (dispatched through the registry, so
 //! `fullscreen` is never named here). Workspace count and per-workspace
 //! config overrides are owned elsewhere (query latches the count;
-//! actions.seedParamsFromConfig seeds the params).
+//! core/loop/seed.zig seeds the params).
 
 const model = @import("model");
 const registry = @import("registry");

@@ -12,10 +12,15 @@
 //! shape check-layers.sh documents for core<->window).
 
 const core = @import("core");
+const log = @import("log");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
+const query = @import("query");
 const registry = @import("registry");
+const build_options = @import("build_options");
+// Layout-name resolution for the state dump; via the build-generated seam.
+const tiling = @import("tiling_seam").tiling;
 
 const parked = @import("parked");
 const layout_params = @import("layout_params");
@@ -38,10 +43,9 @@ pub fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
         null;
 }
 
-// Re-exports: the six action groups live in their own files
-// (parked/geometry/layout_params/ws/manage/covering); `actions.*` stays the
-// single import surface for keybind/events, so those importers
-// are untouched by the split.
+// The six groups' public surface, re-exported from one place so
+// keybind/events import this hub and are untouched by the group split.
+// (Why the files stay separate: see the header.)
 pub const minimize = parked.minimize;
 pub const restore = parked.restore;
 pub const restoreOrdered = parked.restoreOrdered;
@@ -52,8 +56,6 @@ pub const adjustPrimaryWidthAction = layout_params.adjustPrimaryWidthAction;
 pub const adjustPrimaryCount = layout_params.adjustPrimaryCount;
 pub const adjustSecondaryBalance = layout_params.adjustSecondaryBalance;
 pub const swapPrimaryAction = layout_params.swapPrimaryAction;
-pub const seedParamsFromConfig = layout_params.seedParamsFromConfig;
-pub const applyConfigReload = layout_params.applyConfigReload;
 pub const moveWindowTo = ws.moveWindowTo;
 pub const tagToggle = ws.tagToggle;
 pub const pinToggle = ws.pinToggle;
@@ -75,6 +77,44 @@ pub const cancelDragForWindow = geometry.cancelDragForWindow;
 pub const moveFocused = geometry.moveFocused;
 pub const viewportStep = geometry.viewportStep;
 pub const snapViewportFocusedDuty = geometry.snapViewportFocusedDuty;
+/// WM-wide state dump diagnostic: logs a live snapshot of model and subsystem
+/// state on demand (read-only); used by the dump-state action. Not a group of
+/// its own -- it is one read-only log emitter, so it lives here with the
+/// re-export surface it feeds.
+pub fn dumpState() void {
+    // A stack array is the right owner here (no State to hang it off), and it
+    // keeps `query` free of module-level scratch.
+    var scratch: [model_mod.store_capacity]query.Entry = undefined;
+    const all = query.allWindowsInto(&scratch);
+
+    log.info("========== STATE DUMP ==========", .{});
+    log.info("Focused:        {?x}", .{focus.getFocused()});
+    log.info("Total windows:  {}", .{all.len});
+    log.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
+
+    if (build_options.has_workspaces) {
+        const ws_count = query.getWorkspaceCount();
+        for (0..ws_count) |i| {
+            var n: usize = 0;
+            for (all) |e| {
+                if (model_mod.maskedOn(e.mask, model_mod.WSId.fromIndex(i))) n += 1;
+            }
+            log.info(
+                "  WS{}: {} windows",
+                .{ i + 1, n },
+            );
+        }
+    }
+
+    if (build_options.has_tiling and core.tilingEnabled()) {
+        const m = pipeline.model();
+        log.info("Tiling enabled: true", .{});
+        log.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
+        log.info("Tiled windows:  {}", .{model_mod.tiledCountOnWs(m, m.current)});
+    }
+
+    log.info("================================", .{});
+}
 
 /// The four reconcile shapes a tiling action can ask for, as ONE axis.
 ///
@@ -191,8 +231,10 @@ pub fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: 
     return prep;
 }
 
-// restore (unpark)
-
+// Hidden-state query: the module-backed answer to "is this window parked",
+// read by the restore path (parked) and the visibility predicate (ws). A
+// read, not an action — it reconciles nothing, so it sits apart from the
+// transition tails above.
 pub fn isMinimizedOnAnyWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
     return callHookBool(.isWindowHidden, .{ m, win });
 }

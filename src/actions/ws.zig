@@ -1,6 +1,6 @@
 //! The workspace actions: move_to_workspace, tag/pin
 //! toggles, all-view, and the workspace switch. Each
-//! action is one model transition + one sync entry. The
+//! action is one model transition + one reconcile entry. The
 //! shared transition tails (retile, focusFallback) and
 //! the minimized query live in `actions.zig`, the hub
 //! this file imports: the two files form the window
@@ -34,7 +34,10 @@ fn canTagChange(m: *const model_mod.Model, win: model_mod.WindowId) bool {
 /// move_to_workspace. Model moves mask + home list + covering record in one
 /// call; the reconcile's diff parks/repairs geometry globally.
 pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
-    const wm = providerOf(.sendToWs) orelse return;
+    const wm = providerOf(.sendToWs) orelse {
+        log.warn("move_to_workspace: no sendToWs provider bound", .{});
+        return;
+    };
     if (!core.isValidWorkspaceIndex(ws_idx)) return;
 
     const m = pipeline.mut();
@@ -72,7 +75,10 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
     // bound there is nothing to toggle (and no reconcile to trigger).
     const add_prov = providerOf(.addToWs);
     const rem_prov = providerOf(.removeFromWs);
-    if (add_prov == null and rem_prov == null) return;
+    if (add_prov == null and rem_prov == null) {
+        log.warn("toggle_tag: no addToWs/removeFromWs provider bound", .{});
+        return;
+    }
     if (!core.isValidWorkspaceIndex(ws_idx)) return;
 
     const m = pipeline.mut();
@@ -107,17 +113,23 @@ pub fn tagToggle(win: model_mod.WindowId, ws_idx: u8, protect_current: bool) voi
 
 /// move_to_all_workspaces / toggle_tag_all: pinned <-> current-only.
 pub fn pinToggle(win: model_mod.WindowId) void {
-    const wm = providerOf(.togglePin) orelse return;
+    const wm = providerOf(.togglePin) orelse {
+        log.warn("pin_window: no togglePin provider bound", .{});
+        return;
+    };
     const m = pipeline.mut();
     if (!canTagChange(m, win)) return;
     wm.togglePin.?(m, win);
     actions.retile(.{}, null);
 }
 
-/// all_workspaces (Mod+5): flag flip; sync maps foreign windows on enter and
+/// all_workspaces (Mod+5): flag flip; the reconciler maps foreign windows on enter and
 /// parks them again on exit through the ordinary diff.
 pub fn allViewToggle() void {
-    const wm = providerOf(.toggleAllView) orelse return;
+    const wm = providerOf(.toggleAllView) orelse {
+        log.warn("all_workspaces: no toggleAllView provider bound", .{});
+        return;
+    };
     const m = pipeline.mut();
     const entering = wm.toggleAllView.?(m);
     var ft: focus.FocusTransition = .none;
@@ -130,7 +142,7 @@ pub fn allViewToggle() void {
 // workspace switch
 
 /// Workspace switch. One model transition + one reconcile; the LastSent
-/// diff parks leavers once and maps+places arrivers (see sync_test's switch
+/// diff parks leavers once and maps+places arrivers (see reconcile_test's switch
 /// scenario).
 ///
 /// Kept protocol-side: pointer-hover query and focus suppression reset.
