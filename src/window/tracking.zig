@@ -103,12 +103,24 @@ var workspace_count: usize = 1;
 /// u64 workspace bitmask caps the count; clamp (never crash) so a corrupt
 /// config count can't overflow the mask in ReleaseFast. Callers before
 /// core.init (headless test harnesses) keep the default.
-pub fn init() void {
+fn latchWorkspaceCount() void {
     if (core.isReady()) {
         const cs = core.getState().config.workspaces;
         workspace_count = if (cs.enabled) @min(@as(usize, cs.count), constants.max_workspaces) else 1;
     }
+}
+
+pub fn init() void {
+    latchWorkspaceCount();
     clearFocusMru();
+}
+
+/// Re-latch the workspace count after a config swap. The count is config-derived
+/// and the `[workspaces] count`/`enabled` knobs are reloadable, but it used to
+/// be read only at init: a hot reload kept the boot value for admission
+/// clamping, the bar frame, and tag rendering until the next full restart.
+pub fn reLatchWorkspaceCount() void {
+    latchWorkspaceCount();
 }
 
 pub fn deinit() void {

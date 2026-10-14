@@ -305,10 +305,14 @@ pub fn drainPendingSpawns() void {
         // reaper for that pid, and the entry is removed below -- so the
         // intermediate child became a permanent zombie. `spawn_is_closed`
         // keeps the entry in the table until the reap really happened.
+        // `drained_pid` keeps the real pid alive for finishSpawn: clearing
+        // `entry.pid` here must not turn the @intCast in registerSpawn into a
+        // -1 cast.
+        const drained_pid = entry.pid;
         if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
             entry.pid = -1;
 
-        finishSpawn(entry);
+        finishSpawn(entry, drained_pid);
         g_pending.swapRemove(i);
     }
 }
@@ -341,7 +345,7 @@ pub fn conversationFailed(data: []const u8) bool {
 
 /// Applies a fully-drained conversation: on success, registers the spawn for
 /// workspace routing; on failure, says which command did not launch.
-fn finishSpawn(entry: *PendingSpawn) void {
+fn finishSpawn(entry: *PendingSpawn, pid: i32) void {
     const data = entry.buf[0..entry.len];
 
     if (conversationFailed(data)) {
@@ -352,7 +356,7 @@ fn finishSpawn(entry: *PendingSpawn) void {
         return;
     }
     if (entry.spawn_ws) |ws| {
-        admission.registerSpawn(core.WorkspaceId.fromIndex(ws), @intCast(entry.pid));
+        admission.registerSpawn(core.WorkspaceId.fromIndex(ws), @intCast(pid));
     }
 }
 
@@ -374,10 +378,10 @@ pub fn reapPendingChildren() void {
     // it.
     while (c.waitpid(-1, null, c.WNOHANG) > 0) {}
 
-    for (g_pending.slice()) |*entry| {
-        if (entry.pid > 0 and c.waitpid(entry.pid, null, c.WNOHANG) > 0)
-            entry.pid = -1;
-    }
+    // Do NOT clear entry.pid for reaped children here: the drain loop below
+    // still needs the real pid for finishSpawn's registerSpawn, and it keeps
+    // its own copy before any clearing. The waitpid(-1) sweep above is the
+    // reap; the per-pid entries are only used at drain time.
 }
 
 /// Runs `cmd` to completion before returning, for `,`-sequenced exec steps.

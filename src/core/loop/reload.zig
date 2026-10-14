@@ -12,6 +12,7 @@ const window = @import("window");
 const admission = @import("admission");
 const actions = @import("actions");
 const grabs = @import("grabs");
+const tracking = @import("tracking");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `if (changes.bar)` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
@@ -20,14 +21,22 @@ const surfaces = @import("surfaces").Surfaces;
 /// swap. On failure the old config remains active.
 ///
 /// Ordering is load-bearing:
-///   1. Keybind resolution runs pre-swap on the new config.
+///   1. detectChanges runs pre-swap on (old, new) so the swap below can
+///      release the old box while both are still borrowed here.
 ///   2. The swap precedes subsystem reloads (reloadBorders / reloadConfig /
-///      surfaces.onReload) so they rebuild from the NEW config. (The old ordering kept
-///      stale settings, then freed string slices the new bar had shallow-copied;
-///      a use-after-free on the next draw.)
-///   3. grabKeybindings() runs post-swap because fillGrabCookies() reads the
+///      surfaces.onReload) so they rebuild from the NEW config, and precedes
+///      buildKeybinds so the resolver stamps the post-swap config_rev.
+///      (The old ordering kept stale settings, then freed string slices the
+///      new bar had shallow-copied; a use-after-free on the next draw.)
+///   3. buildKeybinds runs POST-swap: its KeybindResolver stamps
+///      core.config_rev() as the rev the dispatch map matches, and that rev is
+///      only bumped BY the swap. Stamping pre-swap left the resolver one rev
+///      behind on every reload, so KeybindResolver.lookup failed closed and
+///      every keyboard keybind silently stopped dispatching until an unrelated
+///      MappingNotify re-stamped it.
+///   4. grabKeybindings() runs post-swap because fillGrabCookies() reads the
 ///      live config.
-///   4. errdefer frees the heap-allocated new config if anything fails pre-swap.
+///   5. errdefer frees the heap-allocated new config if anything fails pre-swap.
 ///      Post-swap all calls are infallible, so no errdefer is needed.
 pub fn handleConfigReload() !void {
     log.info("Reload requested", .{});
@@ -79,9 +88,6 @@ pub fn handleConfigReload() !void {
     }
 
     try config.validate(new_ptr);
-    // XKB exists for the whole process lifetime (init at boot, deinit only at
-    // shutdown), so this reload never sees a null state.
-    input.buildKeybinds(new_ptr.keybindings.items);
 
     // Per-subsystem change detection, BEFORE the swap: it reads both boxes, and
     // the swap below releases the old one. Detecting first is what lets the
@@ -97,6 +103,17 @@ pub fn handleConfigReload() !void {
     // never both free the same box.
     core.replaceOwnedConfig(new_ptr);
     committed = true;
+
+    // Keybind resolution runs POST-swap so the resolver's stamped config_rev
+    // matches the rev the swap just bumped (see the ordering doc). XKB exists
+    // for the whole process lifetime (init at boot, deinit only at shutdown),
+    // so this reload never sees a null state.
+    input.buildKeybinds(new_ptr.keybindings.items);
+
+    // Config-derived counts latched into window modules must re-latch too:
+    // tracking's workspace_count was only ever read at init, so a reload that
+    // edits [workspaces] count/enabled would otherwise keep the boot value.
+    tracking.reLatchWorkspaceCount();
 
     // Freeze the now-live config as the re-exec source: a later reload_hana
     // (binary-only reload) boots from this snapshot rather than from the
