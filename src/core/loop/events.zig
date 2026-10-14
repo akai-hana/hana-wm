@@ -14,6 +14,7 @@ const config = @import("config");
 const scale = @import("dpi");
 const hz = @import("hz");
 const input = @import("input");
+const grabs = @import("grabs");
 const window = @import("window");
 const ledger = @import("ledger");
 const focus = @import("focus");
@@ -21,7 +22,7 @@ const focus = @import("focus");
 const signals = @import("signals");
 const pipeline = @import("pipeline");
 const restart = @import("restart");
-const persist = @import("persist");
+const handoff = @import("handoff");
 const spawn = @import("spawn");
 const timers = @import("timers");
 const build_options = @import("build_options");
@@ -113,10 +114,15 @@ fn handleDestroyNotify(event: *anyopaque) void {
 
 // Adapts input.handleMappingNotify to the EventHandler shape. Only the
 // `request` field matters: it says WHICH mapping changed, and only a keyboard
-// mapping change invalidates the keycode->keysym table (19.2).
+// mapping change invalidates the keycode->keysym table (19.2). A keyboard
+// change also makes the installed key grabs stale, and the regrab runs HERE
+// rather than inside input because grabs reads input's resolved keybind list:
+// calling it from there closed an import cycle (the same reason mouse
+// dispatch lives in dispatch.zig).
 fn handleMappingNotify(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_mapping_notify_event_t, event);
-    input.handleMappingNotify(e.request == xcb.XCB_MAPPING_KEYBOARD);
+    if (input.handleMappingNotify(e.request == xcb.XCB_MAPPING_KEYBOARD))
+        grabs.grabKeybindings();
 }
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
@@ -367,40 +373,41 @@ fn handleReexec() !void {
     const cs = core.getState();
     log.info("Re-executing new binary", .{});
 
-    const path = try persist.defaultStatePath(cs.alloc);
+    const path = try handoff.defaultStatePath(cs.alloc);
     // The path is allocator-owned; execNext never returns so this only
     // ever runs on the error/abort exits below, where the leak would else
     // live for the rest of the process lifetime.
     defer cs.alloc.free(path);
-    try persist.save(cs.alloc, pipeline.model(), path);
+    try handoff.save(cs.alloc, pipeline.model(), path);
 
     // One record for the whole hand-off. The snapshot is the frozen last-good
     // config, so this re-exec swaps ONLY the binary; a re-exec boot that finds
     // no snapshot (no user config was ever loaded) falls back to the normal
     // search, which reproduces today's fallback-only behavior.
-    const handoff = restart.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
+    const exec_handoff = restart.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
         log.err("Re-exec aborted: executable path unknown", .{});
         return error.ExecutablePathUnknown;
     };
 
     xcb.xcb_disconnect(cs.conn);
-    restart.execNext(handoff);
+    restart.execNext(exec_handoff);
 }
 
 /// One comptime-parameterized drain shared by the batch poll loop and the
-/// post-batch queued drain (they differ only in pull function, cap, and
-/// with_tail policy). Each iteration pulls from the caller's `pending`
-/// slot first when `with_tail` is false, so a coalesced non-motion stashed
-/// there is re-pulled (and charged) on the following iteration, preserving
-/// order across batches. With `with_tail` true the terminating non-motion
-/// is already charged by the collapse and is dispatched in place.
+/// post-batch queued drain (they differ only in pull function and cap).
+/// Each iteration pulls from the caller's `pending` slot first, so a
+/// coalesced non-motion stashed there is re-pulled (and charged) on the
+/// following iteration, preserving order across batches. The terminating
+/// non-motion of a motion run is stashed the same way; when the drain stops
+/// on it (cap hit), the caller dispatches the leftover `pending` itself.
+/// One stash policy everywhere -- the former `with_tail` axis (charge +
+/// deliver in place vs. stash) is gone; both call sites read identically.
 fn drainEvents(
     pending: *?*xcb.xcb_generic_event_t,
     conn: core.Connection,
     budget: *usize,
     comptime cap: usize,
     comptime pull: anytype,
-    comptime with_tail: bool,
 ) void {
     while (budget.* < cap) {
         const event = blk: {
@@ -417,15 +424,9 @@ fn drainEvents(
         }
         var newest = event;
         var pause: ?*xcb.xcb_generic_event_t = null;
-        collapseMotionRun(&newest, &pause, conn, budget, cap, pull, with_tail);
+        collapseMotionRun(&newest, &pause, conn, budget, cap, pull);
         dispatchOwned(newest);
-        if (pause) |p| {
-            if (with_tail) {
-                dispatchOwned(p);
-            } else {
-                pending.* = p;
-            }
-        }
+        if (pause) |p| pending.* = p;
     }
 }
 
@@ -441,12 +442,11 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
 /// superseding motion frees it). Reads ahead with `pull` while `budget.*`
 /// stays below `cap`, charging each drained motion into `budget` the same way
 /// the caller's outer loop charges. The first non-motion ends the run and is
-/// stashed to `pause` UNDELIVERED, so the caller emits `newest` before
-/// `pause`, preserving order. `with_tail` mirrors the two budget
-/// policies: the drain loop charges every pull (its terminating non-motion
-/// counts against the per-iteration budget), while the batch loop charges
-/// only drained motions -- its terminating non-motion is re-pulled and
-/// charged by the outer loop later.
+/// stashed to `pause` UNDELIVERED and UNCHARGED -- the drain loop re-pulls it
+/// from `pending` and charges it there (or, at the cap, the caller dispatches
+/// it as the leftover tail), so `newest`-before-`pause` ordering holds
+/// either way. This was the second `with_tail` charge site; with the axis
+/// removed there is exactly one charge policy: pull-when-re-pulled.
 fn collapseMotionRun(
     newest: anytype,
     pause: *?*xcb.xcb_generic_event_t,
@@ -454,12 +454,10 @@ fn collapseMotionRun(
     budget: *usize,
     comptime cap: usize,
     comptime pull: anytype,
-    comptime with_tail: bool,
 ) void {
     while (budget.* < cap) {
         const next = pull(conn) orelse break;
         if (!isMotion(next)) {
-            if (with_tail) budget.* += 1;
             pause.* = next;
             break;
         }
@@ -503,7 +501,6 @@ fn handleXcbEvents() void {
         &dispatched,
         max_events_per_batch,
         xcb.xcb_poll_for_event,
-        false,
     );
 
     // A cap exit can leave a non-motion event held in `pending` (stashed
@@ -522,8 +519,9 @@ fn handleXcbEvents() void {
     // events immediately. Motion runs collapse here too (a motion-heavy
     // read-ahead buffer — the very stream that cap-exited the batch above —
     // collapses to its newest member instead of dispatching up to 256
-    // individual reconciles); with_tail=true charges the terminating
-    // non-motion and delivers it in place.
+    // individual reconciles); its terminating non-motion is stashed to
+    // `queued_pending` like the batch drain's -- one stash policy, no
+    // with_tail variant.
     var queued_pending: ?*xcb.xcb_generic_event_t = null;
     var extra: usize = 0;
     drainEvents(
@@ -532,8 +530,14 @@ fn handleXcbEvents() void {
         &extra,
         max_queued_drain,
         xcb.xcb_poll_for_queued_event,
-        true,
     );
+
+    // Leftover tail of the queued drain: a terminating non-motion stashed
+    // against its cap is delivered here, before post-batch housekeeping --
+    // the same tail rule as the batch drain's `pending` dispatch above
+    // (same policy, second site; the axis that used to inline-deliver it is
+    // gone).
+    if (queued_pending) |p| dispatchOwned(p);
 
     // Drain any spawn pipes that became readable during this event batch.
     // This catches the common case where SIGCHLD and the MapRequest arrive in
@@ -567,7 +571,7 @@ fn handleXcbEvents() void {
     // 3. Border sweep, only when a border-relevant fact actually changed during
     //    the batch; a motion/expose-only batch skips the unconditional O(N)
     //    walk. Wire sends are unchanged either way (the sweep is
-    //    CacheMap-dedup'd), so steady-state output is identical. Last, because
+    //    ledger-dedup'd), so steady-state output is identical. Last, because
     //    it reads the model the two stages above may have moved.
     if (!std.meta.eql(facts_before, core.getState().facts)) window.updateWorkspaceBordersIfNeeded();
 

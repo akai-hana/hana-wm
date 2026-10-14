@@ -10,10 +10,6 @@ const usable_area = @import("usable_area");
 const build_options = @import("build_options");
 const log = @import("log");
 const time = @import("time");
-const surfaces = @import("surfaces").Surfaces;
-// Fullscreen EWMH/bar-arming hooks via the build-generated `window_modules`
-// registry (the loop below no-ops without fullscreen).
-const window_mods = @import("window_modules").modules;
 
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
@@ -25,13 +21,11 @@ const scaling = @import("scaling");
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
-/// True after init(); kept as a named predicate so callers read as
-/// "is the model live" rather than reaching for a bare global. The VALUE now
-/// comes from core's single boot phase, so it cannot disagree with core.isReady()
-/// the way two independently-set latches could.
-pub inline fn initialized() bool {
-    return core.isModelReady();
-}
+// `initialized()` -- the named "is the model live" predicate -- was a pure
+// forward to core.isModelReady() after the Phase unification, and tracking
+// kept a third spelling (modelReady()) on top of it. The KISS audit's 3->1:
+// both facades deleted, every gate reads core.isModelReady() directly (its
+// doc is the one place that explains why the gate exists).
 
 var instance: model_mod.Model = undefined;
 pub fn init() void {
@@ -42,26 +36,32 @@ pub fn init() void {
 }
 /// READ-ONLY access to the WM model (single source of truth). The return type
 /// is `*const`, so any attempt to write through this handle is a compile
-/// error: the compiler is the mutation tripwire. A MUTABLE handle requires
-/// the transition-layer gate (`pipeline.mut`); only modules that own model
-/// transitions declare a private `Gate` (actions/window/focus/tracking).
+/// error: the compiler is the mutation tripwire, and it is the ONLY real one
+/// this layer ever had (see `mut`).
 pub inline fn model() *const model_mod.Model {
-    if (!initialized()) @panic("pipeline.model() called before init()");
+    if (!core.isModelReady()) @panic("pipeline.model() called before init()");
     return &instance;
 }
 
-/// Capability gate for mutable model access (see `mut`). Accident-resistant,
-/// not adversarial: declaring a fresh Gate compiles, but no module does so by
-/// accident -- the read-only `model()` handle is the default.
-pub const Gate = struct {};
-
-/// MUTABLE access to the WM model. Requires a `Gate` value, which only the
-/// transition layer declares privately; every other module sees only the
-/// read-only `model()` handle. Zero-cost: the empty gate is compile-time
-/// discarded.
-pub inline fn mut(g: *const Gate) *model_mod.Model {
-    _ = g;
-    if (!initialized()) @panic("pipeline.mut() called before init()");
+/// MUTABLE access to the WM model. This used to demand a `Gate` value that
+/// each transition module declared privately -- and was deleted as ceremony:
+/// `Gate` was an empty struct that any file could declare in one line, so the
+/// token stopped nothing and cost a declaration per module plus `&gate` at
+/// every call site. The enforcement that remains is the type split itself:
+/// readers take `*const` from `model()`, writers explicitly opt into `mut()`.
+/// Zero-cost.
+///
+/// Deliberately bumps NO fact revision ("rev bumps into mut()" was considered
+/// by the KISS audit and rejected): mut() cannot know WHICH fact a mutation
+/// changed -- `focus.setFocus(pipeline.mut(), ...)` is a focus_rev change, a
+/// params write is layout_rev, and an unconditional window_rev here would
+/// repaint every bar segment on every focus change (a real regression: window
+/// dirties drive the all-segments sweep, focus only the title). Fact bumps
+/// stay adjacent to the change that owns them; the ONE structural bump (10.5)
+/// lives in reconcileGrab, which is the pattern for making a bump
+/// impossible-to-forget -- when a path has a single meaning, not generally.
+pub inline fn mut() *model_mod.Model {
+    if (!core.isModelReady()) @panic("pipeline.mut() called before init()");
     return &instance;
 }
 
@@ -70,7 +70,7 @@ pub inline fn mut(g: *const Gate) *model_mod.Model {
 /// name resolution pre-init. An unresolvable config name (removed module,
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
-    if (initialized()) return model().ws[model().current.index].params.kind;
+    if (core.isModelReady()) return model().ws[model().current.index].params.kind;
     return defaultIndexForLayoutName(core.getState().config.tiling.layout);
 }
 
@@ -87,7 +87,7 @@ pub inline fn getCurrentVariantIdx() usize {
 /// model.LayoutParams.kind), collapsing to `contract.default_kind` when the
 /// name does not resolve. Loud, never silent: an unresolvable/removed
 /// layout name is a config bug. Shared by getCurrentLayout (pre-init fallback)
-/// and persist's restored-layout degradation, so both site types resolve
+/// and handoff's restored-layout degradation, so both site types resolve
 /// config names identically.
 pub fn defaultIndexForLayoutName(name: []const u8) u8 {
     if (!build_options.has_tiling) return contract.default_kind;
@@ -97,7 +97,11 @@ pub fn defaultIndexForLayoutName(name: []const u8) u8 {
 var g_sink: xcb_sink.XcbSink = undefined;
 
 /// The shared XCB sink: inited once in init(), then free across every use.
-inline fn syncSink() sink.Sink {
+/// The shared XCB sink: inited once in init(), then free across every use.
+/// Public for the grab-free wire-write seams this pipeline no longer wraps
+/// (geometry's targeted drag tick, floating's drag raise): a raw request
+/// sequence with no model or grab involvement belongs at the call site.
+pub inline fn syncSink() sink.Sink {
     return (&g_sink).sink();
 }
 
@@ -172,20 +176,16 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
     return model_mod.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
-pub inline fn dragTick(win: model_mod.WindowId) void {
-    reconcile.reconcileDragTick(&instance, syncSink(), win);
-}
-
 /// Scroll viewport caller duties applied at the single reconcile choke
 /// point, dispatched through the active layout module's preReconcile hook
 /// (the scroll addon registers snap-right-on-growth + clamp; a layout that
 /// provides no hook has no pre-reconcile duty).
 /// Single choke point for the pre-reconcile duties. It used to live in three
-/// places at once (prepare(), withServerGrab's grabScoped, and the fullscreen-
-/// enter path's explicit call), and the fullscreen enter path therefore ran it
-/// TWICE per op: once explicitly and once again via withServerGrab->grabScoped
-/// ->prepare. The duties now live in exactly one place -- prepare() -- and every
-/// entry point reaches it through that one call.
+/// places at once (each entry point pairing it with its own ctx() call), and
+/// the fullscreen enter path therefore ran it TWICE per op: once explicitly
+/// and once again via the grab wrapper's ctx build. The duties now live in
+/// exactly one place -- prepare() -- and every entry point reaches them
+/// through that one call (grabScoped -> prepare).
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
     // Internal choke point: touches the private `instance` directly (not via
@@ -230,21 +230,6 @@ pub fn currentCtx() *reconcile.Ctx {
     return &g_ctx;
 }
 
-/// Raise `win` to the top of the stack immediately, outside any server grab,
-/// then flush. The drag-tick path needs only these two ungrabbed requests;
-/// it used to borrow `grabCtx`, which ran a full pre-reconcile duty pass and
-/// built an entire retile ctx for them.
-pub fn raiseWindowNow(win: model_mod.WindowId) void {
-    const s = syncSink();
-    s.stackOnly(win, .above);
-    s.flush();
-}
-
-/// Runs a reconcile-family body under one X server grab, always
-/// releasing+flushing on exit (defer), so no grab site can forget the
-/// atomicity bracket. `body` is a value-capturing struct with a
-/// `fn call(self, c: *Ctx) void` method (the codebase's closure idiom); each
-/// entry point captures the args its compose needs.
 /// Nesting depth of the server grab. `XGrabServer` is NOT reentrant and has no
 /// matching "already held" state: a nested grab followed by an ungrab would
 /// release the OUTER grab too, so the rest of the session would run ungrabbed
@@ -280,11 +265,13 @@ pub const ScopedGrab = struct {
     }
 
     /// Flushless reconcile inside this bracket, against this token's ctx.
-    /// Asserts the token was taken with a ctx (grabScoped always is). This is
-    /// the bar's replacement for the old pub pipeline.reconcileNow(), which
+    /// `o` is passed through to `reconcile.run` (`.{}` for a plain retile;
+    /// the fullscreen grab in manage passes `.force_restack`). Asserts the
+    /// token was taken with a ctx (grabScoped always is). This is the bar's
+    /// replacement for the old pub pipeline.reconcileNow(), which
     /// let a grabbed caller reconcile against a ctx its geometry writes were
     /// not bracketed by.
-    pub fn reconcileNow(self: ScopedGrab) void {
+    pub fn reconcileNow(self: ScopedGrab, o: reconcile.Opts) void {
         std.debug.assert(self.c != null);
         // Refresh the screen-derived fields from LIVE state immediately before
         // geometry is emitted, rather than trusting the snapshot taken when
@@ -305,7 +292,7 @@ pub const ScopedGrab = struct {
         // double-apply anything.
         self.c.?.workarea = usable_area.workArea(core.getState().screen);
         self.c.?.bar_win = usable_area.mappedSurfaceWindow();
-        reconcile.run(&instance, self.c.?, .{});
+        reconcile.run(&instance, self.c.?, o);
     }
 };
 
@@ -335,18 +322,12 @@ pub fn grabOnly() ScopedGrab {
     return .{ .c = null, .s = s };
 }
 
-fn withServerGrab(body: anytype) void {
-    const g = grabScoped();
-    defer g.deinit();
-    body.call(g.c.?);
-}
-
 /// Opt-in retile latency instrumentation (RETILE_PROF). Measures the wall
 /// clock held by each server-grab retile -- the exact latency a user feels
 /// across a tiling op. Gated by `build_options.profile_key` (the same flag as
 /// the key-dispatch path) so release WMs compile it out.
 ///
-/// This lived in `reconcile` next to the `reconcileUnderGrab` it instrumented
+/// This lived in `reconcile` next to the grab bracket it instrumented
 /// (5.4). The bracket belongs to the pipeline, so the measurement of the
 /// bracket belongs here with it.
 const retile_prof = log.WindowedProfiler(
@@ -355,41 +336,31 @@ const retile_prof = log.WindowedProfiler(
     std.log.info,
 );
 
-/// Grab server, reconcile, then ungrabAndFlush, atomically.
-pub inline fn reconcileUnderGrabNow(o: reconcile.Opts) void {
-    // 5.4: this used to be exempt from withServerGrab because
-    // `reconcile.reconcileUnderGrab` ran its OWN grab/ungrab bracket, and a
-    // nested grab's ungrab would release the outer one. That second bracket is
-    // gone: grab ownership now lives here and only here, so this is just
-    // withServerGrab with the profiler around it.
+/// The default reconcile entry: bump the WINDOW fact first (10.5), then
+/// reconcile under a fresh server grab with the given opts -- `.{}` for a
+/// plain retile, `.{ .force_restack = true }` to re-emit stacking even when
+/// the ledger says nothing moved. The retile profiler measures the whole
+/// bracket (ctx build through ungrabAndFlush).
+///
+/// The bump lives HERE, not in each caller. Eight actions used to reconcile
+/// with no bump at all, so the bar could read a stale window fact after
+/// geometry moved -- the invariant was "remember to bump", held only by the
+/// actions that happened to route through a bumping wrapper. Making this the
+/// one path that bumps is what makes it impossible to forget. A bump is a
+/// monotonic `rev +%= 1` compared once per tick, so a site that wants a bump
+/// for its own reasons may take a double bump here without a second work pass.
+///
+/// Grab ownership lives at grabScoped and nowhere else: the reconcile-under-
+/// grab family this entry absorbed used to route through a second grab
+/// bracket inside `reconcile` whose nested ungrab would have released the
+/// outer grab. There is exactly one bracket now, and the profiler wraps it.
+pub inline fn reconcileGrab(o: reconcile.Opts) void {
+    core.window.bump();
     const t0: i128 = if (retile_prof.enabled) time.monotonicNs() else 0;
     defer if (retile_prof.enabled) retile_prof.note(time.monotonicNs() - t0);
-    withServerGrab(struct {
-        o: reconcile.Opts,
-        fn call(self: @This(), c: *reconcile.Ctx) void {
-            reconcile.run(&instance, c, self.o);
-        }
-    }{ .o = o });
-}
-
-/// The common case: reconcile under a fresh server grab with DEFAULT opts,
-/// bumping the WINDOW fact first (10.5).
-///
-/// The bare `reconcileUnderGrabNow(.{})` call site reads as "pass the empty
-/// options struct", which invites the reader to hunt for what the defaults
-/// are; this alias states the intent. `reconcileUnderGrabNow` stays for the
-/// sites that really do set `force_restack`.
-///
-/// The bump lives HERE, not in each caller. Eight actions reconciled through
-/// this alias with no bump at all, so the bar could read a stale window fact
-/// after geometry moved -- the invariant was "remember to bump", held only by
-/// the actions that happened to route through `retile`. Making the default
-/// path bump is what makes it impossible to forget. A bump is a monotonic
-/// `rev +%= 1` compared once per tick, so a site that wants a bump for its
-/// own reasons may take a double bump here without a second work pass.
-pub inline fn reconcileGrab() void {
-    core.window.bump();
-    reconcileUnderGrabNow(.{});
+    const g = grabScoped();
+    defer g.deinit();
+    reconcile.run(&instance, g.c.?, o);
 }
 
 /// Grab server, run the focus transition, reconcile, then ungrabAndFlush
@@ -420,123 +391,16 @@ pub inline fn reconcileGrabFocus(
     order: FocusOrder,
     duty: ?*const fn () void,
 ) void {
-    // The duty is only ever invoked on the `.before` leg (see `call` below).
+    // The duty is only ever invoked on the `.before` leg (see below).
     std.debug.assert(!(order == .after and duty != null));
-    withServerGrab(struct {
-        o: reconcile.Opts,
-        t: focus.FocusTransition,
-        order: FocusOrder,
-        duty: ?*const fn () void,
-        fn call(self: @This(), c: *reconcile.Ctx) void {
-            if (self.order == .before) {
-                focus.applyPendingFocus(self.t);
-                if (self.duty) |d| d();
-            }
-            reconcile.run(&instance, c, self.o);
-            if (self.order == .after) focus.applyPendingFocus(self.t);
-        }
-    }{ .o = o, .t = t, .order = order, .duty = duty });
-}
-
-/// Commit a focus transition inside one server grab with no reconcile: for
-/// focus-only changes where geometry/stacking cannot differ (hover focus).
-/// Borders repaint via the per-batch sweep on the commit's focus bump.
-pub inline fn focusOnlyCommit(t: focus.FocusTransition) void {
-    // grabOnly, not grabScoped/withServerGrab: this path never reconciles, so
-    // building a ctx (and running the model-mutating preReconcileDuties) would
-    // leave the model and the server disagreeing -- the exact hazard
-    // ScopedGrab.reconcileNow exists to prevent.
-    const g = grabOnly();
+    const g = grabScoped();
     defer g.deinit();
-    focus.applyPendingFocus(t);
-}
-
-/// Fullscreen transition classification for the atomic grab path (the fn
-/// below): a named kind instead of a bool-pair so enter/exit/switch_ can't be
-/// passed inconsistently. Drives the EWMH state writes and the bar
-/// hide/show arming inside the grab.
-pub const FullscreenKind = enum { enter, exit, switch_ };
-
-/// Grab server, reconcile, do focus + EWMH + bar hide, then ungrabAndFlush,
-/// atomically. Specialised for the fullscreen toggle path so the focus
-/// handoff, EWMH writes and the bar unmap/hide land inside the same grab as
-/// geometry (grouped atomicity); the enter path unmaps the bar immediately
-/// rather than deferring to ConfigureNotify.
-///
-/// `t` is the optional focus transition to the covering entrant (`.none` for
-/// an exit or an already-focused entrant): a covering switch/enter hands
-/// input focus to the window that owns the usable area. Applied AFTER the
-/// reconcile so the entrant is mapped+raised before xcb_set_input_focus
-/// targets it (the mapRequest ordering rule); a parked/unparked entrant is
-/// re-mapped inside this grab.
-pub inline fn reconcileUnderGrabNowFullscreen(
-    o: reconcile.Opts,
-    t: focus.FocusTransition,
-    win: model_mod.WindowId,
-    prev_fs_win: ?model_mod.WindowId,
-    kind: FullscreenKind,
-) void {
-    withServerGrab(struct {
-        o: reconcile.Opts,
-        t: focus.FocusTransition,
-        win: model_mod.WindowId,
-        prev_fs_win: ?model_mod.WindowId,
-        kind: FullscreenKind,
-        fn call(self: @This(), c: *reconcile.Ctx) void {
-            reconcile.run(&instance, c, self.o);
-            focus.applyPendingFocus(self.t);
-            // EWMH advertisement inside the grab: clear for whoever left
-            // fullscreen, set for entrant. All fire-and-forget
-            // (xcb_change_property). Uniform loop over the sub-system set:
-            // each module that provides the hook runs it. In practice only
-            // fullscreen does, preserving the old gated single hook call
-            // exactly; the loop just makes the dispatch mechanism uniform
-            // rather than a merged struct. Ordering and the
-            // kind/prev_fs_win/instance.focused logic is unchanged.
-            // Not contract.callAll, despite being a fan-out over window_mods:
-            // callAll passes ONE argument set to every binder, and this needs
-            // two calls with different arguments (clear the previous
-            // fullscreen window, then set this one), plus a per-call-site
-            // condition on kind. Routing it through callAll would mean
-            // flattening that into a single uniform call, which is the bug the
-            // uniformity is meant to prevent.
-            for (window_mods) |m| {
-                if (m.setEwmhFullscreenState) |hook| {
-                    if (self.kind == .switch_) {
-                        if (self.prev_fs_win) |old| hook(old, false);
-                    }
-                    hook(self.win, self.kind != .exit);
-                }
-            }
-            // Bar hide/show inside the grab: no separate grab/reconcile cycle.
-            //
-            // ENTER: immediately unmap the bar via the surfaces seam. The
-            // fullscreen client is already mapped+raised+screen-sized by
-            // reconcile.run, so it covers the bar before the unmap reaches
-            // the server. Cancel any stale pending bar show from a previous
-            // exit (a new enter supersedes it).
-            //
-            // EXIT: arm the deferred show. The bar reappears after the
-            // client's ConfigureNotify confirms non-fullscreen dimensions.
-            if (self.kind != .exit) {
-                // Immediate bar unmap when fullscreen claims the usable area.
-                surfaces.hideBarForFullscreen();
-            } else {
-                // Exit: deferred bar show (unchanged path).
-                if (instance.focused) |w| {
-                    contract.callAll(contract.WindowModule, window_mods[0..], .armPendingBarShow, .{w});
-                }
-            }
-        }
-    }{ .o = o, .t = t, .win = win, .prev_fs_win = prev_fs_win, .kind = kind });
-}
-
-/// Flushless reconcile against a FRESH ctx and no grab (drag tick path). Kept
-/// public for the drag tick, which needs no atomicity; the grabbed case moved
-/// onto ScopedGrab.reconcileNow so a grabbed caller cannot reach a reconcile
-/// that would build a second ctx.
-pub inline fn reconcileNow() void {
-    reconcile.run(&instance, prepare(), .{});
+    if (order == .before) {
+        focus.applyPendingFocus(t);
+        if (duty) |d| d();
+    }
+    reconcile.run(&instance, g.c.?, o);
+    if (order == .after) focus.applyPendingFocus(t);
 }
 
 // The old `grabCtx` manual-grab seam is gone. It could be called from inside
@@ -545,3 +409,9 @@ pub inline fn reconcileNow() void {
 // `caller MUST ungrabAndFlush` contract its one in-grab caller could not
 // honour without releasing the enclosing grab. Its callers now use
 // currentCtx() to join a grab in flight, or a named entry point.
+//
+// The reconcile-family fan-out is likewise gone: `reconcileGrab(opts)` and
+// `reconcileGrabFocus(...)` are the two entry points; the drag tick (geometry),
+// the drag raise (floating), the hover focus-only commit (focus) and the
+// fullscreen grab orchestration (manage) live at their sole callers, and the
+// withServerGrab closure wrapper they shared was deleted with them.

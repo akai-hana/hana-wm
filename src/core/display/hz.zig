@@ -35,13 +35,9 @@ const default_hz: f64 = 60.0;
 const min_sane_hz: f64 = 10.0;
 const max_sane_hz: f64 = 1000.0;
 
-/// Latest detected monitor refresh rate in Hz; `default_hz` until a
-/// probe publishes a sane reading. Main thread only.
-var detected_rate_hz: f64 = default_hz;
-
 /// Latest detected monitor refresh rate in Hz.
 pub fn detectedHz() f64 {
-    return detected_rate_hz;
+    return state.rate_hz;
 }
 
 /// Publish a probed rate. The sanity band is the VALUE's own
@@ -50,7 +46,7 @@ pub fn detectedHz() f64 {
 /// re-derived (and risked disagreeing) at each call site.
 pub fn publishDetectedRate(rate: f64) void {
     if (std.math.isFinite(rate) and rate >= min_sane_hz and rate <= max_sane_hz) {
-        detected_rate_hz = rate;
+        state.rate_hz = rate;
         log.info("Detected monitor refresh rate: {d:.2} Hz", .{rate});
     } else {
         log.warn("Detected invalid refresh rate {d:.2} Hz, keeping fallback", .{rate});
@@ -69,18 +65,6 @@ const min_redetect_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const max_outputs = 64;
 const max_cached_modes = 256;
 
-/// RandR extension event base (`first_event`), 0 until detection has run.
-/// Extension event types are server-assigned, so the event dispatcher can
-/// only recognise them once the extension has been queried.
-var randr_first_event: u8 = 0;
-
-/// Only ever touched by the main thread (boot primes it once), so a plain
-/// bool is race-free.
-var detection_initialized: bool = false;
-
-/// Monotonic timestamp of the most recent re-detection.
-var last_redetect_ns: u64 = 0;
-
 /// Perform one-time refresh-rate detection and subscribe to RandR
 /// notify events so later monitor re-configurations re-detect.
 /// Idempotent; safe to call from the main thread on every event; the
@@ -96,8 +80,8 @@ var last_redetect_ns: u64 = 0;
 /// arriving and each one drives `runPendingRedetect`, which is where a
 /// real retry happens.
 pub fn ensureRefreshRateDetected(conn: core.Connection) void {
-    if (detection_initialized) return;
-    detection_initialized = true;
+    if (state.initialized) return;
+    state.initialized = true;
     const root = core.getState().root;
     if (setupRandr(conn, root)) detectRefreshRate(conn, root);
 }
@@ -105,13 +89,8 @@ pub fn ensureRefreshRateDetected(conn: core.Connection) void {
 /// Lets the event dispatcher recognise RandR extension events (which sit
 /// above the fixed core-event table) before the table lookup.
 pub fn randrFirstEvent() u8 {
-    return randr_first_event;
+    return state.randr_first_event;
 }
-
-/// Deferred re-detection flag, set by handleRandrNotifyEvent and consumed by
-/// runPendingRedetect. The actual detection makes several synchronous XCB
-/// round-trips, so it is never run from inside event dispatch.
-var redetect_pending: bool = false;
 
 /// Called by the event loop on any RandR extension event (screen change, CRTC
 /// change, output change).
@@ -131,15 +110,15 @@ pub fn handleRandrNotifyEvent(event: *anyopaque) void {
         // mode is resolved from the payload, drop any full re-detection that a
         // sibling event (e.g. screen change) in the same burst may have queued;
         // the cached table already holds the authoritative rate for this mode.
-        redetect_pending = false;
+        state.redetect_pending = false;
         publishDetectedRate(rate);
         return;
     }
 
     const now = time.monotonicNs();
-    if (now -| last_redetect_ns < min_redetect_interval_ns) return;
-    last_redetect_ns = now;
-    redetect_pending = true;
+    if (now -| state.last_redetect_ns < min_redetect_interval_ns) return;
+    state.last_redetect_ns = now;
+    state.redetect_pending = true;
 }
 
 /// Runs the deferred re-detection, if one is pending. Called once per event
@@ -147,8 +126,8 @@ pub fn handleRandrNotifyEvent(event: *anyopaque) void {
 /// so the synchronous RandR round-trips can't stall the handling of the other
 /// events (e.g. MapRequest) the same batch carried. Main thread only.
 pub fn runPendingRedetect(conn: core.Connection) void {
-    if (!redetect_pending) return;
-    redetect_pending = false;
+    if (!state.redetect_pending) return;
+    state.redetect_pending = false;
     detectRefreshRate(conn, core.getState().root);
 }
 
@@ -158,7 +137,7 @@ fn setupRandr(conn: core.Connection, root: xcb.xcb_window_t) bool {
     const ext = xcb.xcb_query_extension_reply(conn, ext_cookie, null) orelse return false;
     defer std.c.free(ext);
     if (ext.*.present == 0 or ext.*.first_event == 0) return false;
-    randr_first_event = ext.*.first_event;
+    state.randr_first_event = ext.*.first_event;
     subscribeRandrNotify(conn, root);
     return true;
 }
@@ -174,8 +153,35 @@ const CachedMode = struct {
     hz: f64,
 };
 
-var cached_modes: [max_cached_modes]CachedMode = undefined;
-var cached_mode_count: usize = 0;
+/// The file's entire mutable state, declared once (the module doc above owns
+/// the main-thread / no-atomic argument). Keeping it together makes the state
+/// read as state rather than as six globals sprinkled between the functions
+/// that happen to use them.
+var state: State = .{};
+
+const State = struct {
+    /// Latest detected monitor refresh rate in Hz; `default_hz` until a probe
+    /// publishes a sane reading.
+    rate_hz: f64 = default_hz,
+    /// RandR extension event base (`first_event`), 0 until detection has run.
+    /// Extension event types are server-assigned, so the event dispatcher can
+    /// only recognise them once the extension has been queried.
+    randr_first_event: u8 = 0,
+    /// One-shot guard for ensureRefreshRateDetected (boot primes it once; a
+    /// plain bool is race-free because the main thread is the only writer).
+    initialized: bool = false,
+    /// Monotonic timestamp of the most recent full re-detection.
+    last_redetect_ns: u64 = 0,
+    /// Deferred re-detection flag, set by handleRandrNotifyEvent and consumed
+    /// by runPendingRedetect. The actual detection makes several synchronous
+    /// XCB round-trips, so it is never run from inside event dispatch.
+    redetect_pending: bool = false,
+    /// Cached mode table (mode id -> refresh rate) from the last detection,
+    /// so the CRTC-change fast path can resolve an event's mode id with zero
+    /// XCB requests. `cached_mode_count` is the live prefix of it.
+    cached_modes: [max_cached_modes]CachedMode = undefined,
+    cached_mode_count: usize = 0,
+};
 
 /// Precomputes the refresh rate for every mode in the resources reply and
 /// stores it in the cache (capped at max_cached_modes).
@@ -190,9 +196,9 @@ fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
             .{ modes.len, max_cached_modes },
         );
     }
-    cached_mode_count = @min(modes.len, max_cached_modes);
-    for (modes[0..cached_mode_count], 0..) |mode, i| {
-        cached_modes[i] = .{
+    state.cached_mode_count = @min(modes.len, max_cached_modes);
+    for (modes[0..state.cached_mode_count], 0..) |mode, i| {
+        state.cached_modes[i] = .{
             .id = mode.id,
             .hz = if (mode.htotal == 0 or mode.vtotal == 0)
                 0.0
@@ -206,7 +212,7 @@ fn cacheModes(modes: []xcb.xcb_randr_mode_info_t) void {
 /// Looks up the refresh rate for a mode id in the cached table. Returns null
 /// when the id is absent or the mode yields no valid rate.
 fn rateForModeId(mode_id: xcb.xcb_randr_mode_t) ?f64 {
-    for (cached_modes[0..cached_mode_count]) |m|
+    for (state.cached_modes[0..state.cached_mode_count]) |m|
         if (m.id == mode_id and m.hz > 0.0) return m.hz;
     return null;
 }
@@ -220,11 +226,11 @@ fn rateFromNotifyEvent(event: *anyopaque) ?f64 {
     // Only the RRNotify event (base + 1) carries a subCode and notify-data
     // union. The screen-change event (base) has a rotation byte in the same
     // offset as subCode, so trust it only when response_type matches base + 1.
-    if (randr_first_event == 0) return null;
+    if (state.randr_first_event == 0) return null;
     const notify = core.eventCast(*xcb.xcb_randr_notify_event_t, event);
     // Widen before adding 1: an extension base of 255 would wrap the u8 add
     // to 0 and silently disable re-detection for that server.
-    if (notify.*.response_type != @as(u16, randr_first_event) + 1) return null;
+    if (notify.*.response_type != @as(u16, state.randr_first_event) + 1) return null;
     if (notify.*.subCode != xcb.XCB_RANDR_NOTIFY_CRTC_CHANGE) return null;
     const mode_id = notify.*.u.cc.mode;
     if (mode_id == 0) return null;
@@ -258,12 +264,12 @@ fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
         // publishing a rate for a mode that is not the one on screen. Drop it,
         // so every event falls back to the debounced re-detect path until a
         // read succeeds. Cheaper to be wrong slowly than confidently.
-        if (cached_mode_count != 0) {
+        if (state.cached_mode_count != 0) {
             log.warn(
                 "refresh: re-detect could not read the screen; dropping {} cached modes so the fast path cannot answer from a stale table",
-                .{cached_mode_count},
+                .{state.cached_mode_count},
             );
-            cached_mode_count = 0;
+            state.cached_mode_count = 0;
         }
         return;
     };
@@ -291,6 +297,19 @@ fn detectRefreshRate(conn: core.Connection, root: xcb.xcb_window_t) void {
 /// output-info requests are fired before any reply is collected, and all
 /// crtc-info requests are fired before any reply is collected, so the whole
 /// probe takes ~3 blocking waits regardless of output count (vs 1 + 2*N before).
+/// One candidate output carried across the three probe phases: the
+/// output-info cookie and reply, then the crtc-info cookie. The AoS record
+/// for the four parallel arrays this replaces (order / out_cookies /
+/// out_info_ptrs / crtc_cookies, indexed only by position) -- one index, one
+/// lifetime, and the reply that its own cleanup loop frees sits beside the
+/// cookie that produced it.
+const OutputProbe = struct {
+    out: xcb.xcb_randr_output_t,
+    out_cookie: xcb.xcb_randr_get_output_info_cookie_t = undefined,
+    info: ?*xcb.xcb_randr_get_output_info_reply_t = null,
+    crtc_cookie: xcb.xcb_randr_get_crtc_info_cookie_t = undefined,
+};
+
 fn pipelinedRefreshRateFromOutputs(
     conn: core.Connection,
     res: *xcb.xcb_randr_get_screen_resources_current_reply_t,
@@ -302,49 +321,42 @@ fn pipelinedRefreshRateFromOutputs(
     const n_out: usize = @intCast(output_count);
 
     // Build a priority-ordered candidate list (primary first), capped.
-    var order: [max_outputs]xcb.xcb_randr_output_t = undefined;
-    var n_order: usize = 0;
+    var probes: [max_outputs]OutputProbe = undefined;
+    var n_probes: usize = 0;
     if (primary != 0) {
-        order[0] = primary;
-        n_order = 1;
+        probes[0] = .{ .out = primary };
+        n_probes = 1;
     }
     for (outputs[0..@min(n_out, max_outputs)]) |out| {
         if (out == primary) continue;
-        if (n_order >= max_outputs) break;
-        order[n_order] = out;
-        n_order += 1;
+        if (n_probes >= max_outputs) break;
+        probes[n_probes] = .{ .out = out };
+        n_probes += 1;
     }
-    if (n_order == 0) return null;
+    if (n_probes == 0) return null;
 
     // Phase 2: fire an output-info request for every candidate, then collect.
-    var out_cookies: [max_outputs]xcb.xcb_randr_get_output_info_cookie_t = undefined;
-    var out_info_ptrs: [max_outputs]?*xcb.xcb_randr_get_output_info_reply_t = undefined;
-    @memset(out_info_ptrs[0..n_order], null);
     const config_ts = res.*.config_timestamp;
-    for (order[0..n_order], 0..) |out, i|
-        out_cookies[i] = xcb.xcb_randr_get_output_info(conn, out, config_ts);
-    for (order[0..n_order], 0..) |_, i| {
-        const info = xcb.xcb_randr_get_output_info_reply(conn, out_cookies[i], null) orelse continue;
-        out_info_ptrs[i] = info;
-    }
-    defer for (order[0..n_order], 0..) |_, i| {
-        if (out_info_ptrs[i]) |info| std.c.free(info);
+    for (probes[0..n_probes]) |*p|
+        p.out_cookie = xcb.xcb_randr_get_output_info(conn, p.out, config_ts);
+    for (probes[0..n_probes]) |*p|
+        p.info = xcb.xcb_randr_get_output_info_reply(conn, p.out_cookie, null);
+    defer for (probes[0..n_probes]) |*p| {
+        if (p.info) |info| std.c.free(info);
     };
 
     // Phase 3: fire a crtc-info request for every output that has a CRTC.
-    var crtc_cookies: [max_outputs]xcb.xcb_randr_get_crtc_info_cookie_t = undefined;
-    for (order[0..n_order], 0..) |_, i| {
-        const info = out_info_ptrs[i] orelse continue;
-        const crtc = info.crtc;
-        if (crtc == 0) continue;
-        crtc_cookies[i] = xcb.xcb_randr_get_crtc_info(conn, crtc, config_ts);
+    for (probes[0..n_probes]) |*p| {
+        const info = p.info orelse continue;
+        if (info.crtc == 0) continue;
+        p.crtc_cookie = xcb.xcb_randr_get_crtc_info(conn, info.crtc, config_ts);
     }
 
     // Collect the crtc replies in priority order and resolve the active mode.
-    for (order[0..n_order], 0..) |_, i| {
-        const info = out_info_ptrs[i] orelse continue;
+    for (probes[0..n_probes]) |*p| {
+        const info = p.info orelse continue;
         if (info.crtc == 0) continue;
-        const crtc_info = xcb.xcb_randr_get_crtc_info_reply(conn, crtc_cookies[i], null) orelse
+        const crtc_info = xcb.xcb_randr_get_crtc_info_reply(conn, p.crtc_cookie, null) orelse
             continue;
         const mode_id = crtc_info.*.mode;
         std.c.free(crtc_info);

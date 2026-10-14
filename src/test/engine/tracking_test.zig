@@ -5,7 +5,7 @@
 //! current-workspace visibility, and on parked state.
 //!
 //! The facade reads the process-global `pipeline` model, so the fixture
-//! drives that global (`pipeline.initialized()` + `pipeline.mut(&gate)`)
+//! drives that global (`core.isModelReady()` + `pipeline.mut()`)
 //! instead of a local model, and reconciles the SAME instance the facade
 //! reads. The sync sink is the recorder (no live X needed; these are
 //! headless and run in every `zig build test`).
@@ -34,10 +34,6 @@ const testColor = helpers.testColor;
 
 const Recorder = test_sink.TestSink(.record);
 
-/// Test-owned transition-layer gate (same pattern as the shared fixture):
-/// gives the reset path a mutable handle to the pipeline global model.
-var gate: pipeline.Gate = .{};
-
 /// Re-arms the pipeline global model (which the tracking facade reads) and
 /// the sync/capacity module stores, returning the mutable instance handle.
 /// Then every reconcile in a test runs over `pipeline.model()` so facade and
@@ -55,7 +51,7 @@ fn pipelineModel() *model.Model {
     // instance` is never observed -- the very next line overwrites it through
     // the same mutation gate.
     core.markModelReady();
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
     m.* = helpers.makeModel(); // makeModel already re-arms the module stores
     ledger.init();
     tracking.init();
@@ -185,9 +181,8 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
     // rect) and the facade reads it as on the current workspace. The sibling
     // stays a managed window, and the ledger parks it on the wire: the
     // covering occupant owns the screen, so no rect. Focus folding already
-    // collapses the cycle pool to the occupant (focus.zig
-    // collectVisibleWindows), so the model-truth read cannot leak a parked
-    // window into focus recovery.
+    // collapses the cycle pool to the occupant (focus.zig cycleTarget), so
+    // the model-truth read cannot leak a parked window into focus recovery.
     try testing.expect(tracking.isManaged(101));
     try testing.expect(tracking.isOnCurrentWorkspace(101));
     try testing.expect(ledger.lastRectFor(101) != null);

@@ -4,8 +4,8 @@
 //! adjust, swap master, focus next/prev), how much latency does the
 //! server-grab reconcile add, and how does it scale with window count?
 //!
-//! Every tiling op routes through actions -> pipeline.reconcileUnderGrabNow
-//! -> reconcile.reconcileUnderGrab -> reconcile.run. reconcile replays the FULL
+//! Every tiling op routes through actions -> pipeline.reconcileGrab
+//! -> reconcile.run. reconcile replays the FULL
 //! desired wire state for EVERY stored window (all workspaces) each reconcile,
 //! then delta-sends only what changed (no-op elision). The SEND is O(changed)
 //! but the COMPUTE is O(total windows), so a retile's CPU cost grows with
@@ -138,7 +138,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
         .order = order_buf[0..nn],
         .params = &m.ws[m.current.index].params,
         .workarea = screen,
-        .hints = .{ .order = order_buf[0..nn], .hints = hints_buf[0..nn] },
+        .hints = hints_buf[0..nn],
         .focused = m.focused,
         .env = helpers.std_env,
     };
@@ -161,7 +161,7 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
 
 // A *change* reconcile (e.g. every tiling op) sends geometry for every visible
 // window. Counts the XCB requests in the changed reconcile at various window
-// counts, mirroring reconcileUnderGrab's grab-server -> ungrabAndFlush.
+// counts, mirroring the grab-bracketed path's grab-server -> ungrabAndFlush.
 test "tiling: XCB request count on a changing retile (layout switch)" {
     inline for (.{ 1, 20, 35, 50 }) |n| {
         var m = makeModel();

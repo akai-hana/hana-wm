@@ -30,7 +30,7 @@ const window = @import("window");
 const actions = @import("actions");
 const pipeline = @import("pipeline");
 const restart = @import("restart");
-const persist = @import("persist");
+const handoff = @import("handoff");
 const restore = @import("restore");
 const focus = @import("focus");
 
@@ -131,7 +131,10 @@ pub fn main(init: std.process.Init) !void {
     // BEFORE core.init, where events.grabMouseButtons() called getState() and
     // aborted the boot with "core: getState() called before init()". It is here
     // so the input layer's own order still reads setup-then-buildKeybinds.
+    // The mouse grab itself is sequenced from HERE: grabs reads input's
+    // resolved keybind list, so input must not import grabs back.
     input.setup(x.conn, x.screen);
+    grabs.grabMouseButtons();
 
     // Build the key dispatch map now that both the live config and the XKB
     // state exist. Owned by the input layer (see input/keybind.zig); rebuilt
@@ -178,21 +181,31 @@ pub fn main(init: std.process.Init) !void {
     requests.flush(x.conn);
     log.info("hana booted up successfully!", .{});
 
-    // Re-exec session hand-off (restart.execNext sets restart_env).
-    if (restart.restorePathFromEnv()) |restore_path_z| {
-        restore.adoptSession(std.mem.span(restore_path_z));
+    // Re-exec session hand-off (restart.execNext sets restart_env). The env
+    // var is the ONLY adoption gate: execNext sets it alongside a file it has
+    // just written, so an env-gated boot always reads its own predecessor's
+    // record. A cold boot (no env) adopts nothing, and discards a leftover
+    // record from a session that crashed instead of exiting cleanly. Read
+    // ONCE: the same record drives the adoption below and the retirement at
+    // the end, and nothing in this process writes restore_env (execNext's
+    // setenv runs in the predecessor, and is noreturn here anyway).
+    const restore_path_z = restart.restorePathFromEnv();
+    if (restore_path_z) |path_z| {
+        restore.adoptSession(std.mem.span(path_z));
+    } else {
+        handoff.discardOrphan(alloc);
     }
 
     events.run();
 
-    // This session's restore file is a hand-off record, and a graceful exit
-    // is the one case where the NEXT boot must not adopt it: the XIDs it
-    // names have already been given back, so the server may have recycled
-    // them and the successor would adopt unrelated windows. (After a crash
-    // or a re-exec the file is exactly what recovery needs, which is why
-    // this runs only here.)
-    if (restart.restorePathFromEnv()) |restore_path_z| {
-        std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, std.mem.span(restore_path_z)) catch |err| switch (err) {
+    // Retire this session's restore file. It names the windows we are about
+    // to give back, so it must not outlive the session: the server may recycle
+    // those XIDs the moment we release them, and a record pointing at
+    // unrelated windows is worse than no record. Adoption is env-gated (above),
+    // so nothing reads this file after this exit -- delete it as dead state;
+    // a later cold boot would find it and discard it as an orphan anyway.
+    if (restore_path_z) |path_z| {
+        std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, std.mem.span(path_z)) catch |err| switch (err) {
             error.FileNotFound => {},
             else => log.warn("Could not remove restore file: {}", .{err}),
         };

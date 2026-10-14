@@ -9,9 +9,9 @@
 //! intentionally held for the whole process in production).
 //!
 //! `save` is called with the leak-checking `testing` allocator: the
-//! core/proc/persist.zig save path used to transfer the JSON buffer out of its
+//! core/proc/handoff.zig save path used to transfer the JSON buffer out of its
 //! Allocating writer and never free it (an S-F finding, surfaced as leaked
-//! bytes here), and the one-line fix that lands in core/proc/persist.zig frees it
+//! bytes here), and the one-line fix that lands in core/proc/handoff.zig frees it
 //! (`defer al.deinit()`), so the tracking allocator now doubles as a
 //! regression guard for that class of leak.
 
@@ -21,7 +21,7 @@ const testing = std.testing;
 // Some restore/save paths log warn-level diagnostics; debug.zig silences
 // all std.log diagnostics in test binaries, so this stays quiet on success.
 const model = @import("model");
-const persist = @import("persist");
+const handoff = @import("handoff");
 const scratch = @import("scratch");
 const helpers = @import("helpers");
 
@@ -65,11 +65,11 @@ test "F10: save/load keeps every window record and workspace field" {
     var f = try scratch.TmpFile.init("roundtrip.hana-state");
     defer f.deinit();
     try f.write("");
-    try persist.save(testing.allocator, &src, f.path());
+    try handoff.save(testing.allocator, &src, f.path());
 
-    try testing.expect(persist.loadToGlobal(page_alloc, f.path()));
+    try testing.expect(handoff.loadToGlobal(page_alloc, f.path()));
 
-    const recorded = persist.loaded().?;
+    const recorded = handoff.loaded().?;
     // loadToGlobal's own version gate already rejected the wrong-version file;
     // the round-trip record must carry the (internal, non-pub) version value.
     try testing.expect(recorded.version > 0);
@@ -112,20 +112,20 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
     try bad.write("not json at all");
 
     // Failure path must not touch the retained parse: the global before each
-    // rejected attempt is the state the WM keeps. Asserting against persist.loaded()
+    // rejected attempt is the state the WM keeps. Asserting against handoff.loaded()
     // here makes "a failed load leaves the last good state intact" an actual
     // invariant rather than a hope.
-    const retained = persist.loaded();
+    const retained = handoff.loaded();
 
-    try testing.expect(!persist.loadToGlobal(page_alloc, bad.path()));
-    try testing.expect(persist.loaded() == retained);
+    try testing.expect(!handoff.loadToGlobal(page_alloc, bad.path()));
+    try testing.expect(handoff.loaded() == retained);
 
     var wrong_version = try scratch.TmpFile.init("wrong_version");
     defer wrong_version.deinit();
     try wrong_version.write("{ \"version\": 9999, \"current\": 0, \"windows\": [] }");
 
-    try testing.expect(!persist.loadToGlobal(page_alloc, wrong_version.path()));
-    try testing.expect(persist.loaded() == retained);
+    try testing.expect(!handoff.loadToGlobal(page_alloc, wrong_version.path()));
+    try testing.expect(handoff.loaded() == retained);
 
     // A missing path is not an error, just a clean "nothing to restore". The
     // path sits inside a real (merely unwritten) temp dir, so "missing" is
@@ -133,8 +133,8 @@ test "F10: loadToGlobal rejects a corrupt file and a bad version" {
     var missing = try scratch.TmpFile.init("missing");
     defer missing.deinit();
 
-    try testing.expect(!persist.loadToGlobal(page_alloc, missing.path()));
-    try testing.expect(persist.loaded() == retained);
+    try testing.expect(!handoff.loadToGlobal(page_alloc, missing.path()));
+    try testing.expect(handoff.loaded() == retained);
 }
 
 test "F10: applyModelLevel restores focus, ws state and every membership" {
@@ -143,15 +143,15 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 
     var f = try scratch.TmpFile.init("apply"); // (28.5)
     defer f.deinit();
-    try persist.save(testing.allocator, &src, f.path());
-    try testing.expect(persist.loadToGlobal(page_alloc, f.path()));
+    try handoff.save(testing.allocator, &src, f.path());
+    try testing.expect(handoff.loadToGlobal(page_alloc, f.path()));
 
     // The re-exec'd process redisovers its old windows and registers them
     // before the persisted model level is applied back.
     var restored = helpers.makeModel();
     try registerSurvivors(&restored);
 
-    persist.applyModelLevel(&restored);
+    handoff.applyModelLevel(&restored);
 
     try testing.expectEqual(model.WSId.fromIndex(1), restored.current);
     try testing.expectEqual(@as(?model.WindowId, 1), restored.focused);
@@ -184,52 +184,52 @@ test "F10: applyModelLevel restores focus, ws state and every membership" {
 test "ext header: a name-stamped blob round-trips claimant and payload" {
     const name = "minimize";
     const body = [_]u8{ 0x5A, 1, 2, 3, 4 };
-    const header_len = comptime persist.extHeaderLen(name.len);
+    const header_len = comptime handoff.extHeaderLen(name.len);
     // The exact shape the save path writes.
     var blob: [header_len + body.len]u8 = undefined;
-    blob[0] = persist.ext_format_version;
+    blob[0] = handoff.ext_format_version;
     blob[1] = @as(u8, @intCast(name.len));
     @memcpy(blob[2..header_len], name);
     @memcpy(blob[header_len..], &body);
 
-    try testing.expectEqualStrings(name, persist.extClaimantName(&blob).?);
+    try testing.expectEqualStrings(name, handoff.extClaimantName(&blob).?);
     // The payload starts right after the name: an off-by-one here would hand a
     // module a blob whose magic byte is the name's first byte, which is
     // exactly the silent non-claim the stamp was meant to avoid.
-    try testing.expectEqualSlices(u8, &body, persist.extPayload(&blob).?);
-    try testing.expect(persist.extLegacyOrdinal(&blob) == null);
+    try testing.expectEqualSlices(u8, &body, handoff.extPayload(&blob).?);
+    try testing.expect(handoff.extLegacyOrdinal(&blob) == null);
 }
 
 test "ext header: truncated, foreign, and unstamped blobs never slice out of bounds" {
     // Claims a 200-byte name in a 3-byte header.
-    const lying = [_]u8{ persist.ext_format_version, 200, 'x' };
-    try testing.expect(persist.extClaimantName(&lying) == null);
-    try testing.expect(persist.extPayload(&lying) == null);
+    const lying = [_]u8{ handoff.ext_format_version, 200, 'x' };
+    try testing.expect(handoff.extClaimantName(&lying) == null);
+    try testing.expect(handoff.extPayload(&lying) == null);
     // Too short to hold a version byte at all.
-    try testing.expect(persist.extPayload(&[_]u8{}) == null);
-    try testing.expect(persist.extPayload(&[_]u8{persist.ext_format_version}) == null);
+    try testing.expect(handoff.extPayload(&[_]u8{}) == null);
+    try testing.expect(handoff.extPayload(&[_]u8{handoff.ext_format_version}) == null);
     // A future format we do not know: no header interpretation, and the
     // caller falls back to passing the bytes through whole.
     const future = [_]u8{ 99, 1, 2 };
-    try testing.expect(persist.extPayload(&future) == null);
-    try testing.expect(persist.extClaimantName(&future) == null);
-    try testing.expect(persist.extLegacyOrdinal(&future) == null);
+    try testing.expect(handoff.extPayload(&future) == null);
+    try testing.expect(handoff.extClaimantName(&future) == null);
+    try testing.expect(handoff.extLegacyOrdinal(&future) == null);
 }
 
 test "ext header: a legacy ordinal-stamped blob still resolves" {
     // What the previous format wrote: [version=1][ordinal][payload].
-    const legacy = [_]u8{ persist.ext_format_version_ordinal, 2, 0x5A, 0xFF };
-    try testing.expectEqual(@as(usize, 2), persist.extLegacyOrdinal(&legacy).?);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0x5A, 0xFF }, persist.extPayload(&legacy).?);
+    const legacy = [_]u8{ handoff.ext_format_version_ordinal, 2, 0x5A, 0xFF };
+    try testing.expectEqual(@as(usize, 2), handoff.extLegacyOrdinal(&legacy).?);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x5A, 0xFF }, handoff.extPayload(&legacy).?);
     // A name-stamped blob must NOT be read as a legacy ordinal: byte 1 is the
     // name LENGTH there, so conflating the two would send "minimize" to
     // registry slot 8. (An earlier draft of this test wrote 7 for a name that
     // is 8 bytes long, and the reader correctly returned "minimiz" -- the
     // length byte is authoritative, which is the property worth pinning.)
-    const modern = [_]u8{ persist.ext_format_version, 8, 'm', 'i', 'n', 'i', 'm', 'i', 'z', 'e', 0x5A };
-    try testing.expect(persist.extLegacyOrdinal(&modern) == null);
-    try testing.expectEqualStrings("minimize", persist.extClaimantName(&modern).?);
-    try testing.expectEqualSlices(u8, &[_]u8{0x5A}, persist.extPayload(&modern).?);
+    const modern = [_]u8{ handoff.ext_format_version, 8, 'm', 'i', 'n', 'i', 'm', 'i', 'z', 'e', 0x5A };
+    try testing.expect(handoff.extLegacyOrdinal(&modern) == null);
+    try testing.expectEqualStrings("minimize", handoff.extClaimantName(&modern).?);
+    try testing.expectEqualSlices(u8, &[_]u8{0x5A}, handoff.extPayload(&modern).?);
 }
 
 // (9.10) decodeExt is the one reader the restore path uses now, so it is pinned
@@ -240,29 +240,29 @@ test "ext header: a legacy ordinal-stamped blob still resolves" {
 test "decodeExt agrees with the accessors on a name-stamped blob" {
     const name = "minimize";
     const body = [_]u8{ 0x5A, 1, 2 };
-    const header_len = comptime persist.extHeaderLen(name.len);
+    const header_len = comptime handoff.extHeaderLen(name.len);
     var blob: [header_len + body.len]u8 = undefined;
-    blob[0] = persist.ext_format_version;
+    blob[0] = handoff.ext_format_version;
     blob[1] = @as(u8, @intCast(name.len));
     @memcpy(blob[2..header_len], name);
     @memcpy(blob[header_len..], &body);
 
-    const h = persist.decodeExt(&blob);
-    try testing.expectEqualSlices(u8, persist.extPayload(&blob).?, h.payload);
-    try testing.expectEqualStrings(persist.extClaimantName(&blob).?, h.claimed_name.?);
-    try testing.expectEqual(persist.extLegacyOrdinal(&blob), h.legacy_ordinal);
+    const h = handoff.decodeExt(&blob);
+    try testing.expectEqualSlices(u8, handoff.extPayload(&blob).?, h.payload);
+    try testing.expectEqualStrings(handoff.extClaimantName(&blob).?, h.claimed_name.?);
+    try testing.expectEqual(handoff.extLegacyOrdinal(&blob), h.legacy_ordinal);
 }
 
 test "decodeExt agrees with the accessors on a legacy ordinal blob" {
     var blob: [3]u8 = undefined;
-    blob[0] = persist.ext_format_version_ordinal;
+    blob[0] = handoff.ext_format_version_ordinal;
     blob[1] = 2;
     blob[2] = 0xAB;
 
-    const h = persist.decodeExt(&blob);
-    try testing.expectEqualSlices(u8, persist.extPayload(&blob).?, h.payload);
-    try testing.expectEqual(persist.extClaimantName(&blob), h.claimed_name);
-    try testing.expectEqual(persist.extLegacyOrdinal(&blob), h.legacy_ordinal);
+    const h = handoff.decodeExt(&blob);
+    try testing.expectEqualSlices(u8, handoff.extPayload(&blob).?, h.payload);
+    try testing.expectEqual(handoff.extClaimantName(&blob), h.claimed_name);
+    try testing.expectEqual(handoff.extLegacyOrdinal(&blob), h.legacy_ordinal);
     try testing.expectEqual(@as(?usize, 2), h.legacy_ordinal);
 }
 
@@ -271,16 +271,16 @@ test "decodeExt passes an unrecognized blob through whole" {
     // the WHOLE blob -- this is the graceful degrade that lets an unclaimed or
     // future-format blob still reach the module scan.
     const future = [_]u8{ 99, 1, 2 };
-    const h = persist.decodeExt(&future);
+    const h = handoff.decodeExt(&future);
     try testing.expectEqualSlices(u8, &future, h.payload);
     try testing.expectEqual(@as(?[]const u8, null), h.claimed_name);
     try testing.expectEqual(@as(?usize, null), h.legacy_ordinal);
 
-    const lying = [_]u8{ persist.ext_format_version, 200, 'x' };
-    const h2 = persist.decodeExt(&lying);
+    const lying = [_]u8{ handoff.ext_format_version, 200, 'x' };
+    const h2 = handoff.decodeExt(&lying);
     try testing.expectEqualSlices(u8, &lying, h2.payload);
     try testing.expectEqual(@as(?[]const u8, null), h2.claimed_name);
 
     const empty = [_]u8{};
-    try testing.expectEqualSlices(u8, &empty, persist.decodeExt(&empty).payload);
+    try testing.expectEqualSlices(u8, &empty, handoff.decodeExt(&empty).payload);
 }

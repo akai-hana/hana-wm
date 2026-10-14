@@ -4,8 +4,8 @@
 //! reload or keyboard-mapping change). Mouse intake -- the button/motion
 //! handlers, press classification, and drag routing -- lives in mouse.zig and
 //! is re-exported below; key dispatch and the Super+click grab setup stay here.
-//! The action dispatcher itself (executeAction and its scaffold graft) lives in
-//! dispatch.zig, re-exported below: mouse.zig dispatches config mouse binds
+//! The action dispatcher itself (executeAction) lives in dispatch.zig,
+//! re-exported below: mouse.zig dispatches config mouse binds
 //! through dispatch.zig directly, so neither mouse nor dispatch needs to import
 //! this module.
 //! Delegates to keybind.zig for resolution, surfaces for chrome routing,
@@ -23,9 +23,11 @@ const build_options = @import("build_options");
 const cursor = @import("cursor");
 // Bar hook set; the core-owned `surfaces` composition root, absent-safe.
 const surfaces = @import("surfaces").Surfaces;
-// Grab installation lives in grabs.zig (mutual runtime-only
-// dependency: grabs reads this module's resolved keybind list).
-const grabs = @import("grabs");
+// Grab installation lives in grabs.zig, which reads this module's resolved
+// keybind list -- so this module must NOT import it back. The two places that
+// used to (the mouse grab at setup, the regrab after a keyboard mapping
+// change) are sequenced by their callers instead: main.zig and events.zig
+// import both sides, which is where the order belongs anyway.
 
 const time = @import("time");
 
@@ -45,17 +47,14 @@ pub const handleButtonPress = mouse.handleButtonPress;
 pub const handleButtonRelease = mouse.handleButtonRelease;
 pub const handleMotionNotify = mouse.handleMotionNotify;
 pub const findMouseBind = mouse.findMouseBind;
-pub const reportUndeliverableMouseBinds = mouse.reportUndeliverableMouseBinds;
 
-// Action dispatch (the executeAction dispatcher and its scaffold
-// graft) lives in dispatch.zig since review 05-input round 2:
-// mouse.zig's config mouse binds dispatch through it, and keeping
-// the dispatcher here forced input <-> mouse to import each other.
+// Action dispatch (the executeAction dispatcher) lives in dispatch.zig since
+// review 05-input round 2: mouse.zig's config mouse binds dispatch through it,
+// and keeping the dispatcher here forced input <-> mouse to import each other.
 // Re-exported so handleKeyPress and the input tests keep their
 // single unchanged surface.
 const dispatch = @import("dispatch");
 pub const executeAction = dispatch.executeAction;
-pub const grafted = dispatch.grafted;
 
 // Constants
 
@@ -67,6 +66,16 @@ var xkb_state: ?xkbcommon.XkbState = null;
 // borrow `*const Action` pointers from the live config's keybindings.
 var keybind_resolver: keybind.KeybindResolver = .{};
 var resolved_binds: []keybind.ResolvedBind = &.{};
+// Two derived views of the same config bindings, deliberately not merged into
+// one array: `resolved_binds` is the KEYCODE view (config order, derived from
+// the live XKB state, read by the grab path and the unresolved-keysym report)
+// and the resolver's entries are the DISPATCH view (sorted by packed key,
+// no keycode, read on every keypress). Merging them would make keycode
+// resolution and dispatch building share one buffer and one failure path --
+// today a failed realloc keeps the previous grabs working while a failed
+// dispatch build fails closed -- to save one allocation. Each list's own
+// rebuild failure mode is stated where it happens. Two lists, one source
+// (the config's keybindings), no fact stored twice.
 
 /// Initialises the XKB context, keymap, and key state
 /// from the server's current keyboard configuration.
@@ -126,7 +135,7 @@ pub fn buildKeybinds(keybindings: []types.Keybind) void {
 }
 
 /// The keybindings with keycodes resolved against the live XKB state, for
-/// `events.grabKeybindings`. Empty when XKB is unavailable (no keyboard to
+/// `grabs.grabKeybindings`. Empty when XKB is unavailable (no keyboard to
 /// resolve against), which is also when nothing can be grabbed.
 pub fn resolvedKeybinds() []const keybind.ResolvedBind {
     return resolved_binds;
@@ -158,33 +167,37 @@ pub fn deinitKeybinds() void {
 /// made with were resolved against the old layout and go stale; re-resolve
 /// them from the rebuilt table and re-grab (ungrab existing, then grab new)
 /// so keybindings keep firing after the mapping change.
-pub fn handleMappingNotify(keyboard: bool) void {
-    // Only a KEYBOARD mapping change can invalidate the keycode->keysym table
-    // and the key grabs resolved against it. The server also reports
-    // modifier-map and pointer-button remaps through this same event, and
-    // those are common (`xmodmap` touches both): rebuilding for them threw
-    // away working state and made the user pay a full ungrab/regrab storm
-    // over a change that cannot have affected any binding. The modifier map
-    // is not part of this table, and button remapping is the client's own
-    // business.
-    if (!keyboard) return;
+/// Returns true when the keycodes changed under it, i.e. when the root key
+/// grabs (taken with the OLD keycodes) are now stale and the caller must
+/// re-grab. Returns false for the modifier-map and pointer-button remaps that
+/// arrive through the same event: those are common (`xmodmap` touches both),
+/// and rebuilding for them threw away working state and made the user pay a
+/// full ungrab/regrab storm over a change that cannot have affected any
+/// binding. The modifier map is not part of the keycode->keysym table, and
+/// button remapping is the client's own business.
+pub fn handleMappingNotify(keyboard: bool) bool {
+    if (!keyboard) return false;
     const cs = core.getState();
-    const state = getXkbStateMut() orelse return;
+    const state = getXkbStateMut() orelse return false;
     state.rebuild(cs.conn);
 
-    // Re-resolve the compiled list from the new table, then atomically re-grab
-    // (ungrab all, grab the updated set). `buildKeybinds` is the single place
-    // that produces the list, so a mapping change cannot leave the grab path
-    // reading a list resolved against the old keyboard.
+    // `buildKeybinds` is the single place that produces the list, so a mapping
+    // change cannot leave the grab path reading a list resolved against the
+    // old keyboard. The regrab itself is the CALLER's step: grabs reads this
+    // module's list, and calling back into it here was the import cycle.
     buildKeybinds(cs.config.keybindings.items);
-    grabs.grabKeybindings();
+    return true;
 }
 
 // Grab setup
 
-/// Grabs mouse buttons on the root window and applies the user's cursor theme.
+/// Applies the user's cursor theme and reports mouse binds that can never
+/// fire. The root mouse grab itself is installed by the caller (main.zig
+/// calls `grabs.grabMouseButtons` next), because grabs reads this module's
+/// resolved keybind list and an import back the other way would be a cycle.
+/// The report is pure analysis of the config against `keybind.mouse_grab_buttons`,
+/// so it needs no grab to exist yet.
 pub fn setup(conn: core.Connection, screen: core.Screen) void {
-    grabs.grabMouseButtons();
     cursor.Cursor.setupRoot(conn, screen);
     mouse.reportUndeliverableMouseBinds();
 }

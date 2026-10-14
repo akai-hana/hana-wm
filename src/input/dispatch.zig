@@ -4,7 +4,7 @@
 //! config mouse binds without importing input.zig -- which re-exports
 //! mouse's own handlers, an import cycle. Key intake (the XKB state
 //! and the (modifiers, keysym) -> Action dispatch map) stays in
-//! input.zig, which re-exports executeAction/grafted from here so its
+//! input.zig, which re-exports executeAction from here so its
 //! key dispatch and the input tests keep one unchanged surface.
 
 const std = @import("std");
@@ -50,7 +50,7 @@ fn toggleBarPosition() void {
         // placements from it even when there is no current workspace to
         // report: a bare early return left the bar-anchored claim unread and
         // placements stale until an unrelated event reconciled.
-        grab.reconcileNow();
+        grab.reconcileNow(.{});
         return;
     };
     const forced_hidden = if (surfaces.barForcedHiddenByFullscreen) |f|
@@ -58,7 +58,7 @@ fn toggleBarPosition() void {
     else
         false;
     const no_fullscreen = !forced_hidden;
-    if (no_fullscreen) grab.reconcileNow();
+    if (no_fullscreen) grab.reconcileNow(.{});
     window.updateFloatingWindowBorders();
     window.markBordersFlushed();
     log.info("Bar position toggled to: {s}", .{@tagName(core.getState().config.bar.bar_position)});
