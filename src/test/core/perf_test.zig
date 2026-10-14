@@ -1,5 +1,9 @@
 //! Micro-benchmarks for model/reconcile hot paths.
 //!
+//! Subject placement: `core/` (its subject is the model/reconcile path),
+//! not `bench/` — that directory holds the two end-to-end latency
+//! harnesses (focus/tiling); this file is per-function micro-benchmarking.
+//!
 //! Run: zig build test -Dbench --summary all (timings are appended to
 //! `.zig-cache/bench/timings.txt` only under -Dbench; the default suite runs
 //! these as silent smokes so `zig build test` stays quiet).
