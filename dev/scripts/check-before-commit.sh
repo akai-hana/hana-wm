@@ -15,7 +15,13 @@
 #   - Tests (--test) run through dev/scripts/xtest.sh, which starts and tears
 #     down its OWN Xvfb and points DISPLAY at it, so the live session on
 #     DISPLAY=:0 is never touched.
-#   - --modularity is heavy (builds each deletion scenario cold); it is NOT part
+#   - `check` is a no-emit type-check + plugin-template gate (build.zig
+#     wireCheckSteps), and check/test run with -Doptimize=Debug: Debug tests
+#     are several times cheaper than ReleaseFast and cover more asserts. The
+#     ReleaseFast codegen/link proof stays with plain `zig build` (CI's Build
+#     step).
+#   - --modularity runs the feature-deletion matrix; scenario copies keep
+#     their .zig-cache between runs, so only a repeat run is cheap. NOT part
 #     of the default gate.
 #   - Does NOT commit anything; wire it into the automated-sync flow as a
 #     pre-commit gate by invoking it before `git add`/`git commit`.
@@ -49,7 +55,7 @@ echo "[check-before-commit] fmt check..."
 "${fmt_cmd[@]}"
 
 echo "[check-before-commit] zig build check (type-check + plugin-template + layers)..."
-"${zb[@]}" check
+"${zb[@]}" check -Doptimize=Debug
 
 if [ "$RUN_MODULARITY" -eq 1 ]; then
     echo "[check-before-commit] feature-deletion modularity matrix..."
@@ -58,7 +64,7 @@ fi
 
 if [ "$RUN_TEST" -eq 1 ]; then
     echo "[check-before-commit] isolated test suite..."
-    dev/scripts/xtest.sh "${zb[@]}" test
+    dev/scripts/xtest.sh "${zb[@]}" test -Doptimize=Debug
 fi
 
 echo "[check-before-commit] OK"

@@ -215,10 +215,14 @@ Since this is all an arbitrary design choice, it is optional and re-categorizabl
 # Development
 
 ```sh
-# format check, build with layer checks, then the full test suite
+# format check, then the type-check + layer-guard gate, then the test suite
 zig fmt --check .
-zig build check
-dev/scripts/xtest.sh zig build test   # THE test command: Xvfb-backed
+zig build check -Doptimize=Debug      # no-emit: full Sema, no codegen
+dev/scripts/xtest.sh zig build test -Doptimize=Debug   # THE test command: Xvfb-backed
+zig build                             # bare = ReleaseFast binary (codegen/link proof)
+
+# everything above + tests + the 31-scenario feature-deletion matrix
+dev/scripts/check-before-commit.sh --all
 ```
 
 TO-DO
