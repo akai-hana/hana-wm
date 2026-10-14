@@ -25,6 +25,11 @@ pub const Addon = struct {
     init: *const fn (std.mem.Allocator, usize) anyerror!void,
     deinit: *const fn (std.mem.Allocator) void,
 };
+
+/// The registry-facing spelling of this contract: build.zig types the
+/// generated `prompt_subs` array through it, so the generated module
+/// never names the concrete struct (`Addon`) or a sibling's import alias.
+pub const Binding = Addon;
 pub const addons = @import("prompt_subs").addons;
 
 // Editor contract re-exports: the vim extensor and the tests import
