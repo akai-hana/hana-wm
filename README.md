@@ -173,6 +173,10 @@ Finally, I wanted foundational source code **cleanness** and **flexibility**, bo
 
 ## Architecture 
 
+> [!WARNING]
+> This section is very much unfinished.
+> There's lots to talk about that isn't yet written in here. Bear with me.
+
 <img alt="hana's architecture; onion 3-layer diagram" src="https://github.com/user-attachments/assets/54937208-8dd1-4525-b8f1-1cc00996fde0" />
 
 hana counts with a modular codebase architecture, split into single-responsibility code files, written with the goal of making the codebase tidy and easily modifiable by any user. Any file or directory that isn't essential to this WM working/booting up can be just removed, and hana will recompile just fine. 
@@ -186,10 +190,6 @@ The main subsystems are `core`, `window`, `config`, `model`, `tiling`, `input` a
 By default, hana's codebase is organized so that any optional code which extends a particular sub-system lives beside its peers (e.g. bar modules beside the bar, window modules beside the window layer), modularly coded so that each individual addition has its own file, or set of files if needed (e.g. a title segment with its carousel helper). This is to make a clear hierarchy, as to which files are mandatory and which ones are optional, and what does every module add onto.
 
 `tiling` and `floating` are both included by default, making hana a dynamic window manager. At minimum, either one of them must be included in order to compile hana. 
-
-hana's wiring is a hub-and-spoke rather than a strict import : a single core `model`, the event pipeline, and one reconcile boundary sit at the center, with `core` and `window` talking to each other around it. Pluggable behavior hangs off that hub through build-GENERATED registries (`window_modules`, `tiling_modules`, `bar_modules`, and per-package `<pkg>_subs` sub-registries) consumed against the open contracts in `src/core/architecture/contract.zig` (the pure-vocabulary hub; the X-typed half is its `contract_x11.zig` sibling), so the core never names an optional module directly. What `dev/scripts/check-layers.sh` — invoked by `zig build check` — actually enforces is: wire-mutating XCB requests and server grabs belong behind the reconcile boundary (`reconcile.zig` → `sink.zig` → `requests.zig`), `model`, `tiling` and `config` stay xcb-free, and `src/` is `zig fmt` clean. Optional modules extend one subsystem and live beside their peers (bar modules under `bar/modules/`, window modules under `window/modules/`, layouts under `tiling/modules/`), each as a self-contained file that can be deleted to drop the feature from the build.
-
-**One naming rule to know: file stems are a GLOBAL namespace.** Every `.zig` file under `src/` becomes a named module by its file *stem* (the basename, directories ignored), auto-discovered by `build.zig` — so a stem can exist only once in the whole tree. That is why the bar's event intake is `input_events.zig` (the stem `events` is already owned by `src/core/loop/events.zig`) and the contract split uses `contract_x11.zig` (not `contract/x11.zig`, which would still register as a stem and collide). Moving a file between directories does NOT rename its module; renaming the file touches every `@import`. `zig build modules` prints the full discovered stem table if you ever need to check what is taken.
 
 ## Configuration
 
@@ -209,8 +209,6 @@ By default, hana ships a red theme, `config/themes/akai.toml`. When hana is ran,
 hana automatically reads all `.toml` files inside `config/.`, meaning the name of the `.toml` file doesn't really matter. Likewise, multiple `.toml` files can be placed inside `config/.`, and they'll be joined automatically. Any sub-directories within `config/` are ignored, and instead must be manually joined through a `.toml` file in the `config/` level, in the case the user wants to store multiple TOML files but doesn't necessarily want to use all of them at the same time; think the previous example, of different themes that can be swapped around in the config.
 
 Since this is all an arbitrary design choice, it is optional and re-categorizable by the user, so one could do `config/config.toml` and `config/others/<binds.toml/rules.toml/tiling.toml>`, or whatever the heck else.
-
-> BTW, pull requests with custom themes are very much welcome. :-)
 
 ---
 
