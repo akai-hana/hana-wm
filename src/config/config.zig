@@ -2,24 +2,25 @@
 //! Loads, parses, and validates TOML config files.
 
 const std = @import("std");
+const constants = @import("constants");
 const fallback = @import("fallback");
 const log = @import("log");
+const scaling = @import("scaling");
 const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
-const validate_mod = @import("validate");
 const layout_names = @import("layout_names");
 const diff = @import("diff");
 const snapshot_mod = @import("snapshot");
 const discover = @import("discover");
 const binds = @import("binds");
-const sections = @import("sections");
+const tiling_sections = @import("tiling_sections");
+const bar_sections = @import("bar_sections");
 const rules = @import("rules");
 
 // Re-exports: `config` stays the single import surface for callers
 // (main.zig, events.zig, handoff.zig, the tests); the seams below
 // are where the code now lives.
-pub const validate = validate_mod.validate;
 pub const canonicalLayoutName = layout_names.canonicalLayoutName;
 pub const isLayoutName = layout_names.isLayoutName;
 pub const layout_name_grammar = layout_names.layout_name_grammar;
@@ -32,26 +33,6 @@ pub const readFileAlloc = discover.readFileAlloc;
 pub const max_file_bytes = discover.max_file_bytes;
 pub const max_config_files = discover.max_config_files;
 
-// Internal names the orchestrator still uses unqualified.
-const rememberGoodSource = snapshot_mod.rememberGoodSource;
-const publishReadFiles = snapshot_mod.publishReadFiles;
-const ReadSet = discover.ReadSet;
-const parseTomlFile = discover.parseTomlFile;
-const mergeIncludes = discover.mergeIncludes;
-const searchPaths = discover.searchPaths;
-const search_order = discover.search_order;
-const SearchAttempt = discover.SearchAttempt;
-const tryLoadOrWarn = discover.tryLoadOrWarn;
-const discoverDirNames = discover.discoverDirNames;
-const parseDirDoc = discover.parseDirDoc;
-const DirInput = discover.DirInput;
-const parseKeybindings = binds.parseKeybindings;
-const parseTilingStructures = sections.parseTilingStructures;
-const parseBar = sections.parseBar;
-const parseRules = rules.parseRules;
-const padWorkspaceIcons = sections.padWorkspaceIcons;
-const initDefaultBarLayout = sections.initDefaultBarLayout;
-
 /// Longest section name a mis-case warning must lower (bounded helper buffer;
 /// real-world section names are far shorter, this just caps a pathological
 /// line's cost).
@@ -62,12 +43,12 @@ const max_section_name_bytes = 64;
 /// arrays accumulate (enforced by the parser's Value getters: scalar reads resolve to
 /// the last declaration, array reads see every one).
 pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !types.Config {
-    var names = try discoverDirNames(allocator, dir_path);
+    var names = try discover.discoverDirNames(allocator, dir_path);
     defer {
         for (names.items) |n| allocator.free(n);
         names.deinit(allocator);
     }
-    const cfg = try parseAndBuild(allocator, parseDirDoc, DirInput{ .dir_path = dir_path, .names = names.items });
+    const cfg = try parseAndBuild(allocator, discover.parseDirDoc, discover.DirInput{ .dir_path = dir_path, .names = names.items });
     log.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
     return cfg;
 }
@@ -84,7 +65,7 @@ pub fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !ty
 /// re-read the frozen snapshot instead of the user's live config files, and
 /// bind/theme edits would never hot-reload.
 pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, allow_pinned_snapshot: bool) !types.Config {
-    const paths = try searchPaths(allocator);
+    const paths = try discover.searchPaths(allocator);
     defer paths.deinit(allocator);
 
     // A re-exec hand-off (reload_hana, restart.execNext) pins HANA_CONFIG_DIR
@@ -96,7 +77,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
         if (std.c.getenv("HANA_CONFIG_DIR")) |env_z| {
             const env = std.mem.span(env_z);
             if (loadConfigFromDir(allocator, env)) |cfg| {
-                rememberGoodSource(allocator, env, true);
+                snapshot_mod.rememberGoodSource(allocator, env, true);
                 source.* = .user;
                 return cfg;
             } else |err| switch (err) {
@@ -109,11 +90,11 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
     }
 
     // Try directories first (they can hold several .toml files), then single
-    // files. The order comes from `search_order`; each tag resolves its path,
+    // files. The order comes from `discover.search_order`; each tag resolves its path,
     // loader, provenance and wording in one switch, so a new location cannot
     // be added with a missing or mismatched field.
-    inline for (search_order) |loc| {
-        const at: SearchAttempt = switch (loc) {
+    inline for (discover.search_order) |loc| {
+        const at: discover.SearchAttempt = switch (loc) {
             .xdg_dir => .{ .path = paths.xdg_dir, .load = loadConfigFromDir, .is_dir = true },
             .local_dir => .{ .path = paths.local_dir, .load = loadConfigFromDir, .is_dir = true },
             .xdg_file => .{ .path = paths.xdg_file, .load = loadConfig, .is_dir = false },
@@ -129,8 +110,8 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
         // `orelse continue` would read better, but a labeled-`inline for` body
         // rejects it (comptime control flow in a runtime block); the explicit
         // `if` is the same thing and costs one line.
-        if (try tryLoadOrWarn(at.load, allocator, at.path, err_msg)) |cfg| {
-            rememberGoodSource(allocator, at.path, at.is_dir);
+        if (try discover.tryLoadOrWarn(at.load, allocator, at.path, err_msg)) |cfg| {
+            snapshot_mod.rememberGoodSource(allocator, at.path, at.is_dir);
             source.* = .user;
             return cfg;
         }
@@ -159,17 +140,20 @@ pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !types.Config 
 const FileInput = struct { path: []const u8, base_dir: []const u8 };
 
 /// Parses one config file plus its `include`s into an arena document,
-/// recording the file and every consumed include in `read`.
-fn parseFileDoc(a: std.mem.Allocator, read: *ReadSet, in: FileInput) !parser.Document {
-    var parsed = try parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
-    // This path cannot breach either ceiling by itself -- one file, already
-    // bounded by max_file_bytes, which is under max_total_config_bytes, and the
-    // count starts at zero -- so it only records. Its `include`s go through
-    // parseAndMerge, which does check both.
-    read.bytes += parsed.bytes;
-    try read.paths.append(a, in.path);
-    try mergeIncludes(a, &parsed.doc, &parsed.doc, read, in.base_dir);
-    return parsed.doc;
+/// recording the file and every consumed include in `read` via the same
+/// choke point as every other contributing file (discover.mergeAndRecord).
+/// The read itself is NOT wrapped in tryParseTomlFile: a missing or
+/// unreadable file must propagate its raw error so the search-order skip
+/// (silent_missing) and reload's keep-live still see FileNotFound, not
+/// had_errors. The count ceiling starts at zero here, so only the byte
+/// ceiling (covered: one file <= max_file_bytes) can apply to this file;
+/// its includes go through parseAndMerge, which checks the count too.
+fn parseFileDoc(a: std.mem.Allocator, read: *discover.ReadSet, in: FileInput) !parser.Document {
+    var merged = parser.Document.init(a);
+    var parsed = try discover.parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
+    try discover.mergeAndRecord(a, &merged, read, &parsed.doc, parsed.bytes, in.path, "Merged: {s}");
+    try discover.mergeIncludes(a, &merged, &parsed.doc, read, in.base_dir);
+    return merged;
 }
 
 /// Parse inputs for `parseFallbackDoc`: the embedded fallback TOML text.
@@ -177,7 +161,7 @@ const FallbackInput = struct { toml: []const u8 };
 
 /// Parses the embedded fallback TOML into an arena document. The fallback
 /// lives in the binary, so it contributes no files to the snapshot.
-fn parseFallbackDoc(a: std.mem.Allocator, read: *ReadSet, in: FallbackInput) !parser.Document {
+fn parseFallbackDoc(a: std.mem.Allocator, read: *discover.ReadSet, in: FallbackInput) !parser.Document {
     _ = read;
     return try parser.parse(a, in.toml, "<embedded fallback>");
 }
@@ -187,7 +171,7 @@ fn parseFallbackDoc(a: std.mem.Allocator, read: *ReadSet, in: FallbackInput) !pa
 /// document from the arena allocator; `buildConfigFromDoc` then dupes every
 /// owned Config string from the backing `allocator` before the arena reset
 /// reclaims the documents. `parse` also fills `read` with the config files it
-/// consumed, which is republished into module state (see publishReadFiles)
+/// consumed, which is republished into module state (see snapshot_mod.publishReadFiles)
 /// because the re-exec snapshot needs it after this arena dies.
 fn parseAndBuild(
     allocator: std.mem.Allocator,
@@ -197,10 +181,10 @@ fn parseAndBuild(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var read: ReadSet = .{};
+    var read: discover.ReadSet = .{};
     var doc = try parse(a, &read, in);
     var cfg = try buildConfigFromDoc(allocator, &doc);
-    publishReadFiles(read.paths.items) catch |err| {
+    snapshot_mod.publishReadFiles(read.paths.items) catch |err| {
         cfg.deinit(allocator);
         return err;
     };
@@ -239,11 +223,9 @@ fn getDefaultConfig(allocator: std.mem.Allocator) !types.Config {
     errdefer cfg.deinit(allocator);
     // Canonical default name: it resolves to the canonical master module at
     // seed time; every stored name is canonical.
-    const default_layout = try allocator.dupe(u8, types.canon_master_layout);
-    try cfg.tiling.layouts.append(allocator, default_layout);
-    cfg.tiling.layout = cfg.tiling.layouts.items[0];
-    try padWorkspaceIcons(allocator, &cfg);
-    try initDefaultBarLayout(allocator, &cfg);
+    try tiling_sections.seedDefaultLayout(allocator, &cfg, types.canon_master_layout);
+    try bar_sections.padWorkspaceIcons(allocator, &cfg);
+    try bar_sections.initDefaultBarLayout(allocator, &cfg);
     return cfg;
 }
 
@@ -258,15 +240,15 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !type
     // half-applied section doesn't leak. Only armed after getDefaultConfig
     // succeeded, so its own errdefer handled the earlier failure.
     errdefer cfg.deinit(allocator);
-    try parseKeybindings(allocator, doc, &cfg);
-    try parseTilingStructures(allocator, doc, &cfg);
+    try binds.parseKeybindings(allocator, doc, &cfg);
+    try tiling_sections.parseTilingStructures(allocator, doc, &cfg);
     // Every scalar knob ([drag], [fullscreen], [workspaces], [tiling]
     // flags/aesthetics/master trio, all of [bar] incl. [bar.properties])
-    // in one table-driven pass; must precede parseBar so icon padding sees
+    // in one table-driven pass; must precede bar_sections.parseBar so icon padding sees
     // the freshly parsed workspaces.count.
     try schema.applyAll(doc, allocator, &cfg);
-    try parseBar(allocator, doc, &cfg);
-    try parseRules(allocator, doc, &cfg);
+    try bar_sections.parseBar(allocator, doc, &cfg);
+    try rules.parseRules(allocator, doc, &cfg);
     lintDocument(doc);
     return cfg;
 }
@@ -291,15 +273,15 @@ fn lintDocument(doc: *parser.Document) void {
 /// spelling. A section header that differs from one of these only by case is
 /// almost certainly a typo that silently drops the whole section.
 const known_sections = std.StaticStringMap(void).initComptime(.{
-    .{ types.section_binds, {} },                  .{ types.section_binds_alt, {} },
-    .{ types.section_workspace_rules, {} },        .{ types.section_rules, {} },
-    .{ types.section_drag, {} },                   .{ types.section_fullscreen, {} },
-    .{ types.section_display, {} },                .{ types.section_tiling, {} },
-    .{ types.section_workspaces, {} },             .{ types.section_bar, {} },
-    .{ types.section_bar_properties, {} },         .{ "bar.layout.left", {} },
-    .{ "bar.layout.center", {} },                  .{ "bar.layout.right", {} },
-    .{ types.section_bar_modules_workspaces, {} }, .{ types.section_tiling_layouts_master_stack, {} },
-    .{ "tiling.layouts.master_stack", {} },
+    .{ types.section_binds, {} },                                   .{ types.section_binds_alt, {} },
+    .{ types.section_workspace_rules, {} },                         .{ types.section_rules, {} },
+    .{ types.section_drag, {} },                                    .{ types.section_fullscreen, {} },
+    .{ types.section_display, {} },                                 .{ types.section_tiling, {} },
+    .{ types.section_workspaces, {} },                              .{ types.section_bar, {} },
+    .{ types.section_bar_properties, {} },                          .{ types.section_prefix_bar_layout ++ "left", {} },
+    .{ types.section_prefix_bar_layout ++ "center", {} },           .{ types.section_prefix_bar_layout ++ "right", {} },
+    .{ types.section_bar_modules_workspaces, {} },                  .{ types.section_tiling_layouts_master_stack, {} },
+    .{ types.section_prefix_tiling_layouts ++ "master_stack", {} },
 });
 
 /// Section families whose parent section must exist for their knobs to do
@@ -378,6 +360,62 @@ pub fn checkConfig(allocator: std.mem.Allocator, collector: *log.Collector) !voi
     cfg.deinit(allocator);
 }
 
+/// Validates domain invariants on a freshly loaded config.
+fn invalid(comptime fmt: []const u8, args: anytype) error{InvalidConfig} {
+    log.err("Invalid config: " ++ fmt ++ ", keeping old", args);
+    return error.InvalidConfig;
+}
+
+pub fn validate(cfg: *const types.Config) !void {
+    // master_width is a ScalableValue: percentages validate as a
+    // [min_master_width, max_master_width] ratio; pixels only as >= 0, since
+    // the screen width for a ratio isn't available here and the runtime clamps:
+    // a pixel-vs-ratio check would wrongly refuse `master_width = 600`.
+    const mw = cfg.tiling.master_width;
+    if (mw.is_percentage) {
+        const mw_ratio: f32 = scaling.asRatio(mw);
+        if (mw_ratio < constants.min_master_width or mw_ratio > constants.max_master_width)
+            return invalid("master_width {d:.0}% out of [{d:.0}%, {d:.0}%]", .{
+                mw_ratio * 100.0,
+                constants.min_master_width * 100.0,
+                constants.max_master_width * 100.0,
+            });
+    } else if (mw.value < 0.0) {
+        return invalid("master_width {d}px must be >= 0", .{mw.value});
+    }
+    warnOnly(cfg);
+}
+
+/// The warn-first half of validation: values that are legal but almost certainly
+/// not what the user meant, or that a subsystem will silently clamp. They must
+/// NOT fail the load: a config that boots with a loud warning is recoverable,
+/// and a config that refuses to boot over a cosmetic value is not. Every entry
+/// here is therefore `log.warn` with no effect on the returned Config.
+///
+/// Kept separate from the failing checks above on purpose, so the line between
+/// "wrong config" and "odd config" is visible in the source rather than implied
+/// by whether a given `return invalid(...)` happens to be present.
+///
+/// NOT here, on purpose: bar segment names and layout names are validated
+/// against the `bar_modules` / `tiling_mods` registries, and those live in
+/// their own modules -- config is below both in the dependency graph, so
+/// importing them to check names would invert it and break the no-bar and
+/// no-tiling builds the modularity matrix exists to prove. The name checks
+/// therefore sit with their owners (see `bar.warnUnknownSegments` and
+/// `tiling`'s registry resolution), which is the only place they can see the
+/// registry.
+fn warnOnly(cfg: *const types.Config) void {
+    // A font size of 0 is a typo, not a design: the bar's text metrics then
+    // compute a zero height and the bar draws as a bare strip. (A NEGATIVE
+    // size is impossible: the schema's barScalable floor is 0.)
+    if (cfg.bar.font_size.is_percentage) {
+        if (scaling.asRatio(cfg.bar.font_size) == 0.0)
+            log.warn("bar.font_size is 0%; the bar will have no readable text", .{});
+    } else if (cfg.bar.font_size.value == 0.0) {
+        log.warn("bar.font_size is {d}px; the bar will have no readable text", .{cfg.bar.font_size.value});
+    }
+}
+
 pub fn load(allocator: std.mem.Allocator) !types.Config {
     return loadFor(allocator, true);
 }
@@ -396,9 +434,10 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !types.Config {
     // though the second is the one the user cannot see without reading the
     // log. Both are now "this config is not usable, fall back".
     //
-    // `errdefer` is scoped to the labeled block so each `loaded` is released
-    // exactly once: on the fallback path explicitly (the block then yields the
-    // REPLACEMENT config), and on any error return from inside it.
+    // `validate` below is the block's last fallible step: its exhaustive
+    // InvalidConfig arm is the single owner of `loaded` (deinit there, then
+    // yield the replacement), and nothing after it can error — so each
+    // `loaded` is released exactly once with no errdefer/flag pair.
     const cfg = blk: {
         var loaded = loadConfigDefault(allocator, &source, true) catch |err| switch (err) {
             // A config that is broken, out of range, or over a load ceiling is
@@ -411,16 +450,10 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !types.Config {
             },
             else => return err,
         };
-        // `loaded_freed` guards against the double deinit: the InvalidConfig
-        // arm frees `loaded` explicitly below, and if the fallback load then
-        // errors, this errdefer would otherwise fire its deinit a second time.
-        var loaded_freed = false;
-        errdefer if (!loaded_freed) loaded.deinit(allocator);
         validate(&loaded) catch |err| switch (err) {
             error.InvalidConfig => {
                 log.warn("Config failed validation at startup; using the embedded fallback", .{});
                 loaded.deinit(allocator);
-                loaded_freed = true;
                 break :blk try loadFallbackConfig(allocator);
             },
         };

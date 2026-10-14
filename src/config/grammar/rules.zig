@@ -7,21 +7,16 @@
 //! the parsed document so it outlives the load-scoped arena.
 
 const std = @import("std");
-const constants = @import("constants");
 const log = @import("log");
 const parser = @import("parser");
 const types = @import("types");
 
-/// Validates a 1-based workspace number, warn-and-skip when outside 1..255 or
-/// exceeding `max` (the workspace count / constants.max_workspaces ceiling).
+/// Validates a 1-based workspace number, warn-and-skip when outside the
+/// 1..`max` window (workspace count / constants.max_workspaces ceiling).
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
-    if (ws_1based < 1 or ws_1based > constants.max_workspace_number_1based) {
-        log.warn("{s}: workspace {} out of range, skipping", .{ context, ws_1based });
-        return false;
-    }
-    if (ws_1based > max) {
+    if (!types.workspaceInRange(ws_1based, max)) {
         log.warn(
-            "{s}: workspace {} exceeds the {}-workspace limit, skipping",
+            "{s}: workspace {} out of 1..{} range, skipping",
             .{ context, ws_1based, max },
         );
         return false;

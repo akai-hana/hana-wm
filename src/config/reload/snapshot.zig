@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const log = @import("log");
+const paths = @import("paths");
 
 /// Where a default-config load came from. Reported by loadConfigDefault so the
 /// reload path can distinguish "loaded the user config" from "fell back to the
@@ -61,24 +62,24 @@ const SourceFile = struct {
 /// One resolved config file's identity, captured when it is snapshotted.
 const FileStamp = struct { size: u64, mtime: i96 };
 
-/// Backing storage for the resolved-config file set of the most recent load.
-/// Module-level because the set must outlive the load-scoped parse arena (it
-/// is consumed at snapshot time, after the load has returned), and because
-/// discarding it wholesale is then one arena reset instead of per-path free
-/// bookkeeping. `publishReadFiles` installs a FRESH arena per load and frees
-/// the previous one, so a set is never released by a different load's
-/// allocator.
-var read_files_arena: ?std.heap.ArenaAllocator = null;
-
-/// The config files the most recent successful load consumed, in merge order.
-/// Read (never owned) by `rememberGoodSource` at the end of a winning load.
-var load_read_files: [][]const u8 = &.{};
+/// The config files the most recent successful load consumed, in merge order,
+/// paired with the arena that owns their bytes. Module-level because the set
+/// must outlive the load-scoped parse arena (it is consumed at snapshot time,
+/// after the load has returned), and because discarding it wholesale is then
+/// one arena reset instead of per-path free bookkeeping. `publishReadFiles`
+/// installs a FRESH pair per load and frees the previous one, so a set is
+/// never released by a different load's allocator, and the two halves can
+/// never move in step. Read (never owned) by `rememberGoodSource` at the end
+/// of a winning load.
+var read_files: ?struct {
+    arena: std.heap.ArenaAllocator,
+    paths: []const []const u8,
+} = null;
 
 /// Publishes this load's resolved file set, releasing the previous load's.
 pub fn publishReadFiles(items: []const []const u8) !void {
-    if (read_files_arena) |arena| arena.deinit();
-    read_files_arena = null;
-    load_read_files = &.{};
+    if (read_files) |*rf| rf.arena.deinit();
+    read_files = null;
     var fresh: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     errdefer fresh.deinit();
     const a = fresh.allocator();
@@ -88,8 +89,7 @@ pub fn publishReadFiles(items: []const []const u8) !void {
     // load-scoped parse arena, which the caller resets as soon as this load
     // returns, long before refreshSnapshot reads the set.
     for (items) |p| try out.append(a, try a.dupe(u8, p));
-    read_files_arena = fresh;
-    load_read_files = out.items;
+    read_files = .{ .arena = fresh, .paths = out.items };
 }
 
 /// Dupe `items` into a freshly allocated `SourceFile` list owned by
@@ -134,7 +134,7 @@ fn sameSourceList(a: []const SourceFile, b: []const SourceFile) bool {
 pub fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir: bool) void {
     // OOM is silent: the snapshot just keeps the previous good source.
     const duped = allocator.dupe(u8, path) catch return;
-    const files = dupeSourceFiles(allocator, load_read_files) catch {
+    const files = dupeSourceFiles(allocator, if (read_files) |*rf| rf.paths else &.{}) catch {
         allocator.free(duped);
         return;
     };
@@ -167,14 +167,10 @@ pub fn deinitGoodSource(allocator: std.mem.Allocator) void {
     last_good_source = null;
 }
 
-/// Snapshot dir a re-exec boots from. XDG_RUNTIME_DIR is already per-user, so
-/// no uid suffix is needed there; the /tmp fallback carries the uid, mirroring
-/// handoff.zig. Caller owns the returned slice.
+/// Snapshot dir a re-exec boots from; the shared XDG-/tmp-uid policy lives
+/// in paths.runtimeFile. Caller owns the returned slice.
 fn snapshotDirPath(allocator: std.mem.Allocator) ![]u8 {
-    if (std.c.getenv("XDG_RUNTIME_DIR")) |dir| {
-        return std.fmt.allocPrint(allocator, "{s}/hana-config", .{std.mem.span(dir)});
-    }
-    return std.fmt.allocPrint(allocator, "/tmp/hana-config-{d}", .{std.os.linux.getuid()});
+    return paths.runtimeFile(allocator, "hana-config", "");
 }
 
 /// NUL-terminated snapshot path on c_allocator for `setenv`, or null when no
