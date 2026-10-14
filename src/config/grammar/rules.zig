@@ -42,10 +42,12 @@ fn addRule(
 }
 
 pub fn parseRules(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *types.Config) !void {
-    // [workspace.rules]: key is either a class name (value = ws int) or a
-    // workspace number (value = class array). Both directions call addRule.
+    // [workspace.rules]: key is either a class name (value = a workspace
+    // number) or a workspace number (value = class array). Both directions
+    // call addRule.
     if (doc.getSection(types.section_workspace_rules)) |s| try parseWorkspaceRuleSection(allocator, cfg, s);
-    // [rules]: simple class -> workspace mapping (key = class, value = ws int).
+    // [rules]: simple class -> workspace mapping (key = class, value = a
+    // workspace number).
     if (doc.getSection(types.section_rules)) |s| {
         var iter = s.orderedIterator();
         while (iter.next()) |entry| {

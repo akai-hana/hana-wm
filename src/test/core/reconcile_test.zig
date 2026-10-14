@@ -372,10 +372,11 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.init();
     defer fx.deinit();
 
-    helpers.regCur(&fx.m, 701); // home ws 0
+    helpers.regCur(&fx.m, 701); // home workspace 0
     model.setFocus(&fx.m, 701);
-    fx.m.store.getPtr(701).?.mask |= model.bit(model.WSId.fromIndex(1)); // multi-tag onto ws 1
-    fx.reconcile(.{}); // baseline: placed at master slot on ws 0
+    // multi-tag onto workspace 1
+    fx.m.store.getPtr(701).?.mask |= model.bit(model.WSId.fromIndex(1));
+    fx.reconcile(.{}); // baseline: placed at master slot on workspace 0
 
     // The live rect IS what we last sent (ledger read #3 feeds assertions).
     const real_rect = ledger.lastRectFor(701).?;
@@ -386,7 +387,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.rec.clear();
     fx.reconcile(.{});
 
-    // Orphan reconcile: ws 1's home list is empty so no placement owns 701, but
+    // Orphan reconcile: workspace 1's home list is empty so no placement owns 701, but
     // the mask shows it here - kept at its previous REAL geometry
     // (never parks a window with sent history). Even though it is the
     // fallback winner, the raise stays suppressed: same rect, no transition,
@@ -396,16 +397,16 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     try fx.rec.expectLen(0);
     try testing.expectEqual(real_rect, ledger.lastRectFor(701).?);
 
-    // History-less variant: registered here with mask bit for ws 1 but NEVER
-    // reconciled on its home ws (nothing ever sent): first sighting as an
+    // History-less variant: registered here with mask bit for workspace 1 but NEVER
+    // reconciled on its home workspace (nothing ever sent): first sighting as an
     // orphan must PARK, not materialize a bogus geometry. A window that was
     // never mapped still has to reach the server viewable, so the first park
     // is preceded by a single map (the WM maps on behalf of a redirecting
     // substructure client); the parked configure stays ONE merged request.
     fx.m.current = model.WSId.fromIndex(0);
-    helpers.regCur(&fx.m, 702); // home ws 0
+    helpers.regCur(&fx.m, 702); // home workspace 0
     fx.m.store.getPtr(702).?.mask |= model.bit(model.WSId.fromIndex(1));
-    // deliberately no reconcile on ws 0 => 702 has no sent history
+    // deliberately no reconcile on workspace 0 => 702 has no sent history
     fx.m.current = model.WSId.fromIndex(1);
     fx.rec.clear();
     fx.reconcile(.{});
@@ -465,7 +466,7 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     model.setFocus(&fx.m, 901);
     fx.reconcile(.{});
 
-    // Baseline: 902 lives off-ws with NO sent history - its first sight is
+    // Baseline: 902 lives on another workspace with NO sent history - first sight is
     // parked, but substructure-redirect means IT is only viewable once the WM
     // maps it, so the first park carries a single preceding map. The parked
     // configure itself is exactly ONE merged request (never a separate

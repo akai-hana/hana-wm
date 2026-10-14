@@ -5,7 +5,7 @@
 //! file owns the segment-entry decoding; the scalar knob loop stays
 //! in schema, which calls `applyBarProperties` after its knob pass
 //! and hands in its `knobs` table. That parameter is what keeps the
-//! seam cycle-free: the knob-key test stays bound to the very table
+//! dependency cycle-free: the knob-key test stays bound to the very table
 //! the knob loop reads (a future `[bar.properties]` knob can never
 //! desync the map pass) without this file importing schema, which
 //! imports this file.

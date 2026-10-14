@@ -19,7 +19,7 @@ const bar_sections = @import("bar_sections");
 const rules = @import("rules");
 
 // Re-exports: `config` stays the single import surface for callers
-// (main.zig, events.zig, handoff.zig, the tests); the seams below
+// (main.zig, events.zig, handoff.zig, the tests); the re-exports below
 // are where the code now lives.
 pub const canonicalLayoutName = layout_names.canonicalLayoutName;
 pub const isLayoutName = layout_names.isLayoutName;
@@ -330,7 +330,7 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
 /// their pinned config snapshot via `loadConfigDefault(true)`; the in-place
 /// reload path (reload.handleConfigReload) loads live configs itself instead.
 ///
-/// Note: keybinding resolution (keysym -> keycode + dispatch map) is an input
+/// Note: keybind resolution (keysym -> keycode + dispatch map) is an input
 /// concern and happens separately via `input.buildKeybinds` once the config is
 /// live; see `input/keybind.zig`. DPI-scaled bar metrics are derived by the
 /// bar itself (see bar/metrics.zig) rather than stored on the config.

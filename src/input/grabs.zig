@@ -1,4 +1,4 @@
-//! Root-window grab installation: the keybinding grabs
+//! Root-window grab installation: the keybind grabs
 //! (`grabKeybindings`) and the Super+Button mouse grabs
 //! (`grabMouseButtons`), split out of events.zig (review
 //! 05-input round 2). Both are lifecycle concerns -- installed
@@ -94,7 +94,7 @@ fn checkGrabCookies(cookies: []const CookieEntry) void {
             if (reporter.detail()) log.warn("Failed to grab keycode: {}", .{entry.keycode});
         }
     }
-    reporter.tail("keybinding grab");
+    reporter.tail("keybind grab");
 }
 
 /// The root-window mouse grab, as data. `mouse.zig` builds this from the very

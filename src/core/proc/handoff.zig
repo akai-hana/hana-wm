@@ -224,7 +224,7 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
         // the blob is stamped with the module's stable name so adoption can
         // fast-path on it (a deleted or renamed module still falls back to the
         // magic-byte scan). The model is handed across
-        // the seam AS-IS (a `*const` handle -- serialization never mutates, and
+        // the hook AS-IS (a `*const` handle -- serialization never mutates, and
         // the contract type is const so this save path can't even @constCast:
         // writing through it is a compile error).
         var blob: ?[]const u8 = null;
@@ -357,7 +357,7 @@ pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u
     defer snap.deinit();
     // Model-level scalars read live from `m`; the durable records come from
     // the snapshot. The two shapes stay two types on purpose (the judgment
-    // behind this seam's collapse): `Snapshot` OWNS the duped records + blobs
+    // behind this split): `Snapshot` OWNS the duped records + blobs
     // (allocator, partial-fill deinit), `StateFile` is the pure wire value --
     // merging them would hang an Allocator off the JSON type or hand the
     // parsed value an ownership-ful deinit that would free arena memory.
@@ -441,9 +441,9 @@ fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: u
 }
 
 /// Restores model-level fields into the model: current/focused/all_view,
-/// per-ws params, tiled_order and focus_mru (pruned to windows that are
-/// actually registered (closed or never adopted ones are dropped). Call AFTER
-/// the adoption phase registered the surviving windows.
+/// per-workspace params, tiled_order and focus_mru (pruned to windows that
+/// are actually registered (closed or never adopted ones are dropped).
+/// Call AFTER the adoption phase registered the surviving windows.
 ///
 /// No feature counters live here anymore: extensions own all of their state
 /// (minimize maintains its sequence internally), so this phase only re-lists

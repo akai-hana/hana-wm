@@ -162,12 +162,13 @@ pub fn deinitKeybinds() void {
 /// Rebuilds the keymap/keysym table after the server changes the keyboard
 /// mapping (setxkbmap/xmodmap). `keyboard` is the event's `request` field
 /// narrowed to MappingKeyboard; false for the modifier-map and pointer
-/// mapping events that arrive through the same type, which are ignored. Keybinding resolution is keysym-indexed, so
-/// rebuilding the flat keycode->keysym table keeps existing bindings working
-/// under the new layout. However, the per-binding keycodes the key grabs were
-/// made with were resolved against the old layout and go stale; re-resolve
-/// them from the rebuilt table and re-grab (ungrab existing, then grab new)
-/// so keybindings keep firing after the mapping change.
+/// mapping events that arrive through the same type, which are ignored.
+/// Keybind resolution is keysym-indexed, so rebuilding the flat keycode->keysym
+/// table keeps existing bindings working under the new layout. However, the
+/// per-binding keycodes the key grabs were made with were resolved against the
+/// old layout and go stale; re-resolve them from the rebuilt table and re-grab
+/// (ungrab existing, then grab new) so keybindings keep firing after the
+/// mapping change.
 /// Returns true when the keycodes changed under it, i.e. when the root key
 /// grabs (taken with the OLD keycodes) are now stale and the caller must
 /// re-grab. Returns false for the modifier-map and pointer-button remaps that
@@ -234,7 +235,7 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     const matched = keybind_resolver.lookup(mods, keysym, core.config_rev.rev());
 
     // The chrome overlay owns all key input while active; routing is handled
-    // inside it (input flows in, true = consumed, before keybinding dispatch).
+    // inside it (input flows in, true = consumed, before keybind dispatch).
     // No `has_bar` guard: `chromeHandleKeypress` is a no-op hook that returns
     // false when no surface module is compiled in, so the flag test was
     // duplicating a decision the `surfaces` type already made.

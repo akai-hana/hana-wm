@@ -13,7 +13,6 @@
 //! semantics live on `SentEntry` below.
 
 const model = @import("model");
-const contract = @import("contract");
 
 /// What we last sent per window; WRITE-ONLY bookkeeping (the file header owns
 /// why it is wrong-by-design to consult from anywhere else). Field semantics
@@ -79,7 +78,7 @@ pub fn init() void {
 }
 
 /// Ledger read of a window's last-sent record. pub because it is also the
-/// test verification seam (reconcile_test/tracking_test assert what a
+/// test verification seam (reconcile_test/query_test assert what a
 /// reconcile sent); production reads at lastRectFor.
 pub fn sentGet(win: model.WindowId) ?SentEntry {
     return st.sent.get(win);

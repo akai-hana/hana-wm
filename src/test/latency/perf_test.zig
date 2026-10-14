@@ -42,7 +42,7 @@ fn fill(m: *Model, n: u32) !void {
     for (0..n) |i| try model.register(m, @intCast(i + 1), model.WSId.fromIndex(0));
 }
 
-test "bench: findHome scan (100 wins, 10 ws)" {
+test "bench: findHome scan (100 wins, 10 workspaces)" {
     var m = makeModel();
     var win_id: WindowId = 1;
     for (0..10) |ws| {
@@ -66,7 +66,8 @@ test "bench: findHome scan (100 wins, 10 ws)" {
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations * 10));
-    if (bench) helpers.benchLog("[bench] findHome (100 wins, 10 ws): {d:.1} ns/call\n", .{per_call_ns});
+    if (bench)
+        helpers.benchLog("[bench] findHome (100 wins, 10 workspaces): {d:.1} ns/call\n", .{per_call_ns});
 
     for (0..100) |i| {
         const e = m.store.get(@intCast(i + 1)).?;
@@ -407,8 +408,8 @@ test "bench mode records its timings to a file, not to stderr" {
     // unbounded grep would say success without the current write landing.
     const path = ".zig-cache/bench/timings.txt";
     var size_before: usize = 0;
-    if (cwd.openFile(path, .{})) |f_before| {
-        defer f_before.close();
+    if (cwd.openFile(io, path, .{})) |f_before| {
+        defer f_before.close(io);
         size_before = (try f_before.stat(io)).size;
     } else |err| switch (err) {
         error.FileNotFound => {},

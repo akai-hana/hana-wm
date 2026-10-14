@@ -5,7 +5,6 @@
 //! borrowed state (the rules map's config-sourced key slices) pointing at
 //! the box the swap is about to release, and the rebuilds are idempotent.
 
-const std = @import("std");
 const types = @import("types");
 
 pub const ConfigChanges = struct {
@@ -14,7 +13,7 @@ pub const ConfigChanges = struct {
 
 /// Keys-subsystem content: the pair layout — (modifiers, keysym) per keyboard
 /// binding and (modifiers, button) per mouse binding. Action is deliberately
-/// excluded: two keybinds that differ only in their action (e.g. a changed
+/// excluded: two keybindings that differ only in their action (e.g. a changed
 /// command string) still share a pair, so no regrab is needed.
 fn keysChanged(old: *const types.Config, new: *const types.Config) bool {
     if (old.keybindings.items.len != new.keybindings.items.len) return true;
