@@ -47,7 +47,7 @@ const fallbackFont = bar_metrics.default_fallback_font;
 
 /// Owns all Pango font state for one draw target: the layout, the resolved
 /// base font description, its cached metrics, and the size-suffixed description
-/// the indicator-glyph path needs. (22.6)
+/// the indicator-glyph path needs.
 ///
 /// Extracted from `DrawContext` so the font lifecycle has one owner. The sized
 /// description used to be keyed by POINTER IDENTITY against the base
@@ -57,7 +57,7 @@ const fallbackFont = bar_metrics.default_fallback_font;
 /// directly and the cache key is just `sized_px` -- no pointer comparison.
 /// One piece of text together with the exact Pango state it will be measured
 /// and painted with: its own layout, its own attribute list, and its own font
-/// description. (22.7)
+/// description.
 ///
 /// Previously a single layout was shared by every measure and every draw, and
 /// correctness depended on a caller pairing apply/restore correctly. Two
@@ -72,10 +72,10 @@ const fallbackFont = bar_metrics.default_fallback_font;
 /// A run removes the shared mutable state instead of policing it. The run's
 /// layout is private, so measuring it cannot disturb a draw, and its attributes
 /// die with it rather than needing a restore. The draw helpers are infallible
-/// (22.4): a run that could not be built degrades to an empty run that measures
+/// A run that could not be built degrades to an empty run that measures
 /// zero and paints nothing, which is what a zero-length text draw would have
 /// done anyway.
-pub const TextRun = struct {
+const TextRun = struct {
     /// Null exactly when the run could not be built; every method tolerates it.
     layout: ?*bindings.PangoLayout = null,
     /// The attribute list built for this run, owned by the run.
@@ -102,7 +102,7 @@ pub const TextRun = struct {
     }
 };
 
-pub const FontBook = struct {
+const FontBook = struct {
     allocator: std.mem.Allocator,
     pango_layout: *bindings.PangoLayout,
     current_font_desc: ?*bindings.PangoFontDescription = null,
@@ -194,7 +194,7 @@ pub const FontBook = struct {
         return .{ ascent, descent };
     }
 
-    /// Measures `text` in its own run. (22.7) The run's layout is discarded
+    /// Measures `text` in its own run. The run's layout is discarded
     /// immediately, so this is a pure read of the font state with no lasting
     /// effect on any later measure or draw.
     fn measureTextWidth(self: *FontBook, text: []const u8) u16 {
@@ -205,7 +205,7 @@ pub const FontBook = struct {
 
     /// Builds a run for `text` under `props` (and `sized_px` when non-null),
     /// with its own layout. Never returns an error: a failed run is an empty
-    /// run, which measures 0 and paints nothing. (22.7)
+    /// run, which measures 0 and paints nothing.
     fn beginRun(
         self: *FontBook,
         text: []const u8,
@@ -234,7 +234,7 @@ pub const FontBook = struct {
         return run;
     }
 
-    /// Builds a book around a fresh Pango layout on `ctx`. (22.6) This is the
+    /// Builds a book around a fresh Pango layout on `ctx`. This is the
     /// ONLY place a layout is created: the live context and the probe both go
     /// through it, so a change to layout setup cannot reach one path and miss
     /// the other.
@@ -246,7 +246,7 @@ pub const FontBook = struct {
     }
 
     /// Loads `font_names` into a throwaway detached book and returns its
-    /// metrics. (22.6) This is the single layout-bootstrap path: the probe and
+    /// metrics. This is the single layout-bootstrap path: the probe and
     /// the live context now share this construction instead of each building a
     /// surface/context/layout of its own.
     pub fn probe(
@@ -269,10 +269,10 @@ pub const FontBook = struct {
 };
 
 /// Owns the off-screen X drawable and the XCB/cairo machinery that writes to
-/// it. (22.6) Extracted from `DrawContext` so the display resources and the
+/// it. Extracted from `DrawContext` so the display resources and the
 /// font resources have independent owners; `DrawContext` is the facade that
 /// composes them.
-pub const Surface = struct {
+const Surface = struct {
     conn: core.Connection,
     /// The real X window, only used as the copy destination in `blit`.
     window: u32,
@@ -292,7 +292,7 @@ pub const Surface = struct {
     last_color: ?u32 = null,
     /// Cached GC foreground: skips xcb_change_gc when the packed pixel is unchanged.
     last_gc_color: ?u32 = null,
-    /// True once this frame has issued its first XCB fill (22.5).
+    /// True once this frame has issued its first XCB fill.
     xcb_filled_this_frame: bool = false,
 
     fn init(
@@ -384,7 +384,7 @@ pub const Surface = struct {
     /// `last_gc_color` skips xcb_change_gc when the color is unchanged, which is
     /// the common case for adjacent same-background segments.
     ///
-    /// ## Paint-order rule (22.5): XCB fills are ordered BEFORE every cairo
+    /// ## Paint-order rule: XCB fills are ordered BEFORE every cairo
     /// glyph of the frame
     ///
     /// `cairo_surface` is an xcb surface backed by `pixmap` -- the very pixmap
@@ -402,7 +402,7 @@ pub const Surface = struct {
     /// the boundary where the two orderings diverge.
     pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         if (!self.xcb_filled_this_frame) {
-            // Quiesce before the first wire write of the frame (22.5).
+            // Quiesce before the first wire write of the frame.
             bindings.cairo_surface_flush(self.cairo_surface);
             self.xcb_filled_this_frame = true;
         }
@@ -434,7 +434,7 @@ pub const Surface = struct {
     /// is sent with the caller's batch end.
     inline fn blitImpl(self: *Surface, x: u16, w: u16, comptime flush: bool) void {
         // The frame's glyphs go on the wire here, which is what puts them after
-        // this frame's fills (22.5). Re-arms the one-shot quiesce for the next
+        // this frame's fills. Re-arms the one-shot quiesce for the next
         // frame.
         bindings.cairo_surface_flush(self.cairo_surface);
         self.xcb_filled_this_frame = false;
@@ -496,15 +496,15 @@ inline fn showLayoutAtBaseline(
 }
 
 /// The validated span `[start, start + len)` inside `text`, or null when the
-/// span is not a legal non-empty range of it. (22.1/25.3)
+/// span is not a legal non-empty range of it.
 ///
 /// The span arrives as EXPLICIT OFFSETS from the caller. It used to arrive as a
 /// subslice, whose position the painter recovered by subtracting raw addresses
 /// (`@intFromPtr(v.ptr) - @intFromPtr(text.ptr)`) and whose validity was checked
-/// by comparing raw pointers -- see 25.3. A module that knows where its number
+/// by comparing raw pointers. A module that knows where its number
 /// sits now says so, and this only has to range-check it, which is pure and
 /// testable without Pango, cairo or a display.
-pub const ValueRange = struct { start: usize, len: usize };
+const ValueRange = struct { start: usize, len: usize };
 
 pub fn valueRange(text: []const u8, start: usize, len: usize) ?ValueRange {
     // An empty span would colour nothing, so it collapses to the single-colour
@@ -527,7 +527,7 @@ pub fn valueRange(text: []const u8, start: usize, len: usize) ?ValueRange {
 }
 
 /// A foreground colour applied to the byte range `[start, start + len)` of the
-/// laid-out text. (22.1)
+/// laid-out text.
 ///
 /// The one primitive the two-tone segment path needs. Pango interprets
 /// attribute offsets in BYTES, and it attributes by glyph run internally, so a
@@ -620,14 +620,14 @@ pub const DrawContext = struct {
     }
 
     /// Colors the context and paints `run` with its left edge at `x` and its
-    /// baseline at `y`. An empty run paints nothing. (22.7)
+    /// baseline at `y`. An empty run paints nothing.
     inline fn paintRun(self: *DrawContext, run: *TextRun, x: u16, y: u16, color: u32) void {
         const l = run.layout orelse return;
         self.surface.setColor(color);
         showLayoutAtBaseline(self.surface.ctx, l, @floatFromInt(x), y);
     }
 
-    /// Draws `text` with its TOP at `y_top`, in a size-suffixed font. (22.6/22.7)
+    /// Draws `text` with its TOP at `y_top`, in a size-suffixed font.
     /// The sized description and its caching live on `FontBook`; the run is
     /// this text's own layout, so the set/restore pairing is gone.
     pub fn drawTextSized(
@@ -638,7 +638,7 @@ pub const DrawContext = struct {
         size_px: u16,
         color: u32,
     ) !void {
-        // Still the one genuinely fallible text path (22.4): resolving the
+        // Still the one genuinely fallible text path: resolving the
         // size-suffixed description can fail with no base description to copy.
         var run = self.fonts.beginRun(text, .{}, size_px);
         defer run.deinit();
@@ -657,7 +657,7 @@ pub const DrawContext = struct {
     }
 
     /// Draws `text` with its left edge at `x` and baseline at `y`.
-    /// Infallible (22.4): a run that cannot be built degrades to an empty run
+    /// Infallible: a run that cannot be built degrades to an empty run
     /// that measures 0 and paints nothing, so this path has no `error` for
     /// callers to handle. The `!void` this used to declare had an EMPTY error
     /// set, so it was not a contract, just a `try` that callers had to write and
@@ -682,7 +682,7 @@ pub const DrawContext = struct {
     ) void {
         // One run, painted at both positions: the two copies must be the same
         // text in the same state, and a shared mutable layout was the only
-        // thing making that true before. (22.7)
+        // thing making that true before.
         var run = self.fonts.beginRun(text, .{}, null);
         defer run.deinit();
         const l = run.layout orelse return;
@@ -714,7 +714,7 @@ pub const DrawContext = struct {
     }
 
     /// Shared text rendering: build a run for `text` under `props`, optionally
-    /// ellipsize it to `max_width`, and paint at baseline. (22.7) Every draw
+    /// ellipsize it to `max_width`, and paint at baseline. Every draw
     /// now goes through a private run, so there is no layout state left behind
     /// for the next draw to inherit.
     inline fn drawTextImpl(
@@ -771,7 +771,7 @@ pub const DrawContext = struct {
         min_w: ?u16,
         props: types.SegmentProps,
     ) !u16 {
-        // One run measured AND painted. (22.7) These used to be two separate
+        // One run measured AND painted. These used to be two separate
         // operations on a shared layout, which is precisely how a styled
         // segment could reserve one width and paint another: the second
         // operation re-derived the styling instead of reusing the first.
@@ -784,26 +784,26 @@ pub const DrawContext = struct {
         return x + width;
     }
 
-    /// (22.6) Facade forwarder; the implementation AND the paint-order rule
-    /// (22.5) now live on `Surface.fillRect`.
+    /// Facade forwarder; the implementation AND the paint-order rule
+    /// Now live on `Surface.fillRect`.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         self.surface.fillRect(x, y, width, height, color);
     }
 
-    /// (22.6) Facade forwarder to `FontBook.measureTextWidth`.
+    /// Facade forwarder to `FontBook.measureTextWidth`.
     pub fn measureTextWidth(self: *DrawContext, text: []const u8) u16 {
         return self.fonts.measureTextWidth(text);
     }
 
     /// Measures `text` with `props` styling applied, so a styled draw reserves
-    /// exactly the width it will paint. (22.7)
+    /// exactly the width it will paint.
     pub fn measureTextWidthStyled(self: *DrawContext, text: []const u8, props: types.SegmentProps) u16 {
         var run = self.fonts.beginRun(text, props, null);
         defer run.deinit();
         return run.measure();
     }
 
-    /// (22.6) Facade metrics accessor, replacing direct `dc.font.getMetrics()`
+    /// Facade metrics accessor, replacing direct `dc.font.getMetrics()`
     /// access from modules (prompt.zig).
     pub fn metrics(self: *DrawContext) struct { i16, i16 } {
         return self.fonts.getMetrics();
@@ -882,7 +882,7 @@ pub fn drawPaddedSegmentValue(
     if (range == null)
         return dc.paintedSegment(x, height, text, padding, config.bg, fg, null, props);
 
-    // (22.1) ONE Pango pass: measure the whole string, then paint it once with
+    // ONE Pango pass: measure the whole string, then paint it once with
     // a foreground attribute over the value's byte range.
     //
     // What this deletes, and why each part was load-bearing-bad rather than
@@ -912,7 +912,7 @@ pub fn drawPaddedSegmentValue(
     // applied to the SAME layout as the range, so the two can no longer
     // disagree about how the text is shaped.
     //
-    // (22.7) The style props and the value's foreground go into the
+    // The style props and the value's foreground go into the
     // run's OWN attribute list, on the run's OWN layout. Nothing is attached
     // to a shared layout and nothing has to be restored: the run's deinit
     // unrefs the list and the layout together, so a forgotten restore is no
@@ -946,7 +946,7 @@ pub fn drawPaddedSegmentValue(
 pub const FontMetrics = struct { ascent: i16, descent: i16 };
 
 /// Loads `font_names` into a throwaway layout and returns its (ascent, descent)
-/// in pixels. (22.6) Delegates to the one font-bootstrap path in `FontBook`.
+/// in pixels. Delegates to the one font-bootstrap path in `FontBook`.
 pub fn probeFontMetrics(
     allocator: std.mem.Allocator,
     dpi: f32,
@@ -957,7 +957,7 @@ pub fn probeFontMetrics(
 
 /// Owned, size-suffixed copies of the configured font list.
 ///
-/// (22.3) This is a VALUE that owns what it built. It used to be a bare
+/// This is a VALUE that owns what it built. It used to be a bare
 /// `[][]const u8` plus a separate `freeSizedFontList`, and the free function
 /// re-read `core.getState().config.bar.fonts.items` to work out which entries
 /// it owned -- inferring ownership from POINTER IDENTITY against live config.
@@ -972,7 +972,7 @@ pub fn probeFontMetrics(
 /// `fonts` is the configured font family list, and `font_size` is
 /// the point size to build at; both are REQUIRED rather than
 /// optional: each used to be read out of process state that
-/// nothing in the signature mentioned (21.5) -- `font_size` from
+/// nothing in the signature mentioned -- `font_size` from
 /// a module-level global the bar set during height resolution,
 /// `fonts` from `core.getState()` right here. A caller measuring
 /// a trial size passes the trial; a caller drawing the bar passes
@@ -1008,7 +1008,7 @@ pub const SizedFontList = struct {
 /// `allocator` and `fonts` are passed in rather than read out of
 /// `core.getState()`: the caller that already holds cs does not want a hidden
 /// second source of truth here (the SizedFontList doc above names exactly
-/// that bug class for `freeSizedFontList`, and 21.5 fixed it for `build`).
+/// that bug class for `freeSizedFontList`, and `build` was fixed the same way).
 pub fn loadBarFonts(dc: *DrawContext, allocator: std.mem.Allocator, fonts: []const []const u8, font_size: u16) !void {
     var sized = try SizedFontList.build(allocator, fonts, font_size);
     defer sized.deinit();

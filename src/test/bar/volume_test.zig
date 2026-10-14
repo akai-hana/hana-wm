@@ -11,11 +11,11 @@
 //!
 //! The gap hid because the build still type-checks volume.zig, so a mutation
 //! there produced compile errors that read like test kills -- the first
-//! mutation pass in 26.7 reported M36-M48 as KILLED when M46-M48 were
+//! mutation pass reported M36-M48 as KILLED when M46-M48 were
 //! compile-error cascades and no assertion had ever run.
 //!
 //! All the helpers are `pub` and tested HERE. The two recovered `label` tests
-//! were still calling the pre-26.8 by-pointer signature, so they could not have
+//! were still calling the old by-pointer signature, so they could not have
 //! compiled had they ever run; they are corrected below. `label` reads
 //! module-private display state, set up through the explicit
 //! `setDisplayForTest` seam.
@@ -44,7 +44,7 @@ const no = Probe{ .walk = false };
 const yes = Probe{ .walk = true };
 const flip = Probe{ .walk = true };
 
-/// The 25.3 span form: `Label` carries `value_start`/`value_len` rather than a
+/// The span form: `Label` carries `value_start`/`value_len` rather than a
 /// subslice, so assertions spell the comparison out instead of relying on a
 /// `?[]const u8` field these tests used to have.
 fn valueSpan(l: slider.Label) []const u8 {
@@ -63,7 +63,7 @@ test "probeDecision: a ladder that never ran is walked immediately" {
 test "probeDecision: a recorded failure is cached, not re-walked per poll" {
     const t0 = 100_000;
     // Straight after the failure, and for the whole cache window, the ladder
-    // must not run. This is the 26.7 saving: three popens per poll, per press
+    // must not run. This is the backend-latch saving: three popens per poll, per press
     // and per right-click, against a dead daemon.
     try std.testing.expectEqual(no, probeDecision(t0 + 1, t0, t0 + 2, false, false));
     try std.testing.expectEqual(no, probeDecision(t0 + 5_000, t0, t0 + 6_000, false, false));

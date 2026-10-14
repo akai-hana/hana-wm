@@ -1,4 +1,4 @@
-//! The shared linear slot<->level mapping, tested at the home it was lifted to (26.8).
+//! The shared linear slot<->level mapping, tested at the home it was lifted to.
 //!
 //! These used to live in slider_test.zig against `slider.pctFromSlot`. The core
 //! still re-exports that name, so the old entry point keeps working -- but the

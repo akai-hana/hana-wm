@@ -9,7 +9,7 @@
 //! `yank_buf`/`yank_len`), so each test resets the pending command via
 //! `onDeactivate` and re-seeds its own yank register (yy) before any paste.
 
-// (28.6) Declared here, next to the imports that make it necessary, rather than in a
+// Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
 // build-gate: vim, seg_prompt
 

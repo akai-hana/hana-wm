@@ -14,7 +14,7 @@ const types = @import("types");
 const drawing = @import("drawing");
 const testing = std.testing;
 
-// (28.8) A test-local `Slot` + `slotAt` hit-test used to live here, with two
+// A test-local `Slot` + `slotAt` hit-test used to live here, with two
 // tests covering them. Deleted, because they tested NOTHING in hana: `Slot`
 // existed only in this file, `slotAt` was never called by production, and the
 // caller that IS real (`slider.pctFromSlot`) takes the already-resolved
@@ -25,7 +25,7 @@ const testing = std.testing;
 // dividing by zero -- is asserted directly against pctFromSlot just below.
 
 test "a zero-width slot still maps an offset instead of dividing by zero" {
-    // The first-click case (26.3): before the segment's first draw there is
+    // The first-click case: before the segment's first draw there is
     // no painted width, so the mapping must still be defined and monotonic.
     // pctFromSlot clamps the denominator to 1, so any offset saturates rather
     // than wrapping or trapping.
@@ -49,12 +49,12 @@ test "pctFromSlot is the same mapping the click hit-test bounds" {
     try testing.expectEqual(@as(u8, 100), slider.pctFromSlot(0, bound, bound));
 }
 
-test "a slider's reservation follows the width the bar reports (21.7)" {
+test "a slider's reservation follows the width the bar reports" {
     // Same handoff as the systatus case, on the other consumer: the bar feeds
     // the painted width back through onPainted, and it lands in the control's
     // width state -- the single value naturalWidth, the click hit-test bound
     // and the drag denominator all read. The store is the shared one from
-    // [21.4], so "changed -> owes a re-layout" is not re-implemented here.
+    // the width-state rule, so "changed -> owes a re-layout" is not re-implemented here.
     inline for (0..slider.subs.len) |i| {
         const seg = slider.segmentFor(i);
         // Wired for EVERY control, present or not: a control that is absent
@@ -73,7 +73,7 @@ test "a slider's reservation follows the width the bar reports (21.7)" {
             // Reporting 0 means "nothing painted", which is the
             // never-measured state: the reservation falls back to the
             // control's declared probe, NOT to 0 and not to the last painted
-            // width. [21.4]'s rule, reached through [21.7]'s handoff.
+            // width. The rule, reached through the handoff.
             report(0);
             try std.testing.expectEqual(
                 slider.subs[i].probeNaturalWidth,
@@ -83,12 +83,12 @@ test "a slider's reservation follows the width the bar reports (21.7)" {
     }
 }
 
-// (22.1/25.3) The value span the painter is handed. The paint that consumes
+// The value span the painter is handed. The paint that consumes
 // it cannot run headlessly (Pango + cairo + a display), so the boundary
 // arithmetic -- the part where an off-by-one hides -- is pure and tested here.
-// (22.1) M13 shrinks the PAINTED range by one byte and passes the whole suite,
+// M13 shrinks the PAINTED range by one byte and passes the whole suite,
 // so these cases are what make the DECISION checkable even though the paint is
-// not. (25.3) The span is explicit offsets, not a subslice, so the tests say
+// not. The span is explicit offsets, not a subslice, so the tests say
 // "at 4, length 2" instead of handing over a slice.
 
 test "valueRange accepts an explicit span" {

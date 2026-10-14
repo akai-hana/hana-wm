@@ -25,7 +25,7 @@ fn testReset() void {
         @import("fullscreen").deinit();
         @import("fullscreen").init() catch unreachable;
     }
-    // (28.3) floating's drag state was never re-armed. It is a process-global
+    // Floating's drag state was never re-armed. It is a process-global
     // like the other two, and a left-active drag is not a cosmetic leak:
     // `startDrag` early-returns while `g_state.drag.active`, so one test that
     // did not end its drag silently disables dragging for every test after it.
@@ -35,7 +35,7 @@ fn testReset() void {
 }
 
 /// The ONE fixture entry: a fresh model on deterministically re-armed
-/// process-global module stores. (28.3)
+/// process-global module stores.
 ///
 /// There used to be two entry points with different guarantees -- `makeModel`
 /// (bare) and `setUpModel` (reset first) -- and nothing in the type system said
@@ -48,7 +48,7 @@ pub fn makeModel() model.Model {
     return .{};
 }
 
-/// A fresh model with the module stores left ALONE. (28.3)
+/// A fresh model with the module stores left ALONE.
 ///
 /// Only for the latency files, and the reason is measurement hygiene rather
 /// than correctness: `testReset` frees and re-allocates the module stores, and
@@ -147,7 +147,7 @@ pub const std_env: @FieldType(reconcile.Ctx, "env") = .{
 /// the config's accepted set (src/config/config.zig canonical layout names).
 pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibonacci", "leaf", "scroll" };
 
-// --- 28.2: bench timings go to a FILE, not to stderr ---
+// --- bench timings go to a FILE, not to stderr ---
 
 /// Appends one bench timing line to `.zig-cache/bench/timings.txt`.
 ///
@@ -166,7 +166,7 @@ pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibona
 /// swallowed, exactly as the `note`/`flush` instrumentation is.
 /// The one open handle for the timings file, opened on first use.
 ///
-/// (28.2) It has to be ONE handle, not one per call: `createFile` has no
+/// It has to be ONE handle, not one per call: `createFile` has no
 /// append mode, so every fresh handle starts writing at offset 0 and each
 /// record overwrote the head of the last one -- which showed up as timings
 /// truncated to their own tails ("...=130 (configure=50,map=40)" with the

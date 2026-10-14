@@ -3,7 +3,7 @@
 //! live bar, a DrawContext, or Pango -- the metrics.zig pattern: pure
 //! policy over injected seams.
 
-// (28.6) Declared here, next to the imports that make it necessary,
+// Declared here, next to the imports that make it necessary,
 // rather than in a build.zig table that had to be kept in agreement
 // with them by hand.
 // build-gate: bar
