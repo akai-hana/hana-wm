@@ -21,10 +21,8 @@ const focus = @import("focus");
 
 const signals = @import("signals");
 const pipeline = @import("pipeline");
-const restart = @import("restart");
 const handoff = @import("handoff");
 const spawn = @import("spawn");
-const timers = @import("timers");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
@@ -339,7 +337,7 @@ inline fn eventType(e: anytype) u8 {
     return @as(*u8, @ptrCast(e)).*;
 }
 
-// Re-exec hand-off, driven by restart.consumeReexec() in run(). The sequence
+// Re-exec hand-off, driven by lifecycle.consumeReexec() in run(). The sequence
 // is fixed: pin the config snapshot, persist the live session FIRST (a failed
 // save aborts the hand-off and the WM keeps running on its live connection),
 // then drop the X connection so the successor cannot inherit a live
@@ -360,13 +358,13 @@ fn handleReexec() !void {
     // config, so this re-exec swaps ONLY the binary; a re-exec boot that finds
     // no snapshot (no user config was ever loaded) falls back to the normal
     // search, which reproduces today's fallback-only behavior.
-    const exec_handoff = restart.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
+    const exec_handoff = lifecycle.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
         log.err("Re-exec aborted: executable path unknown", .{});
         return error.ExecutablePathUnknown;
     };
 
     xcb.xcb_disconnect(cs.conn);
-    restart.execNext(exec_handoff);
+    lifecycle.execNext(exec_handoff);
 }
 
 /// One comptime-parameterized drain shared by the batch poll loop and the
@@ -570,14 +568,14 @@ pub fn run() void {
     poll_buf[fd_signal] = .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 };
 
     // Core owns the timer list; the surfaces hook is one entry in it (see
-    // timers.Timers). Built once, outside the loop, because the source set
+    // Timers). Built once, outside the loop, because the source set
     // cannot change while the loop runs.
-    var source_buf: [1]timers.Source = undefined;
+    var source_buf: [1]Source = undefined;
     const n_sources: usize = if (build_options.has_bar) blk: {
         source_buf[0] = surfaces.pollTimeoutMs;
         break :blk 1;
     } else 0;
-    const loop_timers: timers.Timers = .{ .sources = source_buf[0..n_sources] };
+    const loop_timers: Timers = .{ .sources = source_buf[0..n_sources] };
 
     while (lifecycle.running.load(.acquire)) {
         // Rebuild the poll set each round so post-boot spawn pipes join it.
@@ -640,7 +638,7 @@ pub fn run() void {
         if (lifecycle.consumeReload())
             reload.handleConfigReload() catch |err| log.err("Reload failed: {}", .{err});
 
-        if (restart.consumeReexec())
+        if (lifecycle.consumeReexec())
             handleReexec() catch |err| log.err("Re-exec failed: {}", .{err});
 
         if (ready == 0 and poll_timeout_ms >= 0) {
@@ -664,3 +662,45 @@ pub fn run() void {
         surfaces.updateClock();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deadline policy (former timers.zig, merged 2026-10-10): aggregates active
+// timer sources to compute the next poll timeout.
+// ---------------------------------------------------------------------------
+
+/// One timer source. `null` means "this source wants no wakeup"; a
+/// non-negative value is "wake me in this many ms".
+///
+/// Sources report ABSENCE as null rather than as a negative number, so the
+/// distinction between "no timer here" and "a timer in -1 ms" cannot be
+/// expressed by accident.
+pub const Source = *const fn () ?i32;
+
+/// The loop's registered timer sources, reduced on demand.
+///
+/// This looks like a list abstraction wrapped around the single entry the loop
+/// currently registers (the bar's own deadline), and has been proposed for
+/// deletion as such. It is the opposite of redundant: the list IS the policy.
+/// The reduce -- consult every source even after one answers, because a later
+/// source may want to wake sooner -- is the rule, and a one-entry version could
+/// not express it, so the second source would arrive as a branch at the call
+/// site, which is the shape this module was created to remove. See
+/// timers_test.zig, which exercises the reduce with four sources.
+pub const Timers = struct {
+    sources: []const Source,
+
+    /// The nearest wakeup across every source, or null when no source wants
+    /// one (the loop then blocks until an fd is ready).
+    ///
+    /// Every source is consulted even once one has answered: a later source
+    /// may want to wake sooner, and "sooner" is the whole point. `min` over
+    /// the answered ones is the deadline.
+    pub fn deadlineMs(self: Timers) ?i32 {
+        var nearest: ?i32 = null;
+        for (self.sources) |source| {
+            const ms = source() orelse continue;
+            if (nearest == null or ms < nearest.?) nearest = ms;
+        }
+        return nearest;
+    }
+};

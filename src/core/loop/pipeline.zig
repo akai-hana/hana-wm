@@ -31,6 +31,17 @@ pub fn init() void {
     core.markModelReady();
     ledger.init();
 }
+
+/// Clear every workspace's focus MRU (index 0 = most recent; see
+/// model.setFocus's front-insert). Boot zeroing (init's `instance = .{}`)
+/// already clears it; this exists for the window layer's deinit/init reset
+/// discipline, which cycles WITHOUT a pipeline re-init — a harness restart
+/// must not inherit the previous cycle's MRU order. Gated so pre-model
+/// callers no-op.
+pub fn clearFocusMru() void {
+    if (!core.isModelReady()) return;
+    for (&instance.ws) |*s| s.focus_mru.clear();
+}
 /// READ-ONLY access to the WM model (single source of truth). The return type
 /// is `*const`, so any attempt to write through this handle is a compile
 /// error: the compiler is the mutation tripwire, and it is the ONLY real one

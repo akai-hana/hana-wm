@@ -5,7 +5,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const spawn = @import("spawn");
-const restart = @import("restart");
 
 const lifecycle = @import("lifecycle");
 // End indices of the self-pipe: signal handlers write to pipe_write; the
@@ -286,7 +285,7 @@ fn dispatchSignal(pending_sig: u8) void {
         // Unconditional in-place re-exec of the current binary (no change
         // check). Dispatch runs on the event loop, NOT in the signal
         // handler, so flag work is safe.
-        .USR1 => restart.requestReexec(),
+        .USR1 => lifecycle.requestReexec(),
         .TERM, .INT => lifecycle.quit(),
         // SIGCHLD: a spawned child has exited (or, now that hana is a
         // subreaper, an orphaned grandchild of one has re-parented to us).
