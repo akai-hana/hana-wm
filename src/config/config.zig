@@ -41,7 +41,6 @@ const mergeIncludes = discover.mergeIncludes;
 const searchPaths = discover.searchPaths;
 const search_order = discover.search_order;
 const SearchAttempt = discover.SearchAttempt;
-const silent_missing = discover.silent_missing;
 const tryLoadOrWarn = discover.tryLoadOrWarn;
 const discoverDirNames = discover.discoverDirNames;
 const parseDirDoc = discover.parseDirDoc;
@@ -130,7 +129,7 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
         // `orelse continue` would read better, but a labeled-`inline for` body
         // rejects it (comptime control flow in a runtime block); the explicit
         // `if` is the same thing and costs one line.
-        if (try tryLoadOrWarn(at.load, allocator, at.path, err_msg, &silent_missing)) |cfg| {
+        if (try tryLoadOrWarn(at.load, allocator, at.path, err_msg)) |cfg| {
             rememberGoodSource(allocator, at.path, at.is_dir);
             source.* = .user;
             return cfg;

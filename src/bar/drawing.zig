@@ -702,7 +702,8 @@ pub const DrawContext = struct {
         for (x_positions) |x| showLayoutAtBaseline(self.surface.ctx, l, x, y);
     }
 
-    /// Resets Pango width/ellipsize to defaults after rendering; subsequent draws unaffected.
+    /// Draws `text` ellipsized to `max_width` at (x, y); the text run is
+    /// one-shot, so no Pango state survives the call.
     pub fn drawTextEllipsis(
         self: *DrawContext,
         x: u16,

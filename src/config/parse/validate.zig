@@ -53,17 +53,13 @@ pub fn validate(cfg: *const types.Config) !void {
 /// `tiling`'s registry resolution), which is the only place they can see the
 /// registry.
 fn warnOnly(cfg: *const types.Config) void {
-    if (cfg.workspaces.count == 0)
-        log.warn("workspaces.count is 0; the WM will have no workspace to draw", .{});
-    if (cfg.tiling.master_count == 0)
-        log.warn("tiling.master_count is 0; layouts will fall back to 1 master pane", .{});
-    // A percentage font size of 0 (or a negative pixel size) is a typo, not a
-    // design: the bar's text metrics then compute a zero or negative height and
-    // the bar draws as a bare strip.
+    // A font size of 0 is a typo, not a design: the bar's text metrics then
+    // compute a zero height and the bar draws as a bare strip. (A NEGATIVE
+    // size is impossible: the schema's barScalable floor is 0.)
     if (cfg.bar.font_size.is_percentage) {
-        if (scaling.asRatio(cfg.bar.font_size) <= 0.0)
+        if (scaling.asRatio(cfg.bar.font_size) == 0.0)
             log.warn("bar.font_size is 0%; the bar will have no readable text", .{});
-    } else if (cfg.bar.font_size.value <= 0.0) {
+    } else if (cfg.bar.font_size.value == 0.0) {
         log.warn("bar.font_size is {d}px; the bar will have no readable text", .{cfg.bar.font_size.value});
     }
 }

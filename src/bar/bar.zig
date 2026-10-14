@@ -148,9 +148,7 @@ pub fn onPollWakeup() void {
 
 /// Combines every module's poll deadline (clock tick, prompt caret blink,
 /// carousel scroll) into the shortest non-negative wait, or null when no
-/// module wants one. Module hooks still speak in negatives ("no wake needed");
-/// THIS is the single place that turns that into absence, because it is the
-/// bar's whole contribution to core's deadline reduction (see core/loop/timers).
+/// module wants one.
 pub fn pollTimeoutMs() ?i32 {
     // A bar-less session wants no wakeups from module hooks at all: polling,
     // then dispatching every dead module's cadence at the frame rate, is a

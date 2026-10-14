@@ -151,14 +151,12 @@ fn parseAndMerge(
     // Ceilings first, so a tree over the limit costs a counter check rather
     // than the read it was about to do.
     if (read.paths.items.len >= max_config_files) {
-        dst.had_errors = true;
         log.err("Config load reads more than {d} files (at '{s}'); refusing to continue. " ++
             "A config dir or include list that large is almost certainly not a config.", .{ max_config_files, path });
         return error.TooManyConfigFiles;
     }
     const doc = tryParseTomlFile(allocator, path, dst) orelse return null;
     if (read.bytes + doc.bytes > max_total_config_bytes) {
-        dst.had_errors = true;
         log.err("Config load exceeds {d}KB across all files (at '{s}'); refusing to continue. " ++
             "Split the config, or raise max_total_config_bytes.", .{ max_total_config_bytes / 1024, path });
         return error.TooManyConfigBytes;
@@ -268,7 +266,7 @@ pub fn parseDirDoc(a: std.mem.Allocator, read: *ReadSet, in: DirInput) !parser.D
 /// purpose: there a parse failure is ALSO non-fatal -- a broken snapshot must
 /// not swap the embedded fallback over an otherwise-fine user config -- which
 /// is the opposite of the search, where a parse failure must reach the caller.
-pub const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
+const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
 
 /// Load failures that mean "this config cannot be used", as opposed to "there
 /// is nothing here". All of them are handled identically at both ends: `load`
@@ -288,7 +286,6 @@ pub fn tryLoadOrWarn(
     allocator: std.mem.Allocator,
     path: []const u8,
     comptime err_msg: []const u8,
-    silent: []const anyerror,
 ) !?types.Config {
     return loader(allocator, path) catch |err| {
         // A parse error must reach the caller. On reload it makes the
@@ -297,7 +294,7 @@ pub fn tryLoadOrWarn(
         // Swallowing it here is what silently installed the fallback over a
         // user's typo'd config.
         if (isFatalLoadError(err)) return err;
-        for (silent) |e| if (err == e) return null;
+        for (silent_missing[0..]) |e| if (err == e) return null;
         log.warn(err_msg, .{ path, err });
         return null;
     };
