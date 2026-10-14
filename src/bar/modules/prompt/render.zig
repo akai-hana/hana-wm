@@ -7,6 +7,7 @@
 //! which owns activation and key routing.
 
 const types = @import("types");
+const defaults = @import("defaults");
 const drawing = @import("drawing");
 const editor = @import("editor");
 const completion = @import("completion");
@@ -440,7 +441,7 @@ pub fn drawActive(
     const accent = config.runPromptColor();
     const bg = config.runBg();
     const fg = config.runFg();
-    const prompt = config.run_prompt orelse types.default_run_prompt;
+    const prompt = config.run_prompt orelse defaults.default_run_prompt;
 
     dc.fillRect(start_x, 0, width, height, bg);
 

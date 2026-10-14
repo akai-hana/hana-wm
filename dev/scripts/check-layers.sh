@@ -36,22 +36,25 @@ wire_allowed() {
         # create/destroy of the bar window + colormap (same lifecycle, split
         # into its own file). Sync only raises bar_win via the force_restack
         # hook; bar self-management stays local to avoid a bar<->sync cycle.
-        # visibility_glue.zig carries the same bar self-management, split out
-        # of bar.zig with the apply* visibility family (map/unmap on
+        # visibility.zig carries the same bar self-management (its wire half;
+        # the pure policy half sits above the banner in the same file), split
+        # out of bar.zig with the apply* visibility family (map/unmap on
         # visibility change, raise-above-others, screen-claim publish).
         # surface.zig holds the bar frame's wire traffic (the xcb_flush that
         # orders fills under glyphs, moved here from drawing.zig with the
         # Surface in Phase 4 step 24); drawing.zig no longer sends wire.
-        src/bar/bar.zig|src/bar/visibility_glue.zig|src/bar/surface.zig|src/bar/win.zig) ;;
+        src/bar/bar.zig|src/bar/visibility.zig|src/bar/surface.zig|src/bar/win.zig) ;;
 
-        # ConfigureRequest compliance: client-requested
-        # geometry is honored for floating windows and BW recorded for tiled
-        # -- protocol duty that answers the CLIENT, not layout.
-        # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
-        # The machinery lives in configure.zig (split out of window.zig,
-        # which no longer sends wire itself); window.zig re-exports the
-        # handler as the dispatch surface.
-        src/window/configure.zig) ;;
+        # Window event handlers (merged client_events.zig): ConfigureRequest
+        # compliance (client-requested geometry honored for floating windows
+        # and BW recorded for tiled -- protocol duty that answers the CLIENT,
+        # not layout; restoreFloatGeom / moveFloatToDefaultPos /
+        # applyBorder ride along), EWMH ClientMessage, and Enter/Leave
+        # crossing. Split out of window.zig (which no longer sends wire
+        # itself); window.zig re-exports the handlers as the dispatch
+        # surface. Merged back from configure/client_message/crossing.zig
+        # 2026-10-09.
+        src/window/client_events.zig) ;;
 
         # Admission preamble: claimManagedEventMask sets the management
         # event mask (PropertyNotify / StructureNotify / FocusChange
@@ -132,20 +135,22 @@ wire_allowed() {
 
         # ICCCM client-message sends (pat1's xcb_send_event): WM_TAKE_FOCUS
         # (icccm.zig hands focus to windows that advertise the protocol),
-        # the synthetic ConfigureNotify (configure.zig reports back the geometry
-        # it actually applied after honoring a ConfigureRequest), and
+        # the synthetic ConfigureNotify (client_events.zig reports back the
+        # geometry it actually applied after honoring a ConfigureRequest), and
         # WM_DELETE_WINDOW (dispatch.zig closes a client gracefully, ICCCM
         # §4.1.2.7). These are client protocol text, not sync-bound wire
-        # mutations. configure.zig is allowlisted above for the
+        # mutations. client_events.zig is allowlisted above for the
         # ConfigureRequest family; icccm.zig joins them here for this family.
         src/window/protocol/icccm.zig) ;;
 
-        # src/test/x11/fixture.zig is a TEST DOUBLE: it drives a real X
+        # src/test/harness/fixture.zig is a TEST DOUBLE: it drives a real X
         # connection owned by the X-gated harness to destroy leftover windows
         # during reset, flush, and write WM_PROTOCOLS / WM_HINTS properties on
         # synthetic override-redirect windows (setWmTakeFocus/setNoInput). Test
-        # setup is not WM wire traffic and never routes through sync.
-        src/test/x11/fixture.zig) ;;
+        # setup is not WM wire traffic and never routes through sync. (It
+        # moved here from src/test/x11/ in the Phase-7 harness consolidation;
+        # the carve-out follows the file.)
+        src/test/harness/fixture.zig) ;;
 
         # src/test/window/focus_test.zig is a TEST DOUBLE: its liveness
         # ordering test destroys the clicked window through the X-gated

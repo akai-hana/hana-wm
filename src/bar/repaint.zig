@@ -16,7 +16,6 @@
 const std = @import("std");
 const log = @import("log");
 const contract = @import("contract");
-const scaffold = @import("scaffold");
 const center_row = @import("center_row");
 const segmod = @import("segment");
 const frame = @import("frame");
@@ -367,7 +366,7 @@ inline fn reportDrewNothing(x: u16) contract.Painted {
 /// back to the segment.
 ///
 /// The width handback and the painted/nothing decision live in
-/// `scaffold.finishDraw` rather than inline here: they are the
+/// `segmod.finishDraw` rather than inline here: they are the
 /// bar's post-draw policy, but testing them through this loop would need a
 /// live DrawContext and an X connection, so in practice they would go
 /// untested -- and a segment that forgets to record its own drawn width
@@ -397,7 +396,7 @@ fn drawSegment(s: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16)
     };
     return .{
         .painted = painted,
-        .drew = scaffold.finishDraw(segmod.segmentAt(i), painted),
+        .drew = segmod.finishDraw(segmod.segmentAt(i), painted),
     };
 }
 
