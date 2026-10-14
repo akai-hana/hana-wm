@@ -50,7 +50,7 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     // display (SKIP headless like the other fixture tests).
     const fixture = @import("fixture");
     const pipeline = @import("pipeline");
-    const model = @import("model");
+    const model = @import("wm_state");
     const fx = try fixture.setUp("F03 fullscreen occupancy");
     defer fx.deinit();
 

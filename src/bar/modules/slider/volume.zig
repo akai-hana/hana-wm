@@ -33,7 +33,7 @@ const types = @import("types");
 const slider = @import("slider");
 const drawing = @import("drawing");
 const spawn_capture = @import("spawn_capture");
-const time = @import("time");
+const core = @import("core");
 const native_pulse = @import("native_pulse");
 const native_alsa = @import("native_alsa");
 
@@ -110,7 +110,7 @@ pub fn probeDecision(
 /// Whether the ladder may be walked now. `probeDecision`'s clock and IO
 /// edge, and the only place that mutates the cache's own bookkeeping.
 fn probeDue() bool {
-    const now = time.realtimeMs();
+    const now = core.realtimeMs();
     const recheck_window = now >= g_pulse_recheck_at_ms;
     const reachable = if (recheck_window) native_pulse.pulseReachable() else false;
     const probe = probeDecision(
@@ -309,7 +309,7 @@ fn runLadder() bool {
         g_backend = .unknown;
     }
 
-    g_ladder_failed_at_ms = noteLadderResult(ok, time.realtimeMs());
+    g_ladder_failed_at_ms = noteLadderResult(ok, core.realtimeMs());
     if (!ok) {
         logNoBackend();
         return false;

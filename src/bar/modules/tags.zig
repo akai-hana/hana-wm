@@ -10,14 +10,27 @@
 //! The mismatch is deliberate: config and registry key on the segment name,
 //! never on the file stem.
 
+const std = @import("std");
+
 const types = @import("types");
 const drawing = @import("drawing");
 const query = @import("query");
-const actions = @import("actions");
+const window = @import("window");
 const focus = @import("focus");
 const build_options = @import("build_options");
 const segmod = @import("segment");
 const contract = @import("contract");
+const wm_state = @import("wm_state");
+
+/// Comptime number strings "1".."64" for workspace display labels. Sized to
+/// the shared workspace ceiling so the table cannot disagree with the model's
+/// fixed-size workspace array.
+const workspace_labels: [wm_state.max_workspaces][]const u8 = blk: {
+    @setEvalBranchQuota(10_000);
+    var labels: [wm_state.max_workspaces][]const u8 = undefined;
+    for (&labels, 1..) |*label, i| label.* = std.fmt.comptimePrint("{d}", .{i});
+    break :blk labels;
+};
 
 /// Reserved row width when the workspaces module is compiled in but reports
 /// zero workspaces (moved here from bar.zig: width policy belongs to the
@@ -29,7 +42,7 @@ const fallback_width: u16 = 270;
 // Sized to workspace_labels, the largest label source. Every workspace index
 // is bounded by query.getWorkspaceCount() (<= max_workspaces), so no
 // fallback path exists.
-var label_widths: [query.workspace_labels.len]u16 = [_]u16{0} ** query.workspace_labels.len;
+var label_widths: [workspace_labels.len]u16 = [_]u16{0} ** workspace_labels.len;
 var ws_width: u16 = 0;
 var cache_valid: bool = false;
 // The ws_current/ws_all_active the cache was built for: the selected tag is
@@ -60,7 +73,7 @@ var cached_ind_y: u16 = 0;
 /// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
 inline fn getLabel(i: usize, config: types.BarConfig) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
-    if (i < query.workspace_labels.len) return query.workspace_labels[i];
+    if (i < workspace_labels.len) return workspace_labels[i];
     return "?";
 }
 
@@ -301,10 +314,10 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
 fn onClickHook(ctx: *const contract.ClickCtx) bool {
     const idx = resolveWorkspaceClick(ctx.offset) orelse return true;
     if (ctx.is_left) {
-        actions.switchTo(@intCast(idx));
+        window.callHook(.switchWorkspace, .{@as(u8, @intCast(idx))});
     } else if (ctx.is_right) {
         const win = focus.getFocused() orelse return true;
-        actions.moveWindowTo(win, @intCast(idx));
+        window.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(idx)) });
     }
     return true;
 }

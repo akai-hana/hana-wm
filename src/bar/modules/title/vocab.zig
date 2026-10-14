@@ -11,7 +11,7 @@
 const std = @import("std");
 const drawing = @import("drawing");
 const types = @import("types");
-const model = @import("model");
+const model = @import("wm_state");
 
 // The title segment's geometry -- its window list, the pixel-perfect tiling
 // shared by its draw and the bar's hit-test -- is not shared segment
@@ -38,7 +38,7 @@ pub const TitleRenderContext = struct {
 /// hand the draw one array's length and another's contents.
 pub const TitleEntry = struct {
     window: u32,
-    /// Borrowed from the WM-owned title cache (wincache.peekTitle); the bar
+    /// Borrowed from the WM-owned title cache (title_cache.peekTitle); the bar
     /// refreshes every entry each frame before the draw.
     title: []const u8,
     geom: ?model.Rect,
