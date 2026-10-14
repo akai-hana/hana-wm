@@ -69,25 +69,25 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
 pub const GatherScratch = struct {
     window_infos: [max_visible_windows]WindowInfo = undefined,
 
-    /// Builds the sorted WindowInfo list for the split view from the snapshot's
-    /// per-window titles/geoms. The bar already resolved both per window id from
-    /// in-process caches (WM title cache + sync truth-rect), so nothing here
-    /// touches the wire and no positional batch exists to scramble. Windows with
-    /// an unknown geometry are dropped, not padded.
+    /// Builds the sorted WindowInfo list for the split view from the
+    /// snapshot's per-window entries (id + title + geom). The bar already
+    /// resolved both per window id from in-process caches (WM title cache +
+    /// sync truth-rect), so nothing here touches the wire and no positional
+    /// batch exists to scramble. Windows with an unknown geometry are dropped,
+    /// not padded.
     pub fn gather(
         self: *GatherScratch,
         snapshot: TitleSnapshot,
-        windows: []const u32,
     ) ?[]WindowInfo {
         var info_count: usize = 0;
-        for (windows[0..@min(windows.len, max_visible_windows)], 0..) |win, i| {
-            const wgeom = snapshot.geoms[i] orelse continue;
+        for (snapshot.entries[0..@min(snapshot.entries.len, max_visible_windows)]) |entry| {
+            const wgeom = entry.geom orelse continue;
             self.window_infos[info_count] = .{
-                .window = win,
+                .window = entry.window,
                 .x = wgeom.x,
                 .y = wgeom.y,
-                .title = snapshot.titles[i],
-                .minimized = snapshot.minimized_set.contains(win),
+                .title = entry.title,
+                .minimized = snapshot.minimized_set.contains(entry.window),
             };
             info_count += 1;
         }
@@ -133,15 +133,15 @@ pub fn segmentIndexOfX(total_width: u16, offset_x: u16, count: u32) usize {
 /// `minimized_set` lookup either way -- in the split view `WindowInfo.minimized`
 /// was set by that very expression during the gather.
 pub fn hitTest(snapshot: TitleSnapshot, width: u16, offset_x: u16) ?ClickTarget {
-    const windows = snapshot.current_ws_wins;
-    if (windows.len == 0) return null;
+    const entries = snapshot.entries;
+    if (entries.len == 0) return null;
 
-    const win = if (windows.len == 1) windows[0] else blk: {
+    const win = if (entries.len == 1) entries[0].window else blk: {
         // Only the split view needs a width to divide into; a lone window is
         // the whole slot whatever the reservation measured.
         if (width == 0) return null;
         var scratch: GatherScratch = .{};
-        const sorted = scratch.gather(snapshot, windows) orelse return null;
+        const sorted = scratch.gather(snapshot) orelse return null;
         break :blk sorted[segmentIndexOfX(width, offset_x, @intCast(sorted.len))].window;
     };
     return .{ .window = win, .minimized = snapshot.minimized_set.contains(win) };

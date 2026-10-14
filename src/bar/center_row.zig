@@ -20,12 +20,12 @@ const bar_mods = @import("bar_modules").modules;
 const center_slot_ids: []const usize = segmod.findAllByCapability(&bar_mods, .center_slot);
 const self_ticking_ids: []const usize = segmod.findAllByCapability(&bar_mods, .self_ticking);
 
-/// True when `name` resolves to a segment in the center-slot
-/// capability set.
-fn isCenterSlot(name: []const u8) bool {
-    const id = segmod.segId(name) orelse return false;
+/// True when the registry id `id` is in the center-slot capability
+/// set (a name that does not resolve is in nothing).
+fn isCenterSlot(id: ?usize) bool {
+    const i = id orelse return false;
     inline for (center_slot_ids) |cid| {
-        if (id == cid) return true;
+        if (i == cid) return true;
     }
     return false;
 }
@@ -45,10 +45,10 @@ pub fn centerShare(remaining: u16, count: u16, idx: u16) u16 {
 /// hook, or 0 for an unknown/removed segment name. The hook takes a
 /// real `*const contract.Frame` (`segmod.Frame` is an alias for
 /// exactly that), so the frame passes through with no cast.
-fn naturalWidthOf(name: []const u8, frame: *const segmod.Frame, clock_width: u16) u16 {
+fn naturalWidthOf(id: ?usize, frame: *const segmod.Frame, clock_width: u16) u16 {
     if (comptime !segmod.hasRegisteredSegments()) return 0;
-    const id = segmod.segId(name) orelse return 0;
-    if (bar_mods[id].naturalWidth) |nw| return nw(frame, clock_width);
+    const i = id orelse return 0;
+    if (bar_mods[i].naturalWidth) |nw| return nw(frame, clock_width);
     return 0;
 }
 
@@ -81,11 +81,13 @@ pub fn centerRowBudget(
     );
     var claim: u16 = 0;
     for (lay.segments.items) |s| {
-        if (isCenterSlot(s)) {
+        // One name -> id resolution per segment for the whole budget pass.
+        const id = segmod.segId(s);
+        if (isCenterSlot(id)) {
             center_count += 1;
             continue;
         }
-        claim +|= naturalWidthOf(s, frame, clock_width);
+        claim +|= naturalWidthOf(id, frame, clock_width);
         claim +|= scaled_spacing;
     }
     remaining = clamped -| claim;
@@ -99,13 +101,19 @@ pub fn centerRowBudget(
 /// as its fallback, so a fresh bar (State.init) and a post-mode-cycle
 /// re-derivation (adoptFreshClockWidth) can never disagree.
 ///
-/// `measure` is the host's string-width probe (a DrawContext's
-/// measureTextWidth), injected so this derivation needs no Pango.
+/// `measure` is the host's string-width probe WITH the segment's
+/// `[bar.properties]` styling applied (a DrawContext's
+/// measureTextWidthStyled), injected so this derivation needs no
+/// Pango. Styled, because the draw measures the same probe styled:
+/// an unstyled budget reserves a narrower slot than a bold/italic
+/// clock paints, and the row overlaps until an unrelated full
+/// redraw. For plain (default) props the two probes are identical,
+/// so styled costs nothing on an unstyled bar.
 pub fn mergedClockWidth(
     ctx: anytype,
     config: types.BarConfig,
     height: u16,
-    measure: *const fn (@TypeOf(ctx), []const u8) u16,
+    measure: *const fn (@TypeOf(ctx), []const u8, types.SegmentProps) u16,
 ) u16 {
     var width: u16 = 0;
     // Comptime guard: with no self-ticking segment compiled in the
@@ -114,7 +122,8 @@ pub fn mergedClockWidth(
     if (comptime self_ticking_ids.len == 0) return width;
     for (self_ticking_ids) |cid| {
         if (bar_mods[cid].measureString) |ms|
-            width = @max(width, measure(ctx, ms()) + 2 * config.scaledSegmentPadding(height));
+            width = @max(width, measure(ctx, ms(), config.segmentProps(bar_mods[cid].name)) +
+                2 * config.scaledSegmentPadding(height));
     }
     return width;
 }

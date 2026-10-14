@@ -5,12 +5,12 @@
 //! recomputation, prompt forced-show/undo, and the shared-screen predicate
 //! behind them -- lives here as pure computations over the core model.
 //!
-//! This partition issues NO X11 requests. The eponymous `bar.zig` imports it
-//! one-way (bar -> visibility), applies a decision, and performs the
-//! map/unmap + screen-claim + reconcile glue; visibility.zig never imports
-//! bar.zig, so every wire token stays in the orchestrator. It also does not
-//! import the pipeline: the model is a parameter, so every decision is a pure
-//! function of what the caller handed in.
+//! This partition issues NO X11 requests. `visibility_glue` (and `bar.zig`
+//! for the prompt-exit decision) import it one-way, apply the decision, and
+//! perform the map/unmap + screen-claim + reconcile glue; visibility.zig
+//! never imports either, so every wire token stays with the orchestrators.
+//! It also does not import the pipeline: the model is a parameter, so every
+//! decision is a pure function of what the caller handed in.
 
 const build_options = @import("build_options");
 const model = @import("model");
@@ -69,13 +69,20 @@ pub const DesiredVisibility = struct {
 /// target and reason, and letting the caller compare, is one step instead of
 /// two and keeps the mapped state at the one place that can see it.
 pub fn desiredVisibility(m: *const model.Model, ws: u8, is_globally_visible: bool) DesiredVisibility {
-    if (is_globally_visible) {
-        if (barForcedHiddenByFullscreen(m, ws)) {
-            return .{ .should_be_visible = false, .reason = .fullscreen_claims_screen };
-        }
-        return .{ .should_be_visible = true, .reason = .user_and_workspace };
-    }
-    return .{ .should_be_visible = false, .reason = .user_hidden };
+    // Short-circuit the model walk when the user toggle already hides the bar:
+    // `shouldBeVisible` ignores `forced_hidden` on that row of its truth table,
+    // so reading the fullscreen occupant there could only produce a reason the
+    // caller never asks for (user_hidden wins by definition).
+    const forced_hidden = is_globally_visible and barForcedHiddenByFullscreen(m, ws);
+    return .{
+        .should_be_visible = shouldBeVisible(is_globally_visible, forced_hidden),
+        .reason = if (!is_globally_visible)
+            Reason.user_hidden
+        else if (forced_hidden)
+            Reason.fullscreen_claims_screen
+        else
+            Reason.user_and_workspace,
+    };
 }
 
 /// Decision for `dismissAfterPrompt`: whether the prompt's forced-show
@@ -83,7 +90,8 @@ pub fn desiredVisibility(m: *const model.Model, ws: u8, is_globally_visible: boo
 /// recomputed visibility. The prompt can outlive the state that justified the
 /// override (e.g. the fullscreen window closes on its own), so this is
 /// recomputed from the CURRENT workspace at prompt-exit time rather than
-/// trusting the decision made at activation.
+/// trusting the decision made at activation. One decision function, not a
+/// second hand-rolled fold of the same two inputs.
 pub fn keepPromptOverride(m: *const model.Model, ws: u8, is_globally_visible: bool) bool {
-    return shouldBeVisible(is_globally_visible, barForcedHiddenByFullscreen(m, ws));
+    return desiredVisibility(m, ws, is_globally_visible).should_be_visible;
 }

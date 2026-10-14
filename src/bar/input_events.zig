@@ -3,15 +3,14 @@
 //! position to a segment's onClick hook. The handlers are thin
 //! -- hit-test against the bounds the last layout pass RECORDED
 //! (never re-derive geometry here), then delegate to the
-//! registry's uniform hooks; the draw/dirty primitives and the
-//! recorded-bound machinery stay in `bar.zig`, exposed pub.
+//! registry's uniform hooks; the recorded-bound machinery and the
+//! state those bounds hang off live in `state.zig`.
 //!
 //! `bar.zig` imports this file to bind the handlers into its
-//! `surfaces` struct and to dispatch the chrome-overlay click:
-//! the two files form the bar subsystem's one intentional import
-//! cycle (runtime accesses only, never comptime -- the same
-//! hub-and-spoke shape check-layers.sh documents for
-//! core<->window). Named `input_events` because the `events`
+//! `surfaces` struct and to dispatch the chrome-overlay click; this
+//! file reads the state through `state.zig`, never through
+//! `bar.zig`, so the edge is one-way. Named `input_events` because
+//! the `events`
 //! stem is taken by the core event loop.
 
 const std = @import("std");
@@ -22,17 +21,17 @@ const constants = @import("constants");
 const title_geom = @import("geom");
 const contract = @import("contract");
 
-const bar = @import("bar");
-const draw = @import("draw");
-const State = bar.State;
-const SegBound = bar.SegBound;
+const state = @import("state");
+const repaint = @import("repaint");
+const State = state.State;
+const SegBound = state.SegBound;
 
 /// The title segment's recorded on-screen bound, or null when the title
 /// addon isn't registered (`title_id`) or the last layout pass never placed
 /// it. Shared by the prompt-open click path and chromeToggleOverlay, so the
 /// title id/name/bound resolution lives in one place.
 pub fn titleIdBound(s: *State) ?SegBound {
-    const center_id = bar.title_id orelse return null;
+    const center_id = state.title_id orelse return null;
     return s.recordedBound(center_id);
 }
 
@@ -42,7 +41,7 @@ pub fn titleIdBound(s: *State) ?SegBound {
 /// focus for the title). Exported as a `BarHandlers.dispatchClick`-shaped
 /// trampoline (see titleClickTrampoline).
 pub fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right: bool) void {
-    if (bar.segAt(id).onClick) |oc| {
+    if (state.segAt(id).onClick) |oc| {
         // Named, not inline `&.{}`: the temporary is only guaranteed to live
         // to the end of the call expression, and a `ctx` that outlived it (a
         // module storing the pointer) would be a silent lifetime bug. This
@@ -53,21 +52,21 @@ pub fn dispatchClick(s: *State, id: usize, offset: u16, is_left: bool, is_right:
             .is_right = is_right,
             .state = s,
             .title_click = titleClickTrampoline,
-            .redraw = draw.redrawInsideGrab,
+            .redraw = repaint.redrawInsideGrab,
         };
         _ = oc(&ctx);
     }
 }
 
 pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
-    if (bar.gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
+    if (state.gBar.state) |s| if (event.window == s.win.win_id and event.count == 0) {
         // A damaged region must be REPAINTED now, even mid-drag: the old
         // special-case set the dirty flag and skipped performDraw, but the
         // tick-driven next draw would then see no seg bits dirty, skip
         // repainting entirely, and clear the flag again -- the exposed region
         // is never redrawn. The drag itself defers its own per-tick blit, so
         // the expose deserves a full performDraw here.
-        draw.performDraw();
+        repaint.performDraw();
     };
 }
 
@@ -95,7 +94,7 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
 /// (the slider sub's clamp-step); a left press on a clickable segment arms
 /// its `onDragMotion` hook for the duration of the press-hold.
 pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
-    const s = bar.gBar.state orelse return;
+    const s = state.gBar.state orelse return;
     if (!s.vis.shown) return;
     if (event.event_x < 0) return;
     const x: u16 = @intCast(event.event_x);
@@ -126,10 +125,10 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     if (detail == constants.mouse_button_scroll_up or
         detail == constants.mouse_button_scroll_down)
     {
-        if (bar.segAt(id).onScroll) |scroll| {
+        if (state.segAt(id).onScroll) |scroll| {
             const dir: i8 = if (detail == constants.mouse_button_scroll_up) 1 else -1;
             s.scroll_segment = id;
-            _ = scroll(dir, draw.redrawScopedSegment);
+            _ = scroll(dir, repaint.redrawScopedSegment);
             s.scroll_segment = null;
             return;
         }
@@ -142,27 +141,27 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
 /// the pointer leaves the bar, so the offset can span outside the segment;
 /// segments clamp their own state. No drag owner -> no-op.
 pub fn handleButtonMotion(event: *const xcb.xcb_motion_notify_event_t) void {
-    const s = bar.gBar.state orelse return;
+    const s = state.gBar.state orelse return;
     const id = s.drag_segment orelse return;
     if (!s.vis.shown) return;
-    if (bar.segAt(id).onDragMotion) |drag| {
+    if (state.segAt(id).onDragMotion) |drag| {
         const tb = s.recordedBound(id) orelse return;
         const off_i = @as(i32, event.event_x) - @as(i32, tb.x);
         const offset: u16 = @intCast(std.math.clamp(off_i, 0, std.math.maxInt(u16)));
         // Scoped repaint, not redrawInsideGrab: a scrub only mutates the
         // dragged segment's slot, and a full-bar redraw per motion is the
         // frame-rate killer for subprocess-bound segments.
-        _ = drag(offset, draw.redrawScopedSegment);
+        _ = drag(offset, repaint.redrawScopedSegment);
     }
 }
 
 /// Ends a press-hold scrub: clears the drag anchor and lets the segment
 /// settle the drag (flush a throttled commit, leave its drag render mode).
 pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
-    const s = bar.gBar.state orelse return;
+    const s = state.gBar.state orelse return;
     const id = s.drag_segment orelse return;
     s.drag_segment = null;
-    if (bar.segAt(id).onDragEnd) |end| end(draw.redrawInsideGrab);
+    if (state.segAt(id).onDragEnd) |end| end(repaint.redrawInsideGrab);
 }
 
 /// `offset` is the click position relative to the title segment's start.
@@ -175,7 +174,7 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
 ///   - the window is already focused -> minimizes it
 ///   - otherwise -> focuses it
 fn handleTitleClick(s: *State, offset: u16) void {
-    if (s.frame.wins_len == 0) return;
+    if (s.frame.entries_len == 0) return;
     const tb = titleIdBound(s) orelse return;
 
     const target = title_geom.hitTest(s.frame.last_ctx.titleSnapshot(), tb.w, offset) orelse return;

@@ -92,8 +92,11 @@ test "centerRowBudget floors a thin budget at the title minimum" {
     try testing.expectEqual(@as(u16, 50), tiny.remaining);
 }
 
-fn stubWidth(_: void, text: []const u8) u16 {
-    return @intCast(text.len);
+fn stubWidth(_: void, text: []const u8, props: types.SegmentProps) u16 {
+    // Props are part of the injected probe's contract: a bold segment must
+    // measure wider than a plain one, so the expected walk below fails if
+    // mergedClockWidth ever stops threading each module's OWN props through.
+    return @intCast(text.len + (if (props.bold) @as(usize, 500) else 0));
 }
 
 test "mergedClockWidth is the max self-ticker span plus double padding" {
@@ -101,14 +104,18 @@ test "mergedClockWidth is the max self-ticker span plus double padding" {
     // without Pango. Expected is the same walk the derivation performs
     // over the registry's own self-ticking set (a segment with no
     // measureString hook contributes nothing), which pins the max
-    // semantics and the 2x padding multiplier.
-    const config = types.BarConfig{};
+    // semantics, the 2x padding multiplier, and the per-module props
+    // threading (bold only the clock, so a shared-default regression
+    // measures the +500 away).
+    var config = types.BarConfig{};
+    try config.segment_props.put(testing.allocator, try testing.allocator.dupe(u8, "clock"), .{ .bold = true });
+    defer types.freeSegmentMap(types.SegmentProps, &config.segment_props, testing.allocator);
     const height: u16 = 100;
     const padding = config.scaledSegmentPadding(height);
     var expected: u16 = 0;
     for (self_ticking_ids) |cid| {
         if (bar_mods[cid].measureString) |ms|
-            expected = @max(expected, stubWidth({}, ms()) + 2 * padding);
+            expected = @max(expected, stubWidth({}, ms(), config.segmentProps(bar_mods[cid].name)) + 2 * padding);
     }
     try testing.expectEqual(expected, center_row.mergedClockWidth({}, config, height, stubWidth));
 }

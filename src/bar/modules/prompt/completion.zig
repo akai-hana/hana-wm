@@ -362,6 +362,12 @@ const hist_read_window: usize = 256 * 1024 - 1;
 
 /// Load history from `path` into the in-memory ring, processing lines in
 /// reverse so the newest entry ends up at index 0.
+/// One history-file line's span into the read window. The AoS pair for the
+/// `line_starts`/`line_ends` parallel rings this replaces: written together
+/// on every scan step, read together when the line is consumed, so there was
+/// no step at which one existed without the other.
+const LineSpan = struct { start: usize, end: usize };
+
 fn histLoadFile(allocator: std.mem.Allocator, path: []const u8) void {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return;
@@ -389,18 +395,16 @@ fn histLoadFile(allocator: std.mem.Allocator, path: []const u8) void {
     // Only the trailing max_lines lines are eligible: history consumers walk
     // them back-to-front for newest-first priority, so dropping the head of
     // an overgrown file keeps the freshest entries visible once it outgrows
-    // the window. The ranges live in a ring indexed modulo max_lines, so the
+    // the window. The spans live in a ring indexed modulo max_lines, so the
     // scan only ever remembers the LAST max_lines lines.
     const max_lines = max_history * 2;
-    var line_starts: [max_lines]usize = undefined;
-    var line_ends: [max_lines]usize = undefined;
+    var spans: [max_lines]LineSpan = undefined;
     var total: usize = 0;
 
     var pos: usize = 0;
     while (pos < text.len) {
         const end = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse text.len;
-        line_starts[total % max_lines] = pos;
-        line_ends[total % max_lines] = end;
+        spans[total % max_lines] = .{ .start = pos, .end = end };
         total += 1;
         pos = end + 1;
     }
@@ -421,7 +425,8 @@ fn histLoadFile(allocator: std.mem.Allocator, path: []const u8) void {
     while (li < @min(total, max_lines)) : (li += 1) {
         if (g.hist_count >= max_history) break;
         const ri = (total - 1 - li) % max_lines;
-        const line = text[line_starts[ri]..line_ends[ri]];
+        const span = spans[ri];
+        const line = text[span.start..span.end];
         const len = histParseLine(line, &out_line);
         if (len == 0) continue;
         const h = std.hash.Wyhash.hash(0, out_line[0..len]);

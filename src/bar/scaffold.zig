@@ -1,8 +1,7 @@
-//! Shared scaffolding for the icon-ish bar segment modules (layout, variants,
-//! clock, tags).
-//! Collapses the duplicated cached-width tracking, redraw-request flag, and
-//! the naturalWidth/draw/onClick hook wiring into a single comptime builder
-//! parameterized by an `Opts` struct.
+//! Shared scaffolding for bar segment modules: the width-state cache (layout,
+//! variants, slider, systatus; tags has its own cell-width math) and the
+//! naturalWidth/draw/onClick hook wiring every module builds through,
+//! collapsed into a single comptime builder parameterized by an `Opts` struct.
 
 const segmod = @import("segment");
 const contract = @import("contract");
@@ -56,50 +55,6 @@ pub fn widthState(comptime tag: []const u8) type {
         /// genuinely need to distinguish the two (not the reservation).
         pub fn measured() u16 {
             return cached;
-        }
-    };
-}
-
-/// Keyed width cache (the clock's mode reservation): the last measured width
-/// plus the `Key` it belongs to, so a caller can tell when the stored width
-/// is stale (a mode/renderer change re-measures). Read before the first
-/// store falls back to the caller's probe width instead of a 0 reservation
-/// (a fresh bar sizes the clock by its probe). No redraw_request: consumers
-/// that re-measure on key change (the clock) drive repaints through their
-/// own staleness path.
-pub fn keyedWidthState(comptime tag: []const u8, comptime Key: type) type {
-    return struct {
-        var cached: u16 = 0;
-        var cached_key: ?Key = null;
-        const _ = tag;
-
-        /// True when `key` is the key the stored width was measured for;
-        /// false before any store (stale).
-        pub fn matches(key: Key) bool {
-            return if (cached_key) |ck| ck == key else false;
-        }
-        /// Stores the measured width under `key`.
-        pub fn store(key: Key, width: u16) void {
-            cached = width;
-            cached_key = key;
-        }
-        /// The stored width when it was measured for `key`, else `fallback`
-        /// (caller's probe width). A width stored under a DIFFERENT key is as
-        /// stale as no width at all: the segment is about to stop filling that
-        /// span, so reserving it would pin the row at the outgoing view's size
-        /// until the next draw had already reflowed around it.
-        pub fn naturalWidth(key: Key, _: *const contract.Frame, fallback: u16) u16 {
-            if (cached > 0) {
-                if (cached_key) |ck| {
-                    if (ck == key) return cached;
-                }
-            }
-            return fallback;
-        }
-        /// Drops the stored width+key so the next draw re-measures.
-        pub fn invalidate() void {
-            cached = 0;
-            cached_key = null;
         }
     };
 }
@@ -234,7 +189,11 @@ fn clickHook(comptime action: anytype) OnClick {
     }.f;
 }
 
-/// The clock's naturalWidth: reserve the measured clock width itself.
+/// The default naturalWidth for a module that binds a measureString: reserve
+/// the bar's clock budget (the `clock_width` argument, the merged self-ticker
+/// measurement) itself, rather than a cached drawn width. This is the clock's
+/// reservation path -- its width store lives in State.Clock.width, re-derived
+/// by the bar, so the hook only forwards.
 fn passthroughWidth(_: *const contract.Frame, clock_width: u16) u16 {
     return clock_width;
 }

@@ -54,8 +54,7 @@ test "F03: fullscreen occupancy forces the bar hidden" {
     const fx = try fixture.setUp("F03 fullscreen occupancy");
     defer fx.deinit();
 
-    var gate: pipeline.Gate = .{};
-    const m = pipeline.mut(&gate);
+    const m = pipeline.mut();
 
     // Empty model: no covering occupant, bar stays up.
     try testing.expect(!visibility.barForcedHiddenByFullscreen(m, 0));
