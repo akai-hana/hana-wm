@@ -70,7 +70,7 @@ Inside `src/window/**`, callers import `registry` directly.
 
 1. **Layout-parameter commands and `moveFocused` are NOT under `src/tiling/`.**
    `build.zig`'s `assertPureLayerImports` forbids `src/tiling/**` from
-   importing anything but the pure shelf, `wm_state`, `domain` and `contract`;
+   importing anything but the pure shelf, `model`, `domain` and `tiling_contract`;
    `check-layers.sh` Rule 3 sweeps `src/tiling` for any `xcb` token. Each of
    these commands reaches `pipeline.reconcileGrab` (a server grab), so none of
    them can sit in the pure layer. They live in

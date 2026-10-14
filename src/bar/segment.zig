@@ -2,7 +2,7 @@
 //!
 //! This is NOT a bar segment module: it holds the shared vocabulary every
 //! segment module (and bar.zig) imports -- `Frame` (live workspace visitability;
-//! an alias for architecture/contract.zig's Frame, so the `naturalWidth` hook
+//! an alias for bar_contract.zig's Frame, so the `naturalWidth` hook
 //! can type its frame parameter), `DrawCtx` (the per-frame scratch bar builds
 //! for each segment's draw), the shared title constants, and the prompt
 //! service-handle struct. The title render/snapshot TYPES live with the title
@@ -36,8 +36,9 @@ const core = @import("core");
 const drawing = @import("drawing");
 const vocab = @import("vocab");
 const types = @import("types");
-const contract = @import("contract");
-const model = @import("wm_state");
+const contract = @import("bar_contract");
+const dispatch = @import("contract_dispatch");
+const model = @import("model");
 
 /// Service handles the bar passes into mechanism segments (the prompt) at
 /// init. Passed once so segments never import the bar orchestrator;
@@ -54,7 +55,7 @@ pub const BarHandlers = struct {
 /// The bar's per-frame workspace facts, collected fresh by bar.zig every
 /// draw -- the only segment-visible slice of WM state (besides what a segment
 /// reads directly from core). The DEFINITION lives in
-/// architecture/contract.zig so the `naturalWidth` hook can type its first
+/// bar_contract.zig so the `naturalWidth` hook can type its first
 /// parameter as a real `*const Frame`; this alias keeps `segmod.Frame` as the
 /// name every reader already uses.
 pub const Frame = contract.Frame;
@@ -289,7 +290,7 @@ pub inline fn segmentAt(id: usize) *const contract.Segment {
 /// Runs the void hook `hook` over every registered segment (the
 /// init/teardown/notification family).
 pub fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
-    contract.callAll(contract.Segment, bar_mods[0..], hook, .{});
+    dispatch.callAll(contract.Segment, bar_mods[0..], hook, .{});
 }
 
 /// True when ANY registered segment's `hook` returns true (short-circuiting

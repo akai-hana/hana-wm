@@ -245,30 +245,33 @@ while IFS= read -r line; do
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
 # Rule 3: no xcb imports/references in the pure state vocabulary
-# (wm_state.zig + its private domain.zig), the window
-# contract, tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
+# (model.zig + its private domain.zig), the split contract vocabulary
+# (tiling_contract.zig, contract_dispatch.zig, window_contract.zig,
+# bar_contract.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
 # awk strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
-# it sweeps for any `xcb` token in the state files, tiling/, and config/ after
+# it sweeps for any `xcb` token in the state files, the contract vocabulary,
+# tiling/, and config/ after
 # comment removal -- imports AND re-exported bare references alike. (The
 # complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
 # a pure module can import an xcb-using sibling and pass there, so Rule 3, not
 # that scan, is the last line of defense on bodies. Only the state files are
-# swept: wm_state.zig is the pure root (state plus the re-exported
+# swept: model.zig is the pure root (state plus the re-exported
 # Rect/Margins value objects and their coordinate helpers), its domain.zig
 # sibling is private to it, and the pure/ shelf carries no xcb tokens by
-# construction. architecture/contract.zig IS on this side of the sweep: the
-# contract names the key-press event as an opaque `KeyPressEvent` and carries
-# the connection as `*const anyopaque`, so it is xcb-free vocabulary and is
-# swept like any other pure file. (The X-typed vocabulary it deliberately
-# does not hold -- the concrete key-press struct and the `Surfaces` hook
-# set -- lives with its binding site in hub-wired bar.zig, outside the
-# sweep.) Its former split siblings
-# (contract_window.zig / contract_segment.zig) merged into the entry
-# 2026-10-08.)
+# construction. The split contracts (from the 2026-10 monolithic
+# contract.zig) ARE on this side of the sweep: they name the key-press event
+# as an opaque `KeyPressEvent` and carry the connection as `*const anyopaque`,
+# so they are xcb-free vocabulary and are swept like any other pure file.
+# (The X-typed vocabulary they deliberately do not hold -- the concrete
+# key-press struct and the `Surfaces` hook set -- lives with its binding
+# site in hub-wired bar.zig, outside the sweep.) The merge of
+# contract_window.zig / contract_segment.zig into the monolith (2026-10-08)
+# and the monolith's later split into per-engine contracts are both history;
+# the sweep follows the files, not the lineage.)
 hits=$(
     while IFS= read -r f; do
         awk '
@@ -284,7 +287,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/architecture/domain.zig src/core/wm_state.zig src/core/architecture/contract.zig src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/domain.zig src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

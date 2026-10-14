@@ -5,7 +5,8 @@ const types = @import("types");
 const drawing = @import("drawing");
 const pipeline = @import("pipeline");
 const window = @import("window");
-const contract = @import("contract");
+const contract = @import("tiling_contract");
+const bar_contract = @import("bar_contract");
 const core = @import("core");
 const segmod = @import("segment");
 
@@ -46,8 +47,8 @@ fn getIndicator() []const u8 {
 
 /// Paints the variant indicator, or nothing at all when tiling is disabled or
 /// no indicator is available -- a successful zero-width draw, which is not the
-/// same thing as a failed one (see contract.Painted).
-fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
+/// same thing as a failed one (see bar_contract.Painted).
+fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !bar_contract.Painted {
     return segmod.drawAndStore("variants", dc, config, height, start_x, getIndicator());
 }
 

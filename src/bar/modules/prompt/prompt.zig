@@ -8,7 +8,7 @@ const xcb = core.xcb;
 const log = @import("log");
 
 const types = @import("types");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 
 const masks = @import("masks");
 const segmod = @import("segment");

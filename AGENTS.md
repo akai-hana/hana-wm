@@ -29,8 +29,11 @@ hana is a modular X11 window manager (+ integrated bar) written in Zig **0.16.0*
    `bar/modules/`, window modules under `window/modules/`, layouts under
    `tiling/modules/`). Deleting a module's file(s) drops the feature and the tree
    must still compile. The core never names an optional module directly: it goes
-   through the contracts in `src/core/architecture/contract.zig`
-   (`contract_x11.zig` for the X-typed half) and the build-generated registries
+   through the split contracts — `src/window/window_contract.zig`
+   (WindowModule), `src/bar/bar_contract.zig` (Segment + bar vocabulary),
+   `src/core/architecture/tiling_contract.zig` (cross-engine tiling
+   vocabulary), `src/core/architecture/contract_dispatch.zig`
+   (providerOf/callAll) — and the build-generated registries
    (`window_modules`, `tiling_modules`, `bar_modules`).
    New community modules must compile against the templates in
    `dev/plugin-template/` (gated by `zig build check-plugin-template`, part of
@@ -62,7 +65,7 @@ CI additionally runs the full suite, `zig build`, and the modularity matrix.
 
 - `src/core/` — event loop, X11 layer, input handling (`core/input/`:
   `xkb`, `keybinds`, `keys`, `mouse`, `dispatch`, `cursor`, `keymap`),
-  reconcile boundary, `architecture/` (contracts + `domain.zig` + `wm_state.zig`,
+  reconcile boundary, `architecture/` (contracts + `domain.zig` + `model.zig`,
   the single source of truth for window state, deliberately X11-free).
 - `src/window/`, `src/tiling/`, `src/bar/`, `src/config/` —
   subsystems; optional ones (`tiling`, `bar`, most modules) can be deleted.
@@ -74,7 +77,7 @@ CI additionally runs the full suite, `zig build`, and the modularity matrix.
 
 ## Notes
 
-- `wm_state` (in `src/core/wm_state.zig`) is the single writer of window
+- `model` (in `src/core/model.zig`) is the single writer of window
   state; sync goes single-writer through the model (guarded by `zig build check`).
   Vocabulary lives in `src/core/architecture/domain.zig`.
 - Unit tests that need a display self-skip with `SkipZigTest` when none is

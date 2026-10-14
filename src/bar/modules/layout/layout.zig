@@ -5,7 +5,8 @@ const types = @import("types");
 const drawing = @import("drawing");
 const window = @import("window");
 const pipeline = @import("pipeline");
-const contract = @import("contract");
+const contract = @import("tiling_contract");
+const bar_contract = @import("bar_contract");
 const core = @import("core");
 const segmod = @import("segment");
 
@@ -39,7 +40,7 @@ fn getIcon() []const u8 {
     );
 }
 
-fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !contract.Painted {
+fn draw(dc: *drawing.DrawContext, config: types.BarConfig, height: u16, start_x: u16) !bar_contract.Painted {
     return segmod.drawAndStore("layout", dc, config, height, start_x, getIcon());
 }
 

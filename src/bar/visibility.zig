@@ -18,7 +18,7 @@
 //! submission in `render.zig`; neither is imported by this file.)
 
 const build_options = @import("build_options");
-const model = @import("wm_state");
+const model = @import("model");
 
 // ---------------------------------------------------------------------------
 // Policy (pure): decisions over the model, no wire.

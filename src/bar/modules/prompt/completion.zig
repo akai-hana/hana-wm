@@ -460,7 +460,7 @@ pub fn loadHistory(allocator: std.mem.Allocator) void {
 }
 
 /// Records the command in the run-history ring, then hands the exec to the
-/// global spawn facility (core/proc/spawn.zig). The prompt used to double-fork
+/// global spawn facility (core/process/spawn.zig). The prompt used to double-fork
 /// here itself; the fold keeps only the prompt-specific duties (history) and
 /// delegates detach/exec to `spawn`, which does it better: WM-as-subreaper
 /// with a spawn-report pipe instead of an untracked double-fork, and

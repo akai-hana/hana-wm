@@ -19,7 +19,7 @@ const window = @import("window");
 const focus = @import("focus");
 const masks = @import("masks");
 const title_geom = @import("geom");
-const contract = @import("contract");
+const contract = @import("bar_contract");
 const segmod = @import("segment");
 
 const state = @import("state");
