@@ -317,16 +317,11 @@ pub const Config = struct {
     }
 
     /// Derives horizontal segment padding from font_size.
-    /// Percentage path: margin = (bar_height - font_height) / 2, scaled.
-    /// Absolute path:   margin = (bar_height - font_px) / 2.
+    /// Margin = (bar_height - font_px) / 2 in both cases: the percentage path
+    /// resolves `font_size` against the bar height first (`scaling`).
     pub inline fn scaledSegmentPadding(self: *const Config, bar_height: u16) u16 {
         const h: f32 = @floatFromInt(bar_height);
-        if (self.font_size.is_percentage) {
-            const margin_ratio = (1.0 - self.font_size.value / 100.0) / 2.0;
-            return scaleToU16(h * margin_ratio);
-        }
-        const font_px = self.font_size.value;
-        return scaleToU16((h - font_px) / 2.0);
+        return scaleToU16((h - scaling.scaleToPixels(self.font_size, h)) / 2.0);
     }
 
     /// Resolves a ScalableValue to pixels: the percentage path multiplies the
@@ -364,13 +359,9 @@ pub const Config = struct {
         return @intFromFloat(@round(std.math.clamp(self.transparency, 0.0, 1.0) * alpha16_ceiling));
     }
 };
-
-// ---------------------------------------------------------------------------
-// The knob table: every bar scalar knob, exactly once. Targets are relative
-// to THIS Config. The `needs` ordering (base palette before the
-// [bar.properties] color_from chain) is enforced by validateTable.
-// ---------------------------------------------------------------------------
-
+/// The knob table: every bar scalar knob, exactly once. Targets are relative
+/// to THIS Config. The `needs` ordering (base palette before the
+/// [bar.properties] color_from chain) is enforced by validateTable.
 /// Plain [bar] boolean.
 fn barBool(key: []const u8) knob.Knob {
     return knob.knob(&.{knob.place(types.section_bar, key)}, key, .b);
@@ -528,14 +519,10 @@ pub fn validate(cfg: *const Config) !void {
         log.warn("bar.font_size is {d}px; the bar will have no readable text", .{cfg.font_size.value});
     }
 }
-
-// ---------------------------------------------------------------------------
-// The `[bar.properties]` segment decoder: segment-name keys the scalar knobs
-// do not own. The knob-key test stays bound to the very table the knob loop
-// reads (a future `[bar.properties]` knob can never desync the map pass) --
-// by being the same file.
-// ---------------------------------------------------------------------------
-
+/// The `[bar.properties]` segment decoder: segment-name keys the scalar knobs
+/// do not own. The knob-key test stays bound to the very table the knob loop
+/// reads (a future `[bar.properties]` knob can never desync the map pass) --
+/// by being the same file.
 /// Reads `[bar.properties]` segment-name entries (any key not owned by the
 /// scalar knobs above) into `cfg.segment_fg` / `segment_value_fg` /
 /// `segment_props`.
