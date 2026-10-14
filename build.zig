@@ -85,10 +85,11 @@ pub fn build(b: *std.Build) !void {
     // Build options
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "profile_key", b.option(bool, "profile-key", "Instrument the key dispatch path to log receive->action latency") orelse false);
-    // Latency/benchmark tests print their timings and run their full loops
-    // only when `-Dbench` is passed; the default suite keeps them as cheap
-    // smoke runs so a passing `zig build test` never writes to stderr (the
-    // build runner flags any test stderr as `failed command:` even on success).
+    // Latency/benchmark tests record their timings to `.zig-cache/bench/
+    // timings.txt` and run their full loops only when `-Dbench` is passed;
+    // the default suite keeps them as cheap smoke runs so a passing
+    // `zig build test` never writes to stderr (the build runner flags any
+    // test stderr as `failed command:` even on success).
     build_opts.addOption(bool, "bench", b.option(bool, "bench", "Run latency/benchmark tests with full iteration counts and timing output (opt-in; off by default)") orelse false);
 
     // Module discovery — runs before has_* probes so file-existence flags can
@@ -270,11 +271,11 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Unit tests for the reworked architecture layers (src/test/**, grouped
-    // by category: core/, window/, bar/, config/, latency/, tiling/, x11/):
-    // every discovered module named *_test.zig becomes a `zig build test`
+    // by category: core/, window/, bar/, config/, input/, latency/, tiling/,
+    // x11/): every discovered module named *_test.zig becomes a `zig build test`
     // run. Discovered modules are cross-wired with all others, so a test
     // file's named imports
-    // (e.g. model, utils) resolve exactly as they do in production builds --
+    // (e.g. model, helpers) resolve exactly as they do in production builds --
     // standalone `zig test <file>` cannot resolve them (module-root escape),
     // which is why tests go through the build system.
     const unit_test_step = b.step("test", "Run unit tests");
@@ -308,22 +309,24 @@ pub fn build(b: *std.Build) !void {
     // steps so server-global input-focus assertions cannot race across the
     // parallel test processes.
     var x_gated_run: ?*std.Build.Step = null;
-    // (28.6) x_gated only. The feature gate used to live here as 34 duplicated
-    // boolean rows that had to be kept in agreement, by hand, with every test
-    // file's own @imports. It now lives in the test file
+    // Presence in this table = the test is X-gated: it shares $DISPLAY with
+    // the other entries and must be serialized (see x_gated_run below). The
+    // FEATURE gate used to live here as 34 duplicated boolean rows that had to
+    // be kept in agreement, by hand, with every test file's own @imports. It
+    // now lives in the test file
     // (`// build-gate: tiling, seg_prompt`) next to the imports that constrain
     // it, so the two cannot drift without a compile error.
     //
     // What STAYS here is X-gating, because that genuinely is a property of the
     // build, not of the file: these tests share one $DISPLAY, and the runner
     // must serialize them. That is not expressible in the test's own source.
-    const test_gates = [_]struct { name: []const u8, x_gated: bool }{
-        .{ .name = "actions_test", .x_gated = true },
-        .{ .name = "ewmh_test", .x_gated = true },
-        .{ .name = "focus_test", .x_gated = true },
-        .{ .name = "pipeline_test", .x_gated = true },
-        .{ .name = "visibility_test", .x_gated = true },
-        .{ .name = "borders_test", .x_gated = true },
+    const test_gates = [_][]const u8{
+        "actions_test",
+        "ewmh_test",
+        "focus_test",
+        "pipeline_test",
+        "visibility_test",
+        "borders_test",
     };
     {
         // Discovered *_test stems; the table below must match them one-to-one.
@@ -338,10 +341,10 @@ pub fn build(b: *std.Build) !void {
         // (renamed/deleted test file) would otherwise sit silent and never
         // run — no feature gate, no X-serialization.
         for (test_gates) |g| {
-            if (!discovered.contains(g.name)) {
+            if (!discovered.contains(g)) {
                 std.debug.print(
                     "build: test_gates row '{s}' has no discovered *_test module; remove or rename it\n",
-                    .{g.name},
+                    .{g},
                 );
                 return error.StaleTestGate;
             }
@@ -376,9 +379,9 @@ pub fn build(b: *std.Build) !void {
             // normal (it just means "not X-gated"); the reverse -- a row
             // naming a test that no longer exists -- is still fatal, and is
             // checked above.
-            const spec: ?@TypeOf(test_gates[0]) = for (test_gates) |g| {
-                if (std.mem.eql(u8, stem, g.name)) break g;
-            } else null;
+            const x_gated = for (test_gates) |g| {
+                if (std.mem.eql(u8, stem, g)) break true;
+            } else false;
             const rel = discovery.source_paths.get(stem) orelse
                 return error.NoTestSourcePath;
             const gate = try readTestGate(b, rel, &feature_flags);
@@ -404,7 +407,7 @@ pub fn build(b: *std.Build) !void {
             const one_desc = std.fmt.allocPrint(b.allocator, "Run only {s}.zig", .{stem}) catch @panic("oom");
             b.step(one_name, one_desc).dependOn(&run.step);
             unit_test_step.dependOn(&run.step);
-            if (spec != null and spec.?.x_gated) {
+            if (x_gated) {
                 if (x_gated_run) |prev| run.step.dependOn(prev);
                 x_gated_run = &run.step;
             }
