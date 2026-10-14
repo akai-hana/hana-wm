@@ -1,5 +1,5 @@
-//! The parked-window actions: minimize parks a window
-//! off-screen through the hide module; restore/restoreOrdered/
+//! The parked-window actions: the minimize module parks a window
+//! off-screen; restore/restoreOrdered/
 //! restoreAll unpark. Each action is one model transition + one
 //! sync entry. The shared transition tails (retile, focusFallback,
 //! prepareAndSetFocus, the covering-occupant queries) live in
@@ -13,11 +13,12 @@ const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 
 const actions = @import("actions");
+const registry = @import("registry");
 
-const providerOf = actions.providerOf;
+const providerOf = registry.providerOf;
 
-const callHook = actions.callHook;
-const dispatchAll = actions.dispatchAll;
+const callHook = registry.callHook;
+const dispatchAll = registry.dispatchAll;
 
 // hide (window park)
 
@@ -57,12 +58,12 @@ fn armFullscreenBarHideIfNeeded(
     win: model_mod.WindowId,
     had_occupant_before: bool,
 ) void {
-    if (build_options.has_bar and !had_occupant_before and actions.isCoveringOnWs(m, win)) {
+    if (build_options.has_bar and !had_occupant_before and model_mod.isCoveringOn(m, win, m.current)) {
         dispatchAll(.armPendingBarHide, .{win});
     }
 }
 
-/// Restores `win` via the hide module's `restoreWindow` hook, re-focuses it,
+/// Restores `win` via the minimize module's `restoreWindow` hook, re-focuses it,
 /// and arms the deferred bar-hide when the restore opened a fresh claim.
 fn restoreTarget(m: *model_mod.Model, win: model_mod.WindowId) void {
     const had_occupant_before = actions.currentCoveringOccupant(m) != null;

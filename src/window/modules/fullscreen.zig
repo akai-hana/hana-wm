@@ -10,7 +10,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const model = @import("model");
 const pipeline = @import("pipeline");
-const window = @import("window");
+const registry = @import("registry");
 const atoms = @import("atoms");
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
@@ -134,7 +134,7 @@ pub fn deinit() void {
 /// feature->feature guard). The model store's capacity is the ceiling, so no
 /// separate fullscreen-store capacity check exists.
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
-    if (window.callHookBool(.isWindowHidden, .{ m, win })) return false;
+    if (registry.callHookBool(.isWindowHidden, .{ m, win })) return false;
     const e = m.store.getPtr(win) orelse return false;
     if (e.covering_ws != null) {
         // OFF: leave fullscreen; clearing the core intent replays the
@@ -142,9 +142,9 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
         releaseCovering(m, win);
         return true;
     }
-    // Covering SWITCH: a resident occupant of this ws yields first
+    // Covering SWITCH: a resident occupant of this workspace yields first
     // (sync's store-order scan, model.coveringOccupantOnWs). The release
-    // is gated on the entrant being able to claim this ws (present and
+    // is gated on the entrant being able to claim this workspace (present and
     // visible here): a stray intent elsewhere never displaces the owner.
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
@@ -165,7 +165,7 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
 /// occupant-eviction path.
 ///
 /// `toggleCovering` reaches this same body, but only after proving the window
-/// IS covering. A peer that means "demote" (the workspaces move/tag seam) must
+/// IS covering. A peer that means "demote" (the workspaces move/tag path) must
 /// not have to re-derive that proof to use a two-edged verb safely, so this is
 /// the entry that cannot turn a demote into a fullscreen entry.
 pub fn releaseCovering(m: *model.Model, win: model.WindowId) void {
@@ -187,9 +187,9 @@ pub fn releaseCovering(m: *model.Model, win: model.WindowId) void {
 /// counts as an occupant — sync parks such strays instead of letting them
 /// claim the slot). Pure store-order AND scan over the model: the entry IS the
 /// record, so there is no separate registry to scan. At most one visible
-/// occupant per ws is guaranteed by sync (others parked).
+/// occupant per workspace is guaranteed by sync (others parked).
 /// Contrast `model.coveringOccupantOnWs` (OR: anchor-or-visibility union).
-/// Routed through contract.visibleCoveringOnWs for the workspaces move/tag seam.
+/// Routed through contract.visibleCoveringOnWs for the workspaces move/tag path.
 pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -203,7 +203,7 @@ pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowI
     return null;
 }
 
-/// Seam for the workspaces module's move/tag slice: retargets `win`'s
+/// Hook for the workspaces module's move/tag slice: retargets `win`'s
 /// covering intent to `ws` (a covering window stays covering; a ghost of a
 /// minimized window follows the mask) by writing the MODEL's core
 /// `covering_ws` — the single authority on the capture target. The caller has
@@ -216,14 +216,14 @@ pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) vo
 
 /// Persistence needs no module blob: `anchor` and `covering_ws` are carried
 /// verbatim by `handoff.WindowRecord`, so there is no serialize/deserialize
-/// seam here (minimize alone claims the `ext` slot for parked windows).
+/// hook here (minimize alone claims the `ext` slot for parked windows).
 
 // Protocol hooks (EWMH advertisement + deferred bar hide/show).
 
 // Sets or clears the EWMH _NET_WM_STATE_FULLSCREEN property on `win`. The
 // actual change_property write is routed through sync's sink (the ONLY writer
 // to X); the EWMH atoms stay resolved here and the write is queued inside the
-// enclosing grab (the fullscreen grab in manage.fullscreenSetWindow), whose ungrabAndFlush lands
+// enclosing grab (the fullscreen grab in covering.fullscreenSetWindow), whose ungrabAndFlush lands
 // it atomically with geometry. Guards on both EWMH atoms being valid; pub for
 // actions.fullscreenToggleWindow, keeping the advertisement protocol-side.
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
@@ -317,8 +317,8 @@ pub fn armPendingBarShow(win: u32) void {
 /// No bump of its own: the caller is bumping because its own state changed,
 /// and this only retires the intent that would have bumped for it. Taking a
 /// pending HIDE here is equally correct -- a window that left fullscreen can
-/// never still satisfy the hide's confirmation, so the intent was already
-/// unreachable and dropping it is the same answer the hide path would give.
+/// never still satisfy the bar-hide's confirmation, so the intent was already
+/// unreachable and dropping it is the same answer the bar-hide path would give.
 pub fn resolvePendingBarNow(win: u32) void {
     _ = g_pending_bars.take(win);
 }
@@ -335,7 +335,7 @@ pub fn onWindowGone(win: u32) void {
     if (!pending.hide) core.fullscreen.bump();
 }
 
-/// This module's window sub-system contribution: lifecycle + coverage seam +
+/// This module's window sub-system contribution: lifecycle + coverage hooks +
 /// the EWMH/bar protocol hooks.
 pub const module: @import("contract").WindowModule = .{
     .name = "fullscreen",

@@ -18,8 +18,9 @@ const time = @import("time");
 const log = @import("log");
 
 const actions = @import("actions");
+const registry = @import("registry");
 
-const providerOf = actions.providerOf;
+const providerOf = registry.providerOf;
 
 /// Shared change guard for the tag/pin actions: the window must be present in
 /// the model and not hidden.
@@ -38,7 +39,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
 
     const m = pipeline.mut();
     const was_focused = m.focused == win;
-    const was_fs_current = actions.isCoveringOnWs(m, win);
+    const was_fs_current = model_mod.isCoveringOn(m, win, m.current);
 
     wm.sendToWs.?(m, win, model_mod.WSId.fromIndex(ws_idx));
     if (m.store.get(win) == null) return; // unknown window: no-op
@@ -51,7 +52,7 @@ pub fn moveWindowTo(win: model_mod.WindowId, ws_idx: u8) void {
         // Moving the current workspace's covering window away changes the
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
-    } else if (!was_fs_current and actions.isCoveringOnWs(m, win)) {
+    } else if (!was_fs_current and model_mod.isCoveringOn(m, win, m.current)) {
         // A covering window moved ONTO the current workspace: current gained
         // a screen-claiming occupant, so bump the core fullscreen fact and
         // re-apply the bar's visibility for the new occupant. Without this, a
@@ -133,7 +134,7 @@ pub fn allViewToggle() void {
 /// scenario).
 ///
 /// Kept protocol-side: pointer-hover query and focus suppression reset.
-/// model.current is the single store; tracking's getCurrentWorkspace is a
+/// model.current is the single store; query's getCurrentWorkspace is a
 /// read-through facade over it.
 ///
 /// Geometry-before-focus: the reconcile maps the arriving window before
@@ -178,9 +179,9 @@ pub fn switchTo(ws_idx: u8) void {
     // carries a covering occupant: the bar's reactive path derives its claim
     // from the fact, so spuriously bumping it on every switch would churn a
     // bar-redraw for workspaces with no fullscreen window (the claim for the
-    // new ws was already applied by updateBarVisibilityForWorkspace above).
+    // new workspace was already applied by updateBarVisibilityForWorkspace above).
     // OR scan (not the module AND hook): any covering entry, anchored or
-    // merely visible on ws, owns the screen here.
+    // merely visible on the current workspace, owns the screen here.
     if (model_mod.coveringOccupantOnWs(m, m.current) != null) core.fullscreen.bump();
 
     const t1: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
@@ -205,8 +206,8 @@ pub fn switchTo(ws_idx: u8) void {
 
     const t2: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
 
-    // Reconcile + focus under one server grab, atomically, via the pipeline
-    // seam (grabCtx/reconcile/applyPendingFocus/ungrabAndFlush consolidated).
+    // Reconcile + focus under one server grab, atomically, via the pipeline's
+    // grab path (grabCtx/reconcile/applyPendingFocus/ungrabAndFlush consolidated).
     // Only fire-and-forget XCB runs inside the grab, so it is held for
     // microseconds—no blocking wait can freeze a next keypress.
     //
