@@ -19,12 +19,11 @@ const keybind = @import("keybind");
 const grabs = @import("grabs");
 const actions = @import("actions");
 const surfaces = @import("surfaces").Surfaces;
-// The action dispatcher and its scaffold graft live in
-// dispatch.zig (split out of input.zig): mouse binds dispatch
-// through dispatch without importing input.zig -- which
-// re-exports this module's handlers -- breaking the
-// input <-> mouse import cycle.
-const dispatch = @import("dispatch");
+// The action dispatcher lives in input.zig (re-merged from dispatch.zig
+// 2026-10-10): mouse binds dispatch through it, forming a lazy
+// input <-> mouse import cycle; the
+// alias keeps the call sites' `dispatch.*` spelling.
+const dispatch = @import("input");
 
 /// Dispatches a priority-ordered button-press event, splitting the two named
 /// paths: a plain click on the bar window routes to the bar; every other
