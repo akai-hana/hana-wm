@@ -17,6 +17,9 @@ const variant_gaps: u8 = tiling.variantIndex(&variants, "gaps");
 /// screen edge when gaps enabled, else zero. All dimensions are u16 and
 /// shrunk via shrinkClamped (floor clamped to min_dim).
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+    // Guard the empty-order read below: a direct/test caller passing n==0
+    // would otherwise panic on v.order[len - 1].
+    if (v.order.len == 0) return;
     const m = v.env.margins;
     const gaps = v.params.variant_idx == variant_gaps;
     const inset: u16 = if (gaps) m.gap else 0;
@@ -26,7 +29,17 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     // resurfaces on close.
     const top_win = tiling.focusedElse(v, v.order, v.order[v.order.len - 1]);
 
-    const top_rect = tiling.insetRect(inset, tiling.waY(v) +| inset, v.workarea.width, v.workarea.height, total_margin, v.env.min_dim);
+    // top_rect insets use the FULL workarea origin, not just waY: the x axis
+    // was missing v.workarea.x and the top window landed at the screen's left
+    // edge whenever the workarea started off-origin.
+    const top_rect = tiling.insetRect(
+        v.workarea.x + @as(i32, inset),
+        tiling.waY(v) +| inset,
+        v.workarea.width,
+        v.workarea.height,
+        total_margin,
+        v.env.min_dim,
+    );
 
     // One pass, in View.order order, one placement per window: the previous
     // shape emitted `top_win` first regardless of its position in v.order,

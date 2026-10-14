@@ -77,7 +77,9 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
             tiling.emitHidden(out, win);
             continue;
         }
-        tiling.emitRect(v, out, win, x, win_y, content_w, content_h);
+        // slot_left (and so x) is relative to the workarea's left edge: emit at
+        // the workarea's position, not the screen's left edge.
+        tiling.emitRect(v, out, win, x + v.workarea.x, win_y, content_w, content_h);
     }
 }
 

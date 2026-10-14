@@ -240,9 +240,12 @@ fn tileStack(
     const stack_n: u16 = @intCast(windows.len);
 
     // Fits per window: min pane dim plus the row pitch (gap + doubled border).
+    // A zero min_dim+gap+border Env would make the denominator 0 and the
+    // division panic; floor it to 1 so the degenerate case can't (the fit
+    // count then becomes available/1 = huge, which the stack/clamp handle).
     const space_per_window: u16 = ctx.min_dim +| rowPitch(ctx.m);
     const available: u32 = @as(u32, h) -| @as(u32, ctx.m.gap);
-    const max_fit: u16 = @intCast(@max(1, available / space_per_window));
+    const max_fit: u16 = @intCast(@max(1, available / @max(1, @as(u32, space_per_window))));
 
     if (stack_n <= max_fit) {
         const stack_inner_w = tiling.shrinkClamped(w, stackSeamMargin(ctx.m), ctx.min_dim);
@@ -274,7 +277,7 @@ fn tileStackExtra(
         // leaves the stack pane; surplus (a row narrower than the column count)
         // has no free row to spill into and is parked instead.
         const cols_by_count: u16 = (stack_n - row + max_fit - 1) / max_fit;
-        const cols_by_width: u16 = @max(1, (w +| ctx.m.gap) / (min_col_w +| ctx.m.gap));
+        const cols_by_width: u16 = @max(1, (w +| ctx.m.gap) / @max(1, min_col_w +| ctx.m.gap));
         const cols_in_row: u16 = @max(1, @min(cols_by_count, cols_by_width));
 
         const gaps_in_row = tiling.seamGap(ctx.m) +| ctx.m.gap *| cols_in_row;
@@ -306,7 +309,10 @@ fn tileStackExtra(
 /// the call sites on purpose: they differ in the min_dim-floor corner, and
 /// merging them is not behavior-preserving.
 inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
-    tiling.emitRect(ctx.v, ctx.out, win, @intCast(px), @intCast(py), w, h);
+    // px is relative to the workarea's left edge (master_x/stack_origin both
+    // start at 0 within screen_w): offset it by v.workarea.x so it lands on a
+    // side-claimed workarea, not the screen's left edge.
+    tiling.emitRect(ctx.v, ctx.out, win, @as(i32, @intCast(px)) + ctx.v.workarea.x, @intCast(py), w, h);
 }
 
 /// Total pixel height available for window content after gaps and borders.
