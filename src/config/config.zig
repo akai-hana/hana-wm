@@ -10,7 +10,6 @@ const parser = @import("parser");
 const schema = @import("schema");
 const types = @import("types");
 const layout_names = @import("layout_names");
-const diff = @import("diff");
 const snapshot_mod = @import("snapshot");
 const discover = @import("discover");
 const binds = @import("binds");
@@ -24,7 +23,6 @@ const rules = @import("rules");
 pub const canonicalLayoutName = layout_names.canonicalLayoutName;
 pub const isLayoutName = layout_names.isLayoutName;
 pub const layout_name_grammar = layout_names.layout_name_grammar;
-pub const detectChanges = diff.detectChanges;
 pub const DefaultSource = snapshot_mod.DefaultSource;
 pub const deinitGoodSource = snapshot_mod.deinitGoodSource;
 pub const reexecSnapshotPathZ = snapshot_mod.reexecSnapshotPathZ;
@@ -465,4 +463,39 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !types.Config {
     // (both now reach here through the same path, see above).
     if (snapshot) refreshSnapshot(allocator);
     return cfg;
+}
+
+// ---------------------------------------------------------------------------
+// Reload change detection (former persist/diff.zig, merged 2026-10-10):
+// whether the key PAIR layout changed, so an unchanged reload can skip the
+// regrab. Bar and tiling deliberately have NO detector -- their rebuilds run
+// on every reload; a skip would leave borrowed state pointing at the box the
+// swap is about to release, and the rebuilds are idempotent.
+// ---------------------------------------------------------------------------
+
+pub const ConfigChanges = struct {
+    keys: bool = false,
+};
+
+/// Keys-subsystem content: the pair layout — (modifiers, keysym) per keyboard
+/// binding and (modifiers, button) per mouse binding. Action is deliberately
+/// excluded: two keybindings that differ only in their action (e.g. a changed
+/// command string) still share a pair, so no regrab is needed.
+fn keysChanged(old: *const types.Config, new: *const types.Config) bool {
+    if (old.keybindings.items.len != new.keybindings.items.len) return true;
+    for (old.keybindings.items, new.keybindings.items) |a, b| {
+        if (a.modifiers != b.modifiers or a.keysym != b.keysym) return true;
+    }
+    if (old.mouse_bindings.items.len != new.mouse_bindings.items.len) return true;
+    for (old.mouse_bindings.items, new.mouse_bindings.items) |a, b| {
+        if (a.modifiers != b.modifiers or a.button != b.button) return true;
+    }
+    return false;
+}
+
+/// Compares old and new configs for the one subsystem whose rebuild is
+/// skipped on an unchanged pair layout (the regrab). Gate the regrab on
+/// `.keys`; everything else rebuilds unconditionally.
+pub fn detectChanges(old: *const types.Config, new: *const types.Config) ConfigChanges {
+    return .{ .keys = keysChanged(old, new) };
 }

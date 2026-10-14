@@ -4,7 +4,6 @@
 const std = @import("std");
 const action = @import("action");
 const constants = @import("constants");
-const defaults = @import("defaults");
 const ids = @import("ids");
 const scaling = @import("scaling");
 
@@ -191,8 +190,8 @@ pub const TilingConfig = struct {
     master_count: u8 = 1,
     gap_width: ScalableValue = ScalableValue.absolute(10.0),
     border_width: ScalableValue = ScalableValue.absolute(2.0),
-    border_focused: Color = defaults.default_focused_border,
-    border_unfocused: Color = defaults.default_unfocused_border,
+    border_focused: Color = default_focused_border,
+    border_unfocused: Color = default_unfocused_border,
     /// Smallest on-screen width/height a tiled window (and floating drag
     /// resize) is allowed to reach, in pixels.
     min_window_dim: u16 = constants.min_window_dim,
@@ -411,21 +410,21 @@ pub const BarConfig = struct {
     spacing: ScalableValue = ScalableValue.absolute(12.0),
 
     // Bar color scheme; all values are 0xRRGGBB (see Color type alias).
-    bg: Color = defaults.default_bar_bg,
-    fg: Color = defaults.default_bar_fg,
-    selected_bg: Color = defaults.default_bar_selected_bg,
-    selected_fg: Color = defaults.default_bar_selected_fg,
+    bg: Color = default_bar_bg,
+    fg: Color = default_bar_fg,
+    selected_bg: Color = default_bar_selected_bg,
+    selected_fg: Color = default_bar_selected_fg,
 
     // Palette canon, declared in the theme's palette section; the other three
     // exist so the palette is first-class config even though rendering
     // consumes them through the title/run chains below.
-    primary_color: Color = defaults.default_accent,
-    secondary_color: Color = defaults.default_accent,
-    alternative_color: Color = defaults.default_accent,
-    text_color: Color = defaults.default_accent,
-    title_accent_color: Color = defaults.default_accent,
-    title_unfocused_accent: Color = defaults.default_bar_bg,
-    title_minimized_accent: Color = defaults.default_accent,
+    primary_color: Color = default_accent,
+    secondary_color: Color = default_accent,
+    alternative_color: Color = default_accent,
+    text_color: Color = default_accent,
+    title_accent_color: Color = default_accent,
+    title_unfocused_accent: Color = default_bar_bg,
+    title_minimized_accent: Color = default_accent,
 
     workspace_icons: std.ArrayList([]const u8) = .empty,
     indicator_size: ScalableValue = ScalableValue.percentage(30.0),
@@ -467,7 +466,7 @@ pub const BarConfig = struct {
     /// Marquee scroll speed in pixels per second.
     carousel_speed_px_s: u16 = 125,
 
-    // run segment colors and prompt; all nullable, falling back to bar-wide defaults.
+    // run segment colors and prompt; all nullable, falling back to bar-wide
     run_bg: ?Color = null, // Background; falls back to bg
     run_fg: ?Color = null, // Typed text color; falls back to fg
     run_prompt_color: ?Color = null, // Prompt text color; falls back to primary_color
@@ -698,3 +697,31 @@ pub const Config = struct {
         self.tiling.deinit(allocator);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Config defaults (former defaults.zig, merged 2026-10-10): the scheme
+// colors (tiling borders, accent, bar palette) and the read-time fallback
+// strings for optional `BarConfig` fields. Typed `u32` — the value of
+// `Color` — as the field initializers above use them.
+// ---------------------------------------------------------------------------
+
+/// Default color scheme for the focused/unfocused tiling borders.
+pub const default_focused_border: u32 = 0x5294E2;
+pub const default_unfocused_border: u32 = 0x383C4A;
+
+/// Default accent color; declared once so every referencing field has a single source of truth.
+pub const default_accent: u32 = 0x61AFEF;
+
+/// Default bar background/foreground scheme. Kept in one place so the bar's
+/// color defaults read as a palette rather than scattered hex literals.
+pub const default_bar_bg: u32 = 0x222222;
+pub const default_bar_fg: u32 = 0xBBBBBB;
+pub const default_bar_selected_bg: u32 = 0x005577;
+pub const default_bar_selected_fg: u32 = 0xEEEEEE;
+
+/// Type-level defaults for optional string fields in BarConfig.
+/// When a field is `null`, the corresponding default is used at read time.
+pub const default_clock_format: []const u8 = "%Y-%m-%d %H:%M:%S";
+pub const default_run_prompt: []const u8 = "run: ";
+pub const default_indicator_focused: []const u8 = "■";
+pub const default_indicator_unfocused: []const u8 = "□";
