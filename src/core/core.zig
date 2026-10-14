@@ -332,3 +332,4 @@ pub fn dpi() f32 {
 pub fn setDpi(v: f32) void {
     getState().dpi_info = v;
 }
+pub const hz = @import("hz.zig");
