@@ -1,18 +1,8 @@
-//! The X-free half of the keymap pipeline: an `xkb_keymap` in, a flat
-//! keycode->keysym table and a reverse index out.
-//!
-//! These are pure functions of a keymap that libxkbcommon has already built.
-//! They need no X connection and no `xkb_state`, so they are the only part of
-//! the keyboard stack a headless test can reach -- and they are where the two
-//! policies that decide whether the WM can use a keyboard at all actually
-//! live: the readiness heuristic that rejects a half-built keymap, and the
-//! tie-break that decides which of two keys sharing a keysym a binding grabs.
-//! Both were previously unreachable from a test, so neither was tested, by
-//! construction rather than by choice.
-//!
-//! This module is also the single `@cImport` owner for libxkbcommon (19.8).
-//! `xkbcommon.zig` (which needs the X11 half of the library) and `keysyms.zig`
-//! (the pure name vocabulary) both borrow it from here, so the header is
+//! X-free keymap utilities: given an `xkb_keymap`, build a flat keycode→keysym
+//! table and a reverse index. Pure functions of the compiled keymap; no X
+//! connection or `xkb_state`. Home to the keymap readiness heuristic and keycode
+//! tie-break policy (headless-testable). Single `@cImport` owner for libxkbcommon;
+//! xkbcommon.zig and keysyms.zig borrow it from here.
 //! translated once instead of once per importer.
 //!
 //! Layer note: connection-free, so it is importable from the pure layers.

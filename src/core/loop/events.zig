@@ -1,5 +1,6 @@
 //! X event dispatch and main event loop.
-//! Handles X events, OS signals, and config reload, driving the WM's main loop.
+//! Drives the WM: dispatches X11 events, OS signals, and config reload; runs
+//! the poll/select main loop with timer sources.
 
 const std = @import("std");
 

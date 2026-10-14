@@ -1,5 +1,5 @@
-//! XKB bindings and keyboard state
-//! Wraps the XKB library to provide keyboard state tracking and keysym resolution.
+//! XKB bindings and keyboard state.
+//! Wraps libxkbcommon/libxcb-xkb to track keyboard state and resolve keysyms.
 
 const std = @import("std");
 

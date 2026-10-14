@@ -1,6 +1,8 @@
-//! ICCCM 4.1.2/4.1.7 protocol handling
-//! WM_PROTOCOLS/WM_HINTS focus-property cache, the four ICCCM focus-delivery
-//! modes, and WM_TAKE_FOCUS client-message dispatch. Owns its cache state:
+//! ICCCM focus protocol support (WM_HINTS and WM_PROTOCOLS).
+//! Caches per-window focus properties, determines the four ICCCM 4.1.7
+//! focus-delivery modes, and dispatches WM_TAKE_FOCUS client messages.
+//! Managed via lifecycle hooks from `window.zig` and provides shared
+//! property-query utilities.
 //! window.zig calls init/deinit/evictCache through the lifecycle, and shares
 //! firePropQuery/u32Values for its admission and size-hints paths.
 

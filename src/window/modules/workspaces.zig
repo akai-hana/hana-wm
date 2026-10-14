@@ -1,16 +1,16 @@
-//! Complete workspaces feature: tag membership transitions.
-//! A self-contained plugin over the model: switching, tagging, and moving are
-//! model transitions (tag mask + tiled_order moves). The workspace count is
-//! no longer forwarded here: the tracking facade latches it directly from
-//! config at init. The per-workspace config-override store once held here was
-//! dead weight (never read in production) and is gone; config overrides seed
-//! the model params directly through actions.seedParamsFromConfig.
+//! Workspace state transitions over the window model: tag membership, moves,
+//! pin and all-view toggles. Pure model edits, no state of its own -- a
+//! window's membership IS its tag mask plus its workspace's `tiled_order`,
+//! so a move is one mask write plus two list edits. The only cross-module
+//! rule is covering intent: a move or a removed tag retargets a covering
+//! window to the new workspace, or drops it to de-fullscreen when that
+//! destination already has an owner (dispatched through the registry, so
+//! `fullscreen` is never named here). Workspace count and per-workspace
+//! config overrides are owned elsewhere (tracking latches the count;
+//! actions.seedParamsFromConfig seeds the params).
 
 const model = @import("model");
 const window = @import("window");
-// Peers reach each other's hooks through the generated window registry,
-// never by naming a sibling module: deleting a sibling only shortens the
-// registry, and capabilities stay provider-agnostic.
 const providerOf = window.providerOf;
 
 /// Test-only; the production switch path is `actions.switchTo`.
