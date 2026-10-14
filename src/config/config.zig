@@ -411,11 +411,16 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !types.Config {
             },
             else => return err,
         };
-        errdefer loaded.deinit(allocator);
+        // `loaded_freed` guards against the double deinit: the InvalidConfig
+        // arm frees `loaded` explicitly below, and if the fallback load then
+        // errors, this errdefer would otherwise fire its deinit a second time.
+        var loaded_freed = false;
+        errdefer if (!loaded_freed) loaded.deinit(allocator);
         validate(&loaded) catch |err| switch (err) {
             error.InvalidConfig => {
                 log.warn("Config failed validation at startup; using the embedded fallback", .{});
                 loaded.deinit(allocator);
+                loaded_freed = true;
                 break :blk try loadFallbackConfig(allocator);
             },
         };

@@ -65,6 +65,45 @@ test "IdMap: tombstones are reclaimed and do not lose live entries" {
     for (1..16) |k| try testing.expectEqual(@as(?u32, @intCast(k * 10)), m.get(@intCast(k)));
 }
 
+test "IdMap: filled-to-capacity churn never strands a tombstone that hangs find" {
+    var m = IdMap(u32, 7){};
+    // slots = 8, so capacity 7 leaves exactly one empty slot. Filling,
+    // removing three (3 tombstones), and re-inserting three FRESH ids used to
+    // be able to land the insert on the surviving empty slot while a tombstone
+    // remained: len + tombstones == slots with NO empty slot, so the next
+    // get()/contains() spun forever. The post-insert rehash must always
+    // restore an empty slot.
+    var next: u32 = 1;
+    var round: u32 = 0;
+    while (round < 50) : (round += 1) {
+        var live: [7]u32 = undefined;
+        for (&live) |*w| {
+            w.* = next;
+            next += 1;
+            try testing.expect(m.put(w.*, w.*));
+        }
+        try testing.expect(!m.put(next, 0)); // at capacity: report full
+        next += 1;
+        try testing.expect(m.remove(live[0]));
+        try testing.expect(m.remove(live[2]));
+        try testing.expect(m.remove(live[4]));
+        try testing.expect(m.put(next, next));
+        next += 1;
+        try testing.expect(m.put(next, next));
+        next += 1;
+        try testing.expect(m.put(next, next));
+        next += 1;
+        // Every absent probe must terminate, and live entries stay reachable.
+        try testing.expect(m.get(0xDEAD_0000 + round) == null);
+        try testing.expect(!m.contains(0xDEAD_0000 + round));
+        try testing.expectEqual(@as(?u32, live[1]), m.get(live[1]));
+        try testing.expectEqual(@as(?u32, live[3]), m.get(live[3]));
+        try testing.expectEqual(@as(?u32, live[5]), m.get(live[5]));
+        try testing.expectEqual(@as(?u32, next - 1), m.get(next - 1));
+        m.clear();
+    }
+}
+
 test "IdMap: clear drops live entries and tombstones" {
     var m = IdMap(u32, 8){};
     try testing.expect(m.put(7, 70));
