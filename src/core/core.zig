@@ -280,13 +280,13 @@ pub fn replaceOwnedConfig(new_config: *composed.Config) void {
 
 /// Display DPI in use, as a fact on `State` rather than a bare global.
 ///
-/// It was a `pub var` outside `State`, which meant the value that scales every
-/// font metric the bar probes lived somewhere no initialization order
-/// constrained: `State`'s own accessors panic when read before `init`, but
-/// this one quietly answered with a default, so a module that read it early
-/// got `baseline_dpi` and a bar sized for the wrong display, with no signal
-/// that the real value had not arrived yet. As a field it is covered by the
-/// same "uninitialized access panics cleanly" rule as everything else.
+/// A bare global would let the value that scales every font metric the bar
+/// probes live somewhere no initialization order constrains: `State`'s own
+/// accessors panic when read before `init`, but a global quietly answers with
+/// a default, so a module that reads it early gets `baseline_dpi` and a bar
+/// sized for the wrong display, with no signal that the real value has not
+/// arrived yet. As a field it is covered by the same "uninitialized access
+/// panics cleanly" rule as everything else.
 ///
 /// Two writers only: `init` seeds it (a config override beats detection), and
 /// `setDpi` re-derives it on the RandR size-change path.
@@ -302,14 +302,11 @@ pub fn setDpi(v: f32) void {
 /// this value.
 pub const baseline_dpi: f32 = 96.0;
 
-// --- Clock reads -------------------------------------------------------------
+// Clock reads
 // Monotonic and wall-clock time, kept together so a caller picks the family
 // deliberately: `monotonic*` is wall-independent and is what deadlines and
 // frame deltas must use; `realtime*` is for displayed timestamps and expiry
-// against the wall clock. These used to live in a standalone `time` module,
-// but the two families are four tiny wrappers over one syscall and every
-// caller already spoke to (or could speak to) the hub, so they fold in here
-// rather than keeping a one-function module alive.
+// against the wall clock.
 
 // clock_gettime with a best-effort fallback to the other clock id (a
 // monotonic-realtime node or similar), then nanos.

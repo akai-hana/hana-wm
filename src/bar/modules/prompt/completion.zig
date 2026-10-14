@@ -179,11 +179,8 @@ inline fn setGhost(suffix: []const u8) void {
 /// The word under the cursor: the buffer up to the cursor, back to the last
 /// space, as {token, byte offset of the token's first byte}.
 ///
-/// The old code took the first space in the WHOLE buffer and bailed if
-/// one existed, so nothing past the first argument could ever be completed --
-/// "git ch" got no ghost even when "checkout" was in the table. Word-at-cursor
-/// is what the completion sources actually need: they match a token, not a
-/// prefix of a line, and the buffer they see is exactly the token.
+/// Word-at-cursor is what the completion sources need: they match a token,
+/// not a prefix of a line, and the buffer they see is exactly the token.
 ///
 /// `cursor` is passed rather than read so the split is a pure function of
 /// (buffer, cursor) and testable without the module's global state.
@@ -280,10 +277,9 @@ pub fn updateGhost(vim_state: *const editor.EditorState) void {
     if (vim_state.mode != .insert or vim_state.len == 0 or
         vim_state.cursor != vim_state.len) return;
 
-    // The token under the cursor, so an ARGUMENT completes. The old
-    // shape bailed on any space in the buffer, which made every second word
-    // un-completable; the cost of the scan is nil because the buffer is at most
-    // `max_input` (256) bytes and every candidate lookup below reads it anyway.
+    // The token under the cursor, so an ARGUMENT completes. The cost of the
+    // scan is nil because the buffer is at most `max_input` (256) bytes and
+    // every candidate lookup below reads it anyway.
     const word = wordAtCursor(vim_state.buf[0..vim_state.len], vim_state.len);
     if (word.token.len == 0) return;
 
@@ -365,10 +361,8 @@ const hist_read_window: usize = 256 * 1024 - 1;
 
 /// Load history from `path` into the in-memory ring, processing lines in
 /// reverse so the newest entry ends up at index 0.
-/// One history-file line's span into the read window. The AoS pair for the
-/// `line_starts`/`line_ends` parallel rings this replaces: written together
-/// on every scan step, read together when the line is consumed, so there was
-/// no step at which one existed without the other.
+/// One history-file line's span into the read window: written together
+/// on every scan step, read together when the line is consumed.
 const LineSpan = struct { start: usize, end: usize };
 
 fn histLoadFile(allocator: std.mem.Allocator, path: []const u8) void {
@@ -460,12 +454,10 @@ pub fn loadHistory(allocator: std.mem.Allocator) void {
 }
 
 /// Records the command in the run-history ring, then hands the exec to the
-/// global spawn facility (core/process/spawn.zig). The prompt used to double-fork
-/// here itself; the fold keeps only the prompt-specific duties (history) and
-/// delegates detach/exec to `spawn`, which does it better: WM-as-subreaper
-/// with a spawn-report pipe instead of an untracked double-fork, and
-/// workspace routing for any window the command opens (spawn-crossing
-/// suppression, so it lands on the workspace the prompt was invoked from).
+/// global spawn facility (core/process/spawn.zig): WM-as-subreaper with a
+/// spawn-report pipe, plus workspace routing for any window the command opens
+/// (spawn-crossing suppression, so it lands on the workspace the prompt was
+/// invoked from).
 pub fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToFile(cmd);

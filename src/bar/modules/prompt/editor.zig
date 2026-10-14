@@ -41,10 +41,9 @@ pub const Mode = enum(u2) {
     /// 0 means "no hint", which is what suppresses the pill entirely.
     ///
     /// The pill is the extensor's UI, so the WIDTH POLICY belongs to the
-    /// mode rather than to the bar: the host used to measure the provider's
-    /// label and decide on its own what a mode with no label means. Asking the
-    /// mode for its hint width moves the "no label => no pill" rule next to the
-    /// label that produces it, so the two cannot drift.
+    /// mode rather than to the bar: asking the mode for its hint width keeps
+    /// the "no label => no pill" rule next to the label that produces it, so
+    /// the two cannot drift.
     ///
     /// The cache cell is passed in rather than kept here on purpose: it has to
     /// be invalidated when the font changes on reload (see onDeactivate), which
@@ -111,9 +110,8 @@ pub fn insertSlice(es: *EditorState, slice: []const u8) void {
 /// The mode-aware clamp lives here rather than in the caller: in NORMAL mode a
 /// cursor may sit ON the last character (it addresses it, so the next motion
 /// has something to act on), and a delete that emptied the tail would
-/// otherwise leave normal mode addressing `len`, one past the end. Five
-/// divergent memmove+clamp copies existed between this module and the vim
-/// extensor; this is the one that owns the rule, and both now call it.
+/// otherwise leave normal mode addressing `len`, one past the end. This
+/// function owns the rule; the vim extensor calls it too.
 pub fn deleteRange(es: *EditorState, from: usize, to: usize) void {
     if (from >= to or to > es.len) return;
     const n = to - from;
@@ -260,14 +258,10 @@ pub var handlers: Handlers = .{};
 
 pub fn registerHandlers(h: Handlers) void {
     handlers = h;
-    // Registering a handler set is what MAKES this a modal prompt, and
-    // the two places that used to ask `config.bar.vim_mode` were really asking
-    // that question through a config key -- so a compiled-in extensor that
-    // implements the modal engine was silently bypassed in insert mode and had
-    // its mode pill suppressed, purely because the user had not set
-    // `vim_mode`. The flag is the honest answer to "is a handler installed",
-    // and it leaves `vim_mode` a policy input a handler may consult instead of
-    // a second dispatch mode the host switches on.
+    // Registering a handler set is what MAKES this a modal prompt. The flag
+    // is the honest answer to "is a handler installed", and it leaves
+    // `vim_mode` a policy input a handler may consult instead of a second
+    // dispatch mode the host switches on.
     addon_active = true;
 }
 

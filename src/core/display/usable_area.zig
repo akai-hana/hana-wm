@@ -46,12 +46,11 @@ const Claim = struct {
 /// The one active claim, absent when nothing occupies screen space.
 ///
 /// A single optional, not a table: today exactly one surface (the bar) claims
-/// screen space, so the `[max_claims]`-slots-plus-comptime-ids ledger was a
-/// table of exactly 1 (the KISS audit's ?Claim collapse). A second claimant
-/// reintroduces slots AND per-claimant keying then -- `mappedSurfaceWindow`
-/// must key off its OWN claimant's claim, never "any claim", the day two
-/// coexist. `px == 0` is encoded as absence (null), not an inactive entry:
-/// every reader (insets, mapped-surface) skips both encodings identically.
+/// screen space. A second claimant reintroduces slots AND per-claimant keying
+/// then -- `mappedSurfaceWindow` must key off its OWN claimant's claim, never
+/// "any claim", the day two coexist. `px == 0` is encoded as absence (null),
+/// not an inactive entry: every reader (insets, mapped-surface) skips both
+/// encodings identically.
 var claim: ?Claim = null;
 
 /// The X window id of the chrome surface (the bar), registered by that
@@ -95,13 +94,10 @@ pub fn mappedSurfaceWindow() ?core.WindowId {
     return surface_win;
 }
 
-/// Sets (or re-sets) the claim. `px == 0` releases it (null), the same
-/// observable state the old inactive table entry had. Calling this with a
-/// changed edge or pixel count replaces the previous claim; the caller is
-/// responsible for triggering any reconcile that new geometry requires.
-/// No id parameter: with one slot there is nothing to address (the old
-/// comptime-id bounds check was the table-of-1's scaffolding -- a no-op
-/// ReleaseFast assert could never be its replacement).
+/// Sets (or re-sets) the claim. `px == 0` releases it (null). Calling this
+/// with a changed edge or pixel count replaces the previous claim; the caller
+/// is responsible for triggering any reconcile that new geometry requires.
+/// No id parameter: with one slot there is nothing to address.
 pub fn setClaim(edge: Edge, px: u16) void {
     claim = if (px == 0) null else .{ .edge = edge, .px = px };
 }
@@ -124,9 +120,8 @@ fn inset(edge: Edge) u32 {
 /// Every subtraction SATURATES (`-|`) on purpose: an over-claiming surface
 /// (two bars on one edge, or a claim wider than a small screen) must yield a
 /// zero-sized area rather than wrapping to a huge one and handing the layouts
-/// a rect off the end of the display. That behavior is load-bearing and was
-/// previously only reachable through a live screen, which is why it now has
-/// this public entry.
+/// a rect off the end of the display. That behavior is load-bearing, so the
+/// arithmetic is exposed through this public, X-free entry.
 ///
 /// A zero-sized result is a DEGENERATE CONFIGURATION, not a normal state and
 /// not a fullscreen encoding: it is reachable only when the sum of claims on

@@ -290,7 +290,7 @@ const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
 /// same policy, spelled twice, and the ceilings joined both.
 fn isFatalLoadError(err: anyerror) bool {
     return switch (err) {
-        // InvalidConfig joins the list: a fragment's validate now fails
+        // InvalidConfig is part of the list: a fragment's validate fails
         // inside composed.parse, so an out-of-range value must propagate
         // out of the search exactly like a TOML parse failure (boot falls
         // back; reload keeps live) rather than warn-and-skip to the next
@@ -310,7 +310,7 @@ pub fn tryLoadOrWarn(
         // A parse error must reach the caller. On reload it makes the
         // swap fail so the live config is kept (see reload.handleConfigReload);
         // at boot `load` catches it and falls back to the embedded config.
-        // Swallowing it here is what silently installed the fallback over a
+        // Swallowing it here would silently install the fallback over a
         // user's typo'd config.
         if (isFatalLoadError(err)) return err;
         for (silent_missing[0..]) |e| if (err == e) return null;
@@ -370,14 +370,11 @@ pub const SearchAttempt = struct {
 /// `$XDG_CONFIG_HOME` wins when set AND non-empty; otherwise `$HOME/.config`.
 /// An EMPTY value counts as unset, per the XDG spec and for a concrete reason:
 /// joining `""` with the app name yields a RELATIVE path, so `XDG_CONFIG_HOME=""`
-/// silently redirected the config search to the current working directory --
-/// a config that boots differently depending on where hana was started. The
-/// old `getenv`-is-non-null test took the empty string at face value and hit
-/// exactly that.
+/// would silently redirect the config search to the current working directory
+/// -- a config that boots differently depending on where hana was started.
 ///
-/// Writes into `buf` and returns the slice; `buf` is caller-owned so the
-/// previous arena-dupe-then-free dance disappears. Used to live in the
-/// dissolved `paths` module; discover's searchPaths is the only caller.
+/// Writes into `buf` and returns the slice; `buf` is caller-owned.
+/// discover's searchPaths is the only caller.
 pub fn configHome(buf: []u8, xdg: ?[]const u8, home: []const u8) ![]const u8 {
     if (xdg) |x| {
         if (x.len != 0) return std.fmt.bufPrint(buf, "{s}", .{x}) catch error.NameTooLong;
@@ -392,10 +389,10 @@ pub fn configHome(buf: []u8, xdg: ?[]const u8, home: []const u8) ![]const u8 {
 }
 
 pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
-    // An unset or empty HOME used to be taken as "/" with no word to the user,
-    // so the search silently became `/.config/hana` and then `./config/` -- a
-    // WM that came up with a different config than every other launch, with
-    // nothing on stderr to say so. Name the substitution instead.
+    // An unset or empty HOME taken as "/" with no word to the user would
+    // silently become `/.config/hana` and then `./config/` -- a WM that came
+    // up with a different config than every other launch, with nothing on
+    // stderr to say so. Name the substitution instead.
     const home: []const u8 = if (std.c.getenv("HOME")) |h| blk: {
         const s = std.mem.span(h);
         break :blk if (s.len == 0) "/" else s;

@@ -15,7 +15,7 @@
 //! is why the contract type is named as `@TypeOf(subs[0])` below rather
 //! than as `slider.Sub`.
 //!
-//! Interaction mirrors the standalone segments it replaces, verbatim:
+//! Interaction:
 //!   - wheel up/down: +/- 2 %;
 //!   - left press / press-hold drag anywhere over the control's slot: set its
 //!     level from the horizontal position; while the press is held the
@@ -56,7 +56,7 @@ const subs = @import("slider_subs").subs;
 /// of it -- naming it this way keeps the shell -> core edge out of the graph.
 const Sub = @TypeOf(subs[0]);
 
-/// The level map (lifted to `bar/level.zig`), called through `level`: the
+/// The level map (defined in `level.zig`), called through `level`: the
 /// core keeps its own slider-named re-export for its tests, and this alias
 /// keeps the shell's dependency one-way.
 const pctFromSlot = level.pctFromSlot;
@@ -74,15 +74,11 @@ const max_cadence_ms: i64 = 5000;
 /// it, and a control whose spawn is cheaper than average can declare a
 /// tighter window of its own via `Sub.commit_window_ms`.
 const throttle_ms: i64 = 80;
-/// What the caller wants a `write` to do. Named, and folded into ONE hook from
-/// the three it replaces (`preview` / `commit` / `apply`).
-///
-/// They were never three operations. A module that differed in only one of them
-/// -- brightness writes a file, volume writes a sink, and both clamp the same
-/// way -- had to write a near-duplicate function per hook, so the clamp and the
-/// display update existed three times each and could drift apart. One hook with
-/// a named mode puts each of those in one place, and the mode says which of the
-/// three it used to be.
+/// What the caller wants a `write` to do. One hook with a named mode, so the
+/// clamp and the display update each live in one place and cannot drift
+/// between near-duplicate functions: a module that differs in only one of the
+/// modes (brightness writes a file, volume writes a sink, both clamp the same
+/// way) still writes each shared thing once.
 pub const Write = enum {
     /// Display only: advance the label now, write nothing to the backend. This
     /// is what scroll/drag motion wants, where the write is deferred anyway.
@@ -97,7 +93,8 @@ pub const Write = enum {
     apply,
 };
 /// The latency class of ONE commit on a control, as a value the scheduler
-/// switches on rather than a boolean the shell has to interpret.
+/// switches on rather than a bare bool whose meaning lives in the control's
+/// comment.
 ///
 /// It stays a function (not a plain field) because the class is genuinely a
 /// per-BACKEND fact that resolves at runtime, not a per-control constant:
@@ -105,10 +102,7 @@ pub const Write = enum {
 /// spawns `brightnessctl` when it is not, and volume is native over libpulse
 /// or ALSA depending on what it attached to. A static field would have to
 /// claim the cheaper class and then throttle a sysfs write that needs no
-/// window, or claim the spawn class and lag a native drag. What changed is
-/// that the answer is a NAMED class instead of a bare bool, so the scheduler
-/// reads `cost == .immediate` rather than a predicate whose meaning lives in
-/// the control's comment.
+/// window, or claim the spawn class and lag a native drag.
 pub const CommitCost = enum { immediate, rate_limited };
 /// Commit scheduler for scroll/drag events, shared by every slider control. A
 /// native commit is applied immediately; a spawn commit runs at most once per
@@ -118,10 +112,7 @@ pub const Throttle = struct {
     interval_ms: i64,
     /// Where a landed commit goes. The scheduler is per control, so the control
     /// it writes to belongs here rather than being threaded through `apply` /
-    /// `flushOwed` / `finish` as an argument. It was an argument because
-    /// the target used to be a bare `commit` hook; it is now the `.commit` mode
-    /// of one `write`, and passing it three times only to bind a mode was the
-    /// shape of the thing being folded away.
+    /// `flushOwed` / `finish` as an argument.
     write: *const fn (Write, u8) void,
     last_ms: i64 = 0,
     pending: bool = false,
@@ -168,12 +159,9 @@ pub const Throttle = struct {
     }
 };
 /// One control's mutable state, indexed by registry position (segment i ==
-/// subs[i]). The AoS slot for what used to be five parallel arrays
-/// (g_inst/g_armed/g_pending_redraw/g_throttle/g_drag): the arrays shared
-/// only an index, so a control's lifecycle was spread across five
-/// declarations to keep in lockstep. One struct says which fields belong to
-/// the same control, and `&g_state[idx]` hands the whole lifecycle to a
-/// helper at once (the same shape systatus's `Readout` gives its readouts).
+/// subs[i]). One struct says which fields belong to the same control, and
+/// `&g_state[idx]` hands the whole lifecycle to a helper at once (the same
+/// shape systatus's `Readout` gives its readouts).
 const SubState = struct {
     /// Set by the control's first draw (which arms it: the segment doesn't
     /// wake the loop before the bar actually renders it).
@@ -205,24 +193,14 @@ var g_state: [subs.len]SubState = blk: {
 fn applyCommitWindow(idx: usize) void {
     if (subs[idx].commit_window_ms) |w| g_state[idx].throttle.interval_ms = w;
 }
-/// The width the bar reserves for control `idx`, and the ONE denominator for
-/// everything that needs a slider's width: the row reservation
-/// (`naturalWidthFor`), the drag mapping (`pctAt`) and the click hit-test
-/// (`onClickFor`).
-///
-/// These used to disagree on the first frame: the width was 0 until the
-/// segment's first draw completed, `onClickFor` rejected every click while it
-/// was 0 (so the very first press on a freshly laid-out slider did nothing at
-/// all), and the drag denominator and the row reservation fell back to
-/// DIFFERENT values. `widthState.resolved` is now that one rule, shared
-/// with systatus, so the hit-test, the drag range and the reservation cannot
-/// disagree about what "not measured yet" means.
 /// The shared `segmod.widthState` singleton for this control's name, which
-/// owns the store / consumeRedrawRequest / resolved triple. The hand-rolled
-/// `slot_w` field plus its inline "did the width change? mark dirty"
-/// was a second implementation of code systatus already used, and this module
-/// is comptime-indexed by `subs`, so one instantiation per name is exactly
-/// the state each control needs.
+/// owns the store / consumeRedrawRequest / resolved triple, and the ONE
+/// denominator for everything that needs a slider's width: the row
+/// reservation (`naturalWidthFor`), the drag mapping (`pctAt`) and the click
+/// hit-test (`onClickFor`). `resolved` is the shared rule so the hit-test,
+/// the drag range and the reservation cannot disagree about what "not
+/// measured yet" means. This module is comptime-indexed by `subs`, so one
+/// instantiation per name is exactly the state each control needs.
 fn widthStateFor(comptime idx: usize) type {
     return segmod.widthState(subs[idx].name);
 }
@@ -231,9 +209,9 @@ fn reservedWidth(idx: usize) u16 {
     // Event handlers reach here with a RUNTIME idx (a pointer event names the
     // control it landed on), while the width state is one comptime-tagged
     // singleton per control. `inline for` keeps the selection comptime and
-    // leaves a straight-line compare per control -- the array is a compile-time
-    // constant of 2, so this is cheaper than any index it replaced, and there
-    // is no runtime `slot_w` mirror to fall out of sync with.
+    // leaves a straight-line compare per control -- the array is a
+    // compile-time constant of 2, so this is cheap, and there is no runtime
+    // `slot_w` mirror to fall out of sync with.
     inline for (0..subs.len) |i| {
         if (i == idx) return widthStateFor(i).resolved(subs[i].probeNaturalWidth);
     }

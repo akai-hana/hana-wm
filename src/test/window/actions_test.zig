@@ -1,10 +1,9 @@
-//! X-gated integration tests for the command layer (the dissolved
-//! `src/actions`): every scenario runs against a live X server through the
-//! real admission/reconcile pipeline. When no server is present the tests
-//! print SKIP and pass, keeping `zig build test` green headless. The
-//! model-side invariants these assert are the same ones the commands
-//! maintain in production; the server-side geometry checks verify the
-//! end-to-end tile.
+//! X-gated integration tests for the command layer: every scenario runs
+//! against a live X server through the real admission/reconcile pipeline.
+//! When no server is present the tests print SKIP and pass, keeping
+//! `zig build test` green headless. The model-side invariants these assert
+//! are the same ones the commands maintain in production; the server-side
+//! geometry checks verify the end-to-end tile.
 //!
 //! The commands live with the module that owns the state they write, so the
 //! test reaches each one there (or through `window` for the always-present
@@ -12,7 +11,7 @@
 //! line declares exactly what these imports make necessary.
 
 // Declared here, next to the imports that make it necessary, rather than in a
-// build.zig table that had to be kept in agreement with them by hand.
+// build.zig table that must be kept in agreement with them by hand.
 // build-gate: tiling, floating, minimize, workspaces
 
 const std = @import("std");
@@ -415,10 +414,8 @@ test "actions: layout kind and variant step through the registry" {
 // The fact-bump invariant, pinned at the entry that owns it.
 //
 // Eight actions reconcile through `pipeline.reconcileGrab(.{})`. The bump
-// used to be the caller's job and those eight did not do it, so nothing but
-// this assertion kept the invariant true. The bump is now inside the entry;
-// the `retile` paths are covered by the geometry assertions above, which
-// all route through it.
+// lives inside that entry, not in the callers, and the `retile` paths are
+// covered by the geometry assertions above, which all route through it.
 //
 // X-gated like the rest of this file: `reconcileGrab` takes a real server
 // grab, so this skips headless.

@@ -106,11 +106,9 @@ pub const Sub = struct {
     /// then renders nothing: zero-width slot, unclickable). Null HOOK = always
     /// present.
     ///
-    /// This is one hook, not the `{bool, u8}` pair it replaced. The two
-    /// were always written and always latched together, and a module that
-    /// latched one and forgot the other produced a control that reported a
-    /// level nobody had or hid a level everybody could see. The absence is now
-    /// in the type, so it cannot disagree with the value.
+    /// The absence is in the type, so it cannot disagree with the value: a
+    /// module that latches a level and forgets its presence flag cannot report
+    /// a level nobody has or hide a level everybody can see.
     level: ?*const fn () ?u8 = null,
     /// True while the backend can write; while false interactions no-op but
     /// the level still displays.
@@ -145,12 +143,11 @@ pub const Sub = struct {
 /// never names the concrete struct (`Sub`) or a sibling's import alias.
 pub const Binding = Sub;
 
-/// Linear slider mapping across a slot. Lifted to `bar/level.zig`: it
-/// is not a slider concept -- every horizontal meter needs it -- and the
-/// zero-width-slot rule and the far-edge saturation had to be right in
-/// whichever module happened to need them first. This re-export keeps the
-/// slider's own name working, so the pure test and the core keep the same
-/// entry point.
+/// Linear slider mapping across a slot; defined in `level.zig`, which is not
+/// a slider concept -- every horizontal meter needs it, and the zero-width-slot
+/// rule and the far-edge saturation must be right in one place. This
+/// re-export keeps the slider's own name working, so the pure test and the
+/// core keep the same entry point.
 pub const pctFromSlot = level.pctFromSlot;
 
 // Declared by the interaction shell and re-exported here: `Write` and

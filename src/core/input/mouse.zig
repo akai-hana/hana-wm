@@ -1,11 +1,9 @@
 //! Mouse intake: button and motion events, press classification,
-//! and routing to the floating drag engine. Split out of input.zig
-//! (review 05-input, Phase 6): the press-classification and
-//! motion-routing halves -- the mouse gesture state machine -- are a
+//! and routing to the floating drag engine. The press-classification and
+//! motion-routing halves (the mouse gesture state machine) are a
 //! distinct concern from key dispatch. The event loop dispatches straight
-//! to this module now (no facade), and config mouse binds reach the action
-//! interpreter through `dispatch` -- one dependency, not the input <-> mouse
-//! cycle that used to stand between the two.
+//! to this module (no facade), and config mouse binds reach the action
+//! interpreter through `dispatch`; one dependency between them.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -37,8 +35,7 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // Super+Button grab, so a plain click arrives ungrabbed; route it to the bar
     // and skip the managed-window/replay-pointer machinery built for the
     // synchronous grab a client-window click goes through. Super-held clicks
-    // fall through to the normal mouse-binding/drag path. Previously two
-    // wrappers stood between this and the surfaces hook, for one call site.
+    // fall through to the normal mouse-binding/drag path.
     if (!super_held and surfaces.isBarWindow(clicked_window)) {
         surfaces.handleButtonPress(event);
         return;
@@ -63,11 +60,10 @@ pub const MousePress = struct {
     bind_fired: bool,
 };
 
-/// What a press should do, and -- the part that used to be implicit -- what
-/// happens to the grab afterwards. Every arm of the dispatch below is one of
-/// these, and the dispatch is exhaustive with no `else`, so a new arm that
-/// forgets to settle the grab is a compile error rather than a frozen
-/// keyboard and pointer.
+/// What a press should do, and what happens to the grab afterwards. Every arm
+/// of the dispatch below is one of these, and the dispatch is exhaustive with
+/// no `else`, so a new arm that forgets to settle the grab is a compile error
+/// rather than a frozen keyboard and pointer.
 pub const MouseIntent = union(enum) {
     /// Super+scroll: a viewport bind, or a plain release when unbound. Checked
     /// before the managed-window guard because scroll binds do not target a

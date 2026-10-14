@@ -1,13 +1,12 @@
 //! Keybinds: resolution (keysym -> keycode against the live keyboard), the
 //! (modifiers, keysym) -> Action dispatch map read on every keypress, and the
-//! root-window grabs that make both reachable. Absorbs keybind.zig (the
-//! resolver) and grabs.zig (grab installation) plus the compile/teardown
-//! functions input.zig used to hold -- three concerns that were only ever
-//! one lifecycle: build the binds, grab them, tear them down.
+//! root-window grabs that make both reachable. Three concerns: resolution,
+//! grab installation, and lifecycle unified because they share one
+//! lifecycle: build the binds, grab them, tear them down.
 //!
 //! Wire traffic: the keybind and Super+Button grab installations and their
 //! flushes. Grabs are installed at startup and re-installed on config reload
-//! and keyboard-mapping change -- lifecycle, not per-window mutation -- which
+//! and keyboard-mapping change (lifecycle, not per-window mutation), which
 //! is why this file carries its own allowlist entry in check-layers.sh.
 const std = @import("std");
 
@@ -19,9 +18,7 @@ const log = @import("log");
 const keymap = @import("keymap");
 const xkb = @import("xkb");
 
-// ---------------------------------------------------------------------------
-// Module-owned bind state (from input.zig).
-// ---------------------------------------------------------------------------
+/// Module-owned bind state
 // The (modifiers, keysym) -> Action dispatch map. Owned here, not by Config,
 // to keep the pure config layer X-free (see the rationale on KeybindResolver below).
 // Rebuilt on startup and every config reload (buildKeybinds); the entries
@@ -33,16 +30,13 @@ var resolved_binds: []ResolvedBind = &.{};
 // the live XKB state, read by the grab path and the unresolved-keysym report)
 // and the resolver's entries are the DISPATCH view (sorted by packed key,
 // no keycode, read on every keypress). Merging them would make keycode
-// resolution and dispatch building share one buffer and one failure path --
+// resolution and dispatch building share one buffer and one failure path;
 // today a failed realloc keeps the previous grabs working while a failed
-// dispatch build fails closed -- to save one allocation. Each list's own
+// dispatch build fails closed to save one allocation. Each list's own
 // rebuild failure mode is stated where it happens. Two lists, one source
 // (the config's keybindings), no fact stored twice.
 
-// ---------------------------------------------------------------------------
-// Compile / tear down the binds (from input.zig).
-// ---------------------------------------------------------------------------
-
+/// Compile / tear down the binds
 /// Resolves `keybindings` against the live XKB state and rebuilds the dispatch
 /// map. Call once at startup (after `initXkb` and config load) and again on
 /// every config reload with the new config's keybindings. No-op without XKB.
@@ -55,9 +49,9 @@ pub fn buildKeybinds(keybindings: []types.Keybind) void {
     // change and a binding change take the same path.
     resolved_binds = alloc.realloc(resolved_binds, keybindings.len) catch |err| {
         // Do NOT clobber resolved_binds on failure: the old allocation is now
-        // the only copy, and overwriting it here leaked it and silently
-        // emptied the compiled list -> the next keypress grabbed nothing until
-        // a keymap event. Keep the old set and tell the user.
+        // the only copy, and overwriting it here would leak it and silently
+        // empty the compiled list -> the next keypress grabs nothing until a
+        // keymap event. Keep the old set and tell the user.
         log.warn("buildKeybinds: realloc for {} bindings failed ({}); keeping the old set", .{ keybindings.len, err });
         return;
     };
@@ -76,8 +70,7 @@ pub fn resolvedKeybinds() []const ResolvedBind {
 /// Releases the dispatch map AND the compiled keybind list. Call before the
 /// config whose keybindings the entries point into is freed (shutdown).
 ///
-/// The list was allocated by `buildKeybinds` via `alloc.realloc` and this used
-/// to free only the dispatch map, leaking the list on every shutdown. The
+/// The list was allocated by `buildKeybinds` via `alloc.realloc`. The
 /// `len != 0` guard is not cosmetic: the initial value is a `&.{}` pointing at
 /// a static empty slice, and freeing that would be handing the allocator a
 /// pointer it never produced.
@@ -104,7 +97,7 @@ pub fn deinitKeybinds() void {
 /// grabs (taken with the OLD keycodes) are now stale and the caller must
 /// re-grab. Returns false for the modifier-map and pointer-button remaps that
 /// arrive through the same event: those are common (`xmodmap` touches both),
-/// and rebuilding for them threw away working state and made the user pay a
+/// and rebuilding for them throws away working state and makes the user pay a
 /// full ungrab/regrab storm over a change that cannot have affected any
 /// binding. The modifier map is not part of the keycode->keysym table, and
 /// button remapping is the client's own business.
@@ -132,10 +125,7 @@ pub fn lookupAction(
     return keybind_resolver.lookup(mods, keysym, live_config_rev);
 }
 
-// ---------------------------------------------------------------------------
-// Resolution and the dispatch map (from keybind.zig).
-// ---------------------------------------------------------------------------
-
+/// Resolution and the dispatch map
 /// Orders the dispatch table by packed key, applied ONCE after the table is
 /// built (see rebuildDispatchMap). The key is a u64 built as
 /// (modifiers << 32) | keysym, so this is also a plain numeric order on the
@@ -145,20 +135,18 @@ fn entryLessThan(_: void, a: DispatchEntry, b: DispatchEntry) bool {
 }
 
 /// Field comparator for the lookup, where what is ordered is each entry's `key`
-/// FIELD rather than the entry. `find` was hand-rolled for years on the
-/// grounds that binarySearch only searches whole elements; std.sort.binarySearch
-/// has taken a per-element Order-returning fn since 0.16, so that reason is
-/// gone. entryLessThan is not reusable here: std.sort.heap wants a
-/// lessFn(context, a, b) bool, binarySearch wants an Order fn.
+/// FIELD rather than the entry. std.sort.binarySearch takes a per-element
+/// Order-returning fn; entryLessThan is not reusable here because std.sort.heap
+/// wants a lessFn(context, a, b) bool.
 fn byKey(key: u64, e: DispatchEntry) std.math.Order {
     return std.math.order(key, e.key);
 }
 
 /// One-line report for a binding that can never fire because an earlier one
 /// already claims the same (modifiers, trigger). Shared by the keyboard and
-/// mouse tables so the two paths cannot drift: the keyboard path reported
-/// conflicts and let the later entry win, while the mouse scan silently took
-/// the FIRST match, so the same config mistake was a warning on one trigger
+/// mouse tables so the two paths cannot drift: the keyboard path reports
+/// conflicts and lets the later entry win, while the mouse scan takes the
+/// FIRST match, so the same config mistake would be a warning on one trigger
 /// and silence on the other.
 ///
 /// `trigger_label`/`trigger` are the trigger's own description ("keysym" and a
@@ -243,9 +231,7 @@ pub const KeybindResolver = struct {
         };
         // Dedup FIRST, in config order (so each shadowed binding is reported
         // once, where the reader of the config sees it), then sort ONCE. The
-        // scan is O(n^2) over a slice that holds tens of bindings, and it
-        // replaces the old append-then-re-sort-per-entry, which re-ordered the
-        // half-built table on every insert.
+        // scan is O(n^2) over a slice that holds tens of bindings.
         for (keybindings, 0..) |*kb, i| {
             const entry: DispatchEntry = .{
                 .key = dispatchKey(kb.modifiers, kb.keysym),
@@ -317,7 +303,7 @@ pub const KeybindResolver = struct {
 };
 
 /// Resolves each binding's keysym to a keycode, reporting (once, via
-/// `reportUnresolved`) keysyms with no base keycode -- shifted symbols must be
+/// `reportUnresolved`) keysyms with no base keycode; shifted symbols must be
 /// bound via their unshifted key name.
 /// One keybinding with its keycode resolved against the live XKB state.
 pub const ResolvedBind = struct {
@@ -353,8 +339,8 @@ pub fn resolveKeycodes(
 
 /// Log the bindings that resolved to nothing, ONCE per resolve rather than once
 /// per binding. A config with a whole keyboard's worth of shifted-symbol
-/// bindings used to produce one warning line per binding, which buries the one
-/// line that matters.
+/// bindings would produce one warning line per binding, burying the one line
+/// that matters.
 pub fn reportUnresolved(resolved: []const ResolvedBind) void {
     var count: usize = 0;
     for (resolved) |r| {
@@ -375,10 +361,7 @@ pub fn reportUnresolved(resolved: []const ResolvedBind) void {
     if (count > 8) log.warn("... and {} further unresolvable keybindings", .{count - 8});
 }
 
-// ---------------------------------------------------------------------------
-// Root-window grab installation (from grabs.zig).
-// ---------------------------------------------------------------------------
-
+/// Root-window grab installation
 /// Upper bound for the XCB cookie scratch buffer in grabKeybindings
 /// (max distinct keybindings x lock_modifiers.len combinations).
 /// Raise if you ever exceed 128 keybindings.
@@ -467,14 +450,14 @@ pub const MouseGrabSpec = struct {
     /// The non-lock modifier the grab is taken with (Super).
     modifiers: u16,
     /// Lock bits, which the grab takes in every combination and which
-    /// `normalizeModifiers` masks off before dispatch -- so they can neither
+    /// `normalizeModifiers` masks off before dispatch, so they can neither
     /// make a bind reachable nor unreachable.
     lock_bits: u16,
 };
 
 /// The buttons the root mouse grab covers, in grab order: the table
 /// `grabMouseButtons` fires, the spec `mouse.zig`'s report builds, and the
-/// reachability rule below judges -- one home so all three cannot drift.
+/// reachability rule below judges; one home so all three cannot drift.
 pub const mouse_grab_buttons = [_]u8{
     masks.mouse_button_left,
     masks.mouse_button_middle,
@@ -489,8 +472,8 @@ pub const mouse_grab_buttons = [_]u8{
 /// nothing: a button the grab does not cover (a bare Button1 click is delivered
 /// to the client, so the WM never sees it), and a modifier the grab does not
 /// take (Super+Shift+Button1 is never grabbed, and the dispatcher compares
-/// modifiers exactly). This is the worst failure mode a config surface has --
-/// the bind loads, the config looks valid, the key does nothing -- so it is
+/// modifiers exactly). This is the worst failure mode a config surface has:
+/// the bind loads, the config looks valid, the key does nothing; so it is
 /// reported rather than left to be discovered by pressing the combo.
 pub fn undeliverableMouseBindReason(mb: types.MouseBind, grab: MouseGrabSpec) ?[]const u8 {
     if (std.mem.indexOfScalar(u8, grab.buttons, mb.button) == null) {
@@ -506,11 +489,10 @@ pub fn undeliverableMouseBindReason(mb: types.MouseBind, grab: MouseGrabSpec) ?[
 /// The label that names a mouse grab in a failure message.
 const MouseGrabLabel = struct { button: u8, lock: u16 };
 
-/// One fired mouse-grab request with its failure label. The AoS pair for the
-/// two parallel arrays (cookies + labels, same length, same index) this
-/// replaces -- the key path already stored its cookie with its keycode the
-/// same way (`CookieEntry`), and a label that travelled separately could
-/// desynchronize from its cookie only by a range-slice typo.
+/// One fired mouse-grab request with its failure label, kept in one value so
+/// a label cannot desynchronize from its cookie. The key path pairs its
+/// cookie with its keycode the same way (`CookieEntry`); a label kept
+/// separately could fall out of step only by a range-slice typo.
 const MouseGrab = struct {
     cookie: xcb.xcb_void_cookie_t,
     label: MouseGrabLabel,
@@ -519,13 +501,10 @@ const MouseGrab = struct {
 /// Grabs Super+Button{1,2,3,4,5} (including the scroll buttons) on the root
 /// window for every lock-modifier combination, checking each one.
 ///
-/// Lives beside `grabKeybindings` and uses its discipline on purpose. This
-/// used to fire forty unverified grabs in the input layer: a grab that failed
-/// (another client already holds Super+Button1 -- a screenshot tool, a
-/// keymap tool, or the WM that was here before) was indistinguishable from one
-/// that succeeded, so the mouse binds silently stopped firing with nothing on
-/// stderr to say why. Each failure now names the button and modifier that did
-/// not take.
+/// Lives beside `grabKeybindings` and uses its discipline: each grab is
+/// verified, so a failure (another client already holds Super+Button1) is
+/// reported with the button and modifier that did not take, rather than
+/// leaving mouse binds silently broken.
 pub fn grabMouseButtons() void {
     const cs = core.getState();
     var grabs: [mouse_grab_buttons.len * masks.lock_modifiers.len]MouseGrab = undefined;

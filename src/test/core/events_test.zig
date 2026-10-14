@@ -2,13 +2,12 @@
 //!
 //! `eventWindowFor` reads the window id out of a raw XCB event without
 //! knowing the event's concrete struct type, so it hard-codes byte offsets.
-//! That is the kind of shortcut that is right until it silently isn't: the
-//! function originally read bytes 4..7 for every event on the premise that all
-//! window-carrying event structs put `window` in the same place. Compiling
-//! against xcb/xcb.h shows three different layouts, so the premise was false
-//! and the read was wrong for ConfigureNotify, ConfigureRequest, MapRequest,
-//! UnmapNotify, DestroyNotify and the rest of the offset-8 group -- which are
-//! exactly the geometry events a browser-window trace needs to observe.
+//! That is the kind of shortcut that is right until it silently isn't: not all
+//! window-carrying event structs put `window` in the same place. xcb/xcb.h
+//! shows three different layouts, so a single blanket offset is wrong for
+//! ConfigureNotify, ConfigureRequest, MapRequest, UnmapNotify, DestroyNotify
+//! and the rest of the offset-8 group -- which are exactly the geometry events
+//! a browser-window trace needs to observe.
 //!
 //! These tests pin the table against the real xcb structs via @offsetOf, so
 //! the offsets are checked against the header rather than against a comment.
@@ -83,9 +82,9 @@ fn expectEventAt(t: u8, comptime Struct: type, comptime off: usize) !void {
 }
 
 test "eventWindowFor: offset-4 group reads `window` at byte 4" {
-    // ClientMessage is the one the earlier "bytes 4-7 is wrong for
-    // ClientMessage" claim blamed; it is in fact correct here, and this test
-    // exists to keep that correction from being re-broken.
+    // ClientMessage's `window` field sits at byte 4, though it is often
+    // blamed for the offset-8 breakage; this test pins the correction so it
+    // cannot be re-broken.
     try expectWindowAt(xcb.XCB_CLIENT_MESSAGE, xcb.xcb_client_message_event_t, 4);
     try expectWindowAt(xcb.XCB_PROPERTY_NOTIFY, xcb.xcb_property_notify_event_t, 4);
     try expectWindowAt(xcb.XCB_EXPOSE, xcb.xcb_expose_event_t, 4);
@@ -93,7 +92,7 @@ test "eventWindowFor: offset-4 group reads `window` at byte 4" {
 }
 
 test "eventWindowFor: offset-8 group reads `window` at byte 8" {
-    // These are the ones the unconditional offset-4 read got wrong.
+    // A blanket offset-4 read gets every event in this group wrong.
     try expectWindowAt(xcb.XCB_CONFIGURE_NOTIFY, xcb.xcb_configure_notify_event_t, 8);
     try expectWindowAt(xcb.XCB_CONFIGURE_REQUEST, xcb.xcb_configure_request_event_t, 8);
     try expectWindowAt(xcb.XCB_MAP_REQUEST, xcb.xcb_map_request_event_t, 8);

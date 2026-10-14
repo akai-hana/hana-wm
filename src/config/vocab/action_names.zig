@@ -39,7 +39,7 @@ fn resolveAutoTerminal(allocator: std.mem.Allocator) ![]const u8 {
 /// intended alias fails the parser's unknown-action typo detection instead
 /// of silently unparsable.
 const action_entries = [_]struct { key: []const u8, action: types.Action }{
-    // Void-variant aliases (old tag names → renamed void variants).
+    // Void-variant aliases (legacy spellings of the auto-derived void tags).
     .{ .key = "close", .action = .{ .close_window = {} } },
     .{ .key = "kill", .action = .{ .close_window = {} } },
     .{ .key = "fullscreen", .action = .{ .toggle_fullscreen = {} } },
@@ -156,9 +156,9 @@ fn looksLikeActionWord(cmd: []const u8) bool {
 }
 
 /// True when `cmd` still carries a `{kill}` token or a `{...}` placeholder
-/// fragment. After the hoisted substitution this should never be true for a
-/// config action; it is a defensive guard so an unresolved placeholder can
-/// never be handed to the shell verbatim.
+/// fragment. The `{kill}` substitution runs before parseAction, so this should
+/// never be true for a config action; it is a defensive guard so an unresolved
+/// placeholder can never be handed to the shell verbatim.
 fn hasPlaceholderFragment(cmd: []const u8) bool {
     if (std.mem.indexOf(u8, cmd, "{kill}") != null) return true;
     const lbrace = std.mem.indexOfScalar(u8, cmd, '{') orelse return false;
@@ -171,8 +171,8 @@ pub fn parseAction(allocator: std.mem.Allocator, cmd: []const u8) !types.Action 
         if (tryParseWorkspace(cmd, spec.base ++ "_")) |ws| return spec.make(ws);
     }
     // Resolved here, not in the fallback loader: a USER config binding
-    // "auto_terminal" used to reach the shell verbatim, where it is not a
-    // command, so the bind parsed fine and then silently did nothing.
+    // "auto_terminal" would otherwise reach the shell verbatim, where it is
+    // not a command, so the bind parses fine and then silently does nothing.
     if (std.mem.eql(u8, cmd, "auto_terminal")) {
         return .{ .exec = try resolveAutoTerminal(allocator) };
     }

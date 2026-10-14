@@ -4,7 +4,7 @@
 //! (title ownership, at-capacity drop) is pure allocation bookkeeping,
 //! so the leak-checking testing allocator pins it. The wire-touching half
 //! (fireTitleCookies/collectTitleCookies and the
-//! border-width dedup, which lives in the sync ledger now) needs a live
+//! border-width dedup, which lives in the sync ledger) needs a live
 //! display and stays in the integration layer. Size hints are NOT tested
 //! here: they have a single store (the model entry, threaded through
 //! admission as a parameter), so there is no cache path to pin.
@@ -14,11 +14,9 @@ const testing = std.testing;
 
 const title_cache = @import("title_cache");
 
-// The title is a fixed inline buffer now, so there is no ownership left
-// to test -- which is the point. This used to be "title ownership: overwrite
-// frees prior, remove frees owned", which asserted the three free paths that
-// no longer exist. What remains worth pinning is the copy semantics they used
-// to interfere with, plus the truncation bound that replaced the allocator.
+// The title is a fixed inline buffer, so there is no ownership to free --
+// which is the point. What is pinned here is the copy semantics and the
+// truncation bound of that buffer.
 test "title store: overwrite replaces in place, remove clears, oversize truncates" {
     const alloc = std.testing.allocator;
     title_cache.init(alloc);

@@ -1,10 +1,9 @@
 //! Headless tests for the shared bounded collections (`core/pure/bounded`).
 //!
 //! `BoundedList` backs the window caches, minimize records, and the spawn
-//! pending table, so its cap/evict/scan semantics are load-bearing but were
-//! previously only exercised indirectly through those call sites. These tests
-//! pin the contract: full-capped append, linear find, both removal flavors,
-//! insert clamping, and the id-keyed remove helpers.
+//! pending table, so its cap/evict/scan semantics are load-bearing. These
+//! tests pin the contract: full-capped append, linear find, both removal
+//! flavors, insert clamping, and the id-keyed remove helpers.
 
 const std = @import("std");
 const bounded = @import("bounded");

@@ -297,8 +297,7 @@ fn brightnessctlApply(pct: u8) bool {
 
 /// The latency class of one commit on the live backend: a direct sysfs write
 /// is microseconds and needs no window, while the `brightnessctl` fallback is
-/// a fork+exec that does. Named value (see `slider.CommitCost`) rather than
-/// the bare bool this used to be.
+/// a fork+exec that does (see `slider.CommitCost`).
 fn commitCost() slider.CommitCost {
     return if (g_backend == .sysfs) .immediate else .rate_limited;
 }
@@ -324,24 +323,18 @@ fn commitPct(v: u8) void {
         }
     }
     // Latch read-only ONLY on a permission denial that the fallback also could
-    // not work around. The old `g_read_only = !ok` latched on ANY failure, so
-    // one transient EIO -- or the brightness node briefly vanishing while a
-    // driver rebound -- turned the module into a permanent, silent no-op for
-    // the rest of the session, with the segment still rendering a level the
-    // user could not actually change.
+    // not work around: a transient EIO, or the brightness node briefly
+    // vanishing while a driver rebounds, must not turn the module into a
+    // permanent silent no-op for the rest of the session while the segment
+    // still renders a level the user cannot change.
     g_read_only = !ok and wrote == .denied;
 }
 
 /// One-shot apply (press, drag end): commit then re-read so the display
 /// follows the device immediately rather than on the next poll tick.
-/// The one write entry point, replacing `previewPct` / `commitPct` /
-/// `applyPct`.
-///
-/// The three were one function each, and the clamp and the display update were
-/// written three times, so they could drift: a preview that forgot to clamp
-/// showed a level the backend then refused, and an apply that forgot to
-/// re-read left the label behind the device. Here the mode names the
-/// difference and there is one copy of each thing that differs.
+/// The single write entry point: each mode names its difference, so there is
+/// one copy of the clamp and one of the display update, and they cannot
+/// drift.
 fn write(w: slider.Write, v: u8) void {
     switch (w) {
         // Scroll/drag motion: the label follows immediately, the backend write
@@ -392,9 +385,7 @@ pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
 
 // Current level / presence / write-gate hooks for the core.
 
-/// The displayed level, or null while no backlight device has answered. The
-/// absence and the value were a `{bool, u8}` pair latched together; they are
-/// one optional now.
+/// The displayed level, or null while no backlight device has answered.
 fn currentLevel() ?u8 {
     return if (g_has_value) g_pct else null;
 }

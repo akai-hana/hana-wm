@@ -5,7 +5,7 @@
 //! Single `@cImport` owner for libxkbcommon; xkb.zig borrows it from here,
 //! translated once instead of once per importer.
 //!
-//! Layer note: connection-free, so it is importable from the pure layers --
+//! Layer note: connection-free, so it is importable from the pure layers;
 //! which is what lets config parse binding names through this module instead
 //! of reaching into a live-device-state input module.
 
@@ -32,7 +32,7 @@ pub const XKB_KEY_NoSymbol: u32 = xkb.XKB_KEY_NoSymbol;
 pub const reverse_capacity = x11_max_keycode - x11_min_keycode;
 
 /// Upper keycode the readiness heuristic scans. A keymap that is populated
-/// across the whole range but empty in the low end -- a partially built one --
+/// across the whole range but empty in the low end (a partially built one)
 /// still reads as healthy if the bound is raised.
 const keymap_health_hi: u8 = 128;
 
@@ -93,13 +93,10 @@ pub const ReverseIndex = struct {
     len: usize,
 
     /// Keycode for `keysym`, or null. Bisection over the sorted index: O(log n)
-    /// rather than the 248-entry scan this replaced, which ran once per
-    /// keybinding on every resolve.
+    /// rather than a 248-entry scan per keybinding on every resolve.
     ///
-    /// This lives here rather than at the call site because the keymap test
-    /// used to carry its own copy of the loop, so the tests that were supposed
-    /// to pin the ordering rules could not catch a change to the lookup that
-    /// used them.
+    /// This lives here so the tests that pin the ordering rules can catch
+    /// changes to the lookup.
     pub fn find(self: *const ReverseIndex, keysym: u32) ?u8 {
         var lo: usize = 0;
         var hi: usize = self.len;
@@ -115,10 +112,9 @@ pub const ReverseIndex = struct {
 
 /// The table -> reverse-index transform, including its two ordering rules.
 ///
-/// Exposed as a function over a plain table (not folded into buildKeysymTable)
-/// precisely so both rules are testable: the forward table is 256 u32s of
-/// literals, and the interesting behaviour is what happens when keysyms
-/// collide.
+/// Exposed as a function over a plain table so both rules are testable: the
+/// forward table is 256 u32s of literals, and the interesting behaviour is
+/// what happens when keysyms collide.
 pub fn buildReverseIndex(table: [x11_max_keycode]u32) ReverseIndex {
     var out: [reverse_capacity]ReverseEntry = undefined;
     var n: usize = 0;
@@ -145,7 +141,7 @@ pub fn buildReverseIndex(table: [x11_max_keycode]u32) ReverseIndex {
     // keycode: with kc10=X, kc11=Y, kc12=X the scan-side check compares X
     // against Y, misses the tie, and appends both. After the sort the two X
     // entries sit next to each other, and the bisection in keysymToKeycode can
-    // land on either one -- so a binding on a keysym carried by two keys could
+    // land on either one, so a binding on a keysym carried by two keys could
     // grab the higher keycode and silently stop responding to the lower one.
     var w: usize = 0;
     for (out[0..n]) |e| {
@@ -156,15 +152,11 @@ pub fn buildReverseIndex(table: [x11_max_keycode]u32) ReverseIndex {
     return .{ .index = out, .len = w };
 }
 
-// ---------------------------------------------------------------------------
-// Keysym-name parsing (merged from keysyms.zig): pure libxkbcommon table
-// lookups, no X connection, xkb_state, or XKB extension setup. They live here
-// because this file owns the single @cImport of the libxkbcommon header they
-// call through -- the reason keysyms.zig existed as a separate file at all was
-// to keep config from importing a live-device-state module, and this module
-// is connection-free, so that property survives the merge.
-// ---------------------------------------------------------------------------
-
+/// Keysym-name parsing: pure libxkbcommon table lookups, no X connection,
+/// xkb_state, or XKB extension setup. They live here because this file owns
+/// the single @cImport of the libxkbcommon header they call through. This
+/// module is connection-free, so config can import it without pulling in
+/// live-device-state modules.
 /// Keysym for `name` under case-insensitive lookup (so `"super_l"` and
 /// `"Super_L"` agree), or `XKB_KEY_NoSymbol` when the name is unknown. `name`
 /// may carry trailing NUL bytes; parsing stops at the first NUL.

@@ -3,7 +3,7 @@
 //! knob tables (core_config, tiling_config, bar_config, workspaces_config,
 //! floating_config) driven through knob.zig's generic engine.
 //!
-//! Covers the four behaviors the refactor must preserve exactly:
+//! Covers the four behaviors these tests pin exactly:
 //!   1. Every fragment's table defaults are byte-equal to its Config's
 //!      field initializers (the anti-drift pin behind parse synthesis).
 //!   2. A config file with no keys yields those same defaults end-to-end,
@@ -22,7 +22,7 @@ const std = @import("std");
 const testing = std.testing;
 
 // The tests deliberately exercise warn-and-revert / layouts-cap
-// diagnostics; src/core/pure/log.zig silences all std.log diagnostics in
+// diagnostics; src/core/debug/log.zig silences all std.log diagnostics in
 // test binaries, so this stays quiet on success.
 const config = @import("config");
 const knob = @import("knob");
@@ -201,9 +201,9 @@ test "per_segment_padding feeds BarConfig.spacing; workspaces count pads icons" 
 }
 
 test "fallback chains: title/run colors follow their siblings" {
-    // Regime 1: no [bar.properties] at all. The accent trio was UNCONDITIONALLY
-    // assigned its fallback sibling (now the palette canon: primary_color /
-    // secondary_color / alternative_color); the run trio were left untouched (null),
+    // Regime 1: no [bar.properties] at all. The accent trio is UNCONDITIONALLY
+    // assigned its fallback sibling (the palette canon: primary_color /
+    // secondary_color / alternative_color); the run trio are left untouched (null),
     // deferring to BarConfig's read-time fallbacks.
     var no_colors = try loadToml(testing.allocator, "chains-nocolors",
         \\[bar]
@@ -223,8 +223,7 @@ test "fallback chains: title/run colors follow their siblings" {
 
     // Regime 2: [bar.properties] present with only `title`. The accent trio now
     // reads per-key (absent keys copy their sibling); the run trio are also
-    // assigned -- copying siblings when their own keys are absent, exactly
-    // like the old `if (colors)` block.
+    // assigned -- copying siblings when their own keys are absent.
     var with_title = try loadToml(testing.allocator, "chains-title",
         \\[bar]
         \\primary_color     = "#010203"
@@ -623,10 +622,9 @@ test "getRatio: bare integers are percentages (indicator_padding)" {
 }
 
 test "getRatio strict: transparency rejects bare integers" {
-    // `= 1` was the trap: 1% here, but `= 1.0` means 100%. Bare
-    // integers are no longer supported at all -- they warn and
-    // revert to the default (fully opaque), so only a decimal ratio
-    // or a percentage can set transparency.
+    // Bare integers are rejected for transparency: `= 1` would be 1%, but
+    // `= 1.0` means 100%. They warn and revert to the default (fully opaque),
+    // so only a decimal ratio or a percentage can set transparency.
     var bare = try loadToml(testing.allocator, "transparency-bare",
         \\[bar]
         \\transparency = 1
@@ -831,9 +829,9 @@ test "display.dpi: integer and fractional spellings both widen; absent stays nul
 }
 
 test "legacy drun_* keys still parse after the rename to run_*" {
-    // The rename is only safe if an UNEDITED existing config keeps
-    // working, so the alias path is pinned here rather than assumed: these are
-    // the exact key spellings hana shipped, loaded into the renamed fields.
+    // An UNEDITED existing config must keep working, so the alias path is
+    // pinned here rather than assumed: these are the exact key spellings hana
+    // shipped, loaded into the canonical run_* fields.
     var legacy = try loadToml(testing.allocator, "drun-alias",
         \\[bar]
         \\primary_color = "#010203"

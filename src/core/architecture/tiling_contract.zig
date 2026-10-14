@@ -17,20 +17,18 @@ const bounded = @import("bounded");
 /// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
 ///
 /// This is the file's ONE edge into a generated implementation module, and it
-/// is intentional -- see `activeLayoutKind`'s comment for the correction to
-/// the "no implementation-module edge" claim that used to sit here.
+/// is deliberate -- see `activeLayoutKind` for why.
 pub const tiling_mods =
     if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
 
 /// The neutral layout: registry index 0, the fallback for an unresolvable
 /// config layout name and for a restored `kind` that no longer resolves.
 ///
-/// NAMED because the index alone hid the consequence. Every degradation path
-/// (unresolvable name, removed layout, pre-init state) passed a bare `0`, so
-/// "falls back to layout 0" was invisible at the call site while being the
-/// single most consequential constant in the config layer: index 0 is whatever
-/// the sorted registry happens to put first, and a typo in a layout name
-/// therefore quietly selected a different layout. Now every use greps.
+/// NAMED because the index alone hides the consequence: index 0 is whatever
+/// the sorted registry happens to put first, so a typo in a layout name would
+/// otherwise quietly select a different layout. Every degradation path
+/// (unresolvable name, removed layout, pre-init state) names this constant, so
+/// "falls back to layout 0" stays visible at the call site.
 pub const default_kind: u8 = 0;
 
 /// Bounds-checked registry lookup for `kind` (the single owner of the
@@ -51,14 +49,12 @@ pub fn moduleOf(kind: u8) ?*const Layout {
 /// value from `pipeline.getCurrentLayout()` (the layout/variants bar segments)
 /// and this applies the registry/tiling gates they would otherwise each repeat.
 ///
-/// One caveat on "no implementation-module edge", because this file used to
-/// claim it had none: it does have exactly one, the generated `tiling_modules`
-/// registry re-exported at the top of this file (see `tiling_mods`). That edge
-/// is deliberate -- it is what lets `moduleOf` resolve a name and a variant
-/// count through the same registry the layout modules bind to -- and it is why
-/// the claim, not the import, is what was wrong. Everything else here reaches
-/// a module through the registry passed in by the caller, and the bar layer is
-/// reached only as `*anyopaque` (see `Segment`).
+/// The generated `tiling_modules` registry re-exported at the top of this file
+/// (see `tiling_mods`) is this file's ONE edge into an implementation module,
+/// and it is deliberate -- it is what lets `moduleOf` resolve a name and a
+/// variant count through the same registry the layout modules bind to.
+/// Everything else here reaches a module through the registry passed in by the
+/// caller, and the bar layer is reached only as `*anyopaque` (see `Segment`).
 /// `tiling_enabled` is passed in rather than read from `core` because this file
 /// is X-free and `core` is not: the caller already has the live config fact,
 /// and making it a parameter is what keeps the gate visible in the signature
@@ -75,9 +71,9 @@ pub fn activeLayoutKind(kind: u8, tiling_enabled: bool) ?u8 {
 /// the caller owns only its OWN fallback text, which is genuinely
 /// per-segment ("no variant icon" vs "><>").
 ///
-/// The two callers were the section's only copy-paste and would have drifted
-/// the moment a third consumer appeared; the shape that actually differs
-/// between them is the fallback, so that is the only thing left parameterised.
+/// The two callers are the section's only copy-paste and would drift the
+/// moment a third consumer appears; the shape that genuinely differs between
+/// them is the fallback, so that is the only thing parameterised.
 /// `kind` stays a parameter (the live value from `pipeline.getCurrentLayout()`)
 /// for the same reason `activeLayoutKind` takes one: this file reads no
 /// pipeline state.
@@ -161,13 +157,12 @@ pub const View = struct {
     order: []const model.WindowId,
     params: *const model.LayoutParams,
     workarea: model.Rect,
-    /// BY VALUE, not a pointer to a caller's stack local. The pointer
-    /// form was the tree's only intra-frame dangling-pointer hazard: the
-    /// `HintsView` outlived the frame that owned it for as long as any layout
-    /// module kept the `View`, and nothing in the type said so. A value cannot
-    /// dangle, and every call site already had the struct in hand. The hints
-    /// themselves are index-aligned with `order`; lookup goes through
-    /// `hintsFor` so the order slice is not stored twice.
+    /// BY VALUE, not a pointer to a caller's stack local: a pointer could let
+    /// the `HintsView` outlive the frame that owned it for as long as any
+    /// layout module kept the `View`, and nothing in the type would say so. A
+    /// value cannot dangle, and every call site already has the struct in
+    /// hand. The hints themselves are index-aligned with `order`; lookup goes
+    /// through `hintsFor` so the order slice is not stored twice.
     hints: HintsView,
     focused: ?model.WindowId,
     // Environment resolved by the CALLER from config.
@@ -175,9 +170,9 @@ pub const View = struct {
 
     /// Frozen size-hint lookup for one window: a scan over the (small)
     /// `order` slice, default fallback when the window is absent. Lives on
-    /// `View` because `View` already owns `order` -- the standalone
-    /// `HintsView` struct that used to wrap this carried its own copy of
-    /// `order`, a second field that could only ever equal this one.
+    /// `View` because `View` already owns `order` -- a standalone `HintsView`
+    /// struct would carry its own copy of `order`, a second field that could
+    /// only ever equal this one.
     pub fn hintsFor(self: View, win: model.WindowId) model.SizeHints {
         std.debug.assert(self.order.len == self.hints.len);
         for (self.order, self.hints) |w, h| {
@@ -205,20 +200,19 @@ pub const List = bounded.BoundedList(Placement, model.store_capacity);
 /// length, same index. The caller materializes it each reconcile; lookup is
 /// `View.hintsFor` (scan over the small order slice — no allocator, bounded
 /// by `model.max_tiled_per_ws` (64), so a map would add nothing). A named
-/// alias rather than a struct: the struct form also held an `order` slice,
-/// which was always assigned the identical `View.order` and so only ever
-/// duplicated the field it had to stay in lockstep with.
+/// alias rather than a struct: a struct form would also carry an `order`
+/// slice that could only ever duplicate `View.order`.
 pub const HintsView = []const model.SizeHints;
 
 /// Caller-resolved environment, one bundled field per layout knob instead of
 /// per-layout booleans that each new layout would grow. Resolved from config
 /// by the reconciler's caller; the core carries no layout-feature booleans.
 /// The variant index is NOT a field here: it is config- and workspace-owned
-/// state that lives in `View.params.variant_idx`, and it used to be copied into
-/// this struct as well. Two homes for one fact, with the copy the layout
-/// modules actually read, so a params change that forgot to refresh the copy
-/// would have driven layout from a stale variant. Each layout module reads
-/// `v.params.variant_idx` and translates it to its own spelling.
+/// state that lives in `View.params.variant_idx`. Storing it here as well
+/// would give one fact two homes, with the copy the layout modules actually
+/// read -- so a params change that forgot to refresh it would drive layout
+/// from a stale variant. Each layout module reads `v.params.variant_idx` and
+/// translates it to its own spelling.
 pub const Env = struct {
     margins: model.Margins = .{},
     min_dim: u16 = 0,

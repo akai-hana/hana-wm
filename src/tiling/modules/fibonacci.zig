@@ -41,7 +41,7 @@ const SpiralDirection = enum(u2) {
 fn compute(v: *const tiling.View, out: *tiling.List) void {
     // LayoutCtx.init copies v.env.margins and v.env.min_dim precisely so
     // modules read them from ctx rather than re-deriving from v.env, which is
-    // how the same fact ends up with two homes. Hoisted above first use.
+    // how the same fact ends up with two homes.
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
     // NOTE: the overflow gate deliberately stays border-only (geometry of what

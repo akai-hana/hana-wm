@@ -31,8 +31,7 @@ const build_options = @import("build_options");
 const surfaces = @import("surfaces").Surfaces;
 const process = @import("process");
 // Config reload (the SIGHUP / reload_config transition) lives in
-// reload.zig (review 05-input round 2): a lifecycle concern, not
-// per-event path work.
+// reload.zig: a lifecycle concern, not per-event path work.
 const reload = @import("reload");
 
 const fd_xcb = 0;
@@ -127,14 +126,13 @@ fn handleMappingNotify(event: *anyopaque) void {
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
 //
-// This and eventWindowFor's offset switch below have been proposed for merging
-// into one table. They answer different questions -- "is there a handler?" vs
-// "where in the struct is the window id?" -- and their code sets are NOT the
-// same, in both directions: MAPPING_NOTIFY has a handler and no window field at
-// all, while VISIBILITY_NOTIFY, FOCUS_IN/OUT, REPARENT/CREATE/GRAVITY/
-// CIRCULATE carry a window and have no handler. Merging them would trade two
-// flat lookups for one wider struct over a hot path, to save a handful of
-// lines, and would need a sentinel for the offset-less case.
+// This and eventWindowFor's offset switch below answer different questions --
+// "is there a handler?" vs "where in the struct is the window id?" -- and their
+// code sets are NOT the same, in both directions: MAPPING_NOTIFY has a handler
+// and no window field at all, while VISIBILITY_NOTIFY, FOCUS_IN/OUT,
+// REPARENT/CREATE/GRAVITY/CIRCULATE carry a window and have no handler. Merging
+// them would trade two flat lookups for one wider struct over a hot path, to
+// save a handful of lines, and would need a sentinel for the offset-less case.
 const dispatch_table = blk: {
     var table = [_]?EventHandler{null} ** dispatch_table_len;
 
@@ -179,26 +177,26 @@ fn isRandrEvent(code: u8) bool {
     return (r != 0 and code >= r and code <= r + 1);
 }
 
-/// Where a raw event byte routes. Split out of dispatch so the SendEvent-bit
-/// rule is testable without an X connection: dispatch needs live core state,
-/// but the routing decision that was wrong here was pure.
+/// Where a raw event byte routes, kept separate from dispatch so the
+/// SendEvent-bit rule is testable without an X connection: dispatch needs live
+/// core state, but the routing decision itself is pure.
 pub const Route = enum { core, randr, ignore };
 
 /// Routes a RAW event byte. Bit 7 is XCB's SendEvent flag, and it is stripped
 /// FIRST, before anything is decided from the code.
 ///
-/// This previously read `if (event_type >= 0x80) return;`, on the reasoning
-/// that an EXTENSION event (server-allocated bases at/above 0x80) would
-/// otherwise alias onto a core code when masked. The reasoning was sound but
-/// the test was not: bit 7 is set by the server on EVERY event delivered via
-/// XSendEvent, and core codes never use bit 7. EWMH _NET_WM_STATE is the case
-/// that matters -- GDK sends it with XSendEvent and propagate=True precisely
-/// so the WM sees the request before the client acts on it, so a browser
-/// native-fullscreen request arrives as 33 | 0x80 == 0xA1. That is >= 0x80,
-/// so every browser/GTK fullscreen request was discarded here and never
-/// reached handleClientMessage: Mod+F worked (hana's own binding calls its
-/// fullscreen code directly, with no event involved) while native fullscreen
-/// silently did nothing.
+/// Rejecting the raw byte instead (`event_type >= 0x80` -> return) would rest
+/// on the reasoning that an EXTENSION event (server-allocated bases at/above
+/// 0x80) would otherwise alias onto a core code when masked. The reasoning is
+/// sound but the test is not: bit 7 is set by the server on EVERY event
+/// delivered via XSendEvent, and core codes never use bit 7. EWMH
+/// _NET_WM_STATE is the case that matters -- GDK sends it with XSendEvent and
+/// propagate=True precisely so the WM sees the request before the client acts
+/// on it, so a browser native-fullscreen request arrives as 33 | 0x80 == 0xA1.
+/// That is >= 0x80, so such a test would discard every browser/GTK fullscreen
+/// request before it reached handleClientMessage: Mod+F would still work
+/// (hana's own binding calls its fullscreen code directly, with no event
+/// involved) while native fullscreen silently does nothing.
 ///
 /// Masking is safe against the aliasing worry because an X client only ever
 /// RECEIVES the events it selected. hana selects core events plus its RandR
@@ -230,11 +228,11 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
             // Re-read the screen size BEFORE the surface path runs, and only
             // when it really changed. Core's cached `Screen` is the
             // pointer the server filled in at setup, so without this a
-            // resolution change left the work area, percentage heights and
-            // font scaling all sized for the display as it was at startup. The
-            // boolean check is what keeps this cheap: a mode change arrives as
-            // a BURST of RandR events, and only the first one that moves a
-            // dimension pays for the round-trip.
+            // resolution change would leave the work area, percentage heights
+            // and font scaling all sized for the display as it was at
+            // startup. The boolean check is what keeps this cheap: a mode
+            // change arrives as a BURST of RandR events, and only the first
+            // one that moves a dimension pays for the round-trip.
             //
             // DPI is re-derived in the same place, because a different screen
             // size usually means a different physical size too, and every font
@@ -281,9 +279,8 @@ fn dispatchOwned(event: *anyopaque) void {
 pub fn eventWindowFor(t: u8, event: *anyopaque) u32 {
     const raw: [*]const u8 = @ptrCast(event);
     // Strip the SendEvent bit first: an EWMH _NET_WM_STATE request arrives as
-    // 33 | 0x80, and without this every such event read as an unknown type
-    // (and reported no_window), which is why a trace aimed at exactly these
-    // events showed nothing.
+    // 33 | 0x80, and without this every such event reads as an unknown type
+    // (and reports no_window).
     const code = t & masks.core_event_code_mask;
     // Three shapes, and MappingNotify is a fourth: it has NO window field at
     // all, so it must never match a watch.
@@ -480,7 +477,7 @@ fn handleXcbEvents() void {
     // A cap exit can leave a non-motion event held in `pending` (stashed
     // during motion coalescing). It was pulled BEFORE anything the queued
     // drain below will read, so dispatch it now to preserve order: carrying it
-    // to the next batch dispatched it after the (hundreds of) later events the
+    // to the next batch would put it after the (hundreds of) later events the
     // drain surfaces. On the normal (socket-empty) exit path `pending` is null.
     if (pending) |p| dispatchOwned(p);
 
@@ -562,7 +559,7 @@ pub fn run() void {
     // valid, then one slot per in-flight spawn pipe. The two fixed entries are
     // set once; the spawn slots are rebuilt each round from spawn.readFds,
     // because the set of in-flight spawn pipes changes as commands come and go
-    // (a fixed set built at boot never saw post-boot pipes, and the
+    // (a fixed set built at boot would never see post-boot pipes, and the
     // spawn_ready branch below could never fire for them).
     var poll_buf: [2 + spawn.max_read_fds]std.posix.pollfd = undefined;
     var spawn_fds: [spawn.max_read_fds]std.posix.fd_t = undefined;
@@ -607,10 +604,10 @@ pub fn run() void {
         // Drain signals BEFORE the reload/reexec flags are consumed below. A
         // signal byte (SIGUSR1/SIGHUP) dispatches the matching request, which
         // sets a flag AND writes a wake byte into this same pipe; consuming
-        // flags first let the byte be drained-and-discarded in the same poll
-        // iteration, leaving the flag set but nothing to wake the loop again
-        // (poll sleeps until unrelated X traffic or a timer). Draining first
-        // makes the consumption below see the flag it just set.
+        // flags first would let the byte be drained-and-discarded in the same
+        // poll iteration, leaving the flag set but nothing to wake the loop
+        // again (poll sleeps until unrelated X traffic or a timer). Draining
+        // first makes the consumption below see the flag it just set.
         if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
             process.drainAndDispatch(signal_fd);
 
@@ -628,8 +625,9 @@ pub fn run() void {
         // The reload flag is set by SIGHUP and the reload_config keybinding
         // (proc.reload, which writes a wake byte to the pipe; the byte can be
         // dropped if the pipe is full). Consume it every iteration, BEFORE the
-        // ready split: confining it to the ready>0 branch let a flag-only
-        // request stall on timeout wakeups until unrelated X traffic arrived.
+        // ready split: confining it to the ready>0 branch would let a
+        // flag-only request stall on timeout wakeups until unrelated X traffic
+        // arrives.
         //
         // Config reload is consumed BEFORE re-exec: a chained bind
         // (["reload_config", "reload_hana"]) sets both flags in one dispatch,
@@ -665,11 +663,8 @@ pub fn run() void {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Deadline policy (former timers.zig, merged 2026-10-10): aggregates active
-// timer sources to compute the next poll timeout.
-// ---------------------------------------------------------------------------
-
+/// Deadline policy: aggregates active timer sources to compute the next poll
+/// timeout.
 /// One timer source. `null` means "this source wants no wakeup"; a
 /// non-negative value is "wake me in this many ms".
 ///
@@ -681,12 +676,12 @@ pub const Source = *const fn () ?i32;
 /// The loop's registered timer sources, reduced on demand.
 ///
 /// This looks like a list abstraction wrapped around the single entry the loop
-/// currently registers (the bar's own deadline), and has been proposed for
-/// deletion as such. It is the opposite of redundant: the list IS the policy.
+/// currently registers (the bar's own deadline). It is the opposite of
+/// redundant: the list IS the policy.
 /// The reduce -- consult every source even after one answers, because a later
 /// source may want to wake sooner -- is the rule, and a one-entry version could
 /// not express it, so the second source would arrive as a branch at the call
-/// site, which is the shape this module was created to remove. See
+/// site, which is the shape this module exists to avoid. See
 /// timers_test.zig, which exercises the reduce with four sources.
 pub const Timers = struct {
     sources: []const Source,

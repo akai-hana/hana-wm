@@ -3,8 +3,7 @@
 //! wall clock; deadlineFromMs, effectiveFormatFor, and cycledMode are the only
 //! pieces with input-independent behavior worth pinning down.
 
-// Declared here, next to the imports that make it necessary, rather than in a
-// build.zig table that had to be kept in agreement with them by hand.
+// Declared here, next to the imports that make it necessary.
 // build-gate: seg_clock
 
 const std = @import("std");
@@ -77,8 +76,7 @@ test "a mode cycle is stale even when the effective format bytes do not move" {
     // configured as the built-in time format and time mode render identical
     // bytes, but their width probes (and therefore the row reservation)
     // differ. The predicate must go stale on the mode itself -- that staleness
-    // is what drives the budget re-derivation the deleted mode-keyed width
-    // cache used to own.
+    // is what drives the budget re-derivation.
     const base = "%H:%M:%S";
     try std.testing.expectEqualStrings(
         clock.effectiveFormatFor(base, .date_time),
@@ -92,8 +90,8 @@ test "a mode cycle is stale even when the effective format bytes do not move" {
 test "staleness keys on the format's bytes, not its address" {
     // Same second, same bytes, different slices: NOT stale.
     try std.testing.expect(!clock.stalenessFor(7, 7, .date_time, .date_time, "%H:%M", "%H:%M"));
-    // Same second, same address, different bytes: stale (the pointer compare
-    // this replaced would have called this unchanged).
+    // Same second, same address, different bytes: stale (a pointer compare
+    // would call this unchanged).
     var buf: [5]u8 = "%H:%M".*;
     try std.testing.expect(clock.stalenessFor(7, 7, .date_time, .date_time, "%H:%M:%S", &buf));
     // Different second: stale regardless of format.

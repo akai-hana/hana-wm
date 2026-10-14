@@ -78,9 +78,7 @@ pub fn consumeReload() bool {
     return should_reload.swap(false, .acq_rel);
 }
 
-// ---------------------------------------------------------------------------
-// In-place exec coordinator (former restart.zig, merged 2026-10-10).
-// ---------------------------------------------------------------------------
+/// In-place exec coordinator (former restart.zig, merged 2026-10-10).
 
 // libc bindings for execv/setenv (no Zig stdlib wrappers exist for them, and
 // the executable links libc, so mirroring spawn.zig's pattern is the honest
@@ -239,11 +237,9 @@ pub fn execNext(handoff: Handoff) noreturn {
     std.process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Signal self-pipe and dispatch (former signals.zig, merged 2026-10-11):
-// routes POSIX signals through a self-pipe so the event loop can dispatch
-// them safely without signal-handler reentrancy.
-// ---------------------------------------------------------------------------
+/// Signal self-pipe and dispatch (former signals.zig, merged 2026-10-11):
+/// routes POSIX signals through a self-pipe so the event loop can dispatch
+/// them safely without signal-handler reentrancy.
 // End indices of the self-pipe: signal handlers write to pipe_write; the
 // event loop polls pipe_read.
 const pipe_read = 0;

@@ -1,9 +1,8 @@
 //! DPI detection and scaling utilities.
 //! Detects display DPI and scales bar dimensions for consistent appearance across resolutions.
 //! The display-free half (RESOURCE_MANAGER parsing, geometry→DPI formula,
-//! sanity band) lives here too -- it used to be a separate `dpi_math` module,
-//! but it exists only to serve the detection path below and is folded in;
-//! `dpi_test.zig` exercises it without an X server.
+//! sanity band) lives here too -- it exists only to serve the detection path
+//! below; `dpi_test.zig` exercises it without an X server.
 
 const std = @import("std");
 
@@ -53,8 +52,8 @@ fn lineStartOf(haystack: []const u8, key: []const u8) ?usize {
 /// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
 ///
 /// The key is matched at a LINE BOUNDARY, not as a bare substring. A plain
-/// `indexOf` meant any key whose name ended in "Xft.dpi:" matched -- e.g. a
-/// client's "NotXft.dpi: 96" or "MyXft.dpi: 144" was read as hana's own
+/// `indexOf` would let any key whose name ends in "Xft.dpi:" match -- e.g. a
+/// client's "NotXft.dpi: 96" or "MyXft.dpi: 144" would be read as hana's own
 /// setting, silently overriding the real resolution. The X resource format
 /// is one name/value binding per line, so a binding starts at the string
 /// head or right after a newline; that is the only place a match is valid.
@@ -92,8 +91,8 @@ pub fn isReasonableDpi(dpi: f32) bool {
 // resolution, so font sizing degrades more gracefully on smaller screens.
 const font_baseline_height: f32 = 1080.0;
 
-/// The bar-height policy as ONE value. These were three loose pub consts
-/// a caller had to know to apply together; nothing stopped someone clamping
+/// The bar-height policy as ONE value. Three loose pub consts would leave a
+/// caller to apply them together, and nothing would stop someone clamping
 /// against the min and forgetting the cap. Grouping them makes "the policy"
 /// a thing you can pass, not a convention you have to remember.
 const BarHeightPolicy = struct {
@@ -221,13 +220,12 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 /// rather than the screen baseline, so font sizes degrade more gracefully on
 /// smaller screens.
 ///
-/// Takes the height as a plain value rather than a `core.Screen`. There
-/// used to be two shapes of this one function -- this one took a whole
-/// `Screen`, and a sibling took `RefDims { screen_h, screen_w }` -- so a
-/// caller holding only a height, or the wrong half of a `RefDims`, had no
-/// signature that made the mistake impossible: width and height are the same
-/// type, and a swap compiles silently and scales a 2560-wide screen as if it
-/// were 1440 tall. A single scalar reference cannot be transposed.
+/// Takes the height as a plain value rather than a `core.Screen`. Two shapes
+/// of this one function (one taking a whole screen, one a width/height pair)
+/// would leave a caller holding only a height, or the wrong half of the pair,
+/// with no signature that makes the mistake impossible: width and height are
+/// the same type, and a swap compiles silently and scales a 2560-wide screen
+/// as if it were 1440 tall. A single scalar reference cannot be transposed.
 ///
 /// The bar's metric resolution takes its inputs as plain values so it can be
 /// resolved and tested without a live screen, and this is the only

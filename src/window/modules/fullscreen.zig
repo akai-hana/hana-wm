@@ -342,23 +342,20 @@ pub fn onWindowGone(win: u32) void {
     if (!pending.hide) core.fullscreen.bump();
 }
 
-// ---------------------------------------------------------------------------
-// Covering commands: the enter/exit/switch transition for an arbitrary window
-// in ONE model transition + ONE reconcile. The old `src/actions/covering.zig`
-// group, moved beside the covering record it writes.
-//
-// The covering winner renders on the full screen edge-to-edge (screen rect,
-// bw=0, pixel=0, ABOVE merged); everyone else parks off-screen in the same
-// transition. Floating exit geometry replays from the base rect via the
-// LastSent diff; tiled exit re-derives placements from the tiling engine, so
-// the pre-exit "restore then re-park" request round collapses away.
-//
-// Bar hide/show deferral and EWMH stay protocol-side, driven through the
-// window_modules registry's pending machinery so events.zig's ConfigureNotify
-// handler works unchanged. The keybind path resolves the focused window at
-// the dispatch site and lands here too.
-// ---------------------------------------------------------------------------
-
+/// Covering commands: the enter/exit/switch transition for an arbitrary window
+/// in ONE model transition + ONE reconcile. The old `src/actions/covering.zig`
+/// group, moved beside the covering record it writes.
+///
+/// The covering winner renders on the full screen edge-to-edge (screen rect,
+/// bw=0, pixel=0, ABOVE merged); everyone else parks off-screen in the same
+/// transition. Floating exit geometry replays from the base rect via the
+/// LastSent diff; tiled exit re-derives placements from the tiling engine, so
+/// the pre-exit "restore then re-park" request round collapses away.
+///
+/// Bar hide/show deferral and EWMH stay protocol-side, driven through the
+/// window_modules registry's pending machinery so events.zig's ConfigureNotify
+/// handler works unchanged. The keybind path resolves the focused window at
+/// the dispatch site and lands here too.
 /// Fullscreen transition classification for the atomic grab path: a named
 /// kind instead of a bool-pair so enter/exit/switch_ can't be passed
 /// inconsistently. Drives the EWMH state writes and the bar hide/show

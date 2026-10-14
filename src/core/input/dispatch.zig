@@ -1,12 +1,10 @@
 //! Action dispatch: `executeAction` + `grafted`, the single router every
-//! configured action ends in. Extracted from input.zig (which had re-merged it
-//! from dispatch.zig on 2026-10-10) as part of the src/core/input split: it is
-//! the one module both the key path (keys.zig) and the mouse path (mouse.zig)
-//! must reach, so giving it a home of its own is what keeps those two from
-//! importing each other. Wire traffic: the ICCCM `WM_DELETE_WINDOW` client
-//! message (closeWindow) and the one-shot root-cursor theming call's sibling
-//! `xcb_destroy_window` fallback -- protocol text and a last-resort close, not
-//! sync-bound geometry, which is why this file carries its own allowlist entry.
+//! configured action ends in. The one module both the key path (keys.zig) and
+//! the mouse path (mouse.zig) must reach, so giving it a home of its own keeps
+//! those two from importing each other. Wire traffic: the ICCCM `WM_DELETE_WINDOW`
+//! client message (closeWindow) and the `xcb_destroy_window` fallback; protocol
+//! text and a last-resort close, not sync-bound geometry, which is why this file
+//! carries its own allowlist entry.
 const std = @import("std");
 const build_options = @import("build_options");
 
@@ -29,13 +27,6 @@ const atoms = @import("atoms");
 const spawn = @import("spawn");
 const process = @import("process");
 
-// ---------------------------------------------------------------------------
-// Action dispatch: the single router every configured action ends in.
-// `executeAction` is pub for mouse.zig's config mouse binds; `grafted`
-// likewise. This is the module both halves of input dispatch through, which
-// is what makes the key -> mouse dependency below impossible.
-// ---------------------------------------------------------------------------
-
 /// The toggle-bar-position action: re-anchor the bar, then reconcile.
 ///
 /// The reconcile lives here rather than in the bar's renderer. It takes
@@ -57,8 +48,8 @@ fn toggleBarPosition() void {
         window.updateWorkspaceBorders();
         // The bar re-anchor already changed the usable-area claim; re-derive
         // placements from it even when there is no current workspace to
-        // report: a bare early return left the bar-anchored claim unread and
-        // placements stale until an unrelated event reconciled.
+        // report: otherwise the bar-anchored claim would go unread and
+        // placements stay stale until an unrelated event reconciles.
         grab.reconcileNow(.{});
         return;
     };
@@ -129,7 +120,7 @@ pub fn executeAction(action: *const types.Action) void {
         // keep running after the batch moves on. Nesting exception: a member
         // that is itself a `,`-sequence is dispatched through executeAction's
         // sequence arm, which blocks on that sequence's exec children via
-        // spawn.execSynchronous -- so a `,`-sequence inside a `+` batch is
+        // spawn.execSynchronous, so a `,`-sequence inside a `+` batch is
         // awaited, not detached.
         .parallel => |acts| for (acts) |*a| executeAction(a),
 
@@ -154,9 +145,9 @@ pub fn executeAction(action: *const types.Action) void {
         // Cycle focus forward/backward. The viewport snap runs as a duty
         // inside the focus transition's single grab (see
         // window.snapViewportFocusedDuty), so a cycle that scrolls the
-        // viewport is still one grab+reconcile, not focus-then-snap's two --
-        // and focus.cycleFocus pairs the target with that duty, so the
-        // pairing is no longer this call site's responsibility.
+        // viewport is still one grab+reconcile, not focus-then-snap's two;
+        // focus.cycleFocus pairs the target with that duty, so the pairing
+        // is not this call site's responsibility.
         .cycle_focus => |dir| focus.cycleFocus(dir, &window.snapViewportFocusedDuty),
 
         // Workspaces. A tree without the workspaces module collapses to a
@@ -203,12 +194,12 @@ pub fn toggleFloatingWindow(win: u32) void {
 ///
 /// The error sits in the `else` branch because Zig prunes the untaken branch
 /// of a comptime-known `if` without analyzing it: `if (!cond) @compileError(..)`
-/// is dead code in exactly the case it exists to catch, and was verified to
-/// compile clean. The converse -- a tag declared as needing the scaffold but
-/// dispatched through a plain arm -- is invisible from here, so the
-/// `tiling scaffold table matches the dispatcher's grafted set` test closes
-/// that direction. `pub` for mouse.zig, whose toggle_floating_window
-/// mouse binds graft through it.
+/// is dead code in exactly the case it exists to catch. The converse: a tag
+/// declared as needing the scaffold but dispatched through a plain arm is
+/// invisible from here; the test
+/// `tiling scaffold table matches the dispatcher's grafted set` closes that
+/// direction. `pub` for mouse.zig, whose toggle_floating_window mouse binds
+/// graft through it.
 pub inline fn grafted(comptime tag: std.meta.Tag(types.Action), comptime op: anytype, arg: anytype) void {
     comptime if (action_mod.needsTilingFocusScaffold(tag)) {} else @compileError(
         "dispatch.grafted used for an action action_mod.needsTilingFocusScaffold does not declare",

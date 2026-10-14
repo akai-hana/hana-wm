@@ -1,7 +1,6 @@
 //! Key event handlers: the press/release half of the dispatch table.
-//! Split out of input.zig during the src/core/input refactor -- the one
-//! concern there was left that is genuinely per-EVENT (everything else in
-//! input.zig was lifecycle: XKB state, bind compilation, grabs, theming).
+//! The one concern in input.zig that is genuinely per-EVENT (everything else
+//! was lifecycle: XKB state, bind compilation, grabs, theming).
 //!
 //! No wire traffic: a key press either resolves to an action through
 //! keybinds' dispatch map or is dropped, and the action itself runs in

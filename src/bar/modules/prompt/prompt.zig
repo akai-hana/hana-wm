@@ -99,8 +99,7 @@ var g: PromptState = .{};
 /// Called from bar.applyReload: the renderer's module globals are built
 /// against the OLD config's fonts and bar height, and a reload can change
 /// both. Without this the prompt renders with stale widths/geometry until
-/// its next full cycle (the old "constant between reloads" assumption was
-/// wrong).
+/// its next full cycle.
 fn invalidateReloadCaches() void {
     render.invalidateReloadCaches();
 }
@@ -289,7 +288,7 @@ fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) bool {
     // No handler installed means there is no modal engine to dispatch
     // to, so insert mode falls back to the basic editor. With one installed,
     // insert keys go to the handler like every other mode -- an extensor that
-    // implements this contract is no longer bypassed for not being "vim".
+    // implements this contract is not bypassed for not being "vim".
     const action = if (!editor.addon_active and g.vim_state.mode == .insert)
         handleInsertBasic(&g.vim_state, sym)
     else switch (g.vim_state.mode) {
@@ -397,9 +396,7 @@ fn deactivate() void {
     g.is_active = false;
     // on_deactivate must be called in exactly the situations dispatch routed
     // key input through the vim/normal handlers -- which is gated on
-    // editor.addon_active, not the vim_mode config key. With the editor
-    // addon registered but the key off, gating on vimModeEnabled() left a
-    // pending operator/count prefix in g.vim_state across sessions.
+    // editor.addon_active, not the vim_mode config key.
     if (editor.addon_active) editor.handlers.on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);
@@ -426,8 +423,7 @@ fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
 
 /// The OVERLAY draw. The overlay contract is a different hook with a
 /// different return (advanced x, no width report -- the host slot owns the
-/// geometry), so the same body needs its own adapter. Sharing one function
-/// across both used to be possible only because neither said what it returned.
+/// geometry), so the same body needs its own adapter.
 fn overlayDrawHook(ctx: *anyopaque, x: u16) !u16 {
     const dc = segmod.castDraw(ctx);
     return draw(dc, x);

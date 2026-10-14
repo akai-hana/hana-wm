@@ -1,26 +1,15 @@
 //! Test module for the dependency-free ALSA control backend.
 //!
 //! The pure ABI-size/ioctl-encoding/percent-mapping logic lives HERE, not in
-//! native_alsa.zig. It used to live inline there with this file as a mere
-//! "reachability anchor" -- on the belief that importing a module runs its
-//! inline tests. IT DOES NOT. A canary `expectEqual(1, 2)` appended to
-//! native_alsa.zig does not fail `zig build test`, while the same canary
-//! appended here does. So those tests, which included the only coverage of
-//! slider.pctFromRaw's inverted-range guard, never ran: mutation M-B2 (dropping
-//! `if (max <= min) return 0;`) survived. Recovered below; it now kills M-B2.
+//! native_alsa.zig: an inline test in an imported module is never analyzed by
+//! this harness. The suite pins the ABI layouts, the ioctl encodings, and the
+//! percent mapping's inverted-range guard.
 //!
 //! The live ioctl read/write path is verified against the probing machine's
 //! card (see the module doc) and cannot run in unit tests.
 
 const std = @import("std");
 const native_alsa = @import("native_alsa");
-
-// ---------------------------------------------------------------------------
-// Recovered dead tests, formerly INLINE in native_alsa.zig. A canary
-// `expectEqual(1, 2)` appended to that file does not fail, so the import in
-// this test root made the module REACHABLE WITHOUT RUNNING its inline tests:
-// the harness only executes test blocks in the test root itself. These now
-// run for the first time. The symbols they touch are `pub` for that reason.
 
 test "UAPI element struct sizes are the pinned ABI" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(native_alsa.ElemId));

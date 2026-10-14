@@ -1,11 +1,10 @@
 //! XKB keyboard state: the live keycode->keysym table, its construction from
 //! the server's keymap, and the one-shot XKB extension negotiation that
-//! makes the table possible. Absorbs xkbcommon.zig plus the state variable
-//! and lifecycle functions input.zig used to hold.
+//! makes the table possible.
 //!
 //! This is the lowest layer of src/core/input: it depends on nothing else in
 //! the directory (only `keymap`, the connection-free table vocabulary), so
-//! everything above it -- keybinds, keys, dispatch -- can read the live
+//! everything above it (keybinds, keys, dispatch) can read the live
 //! keyboard without any of them reaching back.
 const std = @import("std");
 
@@ -13,18 +12,13 @@ const core = @import("core");
 
 const log = @import("log");
 
-// Single @cImport owner for libxkbcommon lives in keymap.zig: the same two
-// headers were translated once here and once in keysyms.zig (since merged
-// into keymap), giving two translation units to keep in sync for no benefit.
+/// Single @cImport owner for libxkbcommon lives in keymap.zig.
 const keymap = @import("keymap");
 const xkb = keymap.xkb;
 
 const xkb_context = keymap.xkb_context;
 
-// ---------------------------------------------------------------------------
-// Module-owned XKB state (from input.zig).
-// ---------------------------------------------------------------------------
-
+/// Module-owned XKB state
 var xkb_state: ?XkbState = null;
 
 /// Initialises the XKB context, keymap, and key state
@@ -45,7 +39,7 @@ pub fn deinitXkb() void {
 /// deinitXkb and must not be cached across it.
 ///
 /// Const, deliberately. Zig has no private fields, so a struct's fields are
-/// reachable by anyone holding a pointer to it -- which made the live
+/// reachable by anyone holding a pointer to it, which makes the live
 /// keycode->keysym table and the reverse index a mutation surface: any module
 /// could overwrite a key's keysym or truncate the index, and the dispatch path
 /// would read the damage with no way to tell it from a real mapping. Handing
@@ -73,16 +67,15 @@ fn getXkbStateMut() ?*XkbState {
 /// grabs, the compiled bind list) is now stale. Returns false for the
 /// modifier-map and pointer-button remaps that arrive through the same
 /// event: those are common (`xmodmap` touches both), and rebuilding for them
-/// threw away working state and made the user pay a full ungrab/regrab storm
+/// throws away working state and makes the user pay a full ungrab/regrab storm
 /// over a change that cannot have affected any binding. The modifier map is
 /// not part of the keycode->keysym table, and button remapping is the
 /// client's own business.
 ///
 /// This is deliberately the XKB HALF only. Re-resolving the compiled binds
 /// from the new table belongs to `keybinds.handleMappingNotify`, which calls
-/// this; making the composite live here would put a keybinds -> xkb ->
-/// keybinds import cycle back into the directory this refactor exists to
-/// make acyclic.
+/// This; making the composite live here would put a keybinds -> xkb ->
+/// keybinds import cycle back into a directory laid out to stay acyclic.
 pub fn rebuildKeymap(keyboard: bool) bool {
     if (!keyboard) return false;
     const state = getXkbStateMut() orelse return false;
@@ -90,9 +83,7 @@ pub fn rebuildKeymap(keyboard: bool) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// XKB state, retry ladder, and detectable auto-repeat (from xkbcommon.zig).
-// ---------------------------------------------------------------------------
+/// XKB state, retry ladder, and detectable auto-repeat
 /// The XKB setup requests are sent once after setup; these retries cover the
 /// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
 /// get_core_keyboard_device_id, keymap creation), while the X server is still
@@ -107,14 +98,15 @@ const xkb_retry_delay_ms: u64 = 20;
 /// events WITHOUT the deactivating KeyRelease X11's default autorepeat elides
 /// between them. Without it a held binding key flaps between do/undo of a
 /// toggle action every repeat. Set via XkbPerClientFlags (minor opcode 21):
-/// there is no XkbSetDetectableAutoRepeat request — the old hand-marshalled
-/// minor opcode 34 does not exist, so the feature was silently never enabled.
+/// there is no XkbSetDetectableAutoRepeat request, and hand-marshalling minor
+/// opcode 34 would silently never enable the feature (that opcode does not
+/// exist).
 const xkb_detectable_auto_repeat_mask: u32 = 1; // XkbPCF_DetectableAutoRepeatMask
 
 /// Enables detectable auto-repeat on the XKB core device. Must be called after
 /// the XKB extension is negotiated (xkb_x11_setup_xkb_extension) and the
 /// extension opcode is discoverable via xcb_get_extension_data. Best-effort: a
-/// failure to look up the opcode or to send the request is logged and ignored —
+/// failure to look up the opcode or to send the request is logged and ignored;
 /// the WM still functions, it just reverts to the flappy autorepeat behaviour
 /// this is meant to eliminate.
 fn enableDetectableAutoRepeat(conn: core.Connection) void {
@@ -161,7 +153,7 @@ pub const XkbState = struct {
     keysym_by_keycode: [keymap.x11_max_keycode]u32,
     /// Reverse index over the same table, sorted by keysym. Held as one value
     /// (not a bare array plus a separate count) so the pair can never be
-    /// updated apart -- `len` is how many entries are live, and the rest of
+    /// updated apart; `len` is how many entries are live, and the rest of
     /// the array is uninitialized.
     reverse: keymap.ReverseIndex,
 
@@ -215,7 +207,7 @@ pub const XkbState = struct {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) {
             // The core keyboard can be absent (a headless or purely virtual
-            // X server). Returning silently here made a missing device
+            // X server). Returning silently here would make a missing device
             // indistinguishable from a device that simply had nothing to
             // rebuild, which is exactly the kind of failure that reads as
             // "my keybinds stopped working after xmodmap".

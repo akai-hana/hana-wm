@@ -40,7 +40,7 @@ const document = @import("document");
 // Re-exports: the model and the cross-file merge both live beside this file
 // (document.zig); `parser.*` keeps naming them so callers (schema, sections,
 // discover, tests) hold one import. The dialect itself
-// -- tokenizer, weight/color token spellings, `parse` -- stays here.
+// tokenizer, weight/color token spellings, `parse` stays here.
 pub const Value = document.Value;
 pub const Section = document.Section;
 pub const Document = document.Document;

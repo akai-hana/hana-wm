@@ -20,10 +20,7 @@
 const build_options = @import("build_options");
 const model = @import("model");
 
-// ---------------------------------------------------------------------------
-// Policy (pure): decisions over the model, no wire.
-// ---------------------------------------------------------------------------
-
+/// Policy (pure): decisions over the model, no wire.
 /// True when a fullscreen window on `ws` forces the bar hidden (shared-screen
 /// reaction). Compile-time folded when the fullscreen module is absent: the
 /// model read is comptime-unreachable, matching the inlined guards that used

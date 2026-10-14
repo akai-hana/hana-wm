@@ -18,7 +18,7 @@ const bindings = @import("bindings");
 
 /// The clock's display format: the configured value, or the built-in default
 /// when unset. Single accessor shared by the clock segment and the bar's
-/// updateClock (each previously re-derived the same fallback).
+/// updateClock.
 pub fn clockFormat(config: bar_config.Config) []const u8 {
     return config.clock_format orelse types.default_clock_format;
 }
@@ -45,21 +45,15 @@ inline fn showLayoutAtBaseline(
 /// The validated span `[start, start + len)` inside `text`, or null when the
 /// span is not a legal non-empty range of it.
 ///
-/// The span arrives as EXPLICIT OFFSETS from the caller. It used to arrive as a
-/// subslice, whose position the painter recovered by subtracting raw addresses
-/// (`@intFromPtr(v.ptr) - @intFromPtr(text.ptr)`) and whose validity was checked
-/// by comparing raw pointers. A module that knows where its number
-/// sits now says so, and this only has to range-check it, which is pure and
-/// testable without Pango, cairo or a display.
+/// The span arrives as EXPLICIT OFFSETS from the caller, so this only has to
+/// range-check it -- pure and testable without Pango, cairo or a display.
 const ValueRange = struct { start: usize, len: usize };
 
 pub fn valueRange(text: []const u8, start: usize, len: usize) ?ValueRange {
     // An empty span would colour nothing, so it collapses to the single-colour
-    // path. A span covering the WHOLE string is legal now and was not before:
-    // a value-only format (a slider whose display is just "{pct}") legitimately
-    // wants its number tinted. Under the old subslice API that case was
-    // indistinguishable from a caller handing over the whole text by accident,
-    // so it was rejected; with explicit offsets the caller is stating intent.
+    // path. A span covering the WHOLE string is legal: a value-only format (a
+    // slider whose display is just "{pct}") legitimately wants its number
+    // tinted, and explicit offsets let a caller state that intent.
     if (len == 0) return null;
     // These two bounds are each independently necessary, not redundant with
     // the `start + len` test below: a caller-supplied offset can be near
@@ -120,7 +114,7 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
                 // past the final `text`), coloring "42%" as one number.
                 const ok_percent = i + 5 < format.len and format[i + 5] == '%';
                 const span = ps.len + @intFromBool(ok_percent and n + ps.len < buf.len);
-                // First {pct} wins, as before.
+                // First {pct} wins.
                 if (value_len == 0) {
                     value_start = n;
                     value_len = span;
@@ -207,7 +201,7 @@ pub const DrawContext = struct {
 
     /// Draws `text` with its TOP at `y_top`, in a size-suffixed font.
     /// The sized description and its caching live on `FontBook`; the run is
-    /// this text's own layout, so the set/restore pairing is gone.
+    /// this text's own layout, so no set/restore pairing is needed.
     pub fn drawTextSized(
         self: *DrawContext,
         x: u16,
@@ -237,11 +231,9 @@ pub const DrawContext = struct {
     /// Draws `text` with its left edge at `x` and baseline at `y`.
     /// Infallible: a run that cannot be built degrades to an empty run
     /// that measures 0 and paints nothing, so this path has no `error` for
-    /// callers to handle. The `!void` this used to declare had an EMPTY error
-    /// set, so it was not a contract, just a `try` that callers had to write and
-    /// an `error` they had to catch. The one genuinely fallible text path is
-    /// `drawTextSized`, which resolves a font
-    /// description and can really return `error.NoFont`; that one stays `!`.
+    /// callers to handle. The one genuinely fallible text path is
+    /// `drawTextSized`, which resolves a font description and can really
+    /// return `error.NoFont`.
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) void {
         self.drawTextImpl(x, y, text, null, color, .{});
     }
@@ -259,8 +251,7 @@ pub const DrawContext = struct {
         color: u32,
     ) void {
         // One run, painted at both positions: the two copies must be the same
-        // text in the same state, and a shared mutable layout was the only
-        // thing making that true before.
+        // text in the same state, which one shared run guarantees.
         var run = self.fonts.beginRun(text, .{}, null);
         defer run.deinit();
         const l = run.layout orelse return;
@@ -293,7 +284,7 @@ pub const DrawContext = struct {
 
     /// Shared text rendering: build a run for `text` under `props`, optionally
     /// ellipsize it to `max_width`, and paint at baseline. Every draw
-    /// now goes through a private run, so there is no layout state left behind
+    /// goes through a private run, so there is no layout state left behind
     /// for the next draw to inherit.
     inline fn drawTextImpl(
         self: *DrawContext,
@@ -349,10 +340,10 @@ pub const DrawContext = struct {
         min_w: ?u16,
         props: bar_config.SegmentProps,
     ) !u16 {
-        // One run measured AND painted. These used to be two separate
-        // operations on a shared layout, which is precisely how a styled
-        // segment could reserve one width and paint another: the second
-        // operation re-derived the styling instead of reusing the first.
+        // One run measured AND painted, so the reserved width and the painted
+        // styling come from one derivation: measuring and painting through two
+        // passes on a shared layout lets a styled segment reserve one width and
+        // paint another, because the second pass can re-derive the styling.
         var run = self.fonts.beginRun(text, props, null);
         defer run.deinit();
         const text_w = run.measure();
@@ -363,7 +354,7 @@ pub const DrawContext = struct {
     }
 
     /// Facade forwarder; the implementation AND the paint-order rule
-    /// Now live on `Surface.fillRect`.
+    /// live on `Surface.fillRect`.
     pub fn fillRect(self: *DrawContext, x: u16, y: u16, width: u16, height: u16, color: u32) void {
         self.surface.fillRect(x, y, width, height, color);
     }
@@ -381,8 +372,8 @@ pub const DrawContext = struct {
         return run.measure();
     }
 
-    /// Facade metrics accessor, replacing direct `dc.font.getMetrics()`
-    /// access from modules (prompt.zig).
+    /// Facade metrics accessor; the prompt overlay reads the bar's font
+    /// metrics through it.
     pub fn metrics(self: *DrawContext) struct { i16, i16 } {
         return self.fonts.getMetrics();
     }
@@ -435,13 +426,12 @@ pub fn drawPaddedSegment(
 
 /// Like `drawPaddedSegment`, but paints the byte span `[value_start,
 /// value_start + value_len)` of `text` (the numeric readout, e.g. "42%") in the
-/// segment's NUMBER color -- the
-/// `[bar.properties] <segment>_value` override (`segmentValueFg`), falling
-/// back to the segment foreground -- and everything else in the segment
-/// foreground. Collapses into `drawPaddedSegment` behavior when `value` is
-/// null or not a subslice of `text`. The width comes from the whole string,
-/// exactly like `drawSegment`, so a segment's reserved slot never changes when
-/// a value color is added.
+/// segment's NUMBER color -- the `[bar.properties] <segment>_value` override
+/// (`segmentValueFg`), falling back to the segment foreground -- and everything
+/// else in the segment foreground. Collapses into `drawPaddedSegment` behavior
+/// when the span is not a legal range of `text` (`valueRange` returns null).
+/// The width comes from the whole string, exactly like `drawSegment`, so a
+/// segment's reserved slot never changes when a value color is added.
 pub fn drawPaddedSegmentValue(
     dc: *DrawContext,
     config: bar_config.Config,
@@ -463,38 +453,20 @@ pub fn drawPaddedSegmentValue(
     // ONE Pango pass: measure the whole string, then paint it once with
     // a foreground attribute over the value's byte range.
     //
-    // What this deletes, and why each part was load-bearing-bad rather than
-    // merely verbose:
+    // One pass is load-bearing: splitting the string into prefix/value/suffix
+    // and summing per-part measurements is not the same as measuring the whole
+    // string -- shaping across a part boundary (kerning, ligatures) changes the
+    // true advance, so the cursor drifts away from where the glyphs go while
+    // the reserved width is still measured from the whole string.
     //
-    //   - The three-way re-shape. `text` was split into prefix/value/suffix and
-    //     each part measured and drawn SEPARATELY, advancing a cursor by
-    //     `measureTextWidth(part)`. Summing per-part measurements is not the
-    //     same as measuring the whole string: shaping across a part boundary
-    //     (kerning, ligatures) means the sum can differ from the true advance,
-    //     so the cursor drifted away from where the glyphs actually went. The
-    //     reserved width came from `measureTextWidth(text)` -- the whole string
-    //     -- while the paint walked a different total. That measure/paint
-    //     divergence is the bug; it was invisible whenever the segment text had
-    //     no boundary-sensitive shaping, which is why it survived.
-    //
-    //   - The pointer-arithmetic subslice contract. `start` was computed as
-    //     `@intFromPtr(v.ptr) - @intFromPtr(text.ptr)`, and validity was checked
-    //     by comparing raw addresses. That encodes "the caller must hand me a
-    //     subslice of this exact string" as a runtime-address property instead
-    //     of a type, and it is what made the range unrepresentable as anything
-    //     but a pointer delta.
-    //
-    // What it gains: Pango owns the range, so the value colour composes with
-    // ellipsize and the style props (bold/italic/underline) for free instead of
-    // being a separate draw that had to reproduce them. The style props are
-    // applied to the SAME layout as the range, so the two can no longer
-    // disagree about how the text is shaped.
-    //
-    // The style props and the value's foreground go into the
-    // run's OWN attribute list, on the run's OWN layout. Nothing is attached
-    // to a shared layout and nothing has to be restored: the run's deinit
-    // unrefs the list and the layout together, so a forgotten restore is no
-    // longer representable.
+    // Pango owning the range also composes for free: the value colour applies
+    // alongside ellipsize and the style props (bold/italic/underline) instead
+    // of being a separate draw that has to reproduce them, and the style props
+    // go on the SAME layout as the range, so the two cannot disagree about how
+    // the text is shaped. Both the props and the value's foreground live in the
+    // run's OWN attribute list, on the run's OWN layout: the run's deinit
+    // unrefs the list and the layout together, so there is no restore to
+    // forget.
     var run = dc.fonts.beginRun(text, props, null);
     defer run.deinit();
     if (run.layout) |l| {
@@ -521,8 +493,7 @@ pub fn drawPaddedSegmentValue(
 /// Loads the configured fonts into `dc`. Called once per DrawContext creation.
 /// `allocator` and `font_names` are passed in rather than read out of
 /// `core.getState()`: the caller that already holds cs does not want a hidden
-/// second source of truth here (the SizedFontList doc above names exactly
-/// that bug class for `freeSizedFontList`, and `build` was fixed the same way).
+/// second source of truth for the bar's fonts.
 pub fn loadBarFonts(dc: *DrawContext, allocator: std.mem.Allocator, font_names: []const []const u8, font_size: u16) !void {
     var sized = try fonts.SizedFontList.build(allocator, font_names, font_size);
     defer sized.deinit();

@@ -40,10 +40,7 @@ const query = @import("query");
 const window = @import("window");
 const registry = @import("registry");
 
-// ---------------------------------------------------------------------------
-// 1. ConfigureRequest compliance.
-// ---------------------------------------------------------------------------
-
+/// 1. ConfigureRequest compliance.
 const geometry_mask: u16 =
     xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
     xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT |
@@ -237,10 +234,7 @@ fn sendRequestedConfigure(
     _ = xcb.xcb_configure_window(core.getState().conn, win, mask, &values);
 }
 
-// ---------------------------------------------------------------------------
-// 2. EWMH ClientMessage.
-// ---------------------------------------------------------------------------
-
+/// 2. EWMH ClientMessage.
 const State = struct {
     // Warn-once latches for client-message diagnostics (see
     // handleClientMessage): a looping pager would otherwise flood the log.
@@ -356,13 +350,10 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     registry.callHook(.setFullscreenWindow, .{ win, want });
 }
 
-// ---------------------------------------------------------------------------
-// 3. Enter/Leave crossing.
-//
-// Shape filtering only; the crossing policy (drag/spawn suppression, hover
-// focus) lives in protocol/focus.zig as crossingShouldDrop/maybeFocusWindow.
-// ---------------------------------------------------------------------------
-
+/// 3. Enter/Leave crossing.
+///
+/// Shape filtering only; the crossing policy (drag/spawn suppression, hover
+/// focus) lives in protocol/focus.zig as crossingShouldDrop/maybeFocusWindow.
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or

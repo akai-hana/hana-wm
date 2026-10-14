@@ -1,8 +1,7 @@
 //! Tests for the display-free half of DPI resolution (display/dpi.zig).
 //!
 //! The formula exists so these could be written at all: the Xft.dpi parser is a
-//! hand-rolled parser over a USER-EDITABLE X resource string, and it used to
-//! live on the x11 side of the shelf with no way to exercise it.
+//! hand-rolled parser over a USER-EDITABLE X resource string.
 
 const std = @import("std");
 const testing = std.testing;

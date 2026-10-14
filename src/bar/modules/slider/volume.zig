@@ -209,10 +209,9 @@ fn logNoBackend() void {
 /// (libpulse -> pactl -> amixer -> native ALSA). Returns true when this read
 /// changed the displayed state.
 fn readVolume() bool {
-    // A LATCHED backend is read directly. This is the change that takes
-    // the ladder off the hot path: previously every read re-walked the rungs
-    // from the top, re-attempting a native attach and, when the daemon was
-    // dead, spawning pactl/amixer on every poll, press and right-click.
+    // A LATCHED backend is read directly: the latch takes the ladder off the
+    // hot path, so a dead daemon does not spawn pactl/amixer on every poll,
+    // press and right-click.
     if (g_backend != .unknown) {
         if (readLatched()) |changed| return changed;
         // The latched backend stopped answering (daemon restarted, card
@@ -409,24 +408,19 @@ fn commitPct(v: u8) void {
     }
 }
 
-/// The one write entry point, replacing `previewPct` / `commitPct` /
-/// `applyPct`. See brightness.zig's for why the three were one function with a
-/// mode: the clamp and the display update existed three times each, and a
-/// preview that skipped the clamp showed a level the sink would refuse.
+/// The one write entry point; each mode names its difference, so the clamp
+/// and the display update each live in one place (see brightness.zig).
 fn write(w: slider.Write, v: u8) void {
     switch (w) {
         // Scroll/drag motion: the label follows immediately while the backend
         // write is the core scheduler's business.
         .preview => g_pct = optimisticAfter(g_backend, v, g_pct),
         .commit => commitPct(v),
-        // Press set / drag end. The follow-up read is gone: it forced a
-        // full re-probe -- and with an unresolved backend, up to three
-        // subprocess spawns blocking the WM loop -- on every press and every
-        // right-click. The value just committed IS the display value, so it is
-        // shown optimistically and the next poll confirms it against the real
-        // sink. With no backend the display does not move, because commitPct
-        // wrote nothing and echoing the value would show a level the sink
-        // never accepted.
+        // Press set / drag end. The value just committed IS the display
+        // value, so it is shown optimistically and the next poll confirms it
+        // against the real sink. With no backend the display does not move,
+        // because commitPct wrote nothing and echoing the value would show a
+        // level the sink never accepted.
         .apply => {
             commitPct(v);
             g_pct = optimisticAfter(g_backend, v, g_pct);
@@ -512,9 +506,7 @@ fn toggleMute() void {
 }
 
 /// The displayed level, or null while the backend has never answered, which is
-/// what makes an audio-less machine reserve no slot and take no clicks. The
-/// absence and the value used to be a `{bool, u8}` pair latched together
-/// One optional cannot hold half of them.
+/// what makes an audio-less machine reserve no slot and take no clicks.
 fn currentLevel() ?u8 {
     return if (g_has_value) g_pct else null;
 }

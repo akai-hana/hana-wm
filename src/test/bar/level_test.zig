@@ -1,11 +1,9 @@
-//! The shared linear slot<->level mapping, tested at the home it was lifted to.
+//! The shared linear slot<->level mapping, tested at its source in
+//! `bar/level.zig`.
 //!
-//! These used to live in slider_test.zig against `slider.pctFromSlot`. The core
-//! still re-exports that name, so the old entry point keeps working -- but the
-//! function is no longer the slider's, and a test that imports it as the
-//! slider's would quietly keep passing after the lift with the mapping gone
-//! from where the test claims to be checking it. Testing `level` directly is
-//! what makes the move real rather than a rename.
+//! The slider core re-exports the same functions as `slider.pctFromSlot`; a
+//! test importing them from the slider would pass equally well and pin nothing
+//! about where the mapping lives, so these go directly to `level`.
 
 // build-gate: level
 
@@ -38,7 +36,7 @@ test "offsetFromPct inverts pctFromSlot, with nearest rounding" {
     // Out-of-range levels clamp rather than escaping the slot.
     try std.testing.expectEqual(@as(u16, 110), level.offsetFromPct(10, 100, 200));
     // A zero-width slot has a single pixel, so EVERY level maps to it --
-    // including 100 %, which the unclamped form reported one pixel outside the
+    // including 100 %, which would otherwise land one pixel outside the
     // control.
     try std.testing.expectEqual(@as(u16, 10), level.offsetFromPct(10, 0, 100));
     try std.testing.expectEqual(@as(u16, 10), level.offsetFromPct(10, 0, 0));

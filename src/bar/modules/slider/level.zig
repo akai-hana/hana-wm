@@ -5,8 +5,7 @@
 //! Every horizontal meter in the bar needs the same mapping and the same two
 //! edge rules -- a zero-width slot must stay defined, and an offset past the
 //! far edge must saturate rather than exceed 100 -- and each copy is a chance
-//! to get one of them wrong. The slider core was the first user, and when a
-//! second meter arrived it would have been the second copy.
+//! to get one of them wrong.
 //!
 //! The mapping is deliberately not a "physics" model: a bar is 0-100 by
 //! definition at the wire level, so there is no curve, no detent and no
@@ -41,11 +40,8 @@ pub fn pctFromSlot(slot_x: u16, slot_w: u16, offset: u16) u8 {
 /// the reason a 50 % fill lines up with the pointer that set it.
 ///
 /// A zero-width slot has a single pixel, so every level maps to that pixel --
-/// the arithmetic already does that, because `0 * pct / 100 == 0`. It used to be
-/// clamped against the slot end as well, which was dead: `pct <= 100` makes
-/// `at <= x + w` always true, so the clamp could never bind. (A mutation that
-/// widened `end` by one survived, which is how the deadness was found.)
-/// What DOES need clamping is the u32 -> u16 narrowing: two u16 slot arguments
+/// the arithmetic already does that, because `0 * pct / 100 == 0`. What DOES
+/// need clamping is the u32 -> u16 narrowing: two u16 slot arguments
 /// can sum past u16, and an unchecked @intCast is a panic in a safe build and
 /// a wrap in ReleaseFast.
 pub fn offsetFromPct(slot_x: u16, slot_w: u16, pct: u8) u16 {

@@ -89,7 +89,7 @@ pub const EventMasks = struct {
     //    detectable auto-repeat held binding keys re-fire their action on
     //    every repeat (a passive grab reports the release to the grab window,
     //    but the root mask, not the grab, decides which events the WM actually
-    //    receives — without the release bit, the detectable-auto-repeat
+    //    receives; without the release bit, the detectable-auto-repeat
     //    press/release stream in core/input/mouse.zig would still work for presses but
     //    releases would be lost).
     // X protocol EventMask bits: KeyPress=1<<0, KeyRelease=1<<1,
@@ -126,16 +126,13 @@ pub const EventMasks = struct {
 
 /// The four modifiers a binding can be expressed in, as a 4-bit value.
 ///
-/// `normalizeModifiers` used to hand back a raw `u16` that callers passed
-/// straight into a binding lookup, which compares it against the configured
-/// masks. That made an un-normalized value a SILENT failure rather than a
-/// mistake: a `u16` still carrying a NumLock or CapsLock bit (or a bare
-/// `event.state` that was never masked at all) can never equal any configured
-/// mask, so the binding simply never fires, with no compiler hint and nothing
-/// in the log to point at. At four bits wide the type cannot represent those
-/// bits, so the mistake becomes a compile error at the call site -- which is
-/// the only place it can be diagnosed, since the symptom is "my binding is
-/// dead" weeks later.
+/// A raw `u16` carries lock bits (NumLock, CapsLock, ScrollLock) and pointer
+/// button bits that can never match a configured mask. That made an un-normalized
+/// value a SILENT failure rather than a mistake: the binding simply never fires,
+/// with no compiler hint and nothing in the log to point at. At four bits wide
+/// the type cannot represent those bits, so the mistake becomes a compile error
+/// at the call site, which is the only place it can be diagnosed, since the
+/// symptom is "my binding is dead" weeks later.
 pub const BindingMods = packed struct(u4) {
     shift: bool = false,
     control: bool = false,

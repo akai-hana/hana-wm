@@ -5,9 +5,8 @@
 //! consumed, with an include's subdirectory preserved -- and that an
 //! unchanged reload rewrites nothing, an edit is picked up, a rename
 //! leaves nothing behind, and a single-file source still lands as
-//! config.toml. Extracted from config_test.zig (the config load
-//! pipeline), whose non-snapshot tests keep using the Sandbox fixture
-//! through this module.
+//! config.toml. config_test.zig (the config load pipeline) reuses this
+//! module's Sandbox fixture for its non-snapshot tests.
 
 const std = @import("std");
 const testing = std.testing;
@@ -53,10 +52,10 @@ pub const Sandbox = struct {
 
     pub fn init(alloc: std.mem.Allocator, name: []const u8) !Sandbox {
         // A per-sandbox tmpDir rather than a child of a shared
-        // process-global scratch dir. Two consequences worth naming: the
-        // isolation no longer depends on a PRNG argument, and
-        // TmpDir.cleanup() removes the whole tree on drop, so there is no
-        // separate recursive delete that can half-succeed and leave the rest.
+        // process-global scratch dir: isolation does not depend on a PRNG
+        // argument, and TmpDir.cleanup() removes the whole tree on drop, so
+        // there is no separate recursive delete that can half-succeed and
+        // leave the rest.
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -93,10 +92,9 @@ pub const Sandbox = struct {
                 alloc.free(v);
             }
         }
-        // Tmp.cleanup() removes the whole tree, root and runtime
-        // included. The old deleteTreeAbs pair removed each independently and
-        // ignored failures, so a partially-failed delete silently left files
-        // behind with nothing left to retry with.
+        // Tmp.cleanup() removes the whole tree, root and runtime included,
+        // in a single pass, so a partially-failed delete cannot silently
+        // leave files behind with nothing left to retry with.
         var tmp = self.tmp; // cleanup takes *TmpDir; deinit() is by-value
         tmp.cleanup();
         alloc.free(self.root);

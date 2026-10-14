@@ -1,12 +1,10 @@
 //! Unit tests for the brightness slider sub's sysfs I/O against a fabricated
 //! `/class/backlight/<dev>/` tree in a temp dir -- no host backlight is ever
-//! touched. The pure scale/offset/format helpers live as inline tests inside
-//! brightness.zig -- an inline test in an imported module is never analyzed by
-//! this harness, so those five were dead; they are recovered below alongside
-//! the file-backed read/write and device-resolution paths.
+//! touched. The pure scale/offset/format helpers live here alongside the
+//! file-backed read/write and device-resolution paths: an inline test in an
+//! imported module is never analyzed by this harness.
 
-// Declared here, next to the imports that make it necessary, rather than in a
-// build.zig table that had to be kept in agreement with them by hand.
+// Declared here, next to the imports that make it necessary.
 // build-gate: seg_brightness
 
 const std = @import("std");
@@ -27,8 +25,7 @@ fn writeAttr(root: std.Io.Dir, comptime class: []const u8, dev: []const u8, comp
 }
 
 /// The span form: `Label` carries `value_start`/`value_len` rather than a
-/// subslice, so assertions spell the comparison out instead of relying on a
-/// `?[]const u8` field these tests used to have.
+/// subslice, so assertions spell the comparison out.
 fn valueSpan(l: drawing.Label) []const u8 {
     return l.text[l.value_start..][0..l.value_len];
 }
@@ -206,15 +203,8 @@ test "findDevice resolves an led-prefixed pin to the LED class" {
     try std.testing.expectEqual(@as(?u8, 25), brightness.readPctFrom(base_path, cls, dev[0..n]));
 }
 
-// ---------------------------------------------------------------------------
-// Recovered dead tests. These lived INLINE in brightness.zig and had never once
-// executed: the harness runs tests from the test root, and nothing imported
-// brightness.zig. The build still type-checked it, so a mutation there read as a
-// kill. They now run for the first time. `label` reads module-private display
-// state, so they set it through the explicit `setDisplayForTest` seam.
-
-// helpers. The file-backed read/write round trips live in the dedicated
-// brightness_test module, which fabricates a sysfs tree in a temp dir.
+// `label` reads module-private display state, so these tests set it through
+// the explicit `setDisplayForTest` seam.
 const testing = std.testing;
 
 test "pctFromRaw maps raw onto the 0-100 scale" {

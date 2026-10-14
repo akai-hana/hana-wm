@@ -1,7 +1,8 @@
-//! Refresh-rate detection via RandR -- the display's refresh rate:
-//! both the VALUE (`detectedHz`) and the PROBE that discovers it
-//! (the RandR query, the mode cache, and the notify handling). One
-//! file, one purpose: everything a consumer needs to pace against
+//! Refresh-rate detection via RandR
+//!
+//! The display's refresh rate: both the VALUE (`detectedHz`) and the
+//! discovery probe (the RandR query, mode cache, and notify handling).
+//! One file, one purpose: everything a consumer needs to pace against
 //! the real refresh rate, and nothing else.
 //!
 //! A display feature, not a bar one. The rate is read by bar segment
