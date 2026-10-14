@@ -33,6 +33,7 @@ const registry = @import("registry");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
+const ledger = @import("ledger");
 
 /// Pointer root position snapshot at spawn-admission time. The first
 /// crossing event armed by a `.window_spawn` suppress compares against
@@ -97,15 +98,12 @@ pub fn deinit() void {
     state = null;
 }
 
-// ---------------------------------------------------------------------------
-// Focus-property cache + ICCCM 4.1.7 input-model resolution
-// (merged from icccm.zig): the per-window WM_HINTS/WM_PROTOCOLS verdict
-// cache, the four delivery modes, WM_TAKE_FOCUS dispatch from a known
-// advertisement, and the PropertyNotify half-refresh. The X11 query
-// machinery (fire/drain/populate) stays in icccm.zig and writes through
-// put() below, so the cache has exactly one owner — this module.
-// ---------------------------------------------------------------------------
-
+/// Focus-property cache + ICCCM 4.1.7 input-model resolution
+/// (merged from icccm.zig): the per-window WM_HINTS/WM_PROTOCOLS verdict
+/// cache, the four delivery modes, WM_TAKE_FOCUS dispatch from a known
+/// advertisement, and the PropertyNotify half-refresh. The X11 query
+/// machinery (fire/drain/populate) stays in icccm.zig and writes through
+/// put() below, so the cache has exactly one owner — this module.
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
 pub const InputModel = enum {
@@ -809,7 +807,15 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             const conn = core.getState().conn;
 
             if (intent.flags.set_input_focus) focusNow(conn, intent.win);
-            if (intent.flags.raise) requests.raiseWindow(conn, intent.win);
+            // Only non-tiled windows ever carry the raise flag (prepareFocus's
+            // tiled exclusion), so this is a FLOAT raise: record it at the top
+            // of the ledger's float raise order, which the reconcile's
+            // re-assert replays to keep floating windows above tiled ones
+            // without disturbing their exact click order.
+            if (intent.flags.raise) {
+                requests.raiseWindow(conn, intent.win);
+                ledger.floatRaise(intent.win);
+            }
 
             if (intent.flags.take_focus_known)
                 sendWMTakeFocusKnown(conn, intent.win, 0, true);
@@ -883,12 +889,10 @@ pub fn drainTilingOpSettle() void {
     if (state.?.suppress_reason == .tiling_operation) state.?.suppress_reason = .none;
 }
 
-// ---------------------------------------------------------------------------
-// Grab-wrapped commit API + focus cycle (former focus_commit.zig, merged
-// 2026-10-10): the two-phase protocol's atomic commit wrappers, plus the
-// cycle. The protocol itself (module state, etiquette table, prepare/apply
-// split, button grabs) lives above; this was always a sub-surface of it.
-// ---------------------------------------------------------------------------
+/// Grab-wrapped commit API + focus cycle (former focus_commit.zig, merged
+/// 2026-10-10): the two-phase protocol's atomic commit wrappers, plus the
+/// cycle. The protocol itself (module state, etiquette table, prepare/apply
+/// split, button grabs) lives above; this was always a sub-surface of it.
 
 // Grab-wrapped focus operations (full atomicity)
 //
