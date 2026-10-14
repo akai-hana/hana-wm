@@ -1,4 +1,4 @@
-//! Headless tests for the canonical workspace identifier (`core/pure/ids`).
+//! Headless tests for the canonical workspace identifier (model.WorkspaceId).
 //!
 //! `WorkspaceId` unifies the former `core.WorkspaceId`+`model.WSId` pair, and
 //! `fromIndex` now takes `anytype` with a checked internal cast so callers
@@ -8,43 +8,42 @@
 const std = @import("std");
 const testing = std.testing;
 
-const ids = @import("ids");
-const constants = @import("constants");
+const model = @import("wm_state");
 
 test "ids: fromIndex round-trips the index and eql compares it" {
-    const a = ids.WorkspaceId.fromIndex(3);
-    const b = ids.WorkspaceId.fromIndex(3);
+    const a = model.WorkspaceId.fromIndex(3);
+    const b = model.WorkspaceId.fromIndex(3);
     try testing.expectEqual(@as(u8, 3), a.index);
     try testing.expect(a.eql(b));
-    try testing.expect(!a.eql(ids.WorkspaceId.fromIndex(4)));
+    try testing.expect(!a.eql(model.WorkspaceId.fromIndex(4)));
 }
 
 test "ids: fromIndex accepts wider ints via the checked internal cast" {
-    try testing.expectEqual(@as(u8, 5), ids.WorkspaceId.fromIndex(@as(u16, 5)).index);
+    try testing.expectEqual(@as(u8, 5), model.WorkspaceId.fromIndex(@as(u16, 5)).index);
 }
 
 // --- workspace validity: ONE notion -----------------------------
 
 test "isValidWorkspaceIndex is the single range definition" {
-    try testing.expect(ids.isValidWorkspaceIndex(0));
-    try testing.expect(ids.isValidWorkspaceIndex(constants.max_workspaces - 1));
-    try testing.expect(!ids.isValidWorkspaceIndex(constants.max_workspaces));
-    try testing.expect(!ids.isValidWorkspaceIndex(255));
+    try testing.expect(model.isValidWorkspaceIndex(0));
+    try testing.expect(model.isValidWorkspaceIndex(model.max_workspaces - 1));
+    try testing.expect(!model.isValidWorkspaceIndex(model.max_workspaces));
+    try testing.expect(!model.isValidWorkspaceIndex(255));
 }
 
 test "WorkspaceId.isValid agrees with the free function" {
-    try testing.expect(ids.WorkspaceId.fromIndex(3).isValid());
+    try testing.expect(model.WorkspaceId.fromIndex(3).isValid());
     // The lenient constructor admits an out-of-range value ON PURPOSE, so
     // this is the case every fixed-size consumer must check for itself.
-    const oob = ids.WorkspaceId.fromIndex(constants.max_workspaces);
+    const oob = model.WorkspaceId.fromIndex(model.max_workspaces);
     try testing.expect(!oob.isValid());
-    try testing.expectEqual(!ids.isValidWorkspaceIndex(oob.index), !oob.isValid());
+    try testing.expectEqual(!model.isValidWorkspaceIndex(oob.index), !oob.isValid());
 }
 
 test "fromIndexChecked returns the index on the in-range path" {
     try testing.expectEqual(
         @as(u8, 5),
-        ids.WorkspaceId.fromIndexChecked(5).index,
+        model.WorkspaceId.fromIndexChecked(5).index,
     );
     // Its OTHER behavior -- panicking on an out-of-range index -- is
     // std.debug.assert and has no in-process pin (std.testing has no

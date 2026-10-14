@@ -1,19 +1,92 @@
 //! DPI detection and scaling utilities.
 //! Detects display DPI and scales bar dimensions for consistent appearance across resolutions.
+//! The display-free half (RESOURCE_MANAGER parsing, geometry→DPI formula,
+//! sanity band) lives here too -- it used to be a separate `dpi_math` module,
+//! but it exists only to serve the detection path below and is folded in;
+//! `dpi_test.zig` exercises it without an X server.
 
 const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
+
 const log = @import("log");
 
 const types = @import("types");
 const atoms = @import("atoms");
-const dpi_math = @import("dpi_math");
 const scaling = @import("scaling");
 
-const baseline_dpi = constants.baseline_dpi;
+const baseline_dpi = core.baseline_dpi;
+
+/// Reasonable-DPI band applied to both the geometry-derived and Xft.dpi paths.
+/// Values outside this range (or non-finite) are rejected as misconfiguration
+/// rather than being fed straight into Pango, where 0/negative/NaN DPI would
+/// produce divide-by-zero or garbage font metrics.
+const min_reasonable_dpi: f32 = 50.0;
+const max_reasonable_dpi: f32 = 300.0;
+
+/// Inches per meter, i.e. mm per inch: converts screen mm to pixels-per-inch.
+const mm_per_inch: f32 = 25.4;
+
+/// Geometry inputs to the DPI formula, in the units X reports them. A struct
+/// so the formula cannot be called with the four values in the wrong order.
+pub const Geometry = struct {
+    width_px: u32,
+    height_px: u32,
+    width_mm: u32,
+    height_mm: u32,
+};
+
+/// Index of the first occurrence of `key` that sits at a LINE BOUNDARY (the
+/// string head, or the byte after a newline), or null when there is none.
+fn lineStartOf(haystack: []const u8, key: []const u8) ?usize {
+    var from: usize = 0;
+    while (from + key.len <= haystack.len) {
+        const at = std.mem.indexOfPos(u8, haystack, from, key) orelse return null;
+        if (at == 0 or haystack[at - 1] == '\n') return at;
+        // Not at a line start: keep looking from just past this occurrence.
+        from = at + 1;
+    }
+    return null;
+}
+
+/// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
+///
+/// The key is matched at a LINE BOUNDARY, not as a bare substring. A plain
+/// `indexOf` meant any key whose name ended in "Xft.dpi:" matched -- e.g. a
+/// client's "NotXft.dpi: 96" or "MyXft.dpi: 144" was read as hana's own
+/// setting, silently overriding the real resolution. The X resource format
+/// is one name/value binding per line, so a binding starts at the string
+/// head or right after a newline; that is the only place a match is valid.
+pub fn parseXftDpi(resource_str: []const u8) ?f32 {
+    const prefix = "Xft.dpi:";
+    const start = lineStartOf(resource_str, prefix) orelse return null;
+    const rest_raw = resource_str[start + prefix.len ..];
+    const rest = std.mem.trim(u8, rest_raw, " \t");
+    // The value ends at the next newline or end of string.
+    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    const value = std.mem.trim(u8, rest[0..end], " \t\r");
+    return std.fmt.parseFloat(f32, value) catch null;
+}
+
+/// Computes DPI from physical screen dimensions, or null when the screen
+/// reports 0mm (virtual displays and headless X report this). Null rather
+/// than a silent baseline: the caller owns the decision and the log message.
+pub fn calcDpiFromGeometry(g: Geometry) ?f32 {
+    if (g.width_mm == 0 or g.height_mm == 0) return null;
+    const width_px: f32 = @floatFromInt(g.width_px);
+    const height_px: f32 = @floatFromInt(g.height_px);
+    const width_mm: f32 = @floatFromInt(g.width_mm);
+    const height_mm: f32 = @floatFromInt(g.height_mm);
+    const dpi_x = (width_px / width_mm) * mm_per_inch;
+    const dpi_y = (height_px / height_mm) * mm_per_inch;
+    return (dpi_x + dpi_y) / 2.0;
+}
+
+/// True when `dpi` is finite and inside the sanity band.
+pub fn isReasonableDpi(dpi: f32) bool {
+    return std.math.isFinite(dpi) and dpi >= min_reasonable_dpi and dpi <= max_reasonable_dpi;
+}
 
 // Font size percentages are relative to 1080p height, not the screen's own
 // resolution, so font sizing degrades more gracefully on smaller screens.
@@ -84,7 +157,7 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
     const resource_str = @as([*]const u8, @ptrCast(value_ptr))[0..@intCast(value_len)];
     return .{
         .got_string = true,
-        .dpi = dpi_math.parseXftDpi(resource_str),
+        .dpi = parseXftDpi(resource_str),
         // Truncation is `bytes_after > 0`, not the value_len hitting the
         // requested cap (a string of exactly cap length is complete).
         .possibly_truncated = prop_reply.*.bytes_after > 0,
@@ -117,7 +190,7 @@ fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
 /// lifetime (and on a RandR size change, which can move it).
 pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     if (readXftDpi(conn, screen)) |xft_dpi| {
-        if (dpi_math.isReasonableDpi(xft_dpi)) {
+        if (isReasonableDpi(xft_dpi)) {
             log.info("Using DPI from X resources (Xft.dpi): {d:.1}", .{xft_dpi});
             return xft_dpi;
         }
@@ -126,7 +199,7 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
 
     // The formula is pure and returns null for a 0mm screen (the
     // "virtual display" case), so the decision and its log stay here.
-    const geometry_dpi = dpi_math.calcDpiFromGeometry(.{
+    const geometry_dpi = calcDpiFromGeometry(.{
         .width_px = screen.width_in_pixels,
         .height_px = screen.height_in_pixels,
         .width_mm = screen.width_in_millimeters,
@@ -135,7 +208,7 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
         log.warn("Display reports 0mm dimensions, using baseline DPI", .{});
         return baseline_dpi;
     };
-    if (!dpi_math.isReasonableDpi(geometry_dpi)) {
+    if (!isReasonableDpi(geometry_dpi)) {
         log.warn("Calculated DPI {d:.1} seems unreasonable, using baseline DPI", .{geometry_dpi});
         return baseline_dpi;
     }

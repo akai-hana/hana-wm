@@ -4,7 +4,7 @@
 //! adjust, swap master, focus next/prev), how much latency does the
 //! server-grab reconcile add, and how does it scale with window count?
 //!
-//! Every tiling op routes through actions -> pipeline.reconcileGrab
+//! Every tiling op routes through its command -> pipeline.reconcileGrab
 //! -> reconcile.run. reconcile replays the FULL
 //! desired wire state for EVERY stored window (all workspaces) each reconcile,
 //! then delta-sends only what changed (no-op elision). The SEND is O(changed)
@@ -16,13 +16,13 @@
 // build-gate: tiling
 
 const std = @import("std");
-const model = @import("model");
+const model = @import("wm_state");
 const tiling = @import("tiling");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 
-const time = @import("time");
+const core = @import("core");
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
@@ -36,7 +36,7 @@ const WindowId = model.WindowId;
 
 const makeModel = helpers.makeBareModel; // Bench: no module-store churn between iterations
 const regCur = helpers.regCur;
-const nowNs = time.monotonicNs;
+const nowNs = core.monotonicNs;
 
 const CountingSink = test_sink.TestSink(.category);
 

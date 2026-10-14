@@ -2,7 +2,7 @@
 //! Loads, parses, and validates TOML config files.
 
 const std = @import("std");
-const constants = @import("constants");
+const model = @import("wm_state");
 const fallback = @import("fallback");
 const log = @import("log");
 const scaling = @import("scaling");
@@ -18,7 +18,7 @@ const bar_sections = @import("bar_sections");
 const rules = @import("rules");
 
 // Re-exports: `config` stays the single import surface for callers
-// (main.zig, events.zig, handoff.zig, the tests); the re-exports below
+// (main.zig, events.zig, session.zig, the tests); the re-exports below
 // are where the code now lives.
 pub const canonicalLayoutName = layout_names.canonicalLayoutName;
 pub const isLayoutName = layout_names.isLayoutName;
@@ -329,8 +329,8 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
 /// reload path (reload.handleConfigReload) loads live configs itself instead.
 ///
 /// Note: keybind resolution (keysym -> keycode + dispatch map) is an input
-/// concern and happens separately via `input.buildKeybinds` once the config is
-/// live; see `input/keybind.zig`. DPI-scaled bar metrics are derived by the
+/// concern and happens separately via `keybinds.buildKeybinds` once the config
+/// is live; see `core/input/keybinds.zig`. DPI-scaled bar metrics are derived by the
 /// bar itself (see bar/metrics.zig) rather than stored on the config.
 /// Loads the default config with every warn/err diagnostic CAPTURED into
 /// `collector` instead of only reaching stderr, then throws the config away.
@@ -372,11 +372,11 @@ pub fn validate(cfg: *const types.Config) !void {
     const mw = cfg.tiling.master_width;
     if (mw.is_percentage) {
         const mw_ratio: f32 = scaling.asRatio(mw);
-        if (mw_ratio < constants.min_master_width or mw_ratio > constants.max_master_width)
+        if (mw_ratio < model.min_master_width or mw_ratio > model.max_master_width)
             return invalid("master_width {d:.0}% out of [{d:.0}%, {d:.0}%]", .{
                 mw_ratio * 100.0,
-                constants.min_master_width * 100.0,
-                constants.max_master_width * 100.0,
+                model.min_master_width * 100.0,
+                model.max_master_width * 100.0,
             });
     } else if (mw.value < 0.0) {
         return invalid("master_width {d}px must be >= 0", .{mw.value});

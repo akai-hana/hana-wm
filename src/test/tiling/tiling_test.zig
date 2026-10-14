@@ -11,7 +11,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("model");
+const model = @import("wm_state");
 const helpers = @import("helpers");
 
 const build_options = @import("build_options");

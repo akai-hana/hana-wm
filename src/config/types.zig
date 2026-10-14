@@ -3,9 +3,20 @@
 
 const std = @import("std");
 const action = @import("action");
-const constants = @import("constants");
-const ids = @import("ids");
+const model = @import("wm_state");
 const scaling = @import("scaling");
+
+/// Largest 1-based workspace number accepted when parsing a workspace
+/// reference from config. 1-based values range 1..=255 (matching a u8
+/// workspace index of 0..=254 in normal use); the parse helper is slightly
+/// more lenient, tolerating 256 before subtracting 1 to reach index 255.
+pub const max_workspace_number_1based: usize = 255;
+
+/// Smallest on-screen width/height a tiled window (and floating drag
+/// resize) is allowed to reach, in pixels. The default for the
+/// `tiling.min_window_dim` config field; config validation is the only
+/// consumer of the floor itself.
+const min_window_dim: u16 = 50;
 
 /// A value that can be expressed as either an absolute pixel count or a
 /// percentage of some reference dimension. Defined here (not in the parser)
@@ -36,7 +47,7 @@ pub const max_color: u32 = 0xFF_FF_FF;
 /// syntax bound is folded in — no caller passes a `max` above it.
 pub fn workspaceInRange(ws_1based: usize, max: usize) bool {
     return ws_1based >= 1 and
-        ws_1based <= constants.max_workspace_number_1based and
+        ws_1based <= max_workspace_number_1based and
         ws_1based <= max;
 }
 
@@ -121,10 +132,10 @@ pub const MouseBind = struct {
 };
 
 // The (modifiers, keysym) -> Action dispatch map and its keysym->keycode
-// resolution live in the input layer (`input/keybind.zig`): resolving a keysym
-// needs a live XkbState, which the pure config layer must not depend on.
-// Keeping it out of this file also breaks the types -> xkbcommon -> core ->
-// types import cycle.
+// resolution live in the input layer (`core/input/keybinds.zig`): resolving a
+// keysym needs a live XkbState, which the pure config layer must not depend
+// on. Keeping it out of this file also breaks the types -> keybinds -> core
+// -> types import cycle.
 
 // Tiling layout types
 
@@ -167,14 +178,14 @@ pub const MasterSide = enum {
 /// Per-workspace startup layout assignment, overriding the global default.
 /// variant is null -> use the per-layout map default ([tiling].variants).
 pub const WorkspaceLayoutOverride = struct {
-    workspace_idx: ids.WorkspaceId,
+    workspace_idx: model.WorkspaceId,
     layout_idx: u8, // index into TilingConfig.layouts
     variant: ?[]const u8, // null = use per-layout variants-map default
 };
 
 /// Per-workspace master count override, parsed from [tiling.layouts.master-stack.counts].
 pub const WorkspaceMasterCountOverride = struct {
-    workspace_idx: ids.WorkspaceId,
+    workspace_idx: model.WorkspaceId,
     count: u8,
 };
 
@@ -194,7 +205,7 @@ pub const TilingConfig = struct {
     border_unfocused: Color = default_unfocused_border,
     /// Smallest on-screen width/height a tiled window (and floating drag
     /// resize) is allowed to reach, in pixels.
-    min_window_dim: u16 = constants.min_window_dim,
+    min_window_dim: u16 = min_window_dim,
 
     // Per-layout variant preferences: window placement policy expressed as
     // value-strings in this canonical layout-name -> VALUE-STRING map (no
@@ -221,8 +232,8 @@ pub const TilingConfig = struct {
     /// no override for that workspace (use the global default). Consumed by
     /// the core seed path (seed.seedParamsFromConfig), so the last-wins
     /// rule lives in one place.
-    pub fn masterCountLookup(self: *const TilingConfig) [constants.max_workspaces]?u8 {
-        var lookup: [constants.max_workspaces]?u8 = .{null} ** constants.max_workspaces;
+    pub fn masterCountLookup(self: *const TilingConfig) [model.max_workspaces]?u8 {
+        var lookup: [model.max_workspaces]?u8 = .{null} ** model.max_workspaces;
         for (self.workspace_master_count_overrides.items) |o| {
             // One validity notion, not a second inline range test.
             if (o.workspace_idx.isValid())
@@ -243,8 +254,8 @@ pub const TilingConfig = struct {
     /// `null` at an index means no override for that workspace. Consumed by
     /// the core seed path (seed.seedParamsFromConfig), so the last-wins
     /// rule lives in one place.
-    pub fn workspaceLayoutLookup(self: *const TilingConfig) [constants.max_workspaces]?usize {
-        var lookup: [constants.max_workspaces]?usize = .{null} ** constants.max_workspaces;
+    pub fn workspaceLayoutLookup(self: *const TilingConfig) [model.max_workspaces]?usize {
+        var lookup: [model.max_workspaces]?usize = .{null} ** model.max_workspaces;
         for (self.workspace_layout_overrides.items, 0..) |o, oi| {
             if (o.workspace_idx.isValid())
                 lookup[o.workspace_idx.index] = oi;

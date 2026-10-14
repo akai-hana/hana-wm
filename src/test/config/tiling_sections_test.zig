@@ -155,7 +155,7 @@ test "master counts: valid rows land, every invalid row skips" {
     defer arena.deinit();
     var cfg: types.Config = .{};
     defer cfg.deinit(testing.allocator);
-    // constants.max_workspaces is 64 -> workspace 65 is out of range;
+    // model.max_workspaces is 64 -> workspace 65 is out of range;
     // counts are capped at 10; "abc" is not a number; 4's value is a string.
     try load(arena.allocator(), &cfg,
         \\[tiling]

@@ -1,4 +1,4 @@
-//! Config → model seeding (src/core/loop/seed.zig): the two pure halves the
+//! Config → model seeding (src/core/architecture/seed.zig): the two pure halves the
 //! boot/reload wrapper composes, tested without a boot.
 //!
 //! `seedParamsFromConfig` is the only state-touching step — it reads
@@ -16,7 +16,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const seed = @import("seed");
-const model = @import("model");
+const model = @import("wm_state");
 const helpers = @import("helpers");
 const types = @import("types");
 const tiling = @import("tiling");

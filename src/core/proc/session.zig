@@ -4,11 +4,10 @@
 
 const std = @import("std");
 const config_mod = @import("config");
-const constants = @import("constants");
 const core = @import("core");
 const log = @import("log");
-const model = @import("model");
-const paths = @import("paths");
+const model = @import("wm_state");
+const snapshot = @import("snapshot");
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
@@ -21,7 +20,7 @@ const pipeline_mod = @import("pipeline");
 // registry (a tree without a feature has no serializeWindow provider).
 const window_mods = @import("window_modules").modules;
 
-const MAX_WS = constants.max_workspaces;
+const MAX_WS = model.max_workspaces;
 
 /// Wire-format revision of the restore file. Failed or older revisions are
 /// rejected in loadToGlobal rather than migrated. Bumped whenever the durable
@@ -144,9 +143,9 @@ const StateFile = struct {
 var loaded_parsed: ?std.json.Parsed(StateFile) = null;
 
 /// Default restore path; the shared XDG-/tmp-uid policy lives in
-/// paths.runtimeFile. Caller owns the returned slice.
+/// snapshot.runtimeFile. Caller owns the returned slice.
 pub fn defaultStatePath(alloc: std.mem.Allocator) ![]u8 {
-    return paths.runtimeFile(alloc, "hana-restore", ".json");
+    return snapshot.runtimeFile(alloc, "hana-restore", ".json");
 }
 
 /// Cold-boot housekeeping for the file this module owns. Adoption is gated on
@@ -347,7 +346,7 @@ fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8
 
 /// Exclusive, owner-only create (no-follow): see atomicWrite's comment.
 fn createExclusive(io: std.Io, path: []const u8) !std.Io.File {
-    return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = @enumFromInt(paths.restricted_file_mode) });
+    return std.Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true, .permissions = @enumFromInt(snapshot.restricted_file_mode) });
 }
 
 /// Serializes the live model to `path`. Any error returns to the caller,

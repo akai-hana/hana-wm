@@ -2,7 +2,7 @@
 //! Splits the work area into equal cells, rigid or relaxed per the variant.
 
 const tiling = @import("tiling");
-const model = @import("model");
+const model = @import("wm_state");
 
 /// The ONE variant table for this layout.
 const variants = [_]tiling.Variant{

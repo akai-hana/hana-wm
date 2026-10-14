@@ -23,12 +23,12 @@ const core = @import("core");
 const xcb = core.xcb;
 const build_options = @import("build_options");
 const types = @import("types");
-const model = @import("model");
+const model = @import("wm_state");
 const pipeline = @import("pipeline");
 const window = @import("window");
 const atoms = @import("atoms");
 const usable_area = @import("usable_area");
-const constants = @import("constants");
+const sink = @import("sink");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
 const helpers = @import("helpers");
 
@@ -209,7 +209,7 @@ pub const Fx = struct {
 
         // The baseline is what main would pass if the config had no [display]
         // dpi override: these tests are about window plumbing, not scaling.
-        core.init(conn, scr, scr.*.root, alloc, &fx.config, constants.baseline_dpi);
+        core.init(conn, scr, scr.*.root, alloc, &fx.config, core.baseline_dpi);
         window.init(alloc) catch {
             std.heap.page_allocator.destroy(fx);
             return null;
@@ -425,6 +425,6 @@ pub const Fx = struct {
     /// Asserts the window sits parked off-screen (X = offscreen slot).
     pub fn expectParked(self: *const Fx, win: u32) !void {
         const g = self.geometry(win) orelse return error.ClosedWindow;
-        try std.testing.expectEqual(@as(i32, constants.offscreen_x_position), @as(i32, g.x));
+        try std.testing.expectEqual(@as(i32, sink.offscreen_x_position), @as(i32, g.x));
     }
 };

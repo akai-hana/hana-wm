@@ -1,4 +1,4 @@
-//! Tests for the signal disposition POLICY (signals.plan).
+//! Tests for the signal disposition POLICY (process.plan).
 //!
 //! This file deliberately tests `plan` and never `setup`. `setup` opens the
 //! self-pipe and calls sigaction on five signals, which in a test binary would
@@ -13,10 +13,10 @@
 //! the start-up smoke test do.
 
 const std = @import("std");
-const signals = @import("signals");
+const process = @import("process");
 
 test "plan: the five control signals are handled, in order" {
-    const p = signals.plan();
+    const p = process.plan();
 
     try std.testing.expectEqual(@as(usize, 5), p.handled.len);
     // Order is the install order. It is not merely cosmetic: the handler is
@@ -30,7 +30,7 @@ test "plan: the five control signals are handled, in order" {
 }
 
 test "plan: SIGPIPE is ignored, not handled" {
-    const p = signals.plan();
+    const p = process.plan();
 
     try std.testing.expectEqual(std.posix.SIG.PIPE, p.ignored);
     // SIGPIPE must NOT also be in the handled set: the ignored disposition is
@@ -42,7 +42,7 @@ test "plan: SIGPIPE is ignored, not handled" {
 }
 
 test "plan: SIGUSR2 is the backtrace signal, so it is not in the handled set" {
-    const p = signals.plan();
+    const p = process.plan();
 
     // SIGUSR2 is armed separately by setupBacktraceHandler (SA.SIGINFO), not
     // by the self-pipe handler. If it ever appeared in `handled`, the later

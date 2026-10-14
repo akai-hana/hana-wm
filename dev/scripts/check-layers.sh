@@ -36,14 +36,14 @@ wire_allowed() {
         # create/destroy of the bar window + colormap (same lifecycle, split
         # into its own file). Sync only raises bar_win via the force_restack
         # hook; bar self-management stays local to avoid a bar<->sync cycle.
-        # visibility.zig carries the same bar self-management (its wire half;
-        # the pure policy half sits above the banner in the same file), split
-        # out of bar.zig with the apply* visibility family (map/unmap on
-        # visibility change, raise-above-others, screen-claim publish).
+        # The apply* visibility family (map/unmap on visibility change,
+        # raise-above-others, screen-claim publish) lives here too: it was
+        # split out as wire/visibility.zig, then folded back in (Phase 3 of
+        # the bar refactor) with the pure policy left in src/bar/visibility.zig.
         # surface.zig holds the bar frame's wire traffic (the xcb_flush that
         # orders fills under glyphs, moved here from drawing.zig with the
         # Surface in Phase 4 step 24); drawing.zig no longer sends wire.
-        src/bar/bar.zig|src/bar/wire/visibility.zig|src/bar/render/surface.zig|src/bar/wire/win.zig) ;;
+        src/bar/bar.zig|src/bar/render/surface.zig|src/bar/wire/win.zig) ;;
 
         # Window event handlers (merged client_events.zig): ConfigureRequest
         # compliance (client-requested geometry honored for floating windows
@@ -89,7 +89,7 @@ wire_allowed() {
         src/test/core/sink_test.zig) ;;
 
         # Detectable auto-repeat enablement (enableDetectableAutoRepeat in
-        # src/input/xkbcommon.zig): a ONE-SHOT, STARTUP-ONLY XKB negotiation
+        # src/core/input/xkb.zig): a ONE-SHOT, STARTUP-ONLY XKB negotiation
         # that issues xcb_xkb_per_client_flags + its reply and
         # xcb_get_extension_data. It is best-effort setup, not per-window wire
         # mutation: it flips a per-client flag the WM must set once before
@@ -99,7 +99,7 @@ wire_allowed() {
         # Rides pat-wide via the `xcb_xkb_` family plus
         # `xcb_get_extension_data`; see enableDetectableAutoRepeat's own
         # comment for the retry contract.
-        src/input/xkbcommon.zig) ;;
+        src/core/input/xkb.zig) ;;
 
         # Root-window keygrab installation at startup and click-focus
         # stack-mode: startup is pre-WM-loop; the restack routes through
@@ -108,15 +108,18 @@ wire_allowed() {
         # core/x11/requests.zig (claimWindowManagerRole + flush), so the
         # composition root no longer names xcb.
         #
-        # input.zig carries this entry for TWO pieces of wire traffic that
-        # live here by role: the action dispatcher (executeAction/grafted/
-        # closeWindow/toggleBarPosition/dirSign — re-merged from
-        # input/dispatch.zig 2026-10-10; it rode its own allowlist entry
-        # while split) and the one-shot root-cursor theming call (setupRoot,
-        # merged from core/x11/cursor.zig — decoration, not per-window
-        # mutation, same "startup, not mutation" warrant as
-        # enableDetectableAutoRepeat).
-        src/input/input.zig) ;;
+        # The action dispatcher (executeAction/grafted/closeWindow/
+        # toggleBarPosition/dirSign): the ICCCM WM_DELETE_WINDOW client
+        # message plus its xcb_destroy_window fallback. Client protocol
+        # text, not sync-bound wire mutation. Re-split out of input.zig into
+        # src/core/input/dispatch.zig during the src/core/input refactor.
+        src/core/input/dispatch.zig) ;;
+
+        # Root-window cursor theming (setupRoot in src/core/input/cursor.zig):
+        # one xcb_change_window_attributes on the root taken at startup,
+        # decoration rather than per-window mutation — same "startup, not
+        # mutation" warrant as enableDetectableAutoRepeat.
+        src/core/input/cursor.zig) ;;
 
         # Wire PRIMITIVES: core/x11/requests.zig hosts configureWindow /
         # raiseWindow / setBorderPixel / grabServer, and core/x11/atoms.zig
@@ -140,10 +143,12 @@ wire_allowed() {
         # (icccm.zig hands focus to windows that advertise the protocol),
         # the synthetic ConfigureNotify (client_events.zig reports back the
         # geometry it actually applied after honoring a ConfigureRequest), and
-        # WM_DELETE_WINDOW (dispatch.zig closes a client gracefully, ICCCM
-        # §4.1.2.7). These are client protocol text, not sync-bound wire
-        # mutations. client_events.zig is allowlisted above for the
-        # ConfigureRequest family; icccm.zig joins them here for this family.
+        # WM_DELETE_WINDOW (core/input/dispatch.zig's closeWindow closes a
+        # client gracefully, ICCCM §4.1.2.7 — allowlisted as
+        # src/core/input/dispatch.zig above for the same family). These are
+        # client protocol text, not sync-bound wire mutations.
+        # client_events.zig is allowlisted above for the ConfigureRequest
+        # family; icccm.zig joins them here for this family.
         src/window/protocol/icccm.zig) ;;
 
         # src/test/harness/fixture.zig is a TEST DOUBLE: it drives a real X
@@ -174,14 +179,14 @@ wire_allowed() {
         # buffer after others' queued requests). events.zig is the core
         # event-loop flush; display/hz.zig is the RandR refresh-rate detection
         # flush (it subscribes to RandR notify on the root); prompt.zig is the
-        # bar's keyboard grab-drop flush; input/mouse.zig is the Super+click
-        # grab-unwind flush (finishGrab pushes the buffer after the two
-        # xcb_allow_events replay/async calls -- no mutation of its own);
-        # input/grabs.zig is the grab-installation flush
+        # bar's keyboard grab-drop flush; core/input/mouse.zig is the
+        # Super+click grab-unwind flush (finishGrab pushes the buffer after
+        # the two xcb_allow_events replay/async calls -- no mutation of its
+        # own); core/input/keybinds.zig is the grab-installation flush
         # (grabMouseButtons/grabKeybindings push the buffer after firing
         # all grab cookies -- the grabs themselves are not Rule-1 mutations).
         # These are documented non-mutations, not Rule-1 sends.
-        src/core/loop/events.zig|src/core/display/hz.zig|src/bar/modules/prompt/prompt.zig|src/input/mouse.zig|src/input/grabs.zig) ;;
+        src/core/loop/events.zig|src/core/display/hz.zig|src/bar/modules/prompt/prompt.zig|src/core/input/mouse.zig|src/core/input/keybinds.zig) ;;
 
         *) return 1 ;;
     esac
@@ -239,25 +244,29 @@ while IFS= read -r line; do
     viol "rule 2 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
 done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
 
-# Rule 3: no xcb imports/references in the pure model vocabulary, the window
+# Rule 3: no xcb imports/references in the pure state vocabulary
+# (wm_state.zig + its private domain.zig), the window
 # contract, tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
 # awk strips comments while preserving each physical line (and its number), so
 # real code references still match and report at their true location.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
-# it sweeps for any `xcb` token in the model file, tiling/, and config/ after
+# it sweeps for any `xcb` token in the state files, tiling/, and config/ after
 # comment removal -- imports AND re-exported bare references alike. (The
 # complementary IMPORT-EDGE scan lives in build.zig's assertPureLayerImports:
 # a pure module can import an xcb-using sibling and pass there, so Rule 3, not
-# that scan, is the last line of defense on bodies. Only the model file is
-# swept: it is the pure root (state plus the Rect/Margins value objects and
-# their coordinate helpers), its pure/ siblings carry no xcb tokens by
-# construction. architecture/contract.zig IS on this side of the sweep since
-# the xcb event TYPES live in its sibling contract_x11.zig (outside the sweep): the
+# that scan, is the last line of defense on bodies. Only the state files are
+# swept: wm_state.zig is the pure root (state plus the re-exported
+# Rect/Margins value objects and their coordinate helpers), its domain.zig
+# sibling is private to it, and the pure/ shelf carries no xcb tokens by
+# construction. architecture/contract.zig IS on this side of the sweep: the
 # contract names the key-press event as an opaque `KeyPressEvent` and carries
 # the connection as `*const anyopaque`, so it is xcb-free vocabulary and is
-# swept like any other pure file. Its former split siblings
+# swept like any other pure file. (The X-typed vocabulary it deliberately
+# does not hold -- the concrete key-press struct and the `Surfaces` hook
+# set -- lives with its binding site in hub-wired bar.zig, outside the
+# sweep.) Its former split siblings
 # (contract_window.zig / contract_segment.zig) merged into the entry
 # 2026-10-08.)
 hits=$(
@@ -275,7 +284,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/architecture/model.zig src/core/architecture/contract.zig src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/domain.zig src/core/wm_state.zig src/core/architecture/contract.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do

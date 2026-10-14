@@ -8,11 +8,11 @@
 //! actionFromValue/resolveElement chain below is the one
 //! interleaving point between the two, so it stays here and
 //! calls actions.parseAction. Pure parsing -- the bindings
-//! land on the Config, and input/keybind.zig turns them into
+//! land on the Config, and core/input/keybinds.zig turns them into
 //! keycodes at buildKeybinds time.
 
 const std = @import("std");
-const keysyms = @import("keysyms");
+const keymap = @import("keymap");
 const log = @import("log");
 const masks = @import("masks");
 const parser = @import("parser");
@@ -345,6 +345,6 @@ fn keyNameToKeysym(name: []const u8) !u32 {
     var buf: [max_key_name_bytes]u8 = undefined;
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
-    const keysym = keysyms.keysymFromName(&buf);
-    return if (keysym == keysyms.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
+    const keysym = keymap.keysymFromName(&buf);
+    return if (keysym == keymap.XKB_KEY_NoSymbol) error.UnknownKeyName else keysym;
 }

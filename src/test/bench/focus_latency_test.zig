@@ -22,12 +22,12 @@
 // grab+reconcile instead of the old focus-then-snap two.
 
 const std = @import("std");
-const model = @import("model");
+const model = @import("wm_state");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 const build_options = @import("build_options");
 
-const time = @import("time");
+const core = @import("core");
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 // Latency instrumentation only runs its full loops + timing output under
@@ -36,7 +36,7 @@ const reconcile = @import("reconcile");
 // command:` even on success).
 const bench = build_options.bench;
 
-const nowNs = time.monotonicNs;
+const nowNs = core.monotonicNs;
 
 const makeModel = helpers.makeBareModel; // Bench: no module-store churn between iterations
 

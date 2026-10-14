@@ -1,8 +1,7 @@
 //! Master-stack tiling layout.
 //! Master + stack panes, spilling overflow into a column-major grid.
 
-const constants = @import("constants");
-const model = @import("model");
+const model = @import("wm_state");
 const tiling = @import("tiling");
 
 const scaling = @import("scaling");
@@ -119,7 +118,7 @@ fn tileColumn(
     const count: u16 = @intCast(windows.len);
     const avail = calcAvailableHeight(h, count, ctx.m, ctx.min_dim);
 
-    var heights_buf: [constants.max_tiled_windows]u16 = undefined;
+    var heights_buf: [model.max_tiled_windows]u16 = undefined;
     const heights = heights_buf[0..windows.len];
     const used = fillHeights(ctx, windows, avail, boost, heights);
 
@@ -158,7 +157,7 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
     // below re-reads the hint inside its pinning passes, and hoisting it keeps
     // those passes O(n) plain u16 compares instead of re-resolving the hint
     // each time.
-    var slots_buf: [constants.max_tiled_windows]FillSlot = @splat(.{});
+    var slots_buf: [model.max_tiled_windows]FillSlot = @splat(.{});
     const slots = slots_buf[0..windows.len];
     for (windows, 0..) |win, i| slots[i].max_h = ctx.v.hintsFor(win).max_height;
     var rem_avail = avail;

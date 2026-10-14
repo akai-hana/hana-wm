@@ -9,7 +9,26 @@
 
 const std = @import("std");
 const log = @import("log");
-const paths = @import("paths");
+
+/// Runtime-dir file path, the ONE policy for per-session state files:
+/// `$XDG_RUNTIME_DIR/{base}{ext}` when set (already per-user, so no uid
+/// suffix), else `/tmp/{base}-{uid}{ext}` so co-located users stay apart.
+/// The uid suffix in the fallback is load-bearing. Callers own the returned
+/// slice. Deliberately NOT used by native_pulse's socket probe: PulseAudio's
+/// `/run/user/{uid}` fallback is a different convention, not this policy.
+/// Consumers: this module's snapshot dir and proc/session's restore file.
+/// Used to live in the dissolved `paths` module; the snapshot is one of the
+/// two consumers the policy was written for, so it is the natural owner.
+pub fn runtimeFile(alloc: std.mem.Allocator, base: []const u8, ext: []const u8) ![]u8 {
+    if (std.c.getenv("XDG_RUNTIME_DIR")) |dir|
+        return std.fmt.allocPrint(alloc, "{s}/{s}{s}", .{ std.mem.span(dir), base, ext });
+    return std.fmt.allocPrint(alloc, "/tmp/{s}-{d}{s}", .{ base, std.os.linux.getuid(), ext });
+}
+
+/// POSIX mode for files that must never be world/group-writable: the session
+/// restore file and the prompt's history file both call this out explicitly
+/// so the magic literal isn't re-spelled at each call site.
+pub const restricted_file_mode: u32 = 0o600;
 
 /// Where a default-config load came from. Reported by loadConfigDefault so the
 /// reload path can distinguish "loaded the user config" from "fell back to the
@@ -164,9 +183,9 @@ pub fn deinitGoodSource(allocator: std.mem.Allocator) void {
 }
 
 /// Snapshot dir a re-exec boots from; the shared XDG-/tmp-uid policy lives
-/// in paths.runtimeFile. Caller owns the returned slice.
+/// in `runtimeFile` above. Caller owns the returned slice.
 fn snapshotDirPath(allocator: std.mem.Allocator) ![]u8 {
-    return paths.runtimeFile(allocator, "hana-config", "");
+    return runtimeFile(allocator, "hana-config", "");
 }
 
 /// NUL-terminated snapshot path on c_allocator for `setenv`, or null when no

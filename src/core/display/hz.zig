@@ -23,7 +23,6 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const log = @import("log");
-const time = @import("time");
 
 /// Fallback used when RandR is unavailable or returns an invalid value.
 const default_hz: f64 = 60.0;
@@ -115,7 +114,7 @@ pub fn handleRandrNotifyEvent(event: *anyopaque) void {
         return;
     }
 
-    const now = time.monotonicNs();
+    const now = core.monotonicNs();
     if (now -| state.last_redetect_ns < min_redetect_interval_ns) return;
     state.last_redetect_ns = now;
     state.redetect_pending = true;

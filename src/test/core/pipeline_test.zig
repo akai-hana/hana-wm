@@ -11,9 +11,9 @@
 const std = @import("std");
 
 const core = @import("core");
-const model = @import("model");
+const model = @import("wm_state");
 const pipeline = @import("pipeline");
-const actions = @import("actions");
+const window = @import("window");
 const fixture = @import("fixture");
 const xcb = core.xcb;
 const ledger = @import("ledger");
@@ -24,8 +24,8 @@ const fullscreen = if (@import("build_options").has_fullscreen) @import("fullscr
 fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null, null);
-    actions.mapRequest(w2, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w2, 0, true, null, null);
     fx.flush();
     return .{ w1, w2 };
 }
@@ -33,7 +33,7 @@ fn seedTwo(fx: *fixture.Fx) struct { u32, u32 } {
 test "pipeline: reconcile tiles to engine placements and records LastSent" {
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1, const w2 = seedTwo(fx);
 
@@ -58,12 +58,12 @@ test "pipeline: reconcile tiles to engine placements and records LastSent" {
 test "pipeline: fullscreen winner covers the screen and parks siblings" {
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const cs = core.getState();
 
     const w1, const w2 = seedTwo(fx);
 
-    actions.fullscreenToggleWindow(w2);
+    fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
 
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
@@ -82,11 +82,11 @@ test "pipeline: fullscreen winner covers the screen and parks siblings" {
 test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1, const w2 = seedTwo(fx);
 
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
     // The covering winner owns the screen, so it owns keyboard focus too
@@ -95,7 +95,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     try std.testing.expectEqual(w1, fx.inputFocus());
 
     // Direct covering hand-off: claiming a second window while occupied.
-    actions.fullscreenToggleWindow(w2);
+    fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
     try fx.expectParked(w1);
@@ -105,7 +105,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     try std.testing.expectEqual(w2, fx.inputFocus());
 
     // Exit: both windows return to their tiled placements.
-    actions.fullscreenToggleWindow(w2);
+    fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
     try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
     try fx.expectTiledGeometry(w1);
@@ -118,7 +118,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
 test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2" {
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
@@ -128,26 +128,26 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     _ = xcb.xcb_map_window(fx.conn, w1);
     _ = xcb.xcb_map_window(fx.conn, w2);
     fx.flush();
-    actions.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expectEqual(w1, fx.inputFocus());
 
     // 1. Fullscreen w1 (keybinding on the focused window).
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expectEqual(w1, fx.inputFocus());
     try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 
     // 2. Open w2 while w1 is still fullscreened.
-    actions.mapRequest(w2, 0, true, null, null);
+    window.mapRequest(w2, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
     try std.testing.expectEqual(w2, fx.inputFocus());
 
     // 3. Fullscreen w2 on top of the old fullscreened window.
-    actions.fullscreenToggleWindow(w2);
+    fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
     try std.testing.expectEqual(w2, fx.inputFocus());
@@ -178,7 +178,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     //    exactly what step 2 asserts. This step used to run against a plain
     //    tiled w1 and so demanded a bump the product correctly refuses; it had
     //    never run, because the fixture skips without an X display.
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     fullscreen.armPendingBarHide(w1);
     const before = core.fullscreen.rev();
@@ -188,7 +188,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     fullscreen.notifyConfigureIfPending(w1, sw, sh);
     try std.testing.expectEqual(before + 1, core.fullscreen.rev());
     //    Back to NOT covering, which is the premise step 2 depends on.
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
 
     // 2. MODEL TRUTH gates the bar hide. Screen-sized dimensions with a model that
@@ -201,7 +201,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     try std.testing.expectEqual(before2, core.fullscreen.rev());
 
     // 3. PER WINDOW: arming w2 must not evict w1's pending entry.
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     const before3 = core.fullscreen.rev();
     fullscreen.armPendingBarHide(w1);
@@ -214,7 +214,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     const before4 = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
     try std.testing.expectEqual(before4, core.fullscreen.rev());
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     fullscreen.notifyConfigureIfPending(w1, sw, sh);
     try std.testing.expectEqual(before4 + 1, core.fullscreen.rev());
@@ -225,15 +225,15 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     //    to mean anything: step 3 toggled it back OUT, so the "still covers"
     //    premise the comment had always claimed was not actually true, and
     //    the gate below was therefore never exercised.
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     const before5 = core.fullscreen.rev();
     fullscreen.armPendingBarShow(w1);
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
     try std.testing.expectEqual(before5, core.fullscreen.rev()); // w1 still covers
-    actions.fullscreenToggleWindow(w1);
+    fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
-    // The exit bumps the fact ITSELF, on purpose (actions.zig: "the deferred
+    // The exit bumps the fact ITSELF, on purpose (fullscreen.zig: "the deferred
     // bar-show arm waits for a non-fullscreen ConfigureNotify, which never
     // arrives when a window's restored anchor IS the screen size"). Because the
     // toggle therefore answers the question, it also RETIRES the arm it left
@@ -304,28 +304,28 @@ test "pipeline: an explicit fullscreen SET is a no-op, not a toggle" {
     // pressing F twice) would kick the window back out.
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const w1, const w2 = seedTwo(fx);
 
     // Redundant "enter" on a window that is not covering yet.
-    actions.fullscreenSetWindow(w2, true);
+    fullscreen.fullscreenSetWindow(w2, true);
     fx.flush();
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 
     // The idempotent repeat: the exact case a browser produces.
-    actions.fullscreenSetWindow(w2, true);
+    fullscreen.fullscreenSetWindow(w2, true);
     fx.flush();
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
     try std.testing.expectEqual(.covering, (m.store.get(w2) orelse return error.UnknownWindow).presence);
 
     // Redundant "leave" on a window that is not covering.
-    actions.fullscreenSetWindow(w1, false);
+    fullscreen.fullscreenSetWindow(w1, false);
     fx.flush();
     try std.testing.expect(w1 != (model.coveringOccupantOnWs(m, m.current) orelse w1));
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 
     // A genuine leave still works, and the occupant is cleared.
-    actions.fullscreenSetWindow(w2, false);
+    fullscreen.fullscreenSetWindow(w2, false);
     fx.flush();
     try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
 }
@@ -336,14 +336,14 @@ test "pipeline: an explicit fullscreen SET still switches an existing occupant" 
     // states genuinely differ.
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const w1, const w2 = seedTwo(fx);
 
-    actions.fullscreenSetWindow(w1, true);
+    fullscreen.fullscreenSetWindow(w1, true);
     fx.flush();
     try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
 
-    actions.fullscreenSetWindow(w2, true);
+    fullscreen.fullscreenSetWindow(w2, true);
     fx.flush();
     try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
     // The displaced occupant is moved offscreen, which is the observable form

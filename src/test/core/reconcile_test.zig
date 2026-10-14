@@ -8,8 +8,8 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("model");
-const constants = @import("constants");
+const model = @import("wm_state");
+const sink = @import("sink");
 
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
@@ -459,7 +459,7 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
 
     // Production Sink.park folds X-offscreen + BELOW into ONE configure:
     // the X value is this constant, the stack half is BELOW (requests.zig).
-    try testing.expectEqual(@as(i32, -30000), constants.offscreen_x_position);
+    try testing.expectEqual(@as(i32, -30000), sink.offscreen_x_position);
 
     try model.register(&fx.m, 901, model.WSId.fromIndex(0));
     try model.register(&fx.m, 902, model.WSId.fromIndex(1));

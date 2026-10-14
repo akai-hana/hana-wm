@@ -52,7 +52,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
-const model = @import("model");
+const model = @import("wm_state");
 const log = @import("log");
 
 /// The tiling engine is reached through the build-generated `tiling_seam`:
@@ -66,7 +66,7 @@ const log = @import("log");
 const contract = @import("contract");
 const tiling = @import("tiling_seam").tiling;
 const ledger = @import("ledger");
-const xtrace = @import("xtrace");
+const trace = @import("trace");
 
 /// Scratch for the opt-in X trace line; only ever written when tracing is
 /// armed for this window, so the common path never touches it.
@@ -322,14 +322,14 @@ fn sendAll(
         const parked = desire.parked;
         const is_winner = winner.* == win;
 
-        const tracing = xtrace.enabled() and xtrace.watches(win);
+        const tracing = trace.enabled() and trace.watches(win);
         if (parked) {
             // Re-send on the transition OR when the client moved itself while
             // parked: `last.parked` stays true across the drift, so without
             // the dirty term the recompute above would compute a fresh park
             // and then throw it away.
             if (!last.parked or last.parked_dirty) {
-                if (tracing) xtrace.outbound(win, "park", "unpark-then-park");
+                if (tracing) trace.outbound(win, "park", "unpark-then-park");
                 // Map before park: a fresh window's own map request was
                 // redirected by SubstructureRedirect (never performed by the
                 // server), so the offscreen park would otherwise leave it
@@ -342,7 +342,7 @@ fn sendAll(
                 // parked where we put it. Logged because "hana said nothing"
                 // and "hana said nothing BECAUSE it skipped the window" are
                 // different findings, and a trace has to distinguish them.
-                xtrace.outbound(win, "park-elided", "already parked");
+                trace.outbound(win, "park-elided", "already parked");
             }
         } else {
             // Raise triggers per the ledger contract (file header read 2): winner
@@ -360,7 +360,7 @@ fn sendAll(
             const need_pixel = !last.has_rect or last.pixel != pixel;
             const need_geom = moved or unpark_transition or raise_winner;
 
-            // Opt-in X trace (see core/pure/xtrace.zig). Each line is guarded
+            // Opt-in X trace (see core/debug/trace.zig). Each line is guarded
             // by the SAME condition as the send it describes, so the log can
             // never claim a request that did not happen -- a trace that
             // over-reports is worse than no trace. Recorded before the send so
@@ -369,11 +369,11 @@ fn sendAll(
             // ever re-asserted a geometry, or stayed silent while the window's
             // on-screen contents diverged from its state.
             if (need_map) {
-                if (tracing) xtrace.outbound(win, "map", "");
+                if (tracing) trace.outbound(win, "map", "");
                 ctx.sink.map(win);
             }
             if (need_pixel) {
-                if (tracing) xtrace.outbound(win, "border_pixel", "");
+                if (tracing) trace.outbound(win, "border_pixel", "");
                 ctx.sink.borderPixel(win, pixel);
             }
             // One configure carrying everything that changed. Border width and
@@ -381,7 +381,7 @@ fn sendAll(
             // this can no longer express them as two separate requests. The
             // trace prints exactly the fields the request below carries.
             if (need_bw or need_geom) {
-                if (tracing) xtrace.outbound(win, "configure", switch (need_geom) {
+                if (tracing) trace.outbound(win, "configure", switch (need_geom) {
                     true => if (need_bw) std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
                         rect.width,                         rect.height, rect.x, rect.y, bw,
                         if (raise_winner) "above" else "-",

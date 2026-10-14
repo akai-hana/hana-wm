@@ -8,10 +8,8 @@
 //! the load-scoped arena.
 
 const std = @import("std");
-const constants = @import("constants");
-const ids = @import("ids");
 const log = @import("log");
-const model = @import("model");
+const model = @import("wm_state");
 const parser = @import("parser");
 const types = @import("types");
 const layout_names = @import("layout_names");
@@ -123,7 +121,7 @@ fn parseTilingLayoutSubtables(
                 cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
                 var inner = counts_sec.orderedIterator();
                 while (inner.next()) |p| {
-                    if (tryParseWsToken(p.key, constants.max_workspaces, "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
+                    if (tryParseWsToken(p.key, model.max_workspaces, "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
                         const count_val = p.value.asScalar(i64) orelse {
                             log.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});
                             continue;
@@ -132,7 +130,7 @@ fn parseTilingLayoutSubtables(
                             log.warn("master-stack.counts: count {} for workspace {} out of range [0,{d}], skipping", .{ count_val, ws_1based, max_master_count })
                         else
                             try cfg.tiling.workspace_master_count_overrides.append(allocator, .{
-                                .workspace_idx = ids.WorkspaceId.fromIndex(ws_1based - 1),
+                                .workspace_idx = model.WorkspaceId.fromIndex(ws_1based - 1),
                                 .count = @intCast(count_val),
                             });
                     }
@@ -175,9 +173,9 @@ fn parseWorkspaceListInto(
     var ws_iter = std.mem.splitScalar(u8, ws_str, ',');
     while (ws_iter.next()) |ws_tok| {
         const trimmed = std.mem.trim(u8, ws_tok, " \t");
-        const ws_1based = tryParseWsToken(trimmed, constants.max_workspaces, "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
+        const ws_1based = tryParseWsToken(trimmed, model.max_workspaces, "layouts array: invalid workspace number '{s}' for layout '{s}', skipping", .{ trimmed, layout_name }) orelse continue;
         const variant_copy: ?[]const u8 = if (variant) |v| try allocator.dupe(u8, v) else null;
-        try overrides.append(allocator, .{ .workspace_idx = ids.WorkspaceId.fromIndex(ws_1based - 1), .layout_idx = layout_idx, .variant = variant_copy });
+        try overrides.append(allocator, .{ .workspace_idx = model.WorkspaceId.fromIndex(ws_1based - 1), .layout_idx = layout_idx, .variant = variant_copy });
     }
 }
 

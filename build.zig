@@ -2272,13 +2272,14 @@ const Module = struct {
     /// This is a DIRECT-edge (1-hop) guard: it rejects a pure layer's own
     /// import of a hub module — the direction that produced the old
     /// config -> xkbcommon -> core -> config cycle (config now parses keysym
-    /// names through `keysyms`) — and catches regressions of that shape. It
+    /// names through `keymap`) — and catches regressions of that shape. It
     /// does not prove the module graph acyclic in general. Known exception:
-    /// `keysyms`, the config-facing keysym-name parser, lives in src/input/
-    /// and imports `keymap` for input's xkbcommon cImport (keymap is input's
-    /// @cImport owner and cannot move to config), so that edge is scanned as
-    /// a hub edge rather than a pure one and a directory-level config⇄input
-    /// dependency passes the one-hop check by construction.
+    /// `keymap`, the config-facing keysym-name parser, lives in the input
+    /// layer and is therefore scanned as a hub edge rather than a pure one;
+    /// it is sanctioned explicitly by `pureLayerAllows` because it is
+    /// connection-free (no X connection, no xkb_state, no extension setup), so
+    /// that directory-level config⇄input dependency passes the one-hop check
+    /// without handing config any live-device wiring.
     ///
     /// This check is the IMPORT-EDGE guard only. The complementary body/
     /// reference sweep (any bare `xcb` token in the model vocabulary, tiling,
@@ -2292,15 +2293,27 @@ const Module = struct {
         edges: []const []const u8,
         source_paths: *const std.StringHashMap([]const u8),
     ) !void {
-        // The model is the one pure root: it holds the WM's state AND the
-        // Rect/Margins value objects that state holds. `satI16` is also needed
-        // by the pure tiling layer, which is why the coordinate helpers cannot
-        // live on the x11 side. The shelf siblings in src/core/pure/ are
-        // xcb-free by construction. architecture/contract.zig moved its xcb
-        // event TYPES and the Surfaces hook set out to contract_x11.zig (was
-        // seams.zig), so contract.zig itself is pure vocabulary and is
-        // covered by this scan like any other pure module.
-        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig"))
+        // The model vocabulary is the one pure root: it holds the WM's state
+        // (core/wm_state.zig, the public facade) AND the Rect/Margins value
+        // objects that state holds (core/architecture/domain.zig, private to
+        // the facade). `satI16` is also needed by the pure tiling layer, which
+        // is why the coordinate helpers cannot live on the x11 side. The shelf
+        // siblings in src/core/pure/ are xcb-free by construction. architecture/contract.zig keeps its xcb
+        // vocabulary out entirely (the concrete key-press struct and the
+        // Surfaces hook set live with their binding site in hub-wired
+        // bar.zig), so contract.zig itself is pure vocabulary and is covered
+        // by this scan like any other pure module.
+        //
+        // Documented carve-out: `src/config/reload.zig` is the reload
+        // ORCHESTRATION root (load/validate/swap config, then rebuild the hub
+        // subsystems), so it must import hub wiring -- keybinds, window,
+        // admission, surfaces -- by design. It stays out of this guard the
+        // same way a hub file would; check-layers.sh Rule 3 still sweeps its
+        // body for xcb tokens (it has none: the rebuild reaches the wire only
+        // through other modules' APIs).
+        if (std.mem.endsWith(u8, rel_path, "src/config/reload.zig")) return;
+        const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/domain.zig") or
+            std.mem.endsWith(u8, rel_path, "src/core/wm_state.zig"))
             "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
             "tiling"
@@ -2322,27 +2335,30 @@ const Module = struct {
 
     /// The allowed-import policy behind `assertPureLayerImports`. The pure
     /// shelf (src/core/pure/) is xcb-free by construction and safe for every
-    /// layer; `model` is the shared data model AND the geometry vocabulary
-    /// (Rect/Margins) that the state holds. A pure layer's OWN siblings are
-    /// derived from the discovery walk (`source_paths`), not hand-listed —
-    /// the previous static list went stale the moment config split into
-    /// sections/vocab/parse/persist/source and the guard (already inert on a
-    /// double-slash path bug) could never have caught it. The per-layer
-    /// extras are the pure neighborhoods each layer legitimately reaches
-    /// outside its own directory: tiling's `contract` decls; config's pure
-    /// `keysyms` bridge into input. Anything else is hub wiring and belongs
-    /// behind an interface, not an import.
+    /// layer; the state facade (`wm_state`, which re-exports the private
+    /// vocabulary `domain`) is the shared data model AND the geometry
+    /// vocabulary (Rect/Margins) that the state holds. A pure layer's OWN
+    /// siblings are derived from the discovery walk (`source_paths`), not
+    /// hand-listed — the previous static list went stale the moment config
+    /// split into sections/vocab/parse/persist/source and the guard (already
+    /// inert on a double-slash path bug) could never have caught it. The
+    /// per-layer extras are the pure neighborhoods each layer legitimately
+    /// reaches outside its own directory: tiling's `contract` decls; config's
+    /// pure `keymap` bridge into input (keysym-name parsing; the module is
+    /// connection-free, so config never learns a live-device input module).
+    /// Anything else is hub wiring and belongs behind an interface, not an
+    /// import.
     fn pureLayerAllows(
         layer: []const u8,
         dep: []const u8,
         source_paths: *const std.StringHashMap([]const u8),
     ) bool {
         const shelf = [_][]const u8{
-            "constants", "log",     "ids",  "masks",    "paths", "bounded",
-            "idmap",     "scaling", "time", "dpi_math",
+            "log", "masks", "bounded", "idmap", "scaling",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
-        if (std.mem.eql(u8, dep, "model")) return true;
+        if (std.mem.eql(u8, dep, "wm_state") or
+            std.mem.eql(u8, dep, "domain")) return true;
         if (std.mem.eql(u8, layer, "model")) return false;
         // Same-layer siblings: any discovered module whose own source path
         // lives under this layer's directory root.
@@ -2353,7 +2369,7 @@ const Module = struct {
             }
             if (std.mem.eql(u8, layer, "config")) {
                 if (std.mem.startsWith(u8, dep_path, "src/config/")) return true;
-                if (std.mem.eql(u8, dep, "keysyms")) return true;
+                if (std.mem.eql(u8, dep, "keymap")) return true;
             }
         }
         return false;

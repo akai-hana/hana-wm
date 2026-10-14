@@ -43,13 +43,11 @@ var subreaper_installed: bool = false;
 
 const core = @import("core");
 const log = @import("log");
-const time = @import("time");
 const query = @import("query");
 const window = @import("window");
 const admission = @import("admission");
 
 const bounded = @import("bounded");
-const lifecycle = @import("lifecycle");
 /// The one message the spawn pipe can carry, and the only value the wire
 /// format defines. `pub` because it IS the protocol: it is the byte the child
 /// writes, and the tests assert against it so a change to the value cannot
@@ -63,6 +61,22 @@ fn failWithTag(pipe_write: c_int) noreturn {
     _ = c.write(pipe_write, &msg, msg.len);
     _ = c.close(pipe_write);
     std.process.exit(1);
+}
+
+/// Creates a pipe with O_NONBLOCK | O_CLOEXEC on both ends via pipe2(2).
+///
+/// Shared by the detached-spawn plumbing here and the signal self-pipe
+/// (process.zig), avoiding byte-equivalent copies of this in each.
+pub fn makePipe() ![2]std.posix.fd_t {
+    var fds: [2]std.posix.fd_t = undefined;
+    const flags = std.os.linux.O{ .CLOEXEC = true, .NONBLOCK = true };
+    switch (std.posix.errno(std.os.linux.pipe2(&fds, flags))) {
+        .SUCCESS => {},
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+    return fds;
 }
 
 /// execvp of `cmd` through `/bin/sh -c`; failures fall through to the caller's
@@ -174,7 +188,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
         return error.SpawnQueueFull;
     }
 
-    const pipe_fds = lifecycle.makePipe() catch {
+    const pipe_fds = makePipe() catch {
         log.err("pipe2() failed (spawn pipe): {s}", .{cmd});
         return error.PipeFailed;
     };
@@ -207,7 +221,7 @@ pub fn executeShellCommand(cmd: []const u8) !void {
         .pid = pid,
         .spawn_fd = pipe_fds[0],
         .spawn_ws = spawn_ws,
-        .started_ms = time.monotonicMs(),
+        .started_ms = core.monotonicMs(),
     };
     const keep = @min(cmd.len, cmd_report_max);
     @memcpy(entry.cmd[0..keep], cmd[0..keep]);
@@ -274,7 +288,7 @@ pub fn drainPendingSpawns() void {
         // or closed with the child never reaped) is dropped once it is older
         // than spawn_timeout_ms, so 16 stuck entries can no longer wedge
         // `exec` forever behind SpawnQueueFull.
-        if (entry.started_ms != 0 and time.monotonicMs() - entry.started_ms > spawn_timeout_ms) {
+        if (entry.started_ms != 0 and core.monotonicMs() - entry.started_ms > spawn_timeout_ms) {
             log.warn("spawn stuck for {d}ms, dropping: '{s}'", .{
                 spawn_timeout_ms,
                 entry.command(),
@@ -358,7 +372,7 @@ fn finishSpawn(entry: *PendingSpawn, pid: i32) void {
 }
 
 /// Reaps zombie children without blocking. Called from the
-/// SIGCHLD handler; the spawn-pipe drain stays in signals.zig so it doesn't
+/// SIGCHLD handler; the spawn-pipe drain stays in process.zig so it doesn't
 /// run twice per SIGCHLD.
 pub fn reapPendingChildren() void {
     // ONE reaper path. The per-pid loop alone was not enough -- a SIGCHLD

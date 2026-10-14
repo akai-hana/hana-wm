@@ -33,7 +33,7 @@
 //! zero-sized rect, never a wrapped one. See `workAreaFrom`.
 
 const core = @import("core");
-const model = @import("model");
+const model = @import("wm_state");
 
 /// Which screen edge a claim occupies.
 pub const Edge = enum { top, bottom, left, right };

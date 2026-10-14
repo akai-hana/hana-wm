@@ -12,7 +12,7 @@
 //! `reconcile`'s header owns the behavioural reads of this ledger; the field
 //! semantics live on `SentEntry` below.
 
-const model = @import("model");
+const model = @import("wm_state");
 
 /// What we last sent per window; WRITE-ONLY bookkeeping (the file header owns
 /// why it is wrong-by-design to consult from anywhere else). Field semantics
@@ -95,7 +95,7 @@ pub fn sentGetOrPut(win: model.WindowId) ?*SentEntry {
 /// Drop a window's ledger record (X ids recycle: after a destroy, a new
 /// client can appear with the same id, and a stale record would feed the
 /// orphan keep-last branch geometry belonging to the previous incarnation).
-/// Called from window actions on unmanage, and by the test seam.
+/// Called from window.unmanage, and by the test seam.
 pub fn forget(win: model.WindowId) void {
     _ = st.sent.remove(win);
 }
@@ -123,7 +123,7 @@ pub fn markSentBorderWidth(win: model.WindowId, w: u16) void {
 /// Record a border-pixel send unless that exact pixel is already recorded, and
 /// report whether the caller must actually send.
 ///
-/// This is the ONE border-pixel dedup. It was in `wincache` (`border_color`)
+/// This is the ONE border-pixel dedup. It was in `title_cache` (`border_color`)
 /// while the reconcile's own dedup read THIS record's `pixel` field, so the
 /// same fact was tracked in two places that could disagree: the reconcile sent
 /// a pixel through the sink without touching the cache, and the sweep sent

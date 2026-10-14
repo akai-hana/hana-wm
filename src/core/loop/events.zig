@@ -9,25 +9,27 @@ const xcb = core.xcb;
 const masks = @import("masks");
 
 const log = @import("log");
-const xtrace = @import("xtrace");
+const trace = @import("trace");
 const config = @import("config");
 const scale = @import("dpi");
 const hz = @import("hz");
-const input = @import("input");
-const grabs = @import("grabs");
+// The input subsystem ships as separate modules; this file names the four
+// it dispatches to (no facade to re-export them).
+const keybinds = @import("keybinds");
+const keys = @import("keys");
+const mouse = @import("mouse");
 const window = @import("window");
 const ledger = @import("ledger");
 const focus = @import("focus");
 
-const signals = @import("signals");
 const pipeline = @import("pipeline");
-const handoff = @import("handoff");
+const session = @import("session");
 const spawn = @import("spawn");
 const build_options = @import("build_options");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so every `if (build_options.has_bar)` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
-const lifecycle = @import("lifecycle");
+const process = @import("process");
 // Config reload (the SIGHUP / reload_config transition) lives in
 // reload.zig (review 05-input round 2): a lifecycle concern, not
 // per-event path work.
@@ -110,17 +112,17 @@ fn handleDestroyNotify(event: *anyopaque) void {
     window.handleDestroyNotify(e);
 }
 
-// Adapts input.handleMappingNotify to the EventHandler shape. Only the
+// Adapts keybinds.handleMappingNotify to the EventHandler shape. Only the
 // `request` field matters: it says WHICH mapping changed, and only a keyboard
-// mapping change invalidates the keycode->keysym table. A keyboard
-// change also makes the installed key grabs stale, and the regrab runs HERE
-// rather than inside input because grabs reads input's resolved keybind list:
-// calling it from there closed an import cycle (the same reason mouse
-// dispatch lives in dispatch.zig).
+// mapping change invalidates the keycode->keysym table. A keyboard change
+// also makes the installed key grabs stale, so the regrab runs HERE, right
+// after the rebuild: this is the X-event dispatch table, and deciding that a
+// server-side mapping change warrants re-installing the root grabs is a
+// decision about that event, not about bind compilation.
 fn handleMappingNotify(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_mapping_notify_event_t, event);
-    if (input.handleMappingNotify(e.request == xcb.XCB_MAPPING_KEYBOARD))
-        grabs.grabKeybindings(input.resolvedKeybinds());
+    if (keybinds.handleMappingNotify(e.request == xcb.XCB_MAPPING_KEYBOARD))
+        keybinds.grabKeybindings(keybinds.resolvedKeybinds());
 }
 
 // O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
@@ -145,12 +147,12 @@ const dispatch_table = blk: {
     table[xcb.XCB_DESTROY_NOTIFY] = asHandler(handleDestroyNotify);
     table[xcb.XCB_CLIENT_MESSAGE] = asHandler(window.handleClientMessage);
 
-    table[xcb.XCB_KEY_PRESS] = asHandler(input.handleKeyPress);
-    table[xcb.XCB_KEY_RELEASE] = asHandler(input.handleKeyRelease);
+    table[xcb.XCB_KEY_PRESS] = asHandler(keys.handleKeyPress);
+    table[xcb.XCB_KEY_RELEASE] = asHandler(keys.handleKeyRelease);
     table[xcb.XCB_MAPPING_NOTIFY] = asHandler(handleMappingNotify);
-    table[xcb.XCB_BUTTON_PRESS] = asHandler(input.handleButtonPress);
-    table[xcb.XCB_BUTTON_RELEASE] = asHandler(input.handleButtonRelease);
-    table[xcb.XCB_MOTION_NOTIFY] = asHandler(input.handleMotionNotify);
+    table[xcb.XCB_BUTTON_PRESS] = asHandler(mouse.handleButtonPress);
+    table[xcb.XCB_BUTTON_RELEASE] = asHandler(mouse.handleButtonRelease);
+    table[xcb.XCB_MOTION_NOTIFY] = asHandler(mouse.handleMotionNotify);
     table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
 
     table[xcb.XCB_EXPOSE] = asHandler(handleExpose);
@@ -258,14 +260,14 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
 /// (stack- or heap-allocated by XCB), so they all funnel through here.
 fn dispatchOwned(event: *anyopaque) void {
     defer std.c.free(event);
-    // Opt-in per-window X trace (see xtrace): records the dispatch ORDER of
+    // Opt-in per-window X trace (see trace): records the dispatch ORDER of
     // every event for a watched window, which is what a static reading of the
     // WM cannot recover. One branch when disabled, and `watches` is the only
     // thing consulted before anything is formatted.
     const t = eventType(event);
-    if (xtrace.enabled()) {
+    if (trace.enabled()) {
         const win = eventWindowFor(t, event);
-        if (xtrace.watches(win)) xtrace.inbound(t, win);
+        if (trace.watches(win)) trace.inbound(t, win);
     }
     dispatch(t, event);
 }
@@ -337,7 +339,7 @@ inline fn eventType(e: anytype) u8 {
     return @as(*u8, @ptrCast(e)).*;
 }
 
-// Re-exec hand-off, driven by lifecycle.consumeReexec() in run(). The sequence
+// Re-exec hand-off, driven by process.consumeReexec() in run(). The sequence
 // is fixed: pin the config snapshot, persist the live session FIRST (a failed
 // save aborts the hand-off and the WM keeps running on its live connection),
 // then drop the X connection so the successor cannot inherit a live
@@ -347,24 +349,24 @@ fn handleReexec() !void {
     const cs = core.getState();
     log.info("Re-executing new binary", .{});
 
-    const path = try handoff.defaultStatePath(cs.alloc);
+    const path = try session.defaultStatePath(cs.alloc);
     // The path is allocator-owned; execNext never returns so this only
     // ever runs on the error/abort exits below, where the leak would else
     // live for the rest of the process lifetime.
     defer cs.alloc.free(path);
-    try handoff.save(cs.alloc, pipeline.model(), path);
+    try session.save(cs.alloc, pipeline.state(), path);
 
     // One record for the whole hand-off. The snapshot is the frozen last-good
     // config, so this re-exec swaps ONLY the binary; a re-exec boot that finds
     // no snapshot (no user config was ever loaded) falls back to the normal
     // search, which reproduces today's fallback-only behavior.
-    const exec_handoff = lifecycle.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
+    const exec_handoff = process.currentHandoff(path, config.reexecSnapshotPathZ()) orelse {
         log.err("Re-exec aborted: executable path unknown", .{});
         return error.ExecutablePathUnknown;
     };
 
     xcb.xcb_disconnect(cs.conn);
-    lifecycle.execNext(exec_handoff);
+    process.execNext(exec_handoff);
 }
 
 /// One comptime-parameterized drain shared by the batch poll loop and the
@@ -551,10 +553,10 @@ pub fn run() void {
     // session instead.
     if (x_fd < 0) {
         log.err("X connection is no longer usable (fd={d}); ending the event loop", .{x_fd});
-        lifecycle.quit();
+        process.quit();
         return;
     }
-    const signal_fd: std.posix.fd_t = signals.readFd();
+    const signal_fd: std.posix.fd_t = process.readFd();
 
     // Fixed slots first (x_fd, signal_fd) so the fd_xcb/fd_signal indices stay
     // valid, then one slot per in-flight spawn pipe. The two fixed entries are
@@ -577,7 +579,7 @@ pub fn run() void {
     } else 0;
     const loop_timers: Timers = .{ .sources = source_buf[0..n_sources] };
 
-    while (lifecycle.running.load(.acquire)) {
+    while (process.running.load(.acquire)) {
         // Rebuild the poll set each round so post-boot spawn pipes join it.
         const rds = spawn.readFds(&spawn_fds);
         for (rds, 2..) |fd, i| poll_buf[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
@@ -610,7 +612,7 @@ pub fn run() void {
         // (poll sleeps until unrelated X traffic or a timer). Draining first
         // makes the consumption below see the flag it just set.
         if ((fds[fd_signal].revents & std.posix.POLL.IN) != 0)
-            signals.drainAndDispatch(signal_fd);
+            process.drainAndDispatch(signal_fd);
 
         // A spawn pipe with output ready: drain it now instead of waiting for
         // the next X event or SIGCHLD. POLL.ERR/POLL.HUP count too, because a
@@ -635,10 +637,10 @@ pub fn run() void {
         // snapshot) before the successor boots from that snapshot. A reload
         // that fails keeps the last-good snapshot, so the re-exec still lands
         // on the previously live config.
-        if (lifecycle.consumeReload())
+        if (process.consumeReload())
             reload.handleConfigReload() catch |err| log.err("Reload failed: {}", .{err});
 
-        if (lifecycle.consumeReexec())
+        if (process.consumeReexec())
             handleReexec() catch |err| log.err("Re-exec failed: {}", .{err});
 
         if (ready == 0 and poll_timeout_ms >= 0) {
