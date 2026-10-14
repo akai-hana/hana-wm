@@ -27,8 +27,7 @@
 //! bind.
 
 const std = @import("std");
-const constants = @import("constants");
-const model = @import("model");
+const wm_state = @import("wm_state");
 const contract = @import("contract");
 
 const atoms = @import("atoms");
@@ -39,15 +38,16 @@ const bounded = @import("bounded");
 // lifetime. This is also why init()/deinit() must reset everything (test
 // fixtures rely on it; see "test discipline" below).
 
-/// Ceiling on concurrently flagged windows. Pick a constant from
-/// `constants` when possible (e.g. constants.max_minimized); a local const
-/// is fine when the feature defines its own budget.
-const MAX_FLAGGED = constants.max_minimized;
+/// Ceiling on concurrently flagged windows. A local const is fine when the
+/// feature defines its own budget; when the budget is shared with a core
+/// module, import that module's ceiling (e.g. `minimize.max_minimized`)
+/// instead of re-deriving the number.
+const MAX_FLAGGED = 32;
 
 /// One flagged window's record. `mask`/`seq` are just for illustration —
 /// your feature stores whatever it must survive a restart (or nothing).
 const Rec = struct {
-    win: model.WindowId,
+    win: wm_state.WindowId,
     flag: bool = true,
     seq: u32,
 };
@@ -57,7 +57,7 @@ const Rec = struct {
 var g_recs: bounded.BoundedList(Rec, MAX_FLAGGED) = .{};
 var g_seq: u32 = 0;
 
-fn findRec(win: model.WindowId) ?usize {
+fn findRec(win: wm_state.WindowId) ?usize {
     for (g_recs.constSlice(), 0..) |rec, i| {
         if (rec.win == win) return i;
     }
@@ -86,7 +86,7 @@ pub fn deinit() void {
     g_seq = 0;
 }
 
-/// Per-window teardown, dispatched by the wire layer after model.unregister
+/// Per-window teardown, dispatched by the wire layer after wm_state.unregister
 /// (the model itself stays feature-free and never names this module). DROP
 /// every record for `win` here — a dangling record is how recycled XIDs
 /// inherit stale state.
@@ -112,10 +112,10 @@ pub fn onWindowGone(win: u32) void {
 /// presence == .present and I have a record" — so the sets can never
 /// overlap regardless of registry order.
 ///
-/// The model arrives as a READ-ONLY `*const model.Model` (serialization
+/// The model arrives as a READ-ONLY `*const wm_state.Model` (serialization
 /// never mutates; writing through it is a compile error, and persist does
 /// NOT @constCast across this seam). No cast needed on this side.
-pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
+pub fn serializeWindow(m: *const wm_state.Model, win: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const idx = findRec(win) orelse return null;
     // Presence-driven exclusivity (see ownership rule above). TODO: pick the
     // presence values your feature owns (here: only .present windows).
@@ -147,9 +147,9 @@ pub fn serializeWindow(m: *const model.Model, win: u32, alloc: std.mem.Allocator
 /// Replay your state against the LIVE model: the entry is already registered
 /// (present + tiled + home_ws set); flip presence/geometry as your feature
 /// requires. Idempotent: never crash on a double-claim (findRec check).
-/// The model arrives typed as `*model.Model`; adoption may rewrite model
+/// The model arrives typed as `*wm_state.Model`; adoption may rewrite model
 /// state, so it is only dispatched from the window layer's restore path.
-pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
+pub fn deserializeWindow(win: u32, bytes: []const u8, m: *wm_state.Model) bool {
     if (bytes.len != 6 or bytes[0] != 0x50) return false; // not ours
     if (findRec(win) != null) return true; // already adopted
     if (g_recs.len >= MAX_FLAGGED) return false; // capacity BEFORE mutation
@@ -181,11 +181,11 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
 /// `coverageOn` hook is gone, and so are `isCoveringMode`, `coveringWsOf` and
 /// `isCoveringOnWs` -- those three were pure reads of the model's
 /// `covering_ws` field, so they are model queries now
-/// (`model.isCovering` / `model.coveringWsOf` / `model.isCoveringOn`) rather
+/// (`wm_state.isCovering` / `wm_state.coveringWsOf` / `wm_state.isCoveringOn`) rather
 /// than hooks that resolve to null when no covering module is bound. The
 /// remaining covering family is toggleCovering / visibleCoveringOnWs /
 /// releaseCovering / moveCoveringTo -- fullscreen.zig binds the family.)
-pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
+pub fn visibleCoveringOnWs(m: *const wm_state.Model, ws: wm_state.WSId) ?wm_state.WindowId {
     for (g_recs.constSlice()) |rec| {
         if (!rec.flag) continue; // TODO: your "claims the screen" predicate
         const e = m.store.get(rec.win) orelse continue;
@@ -204,10 +204,10 @@ pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowI
 //      gated by `if (build_options.has_otherfeature)`. Never in a signature,
 //      a top-level declaration, or a struct type.
 //   2. Shared vocabulary types (a struct two modules both need) live in
-//      model.zig — never inside either module.
+//      wm_state.zig — never inside either module.
 // Pattern (mirrored from workspaces/floating):
 //   if (build_options.has_fullscreen) {
-//       if (model.isCovering(m, win)) return .ignored;
+//       if (wm_state.isCovering(m, win)) return .ignored;
 //   }
 // Prefer a model query when one answers the question: whether a window is
 // covering is a model fact, so there is no seam to reach across. Reach for

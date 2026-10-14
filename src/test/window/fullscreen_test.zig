@@ -13,7 +13,7 @@ const testing = std.testing;
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
 // warn-level overflow diagnostic; src/core/pure/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
-const model = @import("model");
+const model = @import("wm_state");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};

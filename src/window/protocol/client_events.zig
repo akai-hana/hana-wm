@@ -9,13 +9,14 @@
 //!      geometry with a synthetic ConfigureNotify (ICCCM 4.1.5).
 //!   2. CLIENT_MESSAGE — EWMH fullscreen requests from applications (the
 //!      pager / native-fullscreen side of the fullscreen protocol; the
-//!      model transition itself is actions/covering.zig). Owns the
+//!      model transition itself is modules/fullscreen.zig). Owns the
 //!      warn-once latches: a looping pager would otherwise flood the log,
 //!      and the latches reset with the rest of the window layer's init
 //!      discipline (window.init calls `reset`).
-//!   3. CROSSING — Enter/LeaveNotify handling: hover focus and crossing
-//!      suppression. The focus protocol itself (prepare/apply,
-//!      suppression state) stays in protocol/focus.zig.
+//!   3. CROSSING — Enter/LeaveNotify handling: event-shape filtering, then a
+//!      hand-off to focus.zig's crossing policy (crossingShouldDrop /
+//!      maybeFocusWindow). The focus protocol itself AND the suppression
+//!      policy (spawn-crossing guard, hover focus) live in protocol/focus.zig.
 //!
 //! `window.zig` re-exports the four public handlers as the event dispatch
 //! surface events.zig's table binds. (Formerly three separate files
@@ -32,8 +33,7 @@ const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
-const actions = @import("actions");
-const model_mod = @import("model");
+const model_mod = @import("wm_state");
 const atoms = @import("atoms");
 const focus = @import("focus");
 const query = @import("query");
@@ -80,7 +80,7 @@ fn sendConfigureNotify(win: u32, rect: model_mod.Rect) void {
 /// Returns null when even the fallback fails (window gone).
 fn resolveConfigureGeometry(win: u32) ?model_mod.Rect {
     // Model/sync truth: floating base or last-sent ledger rect.
-    if (reconcile.truthRect(pipeline.model(), win)) |rect| {
+    if (reconcile.truthRect(pipeline.state(), win)) |rect| {
         // Report the border width we actually last sent for this window
         // (the ledger), not the global config default. The two differ before
         // the first reconcile and for per-window overrides; a wrong value here
@@ -139,7 +139,7 @@ fn handleManagedConfigureRequest(
             // window's ConfigureRequest must update its model rect (done in the
             // module above) but not move the X window, which would flash it
             // onto the current workspace; it is configured when next shown.
-            const m = pipeline.model();
+            const m = pipeline.state();
             if (model_mod.visibleOn(m, win, m.current))
                 sendRequestedConfigure(win, event, mask);
             return;
@@ -168,6 +168,14 @@ fn noteHonoredBorderWidth(win: u32, bw: u16) void {
     if (build_options.has_tiling) ledger.markSentBorderWidth(win, bw);
 }
 
+/// Last committed drag rect, for resize-path geometry replay. Zero rect when
+/// no floating module provides the hook, matching the no-floating default.
+fn dragLastRect() model_mod.Rect {
+    const wm = registry.providerOf(.getDragLastRect) orelse
+        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    return wm.getDragLastRect.?();
+}
+
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
 
@@ -177,8 +185,8 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     if (mask == 0) return;
 
     // Deny min-size ConfigureRequests from the window being drag-resized.
-    if (actions.isResizingWindow(win)) {
-        const last = actions.getDragLastRect();
+    if (registry.dispatchFirstTrue(.isResizingWindow, .{win})) {
+        const last = dragLastRect();
         if (last.width != 0) {
             sendConfigureNotify(win, .{
                 .x = last.x,
@@ -294,7 +302,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         };
         // PIPELINE: model-path transition; the transition stays on the single
         // source of truth.
-        actions.fullscreenSetWindow(win, target);
+        registry.callHook(.setFullscreenWindow, .{ win, target });
         return;
     }
 
@@ -345,80 +353,36 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     // itself and computes the covering state inside the same grab, so no
     // covering pre-scan or explicit guard is needed here -- one covering
     // scan per request instead of two.
-    actions.fullscreenSetWindow(win, want);
+    registry.callHook(.setFullscreenWindow, .{ win, want });
 }
 
 // ---------------------------------------------------------------------------
 // 3. Enter/Leave crossing.
+//
+// Shape filtering only; the crossing policy (drag/spawn suppression, hover
+// focus) lives in protocol/focus.zig as crossingShouldDrop/maybeFocusWindow.
 // ---------------------------------------------------------------------------
-
-inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
-    if (focus.getSuppressReason() != .window_spawn) return false;
-    // The spawn snapshot (focus.spawnCursor()) is taken by
-    // handleMapRequest
-    // when the spawn's MapRequest arrives. Mapping a new window under the
-    // stationary cursor produces a PAIR of synthetic crossings, both carrying
-    // the spawn's root coordinates: the enter into the spawned window, and the
-    // return crossing into the window it displaced (which, when the spawned
-    // window immediately parks offscreen, is the previous focus). A one-shot
-    // guard only drops the first, letting the return crossing re-steal focus
-    // from the just-spawned window via mouse_enter.
-    //
-    // Keep the guard armed while crossings stay at the spawn pixel: only a
-    // genuine pointer move (different coordinates) is a real hover and may
-    // clear it. A cursor parked where it was when the app launched can't hover
-    // a different window at that same pixel until it moves, which is the
-    // acceptable price for not stealing focus during the spawn's layout.
-    const cursor = focus.spawnCursor();
-    if (root_x == cursor.x and root_y == cursor.y) return true;
-    focus.setSuppressReason(.none);
-    return false;
-}
-
-/// Shared guard tail for the EnterNotify/LeaveNotify handlers, run after each
-/// handler's event-shape filter (mode/detail/root): a floating drag owns the
-/// pointer, and a spawn's synthetic crossing (the window mapping under the
-/// parked cursor) must be suppressed. Returns true when the crossing should
-/// be dropped.
-inline fn crossingShouldDrop(root_x: i16, root_y: i16) bool {
-    if (actions.isDragging()) return true;
-    return suppressSpawnCrossing(root_x, root_y);
-}
-
-/// Attempt to focus `win` via the hover (EnterNotify) path.
-///
-/// Guards against workspace membership and hidden state before calling
-/// focus.grabFocus(.mouse_enter). The .mouse_enter reason is the direct
-/// EnterNotify path: lightweight, no raise, no confirm.
-inline fn maybeFocusWindow(win: u32) void {
-    // In all-view mode every window is visible on the current workspace
-    // regardless of its tag mask, so hover must be able to focus it too; a
-    // bare membership check made all-view windows un-focusable by ENTER.
-    if (!query.isOnCurrentWorkspace(win) and !pipeline.model().all_view_active) return;
-    if (registry.callHookBool(.isWindowHidden, .{ pipeline.model(), win })) return;
-    focus.grabFocus(win, .mouse_enter);
-}
 
 pub fn handleEnterNotify(event: *const xcb.xcb_enter_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL or
         event.detail == xcb.XCB_NOTIFY_DETAIL_INFERIOR)
         return;
-    if (crossingShouldDrop(event.root_x, event.root_y)) return;
+    if (focus.crossingShouldDrop(event.root_x, event.root_y)) return;
     if (focus.shouldSuppressEnterNotify()) return;
-    maybeFocusWindow(window.findManagedWindow(core.getState().conn, event.event, query.isManaged));
+    focus.maybeFocusWindow(window.findManagedWindow(core.getState().conn, event.event, query.isManaged));
 }
 
 pub fn handleLeaveNotify(event: *const xcb.xcb_leave_notify_event_t) void {
     focus.setLastEventTime(event.time);
     if (event.event != core.getState().root) return;
     if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
-    if (crossingShouldDrop(event.root_x, event.root_y)) return;
+    if (focus.crossingShouldDrop(event.root_x, event.root_y)) return;
     // When child is zero the pointer left to an area not covered by any window.
     if (event.child == 0) return;
     // Guard against unmanaged subwindows (e.g. embedded GTK widgets): a root
     // LeaveNotify with non-zero child doesn't guarantee a managed toplevel.
     // Walk up to the managed toplevel, consistent with handleEnterNotify's
     // findManagedWindow.
-    maybeFocusWindow(window.findManagedWindow(core.getState().conn, event.child, query.isManaged));
+    focus.maybeFocusWindow(window.findManagedWindow(core.getState().conn, event.child, query.isManaged));
 }

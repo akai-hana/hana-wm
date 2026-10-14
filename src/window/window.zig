@@ -1,7 +1,7 @@
 //! X11-facing window protocol layer: the event boundary for managed toplevels.
 //! Translates MapRequest / UnmapNotify / DestroyNotify / ConfigureRequest /
 //! Enter-LeaveNotify / PropertyNotify / ClientMessage into model transitions
-//! (actions, focus) and owns what surrounds them: child-to-toplevel
+//! (commands, focus) and owns what surrounds them: child-to-toplevel
 //! resolution for Electron/Qt/GTK clients and WM_NORMAL_HINTS parsing. The
 //! admission policy itself (WM_CLASS workspace/float rules, the spawn queue,
 //! the five-cookie admission pipeline) and boot-time adoption of pre-existing
@@ -9,7 +9,8 @@
 //!
 //! The event handlers themselves live in protocol/ beside this file --
 //! client_events.zig (ConfigureRequest compliance, EWMH ClientMessage,
-//! Enter/Leave) -- and the per-batch border sweeps in protocol/borders.zig;
+//! Enter/Leave) -- with the pure border helpers in protocol/borders.zig and
+//! the per-batch border sweeps in sync/border_sweeps.zig;
 //! window.zig re-exports all of them so `window.*` remains the single
 //! dispatch surface. Also this layer's stable
 //! facade: window.zig re-exports the icccm protocol surface and the
@@ -21,7 +22,6 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
 const log = @import("log");
 const query = @import("query");
 const focus = @import("focus");
@@ -30,18 +30,21 @@ const reply_mod = @import("reply");
 const build_options = @import("build_options");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
-const wincache = @import("wincache");
+const title_cache = @import("title_cache");
 const borders = @import("borders");
+const border_sweeps = @import("border_sweeps");
 const client_events = @import("client_events");
 const pipeline = @import("pipeline");
 const admission = @import("admission");
-const actions = @import("actions");
-const model_mod = @import("model");
+const model_mod = @import("wm_state");
 const idmap = @import("idmap");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
-const time = @import("time");
+const ledger = @import("ledger");
+const reconcile_tails = @import("reconcile_tails");
+// Layout-name resolution for the state dump, via the build-generated seam.
+const tiling = @import("tiling_seam").tiling;
 
 // Window-module hook dispatch lives in registry.zig (the binding layer);
 // window.zig re-exports the five wrappers so `window.*` stays the stable
@@ -52,12 +55,31 @@ pub const callHookBool = registry.callHookBool;
 pub const dispatchAll = registry.dispatchAll;
 pub const dispatchFirstTrue = registry.dispatchFirstTrue;
 
-// ICCCM protocol surface (ICCCM 4.1.2/4.1.7) lives in icccm.zig; window.zig
-// re-exports the pub API so `window.*` stays the stable external facade.
-pub const peekInputModelResolved = icccm.peekInputModelResolved;
-pub const provisionalResolution = icccm.provisionalResolution;
+// The command surface the dissolved `src/actions` hub used to re-export.
+// Always-present transitions are re-exported as the concrete functions they
+// are; optional-module commands are reached through `callHook` above, so this
+// facade never names an optional module. Tests and the bar import `window`
+// and never the owning file.
+pub const mapRequest = admission.mapRequest;
+pub const focusAfterGeometry = admission.focusAfterGeometry;
+pub const cycleLayoutKind = reconcile_tails.cycleLayoutKind;
+pub const stepVariantDir = reconcile_tails.stepVariantDir;
+pub const adjustPrimaryWidthAction = reconcile_tails.adjustPrimaryWidthAction;
+pub const adjustPrimaryCount = reconcile_tails.adjustPrimaryCount;
+pub const adjustSecondaryBalance = reconcile_tails.adjustSecondaryBalance;
+pub const swapPrimaryAction = reconcile_tails.swapPrimaryAction;
+pub const moveFocused = reconcile_tails.moveFocused;
+pub const viewportStep = reconcile_tails.viewportStep;
+pub const snapViewportFocusedDuty = reconcile_tails.snapViewportFocusedDuty;
+
+// Focus-property cache + ICCCM 4.1.7 input-model surface lives in
+// focus.zig (the cache's owner); the WM_DELETE verdict and cookie helpers
+// stay in icccm.zig. window.zig re-exports the pub API so `window.*` stays
+// the stable external facade.
+pub const peekInputModelResolved = focus.peekInputModelResolved;
+pub const provisionalResolution = focus.provisionalResolution;
 pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
-pub const sendWMTakeFocusKnown = icccm.sendWMTakeFocusKnown;
+pub const sendWMTakeFocusKnown = focus.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
 // Event handlers and border sweeps split out of this file:
@@ -69,11 +91,12 @@ pub const handleConfigureRequest = client_events.handleConfigureRequest;
 pub const handleEnterNotify = client_events.handleEnterNotify;
 pub const handleLeaveNotify = client_events.handleLeaveNotify;
 pub const handleClientMessage = client_events.handleClientMessage;
-pub const updateWorkspaceBorders = borders.updateWorkspaceBorders;
-pub const updateFloatingWindowBorders = borders.updateFloatingWindowBorders;
-pub const reloadBorders = borders.reloadBorders;
+pub const updateWorkspaceBorders = border_sweeps.updateWorkspaceBorders;
+pub const updateFloatingWindowBorders = border_sweeps.updateFloatingWindowBorders;
+pub const reloadBorders = border_sweeps.reloadBorders;
 
-const max_window_tree_depth = constants.max_window_tree_depth;
+/// Maximum depth when walking the X11 window tree in findManagedWindow.
+const max_window_tree_depth: usize = 10;
 
 // Live geometry is read straight off the wire via getGeometry(). The
 // last-sent geometry for X-side state (workspace-switch replay, minimize/
@@ -177,18 +200,18 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // init() cycle (session restart, test harness) starts from a clean slate
     // rather than carrying over whatever the previous cycle left behind.
     // Admission sub-state and the other reset disciplines live beside their
-    // owners (admission.init, icccm.reset, client_events.reset, ...).
+    // owners (admission.init, focus.reset, client_events.reset, ...).
     reset();
     pipeline.clearFocusMru();
     focus.init();
-    wincache.init(alloc);
+    title_cache.init(alloc);
     // Uniform lifecycle dispatch: each compiled-in sub-system's init
     // runs, absent modules aren't in the array, so nothing else needs
     // a has_* guard. The fallible fan-out is stated here (init is its
     // only user; contract's two dispatch primitives are providerOf +
     // callAll, per the 6->2 collapse).
     for (window_mods) |wm| if (wm.init) |f| try f();
-    icccm.reset();
+    focus.reset();
     // Admission sub-state (spawn queue, rules maps): reset and rules-map
     // rebuild live with the admission policy in admission.zig.
     admission.init(alloc);
@@ -198,7 +221,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
 }
 
 pub fn deinit() void {
-    wincache.deinit();
+    title_cache.deinit();
     // Uniform lifecycle dispatch: every compiled-in sub-system's
     // deinit runs, absent modules aren't in the array.
     dispatchAll(.deinit, .{});
@@ -208,7 +231,7 @@ pub fn deinit() void {
     // Clear the focus-property cache before focus deinit,
     // whose managed-window sweeps must not encounter a partially-valid
     // cache.
-    icccm.reset();
+    focus.reset();
     focus.deinit();
     pipeline.clearFocusMru();
     // Empty the child cache so accidental post-deinit lookups MISS instead
@@ -237,7 +260,7 @@ pub const clampToValidWorkspace = admission.clampToValidWorkspace;
 /// lets the X server process them in parallel, saving 2-3 blocking round trips
 /// compared to the previous fire-then-drain-per-property approach.
 ///
-/// TIMING (gated by `-Dprofile-key`, mirroring actions.switchTo): measures
+/// TIMING (gated by `-Dprofile-key`, mirroring workspaces.switchWorkspace): measures
 /// MapRequest receipt -> the map queued by the reconcile inside
 /// admission.admitWindow. `drain_us` is the dominant X round-trip (the reply
 /// to the first of the pipelined batch); `after_drain_us` is pure local work
@@ -246,7 +269,7 @@ pub const clampToValidWorkspace = admission.clampToValidWorkspace;
 pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const win = event.window;
     const conn = core.getState().conn;
-    const t0: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
+    const t0: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
     if (query.isManaged(win)) return; // double-manage guard, see query.isManaged
 
@@ -265,7 +288,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     // The server processes all five requests in parallel while we do pure
     // local bookkeeping below.
     const cookies = admission.fireAdmissionCookies(conn, win);
-    const t_fire: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
+    const t_fire: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
     // Drain replies sequentially
     const decision = admission.resolveAdmissionDecision(current_ws, cookies.c_wm_class, cookies.c_net_wm_pid);
@@ -273,7 +296,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const on_current = target_ws.eql(current_ws);
 
     const size_hints = admission.drainAdmissionCookies(conn, win, cookies, false);
-    const t_drain: u64 = if (build_options.profile_key) time.monotonicNs() else 0;
+    const t_drain: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
@@ -282,7 +305,7 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     admission.admitWindow(win, target_ws.index, on_current, decision.float, size_hints);
 
     if (build_options.profile_key) {
-        const t_map = time.monotonicNs();
+        const t_map = core.monotonicNs();
         log.info("[TIMING] spawn 0x{x}: local={d}us drain={d}us after_drain={d}us total={d}us", .{
             win,
             @as(u64, @intCast(t_fire - t0)) / 1000,
@@ -293,10 +316,35 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     }
 }
 
+/// Unmanage tail: close/destroy/unmap of a managed window. Local
+/// bookkeeping (covering record, caches, sub-system removes) has already
+/// run; this drops the model entry and re-focuses. Inactive-workspace
+/// geometry repairs ride the same global LastSent diff.
+///
+/// Lives here rather than in the admission half of the layer because it is
+/// the OPPOSITE of admission: everything `mapRequest` builds, this unwinds.
+pub fn unmanage(win: model_mod.WindowId) void {
+    const m = pipeline.mut();
+    // Covering and focus truth must be read BEFORE the unregister below
+    // drops the model entry (after which no store query could recover it):
+    // an onWindowGone binder mutating model focus or the covering record
+    // would make them unreadable. The hooks that fire on this path touch
+    // module-local stores only.
+    const was_fs_current = if (model_mod.coveringWsOf(m, win)) |ws_id| ws_id.eql(m.current) else false;
+    const was_focused = m.focused == win;
+
+    model_mod.unregister(m, win);
+    ledger.forget(win); // X ids recycle; stale LastSent must not survive
+
+    // Closing the current workspace's covering occupant releases the area;
+    // retileWithFallback bumps the core fact so the bar reacts.
+    reconcile_tails.retileWithFallback(m, was_fs_current, was_focused);
+}
+
 fn unmanageWindow(win: u32) void {
-    // Covering truth is model-side (actions.unmanage reads it); the module
+    // Covering truth is model-side (unmanage reads it); the module
     // store is queried through the registry below.
-    icccm.evict(win);
+    focus.evict(win);
 
     // Evict child-cache entries pointing at this toplevel, so a new window
     // reusing the same XID can't be mis-identified as its child on the next
@@ -304,12 +352,12 @@ fn unmanageWindow(win: u32) void {
     evictFor(win);
 
     // Local bookkeeping, before the grab
-    // wincache.removeWindow unconditionally evicts the combined cache entry
+    // title_cache.removeWindow unconditionally evicts the combined cache entry
     // (geometry + border + size hints). All three removes are pure local
     // bookkeeping (no X requests), so they run pre-grab, letting the
     // post-close focus target be resolved against win-free query state,
     // with its input model queried BEFORE the grab.
-    wincache.removeWindow(win);
+    title_cache.removeWindow(win);
 
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
@@ -325,8 +373,8 @@ fn unmanageWindow(win: u32) void {
     // via unmap+destroy runs this once per event; unregister/fallback no-op
     // on the second invocation.
     //
-    // actions.unmanage owns the unregister.
-    actions.unmanage(win);
+    // unmanage owns the unregister.
+    unmanage(win);
 }
 
 pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
@@ -334,7 +382,7 @@ pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
-    actions.cancelDragForWindow(event.window);
+    dispatchAll(.cancelDragForWindow, .{event.window});
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
@@ -348,7 +396,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // does no title property fetching at all.
     const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        if (wincache.refreshTitle(conn, event.window)) core.window.bump();
+        if (title_cache.refreshTitle(conn, event.window)) core.window.bump();
         return;
     }
 
@@ -364,7 +412,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     if (event.atom == atoms.getAtomOrZero("WM_PROTOCOLS") or
         event.atom == xcb.XCB_ATOM_WM_HINTS)
     {
-        icccm.refreshCachedPropHalf(conn, event.window, event.atom);
+        focus.refreshCachedPropHalf(conn, event.window, event.atom);
     }
 }
 
@@ -396,4 +444,42 @@ pub fn parseSizeHints(
     defer std.c.free(reply);
     if (reply.*.format != 32 or reply.*.value_len < 5) return null;
     return reply_mod.parse(icccm.u32Values(reply), reply.*.value_len);
+}
+
+/// WM-wide state dump diagnostic: logs a live snapshot of model and subsystem
+/// state on demand (read-only); used by the dump-state command. A read-only
+/// log emitter, so it sits on the facade rather than in a subsystem.
+pub fn dumpState() void {
+    // A stack array is the right owner here (no State to hang it off), and it
+    // keeps `query` free of module-level scratch.
+    var scratch: [model_mod.store_capacity]query.Entry = undefined;
+    const all = query.allWindowsInto(&scratch);
+
+    log.info("========== STATE DUMP ==========", .{});
+    log.info("Focused:        {?x}", .{focus.getFocused()});
+    log.info("Total windows:  {}", .{all.len});
+    log.info("Suppress focus: {s}", .{@tagName(focus.getSuppressReason())});
+
+    if (build_options.has_workspaces) {
+        const ws_count = query.getWorkspaceCount();
+        for (0..ws_count) |i| {
+            var n: usize = 0;
+            for (all) |e| {
+                if (model_mod.maskedOn(e.mask, model_mod.WSId.fromIndex(i))) n += 1;
+            }
+            log.info(
+                "  WS{}: {} windows",
+                .{ i + 1, n },
+            );
+        }
+    }
+
+    if (build_options.has_tiling and core.tilingEnabled()) {
+        const m = pipeline.state();
+        log.info("Tiling enabled: true", .{});
+        log.info("Tiling layout:  {s}", .{tiling.moduleName(pipeline.getCurrentLayout())});
+        log.info("Tiled windows:  {}", .{model_mod.tiledCountOnWs(m, m.current)});
+    }
+
+    log.info("================================", .{});
 }

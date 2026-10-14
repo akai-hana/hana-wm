@@ -1,5 +1,7 @@
 //! The window layer's binding-layer dispatch surface: five thin wrappers
-//! over the generated window-module registry (`window_modules`).
+//! over the generated window-module registry (`window_modules`), plus two
+//! named reads (covering occupant, parked predicate) that wrap one-line
+//! provider lookups every consumer would otherwise restate.
 //!
 //! BINDING-LAYER SURFACE (KISS audit note): the five dispatch wrappers below
 //! (providerOf/callHook/callHookBool/dispatchAll/dispatchFirstTrue) are thin
@@ -9,17 +11,18 @@
 //! collapse deliberately removed. Further collapse: considered, rejected.
 //!
 //! Within `src/window/**` callers import `registry` directly (one hop to the
-//! definition); outside the layer `window.zig` re-exports the same five so
+//! definition); outside the layer `window.zig` re-exports them so
 //! `window.*` stays the stable external facade events.zig, bar/state.zig,
 //! input and the tests import.
 
 const std = @import("std");
 
 const contract = @import("contract");
+const model = @import("wm_state");
 const window_mods = @import("window_modules").modules;
 
 /// Registry lookup for the hook `field` (see `contract.providerOf`), null when
-/// no module binds it; shared by the window layer (actions/borders alias this).
+/// no module binds it; shared by the whole window layer.
 /// Thin typed forward onto the single canonical `contract` dispatch family
 /// (two primitives: providerOf + callAll).
 pub fn providerOf(
@@ -51,7 +54,7 @@ pub fn callHookBool(
 }
 
 /// Runs a hook on EVERY module that binds it, not just the first (callHook
-/// returns after the first provider). Dispatch loops shared by actions.
+/// returns after the first provider).
 pub fn dispatchAll(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
@@ -72,4 +75,25 @@ pub fn dispatchFirstTrue(
         if (@field(m, @tagName(field))) |f| if (@call(.auto, f, args)) return true;
     }
     return false;
+}
+
+/// Convenience over `providerOf`: the current workspace's covering occupant
+/// via the module AND hook (anchored AND visible), null without a fullscreen
+/// module. Contrast the model's OR scan `model.coveringOccupantOnWs`.
+///
+/// Here rather than in each consumer because two owner modules ask the same
+/// question and neither may name the other: `fullscreen` owns the covering
+/// record, `minimize` must know whether parking freed the screen.
+pub fn currentCoveringOccupant(m: *const model.Model) ?model.WindowId {
+    return if (providerOf(.visibleCoveringOnWs)) |prov|
+        prov.visibleCoveringOnWs.?(m, m.current)
+    else
+        null;
+}
+
+/// Convenience over `callHookBool`: is this window parked anywhere in the
+/// model? Asked by the restore path and by the tag-change guard, both of
+/// which need the module-backed answer without naming `minimize`.
+pub fn isMinimizedOnAnyWs(m: *const model.Model, win: model.WindowId) bool {
+    return callHookBool(.isWindowHidden, .{ m, win });
 }

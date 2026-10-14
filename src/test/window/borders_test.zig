@@ -15,8 +15,7 @@ const core = @import("core");
 const pipeline = @import("pipeline");
 const borders = @import("borders");
 const fixture = @import("fixture");
-const model = @import("model");
-const constants = @import("constants");
+const model = @import("wm_state");
 const types = @import("types");
 const scaling = @import("scaling");
 
@@ -67,7 +66,7 @@ test "borders.resolveBorderColorWith resolves focused vs unfocused config colors
 
     // The occupant table is cover-state-only, so one build per test covers
     // every focus step below (focus reads stay live inside the With-form).
-    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    var occupants: [model.max_workspaces]?model.WindowId = @splat(null);
     model.coveringOccupants(m, &occupants);
 
     // Nothing focused yet: both windows take the unfocused color.
@@ -102,7 +101,7 @@ test "borders.resolveBorderColorWith is 0 for a screen-covering window" {
     // policy, mirrored here for callers outside reconcile (fullscreen).
     m.store.getPtr(1).?.covering_ws = model.WSId.fromIndex(0);
 
-    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    var occupants: [model.max_workspaces]?model.WindowId = @splat(null);
     model.coveringOccupants(m, &occupants);
     try testing.expectEqual(@as(u32, 0), borders.resolveBorderColorWith(1, &occupants));
 }
