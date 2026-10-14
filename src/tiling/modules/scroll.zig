@@ -87,11 +87,11 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
             tiling.emitHidden(out, win);
             continue;
         }
-        tiling.emitRect(v, out, win, clipped_x + v.workarea.x, win_y, @intCast(clipped_w), content_h);
+        tiling.emitRect(v, out, win, clipped_x + tiling.waX(v.workarea), win_y, @intCast(clipped_w), content_h);
     }
 }
 
-/// THE scroll clamp (14.7): a viewport offset is always in [0, max_off] for
+/// THE scroll clamp: a viewport offset is always in [0, max_off] for
 /// the CURRENT window count and slot width. Two sites need that and they used
 /// to spell it differently -- `@max(0, @min(...))` in the layout,
 /// `std.math.clamp` in the pre-reconcile grow duty -- so tightening one bound

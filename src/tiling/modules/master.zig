@@ -329,9 +329,9 @@ fn tileStackExtra(
 /// merging them is not behavior-preserving.
 inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
     // px is relative to the workarea's left edge (master_x/stack_origin both
-    // start at 0 within screen_w): offset it by v.workarea.x so it lands on a
-    // side-claimed workarea, not the screen's left edge.
-    tiling.emitRect(ctx.v, ctx.out, win, @as(i32, @intCast(px)) + ctx.v.workarea.x, @intCast(py), w, h);
+    // start at 0 within screen_w): offset it by the workarea origin (waX) so
+    // it lands on a side-claimed workarea, not the screen's left edge.
+    tiling.emitRect(ctx.v, ctx.out, win, @as(i32, @intCast(px)) + tiling.waX(ctx.v.workarea), @intCast(py), w, h);
 }
 
 /// Total pixel height available for window content after gaps and borders.
