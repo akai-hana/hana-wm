@@ -130,9 +130,6 @@ pub const SlotMode = enum {
     /// Right for a segment whose width only changes on a config reload: the
     /// bar re-lays out for that anyway, so a request would be a duplicate.
     measured_no_relayout,
-    /// Fixed width, nothing to measure: no report, no request. A segment that
-    /// is the same size every frame (a fixed cell).
-    fixed,
     /// The module measures its OWN width, on its own cadence, and wants
     /// neither a report nor a request. The clock: its reservation is a
     /// deliberate per-mode text measurement, refreshed when the mode changes,
@@ -199,8 +196,8 @@ fn passthroughWidth(_: *const contract.Frame, clock_width: u16) u16 {
 }
 
 /// The Segment binding for an icon-ish module with a cached-width draw +
-/// optional direction-click action. `opts.mode` additionally wiress
-/// the redraw-request path.
+/// optional direction-click action. `opts.mode` additionally wires the
+/// redraw-request path.
 pub fn module(
     comptime name: []const u8,
     comptime draw: anytype,
@@ -228,7 +225,7 @@ pub fn module(
         // written from exactly one call site (21.7).
         .onPainted = switch (opts.mode) {
             .measured_relayout, .measured_no_relayout => W.store,
-            .fixed, .self_measured => null,
+            .self_measured => null,
         },
         .onClick = opts.on_click orelse clickHook(action),
     };

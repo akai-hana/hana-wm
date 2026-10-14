@@ -51,7 +51,6 @@ pub const registerHandlers = editor.registerHandlers;
 // Completion seam re-exports: `wordAtCursor` is the pure
 // token-under-cursor split, pinned by completion_test.zig through
 // the package core like the editor contract above.
-pub const WordAtCursor = completion.WordAtCursor;
 pub const wordAtCursor = completion.wordAtCursor;
 pub const CompletionSource = completion.CompletionSource;
 pub const handleInsertBasic = editor.handleInsertBasic;

@@ -14,7 +14,7 @@ const bar_properties = @import("bar_properties");
 
 /// One accepted location for a knob: a section name and the key spelling
 /// used inside it.
-pub const Placement = struct {
+const Placement = struct {
     section: []const u8,
     key: []const u8,
 };
@@ -275,7 +275,7 @@ fn isScalarLeaf(comptime t: type) bool {
 /// Config fields that are legitimately NOT schema knobs: the containers and
 /// the fields a bespoke parser owns. Each entry is a contract, not an
 /// exemption -- the reason is why the schema table must not claim it.
-pub const bespoke_fields = [_][]const u8{
+const bespoke_fields = [_][]const u8{
     "tiling.layout",
     "bar.indicator_focused",
     "bar.indicator_unfocused",
@@ -360,7 +360,7 @@ comptime {
 }
 
 /// How an enum-valued knob is parsed.
-pub const EnumRead = struct {
+const EnumRead = struct {
     T: type,
     /// true = case-insensitive lookup through types.enumFromString (the alias
     /// map, e.g. MasterSide's "l"/"left"/"r"/"right"); false = exact-case

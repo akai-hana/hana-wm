@@ -313,7 +313,7 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
 
     const staging = std.fmt.allocPrint(sa, "{s}.new", .{snap}) catch return;
     deleteTreeAbsolute(io, staging);
-    if (!writeSnapshot(io, src, snap, staging, files.items)) {
+    if (!writeSnapshot(io, src, staging, files.items)) {
         deleteTreeAbsolute(io, staging);
         return;
     }
@@ -336,11 +336,9 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
 fn writeSnapshot(
     io: std.Io,
     src: std.Io.Dir,
-    snap: []const u8,
     staging: []const u8,
     files: []const SnapFile,
 ) bool {
-    _ = snap;
     std.Io.Dir.createDirAbsolute(io, staging, .default_dir) catch return false;
     var dest = std.Io.Dir.openDirAbsolute(io, staging, .{ .iterate = true }) catch return false;
     defer dest.close(io);

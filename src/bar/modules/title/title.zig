@@ -19,11 +19,11 @@ const segmod = @import("segment");
 const geom = @import("geom");
 const contract = @import("contract");
 // The scrolling title addon (the carousel) binds its motion, cycle and
-const time = @import("time");
 // frame-pacing hooks to this contract; membership in the generated
 // `title_subs` registry is driven by file presence alone, so this module
 // never names it. Dropping carousel.zig just shortens `addons` and the title
 // falls back to its real built-in static (ellipsis) rendering -- no stub.
+const time = @import("time");
 /// The whole scroll decoration for one frame, as ONE value. Declared HERE, in
 /// the contract, not in the extensor: the seam's shape must not depend on
 /// whether carousel.zig is present, which is the whole point of the addon

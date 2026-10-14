@@ -113,9 +113,8 @@ pub fn segmentBounds(total_width: u16, i: usize, count: u32) struct { x: u16, w:
     return .{ .x = x0, .w = x1 - x0 };
 }
 
-/// Inverse of segmentBounds: the segment index under `offset_x` pixels, i.e.
-/// `partitionPoint(total_width, offset_x, count)` is the smallest `i` with
-/// `segmentBounds(total_width, i, count).x > offset_x`, clamped to `count-1`.
+/// Inverse of segmentBounds: the index of the tile containing `offset_x`,
+/// i.e. `floor(offset_x * count / total_width)`, clamped to `count-1`.
 pub fn segmentIndexOfX(total_width: u16, offset_x: u16, count: u32) usize {
     return @intCast(@min(
         count - 1,

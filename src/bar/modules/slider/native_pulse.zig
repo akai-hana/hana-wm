@@ -55,7 +55,6 @@ const PA_STATE_TERMINATED = 6;
 pub const sink_info_index: usize = 8;
 const sink_info_volume: usize = 72;
 pub const sink_info_channel_bytes: usize = sink_info_volume;
-const sink_info_volume_values: usize = sink_info_volume + 4;
 pub const sink_info_muted: usize = 140;
 
 /// `default_sink_name` in `pa_server_info`: offset 40 pre-16.0, 48 in 16.0+.
