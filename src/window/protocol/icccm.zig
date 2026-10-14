@@ -1,10 +1,10 @@
-//! ICCCM focus protocol support (WM_HINTS and WM_PROTOCOLS).
-//! Caches per-window focus properties, determines the four ICCCM 4.1.7
-//! focus-delivery modes, and dispatches WM_TAKE_FOCUS client messages.
-//! Managed via lifecycle hooks from `window.zig` and provides shared
-//! property-query utilities.
-//! window.zig calls init/deinit/evictCache through the lifecycle, and shares
-//! firePropQuery/u32Values for its admission and size-hints paths.
+//! ICCCM focus protocol support (WM_HINTS and WM_PROTOCOLS): the X11
+//! queries, the four ICCCM 4.1.7 focus-delivery modes, and WM_TAKE_FOCUS
+//! client-message dispatch. The per-window verdict cache itself lives in
+//! state/props.zig (reset/evict wired through window.zig's lifecycle); this
+//! file owns the queries that fill it and the PropertyNotify refresh that
+//! keeps it honest. Also shares firePropQuery/u32Values for its admission
+//! and size-hints paths.
 
 const std = @import("std");
 
@@ -14,20 +14,13 @@ const log = @import("log");
 const constants = @import("constants");
 
 const atoms = @import("atoms");
-const idmap = @import("idmap");
+const props = @import("props");
+const CachedProps = props.CachedProps;
 // WM_HINTS constants (ICCCM 4.1.2.4)
 const wm_hints_input_flag: u32 = 1 << 0;
 const wm_hints_flags_field: usize = 0;
 const wm_hints_input_field: usize = 1;
 pub const wm_hints_long_length: u32 = 9; // flags + 8 fields
-
-// ICCCM focus property cache: keyed by window ID, populated at map time,
-// invalidated on WM_PROTOCOLS/WM_HINTS PropertyNotify and on destruction.
-// Caches accepts_input (WM_HINTS.input), wm_delete (WM_DELETE_WINDOW), and
-// take_focus (WM_TAKE_FOCUS in WM_PROTOCOLS). Safe because the mask-first
-// map ordering guarantees PropertyNotify before any post-seed change can stale.
-
-var cache_slots: idmap.IdMap(CachedProps, max_window_cache) = .{};
 
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
@@ -37,37 +30,6 @@ pub const InputModel = enum {
     locally_active, // input=True,  WM_TAKE_FOCUS:    set focus + send protocol
     globally_active, // input=False, WM_TAKE_FOCUS:    only send protocol
 };
-
-/// Per-window properties cached from WM_HINTS and WM_PROTOCOLS. Kept in
-/// sync via PropertyNotify; take_focus is safe to cache because the mask-first
-/// map ordering guarantees it cannot stale.
-const CachedProps = struct {
-    accepts_input: bool,
-    wm_delete: bool,
-    take_focus: bool,
-};
-
-// Upper bound on live cache entries. The backing IdMap is a fixed
-// allocation-free open-addressed table, so lookups are O(1) even at the cap.
-// Windows beyond max_window_cache still work; they just fall through to the
-// live X11 path.
-pub const max_window_cache: usize = constants.max_window_cache;
-
-/// Drops every cache entry, at the window init/deinit boundary (init starts
-/// from an empty map; deinit clears before focus/tracking teardown, whose
-/// managed-window sweeps must not encounter a partially-valid cache). No
-/// armed flag: an empty map already reads as "not yet seen" for every window,
-/// so reset IS the disabled state, and nothing runs between the boundary's
-/// clear and the next event-loop turn to repopulate it.
-pub fn reset() void {
-    cache_slots.clear();
-}
-
-/// Removes a window's cache entry on unmanage so a reused XID can't borrow a
-/// stale focus verdict.
-pub fn evictCache(win: u32) void {
-    _ = cache_slots.remove(win);
-}
 
 /// Shared admission drain: the MapRequest and boot-adoption routes fire their
 /// admission cookies up-front and land here (via admission.drainAdmissionCookies)
@@ -86,7 +48,7 @@ pub fn populateFocusCacheFromCookies(
     // wm_delete and take_focus both get cached below.
     const protocols_result = drainWMProtocolsReply(conn, protocols_cookie);
 
-    putCachedProps(win, .{
+    props.put(win, .{
         .accepts_input = extractWMHintsInput(conn, hints_cookie),
         .wm_delete = protocols_result.wm_delete,
         .take_focus = protocols_result.take_focus,
@@ -137,37 +99,19 @@ fn extractWMHintsInput(
     return hints[wm_hints_input_field] != 0;
 }
 
-/// Silently drops the entry when the cache is full;
-/// the live-query fallback is always correct.
-fn putCachedProps(win: u32, props: CachedProps) void {
-    // No warn on failure: a capacity miss only degrades that window to the
-    // live-query fallback, which the doc above already says is correct; a
-    // log line on the property-notify hot path would be noise the reader has
-    // to disprove.
-    _ = cache_slots.put(win, props);
-}
-
-/// Returns cached props without triggering a live query, or null on a miss.
-/// The null case means the window's WM_HINTS/WM_PROTOCOLS have not been seen
-/// since the cache seeded (or the cache is full); callers fall back to a
-/// live query or a pre-fired cookie.
-fn peekCachedProps(win: u32) ?CachedProps {
-    return cache_slots.get(win);
-}
-
 /// Returns cached props if available, otherwise queries, caches the result,
 /// and returns it. Blocking only on a miss; used by the non-hot ICCCM paths
 /// (supportsWMDeleteCached / window close) that genuinely need the verdict.
 fn getOrQueryCachedProps(conn: core.Connection, win: u32) CachedProps {
-    if (peekCachedProps(win)) |p| return p;
+    if (props.peek(win)) |p| return p;
     const protocols = queryWMProtocolsProps(conn, win);
-    const props = CachedProps{
+    const result = CachedProps{
         .accepts_input = queryWMHintsAcceptsInput(conn, win),
         .wm_delete = protocols.wm_delete,
         .take_focus = protocols.take_focus,
     };
-    putCachedProps(win, props);
-    return props;
+    props.put(win, result);
+    return result;
 }
 
 /// Resolves the ICCCM 4.1.7 focus-delivery model for `win` together with the
@@ -179,10 +123,10 @@ pub const InputModelResolution = struct {
     take_focus: bool,
 };
 
-fn resolve(props: CachedProps) InputModelResolution {
+fn resolve(cp: CachedProps) InputModelResolution {
     return .{
-        .model = inputModelFrom(props.take_focus, props.accepts_input),
-        .take_focus = props.take_focus,
+        .model = inputModelFrom(cp.take_focus, cp.accepts_input),
+        .take_focus = cp.take_focus,
     };
 }
 
@@ -190,7 +134,7 @@ fn resolve(props: CachedProps) InputModelResolution {
 /// fallback round trip. Returns null on a cache miss (never blocking); the
 /// focus hot path resolves a miss as provisional focus instead of querying.
 pub fn peekInputModelResolved(win: u32) ?InputModelResolution {
-    return if (peekCachedProps(win)) |p| resolve(p) else null;
+    return if (props.peek(win)) |p| resolve(p) else null;
 }
 
 /// Resolves the input model from the focus-property cache, live-queried only
@@ -277,13 +221,13 @@ fn protocolPropsFromReply(
     wm_delete_atom: u32,
 ) WMProtocolsProps {
     if (reply.*.format != 32 or reply.*.value_len == 0) return .{};
-    var props: WMProtocolsProps = .{};
+    var found: WMProtocolsProps = .{};
     for (u32Values(reply)[0..@intCast(reply.*.value_len)]) |atom| {
-        if (atom == take_focus_atom) props.take_focus = true;
-        if (atom == wm_delete_atom) props.wm_delete = true;
-        if (props.take_focus and props.wm_delete) break;
+        if (atom == take_focus_atom) found.take_focus = true;
+        if (atom == wm_delete_atom) found.wm_delete = true;
+        if (found.take_focus and found.wm_delete) break;
     }
-    return props;
+    return found;
 }
 
 fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
@@ -334,7 +278,7 @@ fn queryWMHintsAcceptsInput(conn: core.Connection, win: u32) bool {
 /// property); a WM_HINTS notify invalidates only accepts_input.
 pub fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
     const is_protocols = atom == atoms.getAtomOrZero("WM_PROTOCOLS");
-    const existing: ?CachedProps = peekCachedProps(win);
+    const existing: ?CachedProps = props.peek(win);
 
     // Refresh only the half the notify invalidated; the other half reuses the
     // cache when present, otherwise both halves query live.
@@ -347,7 +291,7 @@ pub fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
     else
         existing.?.accepts_input;
 
-    putCachedProps(win, .{
+    props.put(win, .{
         .accepts_input = accepts_input,
         .wm_delete = protocols.wm_delete,
         .take_focus = protocols.take_focus,
