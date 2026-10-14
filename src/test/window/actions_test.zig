@@ -1,20 +1,29 @@
-//! X-gated integration tests for the actions layer (src/actions/actions.zig):
-//! every scenario runs against a live X server through the real
-//! mapRequest/reconcile pipeline. When no server is present the tests print
-//! SKIP and pass, keeping `zig build test` green headless. The model-side
-//! invariants these assert are the same ones actions/reconcile maintain in
-//! production; the server-side geometry checks verify the end-to-end tile.
+//! X-gated integration tests for the command layer (the dissolved
+//! `src/actions`): every scenario runs against a live X server through the
+//! real admission/reconcile pipeline. When no server is present the tests
+//! print SKIP and pass, keeping `zig build test` green headless. The
+//! model-side invariants these assert are the same ones the commands
+//! maintain in production; the server-side geometry checks verify the
+//! end-to-end tile.
+//!
+//! The commands live with the module that owns the state they write, so the
+//! test reaches each one there (or through `window` for the always-present
+//! transitions). Each module named below is a `build-gate` feature: the gate
+//! line declares exactly what these imports make necessary.
 
 // Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
-// build-gate: tiling
+// build-gate: tiling, floating, minimize, workspaces
 
 const std = @import("std");
 
 const core = @import("core");
-const model = @import("model");
+const model = @import("wm_state");
 const pipeline = @import("pipeline");
-const actions = @import("actions");
+const window = @import("window");
+const workspaces = @import("workspaces");
+const minimize = @import("minimize");
+const floating = @import("floating");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
 
@@ -22,13 +31,13 @@ const ledger = @import("ledger");
 test "actions: mapRequest admits, maps, and focuses a window" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const win = fx.createWindow();
     try std.testing.expect(!m.store.has(win));
 
-    actions.mapRequest(win, 0, true, null, null);
-    actions.mapRequest(win, 0, true, null, null); // double-manage guard: no-op
+    window.mapRequest(win, 0, true, null, null);
+    window.mapRequest(win, 0, true, null, null); // double-manage guard: no-op
     fx.flush();
 
     try std.testing.expect(m.store.has(win));
@@ -42,11 +51,11 @@ test "actions: mapRequest admits, maps, and focuses a window" {
 test "actions: mapRequest admits a float-rule window floating at its rect" {
     var fx = try fixture.setUp("actions_float");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const win = fx.createWindow();
     const rect = model.Rect{ .x = 40, .y = 30, .width = 320, .height = 240 };
-    actions.mapRequest(win, 0, true, rect, null);
+    window.mapRequest(win, 0, true, rect, null);
     fx.flush();
 
     const e = m.store.get(win) orelse return error.ExpectedManaged;
@@ -69,14 +78,14 @@ test "actions: mapRequest admits a float-rule window floating at its rect" {
 test "actions: moveWindowTo transfers membership and parks off-screen" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null, null);
+    window.mapRequest(win, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
 
-    actions.moveWindowTo(win, 2);
+    workspaces.moveToWorkspace(win, 2);
     fx.flush();
 
     const e = m.store.get(win) orelse return error.UnknownWindow;
@@ -90,22 +99,22 @@ test "actions: moveWindowTo transfers membership and parks off-screen" {
 test "actions: tag/detag, pin, and all-workspaces view transitions" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const ws0: u8 = @intCast(m.current.index);
 
     const w1 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
     fx.flush();
 
     // Multi-tag: add tag 2, protecting the current tag.
-    actions.tagToggle(w1, 2, true);
+    workspaces.toggleTag(w1, 2, true);
     const e1 = m.store.get(w1) orelse return error.UnknownWindow;
     try std.testing.expect(model.taggedOn(e1, model.WSId.fromIndex(2)));
     try std.testing.expect(model.taggedOn(e1, m.current));
 
     // Detag the current tag: evicted from the shown workspace, focus follows
     // (no other candidate -> cleared), window parked.
-    actions.tagToggle(w1, ws0, false);
+    workspaces.toggleTag(w1, ws0, false);
     const e2 = m.store.get(w1) orelse return error.UnknownWindow;
     try std.testing.expect(!model.taggedOn(e2, m.current));
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
@@ -113,44 +122,44 @@ test "actions: tag/detag, pin, and all-workspaces view transitions" {
     try fx.expectParked(w1);
 
     // Re-add the current tag: window returns and is shown again.
-    actions.tagToggle(w1, ws0, false);
+    workspaces.toggleTag(w1, ws0, false);
     const e3 = m.store.get(w1) orelse return error.UnknownWindow;
     try std.testing.expect(model.taggedOn(e3, m.current));
     fx.flush();
     try std.testing.expect(fx.isViewable(w1));
 
     // Pin: single-tag window becomes everywhere-visible, and back.
-    actions.pinToggle(w1);
+    workspaces.pinWindow(w1);
     try std.testing.expectEqual(model.ALL_MASK, m.store.get(w1).?.mask);
-    actions.pinToggle(w1);
+    workspaces.pinWindow(w1);
     try std.testing.expectEqual(model.bit(m.current), m.store.get(w1).?.mask);
 
     // All-workspaces view flag flips round-trip.
-    actions.allViewToggle();
+    workspaces.allWorkspaces();
     try std.testing.expect(m.all_view_active);
-    actions.allViewToggle();
+    workspaces.allWorkspaces();
     try std.testing.expect(!m.all_view_active);
 }
 
 test "actions: switching to the CURRENT workspace while in all-view exits it" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const ws0: u8 = @intCast(m.current.index);
 
     const w1 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
     fx.flush();
 
     // w2 lives on a neighbor workspace, hidden from the current one.
     const w2 = fx.createWindow();
-    actions.mapRequest(w2, 0, true, null, null);
-    actions.moveWindowTo(w2, 2);
+    window.mapRequest(w2, 0, true, null, null);
+    workspaces.moveToWorkspace(w2, 2);
     fx.flush();
     try std.testing.expect(model.visibleOn(m, w2, m.current) == false);
 
     // Enter all-view: every workspace's windows become visible.
-    actions.allViewToggle();
+    workspaces.allWorkspaces();
     fx.flush();
     try std.testing.expect(m.all_view_active);
     try std.testing.expect(model.visibleOn(m, w2, m.current));
@@ -158,7 +167,7 @@ test "actions: switching to the CURRENT workspace while in all-view exits it" {
     // Switching to the current workspace (a no-op when the view is already
     // this workspace) must still exit the all-view flag and park the foreign
     // window, returning focus to workspace-1's own window.
-    actions.switchTo(ws0);
+    workspaces.switchWorkspace(ws0);
     fx.flush();
     try std.testing.expect(!m.all_view_active);
     try std.testing.expectEqual(ws0, m.current.index);
@@ -170,21 +179,21 @@ test "actions: switching to the CURRENT workspace while in all-view exits it" {
 test "actions: minimize parks, restore unmaps-and-redraws" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null, null);
+    window.mapRequest(win, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
 
-    actions.minimize(win);
+    minimize.minimizeWindow(win);
     fx.flush();
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
     try std.testing.expectEqual(fx.root, fx.inputFocus());
     try fx.expectParked(win);
     try std.testing.expect(fx.isViewable(win)); // parked, not unmapped
 
-    actions.restore(win);
+    minimize.unminimize(win);
     fx.flush();
     try std.testing.expectEqual(win, m.focused.?);
     try std.testing.expectEqual(win, fx.inputFocus());
@@ -194,14 +203,14 @@ test "actions: minimize parks, restore unmaps-and-redraws" {
 test "actions: toggleFloating round-trips through LastSent geometry" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null, null);
+    window.mapRequest(win, 0, true, null, null);
     fx.flush();
     const before = fx.geometry(win) orelse return error.ClosedWindow;
 
-    actions.toggleFloating(win);
+    floating.toggleFloating(win);
     fx.flush();
     const e1 = m.store.get(win) orelse return error.UnknownWindow;
     try std.testing.expect(e1.anchor == .floating);
@@ -211,7 +220,7 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
     try std.testing.expectEqual(before.width, g1.width);
     try std.testing.expectEqual(before.height, g1.height);
 
-    actions.toggleFloating(win);
+    floating.toggleFloating(win);
     fx.flush();
     const e2 = m.store.get(win) orelse return error.UnknownWindow;
     try std.testing.expect(e2.anchor == .tiled);
@@ -225,14 +234,14 @@ test "actions: toggleFloating round-trips through LastSent geometry" {
 test "actions: dragging a tiled window out detaches AND reflows the pile (no gap)" {
     var fx = try fixture.setUp("actions_drag");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
     const w3 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null, null);
-    actions.mapRequest(w2, 0, true, null, null);
-    actions.mapRequest(w3, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w2, 0, true, null, null);
+    window.mapRequest(w3, 0, true, null, null);
     fx.flush();
 
     // Baseline: three tiled windows (the fixture's default layout kind).
@@ -246,10 +255,10 @@ test "actions: dragging a tiled window out detaches AND reflows the pile (no gap
     // floating (pending-float), ticks move it, release ends the drag.
     const px: i16 = @intCast(@as(i32, g2.x) + @as(i32, g2.width) - 4);
     const py: i16 = @intCast(@as(i32, g2.y) + 4);
-    actions.startDrag(w2, 1, px, py);
-    actions.updateDrag(px + 8, py + 8); // first motion: detach + retile
-    actions.updateDrag(px + 60, py + 60); // subsequent tick
-    actions.stopDrag();
+    window.dispatchAll(.startDrag, .{ w2, 1, px, py });
+    window.dispatchAll(.updateDrag, .{ px + 8, py + 8 }); // first motion: detach + retile
+    window.dispatchAll(.updateDrag, .{ px + 60, py + 60 }); // subsequent tick
+    window.dispatchAll(.stopDrag, .{});
     fx.flush();
 
     // w2 is floating and out of the pile.
@@ -273,18 +282,18 @@ test "actions: dragging a tiled window out detaches AND reflows the pile (no gap
 test "actions: unmanage drops the window and re-focuses" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null, null);
-    actions.mapRequest(w2, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w2, 0, true, null, null);
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
 
     // Non-focused removal is silent for focus.
     // Silent removal, no focus involved.
-    actions.unmanage(w1);
+    window.unmanage(w1);
     fx.flush();
     try std.testing.expect(!m.store.has(w1));
     try std.testing.expect(ledger.lastRectFor(w1) == null); // ledger forgot it
@@ -293,7 +302,7 @@ test "actions: unmanage drops the window and re-focuses" {
     try fx.expectTiledGeometry(w2);
 
     // Focused removal with no remaining candidate clears to root.
-    actions.unmanage(w2);
+    window.unmanage(w2);
     fx.flush();
     try std.testing.expect(!m.store.has(w2));
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);
@@ -303,22 +312,22 @@ test "actions: unmanage drops the window and re-focuses" {
 test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const order = &m.ws[m.current.index].tiled_order;
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
     const w3 = fx.createWindow();
-    actions.mapRequest(w1, 0, true, null, null);
-    actions.mapRequest(w2, 0, true, null, null);
-    actions.mapRequest(w3, 0, true, null, null);
+    window.mapRequest(w1, 0, true, null, null);
+    window.mapRequest(w2, 0, true, null, null);
+    window.mapRequest(w3, 0, true, null, null);
     fx.flush();
     try std.testing.expect(order.len == 3);
     try std.testing.expectEqual(w3, m.focused.?);
 
     // swap_master: the focused window (w3) and the previously focused one (w2)
     // exchange tiled slots, wherever they sit; focus stays on w3.
-    actions.swapPrimaryAction(false);
+    window.swapPrimaryAction(false);
     try std.testing.expectEqual(w1, order.items[0]);
     try std.testing.expectEqual(w3, order.items[1]);
     try std.testing.expectEqual(w2, order.items[2]);
@@ -326,14 +335,14 @@ test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
 
     // swap_master focus variant: the pair swaps once more (toggling back) and
     // focus moves to the previously focused displaced window.
-    actions.swapPrimaryAction(true);
+    window.swapPrimaryAction(true);
     try std.testing.expectEqual(w1, order.items[0]);
     try std.testing.expectEqual(w2, order.items[1]);
     try std.testing.expectEqual(w3, order.items[2]);
     try std.testing.expectEqual(w2, m.focused.?);
 
     // moveFocused steps the focused window one slot (wraps off the far edge).
-    actions.moveFocused(1);
+    window.moveFocused(1);
     try std.testing.expectEqual(w1, order.items[0]);
     try std.testing.expectEqual(w3, order.items[1]);
     try std.testing.expectEqual(w2, order.items[2]);
@@ -343,29 +352,29 @@ test "actions: swapPrimaryAction and moveFocused rotate the tiled order" {
 test "actions: layout parameters adjust within clamps" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const p = &m.ws[m.current.index].params;
 
-    actions.adjustPrimaryWidthAction(0.2);
+    window.adjustPrimaryWidthAction(0.2);
     try std.testing.expectApproxEqAbs(@as(f32, 0.7), p.primary_width, 1e-4);
-    actions.adjustPrimaryWidthAction(-5.0); // clamp to floor
+    window.adjustPrimaryWidthAction(-5.0); // clamp to floor
     try std.testing.expectApproxEqAbs(@as(f32, 0.05), p.primary_width, 1e-4);
 
-    actions.adjustSecondaryBalance(0.3);
+    window.adjustSecondaryBalance(0.3);
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), p.secondary_balance, 1e-4);
-    actions.adjustSecondaryBalance(-10.0); // clamp to floor
+    window.adjustSecondaryBalance(-10.0); // clamp to floor
     try std.testing.expectApproxEqAbs(@as(f32, -6.0), p.secondary_balance, 1e-4);
 
-    actions.adjustPrimaryCount(1);
+    window.adjustPrimaryCount(1);
     try std.testing.expectEqual(@as(u8, 2), p.primary_count);
-    actions.adjustPrimaryCount(-5); // clamp to 1
+    window.adjustPrimaryCount(-5); // clamp to 1
     try std.testing.expectEqual(@as(u8, 1), p.primary_count);
 }
 
 test "actions: layout kind and variant step through the registry" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
     const p = &m.ws[m.current.index].params;
 
     // cycleLayoutKind cycles the CONFIG layout list (seeded by the fixture in
@@ -374,7 +383,7 @@ test "actions: layout kind and variant step through the registry" {
     try std.testing.expect(cfg_layouts.len >= 2); // fixture seeds compiled modules
 
     const start_kind = p.kind;
-    actions.cycleLayoutKind(1);
+    window.cycleLayoutKind(1);
     try std.testing.expectEqual(
         tiling.cycleKind(start_kind, 1, cfg_layouts),
         p.kind,
@@ -382,7 +391,7 @@ test "actions: layout kind and variant step through the registry" {
     try std.testing.expectEqual(@as(u8, 0), p.variant_idx); // reset on cycle
 
     const after = p.kind;
-    actions.cycleLayoutKind(-1);
+    window.cycleLayoutKind(-1);
     try std.testing.expectEqual(
         tiling.cycleKind(after, -1, cfg_layouts),
         p.kind,
@@ -394,11 +403,11 @@ test "actions: layout kind and variant step through the registry" {
     // assertions are vacuous and skipped.
     var guard: usize = 0;
     while (tiling.variantCount(p.kind) <= 1 and guard < cfg_layouts.len) : (guard += 1)
-        actions.cycleLayoutKind(1);
+        window.cycleLayoutKind(1);
     if (tiling.variantCount(p.kind) > 1) {
-        actions.stepVariantDir(1);
+        window.stepVariantDir(1);
         try std.testing.expectEqual(@as(u8, 1), p.variant_idx);
-        actions.stepVariantDir(1);
+        window.stepVariantDir(1);
         try std.testing.expectEqual(@as(u8, 0), p.variant_idx); // wrapped
     }
 }
@@ -418,13 +427,13 @@ test "actions: the default reconcile entry bumps the window fact" {
     defer fx.deinit();
 
     const win = fx.createWindow();
-    actions.mapRequest(win, 0, true, null, null);
+    window.mapRequest(win, 0, true, null, null);
     fx.flush();
 
     // A tiling op that reconciles through the plain alias: toggleFloating
     // ends in pipeline.reconcileGrab with no focus handoff.
     const before = core.window.rev();
-    actions.toggleFloating(win);
+    floating.toggleFloating(win);
     fx.flush();
     try std.testing.expect(core.window.rev() != before);
 }

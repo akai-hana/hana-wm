@@ -2,12 +2,12 @@
 //! the path a BROWSER's native fullscreen takes.
 //!
 //! WHY A SEPARATE FILE
-//!   The regression guarded here is not reachable through `actions`: the
+//!   The regression guarded here is not reachable through the keybind path: the
 //!   keybinding (Mod+F) and the EWMH message are different callers of the same
 //!   transition, and only the message one had ever been broken. `Mod+F`
 //!   working while the browser's own fullscreen button did nothing is exactly
 //!   this asymmetry -- the model path is fine and the EVENT path is not, so a
-//!   test that drives `actions.fullscreenSetWindow` (as pipeline_test does)
+//!   test that drives `fullscreen.fullscreenSetWindow` (as pipeline_test does)
 //!   cannot see the bug at all. Every test below goes through the real
 //!   handler with a synthesized `xcb_client_message_event_t`.
 //!
@@ -20,9 +20,8 @@
 
 const std = @import("std");
 const core = @import("core");
-const model = @import("model");
+const model = @import("wm_state");
 const pipeline = @import("pipeline");
-const actions = @import("actions");
 const window = @import("window");
 const atoms = @import("atoms");
 const fixture = @import("fixture");
@@ -68,7 +67,7 @@ fn covering(m: *const model.Model) ?u32 {
 }
 
 fn admit(win: u32) void {
-    actions.mapRequest(win, 0, true, null, null);
+    window.mapRequest(win, 0, true, null, null);
 }
 
 test "EWMH: a browser's fullscreen REQUEST covers the window" {
@@ -77,7 +76,7 @@ test "EWMH: a browser's fullscreen REQUEST covers the window" {
     // used to be dropped, leaving the player windowed.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
@@ -100,7 +99,7 @@ test "EWMH: fullscreen REQUEST is a SET, so a redundant enter is a no-op" {
     // kicks the window back OUT -- the user sees fullscreen flash and revert.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
@@ -131,7 +130,7 @@ test "EWMH: _NET_WM_STATE add/remove reaches the same transition" {
     // carries the action code in data32[0].
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
@@ -155,7 +154,7 @@ test "EWMH: _NET_WM_STATE add/remove reaches the same transition" {
 test "EWMH: _NET_WM_STATE toggle flips, matching the action code's meaning" {
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     admit(w1);
@@ -178,7 +177,7 @@ test "EWMH: an unmanaged window's request is ignored, not honoured" {
     // hana does not manage must not cover anything.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const managed = fx.createWindow();
     admit(managed);
@@ -205,7 +204,7 @@ test "EWMH: a non-32-format ClientMessage is ignored" {
     // a different union member entirely.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     admit(w1);
@@ -221,7 +220,7 @@ test "EWMH: a non-32-format ClientMessage is ignored" {
 test "EWMH: _NET_ACTIVE_WINDOW is reported as unimplemented, not acted on" {
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     const w2 = fx.createWindow();
@@ -249,7 +248,7 @@ test "EWMH: an unknown action code on a fullscreen REQUEST is dropped" {
     // leaving fullscreen on a client that asked for neither.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     admit(w1);
@@ -266,7 +265,7 @@ test "EWMH: a _NET_WM_STATE request naming another atom changes nothing" {
     // The state branch must not fire on e.g. _NET_WM_STATE_ABOVE.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
-    const m = pipeline.model();
+    const m = pipeline.state();
 
     const w1 = fx.createWindow();
     admit(w1);

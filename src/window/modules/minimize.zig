@@ -1,7 +1,7 @@
 //! Minimize feature: hides a window from the core by writing only its generic
 //! `.parked` presence; the core never names minimize. The real minimized state
 //! lives in this module's own static, allocation-free, bounded record table
-//! (`g_recs`, capped at `constants.max_minimized`), one record per window with
+//! (`g_recs`, capped at `max_minimized`), one record per window with
 //! its former tiled slot and a monotonic sequence number. This module owns the
 //! transitions around that state: minimize/restore, FIFO/LIFO restore-target
 //! selection, restore-all-on-workspace, record cleanup for torn-down windows,
@@ -9,10 +9,14 @@
 //! as a 9-byte blob (0x5A magic + slot + seq).
 
 const std = @import("std");
-const constants = @import("constants");
-const model = @import("model");
+const model = @import("wm_state");
 const log = @import("log");
 const bounded = @import("bounded");
+const pipeline = @import("pipeline");
+const focus = @import("focus");
+const build_options = @import("build_options");
+const registry = @import("registry");
+const reconcile_tails = @import("reconcile_tails");
 
 fn resetState() void {
     g_recs.clear();
@@ -27,8 +31,12 @@ pub fn deinit() void {
     resetState();
 }
 
-/// Ceiling on concurrently minimized windows, sourced from constants.
-const MAX_MINIMIZED = constants.max_minimized;
+/// Maximum number of concurrently minimized windows. Hoisted from here into
+/// the old constants module so the model layer could reach it; folded back
+/// when that module was dissolved -- this module owns the buffer it bounds.
+/// Distinct from `model.max_tiled_windows`: this bounds the minimized-window
+/// buffer, not the tiled-window pool.
+pub const max_minimized: usize = 32;
 
 pub const MinimizeError = error{CapacityFull};
 
@@ -50,10 +58,10 @@ const PackedMinimize = extern struct {
 
 /// Self-contained minimized store: static, allocation-free, <= 32 entries,
 /// linear scans by design. No model bookkeeping backs it.
-var g_recs: bounded.BoundedList(Rec, MAX_MINIMIZED) = .{};
+var g_recs: bounded.BoundedList(Rec, max_minimized) = .{};
 
 /// Monotonic minimize counter; stamps `Rec.seq` across restores too (never
-/// reused) so actions can pick LIFO/FIFO restore targets without a side
+/// reused) so the restore commands can pick LIFO/FIFO targets without a side
 /// buffer. Increments saturating: after 2^32 minimizes the counter pins at
 /// maxInt(u32) instead of wrapping, so persisted seqs keep ordering stable
 /// (a wrapped counter would collide with old blobs on restore).
@@ -64,7 +72,7 @@ pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     // Unknown window: nothing to park and no record to keep.
     if (m.store.get(win) == null) return;
     // Capacity check BEFORE any mutation.
-    if (g_recs.len >= MAX_MINIMIZED) return error.CapacityFull;
+    if (g_recs.len >= max_minimized) return error.CapacityFull;
     var origin: ?model.WSId = null;
     const slot = parkEntry(m, win, &origin);
     const appended = g_recs.append(.{ .win = win, .slot = slot, .seq = g_seq, .origin = origin });
@@ -221,7 +229,7 @@ pub fn latestMinimizedBase(m: *const model.Model, ws: model.WSId) ?model.WindowI
 }
 
 pub fn restoreAllOnWs(m: *model.Model, ws: model.WSId) void {
-    var cands: [MAX_MINIMIZED]RestoreCandidate = undefined;
+    var cands: [max_minimized]RestoreCandidate = undefined;
     var n: usize = 0;
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
@@ -295,7 +303,7 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (bytes.len != 9 or bytes[0] != min_magic) return false; // not our blob; let the loop continue
     if (g_recs.indexOfByIdField(.win, win) != null) return true; // already adopted; idempotent
     if (m.store.getPtr(win) == null) return true; // window gone; claim the blob, nothing to park
-    if (g_recs.len >= MAX_MINIMIZED) {
+    if (g_recs.len >= max_minimized) {
         // Still claim the blob (true), just without adopting the record.
         // Returning false said "not my blob", so the restore loop kept asking
         // every other module, none matched, and the window was left in
@@ -328,6 +336,104 @@ pub fn onWindowGone(win: u32) void {
     _ = g_recs.removeById(.win, win);
 }
 
+// ---------------------------------------------------------------------------
+// Parked-window commands: the old `src/actions/parked.zig` group, moved
+// beside the record table it fills. Each is one model transition plus one
+// reconcile entry, bound on `module` so the core reaches it through the
+// registry. Deleting this file drops hide/restore along with the records.
+// ---------------------------------------------------------------------------
+
+/// Atomicity: hide + fallback-focus + retile land under one grab.
+///
+/// Focus policy reads MODEL truth (`m.focused`): hiding the focused
+/// window hands focus over via focusFallback, otherwise m.focused would keep
+/// pointing at the hidden window (stale title segment, stale border colors
+/// until the next unrelated focus event).
+///
+/// Hiding THE screen-covering occupant also frees the bar-hide reason: the
+/// bar comes back (setBarState re-derives occupancy itself and no-ops when
+/// another occupant remains or the user toggled the bar off). It runs BEFORE
+/// the reconcile because the bar must have updated its screen claim (the
+/// usable-area fact the reconcile reads) before placement is re-derived.
+pub fn minimizeWindow(focused: ?model.WindowId) void {
+    const wm = registry.providerOf(.hideWindow) orelse return;
+    const win = focused orelse return;
+    const m = pipeline.mut();
+    const was_focused = m.focused == win;
+    const fs_ws_before =
+        model.coveringWsOf(m, win); // Model query
+
+    wm.hideWindow.?(m, win) catch return; // Pre-refusal (CapacityFull)
+
+    // Hiding the current workspace's covering occupant releases its screen
+    // claim; retileWithFallback bumps the core fact so the bar reacts.
+    reconcile_tails.retileWithFallback(m, if (fs_ws_before) |fs_ws| fs_ws.eql(m.current) else false, was_focused);
+}
+
+// restore (unpark)
+
+/// Shared hide/close withdraw tail helper for the restore family:
+/// arms the deferred bar-hide when the restore opened a fresh claim.
+fn armFullscreenBarHideIfNeeded(
+    m: *const model.Model,
+    win: model.WindowId,
+    had_occupant_before: bool,
+) void {
+    if (build_options.has_bar and !had_occupant_before and model.isCoveringOn(m, win, m.current)) {
+        registry.dispatchAll(.armPendingBarHide, .{win});
+    }
+}
+
+/// Restores `win` via the `restoreWindow` hook, re-focuses it,
+/// and arms the deferred bar-hide when the restore opened a fresh claim.
+fn restoreTarget(m: *model.Model, win: model.WindowId) void {
+    const had_occupant_before = registry.currentCoveringOccupant(m) != null;
+    registry.callHook(.restoreWindow, .{ m, win });
+    restoreAndFocus(m, win);
+    armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
+}
+
+/// Restores a specific hidden window (title-bar click path).
+pub fn unminimize(win: model.WindowId) void {
+    const m = pipeline.mut();
+    if (!registry.isMinimizedOnAnyWs(m, win)) return;
+    restoreTarget(m, win);
+}
+
+/// Slot-ordered single restore (LIFO/FIFO keybind paths).
+pub fn unminimizeOrdered(order: model.RestoreOrder) void {
+    const m = pipeline.mut();
+    const win = (if (registry.providerOf(.restoreCandidateOn)) |wm|
+        wm.restoreCandidateOn.?(m, m.current, order)
+    else
+        null) orelse return;
+    restoreTarget(m, win);
+}
+
+/// Slot-ordered bulk restore of the current workspace. Focus target is
+/// the most recently hidden PLAIN window (screen-covering windows replay
+/// through the same reconcile's covering branch, straight back into
+/// covering).
+pub fn unminimizeAll() void {
+    const m = pipeline.mut();
+    const wm = registry.providerOf(.latestHiddenOnWs) orelse return;
+    const ws = m.current;
+    const target = (wm.latestHiddenOnWs.?(m, ws) orelse return);
+    const had_occupant_before = registry.currentCoveringOccupant(m) != null;
+    registry.callHook(.restoreOnWs, .{ m, ws });
+    restoreAndFocus(m, target);
+    if (registry.currentCoveringOccupant(m)) |occ|
+        armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
+}
+
+/// Shared restore tail: re-focus the restored window (a no_input
+/// restore never takes model focus, but the reconcile still runs so
+/// the restored window is mapped and placed).
+fn restoreAndFocus(m: *model.Model, win: model.WindowId) void {
+    const prep = focus.prepareAndSetFocus(m, win, .window_spawn);
+    pipeline.reconcileGrabFocus(.{ .force_restack = true }, prep, .before, null);
+}
+
 /// This module's window sub-system contribution: lifecycle + persistence
 /// hooks + record cleanup for torn-down windows.
 pub const module: @import("contract").WindowModule = .{
@@ -344,4 +450,8 @@ pub const module: @import("contract").WindowModule = .{
     .latestHiddenOnWs = latestMinimizedBase,
     .isWindowHidden = isMinimized,
     .collectHiddenSet = collectHiddenSet,
+    .minimizeWindow = minimizeWindow,
+    .unminimize = unminimize,
+    .unminimizeOrdered = unminimizeOrdered,
+    .unminimizeAll = unminimizeAll,
 };

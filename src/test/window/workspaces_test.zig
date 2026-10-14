@@ -11,14 +11,14 @@
 const std = @import("std");
 const testing = std.testing;
 
-const model = @import("model");
-const constants = @import("constants");
+const model = @import("wm_state");
 const helpers = @import("helpers");
+const types = @import("types");
 const build_options = @import("build_options");
 
 const workspaces = if (build_options.has_workspaces) @import("workspaces") else struct {};
 
-const max_ws = constants.max_workspaces;
+const max_ws = model.max_workspaces;
 
 test "moveWindowToWs relocates mask, home_ws, and tiled membership" {
     var m = helpers.makeModel();
@@ -44,7 +44,7 @@ test "moveWindowToWs: out-of-range workspace is a no-op (never indexes m.ws[ws])
     // indexing m.ws[ws] out of bounds; without it ReleaseFast would take the
     // adjacent memory silently.
     workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(max_ws)); // == m.ws.len
-    workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(constants.max_workspace_number_1based));
+    workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(types.max_workspace_number_1based));
     workspaces.moveWindowToWs(&m, 202, model.WSId.fromIndex(std.math.maxInt(u8)));
 
     try testing.expectEqual(before_mask, m.store.get(202).?.mask);

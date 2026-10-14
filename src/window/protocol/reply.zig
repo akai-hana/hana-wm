@@ -9,7 +9,7 @@
 //! 2026-10-10; the X-wired query/refresh half stays in icccm.zig.
 
 const std = @import("std");
-const model = @import("model");
+const model = @import("wm_state");
 const scaling = @import("scaling");
 
 // ---------------------------------------------------------------------------

@@ -19,8 +19,8 @@
 //! here, and registers through admitWindow here — the same pipeline
 //! adoptSession runs for every surviving root child.
 //!
-//! Mutual runtime-only dependency with window.zig (the same shape as
-//! input.zig and events.zig): the wire geometry read and the
+//! Mutual runtime-only dependency with window.zig (the same shape as the
+//! key/mouse dispatch pair in core/input): the wire geometry read and the
 //! size-hints cache bridge used while admitting a window live there,
 //! while the admission policy lives here.
 
@@ -28,26 +28,26 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
 const masks = @import("masks");
 const log = @import("log");
 const query = @import("query");
 const icccm = @import("icccm");
 const reply_mod = @import("reply");
-const wincache = @import("wincache");
+const title_cache = @import("title_cache");
 const atoms = @import("atoms");
-const actions = @import("actions");
-const model_mod = @import("model");
+const contract = @import("contract");
+const focus = @import("focus");
+const model_mod = @import("wm_state");
 const types = @import("types");
 const window = @import("window");
-const handoff = @import("handoff");
+const session = @import("session");
 const pipeline = @import("pipeline");
 const usable_area_mod = @import("usable_area");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
 
 // Spawn queue: pending (workspace, pid) assignments for newly-mapped windows,
-// consumed by actions.mapRequest at admission. Capped at spawn_queue_capacity;
+// consumed by mapRequest below at admission. Capped at spawn_queue_capacity;
 // overflow logs and drops the entry rather than growing unbounded.
 
 const SpawnEntry = struct {
@@ -311,7 +311,7 @@ pub const AdmissionCookies = struct {
     normal_hints_cookie: xcb.xcb_get_property_cookie_t,
     protocols_cookie: xcb.xcb_get_property_cookie_t,
     hints_cookie: xcb.xcb_get_property_cookie_t,
-    title_cookies: wincache.TitleCookies,
+    title_cookies: title_cache.TitleCookies,
 };
 
 /// Fires all property-query cookies for an admitted window (WM_CLASS,
@@ -328,7 +328,7 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     const wm_class_atom = atoms.getAtomOrZero("WM_CLASS");
     const c_wm_class: ?xcb.xcb_get_property_cookie_t =
         if (cs.config.workspaces.rules.items.len > 0 and wm_class_atom != 0)
-            icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, constants.property_max_length)
+            icccm.firePropQuery(conn, win, wm_class_atom, xcb.XCB_ATOM_STRING, icccm.property_max_length)
         else
             null;
 
@@ -341,7 +341,7 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     // Property cookies (always fired).
     const normal_hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS, reply_mod.wm_normal_hints_long_length);
     const protocols_cookie = icccm.fireWMProtocolsQuery(conn, win) orelse
-        icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, constants.property_max_length);
+        icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, icccm.property_max_length);
     const hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, icccm.wm_hints_long_length);
 
     return .{
@@ -350,7 +350,7 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
         .normal_hints_cookie = normal_hints_cookie,
         .protocols_cookie = protocols_cookie,
         .hints_cookie = hints_cookie,
-        .title_cookies = wincache.fireTitleCookies(conn, win),
+        .title_cookies = title_cache.fireTitleCookies(conn, win),
     };
 }
 
@@ -379,7 +379,7 @@ pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: Admission
     }
     const size_hints = window.parseSizeHints(cookies.normal_hints_cookie);
     icccm.populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
-    wincache.collectTitleCookies(conn, win, cookies.title_cookies);
+    title_cache.collectTitleCookies(conn, win, cookies.title_cookies);
     return size_hints;
 }
 
@@ -392,12 +392,126 @@ pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: Admission
 pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) void {
     icccm.discardProtocolCookie(conn, cookies.c_wm_class);
     icccm.discardProtocolCookie(conn, cookies.c_net_wm_pid);
-    wincache.discardTitleCookies(conn, cookies.title_cookies);
+    title_cache.discardTitleCookies(conn, cookies.title_cookies);
     inline for (.{
         cookies.normal_hints_cookie,
         cookies.protocols_cookie,
         cookies.hints_cookie,
     }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
+}
+
+// ---------------------------------------------------------------------------
+// The map-request tail and the post-geometry focus handoff (the old
+// `src/actions/manage.zig` group). Both end in ONE model transition plus ONE
+// reconcile, and both sit here because admission is what knows whether a
+// window has been registered at all.
+// ---------------------------------------------------------------------------
+
+/// MapRequest tail. The caller's front-end (event masks, property queries)
+/// has already run; this registers the window in
+/// the model and lets ONE reconcile do map+pixel+bw+geom(+ABOVE winner) for
+/// on-current spawns. Off-current spawns park by construction; the reconciler sends
+/// their border width at first show instead of immediately (invisible either
+/// way; one less request).
+///
+/// `float_rect` admits the window already floating: the entry is registered
+/// tiled (core membership is tiled-only) and then immediately detached to the
+/// given rect with no home-list membership, mirroring detachTiledToFloating's
+/// anchor/home_ws state. The reconcile tail then sizes it floating in one
+/// reconcile, so a float-rule spawn never flashes a tiled slot.
+///
+/// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
+/// through as a parameter because no model entry exists when the reply
+/// drains. The model entry is the single store for size hints.
+pub fn mapRequest(
+    win: model_mod.WindowId,
+    target_ws: u8,
+    on_current: bool,
+    float_rect: ?model_mod.Rect,
+    size_hints: ?model_mod.SizeHints,
+) void {
+    const m = pipeline.mut();
+    if (query.isManaged(win)) return; // double-manage guard, see query.isManaged
+
+    // A defined refusal (store or home-list full) leaves the window
+    // unmanaged.
+    model_mod.register(m, win, if (on_current) null else model_mod.WSId.fromIndex(target_ws)) catch {
+        log.warn("mapRequest: capacity full; window 0x{x} left unmanaged", .{win});
+        // Evict, or a refused window's XID lingers in the cache forever: XIDs
+        // are recycled, so the next client to be handed this id would inherit
+        // a stale title/child entry and read the wrong window.
+        title_cache.removeWindow(win);
+        return;
+    };
+    // Install the admission drain's WM_NORMAL_HINTS on the fresh entry (no
+    // entry existed when the reply drains, hence the parameter above).
+    const e = m.store.getPtr(win);
+    if (e) |ep| {
+        if (size_hints) |h| ep.size_hints = h;
+    }
+
+    // Float-rule admission: detach the entry from its tiled slot before the
+    // fifo placement runs (which assumes a home slot, nonsensical for a
+    // floating window). The anchor/home_ws state mirrors toggleFloating's
+    // detach, and the reconcile tail applies the rect in the same reconcile.
+    if (float_rect) |rect| {
+        if (e) |ep| model_mod.detachTiledToFloating(m, ep, win, rect);
+    } else {
+        // Primary-fifo variant spawn placement (moved out of model.register;
+        // it is SPAWN policy, not membership policy): a new window takes the
+        // primary-column head slot, and the previous head window drops one
+        // slot.
+        {
+            // Clamp the requested home workspace so a misconfigured target
+            // can't index past the `ws` array in ReleaseFast (defense in depth;
+            // the MapRequest front-end already resolves/clamps the target).
+            const home: model_mod.WSId = if (on_current)
+                m.current
+            else
+                window.clampToValidWorkspace(target_ws, model_mod.WSId.fromIndex(m.current.index));
+            const p = &m.ws[home.index].params;
+            // Same policy restated at the spawn site: driven by the active
+            // module's fifo_variant metadata (the head slot binds variant
+            // index 1).
+            if (contract.moduleOf(p.kind)) |mv| {
+                if (mv.fifo_variant) |v| {
+                    if (p.variant_idx == v and m.ws[home.index].tiled_order.len > 1)
+                        model_mod.reorderTiled(m, win, 0);
+                }
+            }
+        }
+    }
+    focus.initWindowGrabs(win); // protocol-side keygrabs, both paths did this
+    core.window.bump(); // a window was admitted
+
+    if (!on_current) return;
+
+    // Focus prep before the model write (same rule as focusFallback): a
+    // spawned no_input window must never take model focus -- its focus
+    // protocol can't land, so marking it focused would leave borders and
+    // stacking claiming a focus X will never deliver. X input focus lands
+    // AFTER the reconcile, inside the same grab: the window must be mapped
+    // before xcb_set_input_focus, so both map+focus land under one grab.
+    const ft = focus.prepareAndSetFocus(m, win, .window_spawn);
+    pipeline.reconcileGrabFocus(.{}, ft, .after, null);
+}
+
+/// The tail shared with session adoption: put X input focus on whatever the
+/// model says is focused, inside one grab AFTER geometry, or -- when nothing is
+/// focused -- reconcile under the grab with no focus handoff.
+///
+/// Adopted windows are already mapped, so the mapRequest path's ordering
+/// ("map, then focus, in the same grab") is satisfied here for the same
+/// reason. Both callers need this to be identical: a session that adopts 40
+/// windows and then focuses differently from a session that spawned them is a
+/// bug that only shows up after a re-exec.
+pub fn focusAfterGeometry() void {
+    if (pipeline.state().focused) |focused| {
+        const ft = focus.prepareAndSetFocus(pipeline.mut(), focused, .window_spawn);
+        pipeline.reconcileGrabFocus(.{}, ft, .after, null);
+    } else {
+        pipeline.reconcileGrab(.{});
+    }
 }
 
 /// Admission policy shared by the MapRequest path (handleMapRequest) and the
@@ -410,7 +524,7 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
 pub fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool, size_hints: ?model_mod.SizeHints) void {
     const cs = core.getState();
     const float_rect: ?model_mod.Rect = if (float) window.getGeometry(cs.conn, win) else null;
-    actions.mapRequest(win, target_ws, on_current, float_rect, size_hints);
+    mapRequest(win, target_ws, on_current, float_rect, size_hints);
 }
 
 /// Resolves only the float bit of a class rule (adoption never relocates a
@@ -438,7 +552,7 @@ pub fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
 /// normal boot would use. A missing or unreadable restore file is not an
 /// error: that is an ordinary first boot.
 pub fn adoptSession(restore_path: []const u8) void {
-    if (!handoff.loadToGlobal(core.getState().alloc, restore_path)) return;
+    if (!session.loadToGlobal(core.getState().alloc, restore_path)) return;
 
     const n = adoptRootWindows() catch |err| blk: {
         log.err("Window adoption failed: {}", .{err});
@@ -451,14 +565,14 @@ pub fn adoptSession(restore_path: []const u8) void {
     // Re-play the persisted level now that every window is registered; no
     // reconcile here — the single reconcile after adoptSession places every
     // adopted window exactly as it was.
-    handoff.applyModelLevel(pipeline.mut());
-    actions.focusAfterGeometry();
+    session.applyModelLevel(pipeline.mut());
+    focusAfterGeometry();
 }
 
 /// Linear scan for a window's restore record. Restore files are small
 /// (bounded by the model's store_capacity), so a flat scan is cache-local and
 /// avoids allocating a lookup map just for adoption.
-fn findWindowRecord(windows: []const handoff.WindowRecord, win: u32) ?*const handoff.WindowRecord {
+fn findWindowRecord(windows: []const session.WindowRecord, win: u32) ?*const session.WindowRecord {
     for (windows) |*r| {
         if (r.win == win) return r;
     }
@@ -469,7 +583,7 @@ fn findWindowRecord(windows: []const handoff.WindowRecord, win: u32) ?*const han
 /// workspace (lowest set bit of its mask) when present, else the currently
 /// active workspace. Deliberately NOT the spawn-queue/rules resolution, which
 /// describes brand-new spawns rather than pre-existing windows.
-fn restoredOrCurrent(record: ?*const handoff.WindowRecord) u8 {
+fn restoredOrCurrent(record: ?*const session.WindowRecord) u8 {
     if (record) |r| {
         if (r.mask != 0) return @intCast((model_mod.lowestBit(r.mask) orelse unreachable).index);
     }
@@ -478,12 +592,12 @@ fn restoredOrCurrent(record: ?*const handoff.WindowRecord) u8 {
 
 /// Re-applies a restore record's mask, anchor, and presence onto an
 /// already-registered model entry. Registration (admitWindow ->
-/// actions.mapRequest) creates the entry as a present tiled-anchored window on
+/// mapRequest) creates the entry as a present tiled-anchored window on
 /// its target workspace; this overwrites the per-window state that survived
 /// the re-exec so the caller's reconcile can place it exactly as before.
 /// Presence bookkeeping that would otherwise drift is routed through the owning
 /// window module's deserialize hook rather than patched by hand.
-fn applyRestoredRecord(win: u32, record: *const handoff.WindowRecord) void {
+fn applyRestoredRecord(win: u32, record: *const session.WindowRecord) void {
     const model = pipeline.mut();
     const e = model.store.getPtr(win) orelse return;
 
@@ -511,7 +625,7 @@ fn applyRestoredRecord(win: u32, record: *const handoff.WindowRecord) void {
     // on-screen -- the graceful degrade.
     //
     // Claim resolution: the blob is stamped with the claiming module's NAME at
-    // save time (handoff.ext_format_version). Adoption fast-paths on the name;
+    // save time (session.ext_format_version). Adoption fast-paths on the name;
     // when the name no longer resolves (the module was removed or renamed) or
     // its hook declines, the magic-byte scan over every module's
     // self-identifying format tag claims it instead. Blobs written by the
@@ -521,7 +635,7 @@ fn applyRestoredRecord(win: u32, record: *const handoff.WindowRecord) void {
         // decides the outcome, because the payload's own magic bytes do that.
         // Anything unrecognised (a foreign version, a truncated header) is
         // passed through whole, exactly as an unstamped blob was.
-        const header = handoff.decodeExt(stored);
+        const header = session.decodeExt(stored);
         const payload: []const u8 = header.payload;
         if (header.claimed_name) |name| {
             for (window_mods) |mod| {
@@ -550,7 +664,7 @@ fn applyRestoredRecord(win: u32, record: *const handoff.WindowRecord) void {
 const AdoptionEntry = struct {
     win: u32,
     attr_cookie: xcb.xcb_get_window_attributes_cookie_t,
-    record: ?*const handoff.WindowRecord,
+    record: ?*const session.WindowRecord,
     cookies: AdmissionCookies,
 };
 
@@ -572,10 +686,10 @@ const AdoptionEntry = struct {
 ///     presence directly on the model entry.
 ///
 /// CALLING CONTRACT: this does NOT reconcile. Placement derives from
-/// tiled_order / focus_mru, which are rebuilt by handoff.applyModelLevel
+/// tiled_order / focus_mru, which are rebuilt by session.applyModelLevel
 /// AFTER this returns; a reconcile here would place pre-restore state.
 /// adoptSession therefore sequences:
-///     adoptRootWindows(); handoff.applyModelLevel(m); one reconcile.
+///     adoptRootWindows(); session.applyModelLevel(m); one reconcile.
 /// Returns the number of windows admitted (restored-parked ones included).
 ///
 /// PIPELINING: MapRequest pipelines one window's five property queries. Boot
@@ -604,7 +718,7 @@ fn adoptRootWindows() !usize {
     const children = xcb.xcb_query_tree_children(tree_reply);
     const child_count: usize = @intCast(xcb.xcb_query_tree_children_length(tree_reply));
 
-    const loaded = handoff.loaded();
+    const loaded = session.loaded();
 
     // The per-window admission query used to be fired and drained inside this
     // loop (and the attribute query even earlier), costing one serial blocking
@@ -688,7 +802,7 @@ fn adoptRootWindows() !usize {
         const size_hints = drainAdmissionCookies(conn, win, drain_cookies, true);
 
         // Register on the restored-or-current workspace. on_current=false so
-        // actions.mapRequest does NOT reconcile per-window (the caller owns
+        // mapRequest does NOT reconcile per-window (the caller owns
         // the single end-of-adoption reconcile) or steal model focus before
         // applyModelLevel restores the session's focus.
         admitWindow(win, restoredOrCurrent(entry.record), false, float, size_hints);

@@ -18,7 +18,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const core = @import("core");
-const model = @import("model");
+const model = @import("wm_state");
 const pipeline = @import("pipeline");
 const query = @import("query");
 const helpers = @import("helpers");
@@ -36,7 +36,7 @@ const Recorder = test_sink.TestSink(.record);
 
 /// Re-arms the pipeline global model (which the query facade reads) and
 /// the sync/capacity module stores, returning the mutable instance handle.
-/// Then every reconcile in a test runs over `pipeline.model()` so facade and
+/// Then every reconcile in a test runs over `pipeline.state()` so facade and
 /// ledger observe the identical state.
 fn pipelineModel() *model.Model {
     // Advance the real boot phase instead of forging a private latch. The

@@ -1,10 +1,22 @@
 //! X11 focus protocol for the WM: applying, clearing, and tracking which
 //! window owns input focus, plus the button-grab and EnterNotify-suppression
-//! bookkeeping that must stay in sync with it.
+//! bookkeeping that must stay in sync with it. Also owns the per-window
+//! focus-property cache (WM_HINTS/WM_PROTOCOLS verdicts) and the ICCCM 4.1.7
+//! input-model resolution that reads it; the X11 query machinery that fills
+//! the cache lives in icccm.zig (admission) and writes through put() here.
 //!
 //! Focus truth lives in `model.focused`; the `last_applied` field in `state`
 //! is only a protocol-side cache of the focus this module actually pushed to
 //! X. Callers read focus through `getFocused()`.
+//!
+//! Section map, top to bottom:
+//!   1. State + init/deinit (+ the focus-property cache merged from icccm)
+//!   2. Query/mutation accessors, timestamps, button grabs
+//!   3. Etiquette table (per-Reason policy as DATA) + resolve predicates
+//!   4. Two-phase prepare: prepareFocus / prepareClearFocus / yieldsModelFocus
+//!   5. Two-phase apply: applyPendingFocus / clearTail / advertiseActiveWindow
+//!   6. Settle: beginTilingOpSettle / drainTilingOpSettle
+//!   7. Grab-wrapped commit API + focus cycle
 
 const std = @import("std");
 
@@ -14,8 +26,10 @@ const icccm = @import("icccm");
 const query = @import("query");
 const log = @import("log");
 const pipeline = @import("pipeline");
-const model_mod = @import("model");
+const model_mod = @import("wm_state");
 const types = @import("types");
+const idmap = @import("idmap");
+const registry = @import("registry");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
@@ -83,13 +97,196 @@ pub fn deinit() void {
     state = null;
 }
 
+// ---------------------------------------------------------------------------
+// Focus-property cache + ICCCM 4.1.7 input-model resolution
+// (merged from icccm.zig): the per-window WM_HINTS/WM_PROTOCOLS verdict
+// cache, the four delivery modes, WM_TAKE_FOCUS dispatch from a known
+// advertisement, and the PropertyNotify half-refresh. The X11 query
+// machinery (fire/drain/populate) stays in icccm.zig and writes through
+// put() below, so the cache has exactly one owner — this module.
+// ---------------------------------------------------------------------------
+
+/// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
+/// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
+pub const InputModel = enum {
+    no_input, // input=False, no WM_TAKE_FOCUS: window doesn't want focus
+    passive, // input=True,  no WM_TAKE_FOCUS: set focus via `XSetInputFocus`
+    locally_active, // input=True,  WM_TAKE_FOCUS:    set focus + send protocol
+    globally_active, // input=False, WM_TAKE_FOCUS:    only send protocol
+};
+
+/// Resolves the ICCCM 4.1.7 focus-delivery model for `win` together with the
+/// take_focus verdict, so callers can dispatch WM_TAKE_FOCUS without issuing a
+/// second query. Both answers come from the focus-property cache on a hit.
+pub const InputModelResolution = struct {
+    model: InputModel,
+    /// True when `win` advertises WM_TAKE_FOCUS.
+    take_focus: bool,
+};
+
+/// Per-window properties cached from WM_HINTS and WM_PROTOCOLS. Kept in
+/// sync via PropertyNotify; take_focus is safe to cache because the mask-first
+/// map ordering guarantees it cannot stale.
+pub const CachedProps = struct {
+    accepts_input: bool,
+    wm_delete: bool,
+    take_focus: bool,
+};
+
+// Upper bound on live cache entries. The backing IdMap is a fixed
+// allocation-free open-addressed table, so lookups are O(1) even at the cap.
+// Windows beyond idmap.max_window_cache still work; they just fall through to the
+// live X11 path.
+const max_window_cache: usize = idmap.max_window_cache;
+
+var cache_slots: idmap.IdMap(CachedProps, max_window_cache) = .{};
+
+/// Drops every cache entry, at the window init/deinit boundary (init starts
+/// from an empty map; deinit clears before focus teardown, whose
+/// managed-window sweeps must not encounter a partially-valid cache). No
+/// armed flag: an empty map already reads as "not yet seen" for every window,
+/// so reset IS the disabled state, and nothing runs between the boundary's
+/// clear and the next event-loop turn to repopulate it.
+pub fn reset() void {
+    cache_slots.clear();
+}
+
+/// Removes a window's cache entry on unmanage so a reused XID can't borrow a
+/// stale focus verdict.
+pub fn evict(win: u32) void {
+    _ = cache_slots.remove(win);
+}
+
+/// Silently drops the entry when the cache is full;
+/// the live-query fallback is always correct.
+pub fn put(win: u32, p: CachedProps) void {
+    // No warn on failure: a capacity miss only degrades that window to the
+    // live-query fallback, which the docs already say is correct; a log line
+    // on the property-notify hot path would be noise the reader has to
+    // disprove.
+    _ = cache_slots.put(win, p);
+}
+
+/// Returns cached props without triggering a live query, or null on a miss.
+/// The null case means the window's WM_HINTS/WM_PROTOCOLS have not been seen
+/// since the cache seeded (or the cache is full); callers fall back to a
+/// live query or a pre-fired cookie.
+pub fn peek(win: u32) ?CachedProps {
+    return cache_slots.get(win);
+}
+
+/// See ICCCM 4.1.7: the matrix of (accepts_input x supports_take_focus)
+/// determines which focus delivery mechanism the WM must use.
+fn inputModelFrom(supports_take_focus: bool, accepts_input: bool) InputModel {
+    return if (supports_take_focus)
+        (if (accepts_input) .locally_active else .globally_active)
+    else
+        (if (accepts_input) .passive else .no_input);
+}
+
+fn resolve(cp: CachedProps) InputModelResolution {
+    return .{
+        .model = inputModelFrom(cp.take_focus, cp.accepts_input),
+        .take_focus = cp.take_focus,
+    };
+}
+
+/// Bloom-path input-model resolve: from the focus-property cache only, with no
+/// fallback round trip. Returns null on a cache miss (never blocking); the
+/// focus hot path resolves a miss as provisional focus instead of querying.
+pub fn peekInputModelResolved(win: u32) ?InputModelResolution {
+    return if (peek(win)) |p| resolve(p) else null;
+}
+
+/// Fallback for a cache miss in the focus hot path: dwm-style provisional
+/// focus, `xcb_set_input_focus` with no WM_TAKE_FOCUS, never a blocking live
+/// query. Correct because the next map/property refresh corrects the verdict.
+pub fn provisionalResolution() InputModelResolution {
+    return .{ .model = .passive, .take_focus = false };
+}
+
+/// The WM_PROTOCOLS and WM_TAKE_FOCUS atoms this module's focus paths share.
+const FocusAtoms = struct { protocols: u32, take_focus: u32 };
+
+/// Builds and sends the WM_TAKE_FOCUS ClientMessage. No protocol-list scan:
+/// callers either scanned already or hold an authoritative answer.
+fn sendTakeFocusEvent(
+    conn: core.Connection,
+    win: u32,
+    time: u32,
+    at: FocusAtoms,
+) void {
+    var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    event.response_type = xcb.XCB_CLIENT_MESSAGE;
+    event.window = win;
+    event.type = at.protocols;
+    event.format = 32;
+    event.data.data32[0] = at.take_focus;
+    event.data.data32[1] = time;
+
+    _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+}
+
+/// Resolves the WM_PROTOCOLS and WM_TAKE_FOCUS atoms this module's focus paths
+/// share, or null when the atom cache is not ready. The atom set is atomic
+/// (one cache), so a partial failure is impossible.
+fn focusAtoms() ?FocusAtoms {
+    const protocols = atoms.getAtomCached("WM_PROTOCOLS") orelse return null;
+    const take_focus = atoms.getAtomCached("WM_TAKE_FOCUS") orelse return null;
+    return .{ .protocols = protocols, .take_focus = take_focus };
+}
+
+/// Dispatches WM_TAKE_FOCUS from an already-known advertisement bit, the one
+/// resolved into the input-model verdict. Skips the WM_PROTOCOLS round trip
+/// entirely; used by the grab-wrapped focus path so a keyboard focus change
+/// costs one protocol query instead of two.
+pub fn sendWMTakeFocusKnown(
+    conn: core.Connection,
+    win: u32,
+    time: u32,
+    advertises_take_focus: bool,
+) void {
+    if (!advertises_take_focus) return;
+    const at = focusAtoms() orelse return;
+    sendTakeFocusEvent(conn, win, time, at);
+}
+
+/// Refresh one half of CachedProps after a PropertyNotify, keeping the other
+/// halves from cache to avoid a redundant round-trip. When the old is not
+/// cached, the affected half is queried live; this fallback costs one extra
+/// XCB call per window until populateFocusCacheFromCookies seeds the cache.
+///
+/// A WM_PROTOCOLS notify invalidates both wm_delete and take_focus (same
+/// property); a WM_HINTS notify invalidates only accepts_input.
+pub fn refreshCachedPropHalf(conn: core.Connection, win: u32, atom: u32) void {
+    const is_protocols = atom == atoms.getAtomOrZero("WM_PROTOCOLS");
+    const existing: ?CachedProps = peek(win);
+
+    // Refresh only the half the notify invalidated; the other half reuses the
+    // cache when present, otherwise both halves query live.
+    const protocols: icccm.WMProtocolsProps = if (existing == null or is_protocols)
+        icccm.queryWMProtocolsProps(conn, win)
+    else
+        .{ .wm_delete = existing.?.wm_delete, .take_focus = existing.?.take_focus };
+    const accepts_input: bool = if (existing == null or !is_protocols)
+        icccm.queryWMHintsAcceptsInput(conn, win)
+    else
+        existing.?.accepts_input;
+
+    put(win, .{
+        .accepts_input = accepts_input,
+        .wm_delete = protocols.wm_delete,
+        .take_focus = protocols.take_focus,
+    });
+}
+
 // Query API (pure reads)
 
 /// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
     if (core.isModelReady()) {
-        return pipeline.model().focused;
+        return pipeline.state().focused;
     }
     return state.?.last_applied;
 }
@@ -191,7 +388,7 @@ pub inline fn setSuppressReason(r: core.FocusSuppressReason) void {
 //
 // Owned here rather than in window.zig because grabs are a focus-protocol
 // concern, acquired/released only during focus transitions. The sole
-// non-transition call site is actions.mapRequest (spawn admission), served by
+// non-transition call site is admission.mapRequest (spawn admission), served by
 // the public initWindowGrabs shim below.
 
 /// Unconditionally release all button grabs on `win`, then, if `focused` is
@@ -275,7 +472,7 @@ const CommitFlags = struct {
     new_suppress: core.FocusSuppressReason,
 };
 
-// Two-phase focus protocol (focus protocol + geometry land under one grab)
+// Section 4: two-phase prepare (focus protocol + geometry land under one grab)
 //
 // Some actions need focus protocol + geometry to land under one server grab.
 // The existing `setFocus`/`clearFocus` path does round trips (input-model
@@ -337,6 +534,8 @@ pub inline fn yieldsModelFocus(t: FocusTransition) bool {
     };
 }
 
+// Section 3: etiquette table + resolve predicates
+
 /// The focus ETIQUETTE for one `Reason`: all three per-reason
 /// policies as DATA, in one row, instead of three separate switches that
 /// each had to be re-read to answer "what does a workspace switch do?".
@@ -390,6 +589,56 @@ fn etiquetteFor(reason: Reason) Etiquette {
     };
 }
 
+// Crossing-suppression policy + hover focus (moved from client_events.zig):
+// the Enter/Leave handlers validate event shape, then hand the crossing to
+// these.
+
+inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
+    if (getSuppressReason() != .window_spawn) return false;
+    // The spawn snapshot (spawnCursor()) is taken by handleMapRequest
+    // when the spawn's MapRequest arrives. Mapping a new window under the
+    // stationary cursor produces a PAIR of synthetic crossings, both carrying
+    // the spawn's root coordinates: the enter into the spawned window, and the
+    // return crossing into the window it displaced (which, when the spawned
+    // window immediately parks offscreen, is the previous focus). A one-shot
+    // guard only drops the first, letting the return crossing re-steal focus
+    // from the just-spawned window via mouse_enter.
+    //
+    // Keep the guard armed while crossings stay at the spawn pixel: only a
+    // genuine pointer move (different coordinates) is a real hover and may
+    // clear it. A cursor parked where it was when the app launched can't hover
+    // a different window at that same pixel until it moves, which is the
+    // acceptable price for not stealing focus during the spawn's layout.
+    const cursor = spawnCursor();
+    if (root_x == cursor.x and root_y == cursor.y) return true;
+    setSuppressReason(.none);
+    return false;
+}
+
+/// Shared guard tail for the EnterNotify/LeaveNotify handlers, run after each
+/// handler's event-shape filter (mode/detail/root): a floating drag owns the
+/// pointer, and a spawn's synthetic crossing (the window mapping under the
+/// parked cursor) must be suppressed. Returns true when the crossing should
+/// be dropped.
+pub inline fn crossingShouldDrop(root_x: i16, root_y: i16) bool {
+    if (registry.dispatchFirstTrue(.isDragging, .{})) return true;
+    return suppressSpawnCrossing(root_x, root_y);
+}
+
+/// Attempt to focus `win` via the hover (EnterNotify) path.
+///
+/// Guards against workspace membership and hidden state before calling
+/// grabFocus(.mouse_enter). The .mouse_enter reason is the direct
+/// EnterNotify path: lightweight, no raise, no confirm.
+pub inline fn maybeFocusWindow(win: u32) void {
+    // In all-view mode every window is visible on the current workspace
+    // regardless of its tag mask, so hover must be able to focus it too; a
+    // bare membership check made all-view windows un-focusable by ENTER.
+    if (!query.isOnCurrentWorkspace(win) and !pipeline.state().all_view_active) return;
+    if (registry.callHookBool(.isWindowHidden, .{ pipeline.state(), win })) return;
+    grabFocus(win, .mouse_enter);
+}
+
 /// The ONE destroyed-window guard for a focus target. False when `win`
 /// may not take focus or be raised.
 ///
@@ -413,7 +662,7 @@ fn etiquetteFor(reason: Reason) Etiquette {
 ///     name it, so re-focusing needs the live answer.
 fn resolveFocusTarget(win: u32, reason: Reason) bool {
     if (query.isInvalidWindow(win)) return false;
-    if (!pipeline.model().store.has(win)) return false;
+    if (!pipeline.state().store.has(win)) return false;
     if (reason == .mouse_click and !isWindowMapped(core.getState().conn, win)) return false;
     return true;
 }
@@ -429,7 +678,7 @@ fn resolveFocusTarget(win: u32, reason: Reason) bool {
 pub fn prepareFocus(win: u32, reason: Reason) FocusTransition {
     if (!resolveFocusTarget(win, reason)) return .none;
 
-    const resolved = icccm.peekInputModelResolved(win) orelse icccm.provisionalResolution();
+    const resolved = peekInputModelResolved(win) orelse provisionalResolution();
     if (resolved.model == .no_input) {
         // Its own limb, not `.none`: callers that mutate the model on their
         // own must be able to tell this apart from a dedup skip (a no_input
@@ -489,6 +738,52 @@ pub fn prepareClearFocus() FocusTransition {
     return .{ .clear = .{ .old = applied } };
 }
 
+/// Fallback: own-workspace scope only. Order: current workspace's focus_mru
+/// -> reversed tiled_order -> any floating on the workspace. First
+/// visibleOn(current) wins.
+/// Returns a FocusTransition for the caller to commit inside its server grab.
+/// Model and protocol focus are updated together: the model update runs
+/// before the grab, the protocol commit runs inside it. `reason` is the
+/// prepareFocus reason handed to the winner (the fallback's own
+/// `.tiling_operation`, or `.workspace_switch` on a workspace switch).
+pub fn focusFallback(m: *model_mod.Model, reason: Reason) FocusTransition {
+    // Tier policy lives in the model layer so tests can exercise it without
+    // linking the protocol side (see model.fallbackFocusCandidate). A
+    // no_input candidate can never hold X focus, so it is excluded and the
+    // scan continues to the next focusable window; only when nothing
+    // focusable remains is model focus cleared and X focus handed to root.
+    var excluded: ?model_mod.WindowId = null;
+    while (model_mod.fallbackFocusCandidate(m, m.current, excluded)) |winner| {
+        const prep = prepareAndSetFocus(m, winner, reason);
+        if (prep == .no_input) {
+            excluded = winner;
+            continue;
+        }
+        return prep;
+    }
+    // prepareClearFocus reads MODEL focus as its decision source, so it
+    // runs BEFORE the model clear.
+    const prep = prepareClearFocus();
+    model_mod.clearFocus(m);
+    return prep;
+}
+
+/// Prepare BEFORE the model write: prepareFocus resolves the input model
+/// (round trip) and can re-raise an already-applied window. The model write
+/// is conditional on a real `.set` intent, so a no_input candidate never
+/// takes model focus. Returns the transition so the caller can commit it
+/// inside its own server grab.
+pub fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: Reason) FocusTransition {
+    const prep = prepareFocus(win, reason);
+    // `yieldsModelFocus`, not `!= .none`: `.no_input` is a refusal, not a
+    // dedup, so the old test let a no_input window take model focus and
+    // contradicted the rule written directly above this function.
+    if (yieldsModelFocus(prep)) model_mod.setFocus(m, win);
+    return prep;
+}
+
+// Section 5: two-phase apply
+
 /// Shared shutdown tail of the focus-clear paths (applyPendingFocus's `.clear`
 /// limb): drop applied focus, reset suppression, refocus root.
 fn clearTail() void {
@@ -517,7 +812,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             if (intent.flags.raise) requests.raiseWindow(conn, intent.win);
 
             if (intent.flags.take_focus_known)
-                icccm.sendWMTakeFocusKnown(conn, intent.win, 0, true);
+                sendWMTakeFocusKnown(conn, intent.win, 0, true);
 
             // Always bump: focus-consuming surfaces (the bar's title segment)
             // must redraw whenever focus moved. Inside a server grab the
@@ -550,6 +845,8 @@ fn advertiseActiveWindow(win: u32) void {
     const cs = core.getState();
     _ = xcb.xcb_change_property(cs.conn, xcb.XCB_PROP_MODE_REPLACE, cs.root, state.?.net_active_window, xcb.XCB_ATOM_WINDOW, 32, 1, &win);
 }
+
+// Section 6: settle (deferred "has the server caught up" round trip)
 
 /// Fire an async "has the server caught up" round trip that defers lifting
 /// EnterNotify suppression until crossing events from the tiling reflow have
@@ -651,7 +948,7 @@ pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) voi
 ///
 /// This is the coupled form. The two calls the input path used to make --
 /// `if (cycleTarget(dir)) |t| grabFocusWithDuty(t, .user_command,
-/// &actions.snapViewportFocusedDuty)` -- put the pool resolution and the
+/// &reconcile_tails.snapViewportFocusedDuty)` -- put the pool resolution and the
 /// commit in the CALLER's hands, and nothing tied the duty to the transition
 /// it belongs to: resolve a target, then commit it with a different duty or
 /// none, and the snap the cycle exists to fold in silently does not happen
@@ -684,7 +981,7 @@ pub fn cycleTarget(dir: types.Dir) ?u32 {
     // which anchors the cycle on the workspace's tiled_order -- so Mod+j/k
     // follows the arrangement and a move/swap reorders the cycle with it.
     var buf: [model_mod.store_capacity]u32 = undefined;
-    const m = pipeline.model();
+    const m = pipeline.state();
     const len = model_mod.collectCyclePool(m, m.current, &buf);
     if (len == 0) return null;
     const wins = buf[0..len];

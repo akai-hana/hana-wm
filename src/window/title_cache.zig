@@ -14,7 +14,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
+const icccm = @import("icccm");
 const atoms = @import("atoms");
 const requests = @import("requests");
 const idmap = @import("idmap");
@@ -50,7 +50,7 @@ const WindowData = struct {
 /// notifications and earn a cache entry, so sizing the cache AT the model
 /// bound would let transient clients evict live entries and make the cache
 /// the binding constraint where the model is meant to be.
-const max_entries = constants.max_window_cache;
+const max_entries = idmap.max_window_cache;
 
 // Module-level singleton: always-valid and allocation-free. Before init()
 // (and after deinit()) it is simply empty — peeks miss and writes land —
@@ -88,7 +88,7 @@ pub fn removeWindow(window_id: u32) void {
 
 // Window-title cache
 
-const property_no_delete = constants.property_no_delete;
+const property_no_delete = icccm.property_no_delete;
 
 // EWMH atoms, resolved once (null when the server lacks them).
 var net_wm_name: ?u32 = null;
@@ -209,7 +209,7 @@ fn takePropertyReply(
 /// Caches `title` for `win` by copying it into the entry's inline buffer
 /// (POD storage, no heap, no free). Public because it is the cache's write
 /// side (the pipelined admission path reaches it through
-/// `collectTitleCookies`), which the headless `wincache_test` exercises for
+/// `collectTitleCookies`), which the headless `title_cache_test` exercises for
 /// the overwrite/cap lifecycle.
 ///
 /// THE AT-CAPACITY POLICY, in one place: a full store drops a NEW

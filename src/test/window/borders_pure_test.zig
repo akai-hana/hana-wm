@@ -4,8 +4,7 @@
 //! their state as parameters so they run without a server.
 
 const std = @import("std");
-const model = @import("model");
-const constants = @import("constants");
+const model = @import("wm_state");
 const borders = @import("borders");
 const helpers = @import("helpers");
 
@@ -15,7 +14,7 @@ const ws1 = model.WSId.fromIndex(1);
 /// The rule as production evaluates it: build the per-workspace occupant
 /// table (one store pass), then ask the With-form against it.
 fn behind(m: *const model.Model, win: u32, current: model.WSId, comptime has_fullscreen: bool) bool {
-    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    var occupants: [model.max_workspaces]?model.WindowId = @splat(null);
     model.coveringOccupants(m, &occupants);
     return borders.isBehindCoveringWindowWith(m, win, current, has_fullscreen, &occupants);
 }
@@ -84,7 +83,7 @@ test "an occupant anchored elsewhere still covers workspaces its mask shows" {
     // visible on ws0 too. The table must flag both workspaces — the scan
     // form's (anchored or visible) rule — not just the anchor slot.
     m.store.getPtr(20).?.mask |= model.bit(ws0);
-    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    var occupants: [model.max_workspaces]?model.WindowId = @splat(null);
     model.coveringOccupants(&m, &occupants);
     try std.testing.expectEqual(@as(?model.WindowId, 20), occupants[ws0.index]);
     try std.testing.expectEqual(@as(?model.WindowId, 20), occupants[ws1.index]);

@@ -17,13 +17,13 @@ const focus = @import("focus");
 const query = @import("query");
 
 const hz = @import("hz");
-const time = @import("time");
 
 const pipeline = @import("pipeline");
 const ledger = @import("ledger");
 const usable_area = @import("usable_area");
+const reconcile_tails = @import("reconcile_tails");
 
-const model = @import("model");
+const model = @import("wm_state");
 const scaling = @import("scaling");
 const reconcile = @import("reconcile");
 
@@ -160,19 +160,19 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     if (!cs.config.drag_enabled) return;
     if (g_state.drag.active) return;
     if (usable_area.isSurfaceWindow(win)) return;
-    if (model.isCovering(pipeline.model(), win)) return;
+    if (model.isCovering(pipeline.state(), win)) return;
 
     // Reject unmanaged/foreign windows: a drag on a window the WM does not own
     // would no-op every setFloatingRect/dragRect (store.getPtr fails) while
     // g_state.drag.active stays latched, blocking all future drags. The
     // getGeometry fallback below is only for managed-but-never-placed windows,
     // so require store membership before it.
-    if (pipeline.model().store.get(win) == null) return;
+    if (pipeline.state().store.get(win) == null) return;
 
     // Model/sync truth (floating base or last-sent rect) over a live XCB
     // round-trip; fall back to a live query when never placed.
     const cur = blk: {
-        if (reconcile.truthRect(pipeline.model(), win)) |g| break :blk g;
+        if (reconcile.truthRect(pipeline.state(), win)) |g| break :blk g;
         break :blk window.getGeometry(cs.conn, win) orelse return;
     };
 
@@ -279,7 +279,7 @@ fn sizeHintLimits(win: u32) HintLimits {
     const bw2: i32 = @as(i32, core.borderWidth()) * 2;
     const min_dim: i32 = core.getState().config.tiling.min_window_dim;
     // Window may withdraw mid-drag; treat it as hint-less (no constraint).
-    const hints = (pipeline.model().store.get(win) orelse return .{
+    const hints = (pipeline.state().store.get(win) orelse return .{
         .min_w = min_dim,
         .min_h = min_dim,
         .max_w = @as(i32, std.math.maxInt(u16)),
@@ -406,7 +406,7 @@ pub fn updateDrag(x: i16, y: i16) void {
     // Throttle commits to display refresh rate; still track latest position
     // for responsiveness. If a mode switch happens mid-drag, we adapt live.
     const rate = hz.detectedHz();
-    const now = time.monotonicNs();
+    const now = core.monotonicNs();
     const min_period_ns: u64 = 1_000_000_000 / 1000; // cap at 1000Hz max commit rate
     const period_ns: u64 = if (rate <= 0.0) min_period_ns else blk: {
         const p = @as(f64, 1_000_000_000.0) / rate;
@@ -506,6 +506,58 @@ pub fn honorConfigureRequest(
 
 /// This module's window sub-system contribution: the floating drag/resize
 /// commands floating owns.
+// ---------------------------------------------------------------------------
+// tiling<->floating command: the old `src/actions/geometry.zig` toggle, moved
+// beside the drag/rect state it transitions against.
+// ---------------------------------------------------------------------------
+
+/// toggle_floating_window. Tiled->floating seeds the rect from the window's
+/// current on-screen geometry (LastSent); floating->tiled re-enters the home
+/// list at the primary-column head via the ordinary tiling order.
+pub fn toggleFloating(win: model.WindowId) void {
+    const m = pipeline.mut();
+    const e = m.store.getPtr(win) orelse return;
+    // A window carrying a covering record keeps its anchor: the record owns
+    // the screen while covering, and a ghost (parked) record must survive
+    // the command so the later toggle-off restores the ORIGINAL anchor, not
+    // a flipped one.
+    if (model.isCovering(m, win)) return;
+    switch (e.anchor) {
+        .tiled => {
+            const r = ledger.lastRectFor(win) orelse return;
+            model.detachTiledToFloating(m, e, win, r);
+        },
+        .floating => |r| {
+            e.anchor = .tiled;
+            if (!repairStrandedHome(m, e, win)) {
+                // The destination tiled list was full, so the window could not
+                // be re-seated: keep it floating with its original rect rather
+                // than leaving it anchored-tiled with no seat.
+                e.anchor = .{ .floating = r };
+                return;
+            }
+        },
+    }
+    reconcile_tails.retile(.{ .mode = .restack }, null);
+}
+
+/// Defense in depth (the stranded-slot bug class): repair a tiled-anchored
+/// window that has no home-list entry instead of leaving it a
+/// tiling-invisible window this toggle could never fix again.
+fn repairStrandedHome(m: *model.Model, e: *model.Entry, win: model.WindowId) bool {
+    if (model.findHome(m, win) != null) return true;
+    if (model.lowestBit(e.mask)) |h| {
+        // Append fails when the destination tiled list is full; only commit
+        // home_ws when the seat actually got an entry, and report failure so
+        // the caller can revert the anchor. Committing home_ws anyway would
+        // leave the window anchored-tiled with no seat -- the exact stranded
+        // state this function exists to prevent.
+        if (!m.ws[h.index].tiled_order.append(win)) return false;
+        e.home_ws = h;
+    }
+    return true;
+}
+
 pub const module: @import("contract").WindowModule = .{
     .name = "floating",
     .startDrag = startDrag,
@@ -517,4 +569,5 @@ pub const module: @import("contract").WindowModule = .{
     .cancelDragForWindow = cancelDragForWindow,
     .setFloatingRect = setFloatingRect,
     .honorConfigureRequest = honorConfigureRequest,
+    .toggleFloatingWindow = toggleFloating,
 };

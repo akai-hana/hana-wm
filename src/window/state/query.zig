@@ -1,30 +1,28 @@
 //! Read-only accessors over the model singleton (the single source of truth
 //! for windows and workspaces): is a window managed/tiled/on the current
 //! workspace, is the all-view active, plus a caller-owned snapshot of the
-//! registry for callers that sweep it and the comptime workspace label table
-//! the bar renders.
+//! registry for callers that sweep it.
 //!
 //! This file holds NO state and NO lifecycle: the workspace count is derived
 //! from the live config on read, and the focus-MRU clear belongs to the model
 //! owner (pipeline.clearFocusMru, invoked by the window layer's reset
 //! discipline). Every model mutation belongs to its transition owner
-//! (actions/window/focus); all model reads go through core.isModelReady()
+//! (window/focus); all model reads go through core.isModelReady()
 //! (the one spelling), so boot order never touches an undefined instance.
 //! It exists as a LIGHT read surface: core/loop, core/proc, input and bar
-//! readers must not import window.zig (drags focus/admission/actions) or
+//! readers must not import window.zig (drags focus/admission) or
 //! pipeline's reconcile chain for a predicate.
 
 const std = @import("std");
 
 const core = @import("core");
-const constants = @import("constants");
 const pipeline = @import("pipeline");
-const model_mod = @import("model");
+const model_mod = @import("wm_state");
 const usable_area = @import("usable_area");
 
 fn m() ?*const model_mod.Model {
     if (!core.isModelReady()) return null;
-    return pipeline.model();
+    return pipeline.state();
 }
 
 pub const Entry = struct {
@@ -87,14 +85,14 @@ pub fn allWindowsInto(buf: []Entry) []const Entry {
 // latch, no re-latch on reload — see getWorkspaceCount).
 
 /// Read-through facade over `model.current`, the single source of truth:
-/// every write path (actions.switchTo) mutates the model directly, so a
+/// every write path (workspaces.switchWorkspace) mutates the model directly, so a
 /// read-only query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
     // core.isModelReady() and nothing else: the model-live question has one
     // spelling, and the place that owns it documents why the gate exists.
     if (!core.isModelReady()) return null;
-    return pipeline.model().current.index;
+    return pipeline.state().current.index;
 }
 
 /// The workspace count from the live config, derived on read: collapses to a
@@ -107,7 +105,7 @@ pub inline fn getCurrentWorkspace() ?u8 {
 pub inline fn getWorkspaceCount() usize {
     if (!core.isReady()) return 1;
     const cs = core.getState().config.workspaces;
-    return if (cs.enabled) @min(@as(usize, cs.count), constants.max_workspaces) else 1;
+    return if (cs.enabled) @min(@as(usize, cs.count), model_mod.max_workspaces) else 1;
 }
 
 /// True while the all_workspaces (Mod+5) all-view flag is active: every
@@ -117,16 +115,6 @@ pub inline fn isAllViewActive() bool {
     const mm = m() orelse return false;
     return mm.all_view_active;
 }
-
-// Comptime workspace label table
-
-/// Comptime number strings "1".."64" for workspace display labels.
-pub const workspace_labels: [constants.max_workspaces][]const u8 = blk: {
-    @setEvalBranchQuota(10_000);
-    var labels: [constants.max_workspaces][]const u8 = undefined;
-    for (&labels, 1..) |*label, i| label.* = std.fmt.comptimePrint("{d}", .{i});
-    break :blk labels;
-};
 
 /// True when `win` has a tiled anchor (not floating, covering or
 /// minimized); reads the model entry directly.
