@@ -1,18 +1,20 @@
 //! Config → model seeding: stamps every workspace's tiling params from the
 //! live config at boot and on reload. Owns the name/variant resolution
-//! (layout registry ids, per-layout `variant_parse`) and the primary-count
-//! clamp; the stamping loop itself is `model.applyConfigReload`, the reload
-//! reconcile is `pipeline.reconcileGrab`. Callers: `main` (boot, before the
-//! first reconcile) and `config/reload` (post-swap re-seed). The window-layer
-//! command half — layout cycling, variant stepping, primary/swap — lives in
-//! `window/sync/reconcile_tails.zig`.
+//! (layout registry ids, per-layout `variant_parse`), the primary-count
+//! clamp, and the two-arg `applyConfigReload` stamping loop (moved here from
+//! `model.zig` — Option A of the op migration; config owns seeding). The
+//! reload reconcile is `pipeline.reconcileGrab`. Callers: `main` (boot, before
+//! the first reconcile) and `config/reload` (post-swap re-seed via
+//! `reloadAndReconcile`). The window-layer command half — layout cycling,
+//! variant stepping, primary/swap — lives in `window/sync/reconcile_tails.zig`.
 
 const core = @import("core");
 const types = @import("types");
-const model_mod = @import("wm_state");
+const model_mod = @import("model");
+const domain = @import("domain");
 const pipeline = @import("pipeline");
 const tiling = @import("tiling_seam").tiling;
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 const log = @import("log");
 const build_options = @import("build_options");
 
@@ -34,7 +36,7 @@ pub fn templateFrom(cfg: *const types.TilingConfig) model_mod.LayoutParams {
     return .{
         .kind = default_kind,
         .variant_idx = resolveVariant(cfg, default_kind, null),
-        .primary_count = model_mod.capPrimaryCount(cfg.master_count),
+        .primary_count = domain.capPrimaryCount(cfg.master_count),
         .primary_width = 0.5, // runtime-only; reset to the model default (LayoutParams.primary_width)
         .secondary_balance = 0,
     };
@@ -72,7 +74,7 @@ pub fn applyOverrides(
             // string still applies to the active kind).
             s.params.variant_idx = resolveVariant(cfg, kind, o.variant);
         }
-        if (count_overrides[id]) |mc| s.params.primary_count = model_mod.capPrimaryCount(mc);
+        if (count_overrides[id]) |mc| s.params.primary_count = domain.capPrimaryCount(mc);
     }
 }
 
@@ -84,7 +86,7 @@ pub fn applyOverrides(
 /// push state to X.
 ///
 /// The two state-touching steps only: stamp the pure `templateFrom` template
-/// across every workspace (via model.applyConfigReload, whose viewport-preserve
+/// across every workspace (via `applyConfigReload` below, whose viewport-preserve
 /// invariant gets its production caller here), then re-stamp per-workspace
 /// overrides. The resolution itself lives in the two pure halves above.
 pub fn seedParamsFromConfig() void {
@@ -93,8 +95,25 @@ pub fn seedParamsFromConfig() void {
     const tpl = templateFrom(cfg);
 
     const m = pipeline.mut();
-    model_mod.applyConfigReload(m, tpl);
+    applyConfigReload(m, tpl);
     applyOverrides(m, cfg, tpl.kind);
+}
+
+/// Stamp one `LayoutParams` template across every workspace (the config
+/// reload/seeding path — `templateFrom` supplies the template; at-zone tests
+/// use it too). Moved here from `model.zig` (Option A of the op migration):
+/// config owns seeding, so the stamping loop lives beside the resolution.
+pub fn applyConfigReload(m: *model_mod.Model, tpl: model_mod.LayoutParams) void {
+    for (&m.ws) |*s| {
+        // Viewport state is RUNTIME state, not config: preserving it prevents
+        // a spurious snap-right (n > prev_count fires when the counter resets)
+        // on an unrelated reload while the viewport layout is active.
+        const keep_offset = s.params.viewport_offset;
+        const keep_prev_count = s.params.viewport_prev_count;
+        s.params = tpl;
+        s.params.viewport_offset = keep_offset;
+        s.params.viewport_prev_count = keep_prev_count;
+    }
 }
 
 /// Resolve the active variant index for `kind` from the registry-driven
@@ -129,7 +148,10 @@ fn resolveVariant(
     return v_idx;
 }
 
-pub fn applyConfigReload() void {
+/// Boot/reload entry: re-seed the whole model from the live config, then
+/// reconcile so the X side catches up. (Renamed from the no-arg
+/// `applyConfigReload` to make room for the two-arg stamping loop above.)
+pub fn reloadAndReconcile() void {
     seedParamsFromConfig();
     pipeline.reconcileGrab(.{});
 }

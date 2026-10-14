@@ -6,13 +6,13 @@ const std = @import("std");
 const config_mod = @import("config");
 const core = @import("core");
 const log = @import("log");
-const model = @import("wm_state");
+const model = @import("model");
 const snapshot = @import("snapshot");
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
 /// absent. Gated on has_tiling so tree variants without tiling compile (the
 /// scenario matrix removes the tiling subsystem entirely).
-const tiling_mods = @import("contract").tiling_mods;
+const tiling_mods = @import("tiling_contract").tiling_mods;
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
 const pipeline_mod = @import("pipeline");
@@ -481,7 +481,7 @@ pub fn applyModelLevel(m: *model.Model) void {
         // (a module trimmed its variant list between runs) would otherwise
         // index past the end of the module's own table. Clamp to the reported
         // count and say so, rather than reading out of bounds.
-        const restored = @import("contract").moduleOf(s.params.kind);
+        const restored = @import("tiling_contract").moduleOf(s.params.kind);
         if (restored) |l| {
             const vc = l.variant_count;
             if (s.params.variant_idx >= vc) {

@@ -191,7 +191,7 @@ pub const Handoff = struct {
 /// (`init` saw no `/proc`, so there is no exec path to hand over).
 ///
 /// `config_snapshot` is passed in rather than resolved here: the snapshot
-/// lives in the config layer, and importing config from `core/proc` to fetch
+/// lives in the config layer, and importing config from `core/process` to fetch
 /// one path would invert the dependency for no gain. The caller already has
 /// both values; this only fixes their order and names them.
 pub fn currentHandoff(restore_path: []const u8, config_snapshot: ?[:0]const u8) ?Handoff {
