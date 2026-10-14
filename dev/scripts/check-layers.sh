@@ -39,13 +39,19 @@ wire_allowed() {
         # visibility_glue.zig carries the same bar self-management, split out
         # of bar.zig with the apply* visibility family (map/unmap on
         # visibility change, raise-above-others, screen-claim publish).
-        src/bar/bar.zig|src/bar/visibility_glue.zig|src/bar/drawing.zig|src/bar/win.zig) ;;
+        # surface.zig holds the bar frame's wire traffic (the xcb_flush that
+        # orders fills under glyphs, moved here from drawing.zig with the
+        # Surface in Phase 4 step 24); drawing.zig no longer sends wire.
+        src/bar/bar.zig|src/bar/visibility_glue.zig|src/bar/surface.zig|src/bar/win.zig) ;;
 
         # ConfigureRequest compliance: client-requested
         # geometry is honored for floating windows and BW recorded for tiled
         # -- protocol duty that answers the CLIENT, not layout.
         # restoreFloatGeom / moveFloatToDefaultPos / applyBorder ride along.
-        src/window/window.zig) ;;
+        # The machinery lives in configure.zig (split out of window.zig,
+        # which no longer sends wire itself); window.zig re-exports the
+        # handler as the dispatch surface.
+        src/window/configure.zig) ;;
 
         # Admission preamble: claimManagedEventMask sets the management
         # event mask (PropertyNotify / StructureNotify / FocusChange
@@ -126,12 +132,12 @@ wire_allowed() {
 
         # ICCCM client-message sends (pat1's xcb_send_event): WM_TAKE_FOCUS
         # (icccm.zig hands focus to windows that advertise the protocol),
-        # the synthetic ConfigureNotify (window.zig reports back the geometry
+        # the synthetic ConfigureNotify (configure.zig reports back the geometry
         # it actually applied after honoring a ConfigureRequest), and
         # WM_DELETE_WINDOW (dispatch.zig closes a client gracefully, ICCCM
         # §4.1.2.7). These are client protocol text, not sync-bound wire
-        # mutations. window.zig was already allowlisted above;
-        # icccm.zig joins them here for this family.
+        # mutations. configure.zig is allowlisted above for the
+        # ConfigureRequest family; icccm.zig joins them here for this family.
         src/window/protocol/icccm.zig) ;;
 
         # src/test/x11/fixture.zig is a TEST DOUBLE: it drives a real X
@@ -239,13 +245,13 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # that scan, is the last line of defense on bodies. Only the model file is
 # swept: it is the pure root (state plus the Rect/Margins value objects and
 # their coordinate helpers), its pure/ siblings carry no xcb tokens by
-# construction. architecture/contract.zig (and its split siblings
-# contract_window.zig / contract_segment.zig -- same pure vocabulary, see the
-# file-split note in the contract entry) IS on this side of the sweep since
-# the xcb event TYPES moved out to its sibling seams.zig: the contract
-# now names the key-press event as an opaque `KeyPressEvent` and carries the
-# connection as `*const anyopaque`, so it is xcb-free vocabulary and is swept
-# like any other pure file.)
+# construction. architecture/contract.zig IS on this side of the sweep since
+# the xcb event TYPES live in its sibling contract_x11.zig (outside the sweep): the
+# contract names the key-press event as an opaque `KeyPressEvent` and carries
+# the connection as `*const anyopaque`, so it is xcb-free vocabulary and is
+# swept like any other pure file. Its former split siblings
+# (contract_window.zig / contract_segment.zig) merged into the entry
+# 2026-10-08.)
 hits=$(
     while IFS= read -r f; do
         awk '
@@ -261,7 +267,7 @@ hits=$(
               sub(/\/\/.*$/,"",line)
               if (line ~ /xcb/) print FILENAME ":" NR ":" line
             }' "$f"
-    done < <(find src/core/architecture/model.zig src/core/architecture/contract.zig src/core/architecture/contract_window.zig src/core/architecture/contract_segment.zig src/tiling src/config -name '*.zig') || true
+    done < <(find src/core/architecture/model.zig src/core/architecture/contract.zig src/tiling src/config -name '*.zig') || true
 )
 if [ -n "$hits" ]; then
     while IFS= read -r line; do
