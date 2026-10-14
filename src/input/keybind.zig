@@ -10,7 +10,6 @@ const types = @import("types");
 const keysyms = @import("keysyms");
 const xkbcommon = @import("xkbcommon");
 const masks = @import("masks");
-const constants = @import("constants");
 
 /// Owns the (modifiers, keysym) -> Action dispatch map resolved from a
 /// config's keybindings, plus the keycode-resolution step that feeds it.
@@ -225,54 +224,6 @@ pub fn resolveKeycodes(
             .keycode = state.keysymToKeycode(kb.keysym),
         };
     }
-}
-
-/// The root-window mouse grab, as data. `mouse.zig` builds this from the very
-/// tables `grabs.grabMouseButtons` iterates, so the grab and the reachability
-/// rule cannot drift apart. Passed IN rather than imported so this module stays
-/// free of X knowledge and the rule stays unit-testable.
-pub const MouseGrabSpec = struct {
-    /// Button numbers the grab covers.
-    buttons: []const u8,
-    /// The non-lock modifier the grab is taken with (Super).
-    modifiers: u16,
-    /// Lock bits, which the grab takes in every combination and which
-    /// `normalizeModifiers` masks off before dispatch -- so they can neither
-    /// make a bind reachable nor unreachable.
-    lock_bits: u16,
-};
-
-/// The buttons the root mouse grab covers, in grab order. Lives with the spec
-/// it fills (both ends of `undeliverableMouseBindReason`'s argument), not in
-/// `grabs`: the grab layer reads this module's resolved keybind list, so a
-/// reference back from there would be a second import cycle beside the one
-/// that already ties grabs to input.
-pub const mouse_grab_buttons = [_]u8{
-    constants.mouse_button_left,
-    constants.mouse_button_middle,
-    constants.mouse_button_right,
-    constants.mouse_button_scroll_up,
-    constants.mouse_button_scroll_down,
-};
-
-/// Why `mb` can never be delivered by `grab`, or null when it can.
-///
-/// The two unreachable shapes, both of which parse cleanly and then do
-/// nothing: a button the grab does not cover (a bare Button1 click is delivered
-/// to the client, so the WM never sees it), and a modifier the grab does not
-/// take (Super+Shift+Button1 is never grabbed, and the dispatcher compares
-/// modifiers exactly). This is the worst failure mode a config surface has --
-/// the bind loads, the config looks valid, the key does nothing -- so it is
-/// reported rather than left to be discovered by pressing the combo.
-pub fn undeliverableMouseBindReason(mb: types.MouseBind, grab: MouseGrabSpec) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, grab.buttons, mb.button) == null) {
-        return "the root grab covers Button1-5 only";
-    }
-    if (mb.modifiers & ~grab.lock_bits & ~grab.modifiers != 0)
-        return "the root grab is taken with Super+Button only, with no other modifier";
-    if (mb.modifiers & grab.modifiers == 0)
-        return "the root grab is taken with Super held";
-    return null;
 }
 
 /// Log the bindings that resolved to nothing, ONCE per resolve rather than once

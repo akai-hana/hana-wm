@@ -104,7 +104,7 @@ pub const XkbState = struct {
 
         const device_id = try retryDeviceId(xcb_conn);
 
-        const table = try tableForDevice(ctx, xcb_conn, device_id);
+        const table = try retryKeymap(ctx, xcb_conn, device_id);
         const built = keymap.buildReverseIndex(table);
         return XkbState{
             .context = ctx,
@@ -123,7 +123,12 @@ pub const XkbState = struct {
     /// from it, so it must track the new mapping or bindings silently stop
     /// matching. On failure the old mapping is kept. Caller must be on the
     /// main thread; it runs inside the event loop and makes exactly one
-    /// keymap attempt (see `keymapForRebuild`).
+    /// keymap attempt: the opposite of `init`'s retry ladder. The server has
+    /// just told us the keyboard changed, so the new keymap is already there
+    /// and retries would only add `retryDelay` sleeps in front of every other
+    /// event the batch carried, on a path an `xmodmap` can trigger at any
+    /// time. A failure here is a logged one-line miss on a table that is
+    /// still serving the previous mapping.
     pub fn rebuild(self: *XkbState, xcb_conn: core.Connection) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) {
@@ -137,7 +142,7 @@ pub const XkbState = struct {
         }
         // Table swapped only after the new keymap built successfully, so a
         // failed rebuild leaves dispatch fully functional on the old mapping.
-        const table = keymapForRebuild(self.context, xcb_conn, device_id) orelse {
+        const table = keymapOnce(keymapOnceArgs{ .ctx = self.context, .conn = xcb_conn, .device_id = device_id }) orelse {
             log.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
             return;
         };
@@ -233,19 +238,13 @@ fn retryDeviceId(xcb_conn: core.Connection) !i32 {
 }
 
 /// Builds a fresh keysym table for the connection's current keymap.
-/// Shared by init and rebuild: both acquire a device keymap and convert it to
-/// the flat table, differing only in how a failure is handled.
-fn tableForDevice(ctx: *xkb_context, xcb_conn: core.Connection, device_id: i32) ![constants.x11_max_keycode]u32 {
-    return (try retryKeymap(ctx, xcb_conn, device_id)).table;
-}
-
 const keymapOnceArgs = struct {
     ctx: *xkb_context,
     conn: core.Connection,
     device_id: i32,
 };
 
-fn keymapOnce(args: keymapOnceArgs) ?keymap.BuiltTable {
+fn keymapOnce(args: keymapOnceArgs) ?[constants.x11_max_keycode]u32 {
     const km = xkb.xkb_x11_keymap_new_from_device(
         args.ctx,
         @ptrCast(args.conn),
@@ -254,32 +253,16 @@ fn keymapOnce(args: keymapOnceArgs) ?keymap.BuiltTable {
     ) orelse return null;
     defer xkb.xkb_keymap_unref(km);
     const built = keymap.buildKeysymTable(km);
-    return if (built.healthy) built else null;
+    return if (built.healthy) built.table else null;
 }
 
 /// Retries keymap creation up to max_xkb_retries times, accepting only a
 /// sufficiently populated keymap to guard against early-startup races.
-fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) !keymap.BuiltTable {
+fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) ![constants.x11_max_keycode]u32 {
     return withRetries(
-        keymap.BuiltTable,
+        [constants.x11_max_keycode]u32,
         keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id },
         keymapOnce,
         error.XkbKeymapFailed,
     );
-}
-
-/// Keymap for a mapping change, WITHOUT the retry ladder.
-///
-/// `retryKeymap` exists for one situation: the WM starting before the server
-/// has finished bringing XKB up, where waiting helps. This is the opposite
-/// situation -- the server has just told us the keyboard changed, so the new
-/// keymap is already there, and the only thing the retries can contribute is
-/// `retryDelay`'s sleep. Called from the event loop, that put up to
-/// `max_xkb_retries * xkb_retry_delay_ms` of nanosleep in front of every other
-/// event the batch carried, on a path an `xmodmap` can trigger at any time.
-/// One attempt, and a failure is a logged one-line miss on a table that is
-/// still serving the previous mapping.
-fn keymapForRebuild(ctx: *xkb_context, conn: core.Connection, device_id: i32) ?[constants.x11_max_keycode]u32 {
-    const built = keymapOnce(keymapOnceArgs{ .ctx = ctx, .conn = conn, .device_id = device_id }) orelse return null;
-    return built.table;
 }
