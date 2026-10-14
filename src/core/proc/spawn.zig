@@ -44,7 +44,7 @@ var subreaper_installed: bool = false;
 const core = @import("core");
 const log = @import("log");
 const time = @import("time");
-const tracking = @import("tracking");
+const query = @import("query");
 const window = @import("window");
 const admission = @import("admission");
 
@@ -158,7 +158,7 @@ var g_pending: bounded.BoundedList(PendingSpawn, max_pending_spawns) = .{};
 pub fn executeShellCommand(cmd: []const u8) !void {
     // Snapshot the workspace now; correct for sequence actions of the form
     // [exec, switch_workspace] where a later action mutates g_current.
-    const spawn_ws = tracking.getCurrentWorkspace();
+    const spawn_ws = query.getCurrentWorkspace();
 
     var cmd_buf: [stack_cmd_capacity]u8 = undefined;
     const resolved = try resolveCmdZ(core.getState().alloc, cmd, &cmd_buf);

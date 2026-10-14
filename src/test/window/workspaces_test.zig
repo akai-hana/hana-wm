@@ -1,7 +1,7 @@
 //! Unit tests for the workspaces module (tag membership transitions +
 //! workspace switching). Pure model transitions: none of the tested entry
 //! points touch core.getState(), so they run headless (the config-driven
-//! init/deinit path that forwards the workspace count to tracking is
+//! init/deinit path that forwards the workspace count to query is
 //! exercised by the window-layer fixture's boot wiring, not here).
 
 // Declared here, next to the imports that make it necessary, rather than in a
@@ -22,7 +22,7 @@ const max_ws = constants.max_workspaces;
 
 test "moveWindowToWs relocates mask, home_ws, and tiled membership" {
     var m = helpers.makeModel();
-    helpers.regCur(&m, 101); // home ws 0
+    helpers.regCur(&m, 101); // home workspace 0
     try testing.expectEqual(model.WSId.fromIndex(0), model.findHome(&m, 101).?);
 
     workspaces.moveWindowToWs(&m, 101, model.WSId.fromIndex(2));
@@ -66,7 +66,7 @@ test "moveWindowToWs: pinned ALL_MASK window stays put" {
 
 test "moveWindowToWs: full destination list cancels the move before any mutation" {
     var m = helpers.makeModel();
-    helpers.regCur(&m, 404); // stays on ws 0; the destination stays full
+    helpers.regCur(&m, 404); // stays on workspace 0; the destination stays full
     for (0..model.max_tiled_per_ws) |i| {
         try model.register(&m, @as(model.WindowId, @intCast(500 + i)), model.WSId.fromIndex(1));
     }
@@ -82,11 +82,12 @@ test "moveWindowToWs: full destination list cancels the move before any mutation
 
 test "tagRemove protects the last remaining tag; absent tags are refused too" {
     var m = helpers.makeModel();
-    helpers.regCur(&m, 601); // single tag ws 0
+    helpers.regCur(&m, 601); // single tag workspace 0
 
     try testing.expect(!workspaces.tagRemove(&m, 601, model.WSId.fromIndex(0)));
     try testing.expectEqual(model.bit(model.WSId.fromIndex(0)), m.store.get(601).?.mask);
-    try testing.expect(!workspaces.tagRemove(&m, 601, model.WSId.fromIndex(2))); // untagged ws also refused
+    // untagged workspace also refused
+    try testing.expect(!workspaces.tagRemove(&m, 601, model.WSId.fromIndex(2)));
     try testing.expectEqual(model.bit(model.WSId.fromIndex(0)), m.store.get(601).?.mask);
 }
 
@@ -109,7 +110,8 @@ test "tagAdd adds the target bit and optionally protects the current workspace" 
     workspaces.tagAdd(&m, 701, model.WSId.fromIndex(1), false);
     try testing.expectEqual(model.bit(model.WSId.fromIndex(0)) | model.bit(model.WSId.fromIndex(1)), m.store.get(701).?.mask);
 
-    workspaces.tagAdd(&m, 701, model.WSId.fromIndex(2), true); // adds ws 2 AND current ws 3
+    // adds workspace 2 AND current workspace 3
+    workspaces.tagAdd(&m, 701, model.WSId.fromIndex(2), true);
     try testing.expectEqual(
         model.bit(model.WSId.fromIndex(0)) | model.bit(model.WSId.fromIndex(1)) | model.bit(model.WSId.fromIndex(2)) | model.bit(model.WSId.fromIndex(3)),
         m.store.get(701).?.mask,
