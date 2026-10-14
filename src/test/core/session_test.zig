@@ -9,9 +9,9 @@
 //! intentionally held for the whole process in production).
 //!
 //! `save` is called with the leak-checking `testing` allocator: the
-//! core/proc/session.zig save path used to transfer the JSON buffer out of its
+//! core/process/session.zig save path used to transfer the JSON buffer out of its
 //! Allocating writer and never free it (an S-F finding, surfaced as leaked
-//! bytes here), and the one-line fix that lands in core/proc/session.zig frees it
+//! bytes here), and the one-line fix that lands in core/process/session.zig frees it
 //! (`defer al.deinit()`), so the tracking allocator now doubles as a
 //! regression guard for that class of leak.
 
@@ -21,7 +21,9 @@ const testing = std.testing;
 // Some restore/save paths log warn-level diagnostics; core/pure/log.zig
 // silences all std.log diagnostics in test binaries, so this stays quiet
 // on success.
-const model = @import("wm_state");
+const model = @import("model");
+const window_state_ops = @import("window_state_ops");
+const focus = @import("focus");
 const session = @import("session");
 const scratch = @import("scratch");
 const helpers = @import("helpers");
@@ -32,15 +34,17 @@ const page_alloc = std.heap.page_allocator;
 /// workspaces plus one floating window, with focus, reordered tiled order and
 /// custom workspace params and per-workspace runtime viewport state.
 fn buildFixtureModel(m: *model.Model) !void {
-    try model.register(m, 1, model.WSId.fromIndex(0));
-    try model.register(m, 2, model.WSId.fromIndex(0));
-    try model.register(m, 3, model.WSId.fromIndex(1));
-    model.setFocus(m, 1);
+    // Register 2 before 1 so ws0's tiled order is [2, 1] without calling the
+    // tiling engine's reorderTiled (this headless core test must compile and
+    // run with src/tiling/ absent).
+    try window_state_ops.register(m, 2, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 1, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 3, model.WSId.fromIndex(1));
+    focus.setFocus(m, 1);
     _ = try m.store.put(4, .{
         .mask = model.bit(model.WSId.fromIndex(0)),
         .anchor = .{ .floating = .{ .x = 5, .y = 6, .width = 100, .height = 80 } },
     });
-    model.reorderTiled(m, 2, 0); // workspace 0 tiled order [2, 1]
 
     m.current = model.WSId.fromIndex(1);
     m.all_view_active = true;
@@ -53,9 +57,9 @@ fn buildFixtureModel(m: *model.Model) !void {
 /// re-register these after a re-exec). Window 4 floats and is deliberately
 /// absent -- like a window that did not survive the re-exec.
 fn registerSurvivors(m: *model.Model) !void {
-    try model.register(m, 1, model.WSId.fromIndex(0));
-    try model.register(m, 2, model.WSId.fromIndex(0));
-    try model.register(m, 3, model.WSId.fromIndex(1));
+    try window_state_ops.register(m, 1, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 2, model.WSId.fromIndex(0));
+    try window_state_ops.register(m, 3, model.WSId.fromIndex(1));
 }
 
 test "F10: save/load keeps every window record and workspace field" {

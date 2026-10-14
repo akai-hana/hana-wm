@@ -29,7 +29,7 @@ const cursor = @import("cursor");
 /// they were even naming.
 const alloc = std.heap.c_allocator;
 const window = @import("window");
-const seed = @import("seed");
+const seed = @import("model_seeding");
 const pipeline = @import("pipeline");
 const process = @import("process");
 const admission = @import("admission");

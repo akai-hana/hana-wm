@@ -8,9 +8,9 @@
 //!
 //! Boundary (see PLAN Item 11): this file is config loading + subsystem
 //! rebuild ORCHESTRATION. After the pointer swap it hands param stamping to
-//! `seed.applyConfigReload()` (core/architecture/seed.zig, pure config→model)
+//! `seed.reloadAndReconcile()` (config/model_seeding.zig, pure config→model)
 //! and never models state itself. Session continuity across re-exec is a
-//! separate concern owned by proc/session.zig (persist) + proc/process.zig
+//! separate concern owned by process/session.zig (persist) + process/process.zig
 //! (re-exec coordination); neither reaches through here.
 
 const core = @import("core");
@@ -19,7 +19,7 @@ const config = @import("config");
 const keybinds = @import("keybinds");
 const window = @import("window");
 const admission = @import("admission");
-const seed = @import("seed");
+const seed = @import("model_seeding");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
@@ -125,8 +125,8 @@ pub fn handleConfigReload() !void {
     // No `has_bar` guard: `surfaces.onReload` is the no-op hook when no
     // surface module is compiled in, so the gate is already inside the type.
     surfaces.onReload();
-    seed.applyConfigReload();
-    // Borders sweep AFTER applyConfigReload: its reconcile rebuilds geometry,
+    seed.reloadAndReconcile();
+    // Borders sweep AFTER the seed+reconcile: its reconcile rebuilds geometry,
     // and sweeping first would send every border twice -- once here, once
     // again deduped against fresh state. Sweeping last lets the sweep
     // dedup against entries the reconcile just wrote.

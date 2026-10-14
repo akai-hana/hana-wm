@@ -1,10 +1,10 @@
-//! Config → model seeding (src/core/architecture/seed.zig): the two pure halves the
+//! Config → model seeding (src/config/model_seeding.zig): the two pure halves the
 //! boot/reload wrapper composes, tested without a boot.
 //!
 //! `seedParamsFromConfig` is the only state-touching step — it reads
 //! `core.getState().config` and the global pipeline model, both of which need
 //! `core.init` (and therefore an X connection) — and it is nothing more than
-//! `templateFrom` + `model.applyConfigReload` + `applyOverrides`. Every rule
+//! `templateFrom` + `seed.applyConfigReload` + `applyOverrides`. Every rule
 //! worth pinning lives in those halves, which take an explicit
 //! `*const types.TilingConfig` precisely so this file can.
 
@@ -15,12 +15,12 @@
 const std = @import("std");
 const testing = std.testing;
 
-const seed = @import("seed");
-const model = @import("wm_state");
+const seed = @import("model_seeding");
+const model = @import("model");
 const helpers = @import("helpers");
 const types = @import("types");
 const tiling = @import("tiling");
-const contract = @import("contract");
+const contract = @import("tiling_contract");
 
 const alloc = testing.allocator;
 
@@ -140,7 +140,7 @@ test "applyOverrides applies last-wins layout/count overrides on top of the temp
     // overrides on top of it.
     var m = helpers.makeModel();
     const tpl = seed.templateFrom(&cfg);
-    model.applyConfigReload(&m, tpl);
+    seed.applyConfigReload(&m, tpl);
     seed.applyOverrides(&m, &cfg, tpl.kind);
 
     // ws0: the in-range override replaces the default kind.
