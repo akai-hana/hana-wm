@@ -284,8 +284,7 @@ test "actions: unmanage drops the window and re-focuses" {
 
     // Non-focused removal is silent for focus.
     // Silent removal, no focus involved.
-    var quiet = actions.Ctx{ .withdrawn_was_focused = false };
-    actions.unmanage(&quiet, w1);
+    actions.unmanage(w1);
     fx.flush();
     try std.testing.expect(!m.store.has(w1));
     try std.testing.expect(ledger.lastRectFor(w1) == null); // ledger forgot it
@@ -294,8 +293,7 @@ test "actions: unmanage drops the window and re-focuses" {
     try fx.expectTiledGeometry(w2);
 
     // Focused removal with no remaining candidate clears to root.
-    var withdrawing = actions.Ctx{ .withdrawn_was_focused = true };
-    actions.unmanage(&withdrawing, w2);
+    actions.unmanage(w2);
     fx.flush();
     try std.testing.expect(!m.store.has(w2));
     try std.testing.expect(@as(?model.WindowId, null) == m.focused);

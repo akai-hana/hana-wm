@@ -42,30 +42,10 @@ const foreign_blob = [_]u8{ 0x00, 1, 2 };
 /// what records an earlier test left behind.
 const makeModel = helpers.makeModel; // (28.3) reset is now the default, not a separate entry point
 
-fn expectOrder(m: *const Model, ws: WSId, expected: []const WindowId) !void {
-    try testing.expectEqualSlices(WindowId, expected, m.ws[ws.index].tiled_order.constSlice());
-}
-
 const regCur = helpers.regCur;
-
-/// Floating-anchor window, the shape most store.put fixtures use.
-fn addFloating(m: *Model, win: WindowId, r: model.Rect) !void {
-    _ = try m.store.put(win, .{
-        .mask = model.bit(model.WSId.fromIndex(0)),
-        .anchor = .{ .floating = r },
-    });
-}
-
-/// Registers a contiguous window-id run starting at `base` and returns the
-/// ids for fixtures that need them.
-fn registerRange(m: *Model, comptime n: usize, base: u32) [n]WindowId {
-    var wins: [n]WindowId = undefined;
-    for (&wins, 0..) |*w, i| {
-        w.* = @intCast(base + @as(u32, @intCast(i)));
-        regCur(m, w.*);
-    }
-    return wins;
-}
+const expectOrder = helpers.expectOrder;
+const addFloating = helpers.addFloating;
+const registerRange = helpers.registerRange;
 
 /// Every window whose anchor is tiled AND present appears in EXACTLY ONE ws
 /// list; every listed id exists in the store (single-membership invariant).
