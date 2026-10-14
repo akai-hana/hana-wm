@@ -52,6 +52,15 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
             return self.vals[i];
         }
 
+        /// Pointer form of `get`: a pointer to `id`'s stored value, or null
+        /// when absent. Writers update the entry in place through it and
+        /// readers borrow slices out of it (the title-cache contract), so a
+        /// lookup never copies the value out.
+        pub fn getPtr(self: *Self, id: u32) ?*V {
+            const i = self.find(id) orelse return null;
+            return &self.vals[i];
+        }
+
         /// Test seam: `true` when `id` has a live entry.
         pub fn contains(self: *const Self, id: u32) bool {
             return self.find(id) != null;
