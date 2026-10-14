@@ -132,7 +132,7 @@ fn drawSingleWindow(
     const is_minimized = snapshot.minimized_set.contains(single_win);
     const workspace_has_focus = snapshot.focused_window != null;
 
-    const accent = accentFor(ctx.config, workspace_has_focus, is_minimized, ctx.config.bg);
+    const accent = accentFor(ctx.config, workspace_has_focus, is_minimized, ctx.config.title_unfocused_accent);
     ctx.dc.fillRect(ctx.start_x, 0, ctx.width, ctx.height, accent);
 
     const baseline_y = ctx.dc.baselineY(ctx.height);

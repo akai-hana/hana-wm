@@ -397,9 +397,7 @@ pub const Surface = struct {
     /// `fillRect` usable as a BACKGROUND: the segment fills first and the label
     /// lands on top of it.
     ///
-    /// The rule used to hold only because no caller flushed cairo mid-frame,
-    /// which was a fact about six modules' call order rather than about this
-    /// file. It is now enforced at the top: the first XCB write of a frame
+    /// The rule is enforced at the top: the first XCB write of a frame
     /// quiesces cairo first, so no cairo operation can be left pending across
     /// the boundary where the two orderings diverge.
     pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {
@@ -878,9 +876,6 @@ pub fn drawPaddedSegmentValue(
     props: types.SegmentProps,
 ) !u16 {
     const padding = config.scaledSegmentPadding(height);
-    // (25.3) The value span is EXPLICIT. It used to be a subslice whose offset
-    // this function recovered by pointer subtraction, which made every caller
-    // manufacture a subslice just to say "my number is here".
     const range = valueRange(text, value_start, value_len);
     const fg = config.segmentFg(segment_name);
     const value_fg = config.segmentValueFg(segment_name);

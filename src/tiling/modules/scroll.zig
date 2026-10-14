@@ -27,9 +27,10 @@ pub fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
 /// Compute scroll layout: half-screen slots, full gap at screen edges and
 /// half-gap at interior boundaries. Off-viewport slots hidden; offset clamped.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
+    const ctx = tiling.LayoutCtx.init(v, out);
     const windows = v.order;
 
-    const m = v.env.margins;
+    const m = ctx.m;
 
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
@@ -43,7 +44,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const scroll: i32 = clampOffset(v.params.viewport_offset, windows.len, screen_w);
 
     // Border subtracted here (once); emitView's applyHints never touches it.
-    const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.totalInset(m.gap, m), v.env.min_dim);
+    const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.totalInset(m.gap, m), ctx.min_dim);
     const win_y: i32 = @as(i32, tiling.waY(v) +| m.gap);
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
@@ -71,15 +72,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         // width: a boundary slot is parked using exactly what would be on
         // screen, so a slot that clipped to empty is caught off-viewport here
         // instead of mapping a sliver of window past the edge.
-        const right = x + @as(i32, content_w);
-
-        // Slots entirely off-viewport are parked by the algorithm itself
-        // (visibility modeled; sync owns the actual parking geometry). The
-        // computed x can exceed i16 range, hence this check BEFORE casting.
-        if (x >= sw_i32 or right <= 0) {
-            tiling.emitHidden(out, win);
-            continue;
-        }
+        //
         // Clip the emitted rect against the screen (workarea-relative) bounds:
         // a slot straddling an edge emits only its visible slice rather than a
         // straddling rect whose one side maps an offscreen sliver.

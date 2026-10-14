@@ -23,7 +23,8 @@ const StackBoost = struct {
 
 /// Master-stack layout: master pane + stack pane, gaps at screen edges and
 /// half-gap between panes. Heights via cumulative integer division with
-/// max_height capping (water-filling).
+/// max_height capping (water-filling). Requires the engine contract's
+/// non-empty `v.order`.
 pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     const n = windows.len;
@@ -32,18 +33,21 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const screen_w = v.workarea.width;
     const screen_h = v.workarea.height;
-    // Floored at 1 (except for the empty case, which must not underflow the
-    // stack subtraction below): a primary_count of 0 sized the master pane to
-    // zero width, leaving a dead strip instead of a full-width master. The
-    // COUNT is also capped to what the master column can actually fit for
-    // screen_h, so surplus windows fall through to the stack path (tileStack),
-    // which carries its own overflow/park guard -- a master column without
-    // the cap overflowed its rows below the workarea.
-    const master_n: u16 = blk: {
-        if (n == 0) break :blk 0;
-        const fits: u16 = @intCast(@max(1, (@as(u32, screen_h) -| @as(u32, m.gap)) / @max(1, @as(u32, ctx.min_dim +| rowPitch(ctx.m)))));
-        break :blk @intCast(@max(1, @min(@min(v.params.primary_count, n), fits)));
-    };
+    // Row-fit count: how many windows fit in one column at min pane height.
+    // Fits per window = min pane dim plus row pitch (gap + doubled border).
+    // A zero min_dim+gap+border Env would make the denominator 0 and the
+    // division panic; floor it to 1 so the degenerate case can't (the fit
+    // count then becomes available/1 = huge, which the stack/clamp handle).
+    // The same row_fit caps the master COUNT below (floored at 1: a
+    // primary_count of 0 sized the master pane to zero width, leaving a
+    // dead strip instead of a full-width master), so surplus windows fall
+    // through to the stack path (tileStack), which carries its own
+    // overflow/park guard -- a master column without the cap overflowed its
+    // rows below the workarea.
+    const space_per_window: u16 = ctx.min_dim +| rowPitch(ctx.m);
+    const available: u32 = @as(u32, screen_h) -| @as(u32, m.gap);
+    const row_fit: u16 = @intCast(@max(1, available / @max(1, @as(u32, space_per_window))));
+    const master_n: u16 = @intCast(@max(1, @min(@min(v.params.primary_count, n), row_fit)));
     const stack_n: u16 = @intCast(n - master_n);
     const stack_windows = windows[master_n..];
     const y = tiling.waY(v);
@@ -56,7 +60,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     // Shrink the stack pane to the widest bounded slave's max_width
     // (dialogs/small windows no longer leave a dead gap beside them).
-    const is_primary_on_right = v.env.primary_on_right;
+    const is_primary_on_right = ctx.v.env.primary_on_right;
     const stack_pane_w: u16 = screen_w -| master_w_frac;
     const natural_stack_w: u16 = minStackWidth(ctx, stack_windows);
     const stack_w: u16 = if (natural_stack_w > 0 and natural_stack_w < stack_pane_w)
@@ -96,6 +100,7 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
         y,
         stack_w,
         screen_h,
+        row_fit,
         StackBoost.fromBalance(v.params.secondary_balance),
     );
 }
@@ -246,7 +251,9 @@ fn minStackWidth(
 /// Tile the stack pane, spilling into a column-major overflow grid when the
 /// stack exceeds what fits in a single column.
 ///
-/// `boost` only affects the single-column path, see tileStackExtra for why.
+/// `row_fit` is compute's single row-fit computation (shared with the master
+/// COUNT cap). `boost` only affects the single-column path, see
+/// tileStackExtra for why.
 fn tileStack(
     ctx: tiling.LayoutCtx,
     windows: []const model.WindowId,
@@ -254,24 +261,17 @@ fn tileStack(
     y_offset: u16,
     w: u16,
     h: u16,
+    row_fit: u16,
     boost: StackBoost,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
 
-    // Fits per window: min pane dim plus the row pitch (gap + doubled border).
-    // A zero min_dim+gap+border Env would make the denominator 0 and the
-    // division panic; floor it to 1 so the degenerate case can't (the fit
-    // count then becomes available/1 = huge, which the stack/clamp handle).
-    const space_per_window: u16 = ctx.min_dim +| rowPitch(ctx.m);
-    const available: u32 = @as(u32, h) -| @as(u32, ctx.m.gap);
-    const max_fit: u16 = @intCast(@max(1, available / @max(1, @as(u32, space_per_window))));
-
-    if (stack_n <= max_fit) {
+    if (stack_n <= row_fit) {
         const stack_inner_w = tiling.shrinkClamped(w, stackSeamMargin(ctx.m), ctx.min_dim);
         tileColumn(ctx, windows, x +| tiling.seamGap(ctx.m), y_offset, h, stack_inner_w, boost);
         return;
     }
-    tileStackExtra(ctx, windows, x, y_offset, w, h, max_fit);
+    tileStackExtra(ctx, windows, x, y_offset, w, h, row_fit);
 }
 
 /// Column-major overflow grid: row `r` holds windows r, r+max_fit, ...

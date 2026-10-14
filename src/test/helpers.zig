@@ -63,6 +63,31 @@ pub fn regCur(m: *model.Model, win: model.WindowId) void {
     model.register(m, win, null) catch unreachable;
 }
 
+/// Shared tiled-order expectation: `ws`'s ordered ids equal `expected`
+/// exactly. The one copy across the model/fullscreen/minimize fixtures.
+pub fn expectOrder(m: *const model.Model, ws: model.WSId, expected: []const model.WindowId) !void {
+    try std.testing.expectEqualSlices(model.WindowId, expected, m.ws[ws.index].tiled_order.constSlice());
+}
+
+/// Floating-anchor window, the shape most store.put fixtures use.
+pub fn addFloating(m: *model.Model, win: model.WindowId, r: model.Rect) !void {
+    _ = try m.store.put(win, .{
+        .mask = model.bit(model.WSId.fromIndex(0)),
+        .anchor = .{ .floating = r },
+    });
+}
+
+/// Registers a contiguous window-id run starting at `base` and returns the
+/// ids for fixtures that need them.
+pub fn registerRange(m: *model.Model, comptime n: usize, base: u32) [n]model.WindowId {
+    var wins: [n]model.WindowId = undefined;
+    for (&wins, 0..) |*w, i| {
+        w.* = @intCast(base + @as(u32, @intCast(i)));
+        regCur(m, w.*);
+    }
+    return wins;
+}
+
 pub fn colorOfFocused(win: model.WindowId, m: *const model.Model) u32 {
     return if (m.focused == win) 1 else 0;
 }
@@ -101,10 +126,10 @@ pub fn makeCtx(
 /// reconciles and returns nanoseconds per reconcile. Shared by the latency
 /// benchmarks (the identical warm+bench pattern in the latency tests).
 pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
-    var warm = test_sink.TestSink(.count){};
+    var warm = test_sink.TestSink(.category){};
     var warm_ctx = makeCtx(warm.sink(), colorOfFocused, std_wa);
     reconcile.run(m, &warm_ctx, .{});
-    var bench = test_sink.TestSink(.count){};
+    var bench = test_sink.TestSink(.category){};
     var bench_ctx = makeCtx(bench.sink(), colorOfFocused, std_wa);
     const t0 = time.monotonicNs();
     for (0..iterations) |_| reconcile.run(m, &bench_ctx, .{});

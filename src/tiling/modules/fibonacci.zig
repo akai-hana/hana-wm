@@ -3,7 +3,7 @@
 
 const model = @import("model");
 const tiling = @import("tiling");
-const shrinkClamped = tiling.shrinkClamped;
+const shrinkCapped = tiling.shrinkCapped;
 const Region = tiling.Region;
 
 // Clockwise spiral direction for the next window split.
@@ -94,13 +94,10 @@ inline fn splitAndAdvance(
     const off_x: i32 = if (split_x) @intCast(off) else 0;
     const off_y: i32 = if (split_x) 0 else @intCast(off);
 
-    // Border via `shrinkClamped` (14.6), not `-| border2`. But the min_dim
-    // floor must not flare the window past the strip half the split actually
-    // gave it -- cap at the strip's content area so neighbours can't overlap.
     const strip_w = if (split_x) win_dim else cur.w;
     const strip_h = if (split_x) cur.h else win_dim;
-    const w = @max(@min(shrinkClamped(strip_w, border2, ctx.min_dim), strip_w -| border2), 1);
-    const h = @max(@min(shrinkClamped(strip_h, border2, ctx.min_dim), strip_h -| border2), 1);
+    const w = shrinkCapped(strip_w, border2, ctx.min_dim);
+    const h = shrinkCapped(strip_h, border2, ctx.min_dim);
     tiling.emitRect(ctx.v, ctx.out, win, cur.x + off_x, cur.y + off_y, w, h);
     // Advance the remainder origin along the split axis (forward only), then
     // shrink the remainder along that axis by the taken strip.

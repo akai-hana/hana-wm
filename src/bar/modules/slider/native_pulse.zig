@@ -146,6 +146,9 @@ const Lib = struct {
 /// through PipeWire/PulseAudio rather than raw ALSA. The ALSA-control native
 /// backend is only valid (matches amixer's `Master`) on systems where this
 /// probe is false.
+/// NOTE: the `/run/user/{uid}` fallback here is PulseAudio's own convention,
+/// not the `/tmp/{name}-{uid}` state-file policy shared by core/pure
+/// paths.runtimeFile (snapshot + restore); the two deliberately differ.
 pub fn pulseReachable() bool {
     var buf: [192]u8 = undefined;
     const base = if (c.getenv("XDG_RUNTIME_DIR")) |env|

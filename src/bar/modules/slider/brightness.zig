@@ -178,7 +178,7 @@ pub fn applyPctTo(base: []const u8, class: Class, dev: []const u8, pct: u8) Writ
     if (dev.len == 0) return .transient;
     const max = readMaxOf(base, class, dev) orelse return .transient;
     if (max == 0) return .transient;
-    const raw = rawFromPct(@min(pct, 100), max);
+    const raw = rawFromPct(slider.clampPct(pct), max);
     var p: [std.fs.max_path_bytes]u8 = undefined;
     const path = attrPath(&p, base, class, dev, "brightness") orelse return .transient;
     return writeU32File(path, raw);
@@ -288,7 +288,7 @@ fn brightnessctlRead() ?u8 {
 /// permission-denied sysfs nodes).
 fn brightnessctlApply(pct: u8) bool {
     var buf: [64]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&buf, "brightnessctl set {d}%", .{@min(pct, 100)}) catch return false;
+    const cmd = std.fmt.bufPrint(&buf, "brightnessctl set {d}%", .{slider.clampPct(pct)}) catch return false;
     return slider.runOk(cmd);
 }
 
@@ -300,14 +300,6 @@ fn commitCost() slider.CommitCost {
     return if (g_backend == .sysfs) .immediate else .rate_limited;
 }
 
-/// The one clamp every level passes: 0-100 % is all the backend ever
-/// receives. Every `write` mode MUST go through this -- they used to clamp
-/// independently in three separate functions, and when the preview one forgot,
-/// a scroll/drag motion could display a level the backend then refused.
-pub fn clampPct(v: u8) u8 {
-    return @min(v, 100);
-}
-
 /// Applies a level to whatever backend can write: a direct sysfs write when
 /// that backend is live (one tiny file write, un-throttled -- the common case
 /// with a write policy), otherwise a `brightnessctl` spawn. `g_read_only` is
@@ -315,7 +307,7 @@ pub fn clampPct(v: u8) u8 {
 /// brightnessctl). Scheduled by the slider core's throttle, which owns the
 /// commit clock.
 fn commitPct(v: u8) void {
-    const pct = clampPct(v);
+    const pct = slider.clampPct(v);
     const direct = g_backend == .sysfs;
     const wrote: WriteResult = if (direct) applyPctTo("", g_class, g_dev[0..g_dev_len], pct) else .transient;
     var ok = wrote == .ok;
@@ -351,7 +343,7 @@ fn write(w: slider.Write, v: u8) void {
     switch (w) {
         // Scroll/drag motion: the label follows immediately, the backend write
         // is the core scheduler's business.
-        .preview => g_pct = clampPct(v),
+        .preview => g_pct = slider.clampPct(v),
         // The scheduler's commit: write, and let the next read reconcile.
         .commit => commitPct(v),
         // Press set / drag end: write, then re-read so the label follows the
