@@ -6,6 +6,33 @@ on:
   pull_request:
 
 jobs:
+  # Classify the pushed/PR'd diff. `code` is true when any changed file is not
+  # markdown, so a docs-only change skips the heavy jobs below. `test` ignores
+  # this output and always runs.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # Push: base == head makes the action diff against the event's `before`
+      # SHA, i.e. just the pushed commits. PR: `base` is ignored (token is set)
+      # and the PR base is used via the API instead.
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          base: ${{ github.event_name == 'push' && github.ref || '' }}
+          predicate-quantifier: some-with-excludes
+          filters: |
+            code:
+              - '**'
+              - '!*.md'
+              - '!**/*.md'
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -17,10 +44,12 @@ jobs:
         with:
           version: 0.16.0
 
+      # Covers build.zig.zon's `.links` table. libxrandr-dev is X11's randr,
+      # not xcb's — xcb-randr and xcb-keysyms need their own -dev packages.
       - name: Install X11 dev dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
+          sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
 
       - name: zig fmt --check
         run: zig fmt --check src
@@ -36,8 +65,10 @@ jobs:
 
   # Feature-deletion matrix: each optional subsystem is removed and the tree
   # must still compile. Heavy (cold build per scenario), so it is its own job
-  # rather than part of the default `check`.
+  # rather than part of the default `check`. Skipped on docs-only changes.
   modularity:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,19 +80,21 @@ jobs:
       - name: Install X11 dev dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
+          sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
 
       - name: Feature-deletion modularity matrix
         run: ./dev/scripts/check-modularity.sh -j 4
 
   # Behavioral parity harness: boots a private Xvfb and replays the scenarios
-  # against recorded goldens. Runs on pushes to dev only (slow).
+  # against recorded goldens. Runs on pushes to dev only (slow), and only when
+  # the push touched more than markdown.
   #
   # GATING: all S01–S23 goldens were recaptured against the current
   # focus/stacking behavior and `./dev/harness/run-scenario.sh --compare` is
   # green locally, so parity drift now fails CI.
   harness:
-    if: github.ref == 'refs/heads/dev'
+    needs: changes
+    if: github.ref == 'refs/heads/dev' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +106,7 @@ jobs:
       - name: Install X11 + harness tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xdotool x11-utils libxcb1-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev perl
+          sudo apt-get install -y xvfb xdotool x11-utils libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev perl
 
       # Default `zig build` is Debug here (the optimize option is `-Drelease`,
       # and Debug is the default), which the scenarios need for dump_state/
