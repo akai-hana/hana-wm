@@ -1,10 +1,10 @@
 //! Border policy tests (resolution half, X-gated).
 //!
-//! `borders.resolveBorderColor()` and `core.borderWidth()` are the pure public
-//! reads: color resolves the covering-mode policy + config colors against live
-//! MODEL focus, width resolves the tiling border width against the screen
-//! height. Both run over the shared window fixture (real model state),
-//! self-skipping when no X display is reachable. The X-issuing half
+//! `borders.resolveBorderColorWith()` and `core.borderWidth()` are the pure
+//! public reads: color resolves the covering-mode policy + config colors
+//! against live MODEL focus, width resolves the tiling border width against
+//! the screen height. Both run over the shared window fixture (real model
+//! state), self-skipping when no X display is reachable. The X-issuing half
 //! (`applyWith/applyWidth`, the sent ledger) requires a live connection and is
 //! covered by the integration layer instead.
 
@@ -16,6 +16,7 @@ const pipeline = @import("pipeline");
 const borders = @import("borders");
 const fixture = @import("fixture");
 const model = @import("model");
+const constants = @import("constants");
 const types = @import("types");
 const scaling = @import("scaling");
 
@@ -48,7 +49,7 @@ test "core.borderWidth resolves absolute and percentage border widths" {
     try testing.expectEqual(@as(u16, 7), core.borderWidth());
 }
 
-test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
+test "borders.resolveBorderColorWith resolves focused vs unfocused config colors" {
     const fx = try fixture.setUp("borders.color");
     defer fx.deinit();
 
@@ -64,21 +65,26 @@ test "borders.resolveBorderColor resolves focused vs unfocused config colors" {
     try model.register(m, 1, model.WSId.fromIndex(0));
     try model.register(m, 2, model.WSId.fromIndex(0));
 
+    // The occupant table is cover-state-only, so one build per test covers
+    // every focus step below (focus reads stay live inside the With-form).
+    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    model.coveringOccupants(m, &occupants);
+
     // Nothing focused yet: both windows take the unfocused color.
-    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColor(1));
-    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColor(2));
+    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(1, &occupants));
+    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(2, &occupants));
 
     // Focus moves: the focused window flips color, the other stays unfocused.
     model.setFocus(m, 1);
-    try testing.expectEqual(@as(u32, 0x111111), borders.resolveBorderColor(1));
-    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColor(2));
+    try testing.expectEqual(@as(u32, 0x111111), borders.resolveBorderColorWith(1, &occupants));
+    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(2, &occupants));
 
     model.setFocus(m, 2);
-    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColor(1));
-    try testing.expectEqual(@as(u32, 0x111111), borders.resolveBorderColor(2));
+    try testing.expectEqual(@as(u32, 0x222222), borders.resolveBorderColorWith(1, &occupants));
+    try testing.expectEqual(@as(u32, 0x111111), borders.resolveBorderColorWith(2, &occupants));
 }
 
-test "borders.resolveBorderColor is 0 for a screen-covering window" {
+test "borders.resolveBorderColorWith is 0 for a screen-covering window" {
     const fx = try fixture.setUp("borders.covering");
     defer fx.deinit();
 
@@ -96,5 +102,7 @@ test "borders.resolveBorderColor is 0 for a screen-covering window" {
     // policy, mirrored here for callers outside reconcile (fullscreen).
     m.store.getPtr(1).?.covering_ws = model.WSId.fromIndex(0);
 
-    try testing.expectEqual(@as(u32, 0), borders.resolveBorderColor(1));
+    var occupants: [constants.max_workspaces]?model.WindowId = @splat(null);
+    model.coveringOccupants(m, &occupants);
+    try testing.expectEqual(@as(u32, 0), borders.resolveBorderColorWith(1, &occupants));
 }

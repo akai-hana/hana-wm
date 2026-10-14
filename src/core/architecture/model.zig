@@ -327,7 +327,7 @@ pub fn tiledCountOnWs(m: *const Model, ws: WSId) usize {
     return n;
 }
 
-/// The workspace `win`'s covering capture anchors to (12.4), or null when it
+/// The workspace `win`'s covering capture anchors to, or null when it
 /// holds no covering intent.
 ///
 /// GHOST: reports the workspace even while the entry's presence is parked
@@ -339,7 +339,7 @@ pub fn coveringWsOf(m: *const Model, win: WindowId) ?WSId {
 }
 
 /// Whether `win` holds covering intent at all. One definition of the question,
-/// so the "is it covering" test cannot differ between callers (12.4).
+/// so the "is it covering" test cannot differ between callers.
 pub inline fn isCovering(m: *const Model, win: WindowId) bool {
     return coveringWsOf(m, win) != null;
 }
@@ -375,9 +375,13 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
 /// the wrong one for a sweep (the border sweep asks it once per window, so a
 /// full sweep was O(N^2) store scans). This fills the whole table up front.
 ///
-/// Ties resolve to the FIRST occupant in store order, matching
-/// `coveringOccupantOnWs` exactly (the `== null` guard is what preserves that;
-/// a later covering entry must not displace an earlier one).
+/// Per workspace the rule is the scan form's exact (anchored or visible): an
+/// occupant claims its anchor slot AND every workspace its mask makes it
+/// visible on — an anchored occupant whose mask was widened (tagAdd writes
+/// mask only) covers those workspaces too, exactly as the scan reports them.
+/// Ties resolve to the FIRST occupant in store order (the `== null` guard is
+/// what preserves that; a later covering entry must not displace an earlier
+/// one).
 pub fn coveringOccupants(m: *const Model, buf: []?WindowId) void {
     for (buf) |*slot| slot.* = null;
     var it = m.store.iterator();
@@ -385,9 +389,10 @@ pub fn coveringOccupants(m: *const Model, buf: []?WindowId) void {
         if (row.val.presence != .covering) continue;
         if (row.val.covering_ws) |cws| {
             if (cws.index < buf.len and buf[cws.index] == null) buf[cws.index] = row.key;
-            continue;
         }
-        // Unanchored covering window: it owns every workspace it is visible on.
+        // Anchored or not, the occupant also owns every workspace it is
+        // visible on (mask / all-view); already-filled slots keep the
+        // earlier store-order winner.
         for (buf, 0..) |*slot, i| {
             if (slot.* != null) continue;
             if (visibleEntry(m, row.val, WSId.fromIndex(i))) slot.* = row.key;
@@ -434,7 +439,7 @@ pub fn setFocus(m: *Model, win: WindowId) void {
     if (!already) _ = list.pushFrontEvictingTail(win) else _ = list.insert(0, win);
 }
 
-/// The ONE focused/unfocused border-pixel pick (9.6).
+/// The ONE focused/unfocused border-pixel pick.
 ///
 /// This lived as `borders.borderColorOf(focused, ...)` in the window layer
 /// while the core pipeline carried its own copy of the same ternary, so the
@@ -450,7 +455,7 @@ pub inline fn focusedBorderColor(m: *const Model, win: WindowId, focused_px: u32
 }
 
 /// Applies a layout module's pre-reconcile delta to `ws`'s params, IN PLACE,
-/// through the model (8.8).
+/// through the model.
 ///
 /// The hook is value-in/value-out (`old -> new`), and the pipeline used to
 /// write the result straight back through a raw `*LayoutParams` it took from
