@@ -13,7 +13,7 @@ const constants = @import("constants");
 const masks = @import("masks");
 const log = @import("log");
 const window = @import("window");
-const tracking = @import("tracking");
+const query = @import("query");
 const focus = @import("focus");
 const keybind = @import("keybind");
 const grabs = @import("grabs");
@@ -120,7 +120,7 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
     const cs = core.getState();
     const mods = masks.toMask(masks.normalizeModifiers(event.state));
 
-    const managed_window = window.findManagedWindow(cs.conn, clicked_window, tracking.isManaged);
+    const managed_window = window.findManagedWindow(cs.conn, clicked_window, query.isManaged);
     const target_managed = clicked_window != cs.root and managed_window != 0;
 
     // A scroll bind is looked up FIRST, with window 0, because it does not

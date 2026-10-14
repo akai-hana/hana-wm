@@ -1,4 +1,4 @@
-//! Unit tests for the floating module's model-facing seam: the
+//! Unit tests for the floating module's model-facing surface: the
 //! floating anchor's geometry (setFloatingRect) and the
 //! floating-base fullscreen/minimize interaction, asserted through
 //! the model they mutate. Extracted from model_test.zig; same

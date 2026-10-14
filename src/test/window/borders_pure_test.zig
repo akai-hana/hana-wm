@@ -91,21 +91,21 @@ test "an occupant anchored elsewhere still covers workspaces its mask shows" {
     try std.testing.expect(behind(&m, 10, ws0, true));
 }
 
-test "window with no resolvable workspace falls back to the current ws occupant" {
+test "window with no resolvable workspace falls back to the current workspace occupant" {
     var m = try modelWithTiled(ws0);
     _ = m.store.put(30, .{ .mask = 0, .anchor = .tiled }) catch null;
     detach(&m, 30);
     try std.testing.expectEqual(null, model.findHome(&m, 30));
     try model.register(&m, 40, ws0);
     setCovering(&m, 40, ws0);
-    // No home: the current-ws fallback sees the occupant and goes borderless.
+    // No home: the current-workspace fallback sees the occupant and goes borderless.
     try std.testing.expect(behind(&m, 30, ws0, true));
-    // Without any occupant on the current ws, the fallback keeps the color.
+    // Without any occupant on the current workspace, the fallback keeps the color.
     model.unregister(&m, 40);
     try std.testing.expect(!behind(&m, 30, ws0, true));
 }
 
-test "fullscreen-absent build never resolves the current-ws fallback" {
+test "fullscreen-absent build never resolves the current-workspace fallback" {
     var m = try modelWithTiled(ws0);
     _ = m.store.put(30, .{ .mask = 0, .anchor = .tiled }) catch null;
     detach(&m, 30);
@@ -113,7 +113,7 @@ test "fullscreen-absent build never resolves the current-ws fallback" {
     try model.register(&m, 40, ws0);
     setCovering(&m, 40, ws0);
     // No home, but has_fullscreen=false gates the whole covering resolution
-    // off: the window keeps its color despite the current-ws occupant.
+    // off: the window keeps its color despite the current-workspace occupant.
     try std.testing.expect(!behind(&m, 30, ws0, false));
 }
 

@@ -14,7 +14,7 @@ const window = @import("window");
 const admission = @import("admission");
 const actions = @import("actions");
 const grabs = @import("grabs");
-const tracking = @import("tracking");
+const query = @import("query");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
@@ -109,9 +109,9 @@ pub fn handleConfigReload() !void {
     input.buildKeybinds(new_ptr.keybindings.items);
 
     // Config-derived counts latched into window modules must re-latch too:
-    // tracking's workspace_count was only ever read at init, so a reload that
+    // query's workspace_count was only ever read at init, so a reload that
     // edits [workspaces] count/enabled would otherwise keep the boot value.
-    tracking.reLatchWorkspaceCount();
+    query.reLatchWorkspaceCount();
 
     // Freeze the now-live config as the re-exec source: a later reload_hana
     // (binary-only reload) boots from this snapshot rather than from the

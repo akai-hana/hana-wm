@@ -1,4 +1,4 @@
-//! Unit tests for the minimize module's model-facing seam: the
+//! Unit tests for the minimize module's model-facing surface: the
 //! minimize/restore state machine asserted through the model it
 //! mutates (slot preservation, capacity, LIFO/FIFO restore
 //! candidates, serialize round-trip), plus the fallbackFocusCandidate
@@ -47,7 +47,7 @@ const expectOrder = helpers.expectOrder;
 const addFloating = helpers.addFloating;
 const registerRange = helpers.registerRange;
 
-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE ws
+/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
 /// list; every listed id exists in the store (single-membership invariant).
 /// Floating and parked (minimized) windows are home-free.
 fn assertSingleMembership(m: *const Model) !void {
@@ -167,9 +167,9 @@ test "minimize seq stamps drive LIFO/FIFO restore candidates" {
 
     try minimize.init();
     defer minimize.deinit();
-    try model.register(&m, 10, WSId.fromIndex(0)); // ws 0
+    try model.register(&m, 10, WSId.fromIndex(0)); // workspace 0
     try model.register(&m, 11, WSId.fromIndex(0));
-    try model.register(&m, 12, WSId.fromIndex(1)); // ws 1: must never win on ws 0
+    try model.register(&m, 12, WSId.fromIndex(1)); // workspace 1: must never win on workspace 0
     try minimize.minimize(&m, 10); // seq 0 (oldest)
     try minimize.minimize(&m, 11); // seq 1 (newest)
     try testing.expectEqual(@as(u32, 2), minimize.count());
@@ -224,7 +224,7 @@ test "fallbackFocusCandidate tiers pick the previous focus" {
     try testing.expectEqual(@as(?WindowId, 11), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
 
     // Both hidden: reversed tiled_order tier is exhausted by visibility too,
-    // a floating window becomes the candidate, and an empty ws yields null.
+    // a floating window becomes the candidate, and an empty workspace yields null.
     try minimize.minimize(&m, 11);
     try addFloating(&m, 12, .{ .x = 0, .y = 0, .width = 50, .height = 50 });
     try testing.expectEqual(@as(?WindowId, 12), model.fallbackFocusCandidate(&m, WSId.fromIndex(0), null));
@@ -292,7 +292,7 @@ test "restoreAllOnWs restores in slot order" {
 
     try minimize.init();
     defer minimize.deinit();
-    // Minimize every window on ws 0, then restore them all in one call.
+    // Minimize every window on workspace 0, then restore them all in one call.
     try model.register(&m, 10, WSId.fromIndex(0));
     try model.register(&m, 20, WSId.fromIndex(0));
     try model.register(&m, 30, WSId.fromIndex(0));
@@ -315,7 +315,7 @@ test "restoreAllOnWs restores in slot order" {
 }
 
 // Minimize blob round trip -- parked-only serialization, magic claim,
-// and re-adoption through the deserialize seam.
+// and re-adoption through the deserialize hook.
 test "minimize serialize/deserialize round-trip" {
     var m = makeModel();
 
@@ -362,16 +362,16 @@ test "restore to home workspace leaves the current workspace's stack intact" {
     try expectOrder(&m, WSId.fromIndex(0), &.{ 10, 11 });
     try expectOrder(&m, WSId.fromIndex(1), &.{ 20, 21 });
 
-    // Make ws 1 the CURRENT workspace; it is showing its own stack [20, 21].
+    // Make workspace 1 current; it is showing its own stack [20, 21].
     workspaces.switchTo(&m, WSId.fromIndex(1));
 
-    // Minimize a window whose home is ws 0, then restore it -- all while the
+    // Minimize a window whose home is workspace 0, then restore it -- all while the
     // current workspace (1) keeps its own stack in view.
     try minimize.minimize(&m, 10);
     try expectOrder(&m, WSId.fromIndex(1), &.{ 20, 21 }); // current stack undisturbed
     minimize.restore(&m, 10);
 
-    // The restored window is back on its HOME ws 0; ws 1's stack is untouched.
+    // The restored window is back on its HOME workspace 0; workspace 1's stack is untouched.
     try expectOrder(&m, WSId.fromIndex(0), &.{ 10, 11 });
     try expectOrder(&m, WSId.fromIndex(1), &.{ 20, 21 });
     try testing.expect(m.store.get(10).?.presence == .present);

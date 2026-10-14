@@ -113,9 +113,9 @@ test "focus: switching to an empty workspace clears input focus to root" {
     try admit(win);
     try std.testing.expectEqual(win, fx.inputFocus());
 
-    // switchTo(empty ws) runs prepareClearFocus + applyPendingFocus, the same
+    // switchTo(empty workspace) runs prepareClearFocus + applyPendingFocus, the same
     // two-phase path a real workspace switch to an empty target uses.
-    actions.switchTo(2); // ws 2 is empty: no candidate -> clear to root
+    actions.switchTo(2); // workspace 2 is empty: no candidate -> clear to root
     fx.flush();
 
     try std.testing.expectEqual(fx.root, fx.inputFocus());
@@ -156,7 +156,7 @@ test "focus: switch to a workspace with a never-shown window lands input focus" 
     fx.flush();
     try std.testing.expectEqual(w1, fx.inputFocus());
 
-    // w2 is admitted on ws 1 while ws 0 is current: it is parked off-current
+    // w2 is admitted on workspace 1 while workspace 0 is current: it is parked off-current
     // and never mapped (the spawn register path sends no map).
     const w2 = fx.createWindow();
     actions.mapRequest(w2, 1, false, null, null);
@@ -178,7 +178,7 @@ test "focus: switch lands xcb_set_input_focus on globally_active window" {
     defer fx.deinit();
     const m = pipeline.model();
 
-    // w1 on ws 0 holds focus.
+    // w1 on workspace 0 holds focus.
     const w1 = fx.createWindow();
     try admit(w1);
     fx.flush();

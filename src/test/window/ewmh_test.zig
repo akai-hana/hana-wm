@@ -3,7 +3,7 @@
 //!
 //! WHY A SEPARATE FILE
 //!   The regression guarded here is not reachable through `actions`: the
-//!   keybind (Mod+F) and the EWMH message are different callers of the same
+//!   keybinding (Mod+F) and the EWMH message are different callers of the same
 //!   transition, and only the message one had ever been broken. `Mod+F`
 //!   working while the browser's own fullscreen button did nothing is exactly
 //!   this asymmetry -- the model path is fine and the EVENT path is not, so a
@@ -72,7 +72,7 @@ fn admit(win: u32) void {
 }
 
 test "EWMH: a browser's fullscreen REQUEST covers the window" {
-    // The regression itself. Mod+F (a keybind -> actions) works, so the model
+    // The regression itself. Mod+F (a keybinding -> actions) works, so the model
     // path is healthy; the browser button arrives as this ClientMessage and
     // used to be dropped, leaving the player windowed.
     var fx = try fixture.setUp("ewmh_test");
@@ -184,7 +184,7 @@ test "EWMH: an unmanaged window's request is ignored, not honoured" {
     admit(managed);
     fx.flush();
 
-    // Never admitted: not in the tracking table.
+    // Never admitted: not in the query table.
     const stranger = fx.createWindow();
 
     var ev = fullscreenRequest(stranger, true);
