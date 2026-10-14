@@ -33,8 +33,8 @@ const MAX_MINIMIZED = constants.max_minimized;
 pub const MinimizeError = error{CapacityFull};
 
 /// One minimized window's parked record. The on-disk blob is PackedMinimize
-/// ({magic: u8, slot: u32, seq: u32}; slot is maxInt for floating-originated).
-const Rec = struct { win: model.WindowId, slot: ?usize, seq: u32 };
+/// Parsed ({magic: u8, slot: u32, seq: u32}; slot is maxInt for floating-originated).
+const Rec = struct { win: model.WindowId, slot: ?usize, seq: u32, origin: ?model.WSId };
 
 /// Magic byte of the on-disk blob ('Z' — see serializeWindow).
 const min_magic: u8 = 0x5A;
@@ -61,28 +61,38 @@ var g_seq: u32 = 0;
 
 pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     if (isMinimized(m, win)) return; // idempotent
+    // Unknown window: nothing to park and no record to keep. parkEntry used to
+    // return null here, but minimize appended the rec regardless, leaving a
+    // phantom record for an id no window owned.
+    if (m.store.get(win) == null) return;
     // Capacity check BEFORE any mutation.
     if (g_recs.len >= MAX_MINIMIZED) return error.CapacityFull;
-    const slot = parkEntry(m, win);
-    const appended = g_recs.append(.{ .win = win, .slot = slot, .seq = g_seq });
+    var origin: ?model.WSId = null;
+    const slot = parkEntry(m, win, &origin);
+    const appended = g_recs.append(.{ .win = win, .slot = slot, .seq = g_seq, .origin = origin });
     std.debug.assert(appended); // cannot fail: capacity pre-checked above
     g_seq = g_seq +| 1;
 }
 
 /// Shared park: drop `win`'s tiled home-list slot and mark the entry parked.
 /// Returns the former slot (or null when it held none -- a float-originated
-/// window keeps its home so a later restore still resolves a placement).
-fn parkEntry(m: *model.Model, win: model.WindowId) ?usize {
+/// window is never in a tiled_order). `origin` receives the workspace whose
+/// list the slot was taken from (null for a slotless park), so restore can
+/// tell whether the slot index is still meaningful.
+fn parkEntry(m: *model.Model, win: model.WindowId, origin: *?model.WSId) ?usize {
+    origin.* = null;
     const e = m.store.getPtr(win) orelse return null;
     var slot: ?usize = null;
     if (model.findHome(m, win)) |h| {
         slot = m.ws[h.index].tiled_order.indexOfScalar(win);
         model.removeValue(&m.ws[h.index].tiled_order, win);
-        // Only a tiled-anchor window held a home-list seat; a float-anchored
-        // window (floating minimize) keeps its home so restore can still
-        // resolve a placement for it.
-        if (e.anchor == .tiled) e.home_ws = null; // no longer in any tiled_order
+        origin.* = h;
     }
+    // Clear the cached home for every anchor: a parked window is in no
+    // tiled_order, and keeping its home fed parked windows into a destination
+    // tiled_order on move/tag. (Floating windows already had null here; the
+    // unconditional clear also matches restore, which nulls it for floating.)
+    e.home_ws = null;
     e.presence = .parked; // mode stays unchanged (base/fullscreen)
     return slot;
 }
@@ -110,10 +120,18 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
         // rather than half-restoring it.
         if (!list.append(win)) return;
         if (rec.slot) |s| {
-            const last = list.len - 1;
-            if (s < last) {
-                list.orderedRemove(last);
-                _ = list.insert(s, win); // cannot fail: len < capacity here
+            // Only re-seat at the recorded index when restoring to the SAME
+            // workspace the slot was taken from: the index is meaningless in a
+            // different destination's list and would scramble its ordering
+            // (a multi-tag window, or the user moved to another tagged ws
+            // before restoring). Cross-workspace restores append at the end.
+            const same_origin = if (rec.origin) |o| o.eql(h) else false;
+            if (same_origin) {
+                const last = list.len - 1;
+                if (s < last) {
+                    list.orderedRemove(last);
+                    _ = list.insert(s, win); // cannot fail: len < capacity here
+                }
             }
         }
         e.home_ws = h;
@@ -294,10 +312,14 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     const seq = raw.seq;
     // Replay the minimize park (shared with minimize()): drop the tiled slot,
     // mark parked. `mode` comes from the model (already persisted), the blob
-    // restores the rec.
-    _ = parkEntry(m, win);
+    // restores the rec. `origin` recovers the workspace whose list the blob's
+    // slot indexes (the model was just restored to its pre-restart state, so
+    // the slot's workspace == parkEntry's home); a window that parked from a
+    // non-home list gets origin=null and restore appends at the end.
+    var origin: ?model.WSId = null;
+    _ = parkEntry(m, win, &origin);
     if (g_seq <= seq) g_seq = seq +| 1; // keep the monotonic counter ahead (saturating, see g_seq)
-    _ = g_recs.append(.{ .win = win, .slot = slot, .seq = seq });
+    _ = g_recs.append(.{ .win = win, .slot = slot, .seq = seq, .origin = origin });
     return true;
 }
 

@@ -167,9 +167,12 @@ pub fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
     switch (opts.mode) {
         .plain => pipeline.reconcileGrab(),
         .restack => pipeline.reconcileUnderGrabNow(.{ .force_restack = true }),
-        // Focus lands before geometry (focus-before).
-        .focus => pipeline.reconcileGrabFocus(.{}, ft.?, .before, null),
-        .focus_restack => pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft.?, .before, null),
+        // Focus lands before geometry (focus-before). A null transition for a
+        // focus mode used to @panic via ft.?; treat it as the no-op transition
+        // instead, so a caller that forgets the FocusTransition degrades to a
+        // plain focus-mode retile rather than a crash.
+        .focus => pipeline.reconcileGrabFocus(.{}, ft orelse .none, .before, null),
+        .focus_restack => pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft orelse .none, .before, null),
     }
 }
 
