@@ -162,8 +162,11 @@ pub inline fn outerArea(wa: model.Rect, gap: u16) Region {
     return .{
         // Both edges take the work area's own origin plus the gap, not the gap
         // alone: a work area that does not start at x=0 (a side claim) was
-        // silently placed back at the screen's left edge.
-        .x = wa.x +| @as(i32, gap),
+        // silently placed back at the screen's left edge. x gets the same
+        // >=0 floor the y take has (negative-origin workareas are latent, but
+        // one sign flip of a future claim bug must not produce negative-x
+        // placements).
+        .x = @max(0, wa.x) +| @as(i32, gap),
         .y = clampYToU16(wa.y) +| gap,
         .w = wa.width -| gap *| 2,
         .h = wa.height -| gap *| 2,
