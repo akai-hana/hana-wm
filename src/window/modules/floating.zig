@@ -217,6 +217,11 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // (1 configure, no grab).
     const s = pipeline.syncSink();
     s.stackOnly(win, .above);
+    // Record the raise at the top of the float raise order. A press on a
+    // still-tiled window is fine: the order's replay filters by anchor, so
+    // the slot stays inert until the detach, which then inherits the top
+    // position the drag deserves.
+    ledger.floatRaise(win);
     s.flush();
 }
 
@@ -514,11 +519,8 @@ pub fn honorConfigureRequest(
 
 /// This module's window sub-system contribution: the floating drag/resize
 /// commands floating owns.
-// ---------------------------------------------------------------------------
-// tiling<->floating command: the old `src/actions/geometry.zig` toggle, moved
-// beside the drag/rect state it transitions against.
-// ---------------------------------------------------------------------------
-
+/// tiling<->floating command: the old `src/actions/geometry.zig` toggle, moved
+/// beside the drag/rect state it transitions against.
 /// toggle_floating_window. Tiled->floating seeds the rect from the window's
 /// current on-screen geometry (LastSent); floating->tiled re-enters the home
 /// list at the primary-column head via the ordinary tiling order.

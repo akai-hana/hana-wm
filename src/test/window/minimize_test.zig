@@ -4,8 +4,6 @@
 //! candidates, serialize round-trip), plus the fallbackFocusCandidate
 //! focus-recovery policy (a model function whose skip-candidates are
 //! minimized windows, so it lives with the minimize setups it builds).
-//! Extracted from model_test.zig; same makeModel fixture and
-//! minimize.init()/deinit() discipline as the parent file.
 //!
 //! The minimize module's process-global store is re-armed by
 //! helpers.makeModel, so these tests pass in any order.
@@ -15,7 +13,7 @@ const std = @import("std");
 const testing = std.testing;
 
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
-// warn-level overflow diagnostic; src/core/pure/log.zig silences all
+// warn-level overflow diagnostic; src/core/debug/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
 const model = @import("model");
 const helpers = @import("helpers");
@@ -41,7 +39,7 @@ const foreign_blob = [_]u8{ 0x00, 1, 2 };
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel;
 
 const regCur = helpers.regCur;
 const expectOrder = helpers.expectOrder;
@@ -197,8 +195,7 @@ test "latestMinimizedBase skips fullscreen-current and other workspaces" {
     _ = fullscreen.toggleFullscreen(&m, 21);
     try minimize.minimize(&m, 20); // plain base, older
     try minimize.minimize(&m, 21); // fullscreen, newer
-    // 21 still carries its fullscreen RECORD while parked, so it is skipped
-    // (the equivalent of the old prev != .base exclusion).
+    // 21 still carries its fullscreen RECORD while parked, so it is skipped.
     try testing.expectEqual(@as(?model.WindowId, 20), minimize.latestMinimizedBase(&m, WSId.fromIndex(0)));
 }
 

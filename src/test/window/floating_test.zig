@@ -1,15 +1,14 @@
 //! Unit tests for the floating module's model-facing surface: the
 //! floating anchor's geometry (setFloatingRect) and the
 //! floating-base fullscreen/minimize interaction, asserted through
-//! the model they mutate. Extracted from model_test.zig; same
-//! makeModel fixture as the parent file.
+//! the model they mutate.
 
 // build-gate: floating, fullscreen, minimize
 const std = @import("std");
 const testing = std.testing;
 
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
-// warn-level overflow diagnostic; src/core/pure/log.zig silences all
+// warn-level overflow diagnostic; src/core/debug/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
 const model = @import("model");
 const helpers = @import("helpers");
@@ -30,7 +29,7 @@ const unknown_win: WindowId = 999;
 /// Resetting fixture: a fresh model on deterministically re-armed module
 /// stores (minimize/fullscreen), so tests pass in any order regardless of
 /// what records an earlier test left behind.
-const makeModel = helpers.makeModel; // Reset is now the default, not a separate entry point
+const makeModel = helpers.makeModel;
 
 const regCur = helpers.regCur;
 const addFloating = helpers.addFloating;
