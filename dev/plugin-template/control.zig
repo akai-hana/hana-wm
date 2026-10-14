@@ -15,8 +15,9 @@
 //! are real, copy-pasteable code that neither claims a level nor
 //! writes a backend. The slider surface is a closed-core /
 //! open-module system: the CLOSED CORE (`slider.zig`) owns the
-//! render shell, the click/drag interaction, the poll cadence and
-//! the commit throttle; the OPEN MODULES are the siblings binding
+//! contract, the pct map and the `segmentFor` binding (the render
+//! shell, click/drag interaction, poll cadence and commit throttle
+//! live in `slider/shell.zig`); the OPEN MODULES are the siblings binding
 //! `pub const sub: slider.Sub`, each owning its backend's truth
 //! (device discovery, reads, writes, display format). A sibling
 //! WITHOUT the binding is a private implementation file
@@ -28,6 +29,7 @@
 
 const types = @import("types");
 const slider = @import("slider");
+const drawing = @import("drawing");
 
 /// Default display format. `{pct}` is the value region (the core
 /// records its span so the segment paints the number in its value
@@ -95,9 +97,9 @@ fn commitCost() slider.CommitCost {
 /// region; valid until the next call. `renderLineValue` is the
 /// shared `{pct}`/`{state}` substitution walker — use it unless
 /// your display format is genuinely bespoke.
-fn label(config: types.BarConfig, buf: []u8) slider.Label {
+fn label(config: types.BarConfig, buf: []u8) drawing.Label {
     _ = config; // TODO: your config-driven format string, if any.
-    return slider.renderLineValue(default_format, g_pct, null, buf);
+    return drawing.renderLineValue(default_format, g_pct, null, buf);
 }
 
 /// This control's binding to the slider surface (`slider.Sub`). The

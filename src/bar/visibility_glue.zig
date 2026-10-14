@@ -1,6 +1,6 @@
-//! The bar's visibility wire glue: the apply* family that turns the
-//! pure policy in `visibility.zig` into X11 map/unmap + screen-claim
-//! writes. The policy half (what SHOULD be visible, and why) stays in
+//! The bar's visibility wire glue: the apply* family (plus the prompt's
+//! present/dismiss pair) that turns the pure policy in `visibility.zig` into
+//! X11 map/unmap + screen-claim writes. The policy half (what SHOULD be visible, and why) stays in
 //! `visibility.zig`, pure and unit-tested; this file owns only the
 //! wire side -- map/unmap, the claim publish, and the reconcile that
 //! reacts to the claim change.
@@ -13,10 +13,11 @@
 const core = @import("core");
 const xcb = core.xcb;
 const log = @import("log");
-const tracking = @import("tracking");
+const query = @import("query");
 const pipeline = @import("pipeline");
 const usable_area = @import("usable_area");
 const visibility = @import("visibility");
+const segmod = @import("segment");
 
 const state = @import("state");
 const repaint = @import("repaint");
@@ -44,6 +45,55 @@ pub fn raiseBar() void {
             xcb.XCB_CONFIG_WINDOW_STACK_MODE,
             &[_]u32{xcb.XCB_STACK_MODE_ABOVE},
         );
+}
+
+/// Forces the bar to the absolute top of the stacking order and guarantees it
+/// is mapped, overriding whatever would normally keep it hidden or covered:
+/// a fullscreen window, the user toggling the bar off, or another window
+/// raised above it. Used by the inline prompt (prompt.zig) so it is always
+/// visible and reachable while active.
+///
+/// Never touches window geometry or retiles: the bar overlays whatever is
+/// already there (fullscreen included), the way a dock/OSD overlays fullscreen
+/// video. Pair with `dismissAfterPrompt` so the bar returns to its prior state.
+pub fn presentForPrompt() void {
+    const s = state.gBar.state orelse return;
+    if (!s.vis.shown) {
+        // The bar is hidden; map it before drawing so the blit lands in a
+        // mapped window (a draw queued while unmapped is discarded by the
+        // server, leaving a blank bar until the next unrelated redraw) and a
+        // compositor never presents an empty frame.
+        state.gBar.prompt_forced_visible = true;
+        s.vis.shown = true;
+        segmod.runVoidHook(.onBarShown);
+        _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
+        repaint.submitDrawBlockingFull();
+    }
+    raiseBar();
+    _ = xcb.xcb_flush(s.win.conn);
+}
+
+/// Undoes `presentForPrompt` once the prompt exits (entered or cancelled).
+///
+/// If the bar was shown solely to make the prompt visible, hides it again,
+/// but only if it *should still* be hidden. The prompt can outlive the state
+/// that justified the override (e.g. the fullscreen window closes on its own),
+/// so this recomputes the bar's natural visibility at exit time rather than
+/// trusting the decision made at activation.
+///
+/// If the bar was already visible, this leaves it as-is: the forced
+/// top-of-stack position needs no explicit undo, since focusing any other
+/// window already raises it above the bar again (see focus.zig).
+pub fn dismissAfterPrompt() void {
+    const s = state.gBar.state orelse return;
+    if (!state.gBar.prompt_forced_visible) return;
+    state.gBar.prompt_forced_visible = false;
+    const current_ws = query.getCurrentWorkspace() orelse 0;
+    const should_show = visibility.keepPromptOverride(pipeline.model(), current_ws, s.vis.preferred);
+    if (should_show) return; // conditions changed while the prompt was open; stay visible
+    s.vis.shown = false;
+    _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
+    _ = xcb.xcb_flush(s.win.conn);
 }
 
 /// Applies a decided visibility change: updates `vis.shown`, draws when
@@ -90,7 +140,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
         // Tell continuous-motion segments the bar is (re)appearing, so the
         // title marquee resumes from its last shown offset instead of
         // teleporting across the whole hidden gap on this first frame.
-        state.runVoidHook(.onBarShown);
+        segmod.runVoidHook(.onBarShown);
         if (do_reconcile) {
             // Fullscreen toggle path: render to the off-screen pixmap inside
             // the grab so the caller's single ungrabAndFlush ships geometry +
@@ -146,7 +196,7 @@ pub fn hideBarForFullscreen() void {
 /// usable area geometry changed (a write-path side effect from a rendering
 /// module: documented in the check-layers.sh allowlist).
 pub fn applyFullscreenVisibility() void {
-    applyVisibilityDecision(tracking.getCurrentWorkspace() orelse 0, true);
+    applyVisibilityDecision(query.getCurrentWorkspace() orelse 0, true);
 }
 
 /// Computes the desired visibility for `ws` via the shared visibility policy

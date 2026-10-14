@@ -28,9 +28,10 @@
 const std = @import("std");
 
 const segmod = @import("segment");
+const vocab = @import("vocab");
 
 const max_visible_windows = segmod.max_visible_windows;
-const TitleSnapshot = segmod.TitleSnapshot;
+const TitleSnapshot = vocab.TitleSnapshot;
 
 const WindowInfo = struct {
     window: u32,

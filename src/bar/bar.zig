@@ -27,7 +27,6 @@ const log = @import("log");
 
 const types = @import("types");
 
-const tracking = @import("tracking");
 const focus = @import("focus");
 const pipeline = @import("pipeline");
 const model = @import("model");
@@ -48,16 +47,9 @@ const input_events = @import("input_events");
 const repaint = @import("repaint");
 
 // Window-addon registry (generated): the hidden-set synthesis is routed
-// through the collectHiddenSet seam instead of naming the minimize or
+// through the collectHiddenSet hook instead of naming the minimize or
 // fullscreen module directly.
 const contract = @import("contract");
-
-const requests = @import("requests");
-
-// Bar-segment registry (generated). Raw `@import("X_modules").modules` at
-// point of use is the one spelling every registry consumer uses; state.zig's
-// alias of the same expression is file-local, not API.
-const bar_mods = @import("bar_modules").modules;
 
 const state = @import("state");
 // The state itself now lives in state.zig (a leaf, so the repaint /
@@ -68,63 +60,12 @@ const state = @import("state");
 // silently copy it.
 const Bar = state.Bar;
 const State = state.State;
-const anyBoolHook = state.anyBoolHook;
+const anyBoolHook = segmod.anyBoolHook;
 const gBar = &state.gBar;
 const max_batched_redraws = state.max_batched_redraws;
 const renderBar = state.renderBar;
-const runVoidHook = state.runVoidHook;
-const self_ticking_ids = state.self_ticking_ids;
-
-// Bar height / font-size resolution.
-//
-// The RULES live in bar/metrics.zig (`metrics.resolve`), which is pure: it
-// takes the configured values, the screen, and a font probe, and returns a
-// `Metrics` value. This section only supplies the two live pieces -- the
-// current config, and a probe that measures through
-// drawing.probeFontMetrics' throwaway surface (no live DrawContext is
-// touched) -- and threads the result into bar creation, draw-context
-// construction, and the surviving State's own value. No global, no config
-// mutation, and no save/restore: a bar's metrics belong to that bar.
-
-/// Measures the configured fonts at `trial_pt`. The point size is always
-/// explicit: the only two callers are the metric probe itself (a fixed trial
-/// size) and `metrics.resolve`'s height decision, which measures at the
-/// DPI-scaled base.
-fn probeMetrics(trial_pt: u16) ?drawing.FontMetrics {
-    const cs = core.getState();
-    var sized = drawing.SizedFontList.build(cs.alloc, cs.config.bar.fonts.items, trial_pt) catch return null;
-    defer sized.deinit();
-    return drawing.probeFontMetrics(
-        cs.alloc,
-        core.dpi(),
-        sized.items,
-    );
-}
-
-/// Resolves the bar's metrics from the live config and screen. The rules
-/// themselves live in `metrics.resolve`; this only supplies them.
-fn resolveBarMetrics() Metrics {
-    const cs = core.getState();
-    return metrics.resolve(.{
-        .font_size = cs.config.bar.font_size,
-        .height = cs.config.bar.height,
-        .screen_height = cs.screen.height_in_pixels,
-    }, probeTextHeight);
-}
-
-/// The `metrics.Probe` adapter: the configured fonts' ascent+descent at a
-/// trial point size, or null when none could be measured.
-///
-/// Pango reports i16 and a descent is a positive-downward distance here, so
-/// the total is taken in i32 and floored at 0: a font that reports a
-/// pathological negative total must clamp to "no measurement" rather than
-/// wrap through `@intCast` in ReleaseFast.
-fn probeTextHeight(trial_pt: u16) ?u32 {
-    const m = probeMetrics(trial_pt) orelse return null;
-    const total: i32 = @as(i32, m.ascent) + @as(i32, m.descent);
-    if (total <= 0) return null;
-    return @intCast(total);
-}
+const runVoidHook = segmod.runVoidHook;
+const self_ticking_ids = segmod.self_ticking_ids;
 
 /// Uniform poll wakeup: runs every module's onPollWakeup hook (prompt caret
 /// blink, marquee repaint-marking, ...) then submits a draw. The bar never
@@ -166,7 +107,7 @@ pub fn pollTimeoutMs() ?i32 {
     // sources -- a bare -1 would slip past the reduce as an immediate
     // "want to wake NOW" preference.
     var nearest: ?i32 = null;
-    for (bar_mods) |m| {
+    for (segmod.all()) |m| {
         if (m.pollTimeoutMs) |h| {
             const t = h();
             if (t >= 0 and (nearest == null or t < nearest.?)) nearest = t;
@@ -248,7 +189,7 @@ pub fn init() !void {
     std.debug.assert(cs.config.bar.enabled);
     warnUnknownSegments();
     barwin.initAtoms();
-    const m = resolveBarMetrics();
+    const m = metrics.resolveBarMetrics();
     const bar = try createBar(m, barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, m.height));
     gBar.state = bar.state;
     usable_area.setSurfaceWindow(bar.setup.win_id);
@@ -265,17 +206,17 @@ pub fn init() !void {
     // dangle as soon as this init returns, and the prompt calls back through
     // it on the first toggle.
     g_bar_handlers = .{
-        .presentForPrompt = presentForPrompt,
-        .dismissAfterPrompt = dismissAfterPrompt,
+        .presentForPrompt = visibility_glue.presentForPrompt,
+        .dismissAfterPrompt = visibility_glue.dismissAfterPrompt,
         .isBarWindow = isBarWindow,
     };
-    for (bar_mods) |seg| if (seg.init) |f| try f(cs.alloc, cs.conn, &g_bar_handlers);
+    for (segmod.all()) |seg| if (seg.init) |f| try f(cs.alloc, cs.conn, &g_bar_handlers);
     visibility_glue.syncScreenClaim();
 }
 
 pub fn deinit() void {
     const alloc = core.getState().alloc;
-    contract.callAll(contract.Segment, bar_mods[0..], .deinit, .{alloc});
+    contract.callAll(contract.Segment, segmod.all(), .deinit, .{alloc});
     if (gBar.state) |s| {
         s.render.dc.deinit();
         s.deinit();
@@ -322,7 +263,7 @@ pub fn reload() void {
         return;
     }
     warnUnknownSegments();
-    applyReload(old, resolveBarMetrics()) catch |err| {
+    applyReload(old, metrics.resolveBarMetrics()) catch |err| {
         log.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };
 }
@@ -421,55 +362,6 @@ pub fn toggleBarSegmentAnchor() void {
 
 pub fn isBarWindow(win: u32) bool {
     return if (gBar.state) |s| s.win.win_id == win else false;
-}
-
-/// Forces the bar to the absolute top of the stacking order and guarantees it
-/// is mapped, overriding whatever would normally keep it hidden or covered:
-/// a fullscreen window, the user toggling the bar off, or another window
-/// raised above it. Used by the inline prompt (prompt.zig) so it is always
-/// visible and reachable while active.
-///
-/// Never touches window geometry or retiles: the bar overlays whatever is
-/// already there (fullscreen included), the way a dock/OSD overlays fullscreen
-/// video. Pair with `dismissAfterPrompt` so the bar returns to its prior state.
-pub fn presentForPrompt() void {
-    const s = gBar.state orelse return;
-    if (!s.vis.shown) {
-        // The bar is hidden; map it before drawing so the blit lands in a
-        // mapped window (a draw queued while unmapped is discarded by the
-        // server, leaving a blank bar until the next unrelated redraw) and a
-        // compositor never presents an empty frame.
-        gBar.prompt_forced_visible = true;
-        s.vis.shown = true;
-        runVoidHook(.onBarShown);
-        _ = xcb.xcb_map_window(s.win.conn, s.win.win_id);
-        repaint.submitDrawBlockingFull();
-    }
-    visibility_glue.raiseBar();
-    _ = xcb.xcb_flush(s.win.conn);
-}
-
-/// Undoes `presentForPrompt` once the prompt exits (entered or cancelled).
-///
-/// If the bar was shown solely to make the prompt visible, hides it again,
-/// but only if it *should still* be hidden. The prompt can outlive the state
-/// that justified the override (e.g. the fullscreen window closes on its own),
-/// so this recomputes the bar's natural visibility at exit time rather than
-/// trusting the decision made at activation.
-///
-/// If the bar was already visible, this leaves it as-is: the forced
-/// top-of-stack position needs no explicit undo, since focusing any other
-/// window already raises it above the bar again (see focus.zig).
-pub fn dismissAfterPrompt() void {
-    const s = gBar.state orelse return;
-    if (!gBar.prompt_forced_visible) return;
-    gBar.prompt_forced_visible = false;
-    const current_ws = tracking.getCurrentWorkspace() orelse 0;
-    const should_show = visibility.keepPromptOverride(pipeline.model(), current_ws, s.vis.preferred);
-    if (should_show) return; // conditions changed while the prompt was open; stay visible
-    s.vis.shown = false;
-    _ = xcb.xcb_unmap_window(s.win.conn, s.win.win_id);
-    _ = xcb.xcb_flush(s.win.conn);
 }
 
 /// Sets the bar's user-level visibility state. Only the user toggle path
@@ -576,9 +468,9 @@ pub fn updateClock() void {
 /// these through a single `surfaces.Surfaces` alias; when the bar is absent the
 /// whole set is `null` and every such call site compiles away. The emitter
 /// lives in this module, so detaching the bar detaches its handlers. The hook
-/// types themselves live in the core-owned `plugin` interface contract, not
-/// here: this module only binds its functions to that contract.
-pub const surfaces = @import("seams").Surfaces{
+/// types themselves live in the core-owned `contract_x11` interface contract,
+/// not here: this module only binds its functions to that contract.
+pub const surfaces = @import("contract_x11").Surfaces{
     .init = init,
     .deinit = deinit,
     .handleExpose = input_events.handleExpose,

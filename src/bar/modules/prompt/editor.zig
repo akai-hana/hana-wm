@@ -1,7 +1,7 @@
 //! The prompt's line editor: the bounded buffer, its edit
 //! primitives, and the basic (non-modal) key handlers. The vim
 //! extensor (`vim.zig`) layers its own handlers on top through the
-//! `Handlers` seam below; both drive the same `EditorState`, and the
+//! `Handlers` contract below; both drive the same `EditorState`, and the
 //! package core (`prompt.zig`) re-exports every name the extensor
 //! binds to, so the extensor imports the package, never this file.
 

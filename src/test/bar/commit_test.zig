@@ -4,6 +4,7 @@
 //! `Throttle.last_ms` instead of sleeping.
 
 const std = @import("std");
+const time = @import("time");
 const slider = @import("slider");
 const testing = std.testing;
 
@@ -23,7 +24,7 @@ fn record(w: slider.Write, pct: u8) void {
 test "immediate commits apply on every event, never throttled" {
     var t = slider.Throttle{ .interval_ms = 80, .write = record };
     g_calls = 0;
-    t.last_ms = slider.nowMs();
+    t.last_ms = time.realtimeMs();
     t.apply(.immediate, 50);
     t.apply(.immediate, 51);
     try testing.expectEqual(@as(usize, 2), g_calls);
@@ -45,7 +46,7 @@ test "rate-limited commits throttle, coalesce, and flush after the window" {
     t.flushOwed(42); // window not elapsed: still owed
     try testing.expectEqual(@as(usize, 1), g_calls);
 
-    t.last_ms = slider.nowMs() - t.interval_ms - 1; // close the window
+    t.last_ms = time.realtimeMs() - t.interval_ms - 1; // close the window
     t.flushOwed(43); // sweep lands the newest value
     try testing.expectEqual(@as(usize, 2), g_calls);
     try testing.expectEqual(@as(u8, 43), g_last_pct);
@@ -78,7 +79,7 @@ test "reset restarts the clock and clears an owed commit" {
     t.reset();
     try testing.expectEqual(false, t.pending);
 
-    t.last_ms = slider.nowMs() - t.interval_ms - 1; // close the window
+    t.last_ms = time.realtimeMs() - t.interval_ms - 1; // close the window
     t.flushOwed(3); // reset settled the owe, so nothing sends
     try testing.expectEqual(@as(usize, 1), g_calls);
 }

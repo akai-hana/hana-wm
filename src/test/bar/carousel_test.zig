@@ -11,7 +11,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const carousel = @import("carousel");
-// `Scroll` lives in the title CONTRACT, not in this extensor -- the seam's
+// `Scroll` lives in the title CONTRACT, not in this extensor -- the contract's
 // shape must not depend on carousel.zig being present.
 const Scroll = @import("title").Scroll;
 

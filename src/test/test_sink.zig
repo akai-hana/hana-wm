@@ -1,5 +1,5 @@
 //! The recording test sink: the `Sink` vtable double the
-//! sync/tracking/tiling fixtures assert through. Modes
+//! sync/query/tiling fixtures assert through. Modes
 //! count/category/record/none; the recording mode implements
 //! the full vtable and the `expect*` assertion family, so a
 //! fixture asserts on the ops the reconciler ISSUED (the ops
@@ -194,7 +194,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
             // `bw` is deliberately NOT asserted null: geometry and border width
             // are now one request, so a switch that changes both sends one
             // configure carrying both, and this helper only promises the
-            // geometry half. `expectBw` is the helper that pins exclusivity.
+            // geometry half.
             try self.expectStack(i, stack);
         }
 
@@ -241,37 +241,11 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try std.testing.expectEqual(p, op.pixel.p);
         }
 
-        pub fn expectBw(self: *const Self, i: usize, win: model.WindowId, w: u16) !void {
-            comptime if (mode != .record) @compileError("expectBw requires record mode");
-            const op = self.ops.items[i];
-            try std.testing.expect(op == .configure);
-            // A border-width-only configure must stay border-width-only: the
-            // merged slot could trivially have started dragging a rect along,
-            // and a spurious X|Y|W|H on a window whose geometry the WM did not
-            // recompute is a real (if small) correctness regression.
-            try std.testing.expect(op.configure.bw != null);
-            try std.testing.expectEqual(w, op.configure.bw.?);
-            try std.testing.expect(op.configure.rect == null);
-            try std.testing.expect(op.configure.stack == null);
-            try std.testing.expectEqual(win, op.configure.win);
-        }
-
         pub fn expectMap(self: *const Self, i: usize, win: model.WindowId) !void {
             comptime if (mode != .record) @compileError("expectMap requires record mode");
             const op = self.ops.items[i];
             try std.testing.expect(op == .map);
             try std.testing.expectEqual(win, op.map);
-        }
-
-        /// Asserts op `i` is a bare restack (`stack_only`) carrying `s`,
-        /// instead of reading the restack off a `configure.stack` like the
-        /// configure-shaped fixtures do.
-        pub fn expectStackOp(self: *const Self, i: usize, win: model.WindowId, s: sinkmod.Stack) !void {
-            comptime if (mode != .record) @compileError("expectStackOp requires record mode");
-            const op = self.ops.items[i];
-            try std.testing.expect(op == .stack);
-            try std.testing.expectEqual(win, op.stack.win);
-            try std.testing.expectEqual(s, op.stack.s);
         }
 
         /// Asserts op `i` is a `set_state_atom` fullscreen transition.
