@@ -56,6 +56,11 @@ pub const Scroller = struct {
     pivot: *const fn () void,
     pollDeadlineMs: *const fn (now_ms: i64, hz: f64) i32,
 };
+
+/// The registry-facing spelling of this contract: build.zig types the
+/// generated `title_subs` array through it, so the generated module
+/// never names the concrete struct (`Scroller`) or a sibling's import alias.
+pub const Binding = Scroller;
 // The scroller is a SINGLETON slot, and taking `addons[0]` said nothing about
 // that: a second `Scroller` addon was silently dropped while the registry
 // kept looking like a registry. One decorator composes; two need the slot

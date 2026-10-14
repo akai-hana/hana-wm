@@ -340,7 +340,11 @@ fn buildGeneratedModules(
     // BEFORE `buildOwnerRegistries` is called (DFS visit order satisfies
     // this: the single src/ walk above completes discovery before the call).
     var registry = try OwnerRegistry.run(discovery);
-    try validateRegistryNames(b, &registry, &discovery.modules);
+    // Sub-addon registries, derived from what the tree imports (see
+    // `discoverSubRegistrySpecs`): discovered here so the reserved-name check
+    // below sees the `<package>_subs` names they will claim.
+    const sub_specs = try discoverSubRegistrySpecs(b, discovery);
+    try validateRegistryNames(b, &registry, &discovery.modules, sub_specs);
     // Contract names are read from the modules' own `pub const module`
     // declarations (typed or via the segment builder), never from a hand-written table.
     // The classification is single-read memoized during discovery, so this
@@ -353,10 +357,10 @@ fn buildGeneratedModules(
     // `bar_modules` index the SAME sorted list (`i` == `subs[i]`), so the two
     // orderings can never drift from each other.
     var bound_subs = std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)){};
-    for (sub_registry_specs) |spec| {
+    for (sub_specs) |spec| {
         _ = try boundSubStems(b, discovery, spec, &bound_subs);
     }
-    var owner_modules = try buildOwnerRegistries(b, &discovery.modules, target, optimize, &registry, &bound_subs);
+    var owner_modules = try buildOwnerRegistries(b, &discovery.modules, target, optimize, &registry, &bound_subs, sub_specs);
     // Package sub-addon registries (`<package>_subs`), generated from file
     // presence the same way the owner registries are, so a package core
     // (systatus, prompt, title, ...) never names one of its addon siblings
@@ -364,7 +368,7 @@ fn buildGeneratedModules(
     // regenerates a shorter array; nothing in the closed core is touched.
     // Injected through `owner_modules` so every module sees the generated
     // import like the other registries.
-    for (sub_registry_specs) |spec| {
+    for (sub_specs) |spec| {
         const subs = bound_subs.getPtr(spec.package) orelse continue;
         const registry_name = try std.fmt.allocPrint(b.allocator, "{s}_subs", .{spec.package});
         try owner_modules.put(b.allocator, registry_name, try buildSubsRegistryModule(
@@ -929,6 +933,7 @@ fn validateRegistryNames(
     b: *std.Build,
     registry: *const OwnerRegistry,
     discovered: *const std.StringHashMap(*std.Build.Module),
+    sub_specs: []const SubRegistrySpec,
 ) !void {
     var it = registry.owners.iterator();
     while (it.next()) |entry| {
@@ -946,7 +951,7 @@ fn validateRegistryNames(
     // seam are likewise injected into every module; a discovered file
     // claiming any of those names would shadow it. Reject loudly instead of
     // confusing later users of the name.
-    for (sub_registry_specs) |spec| {
+    for (sub_specs) |spec| {
         const registry_name = try std.fmt.allocPrint(b.allocator, "{s}_subs", .{spec.package});
         if (discovered.contains(registry_name)) {
             std.debug.print(
@@ -1197,38 +1202,45 @@ fn deriveOwnerContracts(
     }
 }
 
-/// The sub-addon registries: each dir-named package under a `modules/` tree
-/// whose private sibling files are addons of the package core binds them
-/// through a generated `<package>_subs` module. `binding` is the decl each
-/// sibling exposes, `array` the generated array name, `contract` the type
-/// each sibling's value binds to (its parent package's open contract).
-/// Packages that get a GENERATED sub-registry (`<package>_subs`), each entry
-/// binding one file-sibling that self-declares `pub const <binding>`.
+/// One generated `<package>_subs` sub-addon registry, DERIVED from what the
+/// tree imports instead of from a hand-written table: a package gets a spec
+/// when any discovered module imports `@import("<package>_subs").<array>` --
+/// the package core's own re-export (`pub const subs =
+/// @import("systatus_subs").subs`) or a private sibling reading the array
+/// (`slider/shell.zig`). Everything else on the spec follows from that one
+/// line plus the package core's declarations:
 ///
-/// A directory is NOT a family by itself. Only a package listed HERE gets
-/// a sub-registry, and only its self-declaring siblings join it (see
-/// `declaresBinding`); a file beside a listed package without the declaration is
-/// a private implementation file that stays a plain discovered module. That
-/// distinction is invisible on disk, which is exactly the trap: it made
-/// `src/bar/modules/layout/` look like a peer family of systatus/prompt/title/
-/// slider while being nothing of the kind.
+///   package       the import name minus the `_subs` suffix; must be a
+///                 discovered module, because the generated registry
+///                 imports it back
+///   array         the field access after the import: the registry's
+///                 export name, what every consumer reads
+///   binding       `array` without its plural `s` (`subs` -> `sub`,
+///                 `addons` -> `addon`): the self-declaring role marker a
+///                 bound sibling exposes (see `declaresBinding`)
+///   contract      `<package>.Binding` -- every package core exports that
+///                 alias for its contract struct, so the generated array's
+///                 element type follows the core even where the concrete
+///                 name differs (`Sub`, `Addon`, `Scroller`) or a sibling
+///                 imports it under a local alias (`title_mod.Scroller`)
+///   bar_segments  the package core declares `pub fn segmentFor`; its bound
+///                 subs reach the generated `bar_modules` registry as one
+///                 derived `segmentFor(i)` entry each (see
+///                 `ownerModuleEntries`)
 ///
-/// `layout/` is deliberately NOT a spec, and this is the decision that item
-/// asked for. `layout.zig` (the active-layout icon) and `variants.zig` (the
-/// active-variant text) are two INDEPENDENT bar segments that happen to share a
-/// subject; they declare no `sub`/`addon` binding, share no array and no
-/// contract, and are each registered as their own segment. Making it a real
-/// family would mean inventing a package core plus an array and a binding for
-/// two peers that never enumerate each other.
+/// A directory is NOT a family by itself: the package core's import is what
+/// makes a registry exist, so a `modules/` subdir whose files merely coexist
+/// gets no registry, no array, and no binding to miss. src/bar/modules/
+/// layout/ is the worked example -- layout.zig (the icon) and variants.zig
+/// (the text) are two independent segments sharing a subject, each
+/// registered on its own, so deleting one changes nothing about the other.
+/// And because membership is one bounded source scan plus file presence,
+/// deleting a bound sibling only regenerates a shorter array; deleting the
+/// last consumer drops the registry with no dead references left behind.
 ///
-/// Two consequences, both now false fears rather than latent bugs:
-///   - Deleting `layout.zig` does not leave "a silently empty variants slot".
-///     There is no slot and no registry: variants.zig is independently
-///     discovered and independently registered, so deleting its sibling changes
-///     nothing about it.
-///   - Neither file can be silently excluded for missing a binding, because
-///     there is no binding to declare.
-const sub_registry_specs = [_]struct {
+/// Specs sort by package name: that order feeds `bar_modules`' derived
+/// segmentFor entries, so it must be deterministic across builds.
+const SubRegistrySpec = struct {
     package: []const u8,
     array: []const u8,
     binding: []const u8,
@@ -1242,13 +1254,161 @@ const sub_registry_specs = [_]struct {
     /// contract.Segment`, and the entry index `i` always equals the sub's index
     /// in the generated `<package>_subs` registry (both consume the same
     /// sorted bound-sub list), so `segmentFor(i)` selects exactly `subs[i]`.
-    bar_segments: bool = false,
-}{
-    .{ .package = "systatus", .array = "subs", .binding = "sub", .contract = "systatus.Sub", .bar_segments = true },
-    .{ .package = "prompt", .array = "addons", .binding = "addon", .contract = "prompt.Addon" },
-    .{ .package = "title", .array = "addons", .binding = "addon", .contract = "title.Scroller" },
-    .{ .package = "slider", .array = "subs", .binding = "sub", .contract = "slider.Sub", .bar_segments = true },
+    bar_segments: bool,
 };
+
+/// One `@import("<package>_subs").<array>` literal found in a source line.
+const SubsConsumer = struct {
+    package: []const u8,
+    array: []const u8,
+};
+
+/// Derives every `SubRegistrySpec` from a bounded scan of the discovered
+/// sources: `@import("<package>_subs").<array>` literals name the registries
+/// the tree actually consumes (comment lines are skipped, so prose about an
+/// import never registers one). Consumers of one package (its core plus a
+/// sibling reading the array) dedupe to one spec and must agree on the
+/// array. A consumer naming an undiscovered package, a package core missing
+/// its `pub const Binding` alias, or a non-plural array is a configure-time
+/// error: each would otherwise surface as a raw compile error -- or, for a
+/// drifted binding, as a silently empty registry -- far from its cause.
+fn discoverSubRegistrySpecs(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+) ![]SubRegistrySpec {
+    var specs: std.ArrayListUnmanaged(SubRegistrySpec) = .empty;
+    var seen = std.StringHashMapUnmanaged(struct { index: usize, consumer: []const u8 }){};
+    var consumers: std.ArrayListUnmanaged(SubsConsumer) = .empty;
+    var it = discovery.source_paths.iterator();
+    while (it.next()) |entry| {
+        const rel_path = entry.value_ptr.*;
+        consumers.clearRetainingCapacity();
+        var scan = try SourceScanner.open(b, rel_path);
+        defer scan.close();
+        {
+            var lines = scan.lines();
+            while (lines.next()) |line| {
+                if (std.mem.startsWith(u8, line, "//")) continue;
+                try parseSubsConsumers(b, line, rel_path, &consumers);
+            }
+        }
+        for (consumers.items) |c| {
+            const gop = try seen.getOrPut(b.allocator, c.package);
+            if (gop.found_existing) {
+                const prev = specs.items[gop.value_ptr.index];
+                if (!std.mem.eql(u8, prev.array, c.array)) {
+                    std.debug.print(
+                        "Error: {s} reads '{s}_subs' as '.{s}', but {s} reads it as '.{s}'; one package has one generated array.\n",
+                        .{ rel_path, c.package, c.array, gop.value_ptr.consumer, prev.array },
+                    );
+                    return error.ConflictingSubsArray;
+                }
+                continue;
+            }
+            if (!discovery.modules.contains(c.package)) {
+                std.debug.print(
+                    "Error: {s} imports '{s}_subs', but no module named '{s}' is discovered; the generated registry would import a module that does not exist.\n",
+                    .{ rel_path, c.package, c.package },
+                );
+                return error.UnknownSubsPackage;
+            }
+            if (c.array.len < 2 or c.array[c.array.len - 1] != 's') {
+                std.debug.print(
+                    "Error: {s} reads '{s}_subs' as '.{s}'; the array name must be the plural of the sibling binding ('subs'/'addons' -> 'sub'/'addon').\n",
+                    .{ rel_path, c.package, c.array },
+                );
+                return error.NonPluralSubsArray;
+            }
+            const core_rel = discovery.source_paths.get(c.package).?;
+            if (!try declaresBinding(b, core_rel, "Binding")) {
+                std.debug.print(
+                    "Error: package core {s} does not declare `pub const Binding`; the generated '{s}_subs' array types its elements through that alias.\n",
+                    .{ core_rel, c.package },
+                );
+                return error.MissingSubsBindingAlias;
+            }
+            try specs.append(b.allocator, .{
+                .package = c.package,
+                .array = c.array,
+                .binding = c.array[0 .. c.array.len - 1],
+                .contract = try std.fmt.allocPrint(b.allocator, "{s}.Binding", .{c.package}),
+                .bar_segments = try declaresSegmentFor(b, core_rel),
+            });
+            try seen.put(b.allocator, c.package, .{ .index = specs.items.len - 1, .consumer = rel_path });
+        }
+    }
+    std.mem.sort(SubRegistrySpec, specs.items, {}, struct {
+        fn less(_: void, a: SubRegistrySpec, b_: SubRegistrySpec) bool {
+            return std.mem.lessThan(u8, a.package, b_.package);
+        }
+    }.less);
+    return specs.items;
+}
+
+/// Extracts every `@import("<package>_subs").<array>` literal from `line`,
+/// duped into `out` (the scanner's buffer is freed by the caller). A `_subs`
+/// import without the inline `.field` access is rejected here: the field IS
+/// the registry's export name, so without it neither the array nor the
+/// binding can be derived.
+fn parseSubsConsumers(
+    b: *std.Build,
+    line: []const u8,
+    rel_path: []const u8,
+    out: *std.ArrayListUnmanaged(SubsConsumer),
+) !void {
+    const needle = "@import(\"";
+    var i: usize = 0;
+    while (i + needle.len <= line.len) : (i += 1) {
+        if (!std.mem.startsWith(u8, line[i..], needle)) continue;
+        const name_start = i + needle.len;
+        const quote_off = std.mem.indexOfScalar(u8, line[name_start..], '"') orelse {
+            i = name_start;
+            continue;
+        };
+        const name = line[name_start .. name_start + quote_off];
+        const close = name_start + quote_off + 1;
+        if (!std.mem.endsWith(u8, name, "_subs")) {
+            i = close;
+            continue;
+        }
+        if (name.len == "_subs".len) {
+            std.debug.print(
+                "Error: {s} imports the bare '_subs' name; expected \"<package>_subs\".\n",
+                .{rel_path},
+            );
+            return error.BareSubsImport;
+        }
+        if (close >= line.len or line[close] != ')') {
+            i = close;
+            continue;
+        }
+        const dot = close + 1;
+        if (dot + 1 > line.len or line[dot] != '.') {
+            std.debug.print(
+                "Error: {s} imports '{s}' without the inline `.array` field access (e.g. `@import(\"{s}\").subs`); the generated registry's array name comes from it.\n",
+                .{ rel_path, name, name },
+            );
+            return error.SubsWithoutArrayField;
+        }
+        const field_start = dot + 1;
+        var field_end = field_start;
+        while (field_end < line.len and isIdentByte(line[field_end])) : (field_end += 1) {}
+        if (field_end == field_start) {
+            i = dot;
+            continue;
+        }
+        try out.append(b.allocator, .{
+            .package = try b.allocator.dupe(u8, name[0 .. name.len - "_subs".len]),
+            .array = try b.allocator.dupe(u8, line[field_start..field_end]),
+        });
+        i = field_end - 1;
+    }
+}
+
+/// Identifier byte for the `.field` parse in `parseSubsConsumers`.
+fn isIdentByte(c: u8) bool {
+    return c == '_' or std.ascii.isAlphanumeric(c);
+}
 
 /// True when `rel_path` declares the top-level binding `pub const <binding>`
 /// -- the self-declaring role marker that turns a package sibling into a
@@ -1275,7 +1435,23 @@ fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bo
     return false;
 }
 
-/// Filters one `sub_registry_spec`'s package siblings to those that
+/// True when `rel_path` declares the top-level `pub fn segmentFor` -- the
+/// promotion hook a `bar_segments` package core exports so each bound sub
+/// reaches `bar_modules` as its own individually-configurable segment (see
+/// `SubRegistrySpec.bar_segments`). Comment lines are skipped, mirroring
+/// `declaresBinding`.
+fn declaresSegmentFor(b: *std.Build, rel_path: []const u8) !bool {
+    var scan = try SourceScanner.open(b, rel_path);
+    defer scan.close();
+    var it = scan.lines();
+    while (it.next()) |trimmed| {
+        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        if (std.mem.startsWith(u8, trimmed, "pub fn segmentFor")) return true;
+    }
+    return false;
+}
+
+/// Filters one `SubRegistrySpec`'s package siblings to those that
 /// SELF-DECLARE the binding (`pub const <binding>`), sorts them
 /// alphabetically, caches them (duped, sorted) in `out` keyed by the
 /// package, and returns the map entry pointer (null when the package itself
@@ -1291,7 +1467,7 @@ fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bo
 fn boundSubStems(
     b: *std.Build,
     discovery: *const Module.DiscoveryContext,
-    spec: anytype,
+    spec: SubRegistrySpec,
     out: *std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
 ) !?*std.ArrayListUnmanaged([]const u8) {
     if (!discovery.modules.contains(spec.package)) return null;
@@ -1328,7 +1504,7 @@ const OwnerEntry = struct {
 /// loops and never name a sub-system module. The bar registry additionally
 /// appends -- AFTER the module-declaring stems, never intermixed -- one
 /// `segmentFor(i)` entry per bound sub of each `bar_segments` package (see
-/// `sub_registry_specs`): those packages no longer bind an aggregate belt
+/// `SubRegistrySpec`): those packages no longer bind an aggregate belt
 /// module, so their readouts/controls reach `bar_modules` only as these
 /// derived entries. Committed source is behaviour-identical across presence
 /// combinations; deleting a sub-system's file only regenerates a shorter
@@ -1340,6 +1516,7 @@ fn buildOwnerRegistries(
     optimize: std.builtin.OptimizeMode,
     registry: *OwnerRegistry,
     bound_subs: *const std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+    sub_specs: []const SubRegistrySpec,
 ) !std.StringHashMapUnmanaged(*std.Build.Module) {
     var out = std.StringHashMapUnmanaged(*std.Build.Module){};
     var it = registry.owners.iterator();
@@ -1352,6 +1529,7 @@ fn buildOwnerRegistries(
             std.mem.eql(u8, entry.key_ptr.*, "bar"),
             entry.value_ptr.*.items,
             bound_subs,
+            sub_specs,
         );
         const mod = try buildOwnerRegistryModule(
             b,
@@ -1371,14 +1549,16 @@ fn buildOwnerRegistries(
 /// `@import("<stem>").module` per owner stem (module-declaring only, see
 /// `OwnerRegistry.run`); a bar registry additionally appends one
 /// `@import("<package>").segmentFor(k)` per bound sub of each `bar_segments`
-/// package, iterated in `sub_registry_specs` order and, within a package, in
-/// the same sorted order as its generated `<package>_subs` registry
-/// (`k` == `subs[k]`; both consume `bound_subs`).
+/// package, iterated in `SubRegistrySpec` order (sorted by package name)
+/// and, within a package, in the same sorted order as its generated
+/// `<package>_subs` registry (`k` == `subs[k]`; both consume
+/// `bound_subs`).
 fn ownerModuleEntries(
     b: *std.Build,
     is_bar: bool,
     stems: []const []const u8,
     bound_subs: *const std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
+    sub_specs: []const SubRegistrySpec,
 ) !std.ArrayListUnmanaged(OwnerEntry) {
     var entries = std.ArrayListUnmanaged(OwnerEntry).empty;
     for (stems) |stem| {
@@ -1388,7 +1568,7 @@ fn ownerModuleEntries(
         });
     }
     if (is_bar) {
-        for (sub_registry_specs) |spec| {
+        for (sub_specs) |spec| {
             if (!spec.bar_segments) continue;
             const subs = bound_subs.get(spec.package) orelse continue;
             for (subs.items, 0..) |_, k| {
@@ -1531,9 +1711,10 @@ fn buildOwnerRegistryModule(
 /// `prompt/vim.zig` beside prompt.zig, `title/carousel.zig` beside
 /// title.zig). Lists every discovered sibling that SELF-DECLARES the binding
 /// (`pub const <binding>`) as the package's addon binding value (`sub`,
-/// `addon`, ...) in the contract element `contract` (e.g. `prompt.Addon`),
-/// in deterministic alphabetical stem order. A sibling without the binding is
-/// a private implementation file and is left out of the registry entirely.
+/// `addon`, ...) in the contract element `contract` (the package core's
+/// `Binding` alias), in deterministic alphabetical stem order. A sibling
+/// without the binding is a private implementation file and is left out of
+/// the registry entirely.
 /// Consumed by the package core via `@import("<package>_subs")`, mirroring
 /// `bar_modules` for the bar's segments: file presence fully drives
 /// membership, so adding or removing a sibling regenerates the array with

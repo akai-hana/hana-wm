@@ -139,6 +139,11 @@ pub const Sub = struct {
     probeNaturalWidth: u16 = 44,
 };
 
+/// The registry-facing spelling of this contract: build.zig types the
+/// generated `slider_subs` array through it, so the generated module
+/// never names the concrete struct (`Sub`) or a sibling's import alias.
+pub const Binding = Sub;
+
 /// Linear slider mapping across a slot. Lifted to `bar/level.zig`: it
 /// is not a slider concept -- every horizontal meter needs it -- and the
 /// zero-width-slot rule and the far-edge saturation had to be right in

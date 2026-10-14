@@ -51,6 +51,11 @@ pub const Sub = struct {
     read: *const fn () ?Sample,
 };
 
+/// The registry-facing spelling of this contract: build.zig types the
+/// generated `systatus_subs` array through it, so the generated module
+/// never names the concrete struct (`Sub`) or a sibling's import alias.
+pub const Binding = Sub;
+
 /// One reading from a readout, carrying its DISPLAY text.
 ///
 /// This used to be `?u8` -- a bare 0-100 percent -- and the core hardcoded
