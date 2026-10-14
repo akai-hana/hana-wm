@@ -137,7 +137,15 @@ run_scenario() {
 
     local dest="$TEMP_BASE/$name"
     setup_copy "$dest"
-    remove_paths "$dest" "${paths[@]}"
+    # A stale scenario path makes remove_paths fail; under `set -e` that aborted
+    # the whole matrix without running the scenario's own pass/fail report, so a
+    # leftover entry in this script took every *other* scenario down with it.
+    if ! remove_paths "$dest" "${paths[@]}"; then
+        printf "\x1b[31mFAIL${RESET} (remove_paths: stale path in scenario)\n"
+        FAILED_SCENARIOS+=("$name")
+        ((SKIP_COUNT++)) || true
+        return 0
+    fi
 
     printf "  %-55s " "$name"
 
