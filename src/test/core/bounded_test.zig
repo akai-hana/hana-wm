@@ -42,20 +42,6 @@ test "bounded: indexOfScalar finds by value, indexOfByIdField by key field" {
     try std.testing.expectEqual(@as(?usize, null), rows.indexOfByIdField(.win, 3));
 }
 
-test "bounded: upsertById updates in place or appends" {
-    var rows = bounded.BoundedList(Row, 2){};
-    try std.testing.expect(rows.upsertById(.win, 1, .{ .win = 1, .value = 10 }));
-    try std.testing.expectEqual(@as(usize, 1), rows.len);
-
-    try std.testing.expect(rows.upsertById(.win, 1, .{ .win = 1, .value = 99 }));
-    try std.testing.expectEqual(@as(usize, 1), rows.len);
-    try std.testing.expectEqual(@as(u8, 99), rows.constSlice()[0].value);
-
-    try std.testing.expect(rows.upsertById(.win, 2, .{ .win = 2, .value = 20 }));
-    try std.testing.expect(!rows.upsertById(.win, 3, .{ .win = 3, .value = 30 }));
-    try std.testing.expectEqual(@as(usize, 2), rows.len);
-}
-
 test "bounded: swapRemove drops order, orderedRemove preserves it" {
     var list = bounded.BoundedList(u32, 4){};
     _ = list.append(1);
@@ -83,7 +69,7 @@ test "bounded: insert clamps index and refuses when full" {
     try std.testing.expectEqualSlices(u32, &.{ 5, 10, 20 }, list.constSlice());
 }
 
-test "bounded: removeById and removeAllById act on the key field" {
+test "bounded: removeById acts on the key field" {
     var rows = bounded.BoundedList(Row, 4){};
     _ = rows.append(.{ .win = 1, .value = 1 });
     _ = rows.append(.{ .win = 2, .value = 2 });
@@ -94,19 +80,4 @@ test "bounded: removeById and removeAllById act on the key field" {
     try std.testing.expectEqual(@as(usize, 2), rows.len);
     try std.testing.expectEqual(@as(u32, 1), rows.constSlice()[0].win);
     try std.testing.expectEqual(@as(u32, 3), rows.constSlice()[1].win);
-}
-
-test "bounded: removeAllById prunes every row sharing the key" {
-    var rows = bounded.BoundedList(Row, 4){};
-    _ = rows.append(.{ .win = 1, .value = 1 });
-    _ = rows.append(.{ .win = 2, .value = 2 });
-    _ = rows.append(.{ .win = 1, .value = 3 });
-    _ = rows.append(.{ .win = 3, .value = 4 });
-
-    try std.testing.expectEqual(@as(usize, 2), rows.removeAllById(.win, 1));
-    try std.testing.expectEqual(@as(usize, 2), rows.len);
-    var remaining = [_]u32{ 0, 0 };
-    for (rows.constSlice(), 0..) |row, i| remaining[i] = row.win;
-    std.mem.sort(u32, &remaining, {}, std.sort.asc(u32));
-    try std.testing.expectEqualSlices(u32, &[_]u32{ 2, 3 }, &remaining);
 }

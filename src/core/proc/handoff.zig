@@ -46,40 +46,17 @@ pub const ext_format_version: u8 = 2;
 /// Header byte length for a name-stamped blob: version + name length + the
 /// name itself. The name is variable-length, so this is a function of the
 /// module name rather than a constant -- a fixed 2-byte ordinal header is
-/// what [3.11] removed.
-pub fn extHeaderLen(name_len: usize) usize {
+/// what [3.11] removed. Shared by the writer (save path) and `decodeExt`.
+fn extHeaderLen(name_len: usize) usize {
     return 2 + name_len;
-}
-
-/// Byte offset of the payload for a blob stamped at `header`, or null when
-/// `header` is too short for the length it claims. A truncated or foreign
-/// header must not slice out of bounds, so the check is here rather than at
-/// the two call sites.
-pub fn extPayload(header: []const u8) ?[]const u8 {
-    if (header.len < 2) return null;
-    if (header[0] == ext_format_version) {
-        const name_len: usize = header[1];
-        const len = extHeaderLen(name_len);
-        if (header.len < len) return null;
-        return header[len..];
-    }
-    // Legacy ordinal header: [version=1][ordinal]. Still read, so a session
-    // saved by the previous format is adopted rather than silently dropped.
-    if (header[0] == ext_format_version_ordinal) {
-        if (header.len < 2) return null;
-        return header[2..];
-    }
-    return null;
 }
 
 /// One blob's decoded header: the payload to hand a module, plus WHICH module
 /// the header claims, if any. (9.10)
 ///
-/// The three accessors above each re-derive the header length from the same two
-/// bytes, so a caller that wants all of them re-parses the blob up to three
-/// times and has to know they agree. This is the one answer: `claimed` is a
-/// name, an ordinal, or neither, and a foreign or truncated header yields
-/// `payload = blob` -- passed through WHOLE, exactly as an unstamped blob was.
+/// `decodeExt` below is the ONLY place the on-disk header format is
+/// interpreted, so a format change is a change there rather than at every
+/// reader.
 const ExtHeader = struct {
     /// Bytes after the header. Equals `blob` verbatim when the header is not
     /// recognized, so the payload is always usable.
@@ -90,40 +67,35 @@ const ExtHeader = struct {
     legacy_ordinal: ?usize,
 };
 
-/// Decodes a stored ext blob's header in one pass. (9.10)
+/// Decodes a stored ext blob's header. (9.10)
 ///
-/// `blob` is the raw stored bytes. This is the ONLY place the on-disk header
-/// format is interpreted for the restore path, so a format change is a change
-/// here rather than at every reader.
+/// `blob` is the raw stored bytes: one length check and one version switch,
+/// so all three header facts come from a single parse and cannot disagree
+/// with each other the way independent re-derivations can. A foreign or
+/// truncated header yields `payload = blob` -- passed through WHOLE, exactly
+/// as an unstamped blob was.
 pub fn decodeExt(blob: []const u8) ExtHeader {
-    return .{
-        .payload = extPayload(blob) orelse blob,
-        .claimed_name = extClaimantName(blob),
-        .legacy_ordinal = extLegacyOrdinal(blob),
-    };
-}
-
-/// The claimed module's `name`, for a name-stamped blob, or null when the
-/// blob is legacy, foreign, or truncated.
-pub fn extClaimantName(header: []const u8) ?[]const u8 {
-    if (header.len < 2 or header[0] != ext_format_version) return null;
-    const name_len: usize = header[1];
-    const len = extHeaderLen(name_len);
-    if (header.len < len) return null;
-    return header[2..len];
-}
-
-/// The legacy header's registry ordinal, for a v1 blob, or null.
-pub fn extLegacyOrdinal(header: []const u8) ?usize {
-    if (header.len < 2 or header[0] != ext_format_version_ordinal) return null;
-    return header[1];
+    const miss = ExtHeader{ .payload = blob, .claimed_name = null, .legacy_ordinal = null };
+    if (blob.len < 2) return miss;
+    switch (blob[0]) {
+        ext_format_version => {
+            const len = extHeaderLen(blob[1]);
+            if (blob.len < len) return miss;
+            return .{ .payload = blob[len..], .claimed_name = blob[2..len], .legacy_ordinal = null };
+        },
+        // Legacy ordinal header: [version=1][ordinal]. Still read, so a
+        // session saved by the previous format is adopted rather than
+        // silently dropped.
+        ext_format_version_ordinal => return .{ .payload = blob[2..], .claimed_name = null, .legacy_ordinal = blob[1] },
+        else => return miss,
+    }
 }
 
 /// Longest module name a blob header can carry in its one length byte.
 const max_stamped_name_len: usize = 255;
 
 /// The pre-name blob format: `[version=1][registry ordinal]`. Still READ (see
-/// `extPayload`) so a v5 session file keeps its parked windows, never written.
+/// `decodeExt`) so a v5 session file keeps its parked windows, never written.
 pub const ext_format_version_ordinal: u8 = 1;
 
 /// Cap on the restore file's size. The file is a bounded JSON dump of the
@@ -171,15 +143,10 @@ const StateFile = struct {
 /// loadToGlobal call. Single-threaded (event-loop thread), like the model.
 var loaded_parsed: ?std.json.Parsed(StateFile) = null;
 
-/// Default restore path: XDG_RUNTIME_DIR is already per-user, so
-/// `$XDG_RUNTIME_DIR/hana-restore.json` needs no uid suffix; the /tmp
-/// fallback carries the uid to keep co-located users apart. Caller owns the
-/// returned slice.
+/// Default restore path; the shared XDG-/tmp-uid policy lives in
+/// paths.runtimeFile. Caller owns the returned slice.
 pub fn defaultStatePath(alloc: std.mem.Allocator) ![]u8 {
-    if (std.c.getenv("XDG_RUNTIME_DIR")) |dir| {
-        return std.fmt.allocPrint(alloc, "{s}/hana-restore.json", .{std.mem.span(dir)});
-    }
-    return std.fmt.allocPrint(alloc, "/tmp/hana-restore-{d}.json", .{std.os.linux.getuid()});
+    return paths.runtimeFile(alloc, "hana-restore", ".json");
 }
 
 /// Cold-boot housekeeping for the file this module owns. Adoption is gated on
@@ -462,7 +429,7 @@ pub fn loaded() ?*const StateFile {
 /// last resort as tiling.defaultKind. Runs only on the removed-layout path
 /// (applyModelLevel) where core is already initialized and config is live.
 fn resumableDefaultKind() u8 {
-    const layout_name = core.getState().config.tiling.layout;
+    const layout_name = core.getState().config.tiling.defaultLayout();
     return pipeline_mod.defaultIndexForLayoutName(config_mod.canonicalLayoutName(layout_name));
 }
 

@@ -1,17 +1,20 @@
-//! XCB modifier and event masks; separated from core constants to keep model
-//! XCB-free.
+//! Modifier masks, event masks, and the binding-mask helpers; a member of
+//! the pure shelf (src/core/pure/). The protocol constants are spelled as
+//! their X protocol values rather than `@import("xcb")` names so the shelf
+//! stays xcb-free by construction; src/test/core/masks_test.zig pins every
+//! literal against the XCB names, so a divergence fails there instead of
+//! silently changing grab/input behavior.
 
-const xcb = @import("xcb").xcb;
-
-// Modifier masks
-// Must be u16 as per XCB API
-pub const mod_shift: u16 = xcb.XCB_MOD_MASK_SHIFT;
-pub const mod_capslock: u16 = xcb.XCB_MOD_MASK_LOCK;
-pub const mod_control: u16 = xcb.XCB_MOD_MASK_CONTROL;
-pub const mod_alt: u16 = xcb.XCB_MOD_MASK_1;
-pub const mod_numlock: u16 = xcb.XCB_MOD_MASK_2;
-pub const mod_scrolllock: u16 = xcb.XCB_MOD_MASK_3;
-pub const mod_super: u16 = xcb.XCB_MOD_MASK_4;
+// Modifier masks (X protocol: Shift=1<<0, Lock=1<<1, Control=1<<2,
+// Mod1..Mod5=1<<3..1<<7; Mod2 carries NumLock, Mod3 ScrollLock, Mod4 Super).
+// u16 as required by the XCB API's modifier fields.
+pub const mod_shift: u16 = 1 << 0;
+pub const mod_capslock: u16 = 1 << 1;
+pub const mod_control: u16 = 1 << 2;
+pub const mod_alt: u16 = 1 << 3;
+pub const mod_numlock: u16 = 1 << 4;
+pub const mod_scrolllock: u16 = 1 << 5;
+pub const mod_super: u16 = 1 << 6;
 
 // Modifier keysym band. X11 reserves XK_Shift_L..XK_Hyper_R (0xFFE1..0xFFEE)
 // for modifier keys; the check widens that band by one key on each side (none
@@ -80,17 +83,23 @@ pub const EventMasks = struct {
     //    receives — without the release bit, the detectable-auto-repeat
     //    press/release stream in input.zig would still work for presses but
     //    releases would be lost).
-    pub const root_window = xcb.XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-        xcb.XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
-        xcb.XCB_EVENT_MASK_KEY_PRESS |
-        xcb.XCB_EVENT_MASK_KEY_RELEASE |
-        xcb.XCB_EVENT_MASK_BUTTON_PRESS |
-        xcb.XCB_EVENT_MASK_BUTTON_RELEASE |
-        xcb.XCB_EVENT_MASK_POINTER_MOTION |
-        xcb.XCB_EVENT_MASK_ENTER_WINDOW |
-        xcb.XCB_EVENT_MASK_LEAVE_WINDOW |
-        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY | // DWM: StructureNotifyMask
-        xcb.XCB_EVENT_MASK_PROPERTY_CHANGE;
+    // X protocol EventMask bits: KeyPress=1<<0, KeyRelease=1<<1,
+    // ButtonPress=1<<2, ButtonRelease=1<<3, EnterWindow=1<<4,
+    // LeaveWindow=1<<5, PointerMotion=1<<6, KeymapState=1<<14,
+    // Exposure=1<<15, VisibilityChange=1<<16, StructureNotify=1<<17,
+    // ResizeRedirect=1<<18, SubstructureNotify=1<<19,
+    // SubstructureRedirect=1<<20, FocusChange=1<<21, PropertyChange=1<<22.
+    pub const root_window: u32 = 1 << 20 | // SubstructureRedirect
+        1 << 19 | // SubstructureNotify
+        1 << 0 | // KeyPress
+        1 << 1 | // KeyRelease
+        1 << 2 | // ButtonPress
+        1 << 3 | // ButtonRelease
+        1 << 6 | // PointerMotion
+        1 << 4 | // EnterWindow
+        1 << 5 | // LeaveWindow
+        1 << 17 | // StructureNotify (DWM: StructureNotifyMask)
+        1 << 22; // PropertyChange
 
     // DWM verbatim (manage() in dwm.c): EnterWindow|FocusChange|PropertyChange|
     // StructureNotify via XSelectInput; buttons via XGrabButton (grabbuttons).
@@ -100,10 +109,10 @@ pub const EventMasks = struct {
     // focused-window buttons via the focus-specific grabs. Adding it here would
     // deliver button events through both mechanisms, duplicating events and
     // interfering with SYNC-mode grab sequencing.
-    pub const managed_window = xcb.XCB_EVENT_MASK_ENTER_WINDOW | // DWM: EnterWindowMask
-        xcb.XCB_EVENT_MASK_FOCUS_CHANGE | // DWM: FocusChangeMask
-        xcb.XCB_EVENT_MASK_PROPERTY_CHANGE | // DWM: PropertyChangeMask
-        xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY; // DWM: StructureNotifyMask
+    pub const managed_window: u32 = 1 << 4 | // EnterWindow (DWM: EnterWindowMask)
+        1 << 21 | // FocusChange (DWM: FocusChangeMask)
+        1 << 22 | // PropertyChange (DWM: PropertyChangeMask)
+        1 << 17; // StructureNotify (DWM: StructureNotifyMask)
 };
 
 /// The four modifiers a binding can be expressed in, as a 4-bit value.

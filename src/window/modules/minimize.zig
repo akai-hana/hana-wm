@@ -61,9 +61,7 @@ var g_seq: u32 = 0;
 
 pub fn minimize(m: *model.Model, win: model.WindowId) MinimizeError!void {
     if (isMinimized(m, win)) return; // idempotent
-    // Unknown window: nothing to park and no record to keep. parkEntry used to
-    // return null here, but minimize appended the rec regardless, leaving a
-    // phantom record for an id no window owned.
+    // Unknown window: nothing to park and no record to keep.
     if (m.store.get(win) == null) return;
     // Capacity check BEFORE any mutation.
     if (g_recs.len >= MAX_MINIMIZED) return error.CapacityFull;

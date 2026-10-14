@@ -5,9 +5,22 @@
 //! it, so the two cannot drift). Consumers: config/fallback and
 //! prompt/completion walk the probe order; config/discover resolves
 //! `configHome`; the prompt history and the session restore file share
-//! `restricted_file_mode`.
+//! `restricted_file_mode`; the re-exec snapshot and the restore file share
+//! `runtimeFile`.
 
 const std = @import("std");
+
+/// Runtime-dir file path, the ONE policy for per-session state files:
+/// `$XDG_RUNTIME_DIR/{base}{ext}` when set (already per-user, so no uid
+/// suffix), else `/tmp/{base}-{uid}{ext}` so co-located users stay apart.
+/// The uid suffix in the fallback is load-bearing. Callers own the returned
+/// slice. Deliberately NOT used by native_pulse's socket probe: PulseAudio's
+/// `/run/user/{uid}` fallback is a different convention, not this policy.
+pub fn runtimeFile(alloc: std.mem.Allocator, base: []const u8, ext: []const u8) ![]u8 {
+    if (std.c.getenv("XDG_RUNTIME_DIR")) |dir|
+        return std.fmt.allocPrint(alloc, "{s}/{s}{s}", .{ std.mem.span(dir), base, ext });
+    return std.fmt.allocPrint(alloc, "/tmp/{s}-{d}{s}", .{ base, std.os.linux.getuid(), ext });
+}
 
 /// Directories probed BEFORE the general $PATH walk: the handful of
 /// well-known install locations checked first, in probe order. A dir
@@ -70,7 +83,7 @@ pub fn exeInDir(buf: []u8, dir: []const u8, name: []const u8) bool {
 }
 
 /// XDG config-home resolution, the one place that policy lives (it was inline
-/// in config.searchPaths, which is the only caller but is not the right owner
+/// in discover.searchPaths, which is the only caller but is not the right owner
 /// for a rule about environment variables).
 ///
 /// `$XDG_CONFIG_HOME` wins when set AND non-empty; otherwise `$HOME/.config`.

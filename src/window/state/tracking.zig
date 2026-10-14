@@ -48,15 +48,11 @@ pub fn isManaged(win: u32) bool {
 /// Read-only SNAPSHOT of the model registry into the CALLER's buffer,
 /// returning the filled prefix. Do not retain across mutations.
 ///
-/// The buffer is caller-owned on purpose. This used to be one module-level
-/// array, which was the last global mutable scratch in the window layer: it
-/// was correct only because every walk is short and non-reentrant, and any
-/// future call made from inside another's loop would have had its snapshot
-/// overwritten mid-iteration. A caller now passes its own State-local array,
-/// so the aliasing is not expressible. The old `@min(count, buf.len)` clamp is
-/// an assert instead: silently returning a SHORT snapshot reads like "those
-/// are all the windows", which is the bug this whole function is shaped to
-/// avoid.
+/// The buffer is caller-owned on purpose: each caller passes its own State-
+/// local array, so the aliasing is not expressible. Silently returning a
+/// SHORT snapshot would read like "those are all the windows", which is the
+/// bug this whole function is shaped to avoid, so an undersized buffer is an
+/// assert rather than a clamp.
 pub fn allWindowsInto(buf: []Entry) []const Entry {
     const mm = m() orelse return &.{};
     const n = mm.store.count();
@@ -120,12 +116,8 @@ pub fn deinit() void {
 /// tracking query needs no separate storage. Null before pipeline.init
 /// (callers default to workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
-    // core.isModelReady() and nothing else: this file used to answer "is
-    // the model live?" through its own modelReady() facade over
-    // pipeline.initialized() -- three spellings of one question tree-wide
-    // (the 11.9 fix collapsed this file's two; the KISS audit folded the
-    // remaining facade pair by deleting both). One spelling, defined by the
-    // one place whose doc explains why the gate exists.
+    // core.isModelReady() and nothing else: the model-live question has one
+    // spelling, and the place that owns it documents why the gate exists.
     if (!core.isModelReady()) return null;
     return pipeline.model().current.index;
 }
