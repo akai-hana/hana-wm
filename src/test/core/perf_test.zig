@@ -14,13 +14,12 @@
 
 const std = @import("std");
 const testing = std.testing;
-const model = @import("model");
-const constants = @import("constants");
+const model = @import("wm_state");
 const build_options = @import("build_options");
 const helpers = @import("helpers");
 const test_sink = @import("test_sink");
 
-const time = @import("time");
+const core = @import("core");
 // Bench marks only run (full iterations + timing output) under `-Dbench`.
 const ledger = @import("ledger");
 const reconcile = @import("reconcile");
@@ -35,7 +34,7 @@ const WSId = model.WSId;
 
 const makeModel = helpers.makeBareModel; // Bench: no module-store churn between iterations
 
-const nowNs = time.monotonicNs;
+const nowNs = core.monotonicNs;
 
 const regCur = helpers.regCur;
 
@@ -326,7 +325,7 @@ test "bench: fallbackFocusCandidate (50 wins)" {
 
 test "bench: store.get linear scan (max_tiled_windows, worst case)" {
     var m = makeModel();
-    const n = constants.max_tiled_windows;
+    const n = model.max_tiled_windows;
     try fill(&m, n);
 
     const iterations: usize = if (bench) 50_000 else 1;

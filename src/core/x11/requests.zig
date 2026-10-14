@@ -21,7 +21,7 @@ const Connection = xcbmod.Connection;
 const Screen = xcbmod.Screen;
 
 const atoms = @import("atoms");
-const model = @import("model");
+const model = @import("wm_state");
 const masks = @import("masks");
 const log = @import("log");
 

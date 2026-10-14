@@ -4,14 +4,14 @@
 //! model pipeline lives in architecture/model.zig and tiling/.
 
 const std = @import("std");
-const model_mod = @import("model");
+const model_mod = @import("wm_state");
 const core = @import("core");
 const focus = @import("focus");
 const xcb_sink = @import("sink");
 const usable_area = @import("usable_area");
 const build_options = @import("build_options");
 const log = @import("log");
-const time = @import("time");
+const profile = @import("profile");
 
 /// Layout registry (build-generated); the active layout is a `u8` index into
 /// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
@@ -46,13 +46,13 @@ pub fn clearFocusMru() void {
 /// is `*const`, so any attempt to write through this handle is a compile
 /// error: the compiler is the mutation tripwire, and it is the ONLY real one
 /// this layer ever had (see `mut`).
-pub inline fn model() *const model_mod.Model {
-    if (!core.isModelReady()) @panic("pipeline.model() called before init()");
+pub inline fn state() *const model_mod.Model {
+    if (!core.isModelReady()) @panic("pipeline.state() called before init()");
     return &instance;
 }
 
 /// MUTABLE access to the WM model. The enforcement is the type split itself:
-/// readers take `*const` from `model()`, writers explicitly opt into `mut()`.
+/// readers take `*const` from `state()`, writers explicitly opt into `mut()`.
 /// Zero-cost.
 ///
 /// Deliberately bumps NO fact revision: the bump policy (why fact revs stay
@@ -69,17 +69,17 @@ pub inline fn mut() *model_mod.Model {
 /// name resolution pre-init. An unresolvable config name (removed module,
 /// unknown spelling) is loud, never silent.
 pub inline fn getCurrentLayout() u8 {
-    if (core.isModelReady()) return model().ws[model().current.index].params.kind;
+    if (core.isModelReady()) return state().ws[state().current.index].params.kind;
     return defaultIndexForLayoutName(core.getState().config.tiling.defaultLayout());
 }
 
 /// Returns the current workspace's active tiling variant index (see
 /// model.WSParams.variant_idx) from the live model state, checked at the one
 /// place that already owns the workspace-index rule. A bar module used to
-/// hand-walk `model().ws[model().current.index].params.variant_idx` itself,
+/// hand-walk `state().ws[state().current.index].params.variant_idx` itself,
 /// duplicating this lookup AND its unchecked @intCast; now it asks.
 pub inline fn getCurrentVariantIdx() usize {
-    return @intCast(model().ws[model().current.index].params.variant_idx);
+    return @intCast(state().ws[state().current.index].params.variant_idx);
 }
 
 /// Resolves a config layout name to a registry index (see
@@ -155,7 +155,7 @@ fn ctx() *reconcile.Ctx {
         // Resolved ONCE here, through the same call the bar uses, so
         // geometry and the bar's "no layout" report can never disagree.
         .layout_active = contract.activeLayoutKind(
-            model().ws[model().current.index].params.kind,
+            state().ws[state().current.index].params.kind,
             core.tilingEnabled(),
         ) != null,
     };
@@ -178,7 +178,7 @@ fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
 fn preReconcileDuties() void {
     if (!build_options.has_tiling) return;
     // Internal choke point: touches the private `instance` directly (not via
-    // model()/mut()) because this is the model owner applying the active
+    // state()/mut()) because this is the model owner applying the active
     // layout's pure pre-reconcile delta (value-in, value-out -- no layout
     // module receives a mutable pointer into the model anymore).
     //
@@ -319,7 +319,7 @@ pub fn grabOnly() ScopedGrab {
 /// This lived in `reconcile` next to the grab bracket it instrumented
 /// The bracket belongs to the pipeline, so the measurement of the
 /// bracket belongs here with it.
-const retile_prof = log.WindowedProfiler(
+const retile_prof = profile.WindowedProfiler(
     build_options.profile_key,
     "[RETILE_PROF] last {} grab-retiles: avg={d:.0}ns min={d}ns max={d}ns",
     std.log.info,
@@ -345,8 +345,8 @@ const retile_prof = log.WindowedProfiler(
 /// outer grab. There is exactly one bracket now, and the profiler wraps it.
 pub inline fn reconcileGrab(o: reconcile.Opts) void {
     core.window.bump();
-    const t0: i128 = if (retile_prof.enabled) time.monotonicNs() else 0;
-    defer if (retile_prof.enabled) retile_prof.note(time.monotonicNs() - t0);
+    const t0: i128 = if (retile_prof.enabled) core.monotonicNs() else 0;
+    defer if (retile_prof.enabled) retile_prof.note(core.monotonicNs() - t0);
     const g = grabScoped();
     defer g.deinit();
     reconcile.run(&instance, g.c.?, o);

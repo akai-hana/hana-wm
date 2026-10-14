@@ -15,7 +15,7 @@
 //! a section of types.zig.
 
 const std = @import("std");
-const model = @import("model");
+const model = @import("wm_state");
 
 pub const Dir = enum { forward, reverse };
 pub const SwapMode = enum { normal, focus_swap };
@@ -111,7 +111,7 @@ pub const Action = union(enum) {
 ///
 /// Why only these three, when `set_master_width`, `swap_master`,
 /// `move_window_*` and `scroll_view` also mutate the layout: those reconcile
-/// inside the action itself (`actions.adjustPrimaryWidthAction` and friends
+/// inside the command itself (`window.adjustPrimaryWidthAction` and friends
 /// each end in `pipeline.reconcileGrab`) and never move focus, so there is no
 /// transient focus event to suppress and no settle grab owed. The three
 /// grafted tags DO move focus as a side effect -- toggling float and cycling

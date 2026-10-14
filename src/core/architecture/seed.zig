@@ -3,13 +3,13 @@
 //! (layout registry ids, per-layout `variant_parse`) and the primary-count
 //! clamp; the stamping loop itself is `model.applyConfigReload`, the reload
 //! reconcile is `pipeline.reconcileGrab`. Callers: `main` (boot, before the
-//! first reconcile) and `loop/reload` (post-swap re-seed). The window-layer
-//! action half — layout cycling, variant stepping, primary/swap — stays in
-//! `actions/layout_params.zig`.
+//! first reconcile) and `config/reload` (post-swap re-seed). The window-layer
+//! command half — layout cycling, variant stepping, primary/swap — lives in
+//! `window/sync/reconcile_tails.zig`.
 
 const core = @import("core");
 const types = @import("types");
-const model_mod = @import("model");
+const model_mod = @import("wm_state");
 const pipeline = @import("pipeline");
 const tiling = @import("tiling_seam").tiling;
 const contract = @import("contract");

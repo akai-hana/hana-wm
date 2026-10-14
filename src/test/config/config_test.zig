@@ -17,8 +17,8 @@ const testing = std.testing;
 // src/core/pure/log.zig silences all std.log diagnostics in test binaries,
 // so this stays quiet on success.
 const config = @import("config");
-const constants = @import("constants");
-const paths = @import("paths");
+const model = @import("wm_state");
+const discover = @import("discover");
 const scaling = @import("scaling");
 const scratch = @import("scratch");
 const log = @import("log");
@@ -469,7 +469,7 @@ test "A config that parses but fails validate falls back at BOOT" {
     try config.validate(&booted);
     // The fallback's own master width (55%), not the impossible 500%.
     try testing.expect(booted.tiling.master_width.is_percentage);
-    try testing.expect(scaling.asRatio(booted.tiling.master_width) <= constants.max_master_width);
+    try testing.expect(scaling.asRatio(booted.tiling.master_width) <= model.max_master_width);
 }
 
 test "An EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
@@ -480,17 +480,17 @@ test "An EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
     // RELATIVE path "hana" -- the config search silently became relative to the
     // working directory, so the same config tree gave two different WMs
     // depending on where hana was started.
-    const from_empty = try paths.configHome(&buf, "", "/home/u");
+    const from_empty = try discover.configHome(&buf, "", "/home/u");
     try testing.expectEqualStrings("/home/u/.config", from_empty);
     try testing.expect(std.fs.path.isAbsolute(from_empty));
 
     // Set and non-empty: wins over HOME, as the spec says.
-    const from_xdg = try paths.configHome(&buf, "/xdg/here", "/home/u");
+    const from_xdg = try discover.configHome(&buf, "/xdg/here", "/home/u");
     try testing.expectEqualStrings("/xdg/here", from_xdg);
 
     // Unset, and the HOME-unset case the loader now warns about (it passes "/"
     // so the search stays absolute instead of collapsing to a bare "hana").
-    const from_home = try paths.configHome(&buf, null, "/");
+    const from_home = try discover.configHome(&buf, null, "/");
     try testing.expectEqualStrings("/.config", from_home);
     try testing.expect(std.fs.path.isAbsolute(from_home));
 }

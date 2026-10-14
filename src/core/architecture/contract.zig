@@ -9,13 +9,17 @@
 //! `contract_segment.zig` siblings merged here 2026-10 because their
 //! import-disjointness rationale did not hold (both reached `model`, shared
 //! with this entry) and the re-export indirection cost more than the split
-//! bought. Pure core vocabulary, no X11, no feature imports; the X-typed
-//! half (concrete `KeyPressEvent`, `Surfaces`) lives in `contract_x11.zig`
-//! and is the only sibling that may touch xcb types.
+//! bought. Pure core vocabulary, no X11, no feature imports. The X-typed
+//! vocabulary deliberately does NOT live beside it: the concrete key-press
+//! event is named and cast at its producer and consumer (bar.zig produces
+//! `core.xcb.xcb_key_press_event_t`, prompt.zig reads the fields back) and
+//! the `Surfaces` hook set is defined in bar.zig, its only binding site.
+//! Keeping both out is what lets this file sit inside check-layers.sh Rule
+//! 3's xcb sweep.
 
 const std = @import("std");
 const build_options = @import("build_options");
-const model = @import("model");
+const model = @import("wm_state");
 const types = @import("types");
 
 const bounded = @import("bounded");
@@ -123,15 +127,19 @@ pub const WindowModule = struct {
     /// binders. The build-generated `window_modules` registry asserts at
     /// comptime that each field below has <= 1 binder.
     pub const single_binder_hooks = [_][]const u8{
-        "hideWindow",          "restoreWindow",    "restoreCandidateOn",
-        "restoreOnWs",         "latestHiddenOnWs", "isWindowHidden",
-        "collectHiddenSet",    "toggleCovering",   "visibleCoveringOnWs",
-        "releaseCovering",     "moveCoveringTo",   "sendToWs",
-        "addToWs",             "removeFromWs",     "togglePin",
-        "toggleAllView",       "setFloatingRect",  "honorConfigureRequest",
-        "startDrag",           "stopDrag",         "updateDrag",
-        "isDragging",          "isResizingWindow", "getDragLastRect",
-        "cancelDragForWindow",
+        "hideWindow",             "restoreWindow",       "restoreCandidateOn",
+        "restoreOnWs",            "latestHiddenOnWs",    "isWindowHidden",
+        "collectHiddenSet",       "toggleCovering",      "visibleCoveringOnWs",
+        "releaseCovering",        "moveCoveringTo",      "sendToWs",
+        "addToWs",                "removeFromWs",        "togglePin",
+        "toggleAllView",          "setFloatingRect",     "honorConfigureRequest",
+        "startDrag",              "stopDrag",            "updateDrag",
+        "isDragging",             "isResizingWindow",    "getDragLastRect",
+        "cancelDragForWindow",    "switchWorkspace",     "moveToWorkspace",
+        "toggleTag",              "pinWindow",           "allWorkspaces",
+        "toggleFullscreenWindow", "setFullscreenWindow", "minimizeWindow",
+        "unminimize",             "unminimizeOrdered",   "unminimizeAll",
+        "toggleFloatingWindow",
     };
 
     /// The complementary half of the classification: `WindowModule` hooks whose
@@ -306,6 +314,54 @@ pub const WindowModule = struct {
     isResizingWindow: ?*const fn (u32) bool = null,
     getDragLastRect: ?*const fn () model.Rect = null,
     cancelDragForWindow: ?*const fn (u32) void = null,
+
+    // User-facing commands (the dissolved action layer).
+    //
+    // The old `src/actions/` hub held each command's WHOLE transition -- one
+    // model write plus the reconcile that follows it -- split off from the
+    // module that owns the state it writes. The commands now live in that
+    // module, and these hooks are how the core/input and bar call sites
+    // reach them: the core never names an optional module directly, so a
+    // tree without the module simply has no binder and the command no-ops
+    // (exactly what the old `providerOf(...) orelse return` guards did).
+    // Command hooks take no `*model.Model`: the command resolves the live
+    // model through the pipeline itself, which is what makes it a command
+    // rather than a model transition.
+
+    // Workspace commands (workspaces module).
+    /// Switch the viewed workspace to `ws` (the `switch_workspace` bind).
+    switchWorkspace: ?*const fn (u8) void = null,
+    /// Move a window to a single tag (`move_to_workspace`).
+    moveToWorkspace: ?*const fn (model.WindowId, u8) void = null,
+    /// Toggle tag `ws` on a window (`toggle_tag`); `protect_current` keeps
+    /// the current-workspace bit on add.
+    toggleTag: ?*const fn (model.WindowId, u8, bool) void = null,
+    /// Pin/unpin a window across all tags (`pin_window`).
+    pinWindow: ?*const fn (model.WindowId) void = null,
+    /// Enter/exit all-workspaces view (`all_workspaces`).
+    allWorkspaces: ?*const fn () void = null,
+
+    // Screen-covering commands (fullscreen module).
+    /// Toggle a window between present and covering (`toggle_fullscreen`).
+    toggleFullscreenWindow: ?*const fn (model.WindowId) void = null,
+    /// The SET form of the same transition, for EWMH requests that carry the
+    /// intended end state (`want` null = flip).
+    setFullscreenWindow: ?*const fn (model.WindowId, ?bool) void = null,
+
+    // Hide/restore commands (minimize module).
+    /// Park the focused window (`minimize_window`); null focus = no-op.
+    minimizeWindow: ?*const fn (?model.WindowId) void = null,
+    /// Restore one specific hidden window (title-bar click path).
+    unminimize: ?*const fn (model.WindowId) void = null,
+    /// Restore the next hidden window in slot order (`unminimize`).
+    unminimizeOrdered: ?*const fn (model.RestoreOrder) void = null,
+    /// Restore every hidden window on the current workspace
+    /// (`unminimize_all`).
+    unminimizeAll: ?*const fn () void = null,
+
+    // Floating commands (floating module).
+    /// Toggle a window between tiled and floating (`toggle_floating_window`).
+    toggleFloatingWindow: ?*const fn (model.WindowId) void = null,
 };
 
 /// Dispatch primitives for every generated registry element type
@@ -409,13 +465,13 @@ pub const BarOverlay = struct {
 
 /// The X key-press event a segment's `handleKeypress` hook receives, opaque.
 ///
-/// The concrete struct lives in `contract_x11` (the X-aware half of the
-/// contract, which also holds `Surfaces`). Declaring it opaque here is what
-/// keeps this file importable by a non-X consumer -- a headless test, a
-/// config-only tool -- while still letting the one consumer that needs the
-/// fields (the prompt module) name the real type. An opaque type has no
-/// fields, so a hook that wants them must import `contract_x11` and cast,
-/// which is the correct place for that requirement to live.
+/// The concrete struct is `core.xcb.xcb_key_press_event_t`; bar.zig casts
+/// the real event INTO this opaque type where it is produced, and the prompt
+/// module casts back to the xcb type to read the fields. Declaring it opaque
+/// here is what keeps this file importable by a non-X consumer -- a headless
+/// test, a config-only tool -- while still letting the consumers name the
+/// real type on their side. An opaque type has no fields, so a hook that
+/// wants them must cast, and that requirement lives with the casters.
 pub const KeyPressEvent = opaque {};
 
 /// What a segment actually painted, returned rather than inferred.
@@ -600,10 +656,11 @@ pub const Segment = struct {
     // are bound by ordinary segments too -- prompt/systatus/slider for the
     // redraw request, prompt/title for the cache flush).
     //
-    // `KeyPressEvent` is OPAQUE here and the X struct in `contract_x11`: this
-    // file is X-free, so the field cannot name an xcb type. The bar casts the
-    // real event into it and is the only producer, so the one `@ptrCast` in
-    // the system sits where the value is produced. Prompt-only today:
+    // `KeyPressEvent` is OPAQUE here and the real xcb struct at the cast
+    // points (bar.zig produces it, prompt.zig reads it): this file is X-free,
+    // so the field cannot name an xcb type. The bar casts the real event into
+    // it and is the only producer, so the one producer-side `@ptrCast` sits
+    // where the value is produced. Prompt-only today:
     // `chromeHandleKeypress` is the single caller (bar.zig).
     handleKeypress: ?*const fn (*const KeyPressEvent, ?*const types.Action) bool = null,
     /// Module queued a redraw (width change, subprocess output, blink tick).
@@ -728,7 +785,7 @@ pub const Layout = struct {
     /// Parses a config VALUE-STRING (e.g. "lifo", "fifo", "gaps", "gapless",
     /// "relaxed", "rigid") into this layout's variant index (< variant_count),
     /// or null when the string is not one of its values. Config-driven
-    /// variant resolution calls this (see core/loop/seed.zig); a
+    /// variant resolution calls this (see core/architecture/seed.zig); a
     /// module that binds it decides which spellings map to which indices, so
     /// the variant tables are fully registry-driven. null = this layout does
     /// not accept per-variant value strings.

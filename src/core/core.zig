@@ -4,7 +4,6 @@
 const std = @import("std");
 
 const types = @import("types");
-const constants = @import("constants");
 const scaling = @import("scaling");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
@@ -37,17 +36,18 @@ pub const Screen = xcbmod.Screen;
 /// speak through `core`.
 pub const eventCast = xcbmod.eventCast;
 
-/// Alias of the canonical @import("ids").WindowId (xcb_window_t); see the
-/// ids.zig header for the single-definition rationale.
-pub const WindowId = @import("ids").WindowId;
-
-/// Workspace index wrapper. `model.WSId` is this same type; see the ids.zig
+/// Alias of the canonical `model.WindowId` (xcb_window_t); see the model
 /// header for the single-definition rationale.
-pub const WorkspaceId = @import("ids").WorkspaceId;
+pub const WindowId = @import("wm_state").WindowId;
 
-/// The single workspace-index range check (`ids.zig`); re-exported here so
-/// callers outside core speak the same predicate as `WorkspaceId.isValid`.
-pub const isValidWorkspaceIndex = @import("ids").isValidWorkspaceIndex;
+/// Workspace index wrapper. `model.WSId` is this same type; see the model
+/// header for the single-definition rationale.
+pub const WorkspaceId = @import("wm_state").WorkspaceId;
+
+/// The single workspace-index range check (model.isValidWorkspaceIndex);
+/// re-exported here so callers outside core speak the same predicate as
+/// `WorkspaceId.isValid`.
+pub const isValidWorkspaceIndex = @import("wm_state").isValidWorkspaceIndex;
 
 /// Why keyboard focus is temporarily withheld from a window.
 pub const FocusSuppressReason = enum {
@@ -70,7 +70,7 @@ pub const State = struct {
     /// wins over detection) and re-derived on a RandR size change. Default is
     /// the baseline so a build that somehow never sets it still reads a
     /// defined value; `main` always sets it before any surface exists.
-    dpi_info: f32 = constants.baseline_dpi,
+    dpi_info: f32 = baseline_dpi,
     config: *types.Config,
     /// Monotonic fact revisions, bumped by the module owning each fact (see
     /// Facts); consumers diff against their last-seen value to decide what
@@ -146,10 +146,10 @@ var state: ?State = null;
 /// by design: a headless fixture can have a model with no X connection, so
 /// "is State live" (isReady) and "is the model live" (this) are two facts.
 const Phase = enum {
-    /// No model yet: model()/mut() would panic.
+    /// No model yet: state()/mut() would panic.
     uninit,
     /// pipeline.init() has run: the model instance and its sink exist, so
-    /// model()/mut() are safe to call. Terminal.
+    /// state()/mut() are safe to call. Terminal.
     model_ready,
 };
 
@@ -172,7 +172,7 @@ pub inline fn isReady() bool {
     return state != null;
 }
 
-/// True once the model exists and model()/mut() are safe. The one answer
+/// True once the model exists and state()/mut() are safe. The one answer
 /// every model consumer reads.
 pub inline fn isModelReady() bool {
     return phase == .model_ready;
@@ -310,4 +310,48 @@ pub fn dpi() f32 {
 
 pub fn setDpi(v: f32) void {
     getState().dpi_info = v;
+}
+
+/// Standard DPI for a 1x display. All scale factors are computed relative to
+/// this value.
+pub const baseline_dpi: f32 = 96.0;
+
+// --- Clock reads -------------------------------------------------------------
+// Monotonic and wall-clock time, kept together so a caller picks the family
+// deliberately: `monotonic*` is wall-independent and is what deadlines and
+// frame deltas must use; `realtime*` is for displayed timestamps and expiry
+// against the wall clock. These used to live in a standalone `time` module,
+// but the two families are four tiny wrappers over one syscall and every
+// caller already spoke to (or could speak to) the hub, so they fold in here
+// rather than keeping a one-function module alive.
+
+// clock_gettime with a best-effort fallback to the other clock id (a
+// monotonic-realtime node or similar), then nanos.
+fn clockNs(clock_id: std.os.linux.clockid_t) u64 {
+    var ts: std.os.linux.timespec = undefined;
+    if (std.os.linux.clock_gettime(clock_id, &ts) != 0) {
+        const fallback_id: std.os.linux.clockid_t =
+            if (clock_id == .MONOTONIC) .REALTIME else .MONOTONIC;
+        if (std.os.linux.clock_gettime(fallback_id, &ts) != 0)
+            ts = .{ .sec = 0, .nsec = 0 };
+    }
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+pub inline fn monotonicNs() u64 {
+    return clockNs(.MONOTONIC);
+}
+
+/// Monotonic milliseconds (wall-independent; for deltas and deadlines).
+pub inline fn monotonicMs() i64 {
+    return @intCast(monotonicNs() / std.time.ns_per_ms);
+}
+
+/// Wall-clock milliseconds (for timestamps/expiry, not deltas).
+pub inline fn realtimeMs() i64 {
+    return @intCast(realtimeNs() / std.time.ns_per_ms);
+}
+
+pub inline fn realtimeNs() u64 {
+    return clockNs(.REALTIME);
 }

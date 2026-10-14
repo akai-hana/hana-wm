@@ -10,7 +10,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const binds = @import("binds");
-const keysyms = @import("keysyms");
+const keymap = @import("keymap");
 const masks = @import("masks");
 const parser = @import("parser");
 const types = @import("types");
@@ -21,7 +21,7 @@ fn load(a: std.mem.Allocator, cfg: *types.Config, src: []const u8) !void {
 }
 
 fn ks(name: []const u8) u32 {
-    return keysyms.keysymFromName(name);
+    return keymap.keysymFromName(name);
 }
 
 test "plain bind: modifier mask, keysym, exec fallback payload" {

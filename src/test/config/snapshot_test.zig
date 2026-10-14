@@ -15,7 +15,7 @@ const testing = std.testing;
 const config = @import("config");
 
 // libc bindings for setenv/chdir; the 0.16 stdlib has no wrappers for them,
-// mirroring the pattern restart.zig and events.zig already use.
+// mirroring the pattern process.zig and events.zig already use.
 const libc = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");

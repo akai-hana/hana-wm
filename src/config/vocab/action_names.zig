@@ -4,11 +4,15 @@
 //! verbs (`workspace_N`, `move_to_workspace_N`, `toggle_tag_N`),
 //! the `auto_terminal` substitution, and the exec-fallback typo
 //! warnings. Pure parsing -- the actions land on the Config via
-//! binds.zig, and input/keybind.zig turns them into keycodes at
+//! binds.zig, and core/input/keybinds.zig turns them into keycodes at
 //! buildKeybinds time.
 
 const std = @import("std");
-const constants = @import("constants");
+/// Largest 1-based workspace number tolerated by the action/command parser
+/// before subtracting 1. Command parsing is intentionally one more lenient
+/// than `types.max_workspace_number_1based`: `workspace_N` verbs map cleanly
+/// onto the top 1-based index (255 -> index 255 via 256 - 1).
+const max_workspace_command_1based = types.max_workspace_number_1based + 1;
 const fallback = @import("fallback");
 const log = @import("log");
 const types = @import("types");
@@ -121,7 +125,7 @@ pub const workspace_action_bases = std.StaticStringMap(void).initComptime(block:
 fn tryParseWorkspace(command: []const u8, prefix: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, command, prefix)) return null;
     const num = std.fmt.parseInt(usize, command[prefix.len..], 10) catch return null;
-    if (num < 1 or num > constants.max_workspace_command_1based) return null;
+    if (num < 1 or num > max_workspace_command_1based) return null;
     return @intCast(num - 1);
 }
 

@@ -2,7 +2,7 @@
 //! Reads model types and emits placements; no XCB and no allocation.
 
 const std = @import("std");
-const model = @import("model");
+const model = @import("wm_state");
 const log = @import("log");
 
 const contract = @import("contract");

@@ -1,7 +1,7 @@
 //! Fibonacci (spiral) tiling layout.
 //! Arranges windows in a clockwise spiral, each taking half the remaining screen area.
 
-const model = @import("model");
+const model = @import("wm_state");
 const tiling = @import("tiling");
 const shrinkCapped = tiling.shrinkCapped;
 const Region = tiling.Region;

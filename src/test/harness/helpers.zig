@@ -1,8 +1,8 @@
 const std = @import("std");
-const model = @import("model");
+const model = @import("wm_state");
 const build_options = @import("build_options");
 
-const time = @import("time");
+const core = @import("core");
 const reconcile = @import("reconcile");
 const sinkmod = @import("sink");
 const test_sink = @import("test_sink");
@@ -131,9 +131,9 @@ pub fn benchReconcile(m: *model.Model, iterations: usize) f64 {
     reconcile.run(m, &warm_ctx, .{});
     var bench = test_sink.TestSink(.category){};
     var bench_ctx = makeCtx(bench.sink(), colorOfFocused, std_wa);
-    const t0 = time.monotonicNs();
+    const t0 = core.monotonicNs();
     for (0..iterations) |_| reconcile.run(m, &bench_ctx, .{});
-    return @as(f64, @floatFromInt(time.monotonicNs() - t0)) / @as(f64, @floatFromInt(iterations));
+    return @as(f64, @floatFromInt(core.monotonicNs() - t0)) / @as(f64, @floatFromInt(iterations));
 }
 
 /// Standard test margin/min_dim tuning shared by the sync/tiling fixtures.

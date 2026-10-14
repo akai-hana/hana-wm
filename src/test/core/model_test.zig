@@ -9,8 +9,7 @@ const testing = std.testing;
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
 // warn-level overflow diagnostic; src/core/pure/log.zig silences all
 // std.log diagnostics in test binaries, so this stays quiet on success.
-const model = @import("model");
-const constants = @import("constants");
+const model = @import("wm_state");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
@@ -34,7 +33,7 @@ fn stepCycle(m: *Model, dir: i32) void {
 const Model = model.Model;
 const WindowId = model.WindowId;
 const WSId = model.WSId;
-const max_minimized = constants.max_minimized;
+const max_minimized = minimize.max_minimized;
 const SmallStore = model.Store(u32, u8, 2);
 
 /// Sentinel id for "a window that was never registered": every negative-path
@@ -836,12 +835,12 @@ test "adjustPrimaryWidth clamps" {
 }
 
 // Spawn path: on-current spawn tiles+focuses; off-current spawn tiles
-// on its target workspace but does NOT take focus (mirrors actions.mapRequest).
+// on its target workspace but does NOT take focus (mirrors admission.mapRequest).
 test "spawn admission tiles (on-current focused; off-current target-only)" {
     var m = makeModel();
 
     // On-current spawn: register(m, win, null) + setFocus (mirrors
-    // actions.mapRequest's on_current=true path).
+    // admission.mapRequest's on_current=true path).
     try model.register(&m, 1, null);
     model.setFocus(&m, 1);
     var e = m.store.get(1).?;

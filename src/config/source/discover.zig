@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const log = @import("log");
-const paths_mod = @import("paths");
 const parser = @import("parser");
 const types = @import("types");
 
@@ -361,6 +360,32 @@ pub const SearchAttempt = struct {
     is_dir: bool,
 };
 
+/// XDG config-home resolution, the one place that policy lives.
+///
+/// `$XDG_CONFIG_HOME` wins when set AND non-empty; otherwise `$HOME/.config`.
+/// An EMPTY value counts as unset, per the XDG spec and for a concrete reason:
+/// joining `""` with the app name yields a RELATIVE path, so `XDG_CONFIG_HOME=""`
+/// silently redirected the config search to the current working directory --
+/// a config that boots differently depending on where hana was started. The
+/// old `getenv`-is-non-null test took the empty string at face value and hit
+/// exactly that.
+///
+/// Writes into `buf` and returns the slice; `buf` is caller-owned so the
+/// previous arena-dupe-then-free dance disappears. Used to live in the
+/// dissolved `paths` module; discover's searchPaths is the only caller.
+pub fn configHome(buf: []u8, xdg: ?[]const u8, home: []const u8) ![]const u8 {
+    if (xdg) |x| {
+        if (x.len != 0) return std.fmt.bufPrint(buf, "{s}", .{x}) catch error.NameTooLong;
+    }
+    // The caller passes "/" for an unset HOME (so the result stays absolute),
+    // and a bare "{s}/.config" would then be "//.config" -- harmless, but it
+    // leaks into every warning and path comparison that mentions the config
+    // home. Join semantics, not string concatenation.
+    if (home.len != 0 and home[home.len - 1] == '/')
+        return std.fmt.bufPrint(buf, "{s}.config", .{home}) catch error.NameTooLong;
+    return std.fmt.bufPrint(buf, "{s}/.config", .{home}) catch error.NameTooLong;
+}
+
 pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     // An unset or empty HOME used to be taken as "/" with no word to the user,
     // so the search silently became `/.config/hana` and then `./config/` -- a
@@ -375,12 +400,12 @@ pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     };
     const xdg_config_home: ?[]const u8 = if (std.c.getenv("XDG_CONFIG_HOME")) |ch| blk: {
         const s = std.mem.span(ch);
-        // Empty means unset (XDG spec) -- see paths.configHome. Passing it on
+        // Empty means unset (XDG spec) -- see configHome. Passing it on
         // as-is would make the config dir relative to the cwd.
         break :blk if (s.len == 0) null else s;
     } else null;
     var ch_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const config_home = try paths_mod.configHome(&ch_buf, xdg_config_home, home);
+    const config_home = try configHome(&ch_buf, xdg_config_home, home);
     // Joined through a stack buffer and duped once: `fs.path.join` allocates its
     // result in the arena, and this is an intermediate (the owned copy below is
     // what SearchPaths returns), so an arena-allocated join would be freed only

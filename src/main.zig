@@ -8,8 +8,6 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const events = @import("events");
-const grabs = @import("grabs");
-const signals = @import("signals");
 const config = @import("config");
 const types = @import("types");
 const scale = @import("dpi");
@@ -19,19 +17,23 @@ const log = @import("log");
 // through the core-owned `surfaces` composition root, never by importing the
 // bar module here.
 const surfaces = @import("surfaces").Surfaces;
-const input = @import("input");
+// The input subsystem is no longer one facade: the composition root names
+// exactly the three pieces it sequences at boot (XKB lifecycle, bind
+// compilation + root grabs, cursor theming).
+const xkb = @import("xkb");
+const keybinds = @import("keybinds");
+const cursor = @import("cursor");
 
 /// The process allocator. One binding: a second `std.heap.c_allocator` spelling
 /// is a second place to change, and the two former sites disagreed about what
 /// they were even naming.
 const alloc = std.heap.c_allocator;
 const window = @import("window");
-const actions = @import("actions");
 const seed = @import("seed");
 const pipeline = @import("pipeline");
-const lifecycle = @import("lifecycle");
+const process = @import("process");
 const admission = @import("admission");
-const handoff = @import("handoff");
+const session = @import("session");
 const focus = @import("focus");
 
 const atoms = @import("atoms");
@@ -94,8 +96,8 @@ pub fn main(init: std.process.Init) !void {
     // first or Xft.dpi would never be read.
     try atoms.initAtomCache(x.conn);
 
-    try input.initXkb(x.conn);
-    defer input.deinitXkb();
+    try xkb.initXkb(x.conn);
+    defer xkb.deinitXkb();
 
     const loaded_config = try config.load(alloc);
 
@@ -130,19 +132,17 @@ pub fn main(init: std.process.Init) !void {
     // published the state: any earlier, getState() panics ("called before
     // init()"). Placement also keeps the input layer's own order reading
     // setup-then-buildKeybinds.
-    // The mouse grab itself is sequenced from HERE: grabs reads input's
-    // resolved keybind list, so input must not import grabs back.
-    input.setup(x.conn, x.screen);
-    grabs.grabMouseButtons();
+    cursor.setup(x.conn, x.screen);
+    keybinds.grabMouseButtons();
 
     // Build the key dispatch map now that both the live config and the XKB
-    // state exist. Owned by the input layer (see input/keybind.zig); rebuilt
-    // on every reload. Its entries borrow Actions from the live config.
-    input.buildKeybinds(config_ptr.keybindings.items);
+    // state exist. Owned by core/input/keybinds.zig; rebuilt on every
+    // reload. Its entries borrow Actions from the live config.
+    keybinds.buildKeybinds(config_ptr.keybindings.items);
 
     // Arm the unified reload: resolve the exec path before any reload/reexec
-    // request can arrive (lifecycle.init).
-    lifecycle.init();
+    // request can arrive (process.init).
+    process.init();
 
     // Drop the Config internals and the heap box core owns. No identity guard:
     // a reload goes through core.replaceOwnedConfig, which releases the
@@ -153,18 +153,18 @@ pub fn main(init: std.process.Init) !void {
     defer core.deinitOwnedConfig();
     // Registered AFTER the config-deinit defer, so (LIFO) the resolver's map
     // is released before the keybindings its entries borrow are freed.
-    defer input.deinitKeybinds();
+    defer keybinds.deinitKeybinds();
 
     requests.advertiseEwmhSupport(x.conn, x.screen, x.root);
 
-    try signals.setup();
-    defer signals.deinit();
+    try process.setup();
+    defer process.deinit();
 
-    grabs.grabKeybindings(input.resolvedKeybinds());
+    keybinds.grabKeybindings(keybinds.resolvedKeybinds());
     try window.init(alloc);
     defer window.deinit();
 
-    pipeline.init(); // owns the model; must run before seedParamsFromConfig/model()
+    pipeline.init(); // owns the model; must run before seedParamsFromConfig/state()
 
     // Boot-time config seeding. Without this the config's layout kind,
     // variants, master count, and per-workspace overrides stay inert until
@@ -180,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     requests.flush(x.conn);
     log.info("hana booted up successfully!", .{});
 
-    // Re-exec session hand-off (lifecycle.execNext sets restore_env). The env
+    // Re-exec session hand-off (process.execNext sets restore_env). The env
     // var is the ONLY adoption gate: execNext sets it alongside a file it has
     // just written, so an env-gated boot always reads its own predecessor's
     // record. A cold boot (no env) adopts nothing, and discards a leftover
@@ -188,11 +188,11 @@ pub fn main(init: std.process.Init) !void {
     // ONCE: the same record drives the adoption below and the retirement at
     // the end, and nothing in this process writes restore_env (execNext's
     // setenv runs in the predecessor, and is noreturn here anyway).
-    const restore_path_z = lifecycle.restorePathFromEnv();
+    const restore_path_z = process.restorePathFromEnv();
     if (restore_path_z) |path_z| {
         admission.adoptSession(std.mem.span(path_z));
     } else {
-        handoff.discardOrphan(alloc);
+        session.discardOrphan(alloc);
     }
 
     events.run();

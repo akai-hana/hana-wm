@@ -10,7 +10,7 @@
 //! schema_test; nothing in the runtime config-loading path names them.
 
 const std = @import("std");
-const constants = @import("constants");
+const model = @import("wm_state");
 const log = @import("log");
 const parser = @import("parser");
 const types = @import("types");
@@ -112,7 +112,7 @@ pub const knobs = [_]Knob{
     knob(&.{place(types.section_display, "dpi")}, "dpi", .{ .opt_float = .{ .min = 20.0, .max = 1000.0 } }),
 
     // [bar.modules.workspaces] | [workspaces]
-    knob(&.{ place(types.section_bar_modules_workspaces, "count"), place(types.section_workspaces, "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = constants.max_workspaces } }),
+    knob(&.{ place(types.section_bar_modules_workspaces, "count"), place(types.section_workspaces, "count") }, "workspaces.count", .{ .int = .{ .T = u8, .min = 1, .max = model.max_workspaces } }),
     knob(&.{ place(types.section_bar_modules_workspaces, "enabled"), place(types.section_workspaces, "enabled") }, "workspaces.enabled", .b),
 
     // [tiling]: functional knobs gated on the section itself -- a lone

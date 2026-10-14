@@ -12,7 +12,7 @@ const parser = @import("parser");
 const types = @import("types");
 
 /// Validates a 1-based workspace number, warn-and-skip when outside the
-/// 1..`max` window (workspace count / constants.max_workspaces ceiling).
+/// 1..`max` window (workspace count / model.max_workspaces ceiling).
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     if (!types.workspaceInRange(ws_1based, max)) {
         log.warn(

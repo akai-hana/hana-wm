@@ -23,10 +23,20 @@
 const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
-const constants = @import("constants");
+// Offscreen positioning
+// Windows on inactive workspaces are parked here so they are hidden without
+// being unmapped (unmapping causes some apps to pause).
+//
+// X11's ConfigureWindow encodes x/y as INT16 on the wire (hence Rect.x/y
+// being i16), so -32768 is the hard floor. The old -4000 only cleared a single
+// 3840px-wide display: on multi-monitor layouts with a display left of primary,
+// ultrawides, or 5K/6K panels, -4000 can land back inside real screen estate.
+// -30000 clears any realistic combined desktop while leaving headroom below
+// the INT16 floor.
+pub const offscreen_x_position: i32 = -30000;
 const log = @import("log");
 
-const model = @import("model");
+const model = @import("wm_state");
 const requests = @import("requests");
 /// Stacking mode vocabulary for a request. `above` is currently the only mode
 /// the WM emits.
@@ -178,7 +188,7 @@ pub const XcbSink = struct {
             win,
             xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
             &[_]u32{
-                @bitCast(constants.offscreen_x_position),
+                @bitCast(offscreen_x_position),
                 xcb.XCB_STACK_MODE_BELOW,
             },
         );

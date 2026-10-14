@@ -6,7 +6,7 @@ Concerns related to src/core/. TO-DO item tasks:
 
 - rename xtrace.zig to trace.zig, make trace.zig a module, and create a new directory under core modules where log.zig, profile.zig and trace.zig should live, called "debug/".
 
-- fold masks.zig into input.zig.
+- fold masks.zig into the input layer (src/core/input/).
 
 - fold ids.zig into workspaces.zig
 
@@ -20,7 +20,7 @@ Concerns related to src/core/. TO-DO item tasks:
 
 - seed.zig should be either next to model.zig or inside src/config/. Find the better place and move it there. Right now it is isolated and its placement doesn't really make sense.
 
-- reload.zig, seed.zig, and handoff.zig all have really similar purposes. figure if their split is really justified, or if there's a way to merge them, or fundamentally modify how hana's architecture works, in order to refactor-dissolve these files, or to reach a more manageable architecture, structurally speaking, instead of the current 3-way file split.
+- reload.zig, seed.zig, and session.zig all have really similar purposes. figure if their split is really justified, or if there's a way to merge them, or fundamentally modify how hana's architecture works, in order to refactor-dissolve these files, or to reach a more manageable architecture, structurally speaking, instead of the current 3-way file split.
 
 - fold spawn.zig into prompt.zig
 

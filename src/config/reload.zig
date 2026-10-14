@@ -5,15 +5,21 @@
 //! events.zig (review 05-input round 2). A transition concern --
 //! driven by the reload flag the event loop consumes -- not
 //! per-event path work.
+//!
+//! Boundary (see PLAN Item 11): this file is config loading + subsystem
+//! rebuild ORCHESTRATION. After the pointer swap it hands param stamping to
+//! `seed.applyConfigReload()` (core/architecture/seed.zig, pure config→model)
+//! and never models state itself. Session continuity across re-exec is a
+//! separate concern owned by proc/session.zig (persist) + proc/process.zig
+//! (re-exec coordination); neither reaches through here.
 
 const core = @import("core");
 const log = @import("log");
 const config = @import("config");
-const input = @import("input");
+const keybinds = @import("keybinds");
 const window = @import("window");
 const admission = @import("admission");
 const seed = @import("seed");
-const grabs = @import("grabs");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
@@ -32,7 +38,7 @@ const surfaces = @import("surfaces").Surfaces;
 ///      only bumped BY the swap; stamping before the swap would leave the
 ///      resolver a rev behind, so lookup fails closed (no keybind dispatch).
 ///   4. grabKeybindings() runs post-swap because the caller hands it
-///      input.resolvedKeybinds(), which the buildKeybinds step above just
+///      keybinds.resolvedKeybinds(), which the buildKeybinds step above just
 ///      rebuilt from the new config's bindings.
 ///   5. errdefer frees the heap-allocated new config if anything fails pre-swap.
 ///      Post-swap all calls are infallible, so no errdefer is needed.
@@ -105,7 +111,7 @@ pub fn handleConfigReload() !void {
     // matches the rev the swap just bumped (see the ordering doc). XKB exists
     // for the whole process lifetime (init at boot, deinit only at shutdown),
     // so this reload never sees a null state.
-    input.buildKeybinds(new_ptr.keybindings.items);
+    keybinds.buildKeybinds(new_ptr.keybindings.items);
 
     // Freeze the now-live config as the re-exec source: a later reload_hana
     // (binary-only reload) boots from this snapshot rather than from the
@@ -128,7 +134,7 @@ pub fn handleConfigReload() !void {
     // Rebuild after the swap so borrowed key slices point into the new config's memory.
     admission.buildRulesMap();
 
-    if (changes.keys) grabs.grabKeybindings(input.resolvedKeybinds());
+    if (changes.keys) keybinds.grabKeybindings(keybinds.resolvedKeybinds());
 
     log.info("Reload complete (keys={})", .{changes.keys});
 }
