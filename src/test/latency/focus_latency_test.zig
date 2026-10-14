@@ -9,9 +9,12 @@
 // of it redundant?
 //
 // Every focus change commits a server-grab reconcile (focus.applyPendingFocus +
-// reconcile.run). reconcile replays the FULL desired wire state for EVERY
-// window each reconcile (map + borderPixel + borderWidth + geom), which this
-// instrumentation quantifies as a function of window count.
+// reconcile.run). reconcile recomputes the DESIRED state for every window each
+// pass, then sends ONLY the deltas (map + borderPixel + borderWidth + geom
+// changed bits) the sync ledger recorded as last-sent -- which is what this
+// instrumentation quantifies as a function of window count. A reconcile that
+// re-sent the full desired state every pass (the invariant reconcile_test
+// pins against) was the cost center 14.9 had to remove.
 //
 // The Mod+k caller shape (`focus.cycleTarget` then
 // `focus.grabFocusWithDuty`) now runs the viewport snap as a duty INSIDE the

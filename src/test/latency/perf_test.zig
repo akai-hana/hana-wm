@@ -348,11 +348,26 @@ test "bench mode records its timings to a file, not to stderr" {
         std.debug.print("bench dir: {s}\n", .{@errorName(err)});
         return err;
     };
+    // Record the file's size BEFORE this run's append, so the assertion can be
+    // bound to the bytes this run actually added -- appends accumulate across
+    // process runs by design, and a stale hit from a previous run under an
+    // unbounded grep would say success without the current write landing.
+    const path = ".zig-cache/bench/timings.txt";
+    var size_before: usize = 0;
+    if (cwd.openFile(path, .{})) |f_before| {
+        defer f_before.close();
+        size_before = (try f_before.stat(io)).size;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
     helpers.benchLog("bench-selftest {d}", .{@as(u32, 12345)});
-    const bytes = cwd.readFileAlloc(io, ".zig-cache/bench/timings.txt", testing.allocator, .limited(1 << 20)) catch |err| {
+    const bytes = cwd.readFileAlloc(io, path, testing.allocator, .limited(1 << 20)) catch |err| {
         std.debug.print("bench read: {s}\n", .{@errorName(err)});
         return err;
     };
     defer testing.allocator.free(bytes);
-    try testing.expect(std.mem.indexOf(u8, bytes, "bench-selftest 12345") != null);
+    const from = @min(size_before, bytes.len);
+    try testing.expect(std.mem.indexOf(u8, bytes[from..], "bench-selftest 12345") != null);
 }

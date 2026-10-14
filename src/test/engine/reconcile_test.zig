@@ -507,7 +507,11 @@ test "13.6: an inactive layout floats every window at the work area" {
         },
         else => {},
     };
-    try testing.expect(!tiled_rect.?.eql(helpers.std_wa));
+    // If production ever regressed to NOT emitting a configure for 201 on the
+    // inactive path, `tiled_rect` stays null and the force-unwrap used to
+    // panic the whole test binary; assert the presence explicitly instead.
+    const tiled_rect_val = tiled_rect orelse return error.MissingConfigure;
+    try testing.expect(!tiled_rect_val.eql(helpers.std_wa));
 
     // The inactive path: same model, same windows, only the resolved flag off.
     fx.rec.clear();

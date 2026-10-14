@@ -1,7 +1,7 @@
 //! Unit tests for the model layer.
 // (28.6) Declared here, next to the imports that make it necessary, rather than in a
 // build.zig table that had to be kept in agreement with them by hand.
-// build-gate: minimize, fullscreen, floating, tiling
+// build-gate: minimize, fullscreen, floating, workspaces, tiling
 
 const std = @import("std");
 const testing = std.testing;
@@ -147,9 +147,6 @@ fn assertSingleMembership(m: *const Model) !void {
     }
 }
 
-// register -> tiled in current ws order, mask set.
-
-// register -> tiled in current ws order, mask set.
 test "register tiles on current ws, sets mask, is idempotent" {
     var m = makeModel();
 

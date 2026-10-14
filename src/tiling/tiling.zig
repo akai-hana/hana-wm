@@ -337,7 +337,17 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
     const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
-    if (m.compute) |f| {
+    const f = m.compute orelse {
+        // A null compute can only come from a misbuilt registry entry; with
+        // asserts compiled out (ReleaseFast), it used to leak past as a
+        // silent empty `out`. Park everything ourselves and say it, so the
+        // screen isn't an untestable all-blank state and the reason is
+        // actionable.
+        std.log.warn("tiling: layout model has a null compute hook; parking {} window(s) for kind {}", .{ v.order.len, kind });
+        for (v.order) |win| emitHidden(out, win);
+        return;
+    };
+    {
         // The layout writes into SCRATCH and the engine emits into `out` in
         // `v.order` position (14.9). The order is a property of the SINK
         // (it consumes `out` positionally against a per-slot table built from

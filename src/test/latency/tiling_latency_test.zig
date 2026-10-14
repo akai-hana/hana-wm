@@ -120,7 +120,10 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     ledger.init();
     defer ledger.init();
 
-    const screen: model.Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
+    // Same work area the reconcile bench (helpers.benchReconcile) runs on: the
+    // "% of reconcile" ratio only measures the same pipeline when both terms
+    // are against the SAME workarea, which std_wa is.
+    const screen: model.Rect = helpers.std_wa;
     var order_buf: [128]WindowId = undefined;
     var hints_buf: [128]model.SizeHints = undefined;
     var placements: tiling.List = .{};

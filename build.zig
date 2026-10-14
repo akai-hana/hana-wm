@@ -134,6 +134,11 @@ pub fn build(b: *std.Build) !void {
     const has_seg_brightness = discovery.modules.contains("brightness");
     const has_seg_slider = discovery.modules.contains("slider");
     const has_seg_title = discovery.modules.contains("title");
+    // Segment-less bundle pixels (meter + volume) are module-published too:
+    // tests swapped WHICH segment was present as the gating condition,sneed a
+    // flag of their own rather than gating on seg_brightness.
+    const has_meter = discovery.modules.contains("meter");
+    const has_volume = discovery.modules.contains("volume");
 
     // The vim-modal prompt engine: its presence gates the engine test; the
     // engine is a prompt addon, so its tests also require the host package.
@@ -167,8 +172,8 @@ pub fn build(b: *std.Build) !void {
     // Owner-registry discovery: `modules/` dirs found during the single src/
     // walk above populate per-owner stem lists, which are sorted here for
     // deterministic dispatch order. The registry must be fully populated
-    // BEFORE `buildOwnerRegistries` is called (DFS visit order satisfies this
-    // since discovery runs at build.zig:54 before buildOwnerRegistries at 134).
+    // BEFORE `buildOwnerRegistries` is called (DFS visit order satisfies
+    // this: the single src/ walk above completes discovery before the call).
     var registry = try OwnerRegistry.run(&discovery);
     try validateRegistryNames(b, &registry, &discovery.modules);
     // Contract names are read from the modules' own `pub const module`
@@ -232,7 +237,6 @@ pub fn build(b: *std.Build) !void {
         .fallback_toml = fallback_toml_mod,
         .surfaces = surfaces_mod,
         .owner_modules = owner_modules,
-        .optimize = optimize,
     };
 
     const root_mod = b.createModule(.{
@@ -291,6 +295,10 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "seg_prompt", .on = has_seg_prompt },
         .{ .name = "seg_systatus", .on = has_seg_systatus },
         .{ .name = "seg_brightness", .on = has_seg_brightness },
+        .{ .name = "seg_slider", .on = has_seg_slider },
+        .{ .name = "seg_title", .on = has_seg_title },
+        .{ .name = "meter", .on = has_meter },
+        .{ .name = "volume", .on = has_volume },
     };
 
     // (28.7) Restrict the run to one *_test file. A BUILD-side filter, not
@@ -309,15 +317,15 @@ pub fn build(b: *std.Build) !void {
     // What STAYS here is X-gating, because that genuinely is a property of the
     // build, not of the file: these tests share one $DISPLAY, and the runner
     // must serialize them. That is not expressible in the test's own source.
-    const test_gates = [_]struct { name: []const u8, x_gated: bool, bench: bool = false }{
+    const test_gates = [_]struct { name: []const u8, x_gated: bool }{
         .{ .name = "actions_test", .x_gated = true },
         .{ .name = "ewmh_test", .x_gated = true },
         .{ .name = "focus_test", .x_gated = true },
         .{ .name = "pipeline_test", .x_gated = true },
         .{ .name = "visibility_test", .x_gated = true },
         .{ .name = "borders_test", .x_gated = true },
-        .{ .name = "focus_latency_test", .x_gated = false, .bench = true },
-        .{ .name = "tiling_latency_test", .x_gated = false, .bench = true },
+        .{ .name = "focus_latency_test", .x_gated = false },
+        .{ .name = "tiling_latency_test", .x_gated = false },
     };
     {
         // Discovered *_test stems; the table below must match them one-to-one.
@@ -364,12 +372,12 @@ pub fn build(b: *std.Build) !void {
         var filter_matched = false;
         for (stems.items) |stem| {
             const entry = discovery.modules.getPtr(stem).?;
-            // (28.6) x_gated/bench metadata stays in the build; the FEATURE
+            // (28.6) x_gated metadata stays in the build; the FEATURE
             // gate is read from the test's own source, sitting next to the
             // imports that make it necessary. Absence from this table is now
-            // normal (it just means "not X-gated, not a bench"); the reverse --
-            // a row naming a test that no longer exists -- is still fatal, and
-            // is checked above.
+            // normal (it just means "not X-gated"); the reverse -- a row
+            // naming a test that no longer exists -- is still fatal, and is
+            // checked above.
             const spec: ?@TypeOf(test_gates[0]) = for (test_gates) |g| {
                 if (std.mem.eql(u8, stem, g.name)) break g;
             } else null;
@@ -492,7 +500,6 @@ const SharedBuildContext = struct {
     /// so core source can `@import("window_modules").modules` to iterate an
     /// owner's auto-discovered sub-system set with uniform loops.
     owner_modules: std.StringHashMapUnmanaged(*std.Build.Module),
-    optimize: std.builtin.OptimizeMode,
 };
 
 // Helpers
@@ -894,6 +901,11 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
     var saw_unrecognized: bool = false;
     var it = scan.lines();
     while (it.next()) |trimmed| {
+        // Skip doc/comments: a mentioning of `pub const module` inside a doc
+        // line (an example or a cross-reference) would otherwise trip the
+        // same saw_unrecognized / wrong-shape guard declaresBinding already
+        // escapes with.
+        if (std.mem.startsWith(u8, trimmed, "//")) continue;
         if (std.mem.indexOf(u8, trimmed, typed_needle)) |at| {
             const rest = trimmed[at + typed_needle.len ..];
             var n: usize = 0;
@@ -1365,9 +1377,9 @@ fn buildSubsRegistryModule(
     contract: []const u8,
     sub_stems: []const []const u8,
 ) !*std.Build.Module {
-    const stems = try b.allocator.dupe([]const u8, sub_stems);
-    std.mem.sortUnstable([]const u8, stems, {}, lessStrings);
-
+    // `sub_stems` arrives pre-sorted from boundSubStems (the one sort that
+    // feeds both this registry and segmentFor); no re-sort here, so the two
+    // orderings can never diverge.
     var src = std.ArrayList(u8).empty;
     try src.print(b.allocator, "const {s} = @import(\"{s}\");\n\n", .{ package, package });
     try src.print(b.allocator, "/// The auto-discovered {s} sibling add-ons, in\n", .{package});
@@ -1377,7 +1389,7 @@ fn buildSubsRegistryModule(
     try src.appendSlice(b.allocator, "/// file and is left out of the registry. Membership is driven entirely\n");
     try src.appendSlice(b.allocator, "/// by file presence plus self-declared role.\n");
     try src.print(b.allocator, "pub const {s} = [_]{s}{{\n", .{ array_name, contract });
-    for (stems) |stem| {
+    for (sub_stems) |stem| {
         try src.print(b.allocator, "    @import(\"{s}\").{s},\n", .{ stem, binding });
     }
     try src.appendSlice(b.allocator, "};\n");
@@ -1385,7 +1397,7 @@ fn buildSubsRegistryModule(
     const registry_name = try std.fmt.allocPrint(b.allocator, "{s}_subs.zig", .{package});
     const mod = makeGeneratedModule(b, target, optimize, registry_name, src.items, &[_]Import{});
     if (discovered.get(package)) |m| mod.addImport(package, m);
-    for (stems) |stem| {
+    for (sub_stems) |stem| {
         if (discovered.get(stem)) |m| mod.addImport(stem, m);
     }
     return mod;
@@ -1827,7 +1839,8 @@ const Module = struct {
 
         /// Appends `stem` as a private sibling of the dir-named package
         /// `package` (systatus/cpu.zig inside the systatus package). Deduped,
-        /// unsorted; `buildSubsRegistryModule` sorts for deterministic output.
+        /// unsorted; `boundSubStems` sorts the bound subset that feeds the
+        /// registry generator.
         fn addSubStem(ctx: *DiscoveryContext, package: []const u8, stem: []const u8) !void {
             const gop = try ctx.sub_stems.getOrPut(try ctx.b.allocator.dupe(u8, package));
             if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -1911,10 +1924,12 @@ const Module = struct {
         // Rect/Margins value objects that state holds. `satI16` is also needed
         // by the pure tiling layer, which is why the coordinate helpers cannot
         // live on the x11 side. The shelf siblings in src/core/pure/ are
-        // xcb-free by construction. architecture/contract.zig joined the pure
-        // set when its xcb event TYPES and the Surfaces hook set moved out to
-        // architecture/contract_x11.zig, so it is now guarded by BOTH this
-        // import-edge scan and Rule 3's body sweep.
+        // xcb-free by construction. architecture/contract.zig moved its xcb
+        // event TYPES and the Surfaces hook set out to contract_x11.zig, but
+        // its own import edges (`types`, `build_options`, the generated
+        // `tiling_modules`) are only admitted by this layering via config/
+        // tiling allowances -- so it is NOT covered by the import-edge scan
+        // below, only by Rule 3's body sweep.
         const layer = if (std.mem.endsWith(u8, rel_path, "src/core/architecture/model.zig"))
             "model"
         else if (std.mem.startsWith(u8, rel_path, "src/tiling/"))
