@@ -68,7 +68,7 @@ fn covering(m: *const model.Model) ?u32 {
 }
 
 fn admit(win: u32) void {
-    actions.mapRequest(win, 0, true, null);
+    actions.mapRequest(win, 0, true, null, null);
 }
 
 test "EWMH: a browser's fullscreen REQUEST covers the window" {

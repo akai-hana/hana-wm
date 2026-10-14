@@ -52,7 +52,6 @@ pub fn applyBarProperties(
     const sec = doc.getSection(types.section_bar_properties) orelse return;
     var it = sec.orderedIterator();
     while (it.next()) |pair| {
-        sec.markConsumed(pair.key);
         if (isBarPropertiesKnobKey(knobs, pair.key)) continue;
         const is_value = std.mem.endsWith(u8, pair.key, "_value");
         const seg_key = if (is_value) pair.key[0 .. pair.key.len - "_value".len] else pair.key;

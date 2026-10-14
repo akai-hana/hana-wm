@@ -7,7 +7,6 @@
 //! into a Config.
 
 const std = @import("std");
-const constants = @import("constants");
 const log = @import("log");
 const paths_mod = @import("paths");
 const parser = @import("parser");

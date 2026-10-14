@@ -54,7 +54,6 @@ pub fn parseRules(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *typ
     if (doc.getSection(types.section_rules)) |s| {
         var iter = s.orderedIterator();
         while (iter.next()) |entry| {
-            s.markConsumed(entry.key);
             try tryAddClassRule(allocator, cfg, entry.key, entry.value);
         }
     }
@@ -80,7 +79,6 @@ fn parseNumberedRuleSections(
         if (!checkWorkspaceBound(ws_num, name, cfg.workspaces.count)) continue;
         var iter = entry.value_ptr.orderedIterator();
         while (iter.next()) |class_entry| {
-            entry.value_ptr.markConsumed(class_entry.key);
             try addRule(allocator, cfg, class_entry.key, ws_num);
         }
     }
@@ -129,7 +127,6 @@ fn parseWorkspaceRuleSection(
 ) !void {
     var iter = rules_section.orderedIterator();
     while (iter.next()) |entry| {
-        rules_section.markConsumed(entry.key);
         const digit_run = countLeadingDigits(entry.key);
         if (digit_run == 0) {
             try tryAddClassRule(allocator, cfg, entry.key, entry.value);

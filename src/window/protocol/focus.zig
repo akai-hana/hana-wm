@@ -19,9 +19,6 @@ const model_mod = @import("model");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
-// Private transition-layer gate for mutable model access (per-owner token,
-// see tracking.gate).
-const gate: @import("pipeline").Gate = .{};
 
 // Module state
 //
@@ -79,7 +76,7 @@ pub fn deinit() void {
 /// Focus truth: reads model.focused; falls back to the protocol
 /// cache only before pipeline.init (boot).
 pub inline fn getFocused() ?u32 {
-    if (pipeline.initialized()) {
+    if (core.isModelReady()) {
         return pipeline.model().focused;
     }
     return state.?.last_applied;
@@ -400,11 +397,11 @@ fn setIntent(win: u32, old: ?u32, resolved: anytype, opts: struct {
 ///  1. the invalid-window sentinel (a chrome XID is not a window),
 ///  2. model liveness -- a destroyed window is unregistered, so `store.has`
 ///     is false. This is the check `.user_command` used to skip ENTIRELY, on
-///     the reasoning that collectVisibleWindows had already confirmed the
-///     window was visible. That reasoning holds for the bar's
-///     collectVisibleWindows callers and for nothing else: floating.zig
-///     reaches grabFocus(win, .user_command) directly, so a window destroyed
-///     between spawn and the float toggle could still be focused and raised.
+///     the reasoning that the cycle path had already confirmed the window was
+///     visible. That reasoning holds for cycleTarget's callers and for nothing
+///     else: floating.zig reaches grabFocus(win, .user_command) directly, so a
+///     window destroyed between spawn and the float toggle could still be
+///     focused and raised.
 ///     It costs no round trip -- a load and a compare on a table the caller
 ///     already has open.
 ///  3. the blocking xcb_get_window_attributes liveness query, for the ONE
@@ -582,9 +579,19 @@ pub fn grabFocus(win: u32, reason: Reason) void {
 pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) void {
     const ft = prepareFocus(win, reason);
     if (!yieldsModelFocus(ft)) return;
-    model_mod.setFocus(pipeline.mut(&gate), win);
+    model_mod.setFocus(pipeline.mut(), win);
     if (reason == .mouse_enter) {
-        pipeline.focusOnlyCommit(ft);
+        // Focus-only commit: nothing geometric changes, so skip the
+        // reconcile (dwm's enternotify -> focus()). Borders repaint via the
+        // per-batch sweep on the commit's focus bump.
+        //
+        // grabOnly, not grabScoped: this path never reconciles, so building
+        // a ctx (and running the model-mutating preReconcileDuties) would
+        // leave the model and the server disagreeing -- the exact hazard
+        // ScopedGrab.reconcileNow exists to prevent.
+        const g = pipeline.grabOnly();
+        defer g.deinit();
+        applyPendingFocus(ft);
         return;
     }
     // A null duty is a first-class case, not a contract violation: `grabFocus`
@@ -637,28 +644,10 @@ pub fn drainTilingOpSettle() void {
 
 // Window focus cycling
 //
-// Scratch buffer for collectVisibleWindows, module-level so it isn't
-// stack-allocated on every key press. Sized to the model store capacity: the
-// cycle pool is not restricted to tiled slots (floating windows are admitted
-// too), so sizing by max_tiled_windows dropped a floating tail above 64.
-
-var cycle_buf: [model_mod.store_capacity]u32 = undefined;
-
-/// Count of currently-visible windows on the current workspace, in on-screen
-/// order, written into `cycle_buf`; 0 when none. The ordering itself lives in
-/// model.collectCyclePool, which anchors the cycle on the workspace's
-/// tiled_order -- so Mod+j/k follows the arrangement and a move/swap reorders
-/// the cycle with it.
-fn collectVisibleWindows() usize {
-    const m = pipeline.model();
-    return model_mod.collectCyclePool(m, m.current, cycle_buf[0..]);
-}
-
-/// Returns the next (forward=true) or previous (forward=false) index in a
-/// circular list of `len` elements, starting from `idx`.
-inline fn cycleIndex(forward: bool, idx: usize, len: usize) usize {
-    return model_mod.wrapIndex(idx, if (forward) 1 else -1, len);
-}
+// `cycleTarget` fills its OWN stack scratch (see below); there is deliberately
+// no module-level buffer here. The cycle pool is not restricted to tiled slots
+// (floating windows are admitted too), so the buffer is sized by the model
+// store capacity rather than max_tiled_windows.
 
 /// Cycle focus one step, committing the viewport-snap duty in the SAME grab
 /// (10.10).
@@ -693,9 +682,15 @@ pub fn cycleFocus(dir: types.Dir, duty: *const fn () void) void {
 /// focus-then-snap).
 pub fn cycleTarget(dir: types.Dir) ?u32 {
     const forward = dir == .forward;
-    const len = collectVisibleWindows();
+    // Caller-owned scratch, like every other snapshot buffer in this layer
+    // (tracking.zig): the ordering itself comes from model.collectCyclePool,
+    // which anchors the cycle on the workspace's tiled_order -- so Mod+j/k
+    // follows the arrangement and a move/swap reorders the cycle with it.
+    var buf: [model_mod.store_capacity]u32 = undefined;
+    const m = pipeline.model();
+    const len = model_mod.collectCyclePool(m, m.current, &buf);
     if (len == 0) return null;
-    const wins = cycle_buf[0..len];
+    const wins = buf[0..len];
     // Single visible window: the only sensible cycle step is to focus it
     // when it isn't focused already; the modulo wrap below would otherwise
     // spin a redundant grabFocus against the same id.
@@ -710,5 +705,5 @@ pub fn cycleTarget(dir: types.Dir) ?u32 {
         std.mem.indexOfScalar(u32, wins, w) orelse sentinel
     else
         sentinel;
-    return wins[cycleIndex(forward, idx, len)];
+    return wins[model_mod.wrapIndex(idx, if (forward) 1 else -1, len)];
 }

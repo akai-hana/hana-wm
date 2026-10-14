@@ -273,7 +273,6 @@ pub fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg
     var kill_placeholder: ?[]const u8 = null;
     var iter = section.orderedIterator();
     while (iter.next()) |entry| {
-        section.markConsumed(entry.key);
         if (std.ascii.eqlIgnoreCase(entry.key, "Mod")) {
             mod_placeholder = entry.value.asScalar([]const u8);
             continue;

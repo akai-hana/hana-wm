@@ -150,7 +150,6 @@ fn parseTilingLayoutSubtables(
                 cfg.tiling.workspace_master_count_overrides.clearRetainingCapacity();
                 var inner = counts_sec.orderedIterator();
                 while (inner.next()) |p| {
-                    counts_sec.markConsumed(p.key);
                     if (tryParseWsToken(p.key, constants.max_workspaces, "master-stack.counts: invalid workspace key '{s}', skipping", .{p.key})) |ws_1based| {
                         const count_val = p.value.asScalar(i64) orelse {
                             log.warn("master-stack.counts: non-integer count for workspace {}, skipping", .{ws_1based});

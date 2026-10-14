@@ -77,7 +77,7 @@ fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId
     // 12.4: model query, not a peer-module dispatch. The dispatch returned
     // null when no covering module is bound, which made "is this window
     // covering" answer false in such a build -- while the model still held the
-    // intent, and persisted.zig restores it across a session restart.
+    // intent, and handoff.zig restores it across a session restart.
     const fws = model.coveringWsOf(m, win) orelse return;
     if (fws.eql(ws)) return;
     retargetOrDropFullscreen(m, win, ws);
