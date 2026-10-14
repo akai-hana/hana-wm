@@ -45,6 +45,12 @@ pub fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
     const border2 = model.doubledBorder(m);
+    // NOTE: the overflow gate deliberately stays border-only (geometry of what
+    // the strip can carry). The min_dim requirement is handled AT EMISSION by
+    // capping w/h to the strip's content area, so raising this gate to include
+    // min_dim is redundant with the emission cap and only moves the overflow
+    // threshold -- a stricter gate trips overflow earlier and changes layout
+    // batching.
     const min_region = m.gap *| 2 +| border2;
 
     const outer = tiling.outerArea(v.workarea, m.gap);
@@ -89,15 +95,13 @@ inline fn splitAndAdvance(
     const off_x: i32 = if (split_x) @intCast(off) else 0;
     const off_y: i32 = if (split_x) 0 else @intCast(off);
 
-    // Border via `shrinkClamped` (14.6), not `-| border2`. The saturating
-    // subtract floors at 0, so in the degenerate case -- a split region no
-    // wider than the two borders -- the window was emitted with width 0. Every
-    // other emitter in the tree floors at `min_dim`, which is what keeps a
-    // positive area: a zero-area rect is not "small", it is a window the server
-    // cannot map sensibly. The pixels only move in that degenerate case, which
-    // is why it needed the tiny-workarea pin to be visible at all.
-    const w = shrinkClamped(if (split_x) win_dim else cur.w, border2, ctx.v.env.min_dim);
-    const h = shrinkClamped(if (split_x) cur.h else win_dim, border2, ctx.v.env.min_dim);
+    // Border via `shrinkClamped` (14.6), not `-| border2`. But the min_dim
+    // floor must not flare the window past the strip half the split actually
+    // gave it -- cap at the strip's content area so neighbours can't overlap.
+    const strip_w = if (split_x) win_dim else cur.w;
+    const strip_h = if (split_x) cur.h else win_dim;
+    const w = @max(@min(shrinkClamped(strip_w, border2, ctx.min_dim), strip_w -| border2), 1);
+    const h = @max(@min(shrinkClamped(strip_h, border2, ctx.min_dim), strip_h -| border2), 1);
     tiling.emitRect(ctx.v, ctx.out, win, cur.x + off_x, cur.y + off_y, w, h);
     // Advance the remainder origin along the split axis (forward only), then
     // shrink the remainder along that axis by the taken strip.
