@@ -1,8 +1,7 @@
 //! Headless tests for reply.zig's pure ICCCM reply parsers: the WM_CLASS
 //! split (per-component trimming rule) and the WM_NORMAL_HINTS flags ->
-//! field-offset -> model.SizeHints derivation. Former identity_test.zig +
-//! hints_test.zig, folded 2026-10-10 when the two parsers merged into
-//! reply.zig; both need no property reply or live connection.
+//! field-offset -> model.SizeHints derivation; both need no property
+//! reply or live connection.
 
 const std = @import("std");
 const testing = std.testing;

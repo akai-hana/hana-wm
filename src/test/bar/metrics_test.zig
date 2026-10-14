@@ -1,11 +1,8 @@
 //! The bar's metric resolution rules (bar/metrics.zig).
 //!
-//! These rules used to be a module-level `var` in bar.zig that writing the
-//! height and then overwriting the font size in two steps, reachable only
-//! through process state, so there was nowhere to test them: exercising "20% of
-//! the bar" needed a live config, a screen, and Pango. `resolve` is pure and
-//! takes the font probe as a callback, so every branch below is now testable
-//! headlessly -- including the ones a real screen would rarely produce.
+//! `resolve` is pure and takes the font probe as a callback, so every branch
+//! below is testable headlessly -- including the ones a real screen would
+//! rarely produce.
 
 const std = @import("std");
 
@@ -98,8 +95,7 @@ test "a percentage font size refines against the bar height" {
 
 test "a percentage is a fraction of the largest size that FILLS the bar" {
     // 40px bar, 2px-per-point font: 20pt is exactly what fills it, and the
-    // percentage is taken of THAT, not of the configured absolute size. This
-    // is the rule the old bar-local helper implemented, now pinned.
+    // percentage is taken of THAT, not of the configured absolute size.
     const full = metrics.resolve(.{
         .font_size = px.percentage(100),
         .height = px.absolute(40),
@@ -152,8 +148,8 @@ test "a failed percentage probe keeps the DPI-scaled base rather than inventing 
 }
 
 test "resolution is a function of its inputs alone" {
-    // The old global made this impossible to state: the same config resolved
-    // to different font sizes depending on what the previous bar had written.
+    // Purity matters: with any shared state, the same config could resolve to
+    // different font sizes depending on what a previous resolve wrote.
     const in: metrics.Inputs = .{
         .font_size = px.percentage(50),
         .height = px.absolute(40),

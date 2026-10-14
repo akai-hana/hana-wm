@@ -6,7 +6,7 @@
 //! driven by the reload flag the event loop consumes -- not
 //! per-event path work.
 //!
-//! Boundary (see PLAN Item 11): this file is config loading + subsystem
+//! Boundary: this file is config loading + subsystem
 //! rebuild ORCHESTRATION. After the pointer swap it hands param stamping to
 //! `seed.reloadAndReconcile()` (config/model_config.zig, pure config→model)
 //! and never models state itself. Session continuity across re-exec is a

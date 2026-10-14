@@ -6,8 +6,7 @@
 //! one would make the suite fail the moment a readout file is added or removed
 //! -- precisely the open-module churn this surface is designed to absorb.
 
-// Declared here, next to the imports that make it necessary, rather than in a
-// build.zig table that had to be kept in agreement with them by hand.
+// Declared here, next to the imports that make it necessary.
 // build-gate: seg_systatus
 
 const std = @import("std");
@@ -50,10 +49,9 @@ test "segmentFor wires the readout lifecycle and lean draw hooks" {
 // These live in the readout FILES (cpu.zig / ram.zig / batt.zig), not in the
 // systatus core, and they are tested from here rather than inline because this
 // build only ever runs `*_test` module roots: a `test` block inside an
-// ordinary module is never compiled, so the inline test ram.zig used to carry
-// was dead code. Importing the concrete readouts here is safe against the
-// deletion matrix because that matrix runs `zig build` (exe only) and never
-// the test step; `zig build test` only runs in the full tree.
+// ordinary module is never compiled. Importing the concrete readouts here is
+// safe against the deletion matrix because that matrix runs `zig build` (exe
+// only) and never the test step; `zig build test` only runs in the full tree.
 const cpu = @import("cpu");
 const ram = @import("ram");
 const batt = @import("batt");
@@ -78,9 +76,10 @@ test "parseCpuLine rejects a per-core line and malformed fields" {
 
 test "parseCpuLine stops at the aggregate line and keeps the per-CPU tail out" {
     // A kernel reporting only 4 aggregate counters leaves the tokenizer with
-    // fewer tokens than the field array, so it used to walk past the newline
-    // into "cpu0" and fail the whole parse on a non-numeric token -- the
-    // readout vanished rather than reporting a number.
+    // fewer tokens than the field array; it must stop at the newline rather
+    // than walk into "cpu0" and fail the whole parse on a non-numeric token --
+    // a failed parse would make the readout vanish rather than report a
+    // number.
     const sample = cpu.parseCpuLine("cpu  10 20 30 40\ncpu0 1 1 1 1\ncpu1 1 1 1 1\n").?;
     try std.testing.expectEqual(@as(u64, 100), sample.total);
     try std.testing.expectEqual(@as(u64, 40), sample.idle);
@@ -92,7 +91,7 @@ test "parseCpuLine stops at the aggregate line and keeps the per-CPU tail out" {
 }
 
 test "parseCpuLine sums a long field line rather than dropping the tail" {
-    // 12 aggregate counters. A fixed 8-slot array dropped guest/guest_nice
+    // 12 aggregate counters. A fixed 8-slot array would drop guest/guest_nice
     // here, under-counting `total` and skewing every derived percentage.
     const sample = cpu.parseCpuLine("cpu  100 20 30 400 50 7 8 9 10 11 12 13\n").?;
     try std.testing.expectEqual(@as(u64, 670), sample.total);
@@ -123,9 +122,9 @@ test "utilBetween reports busy percent over the interval" {
 }
 
 test "bootAverage renders the first sample so the segment is never blank" {
-    // The first read has no predecessor, and that is what kept the CPU
-    // segment collapsed for a whole tick on every boot while RAM/VOL/BRT
-    // rendered immediately. /proc/stat's counters are cumulative from boot,
+    // The first read has no predecessor, so without a boot average the CPU
+    // segment stays collapsed for a whole tick on every boot while RAM/VOL/BRT
+    // render immediately. /proc/stat's counters are cumulative from boot,
     // so the since-boot average is the real measurement available from one
     // read: 200 jiffies counted, 120 idle -> 40% busy.
     const first: cpu.Sample = .{ .total = 200, .idle = 120 };
@@ -185,11 +184,10 @@ test "parseCapacity trims, parses and range-checks" {
 }
 
 test "the bar's painted-width report drives the reservation" {
-    // The reservation used to depend on each draw remembering to store its own
-    // width -- a silent omission that shows up as a segment locked onto its
-    // startup width, clipped by its right neighbours. The bar now owns the
-    // handoff, so this exercises it end to end: report a width, read the
-    // reservation back, and check the row now reserves what actually painted.
+    // The reservation depends on the bar-owned painted-width handoff; without
+    // it a segment locks onto its startup width, clipped by its right
+    // neighbours. Exercise the handoff end to end: report a width, read the
+    // reservation back, and check the row reserves what actually painted.
     inline for (systatus.subs, 0..) |_, i| {
         const seg = systatus.segmentFor(i);
         const report = seg.onPainted orelse return error.TestUnexpectedResult;
@@ -211,10 +209,9 @@ test "the bar's painted-width report drives the reservation" {
     }
 }
 
-// The pure half of a systatus segment. `refresh` used to do the
-// formatting, the value-span bookkeeping, the miss latching and the change
-// detection in one function over module globals, so none of it could be
-// tested. `render` is the formatting half, split out and now reachable.
+// The pure half of a systatus segment: `render` is the formatting half --
+// layout and the value-span bookkeeping -- over explicit arguments rather
+// than module globals, so it is testable headlessly.
 
 test "render lays out label, space and value, and reports the value span" {
     var buf: [64]u8 = undefined;
@@ -226,8 +223,8 @@ test "render lays out label, space and value, and reports the value span" {
 }
 
 test "render does not assume the value is a percentage" {
-    // The point of the Sample: the core used to hardcode "{d}%", so a
-    // readout could only ever be a percentage.
+    // The Sample exists so the core does not hardcode "{d}%" and a readout
+    // can be any text, not only a percentage.
     var buf: [64]u8 = undefined;
     for ([_][]const u8{ "2.4G", "up", "3 of 7", "", "\xc2\xb5F" }) |value| {
         const r = systatus.render("DISK", .{ .text = value }, &buf);

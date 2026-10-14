@@ -1,11 +1,10 @@
 //! Root-window cursor theming and the startup mouse-bind reachability report.
-//! Split out of input.zig (which had merged it from cursor.zig): one startup
-//! call that touches the X connection and the screen and nothing else, plus
-//! the pure config-vs-grab analysis `setup` fires right after it.
+//! One startup call that touches the X connection and the screen and nothing
+//! else, plus the pure config-vs-grab analysis `setup` fires right after it.
 //!
 //! Wire traffic: `xcb_change_window_attributes` on the root to apply the
-//! theme. Root DECORATION, taken once at startup before the event loop --
-//! not a per-window mutation -- which is why this file carries its own
+//! theme. Root DECORATION, taken once at startup before the event loop;
+//! not a per-window mutation, which is why this file carries its own
 //! allowlist entry in check-layers.sh.
 const std = @import("std");
 
@@ -14,13 +13,10 @@ const xcb = core.xcb;
 const log = @import("log");
 const mouse = @import("mouse");
 
-// ---------------------------------------------------------------------------
-// Root-window cursor theming via libxcb-cursor: one startup call that
-// touches the X connection and the screen and nothing else. The
-// declarations are hand-written because `xcb_cursor_load_cursor` is a
-// static inline function in the C header, which cImport cannot bind.
-// ---------------------------------------------------------------------------
-
+/// Root-window cursor theming via libxcb-cursor: one startup call that
+/// touches the X connection and the screen and nothing else. The
+/// declarations are hand-written because `xcb_cursor_load_cursor` is a
+/// static inline function in the C header, which cImport cannot bind.
 const Context = opaque {};
 
 extern fn xcb_cursor_context_new(

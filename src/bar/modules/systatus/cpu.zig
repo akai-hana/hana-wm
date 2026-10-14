@@ -6,10 +6,9 @@
 //! rather than staying collapsed for a tick.
 //!
 //! Only that first line is read, and it is read into a buffer sized for a line.
-//! That is the whole reason the segment used to be permanently blank:
 //! /proc/stat carries one line per logical CPU (3.1 KiB on 16 cores, ~25 KiB on
-//! 128), so any buffer smaller than the file reads back "truncated", and this
-//! readout used to reject truncation outright -- returning null on every tick,
+//! 128), so any buffer smaller than the file reads back "truncated"; a
+//! readout that rejected truncation outright would return null on every tick
 //! forever. Sizing for the line and accepting a short read that still contains
 //! the whole line (see `aggregateLineComplete`) is what makes the buffer size a
 //! detail instead of a core-count cliff.

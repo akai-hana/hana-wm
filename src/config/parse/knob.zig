@@ -8,10 +8,10 @@
 //! so a bar knob reads `target = "bg"`, not `"bar.bg"`.
 //!
 //! The comptime contract each fragment runs on its own table (`validateTable`)
-//! turns the three things the old monolithic schema table could only assert
-//! globally into per-fragment checks: every target names a real field, every
-//! scalar leaf is either a knob target or listed bespoke, and every `needs`
-//! dependency is supplied by an earlier knob in the same table.
+//! turns three schema-wide requirements into per-fragment checks: every target
+//! names a real field, every scalar leaf is either a knob target or listed
+//! bespoke, and every `needs` dependency is supplied by an earlier knob in the
+//! same table.
 
 const std = @import("std");
 const log = @import("log");
@@ -20,10 +20,7 @@ const types = @import("types");
 const scaling = @import("scaling");
 const color = @import("color");
 
-// ---------------------------------------------------------------------------
-// The knob table vocabulary: Placement, the table-literal builders, Kind, Knob.
-// ---------------------------------------------------------------------------
-
+/// The knob table vocabulary: Placement, the table-literal builders, Kind, Knob.
 /// One accepted location for a knob: a section name and the key spelling
 /// used inside it.
 pub const Placement = struct {
@@ -119,20 +116,15 @@ pub const Knob = struct {
     /// Targets this knob READS to resolve its value (the sibling a
     /// `color_from`/`color_opt` kind falls back to), by dotted path relative
     /// to the fragment root. This is the ORDERING constraint stated as data:
-    /// the dependency used to be a string embedded in `kind` plus a comment
-    /// in the table saying "base colors precede the color_from chain", which
-    /// nothing checked. A knob moved up or a sibling renamed would silently
-    /// read the DEFAULT value instead of the configured one -- the knob still
+    /// without it, a knob moved up or a sibling renamed would silently read
+    /// the DEFAULT value instead of the configured one -- the knob still
     /// parsed, the color was just wrong, and only a visual diff of the bar
     /// would show it. `validateTable` turns the ordering into a build
     /// failure.
     needs: []const []const u8 = &.{},
 };
 
-// ---------------------------------------------------------------------------
-// Type/value walks into a fragment root by dotted path.
-// ---------------------------------------------------------------------------
-
+/// Type/value walks into a fragment root by dotted path.
 /// Resolves a dotted path from `root` to the FIELD TYPE it names, or null
 /// when any step is missing. Comptime only -- the path is always a comptime
 /// string built by the knob builders, never a runtime value.
@@ -151,8 +143,8 @@ fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
             }
             const t = next orelse return null;
             // The last segment is the answer, even when its type is a struct:
-            // ScalableValue IS a struct, and treating it as a waypoint made
-            // every size/percentage knob look like a dangling path.
+            // ScalableValue IS a struct, and treating it as a waypoint would
+            // make every size/percentage knob look like a dangling path.
             if (it.peek() == null) return t;
             // Otherwise a struct continues the walk and anything else means
             // the path went deeper than the type allows.
@@ -208,10 +200,7 @@ pub fn value(comptime CfgT: type, cfg: *const CfgT, comptime path: []const u8) F
     return walkVal(CfgT, cfg, path);
 }
 
-// ---------------------------------------------------------------------------
-// Comptime table contract.
-// ---------------------------------------------------------------------------
-
+/// Comptime table contract.
 /// True when `t` names a field whose value is a plain scalar the knob tables
 /// are expected to own: bool, int, float, or one of the config value types.
 /// Containers (ArrayList, maps) and nested structs are excluded -- they are
@@ -232,10 +221,10 @@ fn isScalarLeaf(comptime t: type) bool {
 
 /// The comptime contract every fragment runs on its OWN table, with its OWN
 /// Config as the root:
-///   1. every knob target names a real field (a typo in a builder's target
-///      string used to produce a knob that parsed, validated and assigned
-///      into nothing at all -- the config key worked, the value went
-///      nowhere, and no build failed);
+///   1. every knob target names a real field (otherwise a typo in a builder's
+///      target string produces a knob that parses, validates and assigns into
+///      nothing at all -- the config key works, the value goes nowhere, and
+///      no build fails);
 ///   2. every scalar leaf is either a knob target or listed `bespoke`
 ///      (otherwise it compiles, it parses, and it is always at its
 ///      initializer -- a DEAD field);
@@ -304,10 +293,7 @@ pub fn validateTable(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Generic readers.
-// ---------------------------------------------------------------------------
-
+/// Generic readers.
 /// Warn-and-return-default for an out-of-range value, shared by getInRange's
 /// integer path so the warning wording lives once.
 fn reject(
@@ -445,17 +431,14 @@ pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const 
     view.* = copy;
 }
 
-// ---------------------------------------------------------------------------
-// The engine: applies one fragment's knob table onto its root.
-// ---------------------------------------------------------------------------
-
+/// The engine: applies one fragment's knob table onto its root.
 /// Applies every knob of `knobs` from a parsed Document onto `cfg` (a
 /// fragment root). The single table-driven scalar pass; OOM from string
 /// dupes propagates; everything else warns-and-reverts in place. The
 /// document-global palette must already be collected (`color.collectPalette`)
-/// before color knobs read. Unlike the old monolithic applyAll, this does NOT
-/// lint the document and does NOT run any bespoke tail -- those belong to the
-/// caller (composed.parse lints; each fragment appends its own tables).
+/// before color knobs read. This does NOT lint the document and does NOT run
+/// any bespoke tail -- those belong to the caller (composed.parse lints;
+/// each fragment appends its own tables).
 pub fn applyAll(
     comptime CfgT: type,
     doc: *parser.Document,

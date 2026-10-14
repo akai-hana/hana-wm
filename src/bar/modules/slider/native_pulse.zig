@@ -7,8 +7,8 @@
 //! Commits are single socket round-trips (tens of microseconds, no
 //! fork/exec/pipe), which is what makes per-event, un-throttled volume
 //! scrolls/drags possible on PipeWire/PulseAudio machines -- including ones
-//! like the box this was developed on, where `pactl` is unavailable but
-//! `/run/user/$uid/pulse/native` is served by PipeWire.
+//! where `pactl` is unavailable but `/run/user/$uid/pulse/native` is served
+//! by PipeWire.
 //!
 //! The module links NOTHING at build time: symbols are resolved at runtime
 //! with `std.DynLib`. On a machine without `libpulse.so.0` the attach fails
@@ -219,13 +219,11 @@ pub fn volumePct(pvol: []const u8, channels: u8) ?u8 {
     var sum: u64 = 0;
     for (0..n) |i| sum += readLE(u32, pvol, 4 + i * 4);
     const avg = sum / n;
-    // The SHARED map, not a local formula: this used to truncate
-    // (`avg * 100 / PA_VOLUME_NORM`), while `buildCvolume` truncated the other
-    // way (`pct * PA_VOLUME_NORM / 100`). The two disagree by up to 1% on 96 of
-    // 101 levels, so writing 5% and reading it back showed 4%, and the segment
-    // fought the user. slider.rawFromPct/pctFromRaw round to nearest in both
-    // directions, which makes the round trip exact. native_alsa already routed
-    // through it; this is the same fix for the pulse backend.
+    // The SHARED map, not a local formula: truncating in opposite directions
+    // on write and read would disagree by up to 1% on 96 of 101 levels, so
+    // writing 5% and reading it back could show 4% and the segment would fight
+    // the user. slider.rawFromPct/pctFromRaw round to nearest in both
+    // directions, which makes the round trip exact.
     return slider.pctFromRaw(u32, @intCast(avg), 0, PA_VOLUME_NORM);
 }
 
@@ -477,8 +475,8 @@ pub const Backend = struct {
         g_sink = .{};
         _ = runOp(issueSetVolume, &g_sink.done, 100);
         // Return `found` (the daemon's verdict), not just `done`: successCb
-        // fires done with found=false when the daemon rejects the op, so a
-        // rejected commit used to be reported as applied.
+        // fires done with found=false when the daemon rejects the op, so
+        // `done` alone would report a rejected commit as applied.
         return g_sink.done and g_sink.found;
     }
 

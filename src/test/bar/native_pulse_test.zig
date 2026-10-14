@@ -1,24 +1,14 @@
 //! Test module for the runtime-dlopen PulseAudio backend.
 //!
 //! The pure buffer-mapping/offset-guard/cvolume logic lives HERE, not in
-//! native_pulse.zig. It used to live inline there with this file as a mere
-//! "reachability anchor" -- on the belief that importing a module runs its
-//! inline tests. IT DOES NOT (verified with a canary in both places: the canary
-//! fails here and not there). All seven of those tests were dead. Recovered
-//! below, and they now run.
+//! native_pulse.zig: an inline test in an imported module is never analyzed by
+//! this harness.
 //!
 //! Attach/read/commit need libpulse.so.0 and a live daemon, so they are
 //! runtime-verified on real machines instead.
 
 const std = @import("std");
 const native_pulse = @import("native_pulse");
-
-// ---------------------------------------------------------------------------
-// Recovered dead tests, formerly INLINE in native_pulse.zig. A canary
-// `expectEqual(1, 2)` appended to that file does not fail, so the import in
-// this test root made the module REACHABLE WITHOUT RUNNING its inline tests:
-// the harness only executes test blocks in the test root itself. These now
-// run for the first time. The symbols they touch are `pub` for that reason.
 
 const testing = std.testing;
 

@@ -1,5 +1,5 @@
 # )#{<> core >/=!= #
-# "THE FOUNDATION" #
+# "The Foundation" #
 
 `core/` represents the foundation of hana.
 

@@ -56,14 +56,9 @@ pub const Sub = struct {
 /// never names the concrete struct (`Sub`) or a sibling's import alias.
 pub const Binding = Sub;
 
-/// One reading from a readout, carrying its DISPLAY text.
-///
-/// This used to be `?u8` -- a bare 0-100 percent -- and the core hardcoded
-/// "{d}%" when rendering it. That put the readout's presentation in the wrong
-/// place: a module could not report a temperature, a byte count, or "up", and
-/// the only way to express one was to abandon the systatus registry. The sample
-/// now carries the formatted text, so the module owns its own presentation and
-/// the core just paints two spans.
+/// One reading from a readout, carrying its DISPLAY text: the module owns its
+/// own presentation (a temperature, a byte count, "up", a percentage), and the
+/// core just paints two spans.
 ///
 /// `text` is borrowed from storage the module owns (typically a module-level
 /// buffer); the core COPIES it into the render buffer, so it need not outlive
@@ -88,10 +83,10 @@ pub const subs = @import("systatus_subs").subs;
 const FileRead = struct {
     bytes: []const u8,
     /// True when the read filled `buf` completely, so the tail was dropped and
-    /// the contents cannot be trusted whole. `readSmallFile` used to discard
-    /// this, which made a /proc/meminfo larger than the buffer
-    /// indistinguishable from a meminfo with no MemAvailable: a truncated file
-    /// read as "no RAM" rather than as the I/O problem it is.
+    /// the contents cannot be trusted whole. Reporting it keeps a
+    /// /proc/meminfo larger than the buffer distinguishable from a meminfo
+    /// with no MemAvailable: a truncated file must read as an I/O problem, not
+    /// as "no RAM".
     truncated: bool,
 };
 
@@ -122,13 +117,8 @@ const miss_tolerance: u8 = 3;
 const absent_reprobe_ms: i64 = 30_000;
 
 /// One readout's mutable state, indexed by registry position (segment i ==
-/// subs[i]). This is the AoS slot for what used to be nine parallel g_*
-/// arrays (armed, misses, absent, pending_redraw, next_read_ms, last, len,
-/// value_start, value_len): the arrays shared only an index, so a readout's
-/// lifecycle was spread across nine declarations to keep in lockstep, and a
-/// new field meant a tenth. One struct says which fields belong to the same
-/// readout, and `&g_readouts[idx]` hands the whole lifecycle to a helper at
-/// once.
+/// subs[i]). One struct says which fields belong to the same readout, and
+/// `&g_readouts[idx]` hands the whole lifecycle to a helper at once.
 const Readout = struct {
     /// Set by the first draw (when the bar actually renders the segment), so
     /// an unconfigured readout never wakes the loop.
@@ -159,11 +149,9 @@ var g_readouts: [subs.len]Readout = @splat(.{});
 
 /// The last drawn width of a readout is NOT tracked in `Readout`: it is the
 /// shared `segmod.widthState` singleton for that readout's name, which owns
-/// the store / consume / naturalWidth triple. The bar-private copy of that
-/// triple (a `g_slot_width` array plus an inline "did the width change? mark
-/// dirty" at the draw site) was a second implementation of code that already
-/// existed, and the two could drift; every readout is comptime-indexed by
-/// `segmentFor`, so one instantiation per name is exactly the state each needs.
+/// the store / consume / naturalWidth triple. Every readout is
+/// comptime-indexed by `segmentFor`, so one instantiation per name is
+/// exactly the state each needs.
 fn widthStateFor(comptime idx: usize) type {
     return segmod.widthState(subs[idx].name);
 }
@@ -179,10 +167,7 @@ const Rendered = struct {
 
 /// PURE: renders "<label> <value>" into `buf` from a sample. No globals,
 /// no I/O, no latching -- the absence and tolerance POLICY stays in `refresh`,
-/// so this half of the segment is directly testable. Before the split, the
-/// formatting, the value-span bookkeeping, the miss latching and the change
-/// detection were one function over module globals, which is why none of it
-/// could be tested at all.
+/// so this half of the segment is directly testable.
 pub fn render(label: []const u8, sample: Sample, buf: []u8) Rendered {
     var n = appendText(buf, 0, label);
     n = appendText(buf, n, " ");

@@ -88,10 +88,9 @@ fn eqModel(a: *const Model, b: *const Model) bool {
         if (sa.params.primary_width != sb.params.primary_width) return false;
         if (sa.params.primary_count != sb.params.primary_count) return false;
         if (sa.params.secondary_balance != sb.params.secondary_balance) return false;
-        // The viewport fields were NOT compared, so a determinism replay
-        // that diverged in scroll offset or history passed as equal. Both are
-        // per-workspace layout params that a preReconcile duty mutates, which
-        // is exactly the kind of state a replay has to catch.
+        // The viewport fields must be compared too: both are per-workspace
+        // layout params that a preReconcile duty mutates, which is exactly the
+        // kind of state a determinism replay has to catch.
         if (sa.params.viewport_offset != sb.params.viewport_offset) return false;
         if (sa.params.viewport_prev_count != sb.params.viewport_prev_count) return false;
     }

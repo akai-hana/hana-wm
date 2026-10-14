@@ -109,14 +109,11 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?model_mod.Rect {
     return requests.rectFromXcb(reply);
 }
 
-// ---------------------------------------------------------------------------
-// Child XID -> managed toplevel cache (former child_cache.zig, merged
-// 2026-10-10), backing findManagedWindow's fast path below. A fixed flat
-// array (Electron nests at most 3-5 children per app); keyed storage makes
-// the hit O(1) with no capacity cliff, since the lookup sits on the slow
-// path of a BLOCKING xcb_query_tree round trip.
-// ---------------------------------------------------------------------------
-
+/// Child XID -> managed toplevel cache (former child_cache.zig, merged
+/// 2026-10-10), backing findManagedWindow's fast path below. A fixed flat
+/// array (Electron nests at most 3-5 children per app); keyed storage makes
+/// the hit O(1) with no capacity cliff, since the lookup sits on the slow
+/// path of a BLOCKING xcb_query_tree round trip.
 /// Child-window cache ceiling: bounds findManagedWindow's child->toplevel
 /// rows (a flat array; Electron/Qt nest at most a handful of children per app).
 const capacity: usize = 64;

@@ -133,9 +133,9 @@ fn expandGlobKeys(allocator: std.mem.Allocator, key_pattern: []const u8) ![]Glob
 
 /// Substitutes the `{kill}` placeholder (FIRST, for ANY action string,
 /// before the workspace-branch check and before parseAction) and parses
-/// the result. Previously the substitution only ran for glob-expanded
-/// workspace actions, so every ordinary `{kill} foo` bind exec'd a
-/// literal, broken shell command.
+/// the result. Scoping the substitution to glob-expanded workspace actions
+/// instead would make every ordinary `{kill} foo` bind exec a literal,
+/// broken shell command.
 fn resolveAndParseAction(
     allocator: std.mem.Allocator,
     cmd: []const u8,
@@ -228,7 +228,7 @@ fn splitParallel(allocator: std.mem.Allocator, cmd: []const u8, out: *std.ArrayL
 
 /// Resolves one config-list element (or a lone string value) into its Action.
 /// A `+`-linked batch becomes a `.parallel` group; without separators the
-/// result is a single action (byte-for-byte the previous element behavior).
+/// result is a single action.
 fn resolveElement(
     allocator: std.mem.Allocator,
     cmd: []const u8,

@@ -155,11 +155,10 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
 }
 
 // The deferred bar transition is resolved from MODEL TRUTH, and the
-// pending entry is per-window. The two properties the single-slot,
-// dimensions-only version got wrong: it dropped a second window's pending
-// intent, and it re-showed the bar whenever a window's ConfigureNotify stopped
-// reporting screen dimensions -- even if the model still recorded a covering
-// occupant.
+// pending entry is per-window. Two failure modes this pins against: dropping
+// a second window's pending intent, and re-showing the bar whenever a
+// window's ConfigureNotify stops reporting screen dimensions -- even if the
+// model still recorded a covering occupant.
 test "pipeline: deferred bar waits for model truth and keeps per-window entries" {
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
@@ -175,9 +174,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     //    window must REPORT screen dimensions before the bar moves.
     //    w1 has to be COVERING for a hide to confirm at all, because the
     //    decision is MODEL TRUTH, not the reported numbers -- which is
-    //    exactly what step 2 asserts. This step used to run against a plain
-    //    tiled w1 and so demanded a bump the product correctly refuses; it had
-    //    never run, because the fixture skips without an X display.
+    //    exactly what step 2 asserts.
     fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     fullscreen.armPendingBarHide(w1);
@@ -194,7 +191,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     // 2. MODEL TRUTH gates the bar hide. Screen-sized dimensions with a model that
     //    says NOT covering must NOT move the bar: that combination is a client
     //    reporting fullscreen-shaped geometry after being told to leave, and
-    //    hiding the bar there is the bug the dimensions-only version had.
+    //    hiding the bar there is the bug this gate exists to prevent.
     fullscreen.armPendingBarHide(w1);
     const before2 = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, sw, sh);
@@ -223,8 +220,7 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     //    non-fullscreen dimensions are the show's confirmation, and the model
     //    must also agree nothing covers. w1 has to be IN fullscreen for this
     //    to mean anything: step 3 toggled it back OUT, so the "still covers"
-    //    premise the comment had always claimed was not actually true, and
-    //    the gate below was therefore never exercised.
+    //    premise must be re-established below.
     fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
     const before5 = core.fullscreen.rev();
@@ -238,9 +234,8 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
     // arrives when a window's restored anchor IS the screen size"). Because the
     // toggle therefore answers the question, it also RETIRES the arm it left
     // behind, so the ConfigureNotify has nothing left to decide and no second
-    // bump happens. This used to read `after_toggle + 1`: the toggle published
-    // the exit and the still-armed entry republished the identical bar state,
-    // a redundant repaint on every fullscreen exit.
+    // bump happens: a still-armed entry republishing the identical bar state
+    // would be a redundant repaint on every fullscreen exit.
     const after_toggle = core.fullscreen.rev();
     fullscreen.notifyConfigureIfPending(w1, small_w, small_h);
     try std.testing.expectEqual(after_toggle, core.fullscreen.rev());
@@ -250,10 +245,9 @@ test "pipeline: deferred bar waits for model truth and keeps per-window entries"
 // changes the usable area the windows must tile into. The claim lands while
 // the grab is already held -- the fullscreen path unmaps and re-claims the bar
 // inside the same grab that re-tiles the windows -- so `reconcileNow` has to
-// read the claim LIVE. It used to trust the snapshot `grabScoped` took, which
-// tiled into the pre-claim work area: the bar came back but the layout still
-// sized as though it were not there, until a workspace switch happened to
-// rebuild the ctx and correct it.
+// read the claim LIVE. Trusting the snapshot `grabScoped` took would tile into
+// the pre-claim work area: the bar comes back but the layout still sizes as
+// though it were not there, until a workspace switch rebuilds the ctx.
 test "pipeline: a claim taken after the grab still moves the tiles" {
     var fx = try fixture.setUp("pipeline_test");
     defer fx.deinit();
@@ -265,8 +259,8 @@ test "pipeline: a claim taken after the grab still moves the tiles" {
     // Before: the tiles fill the screen, starting at the layout's own gap.
     const before = fx.geometry(w1) orelse return error.ClosedWindow;
 
-    // The bar re-claims the top edge INSIDE the grab, which is the ordering
-    // that was broken.
+    // The bar re-claims the top edge INSIDE the grab -- the ordering this
+    // test exercises.
     const claim_px: u16 = 30;
     {
         var g = pipeline.grabScoped();

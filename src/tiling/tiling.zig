@@ -166,9 +166,10 @@ pub const Region = struct {
 pub inline fn outerArea(wa: model.Rect, gap: u16) Region {
     return .{
         // Both edges take the work area's own origin plus the gap, not the gap
-        // alone: a work area that does not start at x=0 (a side claim) was
-        // silently placed back at the screen's left edge. The origins take
-        // the shared non-negative floors (waX for x, clampYToU16 for y).
+        // alone: without the origin, a work area that does not start at x=0 (a
+        // side claim) would be silently placed back at the screen's left edge.
+        // The origins take the shared non-negative floors (waX for x,
+        // clampYToU16 for y).
         .x = waX(wa) +| @as(i32, gap),
         .y = clampYToU16(wa.y) +| gap,
         .w = wa.width -| gap *| 2,
@@ -220,8 +221,8 @@ pub inline fn emitView(v: *const View, out: *List, win: model.WindowId, rect: mo
 }
 
 /// Emit a visible placement built from integer tiling coordinates, narrowing
-/// x/y through model.satI16. The shared row-emission shape every module used
-/// to hand-build as `model.Rect{ .x = model.satI16(...), ... }` + emitView.
+/// x/y through model.satI16. The shared row-emission shape used by the layout
+/// modules.
 pub inline fn emitRect(v: *const View, out: *List, win: model.WindowId, x: i32, y: i32, w: u16, h: u16) void {
     emitView(v, out, win, .{
         .x = model.satI16(x),
@@ -247,10 +248,9 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
     if (windows.len == 0) return;
     const top = focusedElse(ctx.v, windows, windows[0]);
     emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, model.doubledBorder(ctx.m), ctx.min_dim));
-    // The "show one, hide the rest" fan-out, inline. It was a named helper, but
-    // this is its only caller and its doc claimed the monocle shape uses it --
-    // monocle cannot, because it must land emitView for its top window at that
-    // window's own position in v.order, while this appends unconditionally.
+    // The "show one, hide the rest" fan-out. It appends unconditionally, which
+    // the monocle shape cannot use: monocle must land emitView for its top
+    // window at that window's own position in v.order.
     for (windows) |w| {
         if (w != top) emitHidden(ctx.out, w);
     }
@@ -274,7 +274,7 @@ comptime {
 /// on module names), or null when unregistered.
 /// Returns the registry index as the `u8` kind it will actually be stored as,
 /// not a `usize` the caller has to cast. The kind IS a u8, so returning usize
-/// only created a truncation footgun at eight call sites.
+/// would hand every caller a truncation footgun.
 pub fn layoutByName(name: []const u8) ?u8 {
     for (tiling_mods, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m.name)) return @intCast(i);
     return null;
@@ -357,14 +357,13 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
         // The layout writes into SCRATCH and the engine emits into `out` in
         // `v.order` position. The order is a property of the SINK
         // (it consumes `out` positionally against a per-slot table built from
-        // `order`), not something each layout can be trusted to reproduce:
-        // master's overflow grid is column-major, so it emitted `100 101 110
-        // 102..109` where the order said `100 101 102..110` -- a real screen
-        // bug (each window was given another window's rect) that no golden
-        // test could see, because every golden looked at windows it knew by
-        // name rather than at the position. Making it an engine invariant
-        // means a future layout cannot reintroduce it by choosing a tidier
-        // traversal than a row-major one.
+        // `order`), not something each layout can be trusted to reproduce: a
+        // column-major traversal that emitted `100 101 110 102..109` where the
+        // order said `100 101 102..110` hands each window another window's
+        // rect -- a real screen bug that no golden test can see, because every
+        // golden looks at windows it knows by name rather than at the position.
+        // Making it an engine invariant means a future layout cannot
+        // reintroduce it by choosing a tidier traversal than a row-major one.
         var scratch: List = .{};
         f(v, &scratch);
         emitInOrder(v, &scratch, out);

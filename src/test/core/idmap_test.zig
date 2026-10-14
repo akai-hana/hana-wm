@@ -83,10 +83,10 @@ test "IdMap: tombstones are reclaimed and do not lose live entries" {
 test "IdMap: filled-to-capacity churn never strands a tombstone that hangs find" {
     var m = IdMap(u32, 7){};
     // slots = 8, so capacity 7 leaves exactly one empty slot. Filling,
-    // removing three (3 tombstones), and re-inserting three FRESH ids used to
-    // be able to land the insert on the surviving empty slot while a tombstone
-    // remained: len + tombstones == slots with NO empty slot, so the next
-    // get()/contains() spun forever. The post-insert rehash must always
+    // removing three (3 tombstones), and re-inserting three FRESH ids can
+    // land the insert on the surviving empty slot while a tombstone remains:
+    // len + tombstones == slots with NO empty slot, so the next
+    // get()/contains() would spin forever. The post-insert rehash must always
     // restore an empty slot.
     var next: u32 = 1;
     var round: u32 = 0;
