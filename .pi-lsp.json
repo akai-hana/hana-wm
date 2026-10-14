@@ -1,7 +1,0 @@
-{
-  "autoStart": ["zig"],
-  "autoInjectDiagnostics": ["zig"],
-  "servers": {
-    "zig": { "command": "zls" }
-  }
-}

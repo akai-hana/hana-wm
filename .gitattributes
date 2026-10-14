@@ -1,9 +1,8 @@
-# Normalize all text to LF in the working tree and ensure git never has to
-# guess line endings; Zig sources are defined as LF so a checkout on Windows
-# still works with zigfmt's expectations.
+# Normalize all text to LF in the working tree and ensure git never has to guess line endings;
+# Zig sources are defined as LF so a checkout on Windows still works with zigfmt's expectations.
 * text=auto
 *.zig text eol=lf
 
-# Binary fixture: never a candidate for text normalization, diffing, or
-# merges.
+# Binary fixture; never a candidate for text normalization, diffing, or merges.
+# TODO: move gif out of repo
 dev/demonstration.gif -filter -diff -merge -text
