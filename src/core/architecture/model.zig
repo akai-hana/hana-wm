@@ -209,6 +209,23 @@ pub const Store = bounded.Store;
 /// 16 keeps the per-workspace focus MRU small. Per-workspace tiled membership
 /// is bounds from constants. Transitions never allocate (defined capacities).
 pub const store_capacity = 128;
+
+/// Primary-column capacity: a sane handful of slots, capped at a quarter of
+/// the managed-window ceiling so one workspace can't statically claim the
+/// store. The config grammar lets master_count rise to its u8 ceiling (and
+/// admits a 0 count for a workspace override), so the config-driven stamps go
+/// through `capPrimaryCount`.
+pub const max_primary_count = store_capacity / 4;
+
+/// Clamps a configured primary count into [1, max_primary_count] — the model's
+/// primary-count invariant, and the one clamp the config-driven seed stamps
+/// call. The interactive increment (`adjustPrimaryCount`) clamps the same
+/// bounds inline rather than here: its delta arithmetic runs in i32 so a
+/// decrement below 1 cannot wrap a u8, and narrowing to u8 first would be the
+/// overflow it is avoiding.
+pub fn capPrimaryCount(count: u8) u8 {
+    return std.math.clamp(count, 1, @as(u8, @intCast(max_primary_count)));
+}
 pub const mru_capacity = 16;
 pub const max_tiled_per_ws = constants.max_tiled_windows;
 const OrderList = bounded.BoundedList(WindowId, max_tiled_per_ws);
@@ -653,7 +670,7 @@ pub fn adjustPrimaryWidth(m: *Model, delta: f32) void {
 }
 
 /// Stamp one `LayoutParams` template across every workspace (the config
-/// reload/seeding path — `actions.seedParamsFromConfig` supplies the template;
+/// reload/seeding path — `seed.seedParamsFromConfig` supplies the template;
 /// at-zone tests use it too).
 pub fn applyConfigReload(m: *Model, tpl: LayoutParams) void {
     for (&m.ws) |*s| {
