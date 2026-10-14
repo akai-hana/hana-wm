@@ -7,7 +7,7 @@
 //! destination already has an owner (dispatched through the registry, so
 //! `fullscreen` is never named here). Workspace count and per-workspace
 //! config overrides are owned elsewhere (query latches the count;
-//! config/model_seeding.zig seeds the params).
+//! config/model_config.zig seeds the params).
 //!
 //! The module also owns the WORKSPACE COMMANDS (switch, move, tag, pin,
 //! all-view): each is one model transition plus one reconcile entry, and

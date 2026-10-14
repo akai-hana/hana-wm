@@ -8,7 +8,7 @@
 //!
 //! Boundary (see PLAN Item 11): this file is config loading + subsystem
 //! rebuild ORCHESTRATION. After the pointer swap it hands param stamping to
-//! `seed.reloadAndReconcile()` (config/model_seeding.zig, pure config→model)
+//! `seed.reloadAndReconcile()` (config/model_config.zig, pure config→model)
 //! and never models state itself. Session continuity across re-exec is a
 //! separate concern owned by process/session.zig (persist) + process/process.zig
 //! (re-exec coordination); neither reaches through here.
@@ -19,7 +19,7 @@ const config = @import("config");
 const keybinds = @import("keybinds");
 const window = @import("window");
 const admission = @import("admission");
-const seed = @import("model_seeding");
+const seed = @import("model_config");
 // The bar's hook set lives in the `surfaces` composition root (comptime `null`
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;

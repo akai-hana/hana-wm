@@ -131,7 +131,7 @@ pub const Layout = struct {
     /// Parses a config VALUE-STRING (e.g. "lifo", "fifo", "gaps", "gapless",
     /// "relaxed", "rigid") into this layout's variant index (< variant_count),
     /// or null when the string is not one of its values. Config-driven
-    /// variant resolution calls this (see config/model_seeding.zig); a
+    /// variant resolution calls this (see config/model_config.zig); a
     /// module that binds it decides which spellings map to which indices, so
     /// the variant tables are fully registry-driven. null = this layout does
     /// not accept per-variant value strings.
