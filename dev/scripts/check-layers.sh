@@ -120,8 +120,8 @@ wire_allowed() {
         # Tiled border-width application: borders.zig's xcb_configure_window
         # sets XCB_CONFIG_WINDOW_BORDER_WIDTH on tiled windows (the per-frame
         # border sweep). A width-only configure is NOT a geometry/map
-        # mutation and runs outside reconcile by design; the wincache
-        # cacheBorderWidth dedup keeps it from spamming the server.
+        # mutation and runs outside reconcile by design; the sync ledger's
+        # last-sent-width dedup keeps it from spamming the server.
         src/window/protocol/borders.zig) ;;
 
         # ICCCM client-message sends (pat1's xcb_send_event): WM_TAKE_FOCUS

@@ -173,8 +173,8 @@ pub fn main(init: std.process.Init) !void {
     // so there is no X state to push.
     actions.seedParamsFromConfig();
 
-    // Direct subsystem init: only the bar ever registered hooks (no plugin
-    // registry anymore).
+    // Direct subsystem init: surfaces is the composition root for chrome;
+    // window/tiling/bar hooks dispatch through the build-generated registries.
     surfaces.init() catch |err| log.err("surface init failed: {}", .{err});
     defer surfaces.deinit();
 
