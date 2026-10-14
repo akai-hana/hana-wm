@@ -160,13 +160,21 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
 /// Stops any active drag and updates the last event timestamp.
 pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     focus.setLastEventTime(event.time);
+    // An active floating drag owns release even when the cursor is over the bar
+    // window: a release landing on the bar must still stop the drag, or the
+    // drag state latches and later un-pressed motions keep moving the window
+    // via the still-active updateDrag path. Route to the bar only when no
+    // floating drag is in flight.
+    if (build_options.has_floating and actions.isDragging()) {
+        actions.stopDrag();
+        return;
+    }
     // Releases on the bar window terminate a segment scrub (the bar clears
     // its drag anchor). Routed before the managed-window path, as clicks are.
     if (surfaces.isBarWindow(event.event)) {
         surfaces.handleButtonRelease(event);
         return;
     }
-    if (build_options.has_floating and actions.isDragging()) actions.stopDrag();
 }
 
 /// Forwards motion to the drag engine and clears focus suppression.
@@ -175,16 +183,20 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
 pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     focus.setLastEventTime(event.time);
 
+    // An active floating drag owns motion even when the cursor crosses the bar
+    // window: routing to the bar first would freeze updateDrag (the drag stops
+    // moving over the bar) and feed spurious scrub motion. Route to the bar
+    // only when no floating drag is in flight.
+    if (build_options.has_floating and actions.isDragging()) {
+        actions.updateDrag(event.root_x, event.root_y);
+        return;
+    }
+
     // Press-hold motion on the bar window feeds the scrub-drag path: it is
     // routed before the managed-window drag engine, which targets a client
     // window grab, never the bar.
     if (surfaces.isBarWindow(event.event)) {
         surfaces.handleButtonMotion(event);
-        return;
-    }
-
-    if (build_options.has_floating and actions.isDragging()) {
-        actions.updateDrag(event.root_x, event.root_y);
         return;
     }
 
@@ -255,9 +267,15 @@ fn tryConfigMouseBind(mods: u16, button: u8, win: u32, ts: u32) bool {
 
     // Most mouse binds execute against the keyboard-focused window
     // (executeAction); toggle_floating_window is inherently per-window
-    // and so targets the CLICKED window instead.
+    // and so targets the CLICKED window instead. A scroll bind carries no
+    // clicked window (win==0 from the scroll path), so fall back to the
+    // keyboard-focused window there rather than dispatching against id 0
+    // (a silent no-op against an unknown store entry).
     switch (mb.action) {
-        .toggle_floating_window => dispatch.grafted(.toggle_floating_window, actions.toggleFloating, win),
+        .toggle_floating_window => {
+            const target = if (win != 0) win else focus.getFocused() orelse return true;
+            dispatch.grafted(.toggle_floating_window, actions.toggleFloating, target);
+        },
         else => dispatch.executeAction(&mb.action),
     }
     releaseGrab(ts);

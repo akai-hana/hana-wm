@@ -46,6 +46,11 @@ fn toggleBarPosition() void {
     const current_ws = tracking.getCurrentWorkspace() orelse {
         window.updateWorkspaceBorders();
         window.markBordersFlushed();
+        // The bar re-anchor already changed the usable-area claim; re-derive
+        // placements from it even when there is no current workspace to
+        // report: a bare early return left the bar-anchored claim unread and
+        // placements stale until an unrelated event reconciled.
+        grab.reconcileNow();
         return;
     };
     const forced_hidden = if (surfaces.barForcedHiddenByFullscreen) |f|
@@ -114,7 +119,11 @@ pub fn executeAction(action: *const types.Action) void {
             log.err("exec failed: {}", .{err}),
         // A `+` batch is fire-and-forget: members are launched together, no
         // member waits on another, and execs spawn as detached children that
-        // keep running after the batch moves on.
+        // keep running after the batch moves on. Nesting exception: a member
+        // that is itself a `,`-sequence is dispatched through executeAction's
+        // sequence arm, which blocks on that sequence's exec children via
+        // spawn.execSynchronous -- so a `,`-sequence inside a `+` batch is
+        // awaited, not detached.
         .parallel => |acts| for (acts) |*a| executeAction(a),
 
         // Fullscreen: keybind path resolves the focused window, then shares
