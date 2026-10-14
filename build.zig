@@ -124,13 +124,16 @@ pub fn build(b: *std.Build) !void {
     const has_bar = has_bar_orchestrator and has_drawing and has_bar_win and has_bar_segment;
     build_opts.addOption(bool, "has_bar", has_bar);
 
-    // Segment presence flags are consumed only by the test gate table below;
-    // no Zig source reads them, so they are NOT published as build options.
+    // Segment presence flags are consumed only by the test gate table
+    // and the plugin-template specs below; no Zig source reads them,
+    // so they are NOT published as build options.
     const has_seg_clock = discovery.modules.contains("clock");
     const has_seg_carousel = discovery.modules.contains("carousel");
     const has_seg_prompt = discovery.modules.contains("prompt");
     const has_seg_systatus = discovery.modules.contains("systatus");
     const has_seg_brightness = discovery.modules.contains("brightness");
+    const has_seg_slider = discovery.modules.contains("slider");
+    const has_seg_title = discovery.modules.contains("title");
 
     // The vim-modal prompt engine: its presence gates the engine test; the
     // engine is a prompt addon, so its tests also require the host package.
@@ -435,6 +438,14 @@ pub fn build(b: *std.Build) !void {
         .{ .path = "dev/plugin-template/layout.zig", .import = "layout", .present = has_tiling },
         .{ .path = "dev/plugin-template/provider.zig", .import = "provider", .present = true },
         .{ .path = "dev/plugin-template/segment.zig", .import = "segment", .present = has_bar },
+        // Sub-addon templates: each imports its package core's
+        // contract type, so it is compiled only while that core
+        // is discovered (a removed package would otherwise fail
+        // the template's import).
+        .{ .path = "dev/plugin-template/readout.zig", .import = "readout", .decl = "sub", .present = has_seg_systatus },
+        .{ .path = "dev/plugin-template/control.zig", .import = "control", .decl = "sub", .present = has_seg_slider },
+        .{ .path = "dev/plugin-template/title-addon.zig", .import = "title_addon", .decl = "addon", .present = has_seg_title },
+        .{ .path = "dev/plugin-template/prompt-addon.zig", .import = "prompt_addon", .decl = "addon", .present = has_seg_prompt },
     };
     const plugin_template_check = try buildPluginTemplateCheck(b, &discovery.modules, shared_ctx, has_usr, target, optimize, &plugin_template_specs);
     // Layer guards: `zig build check` type-checks AND enforces the
@@ -549,7 +560,7 @@ const surfaces_generated_source =
     \\// of a real struct rather than `null` is that `Surfaces` is then ONE
     \\// type in every build: core never tests a build flag before calling a
     \\// hook, so a hook ADDED to the contract cannot be forgotten at one of
-    \\// the call sites (the `null` design let `surfaces.handleRandrEvent`
+    \\// the call sites (the `null` design let `surfaces.updateClock`
     \\// compile in some permutations and not others, and the call was only
     \\// safe because the guard in front of it happened to be comptime).
     \\// These bodies are trivial, so the unused surface really does no work.
@@ -569,11 +580,6 @@ const surfaces_generated_source =
     \\fn noopTimeout() i32 {
     \\    return -1;
     \\}
-    \\fn noopFirstEvent() u8 {
-    \\    return 0;
-    \\}
-    \\fn noopOpaque(_: *anyopaque) void {}
-    \\fn noopConn(_: core.Connection) void {}
     \\fn noopWin(_: u32) bool {
     \\    return false;
     \\}
@@ -589,9 +595,6 @@ const surfaces_generated_source =
     \\    .pollTimeoutMs = noopTimeout,
     \\    .onPollWakeup = noopVoid,
     \\    .updateClock = noopVoid,
-    \\    .randrFirstEvent = noopFirstEvent,
-    \\    .handleRandrEvent = noopOpaque,
-    \\    .runPendingRedetect = noopConn,
     \\    .onReload = noopVoid,
     \\    .chromeHandleKeypress = noopKeypress,
     \\    .isBarWindow = noopWin,
@@ -805,6 +808,58 @@ fn validateRegistryNames(
     }
 }
 
+/// The one shared build-time source scanner: a bounded read of a
+/// source file into a buffer the struct owns, plus the line
+/// iteration every line-oriented scan in this file consumes. The
+/// four ad-hoc source scans (module classification, binding
+/// declarations, test gates, import edges) all go through it, so
+/// the read bound (`max_scan_source_bytes`) and the read/free
+/// pairing live in one place instead of four.
+const SourceScanner = struct {
+    b: *std.Build,
+    src: []const u8,
+
+    /// Bounded read: the scanned decls (a `pub const module`
+    /// shape, a binding marker, a build-gate line, an @import
+    /// literal) all live in the first few hundred bytes of a
+    /// file, and a build script is not a place to allocate an
+    /// unbounded read for.
+    fn open(b: *std.Build, rel_path: []const u8) !SourceScanner {
+        return .{
+            .b = b,
+            .src = try b.build_root.handle.readFileAlloc(
+                b.graph.io,
+                rel_path,
+                b.allocator,
+                .limited(Module.max_scan_source_bytes),
+            ),
+        };
+    }
+
+    fn close(self: SourceScanner) void {
+        self.b.allocator.free(self.src);
+    }
+
+    /// Line iterator over the scanned source: splits on newlines
+    /// and trims horizontal whitespace (and a trailing CR) per
+    /// line, the shape every line-oriented scan consumes.
+    fn lines(self: SourceScanner) LineIterator {
+        return .{ .rest = self.src };
+    }
+};
+
+const LineIterator = struct {
+    rest: []const u8,
+
+    fn next(self: *LineIterator) ?[]const u8 {
+        if (self.rest.len == 0) return null;
+        const nl = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
+        const line = std.mem.trim(u8, self.rest[0..nl], " \t\r");
+        self.rest = if (nl == self.rest.len) self.rest[nl..] else self.rest[nl + 1 ..];
+        return line;
+    }
+};
+
 /// The registry element type per owner is DERIVED from each owner's module
 /// files instead of a hand-maintained table, so the generated
 /// `<owner>_modules` typing cannot drift from the contracts the modules
@@ -828,13 +883,8 @@ fn validateRegistryNames(
 /// or a foreign shim) is a LOUD build error — the generated registry would
 /// otherwise mis-type its `module` value against a sibling's contract.
 fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
-    const src = try b.build_root.handle.readFileAlloc(
-        b.graph.io,
-        rel_path,
-        b.allocator,
-        .limited(Module.max_scan_source_bytes),
-    );
-    defer b.allocator.free(src);
+    var scan = try SourceScanner.open(b, rel_path);
+    defer scan.close();
 
     const typed_needle = "pub const module: @import(\"contract\").";
     const scaffold_needle = "pub const module = scaffold.module(";
@@ -842,9 +892,8 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
     // Any `pub const module` declaration in an unrecognized spelling.
     const module_needle = "pub const module";
     var saw_unrecognized: bool = false;
-    var it = std.mem.splitScalar(u8, src, '\n');
-    while (it.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t");
+    var it = scan.lines();
+    while (it.next()) |trimmed| {
         if (std.mem.indexOf(u8, trimmed, typed_needle)) |at| {
             const rest = trimmed[at + typed_needle.len ..];
             var n: usize = 0;
@@ -1024,18 +1073,12 @@ const sub_registry_specs = [_]struct {
 /// declaration must be a real top-level decl of the binding name, not a
 /// doc-comment reference.
 fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bool {
-    const src = try b.build_root.handle.readFileAlloc(
-        b.graph.io,
-        rel_path,
-        b.allocator,
-        .limited(Module.max_scan_source_bytes),
-    );
-    defer b.allocator.free(src);
+    var scan = try SourceScanner.open(b, rel_path);
+    defer scan.close();
     const needle = try std.fmt.allocPrint(b.allocator, "pub const {s}", .{binding});
     defer b.allocator.free(needle);
-    var it = std.mem.splitScalar(u8, src, '\n');
-    while (it.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t");
+    var it = scan.lines();
+    while (it.next()) |trimmed| {
         if (std.mem.startsWith(u8, trimmed, "//")) continue;
         if (!std.mem.startsWith(u8, trimmed, needle)) continue;
         const rest = trimmed[needle.len..];
@@ -1378,21 +1421,15 @@ const TestGate = struct {
 /// existed sat silent. An unknown feature NAME, in contrast, is fatal in both
 /// directions, because a typo there would otherwise mean "no gate at all".
 fn readTestGate(b: *std.Build, path: []const u8, flags: []const FeatureFlag) !TestGate {
-    // Bounded read, like every other source scan in this file: a marker line
-    // lives in the first few hundred bytes, and a test file is not a place to
-    // allocate an unbounded read for.
-    const src = try b.build_root.handle.readFileAlloc(
-        b.graph.io,
-        path,
-        b.allocator,
-        .limited(Module.max_scan_source_bytes),
-    );
-    defer b.allocator.free(src);
+    // Bounded read via the shared scanner: a marker line lives in
+    // the first few hundred bytes, and a test file is not a place
+    // to allocate an unbounded read for.
+    var scan = try SourceScanner.open(b, path);
+    defer scan.close();
     const marker = "// build-gate:";
     var out: TestGate = .{};
-    var lines = std.mem.splitScalar(u8, src, '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t\r");
+    var lines = scan.lines();
+    while (lines.next()) |t| {
         if (!std.mem.startsWith(u8, t, marker)) continue;
         out.decl_line = t;
         out.on = true;
@@ -1418,6 +1455,14 @@ fn readTestGate(b: *std.Build, path: []const u8, flags: []const FeatureFlag) !Te
 const PluginTemplateSpec = struct {
     path: []const u8,
     import: []const u8,
+    /// The template's registry export: the decl the generated
+    /// wrapper references to force container and contract-binding
+    /// analysis. `module` for the whole-surface templates
+    /// (segment, layout, provider); the package's binding name
+    /// (`sub`/`addon`) for the sub-addon templates, whose
+    /// self-declaration is what build.zig's sub-registry
+    /// generation keys on.
+    decl: []const u8 = "module",
     present: bool,
 };
 
@@ -1425,11 +1470,13 @@ const PluginTemplateSpec = struct {
 /// modules (cross-wired exactly like an in-tree module, shared artefacts
 /// included) and registers a `check-plugin-template` step, so contract drift
 /// self-fails on `zig build check`. Compile-only: the wrapper test binary is
-/// built, never run. Importing each template and referencing its `module`
-/// decl forces container analysis and contract-binding type-checking — an
-/// import that no longer resolves, or a hook bound to a stale signature or
-/// a deleted/renamed field (e.g. the pre-Round-3 opaque-cast `computeHook`,
-/// `.has_variants`, `.coverageOn`), becomes a compile error here.
+/// built, never run. Importing each template and referencing its registry
+/// export (`module`, or the package's `sub`/`addon` binding for the
+/// sub-addon templates) forces container analysis and contract-binding
+/// type-checking — an import that no longer resolves, or a hook bound to a
+/// stale signature or a deleted/renamed field (e.g. the pre-Round-3
+/// opaque-cast `computeHook`, `.has_variants`, `.coverageOn`), becomes a
+/// compile error here.
 ///
 /// `specs` lists the template files with the import name the generated
 /// wrapper exposes them under and whether the current tree provides their
@@ -1481,7 +1528,7 @@ fn buildPluginTemplateCheck(
     }
     for (specs) |spec| {
         if (!spec.present) continue;
-        try src.print(b.allocator, "    _ = @import(\"{s}\").module;\n", .{spec.import});
+        try src.print(b.allocator, "    _ = @import(\"{s}\").{s};\n", .{ spec.import, spec.decl });
     }
     try src.appendSlice(b.allocator, "}\n");
 
@@ -1812,13 +1859,9 @@ const Module = struct {
         modules: *std.StringHashMap(*std.Build.Module),
         out: *std.ArrayListUnmanaged([]const u8),
     ) !void {
-        const src = try b.build_root.handle.readFileAlloc(
-            b.graph.io,
-            rel_path,
-            b.allocator,
-            .limited(Module.max_scan_source_bytes),
-        );
-        defer b.allocator.free(src);
+        var scan = try SourceScanner.open(b, rel_path);
+        defer scan.close();
+        const src = scan.src;
 
         const needle = "@import(\"";
         var i: usize = 0;

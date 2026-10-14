@@ -1,5 +1,5 @@
-//! Signal self-pipe and dispatch.
-//! Routes POSIX signals through a self-pipe so the event loop can dispatch them safely.
+//! Signal self-pipe and dispatch: routes POSIX signals through a self-pipe so
+//! the event loop can dispatch them safely without signal-handler reentrancy.
 
 const std = @import("std");
 const builtin = @import("builtin");

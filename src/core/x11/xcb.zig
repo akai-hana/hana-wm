@@ -1,9 +1,6 @@
-//! Single xcb C header translation, plus the aliases and casts every x11
-//! module needs to speak the protocol.
-//! Shared by all modules to avoid duplicate @cImport translations, including
-//! modules outside core's dependency chain. This is the x11 layer's leaf: the
-//! rest of `x11/` names the protocol through here and never through `core`,
-//! which keeps the layer a DAG root (core re-exports these decls upward).
+//! XCB C header translation and protocol aliases/casts shared across x11 modules.
+//! Single @cImport of xcb/xcbext/randr/xkb; leaf layer so other x11 modules name
+//! protocol here rather than through core.
 
 pub const xcb = @cImport({
     @cInclude("xcb/xcb.h");

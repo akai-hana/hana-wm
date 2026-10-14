@@ -253,6 +253,16 @@ pub const Master = struct {
         if (!readElem(self.fd, self.switch_numid, &values)) return null;
         return values[0] != 0;
     }
+
+    /// Applies a mute state to the switch control. False when the card
+    /// has no switch control or the write failed -- the caller then
+    /// cannot honor the request (the subprocess rungs `toggle` blindly,
+    /// the native rungs can only set). One `ELEM_WRITE` ioctl.
+    pub fn setMuted(self: *const Master, muted: bool) bool {
+        if (self.switch_numid == 0) return false;
+        const v: c_long = if (muted) 1 else 0;
+        return writeElem(self.fd, self.switch_numid, &[_]c_long{v});
+    }
 };
 
 /// Largest number of elements a card scan accepts (kernel control devices

@@ -1,38 +1,6 @@
-//! The pluggable-composition contract for the self-containment architecture.
-//! This file defines the TYPES that optional subsystems bind to; it names no
-//! subsystem by module name. Registration lives in build-GENERATED modules
-//! (produced by build.zig): core never names an optional subsystem; the build
-//! does.
-//!
-//! `Surfaces` is the interface the chrome-surface module (today: the bar)
-//! binds to. It stays the sole export of the build-generated `surfaces` module
-//! (`surfaces.Surfaces`), injected into every module, so chrome-surface
-//! consumers never name the bar module directly.
-//!
-//! `WindowModule` is the flat, all-optional-hook interface every module under
-//! a window-owner's `modules/` directory binds to. Registration is build-time:
-//! build.zig scans each owner's `modules/` and emits a generated
-//! `<owner>_modules` module, which core tiers iterate with uniform dispatch
-//! loops — no merged struct, no per-sub-system partial types, `null` for hooks
-//! a module doesn't own.
-//!
-//! Key seams:
-//!   - `serializeWindow(m-const, win, alloc)` -- returns an opaque per-window
-//!     blob for restart persistence, or null. The model is passed as a
-//!     READ-ONLY `*const model.Model` (writing through it is a compile error),
-//!     cast from persist's const handle -- no `@constCast`. Each module
-//!     decides from the model state whether it owns the window's blob
-//!     (presence-driven), so at most one blob exists per window. The generic
-//!     persist/wire layer stamps the claiming module's REGISTRY ORDINAL onto
-//!     every blob (plus a format version), so adoption fast-paths on it.
-//!   - `deserializeWindow(win, blob-payload, m)` -- returns a "claimed"
-//!     bool. Hooks self-identify via a format tag (magic byte) inside the
-//!     payload, so the adoption loop can't mis-claim another module's blob;
-//!     the ordinal stamped at save time is tried FIRST and the magic-byte scan
-//!     is the fallback when the ordinal no longer resolves (module removed
-//!     between runs). Adoption MAY WRITE model state, so the model arrives as
-//!     a mutable `*model.Model`; it is dispatched only from the window layer's
-//!     gate-holding restore path.
+//! Pluggable composition contract types for optional subsystems; registration
+//! is build-generated. Defines Surfaces and WindowModule hook shapes; pure core
+//! vocabulary, no X11, no feature imports.
 
 const std = @import("std");
 const types = @import("types");

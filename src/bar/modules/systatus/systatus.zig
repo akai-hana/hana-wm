@@ -101,11 +101,6 @@ pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
     return .{ .bytes = buf[0..n], .truncated = n == buf.len };
 }
 
-/// Opens `path` and reads its full contents into `buf`, returning the
-/// bytes read, or null when the file is absent/unreadable. Shared open+read
-/// stanza behind every readout's /proc or /sys probe. Callers that can be
-/// hurt by a short read (a /proc file that grows past the buffer) should use
-/// `readFileChecked` and treat `truncated` as a failed read.
 /// Consecutive failed reads tolerated before a readout collapses. One
 /// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must not
 /// blank the segment: collapsing the row on a single failure caused a visible
