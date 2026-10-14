@@ -297,36 +297,26 @@ fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
 /// after the fixpoint is cyclic or references an unknown operand: warned and
 /// skipped (referencing knobs fall back to their own defaults). Call once per
 /// merged Document, before knobs are applied.
-fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
-    return std.mem.lessThan(u8, a, b);
-}
-
 pub fn collectPalette(doc: *parser.Document) void {
     // Last declaration per palette variable, in reserved-name order.
     var last: [parser.palette_var_names.len]?Value = undefined;
     // Deterministic precedence: StringHashMap iteration order is unrelated to
-    // the merge order, so a palette variable declared in two sections used to
-    // resolve to whichever the hasher yielded last -- non-reproducible across
-    // builds. Scan sections in sorted-name order, then root as a peer, so the
-    // "last hit wins, like every other knob" rule is stable: a var declared
-    // in both a section and the root takes the root's value (root is scanned
-    // last), and a var declared in two sections takes the alphabetically
-    // later section. The common case -- a palette var declared exactly once --
-    // yields that same value under any scan order.
-    var names: [64][]const u8 = undefined;
-    var n_names: usize = 0;
-    var iter = doc.sections.iterator();
-    while (iter.next()) |entry| {
-        if (n_names == names.len) break; // pathological; scan is still stable
-        names[n_names] = entry.key_ptr.*;
-        n_names += 1;
-    }
-    std.mem.sort([]const u8, names[0..n_names], {}, lessThanStr);
+    // the merge order, so a palette variable declared in two sections must be
+    // picked by NAME, not walk order: keep the strictly-greatest declaring
+    // section (a var in two sections takes the alphabetically later one),
+    // then let the root override (root applied last, so a var in both a
+    // section and the root takes the root's value). The common case -- a var
+    // declared exactly once -- yields that same value under any scan order.
+    // One pass per var; no name array, no sort, no alloc.
     for (parser.palette_var_names, 0..) |name, i| {
         var best: ?Value = null;
-        for (names[0..n_names]) |sec_name| {
-            if (doc.sections.getPtr(sec_name)) |sec| {
-                if (sec.get(name)) |val| best = val;
+        var best_name: []const u8 = "";
+        var iter = doc.sections.iterator();
+        while (iter.next()) |entry| {
+            const val = entry.value_ptr.get(name) orelse continue;
+            if (std.mem.lessThan(u8, best_name, entry.key_ptr.*)) {
+                best_name = entry.key_ptr.*;
+                best = val;
             }
         }
         if (doc.root.get(name)) |val| best = val;

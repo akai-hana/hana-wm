@@ -137,10 +137,35 @@ fn mergeOneFile(
     try mergeIncludes(allocator, dst, &doc, read, dir_path);
 }
 
-/// Parse-merge-log tail shared by mergeOneFile and mergeIncludes. A file that
-/// parses and merges is appended to `read`, which is how the re-exec snapshot
-/// learns what the load actually consumed; a file that fails returns before
-/// recording, so `read` ends up holding exactly the files that contributed.
+/// The ReadSet choke point: byte ceiling, tally, merge into `dst`, log and
+/// path record. Every contributing file -- single file (config.parseFileDoc),
+/// directory file, include -- passes through here, so both counters move in
+/// one place. A file that fails before reaching this returns without being
+/// recorded, so `read` holds exactly the files that contributed.
+pub fn mergeAndRecord(
+    allocator: std.mem.Allocator,
+    dst: *parser.Document,
+    read: *ReadSet,
+    doc: *const parser.Document,
+    bytes: usize,
+    path: []const u8,
+    comptime msg: []const u8,
+) !void {
+    if (read.bytes + bytes > max_total_config_bytes) {
+        log.err("Config load exceeds {d}KB across all files (at '{s}'); refusing to continue. " ++
+            "Split the config, or raise max_total_config_bytes.", .{ max_total_config_bytes / 1024, path });
+        return error.TooManyConfigBytes;
+    }
+    read.bytes += bytes;
+    try parser.mergeDocumentsInto(allocator, dst, doc);
+    log.info(msg, .{path});
+    try read.paths.append(allocator, path);
+}
+
+/// Read-merge-log path shared by mergeOneFile and mergeIncludes: refuse an
+/// over-limit tree BEFORE the read it was about to do, then read (skipping a
+/// broken file with `had_errors` set) and hand the bookkeeping to
+/// mergeAndRecord. Returns null for an empty or skipped file.
 fn parseAndMerge(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -148,24 +173,16 @@ fn parseAndMerge(
     path: []const u8,
     comptime msg: []const u8,
 ) !?parser.Document {
-    // Ceilings first, so a tree over the limit costs a counter check rather
+    // Ceiling first, so a tree over the limit costs a counter check rather
     // than the read it was about to do.
     if (read.paths.items.len >= max_config_files) {
         log.err("Config load reads more than {d} files (at '{s}'); refusing to continue. " ++
             "A config dir or include list that large is almost certainly not a config.", .{ max_config_files, path });
         return error.TooManyConfigFiles;
     }
-    const doc = tryParseTomlFile(allocator, path, dst) orelse return null;
-    if (read.bytes + doc.bytes > max_total_config_bytes) {
-        log.err("Config load exceeds {d}KB across all files (at '{s}'); refusing to continue. " ++
-            "Split the config, or raise max_total_config_bytes.", .{ max_total_config_bytes / 1024, path });
-        return error.TooManyConfigBytes;
-    }
-    read.bytes += doc.bytes;
-    var owned = doc.doc;
-    try parser.mergeDocumentsInto(allocator, dst, &owned);
-    log.info(msg, .{path});
-    try read.paths.append(allocator, path);
+    const parsed = tryParseTomlFile(allocator, path, dst) orelse return null;
+    const owned = parsed.doc;
+    try mergeAndRecord(allocator, dst, read, &owned, parsed.bytes, path, msg);
     return owned;
 }
 
@@ -181,11 +198,9 @@ pub fn mergeIncludes(
     read: *ReadSet,
     dir_path: []const u8,
 ) !void {
-    // `src_doc` and `dst` are the SAME document on the parseFileDoc path, and
-    // that is the intent: each included file is merged into the document whose
-    // `include` list we are walking. It is safe because the arena never moves
-    // an existing allocation, so the `includes` slice below stays valid while
-    // the loop merges into it.
+    // Each included file is merged into `dst` while we walk `src_doc`'s
+    // `include` list. The arena never moves an existing allocation, so the
+    // `includes` slice below stays valid while the loop merges into it.
     //
     // The `include` key is copied into `dst` by mergeDocumentsInto, so mark it
     // consumed there as well: otherwise warnUnconsumed would flag it as a typo.

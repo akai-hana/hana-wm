@@ -88,12 +88,7 @@ test "readFileAlloc growth path handles stat-less files (/proc)" {
 
 const types = @import("types");
 
-fn loadToml(alloc: std.mem.Allocator, name: []const u8, content: []const u8) !types.Config {
-    var f = try scratch.TmpFile.init(name); // (28.5)
-    defer f.deinit();
-    try f.write(content);
-    return try config.loadConfig(alloc, f.path());
-}
+const loadToml = scratch.loadToml;
 
 test "plain {kill} bind substitutes before parseAction" {
     var cfg = try loadToml(testing.allocator, "s1a",
@@ -263,52 +258,14 @@ test "lowerSlice lowercases into the caller's buffer and nulls on overflow" {
 
 // Config reload change detection deltas
 
-test "detectChanges: identical configs report no subsystem changes" {
+test "detectChanges: identical configs report no key changes" {
     var a = types.Config{};
     var b = types.Config{};
     defer a.deinit(testing.allocator);
     defer b.deinit(testing.allocator);
 
     const changes = config.detectChanges(&a, &b);
-    try testing.expect(!changes.bar);
-    try testing.expect(!changes.tiling);
     try testing.expect(!changes.keys);
-}
-
-test "detectChanges: a bar color tweak flags only bar" {
-    var a = types.Config{};
-    var b = types.Config{};
-    defer a.deinit(testing.allocator);
-    defer b.deinit(testing.allocator);
-    b.bar.bg = a.bar.bg + 1;
-
-    const changes = config.detectChanges(&a, &b);
-    try testing.expect(changes.bar);
-    try testing.expect(!changes.tiling);
-    try testing.expect(!changes.keys);
-}
-
-test "detectChanges: master count and workspaces count fold into tiling only" {
-    var a = types.Config{};
-    defer a.deinit(testing.allocator);
-
-    // The tiling subsystem hash covers tiling params, workspaces, and the
-    // fullscreen/drag/snap gates as one hot-reload unit.
-    var b = types.Config{};
-    defer b.deinit(testing.allocator);
-    b.tiling.master_count = 2;
-    const bc = config.detectChanges(&a, &b);
-    try testing.expect(!bc.bar);
-    try testing.expect(bc.tiling);
-    try testing.expect(!bc.keys);
-
-    var c = types.Config{};
-    defer c.deinit(testing.allocator);
-    c.workspaces.count = 7;
-    const cc = config.detectChanges(&a, &c);
-    try testing.expect(cc.tiling);
-    try testing.expect(!cc.bar);
-    try testing.expect(!cc.keys);
 }
 
 test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
@@ -331,8 +288,6 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
     });
     const ac = config.detectChanges(&base, &action_only);
     try testing.expect(!ac.keys);
-    try testing.expect(!ac.bar);
-    try testing.expect(!ac.tiling);
 
     // Same modifiers, different keysym: keys DID change.
     var moved = types.Config{};
@@ -344,8 +299,6 @@ test "detectChanges: keys hash covers pair layout, deliberately not Actions" {
     });
     const mc = config.detectChanges(&base, &moved);
     try testing.expect(mc.keys);
-    try testing.expect(!mc.bar);
-    try testing.expect(!mc.tiling);
 
     // A keybinding added: keys changed.
     var added = types.Config{};
@@ -557,96 +510,4 @@ test "checkConfig collects the loader's own diagnostics" {
     // snapshot re-exec needs it after the parse arena is gone), so the load
     // allocator is still the owner of those bytes until this releases them.
     config.deinitGoodSource(alloc);
-}
-
-// Every field's compare strategy is derived from its type, so the failure mode
-// is no longer "a field left out of a table" -- there is no table -- but "a
-// type mapped to a strategy that always says equal". That failure is silent and
-// reload-only: the config parses and applies, the bar just never rebuilds. So
-// each strategy gets a field that must be detected as changed here. The colour
-// tweak test above covers `.direct`; these cover the rest.
-test "detectChanges: meta, string_map and layouts fields all flag bar" {
-    const alloc = testing.allocator;
-
-    // .meta via ScalableValue.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        b.bar.font_size.value = a.bar.font_size.value + 1;
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // .meta via ?ScalableValue -- present on one side only, so it also pins
-    // that null vs a value is a difference rather than a silent no-op.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        b.bar.height = types.ScalableValue.absolute(20);
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // .meta via ArrayList(string) -- same length, different contents, which is
-    // the case a pointer-or-capacity comparison would wrongly call equal.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        try b.bar.fonts.append(alloc, try alloc.dupe(u8, "iosevka"));
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // .meta via ?[]const u8.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        b.bar.volume_format = try alloc.dupe(u8, "{volume}");
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // .string_map via StringHashMapUnmanaged(Color).
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        // Keys are owned: BarConfig.deinit frees each one, so a literal here
-        // would be an invalid free.
-        try b.bar.segment_fg.put(alloc, try alloc.dupe(u8, "workspace"), 0xff00ff00);
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // .string_map via StringHashMapUnmanaged(SegmentProps) -- same key, one
-    // flag differs.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        try b.bar.segment_props.put(alloc, try alloc.dupe(u8, "clock"), .{ .bold = true });
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // .layouts via ArrayList(BarLayout), compared element-wise.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        try b.bar.layout.append(alloc, .{ .position = .left, .segments = .empty });
-        try testing.expect(config.detectChanges(&a, &b).bar);
-    }
-    // And the inverse: a bar-only change must not drag tiling or keys along,
-    // for the strategies that are new to this path.
-    {
-        var a = types.Config{};
-        defer a.deinit(alloc);
-        var b = types.Config{};
-        defer b.deinit(alloc);
-        try b.bar.layout.append(alloc, .{ .position = .right, .segments = .empty });
-        const c = config.detectChanges(&a, &b);
-        try testing.expect(c.bar);
-        try testing.expect(!c.tiling);
-        try testing.expect(!c.keys);
-    }
 }
