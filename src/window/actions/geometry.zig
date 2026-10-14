@@ -16,29 +16,19 @@ const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const contract = @import("contract");
-const reconcile = @import("reconcile");
 const ledger = @import("ledger");
 const usable_area = @import("usable_area");
 
 const actions = @import("actions");
+const registry = @import("registry");
 
-const providerOf = actions.providerOf;
+const providerOf = registry.providerOf;
 
-const dispatchAll = actions.dispatchAll;
-const dispatchFirstTrue = actions.dispatchFirstTrue;
-const isCoveringMode = actions.isCoveringMode;
+const dispatchAll = registry.dispatchAll;
+const dispatchFirstTrue = registry.dispatchFirstTrue;
+const isCovering = model_mod.isCovering;
 
 // tiling ops / drag
-
-/// Shared tiled->floating detach (toggleFloating/detachToFloating): seeds the
-/// floating anchor from LastSent geometry and drops the home-list membership.
-fn detachTiledToFloating(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.WindowId) bool {
-    const r = ledger.lastRectFor(win) orelse return false;
-    if (e.home_ws) |home| model_mod.removeValue(&m.ws[home.index].tiled_order, win);
-    e.anchor = .{ .floating = r };
-    e.home_ws = null; // no longer in tiled_order
-    return true;
-}
 
 /// toggle_floating_window. Tiled->floating seeds the rect from the window's
 /// current on-screen geometry (LastSent); floating->tiled re-enters the home
@@ -50,10 +40,11 @@ pub fn toggleFloating(win: model_mod.WindowId) void {
     // the screen while covering, and a ghost (parked) record must survive
     // the command so the later toggle-off restores the ORIGINAL anchor, not
     // a flipped one.
-    if (isCoveringMode(m, win)) return;
+    if (isCovering(m, win)) return;
     switch (e.anchor) {
         .tiled => {
-            if (!detachTiledToFloating(m, e, win)) return;
+            const r = ledger.lastRectFor(win) orelse return;
+            model_mod.detachTiledToFloating(m, e, win, r);
         },
         .floating => |r| {
             e.anchor = .tiled;
@@ -86,27 +77,9 @@ fn repairStrandedHome(m: *model_mod.Model, e: *model_mod.Entry, win: model_mod.W
     return true;
 }
 
-/// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
-/// window's geometry (1 XCB call) instead of replaying all windows. Called
-/// from the drag provider's updateDrag on every motion event.
-pub fn dragRect(win: model_mod.WindowId, r: model_mod.Rect) void {
-    const wm_prov = providerOf(.setFloatingRect) orelse return;
-    const m = pipeline.mut();
-    wm_prov.setFloatingRect.?(m, win, r);
-    reconcile.reconcileDragTick(m, pipeline.syncSink(), win);
-}
-
-/// First motion of a drag on a tiled window detaches it to floating at its
-/// current geometry (pending-float detach + remove + retile).
-pub fn detachToFloating(win: model_mod.WindowId) bool {
-    const m = pipeline.mut();
-    const e = m.store.getPtr(win) orelse return false;
-    if (isCoveringMode(m, win)) return false;
-    if (e.anchor != .tiled) return false;
-    if (!detachTiledToFloating(m, e, win)) return false;
-    pipeline.reconcileGrab(.{});
-    return true;
-}
+// Drag rect application and the drag-path detach moved into the floating
+// module itself (it IS the drag provider): the module reaches model/pipeline
+// directly instead of round-tripping through this action layer.
 
 // floating drag commands (registry loops)
 //

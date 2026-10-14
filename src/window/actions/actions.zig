@@ -1,9 +1,8 @@
 //! The action hub: the shared transition tails every
 //! action group reconciles through (retile,
 //! retileWithFallback, focusFallback,
-//! prepareAndSetFocus), the registry seams, and the
-//! re-export surface. The five action groups
-//! (parked/geometry/layout_params/ws/manage) live in
+//! prepareAndSetFocus), and the re-export surface. The six action groups
+//! (parked/geometry/layout_params/ws/manage/covering) live in
 //! their own files; `actions.*` stays the single
 //! import surface for keybind/events, so those
 //! importers are untouched by the split. Each group
@@ -16,25 +15,22 @@ const core = @import("core");
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
-const window = @import("window");
+const registry = @import("registry");
 
 const parked = @import("parked");
 const layout_params = @import("layout_params");
 const ws = @import("ws");
 const manage = @import("manage");
+const covering = @import("covering");
 const geometry = @import("geometry");
 
-pub const providerOf = window.providerOf;
-
-pub const callHook = window.callHook;
-pub const callHookBool = window.callHookBool;
-pub const dispatchAll = window.dispatchAll;
-pub const dispatchFirstTrue = window.dispatchFirstTrue;
-pub const isCoveringMode = window.isCoveringMode;
+const providerOf = registry.providerOf;
+const callHookBool = registry.callHookBool;
 
 /// Convenience: returns the current workspace's covering occupant via the
-/// module AND hook (active covering record on ws), null without a fullscreen
-/// module. Contrast the OR scan `model.coveringOccupantOnWs`.
+/// module AND hook (active covering record on the current workspace), null
+/// without a fullscreen module. Contrast the OR scan
+/// `model.coveringOccupantOnWs`.
 pub fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
     return if (providerOf(.visibleCoveringOnWs)) |prov|
         prov.visibleCoveringOnWs.?(m, m.current)
@@ -42,14 +38,8 @@ pub fn currentCoveringOccupant(m: *const model_mod.Model) ?model_mod.WindowId {
         null;
 }
 
-/// Convenience: true when `win` is the covering (fullscreen) occupant on its
-/// workspace.
-pub fn isCoveringOnWs(m: *const model_mod.Model, win: model_mod.WindowId) bool {
-    return model_mod.isCoveringOn(m, win, m.current); // Model query
-}
-
-// Re-exports: the five action groups live in their own files
-// (parked/geometry/layout_params/ws/manage); `actions.*` stays the
+// Re-exports: the six action groups live in their own files
+// (parked/geometry/layout_params/ws/manage/covering); `actions.*` stays the
 // single import surface for keybind/events, so those importers
 // are untouched by the split.
 pub const minimize = parked.minimize;
@@ -69,14 +59,12 @@ pub const tagToggle = ws.tagToggle;
 pub const pinToggle = ws.pinToggle;
 pub const allViewToggle = ws.allViewToggle;
 pub const switchTo = ws.switchTo;
-pub const fullscreenToggleWindow = manage.fullscreenToggleWindow;
-pub const fullscreenSetWindow = manage.fullscreenSetWindow;
+pub const fullscreenToggleWindow = covering.fullscreenToggleWindow;
+pub const fullscreenSetWindow = covering.fullscreenSetWindow;
 pub const mapRequest = manage.mapRequest;
 pub const focusAfterGeometry = manage.focusAfterGeometry;
 pub const unmanage = manage.unmanage;
 pub const toggleFloating = geometry.toggleFloating;
-pub const dragRect = geometry.dragRect;
-pub const detachToFloating = geometry.detachToFloating;
 pub const startDrag = geometry.startDrag;
 pub const stopDrag = geometry.stopDrag;
 pub const updateDrag = geometry.updateDrag;
@@ -159,8 +147,9 @@ pub fn retileWithFallback(m: *model_mod.Model, fs_current: bool, was_focused: bo
     retile(.{ .mode = .focus_restack, .bump_fullscreen = fs_current }, ft);
 }
 
-/// Fallback: own-workspace scope only. Order: current ws focus_mru ->
-/// reversed tiled_order -> any floating on ws. First visibleOn(current) wins.
+/// Fallback: own-workspace scope only. Order: current workspace's focus_mru
+/// -> reversed tiled_order -> any floating on the workspace. First
+/// visibleOn(current) wins.
 /// Returns a FocusTransition for the caller to commit inside its server grab.
 /// Model and protocol focus are updated together: the model update runs
 /// before the grab, the protocol commit runs inside it. `reason` is the
