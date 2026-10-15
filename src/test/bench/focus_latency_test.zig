@@ -29,7 +29,6 @@ const build_options = @import("build_options");
 const focus = @import("focus");
 
 const core = @import("core");
-const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 // Latency instrumentation only runs its full loops + timing output under
 // `-Dbench`; the default suite keeps a silent smoke so `zig build
@@ -56,8 +55,8 @@ test "latency: reconcile cost + request count at focus change" {
         var m = makeModel();
         for (0..n) |i| regCur(&m, @intCast(i + 1));
 
-        ledger.init();
-        defer ledger.init();
+        reconcile.init();
+        defer reconcile.init();
 
         // Warm once (a live counter seeds the ledger), then measure the CPU
         // cost of one reconcile.
@@ -94,8 +93,8 @@ test "latency: Mod+k folded focus + viewport-snap reconcile" {
     var m = makeModel();
     for (0..n) |i| regCur(&m, @intCast(i + 1));
 
-    ledger.init();
-    defer ledger.init();
+    reconcile.init();
+    defer reconcile.init();
 
     var warm = CountingSink{};
     var warm_ctx = makeCtx(warm.sink(), colorOfFocused, helpers.std_wa);
