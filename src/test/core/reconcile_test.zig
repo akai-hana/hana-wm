@@ -494,6 +494,212 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectPark(0, 901);
 }
 
+// The resize-parked phase (Opts.resize_parked), the bar-visibility-toggle fix.
+//
+// A bar show/hide changes the workarea. The normal reconcile only computes the
+// CURRENT workspace, so windows parked on other workspaces would keep the old
+// size until their switch reconcile — and that reconcile unparks and sizes
+// them in the SAME flush, which is the visible re-size slow apps (Electron)
+// render as flicker. The phase sizes every OTHER workspace's offscreen windows
+// to the new workarea while they are still parked, so the later switch is a
+// pure position change.
+//
+// The golden workarea below is a top-bar-claimed workarea: bar height 24,
+// so the workarea is 800x576 starting at y=24 (std_wa is the bar-hidden
+// 800x600 at y=0). Single-window master rects on each, from the same
+// formulas as the `golden` struct above.
+const bar_wa: model.Rect = .{ .x = 0, .y = 24, .width = 800, .height = 576 };
+// gap 8 + border 2, total_inset 20: x=8, y=24+8=32, w=800-20=780, h=576-20=556.
+const bar_single: model.Rect = .{ .x = 8, .y = 32, .width = 780, .height = 556 };
+
+test "resize_parked: sizes other workspaces' parked windows offscreen; switch unparks at that size" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 401, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 402, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 401);
+    fx.reconcile(.{}); // baseline at std_wa: 401 placed, 402 parked offscreen
+
+    // The bar becomes visible: the claim shrinks the workarea to bar_wa.
+    // resize_parked=true is what the USER toggle (setBarState) passes; the
+    // fullscreen-reaction path deliberately passes false (that change is
+    // local to one workspace and recomputed at every switch).
+    fx.ctx.workarea = bar_wa;
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+
+    // Current workspace: 401 re-tiles to the new workarea (moved geom, and
+    // it is the winner so the raise rides along). Other workspace: 402 gets a
+    // SIZE-ONLY configure — no x/y, so it stays parked offscreen while its
+    // client re-renders at the new dims.
+    try fx.rec.expectLen(2);
+    try fx.rec.expectGeomRect(0, 401, bar_single, .above);
+    try fx.rec.expectSize(1, 402, bar_single.width, bar_single.height);
+
+    // Switch to ws1: 402 unparks. The phase already recorded the new size in
+    // the ledger, so this unpark's geom carries the SAME width/height the
+    // client already has — a move, not a re-size. 401 parks. 402 has never
+    // been shown, so its first sight is the full map/pixel/geom+bw shape.
+    fx.m.current = model.WSId.fromIndex(1);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(4);
+    try fx.rec.expectPark(0, 401);
+    try fx.rec.expectMap(1, 402);
+    try fx.rec.expectPixel(2, 402, unfocused_pixel);
+    try fx.rec.expectGeomBw(3, 402, bar_single, cfg_bw, .above);
+}
+
+test "resize_parked: ledger dedups an unchanged target; a repeat toggle resends nothing" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 401, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 402, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 401);
+    fx.reconcile(.{}); // baseline: 401 placed, 402 parked (has_rect still false — never shown)
+
+    fx.ctx.workarea = bar_wa;
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+    try fx.rec.expectLen(2); // 401 geom + 402 size (sends despite blank ledger: size unknown)
+    try fx.rec.expectSize(1, 402, bar_single.width, bar_single.height);
+
+    // A repeat toggle with the SAME workarea: 402 was never shown, so its
+    // ledger is still blank (has_rect false — the phase never flips it) and
+    // the dedup cannot elide; it resends the same size. That is the correct
+    // trade: one redundant idempotent configure on a rare user action, in
+    // exchange for never putting a fictional geometry in the "last VISIBLE
+    // geometry sent" record.
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+    try fx.rec.expectLen(1);
+    try fx.rec.expectSize(0, 402, bar_single.width, bar_single.height);
+
+    // Once 402 has been SHOWN (its ledger holds a real visible rect) the
+    // dedup arms: a toggle back to std_wa resizes it, and a toggle back to
+    // bar_wa resizes it again — each is a real change the client must see.
+    fx.m.current = model.WSId.fromIndex(1);
+    fx.reconcile(.{}); // 402 shown at bar_single; ledger now has_rect
+    fx.m.current = model.WSId.fromIndex(0);
+    fx.reconcile(.{}); // 402 parked again, rect preserved
+
+    fx.ctx.workarea = helpers.std_wa; // back to the bar-hidden workarea
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+    try fx.rec.expectLen(2);
+    try fx.rec.expectSize(1, 402, golden.single.width, golden.single.height);
+
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true }); // unchanged: dedup elides 402
+    try fx.rec.expectLen(0);
+}
+
+test "resize_parked: never armed (default) leaves other workspaces stale until switch" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 401, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 402, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 401);
+    fx.reconcile(.{});
+
+    // Same workarea change, but the DEFAULT opts (the fullscreen-reaction
+    // path): only the current workspace re-tiles; 402 is untouched — it will
+    // be sized at its switch reconcile, which is the pre-fix flicker this
+    // phase exists to remove.
+    fx.ctx.workarea = bar_wa;
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(1);
+    try fx.rec.expectGeomRect(0, 401, bar_single, .above);
+}
+
+test "resize_parked: skips windows visible on the current workspace (multi-tag orphan)" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 401, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 402, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 401);
+    // 402 is also tagged onto the CURRENT workspace: it is visible here as a
+    // multi-tag orphan (its home list is ws1's, so no placement on ws0), and
+    // the current pass keeps it at its last real rect. The phase must NOT
+    // resize it from its home workspace's layout — that would move a window
+    // that is on screen right now.
+    fx.m.store.getPtr(402).?.mask |= model.bit(model.WSId.fromIndex(0));
+    fx.reconcile(.{});
+
+    fx.ctx.workarea = bar_wa;
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+
+    // Only 401 retiles. 402 is visible-on-current → skipped by the phase.
+    try fx.rec.expectLen(1);
+    try fx.rec.expectGeomRect(0, 401, bar_single, .above);
+}
+
+test "resize_parked: floating windows keep their anchor; only tiled placements resize" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 401, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 402, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 401);
+    fx.reconcile(.{});
+
+    // 402 detaches to floating on ws1: it leaves tiled_order, so the phase's
+    // placement loop (over the layout compute, which orders tiled_order)
+    // never sees it. Floating geometry is anchor-owned, not workarea-owned.
+    // lastRectFor is null here (402 is parked offscreen on ws1, never shown),
+    // so detach takes the layout rect the ws1 compute would have assigned —
+    // any anchor works; the point is that the phase must not touch it.
+    model.detachTiledToFloating(&fx.m, fx.m.store.getPtr(402).?, 402, golden.single);
+
+    fx.ctx.workarea = bar_wa;
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+
+    // Only 401 (tiled, current) retiles. 402 is floating → no size op.
+    try fx.rec.expectLen(1);
+    try fx.rec.expectGeomRect(0, 401, bar_single, .above);
+}
+
+test "resize_parked: skips a workspace whose screen is covered (fullscreen occupant)" {
+    if (!build_options.has_fullscreen) return error.SkipZigTest;
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 401, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 402, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 401);
+    fx.reconcile(.{});
+
+    // 402 goes fullscreen ON ITS OWN workspace: its screen is then owned by
+    // the covering occupant, whose size is ctx.screen — not the workarea —
+    // so the bar toggle has nothing to resize there. The phase skips the
+    // whole workspace. (toggleFullscreen captures m.current as the covering
+    // target, so we must be ON ws1 when we set it.)
+    fx.m.current = model.WSId.fromIndex(1);
+    _ = fullscreen.toggleFullscreen(&fx.m, 402);
+    fx.m.current = model.WSId.fromIndex(0);
+
+    fx.ctx.workarea = bar_wa;
+    fx.rec.clear();
+    fx.reconcile(.{ .resize_parked = true });
+
+    // 401 retiles; 402's workspace is skipped entirely (no size op).
+    try fx.rec.expectLen(1);
+    try fx.rec.expectGeomRect(0, 401, bar_single, .above);
+}
+
 // The border-pixel dedup the sweep and the reconcile share.
 //
 // The subtle case is pixel 0. A blank ledger record's `pixel` field is 0, so a

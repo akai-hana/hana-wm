@@ -8,7 +8,7 @@
 //! tree at re-exec time cannot take the successor down with it.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.snapshot);
 
 /// Runtime-dir file path, the ONE policy for per-session state files:
 /// `$XDG_RUNTIME_DIR/{base}{ext}` when set (already per-user, so no uid

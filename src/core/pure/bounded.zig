@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-const log = @import("log");
+const log = std.log.scoped(.bounded);
 
 /// Generic fixed-capacity, allocation-free collection backed by a plain
 /// array. Linear scan is the right tool at the counts these call sites deal

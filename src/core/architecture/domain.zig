@@ -147,6 +147,18 @@ pub const Rect = struct {
     }
 };
 
+/// Width/height without a position: the resize-while-parked request shape.
+///
+/// A parked window must be resized OFFSCREEN so its client re-renders before
+/// a workspace switch shows it (the bar-toggle pre-resize), which means a
+/// configure carrying WIDTH|HEIGHT and NOT X/Y — moving it back on screen
+/// would overlay the live workspace. `sink.Configure.size` is the wire shape;
+/// this is its vocabulary, kept beside Rect as the other geometry type.
+pub const Dims = struct {
+    width: u16,
+    height: u16,
+};
+
 /// Gap and border widths applied around a tiled window.
 pub const Margins = struct {
     gap: u16 = 0,
@@ -227,7 +239,53 @@ pub const SizeHints = struct {
             self.inc_width == 0 and self.inc_height == 0 and
             self.min_aspect == 0.0 and self.max_aspect == 0.0;
     }
+
+    /// Shrink-only PAspect fit: reduces whichever dimension of `w` x `h` is
+    /// excess so the result lands inside the declared aspect band (cross-
+    /// multiplied, as in the tiling clamp this was extracted from: `w/h` must
+    /// satisfy `1/min_aspect <= w/h <= max_aspect`). Never grows, never
+    /// violates the bound on either axis; an already in-band size passes
+    /// through unchanged.
+    ///
+    /// BOTH OR NEITHER: the two bounds are the two halves of ONE rule, and a
+    /// lone bound is a DIFFERENT constraint, not a weaker one (a max bound
+    /// alone clamps the offending DIMENSION, so a 400x50 window under
+    /// `max_aspect = 4` gets NARROWER instead of taller -- the client is told
+    /// to resize its content rather than given its declared shape). A record
+    /// with only one bound set therefore returns the size unchanged.
+    ///
+    /// Callers clamp the raw size into the PMin/PMax envelope first; the
+    /// ratio then wins over a declared minimum on the derived axis (letterbox
+    /// freedom is the point of the constraint). A dimension that rounds out
+    /// entirely is floored to 1 when its input was positive.
+    pub fn aspectFit(self: SizeHints, w: u16, h: u16) struct { width: u16, height: u16 } {
+        if (self.min_aspect <= 0.0 or self.max_aspect <= 0.0)
+            return .{ .width = w, .height = h };
+        const fw: f32 = @floatFromInt(w);
+        const fh: f32 = @floatFromInt(h);
+        var out_w = w;
+        var out_h = h;
+        // Cross-multiplied to avoid a per-resize FP division pair. Clamp the
+        // product into the u16 range before narrowing so a huge declared ratio
+        // caps instead of trapping in ReleaseFast.
+        if (fw > fh * self.max_aspect) {
+            out_w = @min(roundAspectDim(fh * self.max_aspect), w);
+        } else if (fh > fw * self.min_aspect) {
+            out_h = @min(roundAspectDim(fw * self.min_aspect), h);
+        }
+        if (out_w == 0 and w > 0) out_w = 1;
+        if (out_h == 0 and h > 0) out_h = 1;
+        return .{ .width = out_w, .height = out_h };
+    }
 };
+
+/// Round a non-negative aspect product to the nearest integer, saturating at
+/// the u16 wire limit (the shared shape with the tiling clamp this serves).
+inline fn roundAspectDim(product: f32) u16 {
+    if (!(product > 0.0)) return 0; // zero or NaN (defensive; ratios are > 0)
+    const clamped = std.math.clamp(@round(product), 0.0, @as(f32, std.math.maxInt(u16)));
+    return @intFromFloat(clamped);
+}
 
 /// Hard ceiling on the number of distinct layouts the cycle ring can hold.
 /// The canonical value lives here because it bounds the u8 `kind` registry

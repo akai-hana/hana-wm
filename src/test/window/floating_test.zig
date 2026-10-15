@@ -8,8 +8,9 @@ const std = @import("std");
 const testing = std.testing;
 
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
-// warn-level overflow diagnostic; src/core/debug/log.zig silences all
-// std.log diagnostics in test binaries, so this stays quiet on success.
+// warn-level overflow diagnostic; the vendored test runner captures
+// std.log output into the diagnostics bag instead of printing, so this
+// stays quiet on success.
 const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
@@ -74,4 +75,136 @@ test "setFloatingRect updates floating window geometry" {
     try testing.expect(m.store.get(6).?.presence == .covering);
     floating.setFloatingRect(&m, 6, new_r);
     try testing.expect(m.store.get(6).?.anchor == .tiled);
+}
+
+// --- nearestResizeCorner: corner selection at drag-start --------------------
+
+test "nearestResizeCorner picks the corner in the press quadrant" {
+    // 200x100 window at (100, 100): center at (200, 150).
+    const rect: model.Rect = .{ .x = 100, .y = 100, .width = 200, .height = 100 };
+    try testing.expect(floating.nearestResizeCorner(110, 110, rect) == .top_left);
+    try testing.expect(floating.nearestResizeCorner(290, 110, rect) == .top_right);
+    try testing.expect(floating.nearestResizeCorner(110, 190, rect) == .bottom_left);
+    try testing.expect(floating.nearestResizeCorner(290, 190, rect) == .bottom_right);
+}
+
+test "nearestResizeCorner maps interior presses, not just borders" {
+    const rect: model.Rect = .{ .x = 100, .y = 100, .width = 200, .height = 100 };
+    // Well inside the window — the old border-proximity check fell back to
+    // bottom_right for all of these; the quadrant rule keeps them nearest.
+    try testing.expect(floating.nearestResizeCorner(150, 130, rect) == .top_left);
+    try testing.expect(floating.nearestResizeCorner(250, 130, rect) == .top_right);
+    try testing.expect(floating.nearestResizeCorner(150, 170, rect) == .bottom_left);
+    try testing.expect(floating.nearestResizeCorner(250, 170, rect) == .bottom_right);
+    // Presses beyond the frame (on the border and just outside it) resolve
+    // by the same quadrant rule.
+    try testing.expect(floating.nearestResizeCorner(98, 98, rect) == .top_left);
+    try testing.expect(floating.nearestResizeCorner(302, 202, rect) == .bottom_right);
+}
+
+// --- computeResizeRect: the pure resize-drag math (PAspect band) -----------
+
+/// No snapping and an unbounded workarea: resize math without a live core.
+const no_wa: floating.WaEdges = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+
+/// Unbounded PMin/PMax envelope carrying `hints` for the aspect fit.
+fn unboundedLimits(hints: model.SizeHints) floating.HintLimits {
+    return .{
+        .min_w = 0,
+        .min_h = 0,
+        .max_w = std.math.maxInt(u16),
+        .max_h = std.math.maxInt(u16),
+        .hints = hints,
+    };
+}
+
+/// A resize drag anchored at `rect`'s bottom-right corner, start-of-drag
+/// geometry only (the live-core fields are irrelevant to the pure math).
+fn resizeDrag(rect: model.Rect) floating.DragState {
+    return .{
+        .mode = .resize,
+        .resize_corner = .bottom_right,
+        .start_win_x = rect.x,
+        .start_win_y = rect.y,
+        .start_win_width = rect.width,
+        .start_win_height = rect.height,
+    };
+}
+
+const r169: model.SizeHints = .{ .min_aspect = 9.0 / 16.0, .max_aspect = 16.0 / 9.0 };
+
+test "drag resize locks a fixed-ratio window to its band" {
+    const start: model.Rect = .{ .x = 100, .y = 100, .width = 320, .height = 180 };
+    const drag = resizeDrag(start);
+
+    // Purely horizontal drag past the ratio: height keeps tracking the
+    // cursor, width is derived back into the band.
+    var r = floating.computeResizeRect(drag, 700, 0, no_wa, unboundedLimits(r169), false);
+    try testing.expectEqual(@as(u16, 320), r.width);
+    try testing.expectEqual(@as(u16, 180), r.height);
+    try testing.expectEqual(@as(i16, 100), r.x); // anchor (top-left) fixed
+    try testing.expectEqual(@as(i16, 100), r.y);
+
+    // Diagonal drag that lands exactly on-ratio: both axes track the cursor.
+    r = floating.computeResizeRect(drag, 640, 360, no_wa, unboundedLimits(r169), false);
+    try testing.expectEqual(@as(u16, 960), r.width);
+    try testing.expectEqual(@as(u16, 540), r.height);
+    try testing.expectEqual(@as(i16, 100), r.x);
+    try testing.expectEqual(@as(i16, 100), r.y);
+
+    // Slightly off-ratio diagonal: the excess (height here) shrinks into
+    // the band, the other axis still tracks.
+    r = floating.computeResizeRect(drag, 640, 400, no_wa, unboundedLimits(r169), false);
+    try testing.expectEqual(@as(u16, 960), r.width);
+    try testing.expectEqual(@as(u16, 540), r.height); // round(960 * 9/16)
+}
+
+test "drag resize anchor stays fixed for a top-left grab" {
+    // Grab top_left: the bottom-right corner is the anchor, pinned at
+    // (420, 280) through the aspect shrink.
+    const start: model.Rect = .{ .x = 100, .y = 100, .width = 320, .height = 180 };
+    var drag = resizeDrag(start);
+    drag.resize_corner = .top_left;
+
+    const r = floating.computeResizeRect(drag, -1000, -100, no_wa, unboundedLimits(r169), false);
+    try testing.expectEqual(@as(u16, 498), r.width); // round(280 * 16/9)
+    try testing.expectEqual(@as(u16, 280), r.height);
+    try testing.expectEqual(@as(i16, 420 - 498), r.x); // anchor_x - width
+    try testing.expectEqual(@as(i16, 0), r.y); // anchor_y - height
+}
+
+test "drag resize break-aspect frees the band; PMax still applies" {
+    const start: model.Rect = .{ .x = 100, .y = 100, .width = 320, .height = 180 };
+    const drag = resizeDrag(start);
+
+    // Shift-broken: the raw dragged shape survives (no aspect fit).
+    var r = floating.computeResizeRect(drag, 700, 0, no_wa, unboundedLimits(r169), true);
+    try testing.expectEqual(@as(u16, 1020), r.width);
+    try testing.expectEqual(@as(u16, 180), r.height);
+
+    // No aspect hints: identical to break-aspect (unchanged shape).
+    r = floating.computeResizeRect(drag, 700, 0, no_wa, unboundedLimits(.{}), false);
+    try testing.expectEqual(@as(u16, 1020), r.width);
+    try testing.expectEqual(@as(u16, 180), r.height);
+
+    // PMax still caps a broken drag.
+    var limits = unboundedLimits(r169);
+    limits.max_w = 500;
+    limits.max_h = 500;
+    r = floating.computeResizeRect(drag, 700, 360, no_wa, limits, true);
+    try testing.expectEqual(@as(u16, 500), r.width);
+    try testing.expectEqual(@as(u16, 500), r.height);
+}
+
+test "drag resize: aspect wins over a conflicting PMin floor" {
+    const start: model.Rect = .{ .x = 100, .y = 100, .width = 320, .height = 180 };
+    const drag = resizeDrag(start);
+    // Envelope floor of 300 conflicts with the 16:9 derivation from width
+    // 500 (height 281): the ratio wins -- letterbox freedom is the point.
+    var limits = unboundedLimits(r169);
+    limits.min_w = 300;
+    limits.min_h = 300;
+    const r = floating.computeResizeRect(drag, 180, 120, no_wa, limits, false);
+    try testing.expectEqual(@as(u16, 500), r.width);
+    try testing.expectEqual(@as(u16, 281), r.height); // round(500 * 9/16) < min_h
 }

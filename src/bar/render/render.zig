@@ -17,7 +17,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const drawing = @import("drawing");
 const focus = @import("focus");
-const log = @import("log");
+const log = std.log.scoped(.render);
 const pipeline = @import("pipeline");
 const model = @import("model");
 const reconcile = @import("reconcile");
@@ -470,12 +470,15 @@ pub fn requestFullRedraw() void {
     if (state.gBar.state) |s| markDirty(s);
 }
 
-/// Folds a queued module redraw request into the dirty state as a full
-/// redraw (flag + every slot). Returns true when it consumed one. Single
-/// shared fold for the poll wakeup, direct-submit, and X-batch paths so no
-/// path can drop a request.
+/// Folds queued module redraw requests into the dirty state as a full
+/// redraw (flag + every slot). Returns true when at least one was pending.
+/// Single shared fold for the poll wakeup, direct-submit, and X-batch paths
+/// so no path can drop a request. One pass consumes EVERY pending request
+/// (`segmod.foldBoolHook`), not just the first: the batched redraw loop
+/// iterates per settle ROUND, so a per-module drain would spend one round
+/// per module and push a multi-module first-paint settle into the cap.
 pub fn foldModuleRedraw(s: *State) bool {
-    if (!segmod.anyBoolHook(.consumeRedrawRequest, .{})) return false;
+    if (!segmod.foldBoolHook(.consumeRedrawRequest)) return false;
     markDirty(s);
     return true;
 }
@@ -670,7 +673,7 @@ const RowPlan = struct {
         if (self.len >= max_row_slots) {
             if (!self.overflowed) {
                 self.overflowed = true;
-                log.warnOnErr(error.RowPlanOverflow, "bar solveRowPlan");
+                log.warn("Best-effort op failed (bar solveRowPlan): {}", .{error.RowPlanOverflow});
             }
             return;
         }
@@ -694,7 +697,7 @@ const Drawn = struct {
 /// An unknown or draw-less segment name: nothing was painted, and the
 /// row falls back to the reservation.
 inline fn reportDrewNothing(x: u16) contract.Painted {
-    log.warnOnErr(error.DrewInvalidSegment, "bar drawSegment");
+    log.warn("Best-effort op failed (bar drawSegment): {}", .{error.DrewInvalidSegment});
     return contract.Painted.nothing(x);
 }
 
@@ -724,7 +727,7 @@ fn drawSegment(s: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16)
     ctx.name = segmod.segmentAt(i).name;
     ctx.width = width orelse measureSegmentWidth(s, &ctx.frame, id);
     const painted = segmod.segmentAt(i).draw.?(ctx, x) catch |e| {
-        log.warnOnErr(e, "bar drawSegment");
+        log.warn("Best-effort op failed (bar drawSegment): {}", .{e});
         // A caught error is a broken segment, not a segment with nothing
         // to show: it painted nothing either way, but reporting it as a
         // zero-width PAINT would let the next layout collapse a slot that

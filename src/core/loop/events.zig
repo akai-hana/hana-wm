@@ -8,7 +8,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const masks = @import("masks");
 
-const log = @import("log");
+const log = std.log.scoped(.events);
 const trace = @import("trace");
 const config = @import("config");
 const scale = @import("dpi");

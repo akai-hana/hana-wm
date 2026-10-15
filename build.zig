@@ -549,7 +549,18 @@ fn wireUnitTests(
             // directly (window, drawing, ...) and get no linkage second-hand
             // from a blanket cross-wire.
             SystemLibraries.link(entry.*);
-            const t = b.addTest(.{ .root_module = entry.* });
+            // The custom test runner (below) compiles as this binary's root
+            // source and @imports "diagnostics" to route captured warn/err
+            // lines into the check-config bag (src/config/diagnostics.zig).
+            // The runner is not scanned by importEdgesOf, so the edge is
+            // declared here for every test root. The leaf is pure std and
+            // hash-stable, so this adds no meaningful cache coupling.
+            if (discovery.modules.get("diagnostics")) |diag_mod|
+                entry.*.addImport("diagnostics", diag_mod);
+            const t = b.addTest(.{
+                .root_module = entry.*,
+                .test_runner = .{ .path = b.path("dev/test_runner.zig"), .mode = .server },
+            });
             const run = b.addRunArtifact(t);
             // Each run step is individually named, so
             // `zig build test.<stem>` runs exactly one file.
@@ -2588,13 +2599,15 @@ const Module = struct {
         source_paths: *const std.StringHashMap([]const u8),
     ) bool {
         const shelf = [_][]const u8{
-            "log",   "masks",    "bounded", "idmap", "scaling",
+            // "log" removed with src/core/debug/log.zig; the capture leaf
+            // that replaced it is pure std, so it joins the shelf.
+            "diagnostics", "masks",    "bounded", "idmap", "scaling",
             // The config-parse vocabulary every `*_config` fragment needs to
             // read TOML: the shared types, the parser/document, the knob
             // engine, and the color decoder. All xcb-free by construction, so
             // a pure fragment in src/tiling/ may reach them without touching
             // hub wiring.
-            "types", "document", "parser",  "knob",  "color",
+            "types",       "document", "parser",  "knob",  "color",
         };
         for (shelf) |m| if (std.mem.eql(u8, m, dep)) return true;
         // The generated config facade: injected into every module like the

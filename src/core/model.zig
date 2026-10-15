@@ -25,6 +25,7 @@ pub const WSId = domain.WSId;
 pub const Mask = domain.Mask;
 pub const ALL_MASK = domain.ALL_MASK;
 pub const Rect = domain.Rect;
+pub const Dims = domain.Dims;
 pub const Margins = domain.Margins;
 pub const SizeHints = domain.SizeHints;
 pub const LayoutParams = domain.LayoutParams;

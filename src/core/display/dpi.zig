@@ -9,7 +9,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 
-const log = @import("log");
+const log = std.log.scoped(.dpi);
 
 const types = @import("types");
 const atoms = @import("atoms");

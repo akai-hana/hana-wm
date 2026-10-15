@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const model = @import("model");
-const log = @import("log");
+const log = std.log.scoped(.minimize);
 const bounded = @import("bounded");
 const pipeline = @import("pipeline");
 const focus = @import("focus");

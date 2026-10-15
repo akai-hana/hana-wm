@@ -17,13 +17,14 @@
 //! import `pipeline`/`focus`/`core` (the "pure model edits" claim above
 //! covers the model transitions, not the commands layered on them).
 
+const std = @import("std");
 const core = @import("core");
 const model = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
 const surfaces = @import("surfaces").Surfaces;
 const build_options = @import("build_options");
-const log = @import("log");
+const log = std.log.scoped(.workspaces);
 const registry = @import("registry");
 const reconcile_tails = @import("reconcile_tails");
 const providerOf = registry.providerOf;

@@ -8,6 +8,7 @@
 //! `reloadAndReconcile`). The window-layer command half — layout cycling,
 //! variant stepping, primary/swap — lives in `window/sync/reconcile_tails.zig`.
 
+const std = @import("std");
 const core = @import("core");
 const types = @import("types");
 const tiling_config = @import("tiling_config");
@@ -16,7 +17,7 @@ const domain = @import("domain");
 const pipeline = @import("pipeline");
 const tiling = @import("tiling_seam").tiling;
 const contract = @import("tiling_contract");
-const log = @import("log");
+const log = std.log.scoped(.model_config);
 const build_options = @import("build_options");
 
 /// The global template resolved from `cfg`: the default layout's registry

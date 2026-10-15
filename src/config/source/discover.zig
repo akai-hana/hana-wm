@@ -5,9 +5,14 @@
 //! what did they merge into" -- turning paths into an arena-backed
 //! TOML document; the orchestrator (config.zig) turns that document
 //! into a Config.
+//!
+//! A config directory contributes exactly ONE file (`entry_file`) plus that
+//! file's `include`s; its other top-level `.toml` files are reported as inert
+//! rather than merged, so a file dropped into the directory can never change
+//! the config behind the user's back.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.discover);
 const parser = @import("parser");
 const composed = @import("composed");
 
@@ -104,10 +109,12 @@ pub fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?ParsedTom
 pub const ParsedToml = struct { doc: parser.Document, bytes: usize };
 
 /// warn-and-skip wrapper around parseTomlFile, the "never crash on bad
-/// config" path shared by the directory loader and `include` resolution.
-/// On read or parse failure, marks the destination merged document's
-/// `had_errors` so the caller can propagate error.ConfigParseFailed.
-/// An empty file returns null without setting `had_errors`.
+/// config" path `include` resolution takes. An entry file or a single-file
+/// location deliberately does NOT: there a read failure must propagate raw
+/// (see config.parseFileDoc). On read or parse failure, marks the destination
+/// merged document's `had_errors` so the caller can propagate
+/// error.ConfigParseFailed. An empty file returns null without setting
+/// `had_errors`.
 fn tryParseTomlFile(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -122,25 +129,11 @@ fn tryParseTomlFile(
     return parsed;
 }
 
-/// Parses and merges one config file (path = `dir_path` + `name`) into `dst`,
-/// then resolves its own `include`s via mergeIncludes.
-fn mergeOneFile(
-    allocator: std.mem.Allocator,
-    dst: *parser.Document,
-    read: *ReadSet,
-    dir_path: []const u8,
-    name: []const u8,
-) !void {
-    const path = try std.fs.path.join(allocator, &.{ dir_path, name });
-    var doc = (try parseAndMerge(allocator, dst, read, path, "Merged: {s}")) orelse return;
-    try mergeIncludes(allocator, dst, &doc, read, dir_path);
-}
-
 /// The ReadSet choke point: byte ceiling, tally, merge into `dst`, log and
-/// path record. Every contributing file -- single file (config.parseFileDoc),
-/// directory file, include -- passes through here, so both counters move in
-/// one place. A file that fails before reaching this returns without being
-/// recorded, so `read` holds exactly the files that contributed.
+/// path record. Every contributing file -- single file and directory entry
+/// (config.parseFileDoc), include -- passes through here, so both counters
+/// move in one place. A file that fails before reaching this returns without
+/// being recorded, so `read` holds exactly the files that contributed.
 pub fn mergeAndRecord(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -161,10 +154,10 @@ pub fn mergeAndRecord(
     try read.paths.append(allocator, path);
 }
 
-/// Read-merge-log path shared by mergeOneFile and mergeIncludes: refuse an
-/// over-limit tree BEFORE the read it was about to do, then read (skipping a
-/// broken file with `had_errors` set) and hand the bookkeeping to
-/// mergeAndRecord. Returns null for an empty or skipped file.
+/// Read-merge-log path `include` resolution takes: refuse an over-limit tree
+/// BEFORE the read it was about to do, then read (skipping a broken file with
+/// `had_errors` set) and hand the bookkeeping to mergeAndRecord. Returns null
+/// for an empty or skipped file.
 fn parseAndMerge(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -228,7 +221,11 @@ fn sliceLessThan(_: void, a: []u8, b: []u8) bool {
 /// order; subdirectories only via explicit `include`), excluding the
 /// embedded `fallback.toml`. The caller owns the returned list and its
 /// strings.
-pub fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std.ArrayList([]u8) {
+///
+/// This does NOT decide what loads -- that is `entry_file` plus its
+/// `include`s -- it is the inventory the two reports below are written
+/// against: the per-file inert warning and the entryless-directory warning.
+fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std.ArrayList([]u8) {
     var names: std.ArrayList([]u8) = .empty;
     errdefer {
         for (names.items) |n| allocator.free(n);
@@ -258,16 +255,58 @@ pub fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std
     return names;
 }
 
-/// Merge inputs for `parseDirDoc`: a sorted file list plus the directory they
-/// live in, for `mergeOneFile`'s path join.
-pub const DirInput = struct { dir_path: []const u8, names: []const []u8 };
+/// The one file a config directory auto-loads, relative to the directory
+/// root. Everything else in there is inert until this file names it in
+/// `include` -- one choke point decides what a dropped-in file can
+/// contribute. Also the name the single-file search locations resolve
+/// (`searchPaths`), so "the entry file" is spelled once for both branches.
+pub const entry_file = "config.toml";
 
-/// Merges every file named in `in.names` (directory-loading order) into one
-/// arena document, recording each consumed file in `read`.
-pub fn parseDirDoc(a: std.mem.Allocator, read: *ReadSet, in: DirInput) !parser.Document {
-    var merged = parser.Document.init(a);
-    for (in.names) |name| try mergeOneFile(a, &merged, read, in.dir_path, name);
-    return merged;
+/// Reports every top-level `*.toml` in `dir_path` the load did NOT consume.
+/// A config dir merges exactly `entry_file` and that file's `include`s, so a
+/// dropped-in file is inert until an `include` names it -- and an inert file
+/// the user meant to be live is the silent-drop failure this module's
+/// ceilings exist to prevent. Membership is checked against `read` (what was
+/// actually read) rather than against the include list, so a named-but-broken
+/// file is reported here too, beside its own parse warning. Intended for the
+/// load's arena allocator, where the walk's allocations cost nothing to
+/// release; `dir_path` is expected to exist (the entry file was just read
+/// from it), and a directory that does not is `discoverDirNames`' report.
+pub fn warnInertSiblings(allocator: std.mem.Allocator, dir_path: []const u8, read: *const ReadSet) void {
+    var names = discoverDirNames(allocator, dir_path) catch return;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    for (names.items) |name| {
+        if (std.mem.eql(u8, name, entry_file)) continue;
+        const abs = std.fs.path.join(allocator, &.{ dir_path, name }) catch continue;
+        defer allocator.free(abs);
+        var consumed = false;
+        for (read.paths.items) |p| {
+            if (std.mem.eql(u8, p, abs)) {
+                consumed = true;
+                break;
+            }
+        }
+        if (consumed) continue;
+        log.warn("'{s}' is not loaded; add it to {s}'s include list", .{ abs, entry_file });
+    }
+}
+
+/// Reports a config dir that holds `.toml` files but no `entry_file`: the
+/// search skips such a directory (it is not a config source) and moves on to
+/// the next location, and skipping it SILENTLY would boot whatever config
+/// answers next with nothing on stderr to explain the tree on disk. No report
+/// when there is nothing to skip -- an absent or empty directory is the
+/// ordinary "no config here" the search is built to walk past.
+pub fn warnEntrylessDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
+    var names = discoverDirNames(allocator, dir_path) catch return;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    log.warn("Config dir '{s}' has no {s}; ignoring its {d} .toml file(s)", .{ dir_path, entry_file, names.items.len });
 }
 
 /// Errors that mean "nothing to load HERE", so the search moves on without a
@@ -422,9 +461,9 @@ pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     const local_dir = try std.fs.path.join(allocator, &.{ cwd, "config" });
     errdefer allocator.free(local_dir);
 
-    const xdg_file = try std.fs.path.join(allocator, &.{ xdg_dir, "config.toml" });
+    const xdg_file = try std.fs.path.join(allocator, &.{ xdg_dir, entry_file });
     errdefer allocator.free(xdg_file);
-    const local_file = try std.fs.path.join(allocator, &.{ cwd, "config.toml" });
+    const local_file = try std.fs.path.join(allocator, &.{ cwd, entry_file });
     return .{
         .xdg_dir = xdg_dir,
         .local_dir = local_dir,

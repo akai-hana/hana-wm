@@ -45,6 +45,20 @@
 //! and is elided entirely when no floating window is present — steady-state
 //! and float-free reconciles still send nothing.
 //!
+//! RESIZE-PARKED (opt-in, Opts.resize_parked). The bar visibility toggle is
+//! the one caller that arms it: its workarea change must reach every
+//! workspace, but the normal pass only computes the CURRENT one, so parked
+//! windows on other workspaces would keep the old size until their switch
+//! reconcile — and that reconcile unparks and sizes them in the SAME flush,
+//! which is the visible re-size slow apps (Electron) render as flicker. The
+//! phase therefore reuses the layout compute for every other workspace
+//! against the CURRENT workarea and size-only-resizes (WIDTH/HEIGHT, no
+//! X/Y) its offscreen windows, so their clients re-render while hidden and
+//! the later switch is a pure position change. Fullscreen-driven bar
+//! hide/show deliberately does NOT arm it (that workarea change is local
+//! and recomputed at every switch; pre-sizing there would only make the
+//! switch size the windows back on show).
+//!
 //! The SENT LEDGER is a write-only record of what was actually sent (field
 //! semantics: `SentEntry`). Exactly five reads of it are behavioral
 //! contract:
@@ -68,7 +82,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const model = @import("model");
-const log = @import("log");
+const log = std.log.scoped(.reconcile);
 
 /// The tiling engine is reached through the build-generated `tiling_seam`:
 /// when no tiling subsystem is present the seam is an empty struct, and every
@@ -340,7 +354,24 @@ pub const Ctx = struct {
     layout_active: bool = true,
 };
 
-pub const Opts = struct { force_restack: bool = false };
+pub const Opts = struct {
+    force_restack: bool = false,
+    /// Opt-in phase (bar visibility toggle): after the normal pass, recompute
+    /// each OTHER workspace's layout against the current workarea and
+    /// resize its offscreen windows to the placements — a size-only
+    /// configure (WIDTH/HEIGHT, no X/Y: they stay parked) so the client
+    /// re-renders while still hidden. A later switch to that workspace then
+    /// unparks windows already at the new size: a pure position change at
+    /// show time, not the visible re-size flicker slow apps (Electron) show
+    /// when the first frame at the new geometry lags the unpark.
+    ///
+    /// Deliberately NOT set by the fullscreen-driven bar hide/show: that
+    /// change is local and recomputed at every switch (the bar returns for a
+    /// non-fullscreen target workspace), so pre-sizing parked windows to the
+    /// full screen there would only make the switch re-size them back at show
+    /// time — the exact flicker this phase exists to remove.
+    resize_parked: bool = false,
+};
 
 /// Fast-path reconcile for drag ticks: sends ONLY geometry for the dragged
 /// window, skipping all other windows, the tiling compute, and border/map
@@ -397,9 +428,9 @@ const Plan = struct {
 
 /// One full reconcile: plan (work area + coverage winner + layout compute),
 /// seed the raise winner, fuse-compute-and-send every stored window, the
-/// conditional float re-assert, then the force_restack bar raise. Split into
-/// phases for readability; the fused per-window loop stays whole because
-/// that fusion IS the algorithm.
+/// conditional float re-assert, the optional resize-parked phase, then the
+/// force_restack bar raise. Split into phases for readability; the fused
+/// per-window loop stays whole because that fusion IS the algorithm.
 pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
     var plan: Plan = .{};
     computeLayout(m, ctx, &plan);
@@ -409,6 +440,10 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
     // condition that arms the re-assert below.
     const reassert = sendAll(m, ctx, opts, &plan, &winner);
     if (reassert) reassertFloats(m, ctx, &plan);
+    // Opt-in only (bar visibility toggle): pre-resize every other
+    // workspace's offscreen windows to the new workarea, so a later switch
+    // unparks them at their final size instead of re-sizing them on show.
+    if (opts.resize_parked) resizeParkedForWorkspaces(m, ctx);
 
     // force_restack additionally raises bar/top. Always AFTER the float
     // re-assert, so a replayed float can never bury the bar.
@@ -424,10 +459,21 @@ pub fn run(m: *const model.Model, ctx: *Ctx, opts: Opts) void {
 /// subsystem is absent). `plan.placements`/`plan.pl_of_slot` start from the
 /// struct defaults (empty / all-null), so nothing needs re-clearing here.
 fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
+    computeLayoutForWs(m, ctx, plan, m.current);
+}
+
+/// The layout compute for ONE workspace: coverage winner plus placements.
+/// Shared by the current-workspace pass (`computeLayout`) and the
+/// resize-parked phase, so there is exactly ONE answer to "what layout does
+/// this workspace want under this workarea" — a second copy would be the
+/// kind of drift the single-compute invariant exists to prevent. `ws` is a
+/// parameter (not `m.current` reads sprinkled through) so the sharing is
+/// structural: the phase cannot accidentally half-share.
+fn computeLayoutForWs(m: *const model.Model, ctx: *Ctx, plan: *Plan, ws: model.WSId) void {
     // Work-area (screen minus bar) and coverage winner: see `Plan`.
     const wa = ctx.workarea;
 
-    plan.fs_win = model.coveringOccupantOnWs(m, m.current);
+    plan.fs_win = model.coveringOccupantOnWs(m, ws);
 
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
@@ -438,16 +484,16 @@ fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
     // showing "no layout" in the bar while the geometry still tiled -- two
     // answers to one question. The resolved kind also subsumes the no-tiling
     // build (an empty registry resolves to null).
-    const params = &m.ws[m.current.index].params;
+    const params = &m.ws[ws.index].params;
     if (plan.fs_win == null) {
         var n: usize = 0;
-        const tiled = &m.ws[m.current.index].tiled_order;
+        const tiled = &m.ws[ws.index].tiled_order;
         for (tiled.constSlice()) |w| {
             // One binary search per window: indexOf locates the row once; the
             // entry comes from `at` instead of a second `get` lookup.
             const slot = m.store.indexOf(w) orelse continue;
             const e = m.store.at(slot).val;
-            if (!model.taggedOn(e.*, m.current)) continue;
+            if (!model.taggedOn(e.*, ws)) continue;
             // First write wins; the store holds each id once so this is
             // just defensive.
             if (plan.pl_of_slot[slot] == null) plan.pl_of_slot[slot] = n;
@@ -476,6 +522,80 @@ fn computeLayout(m: *const model.Model, ctx: *Ctx, plan: *Plan) void {
             } else {
                 const view: contract.View = .{ .order = order_buf[0..n], .params = params, .workarea = wa, .hints = hints_buf[0..n], .focused = m.focused, .env = ctx.env };
                 tiling.compute(params.kind, &view, &plan.placements);
+            }
+        }
+    }
+}
+
+/// The resize-parked phase (Opts.resize_parked): size every OTHER
+/// workspace's offscreen windows to what its layout would compute under the
+/// CURRENT workarea, via a size-only configure (WIDTH/HEIGHT, no X/Y) so
+/// they stay parked while their clients re-render. The bar visibility toggle
+/// arms this: its workarea change would otherwise only reach those windows
+/// at switch time — as a visible re-size of a client that has just been
+/// shown, the flicker slow apps exhibit.
+///
+/// Scope guards, each load-bearing:
+///  - skip `m.current` (the normal pass above already sent its placements);
+///  - skip a workspace whose screen is covered by a fullscreen occupant
+///    (its windows' sizes are bar-independent — screen, not workarea — and
+///    the switch reconcile computes no placements for it either);
+///  - skip a window still VISIBLE on the current workspace (a multi-tag
+///    orphan's geometry is owned by the current pass, not by its home ws);
+///  - skip a window whose ledger already holds the target width/height
+///    (idempotent resend; a repeat toggle back to the original sizes sends
+///    again because the ledger tracked the intermediate change).
+///
+/// The ledger's rect w/h is updated in place — x/y untouched, `parked`
+/// untouched — so the later unpark's moved-check sees the resize already
+/// done. `has_rect` is deliberately NOT flipped: the record's contract is
+/// "last VISIBLE geometry sent", and nothing was sent that put the window
+/// on screen.
+fn resizeParkedForWorkspaces(m: *const model.Model, ctx: *Ctx) void {
+    var plan: Plan = .{};
+    for (0..model.max_workspaces) |i| {
+        const ws = model.WSId.fromIndex(i);
+        if (ws.eql(m.current)) continue;
+        // Cheap guard before the layout compute: an empty workspace has
+        // nothing to resize, and tiled_order is the membership the compute
+        // would iterate anyway.
+        if (m.ws[i].tiled_order.len == 0) continue;
+        // Covered workspaces compute no placements (and their windows' sizes
+        // don't depend on the workarea); skip the compute outright.
+        if (model.coveringOccupantOnWs(m, ws) != null) continue;
+        plan.placements = .{};
+        plan.pl_of_slot = [_]?usize{null} ** model.store_capacity;
+        computeLayoutForWs(m, ctx, &plan, ws);
+        for (plan.placements.constSlice()) |pl| {
+            const e = m.store.get(pl.win) orelse continue;
+            // Visible right now: the current-workspace pass owns its geometry.
+            if (model.visibleEntry(m, &e, m.current)) continue;
+            // presence != .present: minimized (absent from tiled_order anyway)
+            // or covering; neither is ours to resize.
+            if (e.presence != .present) continue;
+            const last = sentGet(pl.win) orelse continue;
+            // Dedup: a shown-then-parked window's ledger holds its last
+            // visible size; when that already equals the target, a previous
+            // toggle already resized it offscreen and resending would be a
+            // no-op the server discards. A never-shown window's record is
+            // blank (has_rect false): its size is unknown, so the resize is
+            // always sent (first show then happens at the right size).
+            if (last.has_rect and last.rect.width == pl.rect.width and
+                last.rect.height == pl.rect.height) continue;
+            ctx.sink.configure(pl.win, .{ .size = .{
+                .width = pl.rect.width,
+                .height = pl.rect.height,
+            } });
+            // Record the new size so the NEXT toggle can dedup against it.
+            // x/y stay as the last VISIBLE position (the unpark sends the
+            // full rect anyway via its transition); has_rect is NOT flipped:
+            // nothing here put the window on screen, and rect is documented
+            // as undefined until has_rect says a geometry was sent.
+            if (sentGetOrPut(pl.win)) |g| {
+                if (g.has_rect) {
+                    g.rect.width = pl.rect.width;
+                    g.rect.height = pl.rect.height;
+                }
             }
         }
     }

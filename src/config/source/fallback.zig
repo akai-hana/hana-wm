@@ -6,7 +6,7 @@
 //! so the two cannot drift.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.fallback);
 const fallback_toml = @import("fallback_toml");
 
 /// Directories probed BEFORE the general $PATH walk: the handful of

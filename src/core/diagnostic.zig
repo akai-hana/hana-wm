@@ -2,8 +2,9 @@
 //! dump-state command. Lives on the core side of the facade so the window
 //! facade keeps rendering/protocol concerns only.
 
+const std = @import("std");
 const core = @import("core");
-const log = @import("log");
+const log = std.log.scoped(.diagnostic);
 const query = @import("query");
 const focus = @import("focus");
 const build_options = @import("build_options");

@@ -6,13 +6,14 @@
 //! hide/show on ConfigureNotify. A minimized covering window remains a ghost
 //! (retains `covering_ws`) so restore reclaims the screen.
 
+const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const model = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");
 const build_options = @import("build_options");
-const log = @import("log");
+const log = std.log.scoped(.fullscreen);
 const registry = @import("registry");
 const surfaces = @import("surfaces").Surfaces;
 const window_mods = @import("window_modules").modules;

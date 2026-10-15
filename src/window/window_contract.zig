@@ -26,19 +26,18 @@ pub const WindowModule = struct {
     /// binders. The build-generated `window_modules` registry asserts at
     /// comptime that each field below has <= 1 binder.
     pub const single_binder_hooks = [_][]const u8{
-        "hideWindow",             "restoreWindow",       "restoreCandidateOn",
-        "restoreOnWs",            "latestHiddenOnWs",    "isWindowHidden",
-        "collectHiddenSet",       "toggleCovering",      "visibleCoveringOnWs",
-        "releaseCovering",        "moveCoveringTo",      "sendToWs",
-        "addToWs",                "removeFromWs",        "togglePin",
-        "toggleAllView",          "setFloatingRect",     "honorConfigureRequest",
-        "startDrag",              "stopDrag",            "updateDrag",
-        "isDragging",             "isResizingWindow",    "getDragLastRect",
-        "cancelDragForWindow",    "switchWorkspace",     "moveToWorkspace",
-        "toggleTag",              "pinWindow",           "allWorkspaces",
-        "toggleFullscreenWindow", "setFullscreenWindow", "minimizeWindow",
-        "unminimize",             "unminimizeOrdered",   "unminimizeAll",
-        "toggleFloatingWindow",
+        "hideWindow",          "restoreWindow",    "restoreCandidateOn",
+        "restoreOnWs",         "latestHiddenOnWs", "isWindowHidden",
+        "collectHiddenSet",    "toggleCovering",   "visibleCoveringOnWs",
+        "releaseCovering",     "moveCoveringTo",   "sendToWs",
+        "addToWs",             "removeFromWs",     "togglePin",
+        "toggleAllView",       "setFloatingRect",  "honorConfigureRequest",
+        "startDrag",           "stopDrag",         "updateDrag",
+        "isDragging",          "isResizingWindow", "cancelDragForWindow",
+        "switchWorkspace",     "moveToWorkspace",  "toggleTag",
+        "pinWindow",           "allWorkspaces",    "toggleFullscreenWindow",
+        "setFullscreenWindow", "minimizeWindow",   "unminimize",
+        "unminimizeOrdered",   "unminimizeAll",    "toggleFloatingWindow",
     };
 
     /// The complementary half of the classification: `WindowModule` hooks whose
@@ -202,10 +201,12 @@ pub const WindowModule = struct {
     // Floating drag/resize commands.
     startDrag: ?*const fn (u32, u8, i16, i16) void = null,
     stopDrag: ?*const fn () void = null,
-    updateDrag: ?*const fn (i16, i16) void = null,
+    /// Motion tick for the active drag. The bool is Shift-held at the motion
+    /// event: true frees a resize from the window's PAspect band (ratio-lock
+    /// escape hatch); ignored for move drags.
+    updateDrag: ?*const fn (i16, i16, bool) void = null,
     isDragging: ?*const fn () bool = null,
     isResizingWindow: ?*const fn (u32) bool = null,
-    getDragLastRect: ?*const fn () model.Rect = null,
     cancelDragForWindow: ?*const fn (u32) void = null,
 
     // User-facing commands.

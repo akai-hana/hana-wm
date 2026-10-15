@@ -5,7 +5,7 @@
 //! and all bar config vocabulary from the build with no trace elsewhere.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.bar_config);
 const parser = @import("parser");
 const scaling = @import("scaling");
 const types = @import("types");

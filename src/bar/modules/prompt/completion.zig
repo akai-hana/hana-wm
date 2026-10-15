@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const log = @import("log");
+const log = std.log.scoped(.completion);
 const spawn = @import("spawn");
 const fallback = @import("fallback");
 const snapshot = @import("snapshot");

@@ -28,7 +28,7 @@
 //! caller's value.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.volume);
 const types = @import("types");
 const bar_config = @import("bar_config");
 const slider = @import("slider");

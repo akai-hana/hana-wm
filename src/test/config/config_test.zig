@@ -13,15 +13,15 @@
 const std = @import("std");
 const testing = std.testing;
 
-// The tests deliberately exercise warn-level diagnostics (bad configs);
-// src/core/debug/log.zig silences all std.log diagnostics in test binaries,
-// so this stays quiet on success.
+// The tests deliberately exercise warn-level diagnostics (bad configs); the
+// vendored test runner (dev/test_runner.zig) captures them into the
+// diagnostics bag instead of printing, so this stays quiet on success.
 const config = @import("config");
+const diagnostics = @import("diagnostics");
 const model = @import("model");
 const discover = @import("discover");
 const scaling = @import("scaling");
 const scratch = @import("scratch");
-const log = @import("log");
 const snapshot_test = @import("snapshot_test");
 
 fn writeAndRead(alloc: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]u8 {
@@ -432,6 +432,52 @@ test "theme quartet: a [tiling] theme merges over a functional [tiling] config" 
     try testing.expectEqual(@as(u32, 0xAC3232), cfg.tiling.border_focused);
     try testing.expectEqual(@as(u32, 0x52263E), cfg.tiling.border_unfocused);
 }
+
+// The entry-file rule: a config dir contributes its `config.toml` plus that
+// file's `include`s, and nothing else. This pins BOTH halves of it on one
+// sibling file -- the drop-in that must stay inert (and say so) until it is
+// named, and the same file named in `include`, which then loads as always.
+test "a sibling .toml loads only when config.toml includes it" {
+    const alloc = testing.allocator;
+    var box = try snapshot_test.Sandbox.init(alloc, "sibling");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+    defer config.deinitGoodSource(alloc);
+
+    try box.write("hana/sibling.toml", "[workspaces]\ncount = 33\n");
+
+    // Not named by config.toml: the file never reaches the parser, so its
+    // knob cannot land -- and the loader REPORTS the inert file rather than
+    // dropping it in silence.
+    try box.write("hana/config.toml", "[tiling]\nenabled = true\n");
+    var inert: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer inert.deinit();
+    try config.checkConfig(alloc, &inert);
+    try testing.expect(inert.count() > 0);
+    try testing.expect(inert.contains("sibling.toml"));
+
+    var source: config.DefaultSource = .fallback;
+    var cfg = try config.loadConfigDefault(alloc, &source, false);
+    defer cfg.deinit(alloc);
+    try testing.expectEqual(config.DefaultSource.user, source);
+    try testing.expectEqual(@as(u8, types.default_workspace_count), cfg.workspaces.count);
+
+    // Named in `include`: the same file is read, merged, and stops being
+    // reported -- one line in config.toml is the whole switch.
+    try box.write("hana/config.toml", "include = [\"sibling.toml\"]\n");
+    var clean: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer clean.deinit();
+    try config.checkConfig(alloc, &clean);
+    try testing.expect(!clean.contains("sibling.toml"));
+
+    var cfg2 = try config.loadConfigDefault(alloc, &source, false);
+    defer cfg2.deinit(alloc);
+    try testing.expectEqual(config.DefaultSource.user, source);
+    try testing.expectEqual(@as(u8, 33), cfg2.workspaces.count);
+}
+
 // ---------------------------------------------------------------------------
 // Boot degradation, search policy, load ceilings
 // ---------------------------------------------------------------------------
@@ -493,6 +539,33 @@ test "An EMPTY XDG_CONFIG_HOME is treated as unset, not as cwd-relative" {
     try testing.expect(std.fs.path.isAbsolute(from_home));
 }
 
+// A directory with `.toml` files but no `config.toml` is not a config
+// source: the search skips it and moves on, and that skip must be REPORTED
+// -- booting whatever location answers next without a word would leave a
+// whole file on disk that hana never read.
+test "A config dir without config.toml is skipped, and says so" {
+    const alloc = testing.allocator;
+    var box = try snapshot_test.Sandbox.init(alloc, "entryless");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+    defer config.deinitGoodSource(alloc);
+
+    // An unknown knob: were this file ever parsed, its name would surface as
+    // an unrecognized-key diagnostic. Its ABSENCE below is therefore the
+    // proof the directory contributed nothing to the load.
+    try box.write("hana/stray.toml", "[tiling]\nzzz_stray_knob = 1\n");
+
+    var diag: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer diag.deinit();
+    try config.checkConfig(alloc, &diag);
+
+    try testing.expect(diag.count() > 0);
+    try testing.expect(diag.contains("has no config.toml"));
+    try testing.expect(!diag.contains("zzz_stray_knob"));
+}
+
 test "A config tree over the file ceiling is refused, not partially loaded" {
     const alloc = testing.allocator;
     var box = try snapshot_test.Sandbox.init(alloc, "toomany");
@@ -504,11 +577,23 @@ test "A config tree over the file ceiling is refused, not partially loaded" {
 
     // One file over the ceiling, each a valid, tiny, distinct config. A load
     // that skipped the surplus would still "succeed" and quietly drop them.
-    var name_buf: [32]u8 = undefined;
+    // The tree grows through the entry file's include list, which is the only
+    // way a config dir holds more than its one file now: config.toml itself,
+    // plus max_config_files + 1 includes.
+    var include_list: std.ArrayList(u8) = .empty;
+    defer include_list.deinit(alloc);
+    try include_list.appendSlice(alloc, "include = [");
+    var path_buf: [32]u8 = undefined;
+    var rel_buf: [16]u8 = undefined;
     for (0..config.max_config_files + 1) |i| {
-        const name = try std.fmt.bufPrint(&name_buf, "hana/c{d:0>3}.toml", .{i});
-        try box.write(name, "[binds]\n");
+        const rel = try std.fmt.bufPrint(&rel_buf, "c{d:0>3}.toml", .{i});
+        const path = try std.fmt.bufPrint(&path_buf, "hana/{s}", .{rel});
+        try box.write(path, "[binds]\n");
+        if (i != 0) try include_list.appendSlice(alloc, ", ");
+        try include_list.print(alloc, "\"{s}\"", .{rel});
     }
+    try include_list.appendSlice(alloc, "]\n");
+    try box.write("hana/config.toml", include_list.items);
 
     var source: config.DefaultSource = .fallback;
     try testing.expectError(
@@ -533,7 +618,7 @@ test "checkConfig collects the loader's own diagnostics" {
     // A typo'd key inside a recognized section: the sweep warns, and this is
     // the whole class of mistake the mode exists to catch.
     try box.write("hana/config.toml", "[tiling]\ngap_wdth = 9\n");
-    var diag: log.Collector = .{ .allocator = alloc };
+    var diag: diagnostics.Diagnostics = .{ .allocator = alloc };
     defer diag.deinit();
     try config.checkConfig(alloc, &diag);
     try testing.expect(diag.count() > 0);
@@ -542,7 +627,7 @@ test "checkConfig collects the loader's own diagnostics" {
     // stderr path would have written -- that is what the mode prints.
     var buf: [256]u8 = undefined;
     for (diag.items.items) |d| {
-        const line = try log.Collector.line(d, &buf);
+        const line = try diagnostics.Diagnostics.line(d, &buf);
         try testing.expect(line.len > "[x] ".len);
         try testing.expect(std.mem.startsWith(u8, line, "["));
     }
@@ -550,14 +635,14 @@ test "checkConfig collects the loader's own diagnostics" {
     // A config the loader cannot parse at all: still diagnostics, and still no
     // error return -- a broken config is a reportable RESULT, not a crash.
     try box.write("hana/config.toml", "this is not toml [[[\n");
-    var bad: log.Collector = .{ .allocator = alloc };
+    var bad: diagnostics.Diagnostics = .{ .allocator = alloc };
     defer bad.deinit();
     try config.checkConfig(alloc, &bad);
     try testing.expect(bad.count() > 0);
 
     // The collector is restored on every path, so an installed-then-removed
     // bag cannot keep intercepting later diagnostics.
-    try testing.expect(log.collector == null);
+    try testing.expect(diagnostics.diagnostics == null);
 
     // A load keeps the winning source alive past its own arena (the
     // snapshot re-exec needs it after the parse arena is gone), so the load

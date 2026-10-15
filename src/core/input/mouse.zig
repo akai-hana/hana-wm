@@ -5,11 +5,12 @@
 //! to this module (no facade), and config mouse binds reach the action
 //! interpreter through `dispatch`; one dependency between them.
 
+const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
 const masks = @import("masks");
-const log = @import("log");
+const log = std.log.scoped(.mouse);
 const window = @import("window");
 const query = @import("query");
 const focus = @import("focus");
@@ -183,9 +184,12 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     // An active floating drag owns motion even when the cursor crosses the bar
     // window: routing to the bar first would freeze updateDrag (the drag stops
     // moving over the bar) and feed spurious scrub motion. Route to the bar
-    // only when no floating drag is in flight.
+    // only when no floating drag is in flight. Shift-held at the motion event
+    // frees a resize from the window's aspect-ratio band (ratio-lock escape
+    // hatch); the drag engine ignores it for move drags.
     if (window.dispatchFirstTrue(.isDragging, .{})) {
-        window.dispatchAll(.updateDrag, .{ event.root_x, event.root_y });
+        const break_aspect = (event.state & masks.mod_shift) != 0;
+        window.dispatchAll(.updateDrag, .{ event.root_x, event.root_y, break_aspect });
         return;
     }
 
@@ -242,18 +246,66 @@ pub fn reportUndeliverableMouseBinds() void {
 ///
 /// Pure over the slice (the only side effect is the warning) so the policy is
 /// testable without a live core state.
+/// Result of a mouse-bind scan: the last matching entry (or null) plus the
+/// number of shadowed entries recorded, when a buffer was provided.
+const ScanResult = struct {
+    bind: ?*const types.MouseBind,
+    shadowed_len: usize,
+};
+
+/// The one conflict scan shared by the dispatch path and the test-facing
+/// collecting variant. `shadowed_out` non-null collects the 0-based indices
+/// of every match that loses to a later one (caller-owned fixed buffer, zero
+/// allocation; truncates silently past capacity -- the count is diagnostic,
+/// not load-bearing, and conflicts are a config error, ~2 entries deep in
+/// practice). Null keeps the production behavior: each shadowed entry is
+/// reported through the shared conflict logger instead.
+fn scanMouseBind(
+    binds: []const types.MouseBind,
+    mods: u16,
+    button: u8,
+    shadowed_out: ?[]usize,
+) ScanResult {
+    var found: ?*const types.MouseBind = null;
+    var shadowed_len: usize = 0;
+    for (binds, 0..) |*mb, i| {
+        if (mb.modifiers != mods or mb.button != button) continue;
+        if (found != null) {
+            if (shadowed_out) |out| {
+                if (shadowed_len < out.len) {
+                    out[shadowed_len] = i;
+                    shadowed_len += 1;
+                }
+            } else {
+                keybinds.logShadowConflict("Mouse binding", i, mods, "button", button);
+            }
+        }
+        found = mb;
+    }
+    return .{ .bind = found, .shadowed_len = shadowed_len };
+}
+
+/// Searches config mouse bindings for a modifier+button match, last wins,
+/// logging each shadowed entry. The dispatch path.
 pub fn findMouseBind(
     binds: []const types.MouseBind,
     mods: u16,
     button: u8,
 ) ?*const types.MouseBind {
-    var found: ?*const types.MouseBind = null;
-    for (binds, 0..) |*mb, i| {
-        if (mb.modifiers != mods or mb.button != button) continue;
-        if (found != null) keybinds.logShadowConflict("Mouse binding", i, mods, "button", button);
-        found = mb;
-    }
-    return found;
+    return scanMouseBind(binds, mods, button, null).bind;
+}
+
+/// Same scan, but returns the shadowed entries as indices into `binds`
+/// instead of logging them, so a test can assert the conflict policy on real
+/// data rather than on log text. `shadowed_out` is caller-owned stack; the
+/// returned `shadowed_len` counts what fit.
+pub fn findMouseBindShadowed(
+    binds: []const types.MouseBind,
+    mods: u16,
+    button: u8,
+    shadowed_out: []usize,
+) ScanResult {
+    return scanMouseBind(binds, mods, button, shadowed_out);
 }
 
 /// Searches config mouse bindings for a modifier+button match and executes it.

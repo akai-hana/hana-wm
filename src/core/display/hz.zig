@@ -23,7 +23,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const log = @import("log");
+const log = std.log.scoped(.hz);
 
 /// Fallback used when RandR is unavailable or returns an invalid value.
 const default_hz: f64 = 60.0;

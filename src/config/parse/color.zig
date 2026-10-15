@@ -20,7 +20,7 @@
 //! imports nothing from `sections/` or `vocab/`.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.color);
 const parser = @import("parser");
 
 const Value = parser.Value;

@@ -22,7 +22,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const log = @import("log");
+const log = std.log.scoped(.window);
 const query = @import("query");
 const focus = @import("focus");
 const icccm = @import("icccm");

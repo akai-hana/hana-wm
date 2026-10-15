@@ -277,6 +277,15 @@ pub const State = struct {
 
     vis: Visibility = .{},
     dirty: Dirty = .{},
+    /// A batch that hit `max_batched_redraws` still owes a frame that no draw
+    /// in that batch landed. The next poll must not sleep: `pollTimeoutMs`
+    /// reports 0 so the loop wakes, folds the owed work and ships it now
+    /// instead of at the next module deadline -- which on an idle bar is the
+    /// clock's whole-second boundary. One-shot by construction: cleared by
+    /// that wake and set only at the cap exit, so a module that re-requests
+    /// forever degrades to the ordinary timer cadence instead of spinning a
+    /// 0-timeout poll.
+    owed_redraw: bool = false,
     clock: Clock = .{},
     clicks: Clicks = .{},
     /// Segment id whose recorded bound owns an in-flight button-1 scrub
