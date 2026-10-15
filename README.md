@@ -198,7 +198,7 @@ hana has dedicated, hot-reloadable config files, written in TOML.
 > See [`config/README.md`](config/README.md) for the section reference and value
 > format details (percent vs pixel sizes, color spellings, file joining).
 
-Configuration can be self-contained on any arrangement of one or more `config/<any-name>.toml` file(s), but by default, hana provides a configuration split into two categories: **functional** and **visual**.
+Configuration can be self-contained in a single `config/config.toml`, or split across as many `config/<any-name>.toml` file(s) as the user likes — but only `config.toml` is read on its own: it is the entry file, and it pulls the rest in with `include`. By default, hana provides a configuration split into two categories: **functional** and **visual**.
 
 **Functional** configuration can be done through `config/config.toml`, while different **visual** configurations (both color palette and other visual details) can be written (also on TOML) and placed on `config/themes/`, then selected from the config. This means general behavior is separated from visual appearance, allowing different themes to be written and swapped around from the config, while retaining functional preferences, like window rules, tiling behavior, keybindings, workspace layouts, etc.
 
@@ -206,9 +206,9 @@ Selecting a file from the config simply merges the contents from that TOML file 
 
 By default, hana ships a red theme, `config/themes/akai.toml`. When hana is ran, both TOML files' contents are joined, then read through with a custom config parser. This means it's very easy for a user to further divide the config into different files, or just place everything inside a single .toml file.
 
-hana automatically reads all `.toml` files inside `config/.`, meaning the name of the `.toml` file doesn't really matter. Likewise, multiple `.toml` files can be placed inside `config/.`, and they'll be joined automatically. Any sub-directories within `config/` are ignored, and instead must be manually joined through a `.toml` file in the `config/` level, in the case the user wants to store multiple TOML files but doesn't necessarily want to use all of them at the same time; think the previous example, of different themes that can be swapped around in the config.
+hana automatically reads exactly one file inside `config/`: `config.toml`. Every other `.toml` there — whatever its name — stays unloaded, and is reported as such, until `config.toml` names it in its `include` list, which is where the joining happens. Likewise, sub-directories within `config/` are never read on their own and must be joined through `include`, in the case the user wants to store multiple TOML files but doesn't necessarily want to use all of them at the same time; think the previous example, of different themes that can be swapped around in the config.
 
-Since this is all an arbitrary design choice, it is optional and re-categorizable by the user, so one could do `config/config.toml` and `config/others/<binds.toml/rules.toml/tiling.toml>`, or whatever the heck else.
+Since this is all an arbitrary design choice, it is optional and re-categorizable by the user, so one could do `config/config.toml` and `config/others/<binds.toml/rules.toml/tiling.toml>` (named in the entry file's `include`), or whatever the heck else.
 
 ---
 

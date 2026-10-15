@@ -14,7 +14,7 @@ const std = @import("std");
 /// onto the top 1-based index (255 -> index 255 via 256 - 1).
 const max_workspace_command_1based = types.max_workspace_number_1based + 1;
 const fallback = @import("fallback");
-const log = @import("log");
+const log = std.log.scoped(.action_names);
 const types = @import("types");
 
 /// Cached terminal probe. `auto_terminal` is resolved at parse time so a user

@@ -11,7 +11,7 @@
 //! nothing and have no deinit.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.document);
 const types = @import("types");
 
 /// Error set shared by the dialect reader, the duplicate-key policy, and
@@ -332,9 +332,11 @@ pub const Document = struct {
 
     pub fn init(allocator: std.mem.Allocator) Document {
         var sections = std.StringHashMap(Section).init(allocator);
-        sections.ensureTotalCapacity(document_sections_reserve) catch |err| log.warnOnErr(err, "document section map reserve");
+        sections.ensureTotalCapacity(document_sections_reserve) catch |err|
+            log.warn("Best-effort op failed (document section map reserve): {}", .{err});
         var palette = std.StringHashMap(u32).init(allocator);
-        palette.ensureTotalCapacity(palette_var_names.len) catch |err| log.warnOnErr(err, "document palette reserve");
+        palette.ensureTotalCapacity(palette_var_names.len) catch |err|
+            log.warn("Best-effort op failed (document palette reserve): {}", .{err});
         return .{ .sections = sections, .root = .{}, .palette = palette };
     }
 

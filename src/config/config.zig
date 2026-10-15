@@ -3,13 +3,16 @@
 
 const std = @import("std");
 const fallback = @import("fallback");
-const log = @import("log");
+const diagnostics = @import("diagnostics");
 const parser = @import("parser");
 const composed = @import("composed");
 const types = @import("types");
 const layout_names = @import("layout_names");
 const snapshot_mod = @import("snapshot");
 const discover = @import("discover");
+// Call sites log through this scope; the sink is main.zig's `logFn` (or the
+// test runner's `log()`).
+const log = std.log.scoped(.config);
 
 // Re-exports: `config` stays the single import surface for callers
 // (main.zig, events.zig, session.zig, the tests); each symbol below is
@@ -30,23 +33,35 @@ pub const max_config_files = discover.max_config_files;
 /// line's cost).
 const max_section_name_bytes = 64;
 
-/// Loads and merges all `*.toml` files directly inside `dir_path` (alphabetical order;
-/// subdirectories only via explicit `include`).  Later files win on scalar conflicts;
-/// arrays accumulate (enforced by the parser's Value getters: scalar reads resolve to
-/// the last declaration, array reads see every one).
+/// Loads `<dir_path>/config.toml` plus that file's `include`s -- and nothing
+/// else. Every other top-level `*.toml` in the directory is inert (reported by
+/// discover.warnInertSiblings, never merged), so a file dropped into the
+/// directory cannot change the config behind the user's back: a config dir
+/// contributes exactly what its entry file names.
 fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !composed.Config {
-    var names = try discover.discoverDirNames(allocator, dir_path);
-    defer {
-        for (names.items) |n| allocator.free(n);
-        names.deinit(allocator);
-    }
-    const cfg = try parseAndBuild(allocator, discover.parseDirDoc, discover.DirInput{ .dir_path = dir_path, .names = names.items });
-    log.info("Loaded config from dir: {s} ({} file(s))", .{ dir_path, names.items.len });
+    const entry_path = try std.fs.path.join(allocator, &.{ dir_path, discover.entry_file });
+    defer allocator.free(entry_path);
+    const cfg = parseAndBuild(allocator, parseDirEntryDoc, FileInput{ .path = entry_path, .base_dir = dir_path }) catch |err| switch (err) {
+        // Only the entry file itself can surface FileNotFound here (a MISSING
+        // include fails as a had_errors parse instead, which is fatal), so
+        // this is "the directory is not a config source" and the search moves
+        // on -- after reporting what it held, so a tree the user meant to be
+        // live cannot vanish without a word on stderr.
+        error.FileNotFound => {
+            discover.warnEntrylessDir(allocator, dir_path);
+            return err;
+        },
+        else => return err,
+    };
+    log.info("Loaded config from dir: {s}", .{dir_path});
     return cfg;
 }
 
 /// Loads config in priority order: (1) ~/.config/hana/, (2) ./config/,
 /// (3) ~/.config/hana/config.toml, (4) ./config.toml, (5) embedded fallback.
+/// A directory location contributes its `config.toml` plus that file's
+/// `include`s (see loadConfigFromDir); a file location is that file plus its
+/// `include`s.
 /// `source` receives where the config actually came from (user vs fallback),
 /// so callers with different boot/reload semantics (see reload.handleConfigReload)
 /// need no separate existence probe. `allow_pinned_snapshot` admits the one
@@ -81,10 +96,10 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
         }
     }
 
-    // Try directories first (they can hold several .toml files), then single
-    // files. The order comes from `discover.search_order`; each tag resolves its path,
-    // loader, provenance and wording in one switch, so a new location cannot
-    // be added with a missing or mismatched field.
+    // Try directories first (each holds one entry file plus its includes),
+    // then single files. The order comes from `discover.search_order`; each
+    // tag resolves its path, loader, provenance and wording in one switch, so
+    // a new location cannot be added with a missing or mismatched field.
     inline for (discover.search_order) |loc| {
         const at: discover.SearchAttempt = switch (loc) {
             .xdg_dir => .{ .path = paths.xdg_dir, .load = loadConfigFromDir, .is_dir = true },
@@ -136,16 +151,36 @@ const FileInput = struct { path: []const u8, base_dir: []const u8 };
 /// choke point as every other contributing file (discover.mergeAndRecord).
 /// The read itself is NOT wrapped in tryParseTomlFile: a missing or
 /// unreadable file must propagate its raw error so the search-order skip
-/// (silent_missing) and reload's keep-live still see FileNotFound, not
-/// had_errors. The count ceiling starts at zero here, so only the byte
-/// ceiling (covered: one file <= max_file_bytes) can apply to this file;
-/// its includes go through parseAndMerge, which checks the count too.
+/// (silent_missing), the directory's entryless report (loadConfigFromDir)
+/// and reload's keep-live still see FileNotFound, not had_errors. The count
+/// ceiling starts at zero here, so only the byte ceiling (covered: one file
+/// <= max_file_bytes) can apply to this file; its includes go through
+/// parseAndMerge, which checks the count too.
 fn parseFileDoc(a: std.mem.Allocator, read: *discover.ReadSet, in: FileInput) !parser.Document {
     var merged = parser.Document.init(a);
     var parsed = try discover.parseTomlFile(a, in.path) orelse return error.ConfigEmpty;
     try discover.mergeAndRecord(a, &merged, read, &parsed.doc, parsed.bytes, in.path, "Merged: {s}");
     try discover.mergeIncludes(a, &merged, &parsed.doc, read, in.base_dir);
     return merged;
+}
+
+/// The directory entry's parse: the identical `config.toml` + `include` read
+/// the single-file path does, plus the report of top-level `.toml` files the
+/// include list left inert -- a config dir reads nothing else, so every
+/// unincluded sibling is named here rather than dropped in silence.
+///
+/// An EMPTY entry file is a config that loads as the built-in defaults, not a
+/// reason to keep searching: failing here would hand the decision to a later
+/// location, a different directory tree entirely, for a directory that did
+/// have an entry file. (The single-file path reads an empty file as "use the
+/// fallback" instead -- see loadConfig.)
+fn parseDirEntryDoc(a: std.mem.Allocator, read: *discover.ReadSet, in: FileInput) !parser.Document {
+    const doc = parseFileDoc(a, read, in) catch |err| switch (err) {
+        error.ConfigEmpty => parser.Document.init(a),
+        else => return err,
+    };
+    discover.warnInertSiblings(a, in.base_dir, read);
+    return doc;
 }
 
 /// Parse inputs for `parseFallbackDoc`: the embedded fallback TOML text.
@@ -310,7 +345,7 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
 /// degrades exactly like a parse failure (see `loadFor` / `isFatalLoadError`).
 ///
 /// Loads the default config with every warn/err diagnostic CAPTURED into
-/// `collector` instead of only reaching stderr, then throws the config away.
+/// `diag` instead of only reaching stderr, then throws the config away.
 ///
 /// This is the whole of `hana --check-config`: a config problem the WM merely
 /// warns about at boot is invisible to anyone not reading the log, and
@@ -320,13 +355,14 @@ fn warnInertSectionFamilies(doc: *parser.Document) void {
 /// warn-and-continue decisions -- so a check that passes means the config the
 /// WM would actually take is the config that was checked.
 ///
-/// The collector is installed here rather than passed down: see
-/// `log.Collector`. Restored on every exit path, including the error path, so
-/// a failed check cannot leave later diagnostics pointing at a dead bag.
-pub fn checkConfig(allocator: std.mem.Allocator, collector: *log.Collector) !void {
-    const saved = log.collector;
-    log.collector = collector;
-    defer log.collector = saved;
+/// The bag is installed here rather than passed down: see
+/// `diagnostics.Diagnostics`. Restored on every exit path, including the error
+/// path, so a failed check cannot leave later diagnostics pointing at a dead
+/// bag.
+pub fn checkConfig(allocator: std.mem.Allocator, diag: *diagnostics.Diagnostics) !void {
+    const saved = diagnostics.diagnostics;
+    diagnostics.diagnostics = diag;
+    defer diagnostics.diagnostics = saved;
     // `snapshot = false`: a check must not WRITE the re-exec hand-off state.
     // It runs the same load, but leaving a snapshot behind would be a
     // validation run with a side effect -- and one that leaks by design, since

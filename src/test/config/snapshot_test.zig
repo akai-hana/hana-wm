@@ -307,6 +307,10 @@ test "a renamed config file is not left behind in the snapshot" {
     defer alloc.free(env[0]);
     defer alloc.free(env[1]);
 
+    // The entry file plus the one it includes: that pair is the whole of a
+    // config dir's load, so a rename here is an edit to the file AND to the
+    // include list naming it.
+    try box.write("hana/config.toml", "include = [\"aaa.toml\"]\n");
     try box.write("hana/aaa.toml", "[binds]\nMod = \"Mod4\"\n");
     // The good-source state is process-lifetime in production; hand it back
     // so the DebugAllocator sees a clean slate.
@@ -316,9 +320,10 @@ test "a renamed config file is not left behind in the snapshot" {
     defer cfg.deinit(alloc);
     config.refreshSnapshot(alloc);
 
-    // The user renames their file. A refresh that only ADDED the new name
-    // would leave the old one behind, and the successor would then load a
-    // config file the user had deleted.
+    // The user renames their file and follows it in the include list. A
+    // refresh that only ADDED the new name would leave the old one behind,
+    // and the successor would then load a config file the user had deleted.
+    try box.write("hana/config.toml", "include = [\"zzz.toml\"]\n");
     try box.write("hana/zzz.toml", "[binds]\nMod = \"Mod4\"\n");
     box.remove("hana/aaa.toml");
 
@@ -331,8 +336,9 @@ test "a renamed config file is not left behind in the snapshot" {
     defer alloc.free(snap);
     const got = try Sandbox.treeFiles(alloc, snap);
     defer freeTree(alloc, got);
-    try testing.expectEqual(@as(usize, 1), got.len);
-    try testing.expectEqualStrings("zzz.toml", got[0]);
+    try testing.expectEqual(@as(usize, 2), got.len);
+    try testing.expectEqualStrings("config.toml", got[0]);
+    try testing.expectEqualStrings("zzz.toml", got[1]);
 }
 
 test "a single-file config source still snapshots as config.toml" {

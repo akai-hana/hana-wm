@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const keymap = @import("keymap");
-const log = @import("log");
+const log = std.log.scoped(.binds);
 const masks = @import("masks");
 const parser = @import("parser");
 const types = @import("types");
