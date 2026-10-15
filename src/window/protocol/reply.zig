@@ -3,16 +3,16 @@
 //! the reply BYTES/fields and derive model values; no X round trips, no
 //! cache writes. The caller owns the wire read (icccm.firePropQuery +
 //! reply drain) and where the result lands -- the model entry, threaded
-//! as a parameter at admission time (see manage.mapRequest). Pure by
+//! as a parameter at admission time (see admission.mapRequest). Pure by
 //! construction, so both derivations are unit-testable without a
-//! connection (reply_test.zig). Former identity.zig + hints.zig, merged
-//! 2026-10-10; the X-wired query/refresh half stays in icccm.zig.
+//! connection (reply_test.zig). The X-wired query/refresh half stays in
+//! icccm.zig.
 
 const std = @import("std");
 const model = @import("model");
 const scaling = @import("scaling");
 
-/// WM_CLASS split (former identity.zig).
+/// WM_CLASS split.
 /// The two WM_CLASS components: `instance` (the res_name,
 /// e.g. "alacritty") and `class` (the res_class, e.g.
 /// "Alacritty").
@@ -38,7 +38,7 @@ pub fn parseWmClass(data: []const u8) ?WmClass {
     return .{ .instance = instance, .class = class_raw[0..class_end] };
 }
 
-/// WM_NORMAL_HINTS field walk (former hints.zig).
+/// WM_NORMAL_HINTS field walk.
 /// ICCCM flag bits (the PMinSize/PMaxSize/... word of the reply).
 const p_min_size: u32 = 0x10;
 const p_max_size: u32 = 0x20;

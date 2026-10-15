@@ -57,7 +57,7 @@ pub fn fillDrawCtx(s: *State, ctx: *segmod.DrawCtx) void {
     // The minimized-state service is drawn from the window module registry
     // here (upfront, per frame) so the title segment need not name the
     // addon that owns it. No provider compiled in => empty api =>
-    // scanLiveFrame no-ops, matching prior boot ordering.
+    // scanLiveFrame no-ops.
     var minimized_api: segmod.MinimizedApi = .{};
     if (collect_hidden_set != null)
         minimized_api.collect = minimizedCollect;

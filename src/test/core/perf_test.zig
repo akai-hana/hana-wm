@@ -23,7 +23,6 @@ const window_state_ops = @import("window_state_ops");
 
 const core = @import("core");
 // Bench marks only run (full iterations + timing output) under `-Dbench`.
-const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const bench = build_options.bench; // Timings -> file
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
@@ -184,10 +183,9 @@ test "bench: reorderTiled (50 wins)" {
 }
 
 fn testColor(_: model.WindowId, _: *const model.Model) u32 {
-    // Helpers.focused_pixel, not a literal 100. The literal was a
-    // second copy of a shared constant: changing the focused pixel would have
-    // left this returning the old value with no test failing, since nothing
-    // compared the two.
+    // helpers.focused_pixel, not a literal 100: a duplicate of that shared
+    // constant would go stale when the focused pixel changes, and nothing
+    // here would notice, since nothing compares the two.
     return helpers.focused_pixel;
 }
 
@@ -196,8 +194,8 @@ test "bench: reconcile pass (50 windows)" {
     try fill(&m, 50);
     focus.setFocus(&m, 25);
 
-    ledger.init();
-    defer ledger.init();
+    reconcile.init();
+    defer reconcile.init();
 
     const per_pass_ns = helpers.benchReconcile(&m, if (bench) 1_000 else 1);
     if (bench) helpers.benchLog("[bench] reconcile (50 wins): {d:.1} ns/pass\n", .{per_pass_ns});
@@ -225,8 +223,8 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     const e = m.store.getPtr(dragged).?;
     e.anchor = .{ .floating = .{ .x = 100, .y = 100, .width = 300, .height = 200 } };
 
-    ledger.init();
-    defer ledger.init();
+    reconcile.init();
+    defer reconcile.init();
 
     var recorder = test_sink.TestSink(.none){};
     var ctx = makeCtx(recorder.sink(), testColor, helpers.std_wa);
@@ -351,31 +349,31 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     // COLD = fresh ledger first-touch (post-boot reconcile); WARM = already-seeded
     // ledger, hit-only sweep (steady-state reconcile; model.Store iterates sorted-key
     // order, so the sweep walks ascending window ids).
-    ledger.init();
-    defer ledger.init();
+    reconcile.init();
+    defer reconcile.init();
 
     const n: usize = 64;
 
     const it_cold: usize = if (bench) 20_000 else 1;
     const t0 = nowNs();
     for (0..it_cold) |_| {
-        ledger.init();
-        for (0..n) |i| _ = ledger.sentGetOrPut(@intCast(i + 1));
+        reconcile.init();
+        for (0..n) |i| _ = reconcile.sentGetOrPut(@intCast(i + 1));
     }
     const cold_ns = nowNs() - t0;
     const per_cold_ns = @as(f64, @floatFromInt(cold_ns)) / @as(f64, @floatFromInt(it_cold * n));
 
     // Cold fill landed: every id from the last cold pass is present.
     for (0..n) |i| {
-        try testing.expect(ledger.sentGet(@intCast(i + 1)) != null);
+        try testing.expect(reconcile.sentGet(@intCast(i + 1)) != null);
     }
 
-    ledger.init();
-    for (0..n) |i| _ = ledger.sentGetOrPut(@intCast(i + 1001));
+    reconcile.init();
+    for (0..n) |i| _ = reconcile.sentGetOrPut(@intCast(i + 1001));
     const it_warm: usize = if (bench) 20_000 else 1;
     const t1 = nowNs();
     for (0..it_warm) |_| {
-        for (0..n) |i| _ = ledger.sentGetOrPut(@intCast(i + 1001));
+        for (0..n) |i| _ = reconcile.sentGetOrPut(@intCast(i + 1001));
     }
     const warm_ns = nowNs() - t1;
     const per_warm_ns = @as(f64, @floatFromInt(warm_ns)) / @as(f64, @floatFromInt(it_warm * n));
@@ -383,10 +381,10 @@ test "bench: sent ledger (64 wins: cold fill + warm hit sweep)" {
     // Warm sweep landed on the seeded records: every swept id survived it,
     // and an id outside the sweep is absent until the put path creates it.
     for (0..n) |i| {
-        try testing.expect(ledger.sentGet(@intCast(1001 + i)) != null);
+        try testing.expect(reconcile.sentGet(@intCast(1001 + i)) != null);
     }
-    try testing.expect(ledger.sentGet(4001) == null);
-    try testing.expect(ledger.sentGetOrPut(4001) != null);
+    try testing.expect(reconcile.sentGet(4001) == null);
+    try testing.expect(reconcile.sentGetOrPut(4001) != null);
 
     if (bench)
         helpers.benchLog(

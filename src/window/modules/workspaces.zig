@@ -62,12 +62,12 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 /// Move `win`'s covering intent to `dest`, or drop it when a resident occupant
 /// there swallows the transfer.
 ///
-/// The demote direction is EXPLICIT. This used to demote by calling
-/// `toggleCovering`, whose correctness depended entirely on a guard the caller
-/// had already proved -- `win` really was covering. Toggle is a two-edged verb:
-/// if that proof were ever lost (a reordered check, a new caller, a provider
-/// that reports covering differently) the "demote" silently became a fullscreen
-/// ENTRY, and the failure is a window jumping to screen-covering, not a no-op.
+/// The demote direction is EXPLICIT. `toggleCovering` is a two-edged verb
+/// whose correctness depends entirely on a guard the caller has already
+/// proved -- `win` really is covering. If that proof were ever lost (a
+/// reordered check, a new caller, a provider that reports covering
+/// differently) a "demote" silently becomes a fullscreen ENTRY, and the
+/// failure is a window jumping to screen-covering, not a no-op.
 /// `releaseCovering` only goes one way, so the wrong-direction mistake is
 /// unrepresentable.
 fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
@@ -91,9 +91,9 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 /// (minimized-from-fullscreen) move their workspace too, following the
 /// parked mask.
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
-    // Model query, not a peer-module dispatch. The dispatch returned
-    // null when no covering module is bound, which made "is this window
-    // covering" answer false in such a build -- while the model still held the
+    // Model query, not a peer-module dispatch: a dispatch returns null when
+    // no covering module is bound, which would answer "is this window
+    // covering" false in such a build -- while the model still holds the
     // intent, and session.zig restores it across a session restart.
     const fws = model.coveringWsOf(m, win) orelse return;
     if (fws.eql(ws)) return;
@@ -151,11 +151,11 @@ pub fn allViewToggle(m: *model.Model) bool {
     return m.all_view_active;
 }
 
-/// Workspace commands: one model transition + one reconcile entry each. These
-/// are the old `src/actions/ws.zig` group, moved beside the state they write.
-/// The core reaches them through the `switchWorkspace`/`moveToWorkspace`/
-/// `toggleTag`/`pinWindow`/`allWorkspaces` hooks on `module`, so a tree
-/// without this file compiles with no binder rather than a dangling import.
+/// Workspace commands: one model transition + one reconcile entry each, living
+/// beside the state they write. The core reaches them through the
+/// `switchWorkspace`/`moveToWorkspace`/`toggleTag`/`pinWindow`/`allWorkspaces`
+/// hooks on `module`, so a tree without this file compiles with no binder
+/// rather than a dangling import.
 /// Shared change guard for the tag/pin commands: the window must be present
 /// in the model and not hidden.
 fn canTagChange(m: *const model.Model, win: model.WindowId) bool {
@@ -191,9 +191,9 @@ pub fn moveToWorkspace(win: model.WindowId, ws_idx: u8) void {
         // A covering window moved ONTO the current workspace: current gained
         // a screen-claiming occupant, so bump the core fullscreen fact and
         // re-apply the bar's visibility for the new occupant. Without this, a
-        // tag-move of a fullscreen window onto the active workspace left the
-        // bar mapped over the new cover (switchWorkspace did handle arrival;
-        // this move path did not).
+        // tag-move of a fullscreen window onto the active workspace leaves the
+        // bar mapped over the new cover (switchWorkspace handles arrival on a
+        // switch; this move path must handle it too).
         surfaces.updateBarVisibilityForWorkspace(ws_idx);
         core.fullscreen.bump();
     }
@@ -305,7 +305,11 @@ pub fn switchWorkspace(ws_idx: u8) void {
     m.all_view_active = false;
 
     // model.current is the ONLY store for the current workspace; the other
-    // layers read through it.
+    // layers read through it. The layout params are per-workspace too, so the
+    // outgoing workspace's kind/variant are captured HERE, before the flip --
+    // they are what the layout and variants segments were last drawn from.
+    const leaving_kind = m.ws[m.current.index].params.kind;
+    const leaving_variant = m.ws[m.current.index].params.variant_idx;
     m.current = model.WSId.fromIndex(ws_idx);
 
     // Bump the window fact: the workspace indicator always changes on switch.
@@ -313,6 +317,17 @@ pub fn switchWorkspace(ws_idx: u8) void {
     // switch), so the focus fact alone can't guarantee a redraw; bumping the
     // window fact here makes the bar redraw at end-of-batch.
     core.window.bump();
+    // The window fact repaints only the frame-declaring segments (title, tags):
+    // the layout/variants indicators render the ACTIVE workspace's per-workspace
+    // kind/variant, which that fact does not carry -- without this they stayed
+    // stale on a switch until an unrelated segment's redraw request happened to
+    // repaint the row. The layout fact is the revision that means "the kind or
+    // variants changed" (a full redraw, the same tail cycle_layout/cycle_variants
+    // take), so bump it ONLY when the switch actually changed what they render:
+    // an identical switch must not churn a redraw, a differing one must not wait.
+    const entering = m.ws[ws_idx].params;
+    if (leaving_kind != entering.kind or leaving_variant != entering.variant_idx)
+        core.layout.bump();
     // Bar visibility follows the NEW workspace's fullscreen occupant. Apply it
     // NOW (X-free, no reconcile) so the FIRST reconcile below already reads the
     // correct screen claim / workarea for this workspace. Otherwise the bar's
@@ -337,7 +352,7 @@ pub fn switchWorkspace(ws_idx: u8) void {
     // focus-candidate selection and the FocusTransition prep — runs here,
     // model-local or cache-backed,
     // BEFORE grabServer so a fast-following keypress is never starved by this
-    // switch (the drop-safety fix).
+    // switch.
 
     // Keyboard-triggered switch focuses the model's tiered fallback
     // (newest-first MRU, then reversed tiled_order, then floating) — NO

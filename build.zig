@@ -609,23 +609,23 @@ fn wireCheckSteps(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) !void {
-    // Plugin-template compile gate: dev/plugin-template/** is compiled against
+    // Plugin-template compile gate: contrib/plugin-template/** is compiled against
     // the real discovered modules (cross-wired like an in-tree module), so the
     // drop-in templates can't drift from current contracts without
     // `zig build check-plugin-template` (and by extension `zig build check`)
     // failing. Each template is only compiled when its imports are present.
     const plugin_template_specs = [_]PluginTemplateSpec{
-        .{ .path = "dev/plugin-template/layout.zig", .import = "layout", .present = features.has_tiling },
-        .{ .path = "dev/plugin-template/provider.zig", .import = "provider", .present = true },
-        .{ .path = "dev/plugin-template/segment.zig", .import = "segment", .present = features.has_bar },
+        .{ .path = "contrib/plugin-template/layout.zig", .import = "layout", .present = features.has_tiling },
+        .{ .path = "contrib/plugin-template/provider.zig", .import = "provider", .present = true },
+        .{ .path = "contrib/plugin-template/segment.zig", .import = "segment", .present = features.has_bar },
         // Sub-addon templates: each imports its package core's
         // contract type, so it is compiled only while that core
         // is discovered (a removed package would otherwise fail
         // the template's import).
-        .{ .path = "dev/plugin-template/readout.zig", .import = "readout", .decl = "sub", .present = features.has_seg_systatus },
-        .{ .path = "dev/plugin-template/control.zig", .import = "control", .decl = "sub", .present = features.has_seg_slider },
-        .{ .path = "dev/plugin-template/title-addon.zig", .import = "title_addon", .decl = "addon", .present = features.has_seg_title },
-        .{ .path = "dev/plugin-template/prompt-addon.zig", .import = "prompt_addon", .decl = "addon", .present = features.has_seg_prompt },
+        .{ .path = "contrib/plugin-template/readout.zig", .import = "readout", .decl = "sub", .present = features.has_seg_systatus },
+        .{ .path = "contrib/plugin-template/control.zig", .import = "control", .decl = "sub", .present = features.has_seg_slider },
+        .{ .path = "contrib/plugin-template/title-addon.zig", .import = "title_addon", .decl = "addon", .present = features.has_seg_title },
+        .{ .path = "contrib/plugin-template/prompt-addon.zig", .import = "prompt_addon", .decl = "addon", .present = features.has_seg_prompt },
     };
     const plugin_template_check = try buildPluginTemplateCheck(b, &discovery.modules, shared_ctx, has_usr, target, optimize, &plugin_template_specs);
     // `zig build check` type-checks the exe AND runs the layer guards
@@ -2052,7 +2052,7 @@ fn readTestGate(b: *std.Build, path: []const u8, flags: []const FeatureFlag) !Te
     return out;
 }
 
-/// Input to `buildPluginTemplateCheck`: one dev/plugin-template file to
+/// Input to `buildPluginTemplateCheck`: one contrib/plugin-template file to
 /// compile against the real modules, the import name to expose it under in
 /// the generated wrapper, and whether the current tree provides its
 /// dependencies (`present`; a skipped entry is left out of the wrapper
@@ -2071,7 +2071,7 @@ const PluginTemplateSpec = struct {
     present: bool,
 };
 
-/// Compiles every `dev/plugin-template/` file against the REAL discovered
+/// Compiles every `contrib/plugin-template/` file against the REAL discovered
 /// modules (cross-wired exactly like an in-tree module, shared artefacts
 /// included) and registers a `check-plugin-template` step, so contract drift
 /// self-fails on `zig build check`. Compile-only: the wrapper test binary is
@@ -2141,7 +2141,7 @@ fn buildPluginTemplateCheck(
     }
 
     const t = b.addTest(.{ .root_module = wrapper });
-    const step = b.step("check-plugin-template", "Type-check dev/plugin-template/*.zig against current contracts");
+    const step = b.step("check-plugin-template", "Type-check contrib/plugin-template/*.zig against current contracts");
     step.dependOn(&t.step);
     return step;
 }

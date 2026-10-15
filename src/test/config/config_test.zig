@@ -14,7 +14,7 @@ const std = @import("std");
 const testing = std.testing;
 
 // The tests deliberately exercise warn-level diagnostics (bad configs);
-// src/core/pure/log.zig silences all std.log diagnostics in test binaries,
+// src/core/debug/log.zig silences all std.log diagnostics in test binaries,
 // so this stays quiet on success.
 const config = @import("config");
 const model = @import("model");
@@ -446,8 +446,8 @@ test "A config that fails fragment validate falls back at BOOT" {
     defer config.deinitGoodSource(alloc);
 
     // Valid TOML, semantically impossible: 500% is far outside the
-    // [min_master_width, max_master_width] band. Before the boot fallback existed, this was the
-    // config that took the WM down at boot while a typo'd key did not.
+    // [min_master_width, max_master_width] band. This is the config that
+    // takes the WM down at boot while a typo'd key does not.
     // The `%` matters: a bare number parses as an ABSOLUTE pixel value, which
     // validation accepts (the screen width is not known here), so `500` would
     // be a perfectly good config and the test would prove nothing.

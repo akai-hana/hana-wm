@@ -319,8 +319,8 @@ fn runLadder() bool {
     return changedFrom(had_value, old_pct, old_muted);
 }
 
-/// Mute flag captured alongside the level by `tryRung`. Split out because the
-/// two subprocess rungs differ only in their mute token and command set.
+/// Mute flag captured alongside the level by `tryRung`: the two subprocess
+/// rungs differ only in their mute token and command set.
 var g_pulse_muted: bool = false;
 var g_alsa_muted: bool = false;
 

@@ -10,11 +10,10 @@
 //! parallel, drain the replies sequentially), the admission decision,
 //! and the registration helper both admission paths run through.
 //! The cookie/decision/register helpers serve both paths: the runtime
-//! MapRequest pipeline and the boot-time adoption driver (former
-//! restore.zig, merged 2026-10-10), which walks the root's children the
-//! same pipeline runs per MapRequest.
+//! MapRequest pipeline and the boot-time adoption driver, which walks the
+//! root's children with the same pipeline that runs per MapRequest.
 //!
-//! One consumer remains in window.zig: handleMapRequest (the runtime
+//! One consumer lives in window.zig: handleMapRequest (the runtime
 //! MapRequest path); it fires its cookies here, resolves the decision
 //! here, and registers through admitWindow here — the same pipeline
 //! adoptSession runs for every surviving root child.
@@ -407,10 +406,9 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
     }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
 }
 
-/// The map-request tail and the post-geometry focus handoff (the old
-/// `src/actions/manage.zig` group). Both end in ONE model transition plus ONE
-/// reconcile, and both sit here because admission is what knows whether a
-/// window has been registered at all.
+/// The map-request tail and the post-geometry focus handoff. Both end in ONE
+/// model transition plus ONE reconcile, and both sit here because admission
+/// is what knows whether a window has been registered at all.
 /// MapRequest tail. The caller's front-end (event masks, property queries)
 /// has already run; this registers the window in
 /// the model and lets ONE reconcile do map+pixel+bw+geom(+ABOVE winner) for
@@ -485,7 +483,7 @@ pub fn mapRequest(
             }
         }
     }
-    focus.initWindowGrabs(win); // protocol-side keygrabs, both paths did this
+    focus.initWindowGrabs(win); // protocol-side keygrabs, both paths do this
     core.window.bump(); // a window was admitted
 
     if (!on_current) return;
@@ -519,7 +517,7 @@ pub fn focusAfterGeometry() void {
 }
 
 /// Admission policy shared by the MapRequest path (handleMapRequest) and the
-/// boot-time adoption path (restore.adoptSession). Both sources fire and drain
+/// boot-time adoption path (adoptSession). Both sources fire and drain
 /// their property cookies and resolve the target workspace BEFORE calling
 /// here; this is the single place where a window is registered with the model
 /// and its keyboard grabs seeded. One map-request path, one adoption path, one
@@ -533,7 +531,7 @@ pub fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool, size_
 
 /// Resolves only the float bit of a class rule (adoption never relocates a
 /// pre-existing window's workspace, so a workspace match is deliberately
-/// ignored here). Drains the WM_CLASS reply. Restore.zig's adoption path
+/// ignored here). Drains the WM_CLASS reply. The session-adoption path
 /// is the caller; the policy stays here beside the rules map it reads.
 pub fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
     const c = cookie orelse return false;
@@ -541,11 +539,11 @@ pub fn resolveClassFloat(cookie: ?xcb.xcb_get_property_cookie_t) bool {
     return rule.float;
 }
 
-/// Session adoption (former restore.zig, merged 2026-10-10): the re-exec-
-/// only path where a successor WM takes over the X clients a predecessor
-/// left behind. main calls adoptSession exactly once -- after surfaces.init()
-/// (bar up so bar-aware work area is live) and before events.run() --
-/// sequencing handoff, window adoption, and focus against each other.
+/// Session adoption: the re-exec-only path where a successor WM takes over
+/// the X clients a predecessor left behind. main calls adoptSession exactly
+/// once -- after surfaces.init() (bar up so bar-aware work area is live) and
+/// before events.run() -- sequencing handoff, window adoption, and focus
+/// against each other.
 /// Adopt the session described by `restore_path`, if there is one to adopt.
 ///
 /// Called after the bar is up, so the bar-aware work area is already live and
@@ -656,8 +654,7 @@ fn applyRestoredRecord(win: u32, record: *const session.WindowRecord) void {
         // Uniform magic-byte claim scan: every module in registry order gets
         // a chance; the first hook to claim (return true) ends the scan, so
         // this is dispatchFirstTrue's stop-at-first-true shape rather than a
-        // full fan-out. The function ends here either way -- the early
-        // return this replaced just exited the same scope.
+        // full fan-out.
         _ = registry.dispatchFirstTrue(.deserializeWindow, .{ win, payload, model });
     }
 }
@@ -721,14 +718,15 @@ fn adoptRootWindows() !usize {
 
     const loaded = session.loaded();
 
-    // The per-window admission query used to be fired and drained inside this
-    // loop (and the attribute query even earlier), costing one serial blocking
-    // round trip for the attribute and one for the admission batch per child:
-    // 1 + 2N total. Firing them all up-front lets the X server process every
-    // child's attribute + property query in parallel; the replies then arrive
-    // back-to-back and are drained in order below, so the batch costs a single
-    // blocking read. Candidates that fail the attribute gate during the drain still
-    // have their up-front property replies discarded, never leaked.
+    // The attribute query and the per-window admission queries are all fired
+    // up-front, before any reply is drained: the serial alternative costs one
+    // blocking round trip for the attribute plus one for the admission batch
+    // per child (1 + 2N total). Firing them all up-front lets the X server
+    // process every child's attribute + property query in parallel; the
+    // replies then arrive back-to-back and are drained in order below, so the
+    // batch costs a single blocking read. Candidates that fail the attribute
+    // gate during the drain still have their up-front property replies
+    // discarded, never leaked.
     var entries: std.ArrayListUnmanaged(AdoptionEntry) = .empty;
     defer entries.deinit(alloc);
     try entries.ensureTotalCapacity(alloc, child_count);

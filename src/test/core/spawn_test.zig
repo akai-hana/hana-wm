@@ -17,9 +17,8 @@ test "a clean EOF is success" {
 }
 
 test "the real tag_failed byte is failure" {
-    // The case the old predicate got backwards: this byte is the failure
-    // signal, and the old code compared it to itself, concluded it was not
-    // tag_failed, and registered a spawn that had never exec'd.
+    // A classifier that compares the tag to itself would conclude this byte is
+    // not tag_failed, and register a spawn that had never exec'd.
     try testing.expect(spawn.conversationFailed(&[_]u8{spawn.tag_failed}));
 }
 

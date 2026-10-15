@@ -192,9 +192,9 @@ test "one call returns the offset, the cycle and the active bit together" {
 test "cadence does not change the position: coarse and fine ticks agree" {
     // The property the accumulator could not have. Driving the same 1000ms of
     // scroll in 1 tick, 10 ticks and 100 ticks must land on the same pixel,
-    // because the offset is now mod((now - anchor) * speed, cycle) rather than
-    // a running sum. Under the old `offset_px += speed * dt` this only held
-    // when the frame rate was exactly what the sum assumed.
+    // because the offset is mod((now - anchor) * speed, cycle) rather than a
+    // running sum, which only agrees when the frame rate is exactly what the
+    // sum assumed.
     reset();
     try expectOffset(0, tick(1, 500, 100, 30, 0)); // anchor at the head
     const coarse = tick(1, 500, 100, 30, 1000);
@@ -208,12 +208,10 @@ test "cadence does not change the position: coarse and fine ticks agree" {
 
 test "a duplicated draw is a no-op, not a double step" {
     // A repeated frame at the same timestamp is something the event loop
-    // genuinely does (a wakeup that turns out to have nothing new to redraw).
-    // Worth pinning, but note it is NOT a case the old accumulator got wrong:
-    // its dt was zero for a repeated timestamp, so it already answered the
-    // same. Mutation against a reconstruction of the accumulator confirms this
-    // test does not discriminate -- the defects it actually fixes are the two
-    // below, not this one.
+    // genuinely does (a wakeup that turns out to have nothing new to redraw),
+    // so the duplicate must be a no-op rather than a double step. Worth
+    // pinning on its own, even though it does not discriminate the anchor
+    // design: a zero dt already yields the same answer.
     reset();
     _ = tick(1, 500, 100, 30, 0);
     const first = tick(1, 500, 100, 30, 500);

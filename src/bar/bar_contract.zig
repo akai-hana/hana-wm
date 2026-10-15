@@ -72,15 +72,12 @@ pub const KeyPressEvent = opaque {};
 
 /// What a segment actually painted, returned rather than inferred.
 ///
-/// `draw` used to return only the advanced `x`, and the bar decided whether a
-/// segment had drawn anything by comparing it against the `x` it passed in.
-/// That conflates "painted nothing" with "failed", and the two are not the
-/// same: a readout with nothing to show (no battery, unreadable file) is a
-/// SUCCESS that occupies zero width, while a failed draw is a success-shaped
-/// fallback the bar substitutes. Both happen to end up advancing the row by the
-/// reserved width, so the confusion was invisible -- but a segment that meant
-/// to paint an empty cell and keep its slot could not say so, and the bar had
-/// no way to tell that apart from an error it had just caught.
+/// The two outcomes are not the same: a readout with nothing to show (no
+/// battery, unreadable file) is a SUCCESS that occupies zero width, while a
+/// failed draw is a success-shaped fallback the bar substitutes. Both advance
+/// the row by the reserved width, but a segment that means to paint an empty
+/// cell and keep its slot must be able to say so, and the bar must be able to
+/// tell that apart from an error it just caught.
 pub const Painted = struct {
     /// x just past the painted content.
     end_x: u16,
@@ -104,10 +101,9 @@ pub const Painted = struct {
 /// types, so it lives HERE rather than in bar/segment.zig: the `naturalWidth`
 /// hook takes it as a real `*const Frame`, and a hook signature cannot
 /// name a type the contract may not import. bar/segment.zig re-exports this
-/// (`pub const Frame = contract.Frame`), so every existing reader is
-/// unaffected -- and the hook no longer has to be documented as "the caller
-/// promises this is a Frame", which is a promise `*const anyopaque` cannot
-/// check.
+/// (`pub const Frame = contract.Frame`) as the name readers use, and a hook's
+/// `*const Frame` parameter is checked -- unlike a `*const anyopaque` promise
+/// that "the caller says this is a Frame".
 pub const Frame = struct {
     workspace_count: u32 = 0,
     current_workspace: u8 = 0,
@@ -117,14 +113,12 @@ pub const Frame = struct {
 
 /// Everything a segment's click hook needs, by name.
 ///
-/// This was six positional parameters -- offset, two direction bools, the bar
-/// state, and two bar-provided fn pointers -- and every implementation had to
-/// restate the whole list to ignore most of it: the clock's hook discarded four
-/// of six, the tags hook three. Positionally, `offset: u16` and the two bools
-/// are indistinguishable at the call site, so a transposed pair type-checked.
-/// One named struct makes the ignored fields `_ = ctx.redraw` instead of six
-/// `_:` parameters, and leaves room to add a field (a timestamp, a modifier
-/// mask) without touching any implementation's signature.
+/// Every field is named rather than positional: `offset: u16` and the two
+/// direction bools are indistinguishable positionally at the call site, so a
+/// transposed pair would type-check. A named struct makes the ignored fields
+/// `_ = ctx.redraw` instead of a wall of `_:` parameters, and leaves room to
+/// add a field (a timestamp, a modifier mask) without touching any
+/// implementation's signature.
 pub const ClickCtx = struct {
     /// Pixels from the segment's recorded left edge. Compare against the width
     /// the row reserved (`naturalWidth`), not the last painted width.
@@ -261,7 +255,7 @@ pub const Segment = struct {
     handleKeypress: ?*const fn (*const KeyPressEvent, ?*const types.Action) bool = null,
     /// Module queued a redraw (width change, subprocess output, blink tick).
     /// Returning true DRAINS the request and forces a whole-bar redraw in the
-    /// CURRENT batch: every caller funnels through `repaint.foldModuleRedraw`,
+    /// CURRENT batch: every caller funnels through `render.foldModuleRedraw`,
     /// which marks the bar dirty on a true return, so no wake path can drop a
     /// request and no path can redraw twice for one flag.
     consumeRedrawRequest: ?*const fn () bool = null,

@@ -1,7 +1,7 @@
 //! Workspace tag indicator.
 //! Renders workspace labels and activity glyphs on the status bar.
 //!
-//! Naming, decided (structure audit step 27): the registered segment -- and
+//! Naming: the registered segment -- and
 //! the config-visible `segments` name -- is "workspaces"; this FILE is
 //! `tags.zig` (the dwm-lineage term for the same concept). Renaming the file
 //! to `workspaces.zig` would collide with `window/modules/workspaces.zig` in
@@ -34,8 +34,8 @@ const workspace_labels: [model.max_workspaces][]const u8 = blk: {
 };
 
 /// Reserved row width when the workspaces module is compiled in but reports
-/// zero workspaces (moved here from bar.zig: width policy belongs to the
-/// segment that owns the pixels). WITH the module removed entirely this
+/// zero workspaces (width policy belongs to the segment that owns the
+/// pixels). WITH the module removed entirely this
 /// reserve is not just unused, it is wrong: nothing can be drawn, so the
 /// honest answer is zero -- see naturalWidthHook.
 const fallback_width: u16 = 270;
@@ -278,9 +278,9 @@ fn cellWidth() u16 {
 /// This module's bar-segment contribution (registry binding).
 fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
     // Without the workspaces module the bar never fills workspace_count (the
-    // only writer is build_options.has_workspaces-gated), so the old code
-    // reserved 270px for a segment that can never paint: "remove a module,
-    // recompile" was not free. Reserve what there is.
+    // only writer is build_options.has_workspaces-gated), so a fixed reserve
+    // would hold 270px for a segment that can never paint. Reserve what there
+    // is.
     if (comptime !build_options.has_workspaces) return 0;
     if (f.workspace_count > 0) {
         // All-view collapses 8 tags -> 1: the row reservation narrows with it.

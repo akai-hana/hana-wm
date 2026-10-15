@@ -10,7 +10,7 @@
 //! X. Callers read focus through `getFocused()`.
 //!
 //! Section map, top to bottom:
-//!   1. State + init/deinit (+ the focus-property cache merged from icccm)
+//!   1. State + init/deinit (+ the focus-property cache)
 //!   2. Query/mutation accessors, timestamps, button grabs
 //!   3. Etiquette table (per-Reason policy as DATA) + resolve predicates
 //!   4. Two-phase prepare: prepareFocus / prepareClearFocus / yieldsModelFocus
@@ -33,7 +33,7 @@ const registry = @import("registry");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
-const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 
 /// Pointer root position snapshot at spawn-admission time. The first
 /// crossing event armed by a `.window_spawn` suppress compares against
@@ -98,12 +98,12 @@ pub fn deinit() void {
     state = null;
 }
 
-/// Focus-property cache + ICCCM 4.1.7 input-model resolution
-/// (merged from icccm.zig): the per-window WM_HINTS/WM_PROTOCOLS verdict
-/// cache, the four delivery modes, WM_TAKE_FOCUS dispatch from a known
-/// advertisement, and the PropertyNotify half-refresh. The X11 query
-/// machinery (fire/drain/populate) stays in icccm.zig and writes through
-/// put() below, so the cache has exactly one owner — this module.
+/// Focus-property cache + ICCCM 4.1.7 input-model resolution: the per-window
+/// WM_HINTS/WM_PROTOCOLS verdict cache, the four delivery modes,
+/// WM_TAKE_FOCUS dispatch from a known advertisement, and the PropertyNotify
+/// half-refresh. The X11 query machinery (fire/drain/populate) stays in
+/// icccm.zig and writes through put() below, so the cache has exactly one
+/// owner — this module.
 /// The four ICCCM focus delivery modes (4.1.7), determined by the combination of
 /// WM_HINTS.input and WM_TAKE_FOCUS presence in WM_PROTOCOLS.
 pub const InputModel = enum {
@@ -505,24 +505,19 @@ pub const FocusTransition = union(enum) {
     set: SetFocusIntent,
     clear: ClearFocusIntent,
     /// Focus must not move: the target's input model is `no_input`. Distinct
-    /// from `.none`, which is the already-applied dedup. This used to be a
-    /// module-global flag read synchronously after the call, with the rule
-    /// "a no_input target must never take model focus" living only in a
-    /// comment; as a union limb the compiler carries the verdict to every
-    /// consumer and no read can be forgotten or reordered.
+    /// from `.none`, which is the already-applied dedup. The verdict lives as
+    /// a union limb so the compiler carries it to every consumer and no read
+    /// can be forgotten or reordered.
     no_input: void,
     none: void,
 };
 
 /// Whether this transition actually lands focus and therefore licenses a model
-/// write. Callers MUST ask this rather than comparing against `.none`.
+/// write. Callers MUST ask this rather than comparing against `.none`: the
+/// `.no_input` limb is not `.none`, so a naive `!= .none` test lets a
+/// no_input window take model focus.
 ///
-/// Two call sites did the naive `!= .none` test, and both were wrong: the
-/// `.no_input` limb is not `.none`, so a `no_input` window took model focus
-/// anyway. That is the exact failure the split limb was introduced to prevent
-/// -- its own doc comment says the union exists so "no read can be forgotten
-/// or reordered" -- yet the reads were still shaped like the old single-flag
-/// era. `prepareFocus` returning a no-input verdict is the whole point of the
+/// `prepareFocus` returning a no-input verdict is the whole point of the
 /// type; this is the one place that converts it back into a decision, so it
 /// lives next to the union rather than being re-derived at each consumer.
 pub inline fn yieldsModelFocus(t: FocusTransition) bool {
@@ -536,7 +531,7 @@ pub inline fn yieldsModelFocus(t: FocusTransition) bool {
 
 /// The focus ETIQUETTE for one `Reason`: all three per-reason
 /// policies as DATA, in one row, instead of three separate switches that
-/// each had to be re-read to answer "what does a workspace switch do?".
+/// each have to be re-read to answer "what does a workspace switch do?".
 const Etiquette = struct {
     /// Whether a focus target is raised here. The TILED exclusion is not in
     /// here because it is a property of the window, not of the reason: sync's
@@ -559,8 +554,8 @@ const Etiquette = struct {
 /// One row per reason. A `switch` rather than an array because the array form
 /// would be positional (an inserted variant silently shifts every row after
 /// it, with no diagnostic); this way the compiler rejects a missing arm the
-/// moment a variant is added, which is the whole point of the merge. Reading
-/// one policy is now a field read instead of a hunt through three switches.
+/// moment a variant is added. Reading one policy is a field read instead of a
+/// hunt through three switches.
 fn etiquetteFor(reason: Reason) Etiquette {
     return switch (reason) {
         // A click expects its raise side effect even when the window already
@@ -587,9 +582,8 @@ fn etiquetteFor(reason: Reason) Etiquette {
     };
 }
 
-// Crossing-suppression policy + hover focus (moved from client_events.zig):
-// the Enter/Leave handlers validate event shape, then hand the crossing to
-// these.
+// Crossing-suppression policy + hover focus: the Enter/Leave handlers in
+// client_events.zig validate event shape, then hand the crossing to these.
 
 inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
     if (getSuppressReason() != .window_spawn) return false;
@@ -645,12 +639,9 @@ pub inline fn maybeFocusWindow(win: u32) void {
 ///
 ///  1. the invalid-window sentinel (a chrome XID is not a window),
 ///  2. model liveness -- a destroyed window is unregistered, so `store.has`
-///     is false. This is the check `.user_command` used to skip ENTIRELY, on
-///     the reasoning that the cycle path had already confirmed the window was
-///     visible. That reasoning holds for cycleTarget's callers and for nothing
-///     else: floating.zig reaches grabFocus(win, .user_command) directly, so a
-///     window destroyed between spawn and the float toggle could still be
-///     focused and raised.
+///     is false. It applies to `.user_command` too: floating.zig reaches
+///     grabFocus(win, .user_command) directly, so a window destroyed between
+///     spawn and the float toggle must not be focused and raised.
 ///     It costs no round trip -- a load and a compare on a table the caller
 ///     already has open.
 ///  3. the blocking xcb_get_window_attributes liveness query, for the ONE
@@ -774,8 +765,8 @@ pub fn focusFallback(m: *model_mod.Model, reason: Reason) FocusTransition {
 pub fn prepareAndSetFocus(m: *model_mod.Model, win: model_mod.WindowId, reason: Reason) FocusTransition {
     const prep = prepareFocus(win, reason);
     // `yieldsModelFocus`, not `!= .none`: `.no_input` is a refusal, not a
-    // dedup, so the old test let a no_input window take model focus and
-    // contradicted the rule written directly above this function.
+    // dedup, so a `!= .none` test lets a no_input window take model focus
+    // and contradicts the rule written directly above this function.
     if (yieldsModelFocus(prep)) setFocus(m, win);
     return prep;
 }
@@ -814,7 +805,7 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             // without disturbing their exact click order.
             if (intent.flags.raise) {
                 requests.raiseWindow(conn, intent.win);
-                ledger.floatRaise(intent.win);
+                reconcile.floatRaise(intent.win);
             }
 
             if (intent.flags.take_focus_known)
@@ -889,10 +880,10 @@ pub fn drainTilingOpSettle() void {
     if (state.?.suppress_reason == .tiling_operation) state.?.suppress_reason = .none;
 }
 
-/// Grab-wrapped commit API + focus cycle (former focus_commit.zig, merged
-/// 2026-10-10): the two-phase protocol's atomic commit wrappers, plus the
-/// cycle. The protocol itself (module state, etiquette table, prepare/apply
-/// split, button grabs) lives above; this was always a sub-surface of it.
+/// Grab-wrapped commit API + focus cycle: the two-phase protocol's atomic
+/// commit wrappers, plus the cycle. The protocol itself (module state,
+/// etiquette table, prepare/apply split, button grabs) lives above; this is
+/// a sub-surface of it.
 
 // Grab-wrapped focus operations (full atomicity)
 //
@@ -901,7 +892,7 @@ pub fn drainTilingOpSettle() void {
 // atomically under one server grab.
 
 /// Atomically focus `win` with `reason`. Focus protocol, borders, and geometry
-/// land inside one server grab. Drop-in for the old setFocus path.
+/// land inside one server grab.
 pub fn grabFocus(win: u32, reason: Reason) void {
     grabFocusWithDuty(win, reason, null);
 }
@@ -950,22 +941,14 @@ pub fn grabFocusWithDuty(win: u32, reason: Reason, duty: ?*const fn () void) voi
 
 /// Cycle focus one step, committing the viewport-snap duty in the SAME grab.
 ///
-/// This is the coupled form. The two calls the input path used to make --
-/// `if (cycleTarget(dir)) |t| grabFocusWithDuty(t, .user_command,
-/// &reconcile_tails.snapViewportFocusedDuty)` -- put the pool resolution and the
-/// commit in the CALLER's hands, and nothing tied the duty to the transition
-/// it belongs to: resolve a target, then commit it with a different duty or
-/// none, and the snap the cycle exists to fold in silently does not happen
-/// (one extra grab-and-reconcile later, or not at all). The "the snap rides
-/// along in the cycle's grab" rule lived only in a comment at the call site.
+/// This is the coupled form: pool resolution and commit land together, so the
+/// duty cannot be separated from the transition it belongs to. Resolve a
+/// target and commit it separately with a different duty or none, and the snap
+/// the cycle exists to fold in silently does not happen (one extra
+/// grab-and-reconcile later, or not at all).
 ///
-/// Deliberately NOT the whole refactor: `cycleTarget` is still `pub` for the
-/// pure read. Privatizing it is the right end state, but its only other
-/// consumers are assertions in the X-gated focus_test that this environment
-/// cannot execute, and the mechanical conversion (cycleTarget reads -> cycleFocus
-/// commits, which mutates the very order/focus state the following assertions
-/// read) is not a rewrite I can verify here. Left public, with the coupling
-/// now enforced on the path that matters.
+/// `cycleTarget` stays `pub` for the pure read; its other consumers are
+/// assertions in the X-gated focus_test.
 pub fn cycleFocus(dir: types.Dir, duty: *const fn () void) void {
     const target = cycleTarget(dir) orelse return;
     grabFocusWithDuty(target, .user_command, duty);
@@ -1006,8 +989,8 @@ pub fn cycleTarget(dir: types.Dir) ?u32 {
     return wins[model_mod.wrapIndex(idx, if (forward) 1 else -1, len)];
 }
 
-// Section: model focus operations (moved from model.zig — Option A of the op
-// migration; the focus protocol owns focus state transitions on the model).
+// Section: model focus operations (the focus protocol owns focus state
+// transitions on the model).
 
 /// Writes `win` as the model's focused window and moves it to the front of
 /// the focus MRU. Unknown windows are ignored.
@@ -1029,16 +1012,13 @@ pub fn clearFocus(m: *model_mod.Model) void {
     m.focused = null;
 }
 
-/// The ONE focused/unfocused border-pixel pick.
+/// The ONE focused/unfocused border-pixel pick, sitting with focus because
+/// the focus state is what the pick reads: a second copy of the same ternary
+/// in the window layer could drift from the core pipeline's copy and nothing
+/// would notice.
 ///
-/// This lived as `borders.borderColorOf(focused, ...)` in the window layer
-/// while the core pipeline carried its own copy of the same ternary, so the
-/// two could drift and nothing would notice. It sits with focus because the
-/// focus state is what the pick reads.
-///
-/// `m` supplies the focus source so the caller does not have to pass a
-/// possibly-different answer (borders used `focus.getFocused()`, the pipeline
-/// read `m.focused`; those agree in production but nothing enforced it).
+/// `m` supplies the focus source so the caller cannot pass an answer that
+/// differs from the pipeline's own `m.focused`.
 pub inline fn focusedBorderColor(m: *const model_mod.Model, win: model_mod.WindowId, focused_px: u32, unfocused_px: u32) u32 {
     return if (m.focused == win) focused_px else unfocused_px;
 }
