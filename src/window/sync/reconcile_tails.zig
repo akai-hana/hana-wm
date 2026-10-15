@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const core = @import("core");
-const log = @import("log");
+const log = std.log.scoped(.reconcile_tails);
 const model_mod = @import("model");
 const pipeline = @import("pipeline");
 const focus = @import("focus");

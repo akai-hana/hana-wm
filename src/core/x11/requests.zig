@@ -23,7 +23,7 @@ const Screen = xcbmod.Screen;
 const atoms = @import("atoms");
 const model = @import("model");
 const masks = @import("masks");
-const log = @import("log");
+const log = std.log.scoped(.requests);
 
 // Geometry <-> wire conversions
 

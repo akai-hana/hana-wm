@@ -290,11 +290,40 @@ pub fn runVoidHook(comptime hook: std.meta.FieldEnum(contract.Segment)) void {
 }
 
 /// True when ANY registered segment's `hook` returns true (short-circuiting
-/// walk; the predicate family: keypress routing, elapsed-seconds fan-out,
-/// redraw-request folding).
+/// walk; the predicate family: keypress routing, elapsed-seconds fan-out).
 pub fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: anytype) bool {
     for (bar_mods) |seg| if (@field(seg, @tagName(hook))) |f| if (@call(.auto, f, args)) return true;
     return false;
+}
+
+/// Consume-all fold over an explicit probe list: every probe is called, each
+/// one that answers true has consumed its own request by returning it, and
+/// the result is whether ANY fired. The opposite drain policy of
+/// `anyBoolHook`'s short circuit on purpose: short-circuiting here would
+/// consume the first pending request and strand every later one until the
+/// next fold, turning a five-module first-paint settle into five rounds --
+/// which is what pushed a real boot past `max_batched_redraws` and left the
+/// last module's frame waiting on an unrelated timer tick.
+pub fn foldProbes(probes: []const ?*const fn () bool) bool {
+    var any = false;
+    for (probes) |p| {
+        if (p) |f| {
+            if (f()) {
+                any = true;
+            }
+        }
+    }
+    return any;
+}
+
+/// The registry fold: `foldProbes` over every segment's no-arg bool `hook`,
+/// in registry order. Takes no args -- unlike `anyBoolHook`, whose callers
+/// pass per-event payloads -- because the fold family only answers "is there
+/// pending work", never "did this event match".
+pub fn foldBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment)) bool {
+    var probes: [bar_mods.len]?*const fn () bool = undefined;
+    for (bar_mods, 0..) |seg, i| probes[i] = @field(seg, @tagName(hook));
+    return foldProbes(&probes);
 }
 
 /// Segment-binding builder: width-state cache, the comptime `module` builder

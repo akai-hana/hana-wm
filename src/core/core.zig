@@ -10,7 +10,7 @@ const build_options = @import("build_options");
 
 // Centralized here to avoid repeated @cImport translation across compilation units.
 const xcbmod = @import("xcb");
-const log = @import("log");
+const log = std.log.scoped(.core);
 pub const xcb = xcbmod.xcb;
 
 /// X11 keysym constants, matching <X11/keysymdef.h>. Cast to xcb_keysym_t with @intFromEnum.

@@ -14,7 +14,7 @@ const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
 const masks = @import("masks");
-const log = @import("log");
+const log = std.log.scoped(.keybinds);
 const keymap = @import("keymap");
 const xkb = @import("xkb");
 
@@ -226,7 +226,7 @@ pub const KeybindResolver = struct {
         self.stale_reported = false;
         self.entries.clearRetainingCapacity();
         self.entries.ensureTotalCapacity(allocator, keybindings.len) catch |e| {
-            log.warnOnErr(e, "keybind dispatch table build");
+            log.warn("Best-effort op failed (keybind dispatch table build): {}", .{e});
             return;
         };
         // Dedup FIRST, in config order (so each shadowed binding is reported

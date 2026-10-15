@@ -3,7 +3,7 @@
 //! Enabled via `HANA_XTRACE=...` or `HANA_XTRACE=*`; zero cost when disabled.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.trace);
 
 /// Arming state: null = not yet resolved from the environment. Resolving it
 /// lazily keeps getenv off the hot path for the common (disabled) case while

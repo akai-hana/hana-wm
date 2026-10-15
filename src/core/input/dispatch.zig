@@ -11,7 +11,7 @@ const build_options = @import("build_options");
 const core = @import("core");
 const xcb = core.xcb;
 const types = @import("types");
-const log = @import("log");
+const log = std.log.scoped(.dispatch);
 const focus = @import("focus");
 /// Primary-column width step per primary-width adjustment press.
 const master_width_step: f32 = 0.025;

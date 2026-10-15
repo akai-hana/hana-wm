@@ -10,7 +10,7 @@ const std = @import("std");
 
 const core = @import("core");
 
-const log = @import("log");
+const log = std.log.scoped(.xkb);
 
 /// Single @cImport owner for libxkbcommon lives in keymap.zig.
 const keymap = @import("keymap");
