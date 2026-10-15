@@ -9,11 +9,11 @@ const core = @import("core");
 const xcb = core.xcb;
 const events = @import("events");
 const config = @import("config");
+const diagnostics = @import("diagnostics");
 const types = @import("types");
 const composed = @import("composed");
 const scale = @import("dpi");
 const hz = @import("hz");
-const log = @import("log");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
 // through the core-owned `surfaces` composition root, never by importing the
 // bar module here.
@@ -29,6 +29,8 @@ const cursor = @import("cursor");
 /// is a second place to change, and two sites can disagree about what they
 /// are even naming.
 const alloc = std.heap.c_allocator;
+// Call sites log through this scope; the sink is `logFn` below.
+const log = std.log.scoped(.main);
 const window = @import("window");
 const seed = @import("model_config");
 const pipeline = @import("pipeline");
@@ -47,7 +49,24 @@ const requests = @import("requests");
 pub const std_options: std.Options = .{
     .enable_segfault_handler = true,
     .allow_stack_tracing = true,
+    .logFn = logFn,
 };
+
+/// The process-wide log sink. Captures warn/err into the check-config bag
+/// (no-op unless `--check-config` installed one), then writes the same
+/// "[module] message" line the old hand-rolled wrapper produced. The scope is
+/// passed as `.default` with the tag baked into the format because
+/// `defaultLog` prints its own "(scope): " infix for non-default scopes,
+/// which would double up with the bracketed tag.
+fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    diagnostics.capture(message_level, scope, format, args);
+    std.log.defaultLog(message_level, .default, "[{t}] " ++ format, .{scope} ++ args);
+}
 
 /// The longest captured diagnostic line `--check-config` can print without
 /// truncating it; a longer one is clipped rather than wrapped, so the count is
@@ -68,7 +87,7 @@ fn checkConfigRequested(args: std.process.Args) bool {
 }
 
 fn runCheckConfig() !void {
-    var diag: log.Collector = .{ .allocator = alloc };
+    var diag: diagnostics.Diagnostics = .{ .allocator = alloc };
     defer diag.deinit();
     try config.checkConfig(alloc, &diag);
     const n = diag.count();
@@ -77,7 +96,7 @@ fn runCheckConfig() !void {
         // A diagnostic longer than the buffer is clipped with a marker rather
         // than silently cut, so a truncated line is never mistaken for a
         // complete one.
-        const line = try log.Collector.line(d, &buf);
+        const line = try diagnostics.Diagnostics.line(d, &buf);
         std.debug.print("{s}{s}\n", .{ line, if (line.len == buf.len) "  [truncated]" else "" });
     }
     std.debug.print("hana --check-config: {d} diagnostic(s) in the loaded config\n", .{n});

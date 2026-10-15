@@ -32,7 +32,7 @@
 //!
 //! The error set is `ParseError`, declared in `document.zig`.
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.parser);
 const types = @import("types");
 
 const document = @import("document");

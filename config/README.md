@@ -1,9 +1,9 @@
 # hana configuration
 
-hana's configuration is one or more **TOML** files living inside `config/`.
-There is no schema duty: every file is parsed with hana's own TOML parser, so
-malformed values are either warned-and-ignored or rejected while keeping the
-previous config in memory.
+hana's configuration is a `config.toml` living inside `config/`, plus every
+file that file pulls in with `include`. There is no schema duty: every file
+is parsed with hana's own TOML parser, so malformed values are either
+warned-and-ignored or rejected while keeping the previous config in memory.
 
 Sections follow the build: each optional subsystem ships a `*_config.zig`
 fragment next to its code, and the binary only parses the sections owned by
@@ -17,9 +17,9 @@ The stock split (arbitrary, and entirely up to you):
 
 | file                 | role                                        |
 | -------------------- | ------------------------------------------- |
-| `config.toml`        | functional behavior, bar, rules             |
-| `themes/akai.toml`   | visual palette & appearance                 |
-| `binds.toml`         | keybindings, incl. personal program binds   |
+| `config.toml`        | the entry file: functional behavior, bar, rules |
+| `binds.toml`         | keybindings, incl. personal program binds (via `include`) |
+| `themes/akai.toml`   | visual palette & appearance (via `include`) |
 | `fallback.toml`      | built-in config used when no file is found  |
 
 > `fallback.toml` is a compile-time default, not a file you edit; edit
@@ -27,17 +27,25 @@ The stock split (arbitrary, and entirely up to you):
 
 ## File joining
 
-- Every `.toml` file placed directly in `config/` is loaded automatically,
-  sorted by name. Later files win on scalar conflicts.
-- Files placed in **subdirectories** of `config/` (e.g. `config/themes/`) are
-  ignored by the auto-loader. Pull them in explicitly from a top-level file:
+- `config.toml` is the **only** file a config directory loads on its own.
+  Every other top-level `.toml` is inert — and reported as a warning —
+  until `config.toml` names it:
 
   ```toml
-  include = ["themes/akai.toml"]
+  include = ["binds.toml", "themes/akai.toml"]
   ```
 
-- Sub-directories never auto-load; `include` is the only way to use them. This
-  is what makes swap-able themes and separate keybind files convenient.
+- `include` is a root-level key, so it has to sit above the first table
+  header. Files merge in list order, after `config.toml` itself: later files
+  win on scalar conflicts, arrays accumulate.
+- Sub-directories are never read on their own; `include` is the only way to
+  reach them (`themes/akai.toml`), resolved one level deep — an included
+  file's own `include` is ignored.
+- This is what makes swap-able themes and separate keybind files convenient:
+  change what loads in one place, without moving any file around.
+- A directory with `.toml` files but no `config.toml` is skipped as a config
+  source entirely (the search moves on) and says so, rather than booting
+  whatever location answers next without a word.
 
 ## Value formats
 

@@ -1,28 +1,24 @@
 #!=<|># config.toml #<=*~>#
 # hana-wm behavior config #
 
-# ---------------------------------------------------------------------------
-#
-# This file holds hana's functional behavior. See `binds.toml` for the bind
-# list and `themes/akai.toml` for visual behavior.
-#
-# Files can be structured however you want; this layout keeps quick theme
-# swapping viable and functional behavior swappable without touching your
-# personal binds list.
+# By default, this file only holds functional behavior.
+# See `binds.toml` for the bind list, and `themes/akai.toml` for visual behavior.
 
-# ---------------------------------------------------------------------------
+# You're not constricted to these names, nor to this specific structure, to manage
+# your config. Going mono-file is perfectly fine.
+# The reason why hana does this by default is to make quick theme-swapping viable,
+# as well as functional behavior swapping, without affecting your curated bind list.
+
+# ----------------------------------------------------------------------------------
 
 # TOML config files to load.
-# - Files placed in the main config directory are auto-loaded (alphabetically).
-# - Files placed in subdirectories must be added here manually.
-# - Multiple files are unified at runtime; later files win on scalar conflicts.
-#
-# See config/README.md for value format details (ScalableValue, glob expansion, etc.)
-include = ["themes/akai.toml"]
+# - `config.toml` (this file) is the ONLY file hana reads from the config
+#   directory; every other .toml stays inert until it is listed here.
+# - Files placed in subdirectories must be path-qualified (e.g. themes/akai.toml).
+# - Files are unified at runtime in list order; later files win on scalar conflicts.
+include = ["binds.toml", "themes/akai.toml"]
 
-# ---------------------------------------------------------------------------
 # Tiling
-# ---------------------------------------------------------------------------
 
 [tiling]
 
@@ -58,7 +54,7 @@ layouts = [
     # "leaf",
 ]
 
-# -- Layout-specific settings --
+# Layout-specific settings
 
 [tiling.layouts.master-stack]
 count    = 1        # Number of windows in the master area [1..]
@@ -75,7 +71,7 @@ variants = "relaxed"   # "rigid" (strict grid) | "relaxed" (last window expands)
 [tiling.layouts.fibonacci]
 # Fibonacci has no behavioral variants.
 
-# -- Window aesthetics --
+# Window aesthetics
 # Defaults below; the theme file (themes/akai.toml) typically overrides these.
 # Window chrome lives in the [tiling] section itself; standalone spelling:
 #
@@ -85,24 +81,20 @@ variants = "relaxed"   # "rigid" (strict grid) | "relaxed" (last window expands)
 # border_focused   = "#5294E2"
 # border_unfocused = "#383C4A"
 
-# -- Drag & drop --
+# Drag & drop
 [drag]
 snap_distance = 16 # Pixel distance at which windows snap together
 
-# ---------------------------------------------------------------------------
 # Workspaces
-# ---------------------------------------------------------------------------
 [workspaces]
 count = 8 # Number of workspaces [1-64]
 
-# ---------------------------------------------------------------------------
 # Bar
-# ---------------------------------------------------------------------------
 [bar]
 enabled  = true
-position = "bottom" # "top" / "bottom" — can be toggled at runtime
+position = "bottom" # "top"/"bottom" (can be toggled on runtime, check binds)
 
-# -- Bar layout --
+# Bar layout
 # Segments are placed into left/center/right anchor groups.
 # Available segments: "workspaces", "title", "clock", "layout", "variants",
 #                     "batt", "cpu", "ram", "volume", "brightness".
@@ -117,14 +109,7 @@ segments = ["title"]
 [bar.layout.right]
 segments = ["cpu", "ram", "volume", "brightness", "clock"]
 
-# ---------------------------------------------------------------------------
-# Keybindings
-# ---------------------------------------------------------------------------
-# All binds live in binds.toml.
-
-# ---------------------------------------------------------------------------
 # Workspace rules
-# ---------------------------------------------------------------------------
 # Maps window class names to workspaces. Two formats:
 #
 # Numbered arrays (workspace -> list of classes):

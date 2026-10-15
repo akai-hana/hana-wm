@@ -12,8 +12,9 @@
 //! separate concern owned by process/session.zig (persist) + process/process.zig
 //! (re-exec coordination); neither reaches through here.
 
+const std = @import("std");
 const core = @import("core");
-const log = @import("log");
+const log = std.log.scoped(.reload);
 const config = @import("config");
 const keybinds = @import("keybinds");
 const window = @import("window");
