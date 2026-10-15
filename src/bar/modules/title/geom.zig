@@ -91,7 +91,7 @@ pub const GatherScratch = struct {
         }
         if (info_count == 0) return null;
         const window_infos = self.window_infos[0..info_count];
-        std.mem.sort(WindowInfo, window_infos, {}, compareWindows);
+        std.sort.heap(WindowInfo, window_infos, {}, compareWindows);
         return window_infos;
     }
 };

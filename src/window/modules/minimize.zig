@@ -164,6 +164,7 @@ fn slotLess(a: ?usize, b: ?usize) bool {
 const RestoreCandidate = struct {
     win: model.WindowId,
     slot: ?usize,
+    seq: u32,
 };
 
 /// Parked-on-ws predicate: the window exists, is parked (minimized), and its
@@ -231,12 +232,14 @@ pub fn restoreAllOnWs(m: *model.Model, ws: model.WSId) void {
     var n: usize = 0;
     for (g_recs.constSlice()) |rec| {
         if (!parkedOnWs(m, rec, ws)) continue;
-        cands[n] = .{ .win = rec.win, .slot = rec.slot };
+        cands[n] = .{ .win = rec.win, .slot = rec.slot, .seq = rec.seq };
         n += 1;
     }
-    std.mem.sort(RestoreCandidate, cands[0..n], {}, struct {
+    std.sort.heap(RestoreCandidate, cands[0..n], {}, struct {
         fn lessThan(_: void, a: RestoreCandidate, b: RestoreCandidate) bool {
-            return slotLess(a.slot, b.slot);
+            if (slotLess(a.slot, b.slot)) return true;
+            if (slotLess(b.slot, a.slot)) return false;
+            return a.seq < b.seq;
         }
     }.lessThan);
     for (cands[0..n]) |c| restore(m, c.win);

@@ -251,7 +251,7 @@ fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std.Arr
         log.info("No .toml files in config dir: {s}", .{dir_path});
         return error.FileNotFound;
     }
-    std.mem.sort([]u8, names.items, {}, sliceLessThan);
+    std.sort.heap([]u8, names.items, {}, sliceLessThan);
     return names;
 }
 
