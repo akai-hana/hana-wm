@@ -15,7 +15,7 @@ const types = @import("types");
 const keybinds = @import("keybinds");
 const mouse = @import("mouse");
 const masks = @import("masks");
-const log = @import("log");
+const diagnostics = @import("diagnostics");
 
 /// Stand-in config generation for the resolver tests. Any value works: what
 /// they pin is that a table built at generation N only answers for N.
@@ -272,7 +272,8 @@ test "tiling scaffold table matches the dispatcher's grafted set" {
 // in silence leaves the second of two `Super+Button1` entries dead with no
 // diagnostic, and makes the winner depend on file order in one trigger path
 // but not the other. This pins the unified policy: last wins, and each
-// shadowed entry says so through the shared reporter.
+// shadowed entry is reported -- asserted on both channels: the returned
+// indices (data) and the production conflict log (bag).
 test "mouse bind shadowing: last entry wins and every shadowed entry is reported" {
     const B1 = 1;
     const binds = [_]types.MouseBind{
@@ -283,11 +284,21 @@ test "mouse bind shadowing: last entry wins and every shadowed entry is reported
         .{ .modifiers = masks.mod_super, .button = 3, .action = .{ .minimize_window = {} } },
     };
 
-    var diag: log.Collector = .{ .allocator = testing.allocator };
+    // Data channel: the collecting variant returns the shadowed indices.
+    var shadowed: [4]usize = undefined;
+    const m = mouse.findMouseBindShadowed(&binds, masks.mod_super, B1, &shadowed);
+    try testing.expect(m.bind != null);
+    try testing.expectEqual(types.Action.reload_config, m.bind.?.action);
+    try testing.expectEqual(@as(usize, 2), m.shadowed_len);
+    try testing.expectEqual(@as(usize, 1), shadowed[0]);
+    try testing.expectEqual(@as(usize, 2), shadowed[1]);
+
+    // Production channel: the dispatch-path scan logs the same two conflicts.
+    var diag: diagnostics.Diagnostics = .{ .allocator = testing.allocator };
     defer diag.deinit();
-    const prev = log.collector;
-    log.collector = &diag;
-    defer log.collector = prev;
+    const prev = diagnostics.diagnostics;
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = prev;
 
     const found = mouse.findMouseBind(&binds, masks.mod_super, B1).?;
     try testing.expectEqual(types.Action.reload_config, found.action);
@@ -305,4 +316,8 @@ test "mouse bind shadowing: last entry wins and every shadowed entry is reported
     // And a modifier mismatch misses even though the button exists.
     try testing.expect(mouse.findMouseBind(&binds, masks.mod_alt, B1) == null);
     try testing.expectEqual(seen, diag.count());
+    // The collecting variant agrees: no match, nothing shadowed.
+    const miss = mouse.findMouseBindShadowed(&binds, masks.mod_alt, B1, &shadowed);
+    try testing.expect(miss.bind == null);
+    try testing.expectEqual(@as(usize, 0), miss.shadowed_len);
 }

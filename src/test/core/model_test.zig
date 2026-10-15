@@ -7,8 +7,9 @@ const std = @import("std");
 const testing = std.testing;
 
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
-// warn-level overflow diagnostic; src/core/debug/log.zig silences all
-// std.log diagnostics in test binaries, so this stays quiet on success.
+// warn-level overflow diagnostic; the vendored test runner captures
+// std.log output into the diagnostics bag instead of printing, so this
+// stays quiet on success.
 const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
@@ -551,6 +552,97 @@ test "ConfigureRequest honoring per mode" {
         model.HonorDecision.ignored,
         floating.honorConfigureRequest(&m, unknown_win, .{ .x = 1 }),
     );
+}
+
+// SizeHints.aspectFit: the ONE shrink-only PAspect band fit, shared by the
+// tiling clamp (applyHints) and the floating drag/configure-request paths.
+test "aspectFit shrinks the excess dimension into the band" {
+    // Fixed 16:9 (video player): stored min = 9/16, max = 16/9 (dwm
+    // convention; the w/h band is [1/min, max] = [16/9, 16/9]).
+    const r169: model.SizeHints = .{ .min_aspect = 9.0 / 16.0, .max_aspect = 16.0 / 9.0 };
+    // Too wide for its height: width derived from height, height tracks.
+    var fit = r169.aspectFit(1000, 200);
+    try testing.expectEqual(@as(u16, 200), fit.height);
+    try testing.expectEqual(@as(u16, 356), fit.width); // round(200 * 16/9)
+    // Too tall for its width: height derived from width, width tracks.
+    fit = r169.aspectFit(200, 900);
+    try testing.expectEqual(@as(u16, 200), fit.width);
+    try testing.expectEqual(@as(u16, 113), fit.height); // round(200 * 9/16)
+    // Exactly in band: unchanged.
+    fit = r169.aspectFit(1600, 900);
+    try testing.expectEqual(@as(u16, 1600), fit.width);
+    try testing.expectEqual(@as(u16, 900), fit.height);
+    // Shrink-only: never grows either axis (slightly under-ratio input).
+    fit = r169.aspectFit(355, 200);
+    try testing.expectEqual(@as(u16, 355), fit.width);
+    try testing.expectEqual(@as(u16, 200), fit.height);
+}
+
+test "aspectFit honors a band, and both-or-neither" {
+    // min = 2, max = 2 -> the w/h band [1/2, 2].
+    const band: model.SizeHints = .{ .min_aspect = 2.0, .max_aspect = 2.0 };
+    var fit = band.aspectFit(500, 100); // w/h = 5, above the band
+    try testing.expectEqual(@as(u16, 200), fit.width);
+    try testing.expectEqual(@as(u16, 100), fit.height);
+    fit = band.aspectFit(100, 500); // w/h = 0.2, below the band
+    try testing.expectEqual(@as(u16, 100), fit.width);
+    try testing.expectEqual(@as(u16, 200), fit.height);
+    fit = band.aspectFit(300, 200); // w/h = 1.5, inside the band
+    try testing.expectEqual(@as(u16, 300), fit.width);
+    try testing.expectEqual(@as(u16, 200), fit.height);
+
+    // Lone bounds are a DIFFERENT constraint, not a weaker one: no fit.
+    const max_only: model.SizeHints = .{ .max_aspect = 2.0 };
+    fit = max_only.aspectFit(500, 100);
+    try testing.expectEqual(@as(u16, 500), fit.width);
+    try testing.expectEqual(@as(u16, 100), fit.height);
+    const min_only: model.SizeHints = .{ .min_aspect = 2.0 };
+    fit = min_only.aspectFit(100, 500);
+    try testing.expectEqual(@as(u16, 100), fit.width);
+    try testing.expectEqual(@as(u16, 500), fit.height);
+    // No hints at all.
+    fit = (model.SizeHints{}).aspectFit(123, 456);
+    try testing.expectEqual(@as(u16, 123), fit.width);
+    try testing.expectEqual(@as(u16, 456), fit.height);
+}
+
+test "aspectFit floors a rounded-out dimension to 1" {
+    // Fixed ratio 10000: deriving height from width 1 rounds 0.0001 to 0,
+    // which must not become a zero-sized window.
+    const extreme: model.SizeHints = .{ .min_aspect = 0.0001, .max_aspect = 10000.0 };
+    const fit = extreme.aspectFit(1, 100);
+    try testing.expectEqual(@as(u16, 1), fit.width);
+    try testing.expectEqual(@as(u16, 1), fit.height);
+}
+
+// honorConfigureRequest applies the shared PAspect fit to size-carrying
+// requests (ratio-accurate client-driven resizes) and leaves position-only
+// ones alone (a Shift-freed rect must not be re-locked by a move request).
+test "ConfigureRequest floating aspect clamp" {
+    var m = makeModel();
+
+    const r0: model.Rect = .{ .x = 0, .y = 0, .width = 1600, .height = 900 };
+    try addFloating(&m, 2, r0);
+    m.store.getPtr(2).?.size_hints = .{ .min_aspect = 9.0 / 16.0, .max_aspect = 16.0 / 9.0 };
+
+    // Size-carrying request: the excess dimension is clamped into the band.
+    try testing.expectEqual(
+        model.HonorDecision.geometry_applied,
+        floating.honorConfigureRequest(&m, 2, .{ .width = 1000, .height = 200 }),
+    );
+    var fr = m.store.get(2).?.anchor.floating;
+    try testing.expectEqual(@as(u16, 356), fr.width); // round(200 * 16/9)
+    try testing.expectEqual(@as(u16, 200), fr.height);
+
+    // Position-only request does NOT re-fit an off-band rect.
+    m.store.getPtr(2).?.anchor.floating.width = 500;
+    m.store.getPtr(2).?.anchor.floating.height = 500; // off-band on purpose
+    _ = floating.honorConfigureRequest(&m, 2, .{ .x = 42, .y = 24 });
+    fr = m.store.get(2).?.anchor.floating;
+    try testing.expectEqual(@as(i16, 42), fr.x);
+    try testing.expectEqual(@as(i16, 24), fr.y);
+    try testing.expectEqual(@as(u16, 500), fr.width);
+    try testing.expectEqual(@as(u16, 500), fr.height);
 }
 
 // applyConfigReload replaces layout params but preserves scroll
