@@ -61,8 +61,8 @@ test "stack alone lands in the STACK_MODE slot" {
 }
 
 test "all three parts coexist in one request, each in its own slot" {
-    // This is the case the merged `configure` slot exists for: the old
-    // geom+geom_bordered pair could not express it as one request at all.
+    // This is the case the merged `configure` slot exists for: rect, border
+    // width and stack mode are wanted in ONE request.
     const w = sink.configureWire(.{ .rect = rect, .bw = bw, .stack = .above });
     try testing.expectEqual(
         @as(u16, xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |

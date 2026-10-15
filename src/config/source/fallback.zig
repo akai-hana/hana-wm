@@ -3,7 +3,7 @@
 //! Also hosts the shared $PATH probe-order machinery (probe_order,
 //! dirIterator, exeInDir): one probe order for finding an executable, shared
 //! by this module's terminal detection and the prompt's command completion,
-//! so the two cannot drift. Used to live in the dissolved `paths` module.
+//! so the two cannot drift.
 
 const std = @import("std");
 const log = @import("log");

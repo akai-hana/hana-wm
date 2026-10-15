@@ -1,7 +1,6 @@
 //! Headless tests for the canonical workspace identifier (model.WorkspaceId).
 //!
-//! `WorkspaceId` unifies the former `core.WorkspaceId`+`model.WSId` pair, and
-//! `fromIndex` now takes `anytype` with a checked internal cast so callers
+//! `WorkspaceId` has a checked `fromIndex` that takes `anytype` so callers
 //! don't scatter `@intCast` wrappers. These tests pin the index round-trip
 //! and the wide-integer acceptance.
 

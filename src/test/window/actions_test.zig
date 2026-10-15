@@ -25,8 +25,7 @@ const minimize = @import("minimize");
 const floating = @import("floating");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
-
-const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 test "actions: mapRequest admits, maps, and focuses a window" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
@@ -295,7 +294,7 @@ test "actions: unmanage drops the window and re-focuses" {
     window.unmanage(w1);
     fx.flush();
     try std.testing.expect(!m.store.has(w1));
-    try std.testing.expect(ledger.lastRectFor(w1) == null); // ledger forgot it
+    try std.testing.expect(reconcile.lastRectFor(w1) == null); // ledger forgot it
     try std.testing.expect(m.store.has(w2));
     try std.testing.expectEqual(w2, m.focused.?);
     try fx.expectTiledGeometry(w2);
@@ -433,4 +432,55 @@ test "actions: the default reconcile entry bumps the window fact" {
     floating.toggleFloating(win);
     fx.flush();
     try std.testing.expect(core.window.rev() != before);
+}
+
+// The layout fact is how the bar learns that what the layout/variants
+// segments render changed. Those two render the ACTIVE workspace's
+// per-workspace kind/variant, which the window fact the switch always bumps
+// does not carry: without a conditional layout bump the variants indicator
+// went stale on a switch until an unrelated segment's redraw request
+// repainted the row. X-gated like the rest of this file (switchWorkspace
+// reconciles under a real server grab).
+test "actions: a workspace switch bumps the layout fact only when the variant differs" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+    const m = pipeline.mut();
+    const home: u8 = @intCast(m.current.index);
+    const other: u8 = if (home == 0) 1 else 0;
+
+    // Park both workspaces on a layout that HAS variants (the fixture seeds
+    // kind 0, which may be a variant-less registry entry where there is no
+    // indicator to compare), at the same variant.
+    const cfg_layouts = core.getState().config.tiling.layouts.items;
+    var kind: u8 = m.ws[home].params.kind;
+    var guard: usize = 0;
+    while (tiling.variantCount(kind) <= 1 and guard < cfg_layouts.len) : (guard += 1)
+        kind = tiling.cycleKind(kind, 1, cfg_layouts);
+    if (tiling.variantCount(kind) <= 1) return; // no multi-variant layout compiled
+    m.ws[home].params.kind = kind;
+    m.ws[other].params.kind = kind;
+    m.ws[home].params.variant_idx = 0;
+    m.ws[other].params.variant_idx = 0;
+
+    // Identical kind+variant on both sides: nothing the segments render
+    // changes, so no layout revision is owed.
+    const flat = core.layout.rev();
+    workspaces.switchWorkspace(other);
+    fx.flush();
+    try std.testing.expectEqual(other, m.current.index);
+    try std.testing.expectEqual(flat, core.layout.rev());
+
+    // A variant only a cycle_variants ON the far workspace could have left
+    // behind: switching across it is what must carry the difference to the
+    // bar, in both directions.
+    m.ws[other].params.variant_idx = 1;
+    const stepped = core.layout.rev();
+
+    workspaces.switchWorkspace(home);
+    fx.flush();
+    try std.testing.expectEqual(stepped + 1, core.layout.rev());
+
+    workspaces.switchWorkspace(other);
+    fx.flush();
+    try std.testing.expectEqual(stepped + 2, core.layout.rev());
 }

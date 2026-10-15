@@ -236,7 +236,7 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
 /// Batch form of `coveringOccupantOnWs`, which answers the same question
 /// for a single workspace: that is the right shape for a one-off query and
 /// the wrong one for a sweep (the border sweep asks it once per window, so a
-/// full sweep was O(N^2) store scans). This fills the whole table up front.
+/// full sweep would be O(N^2) store scans). This fills the whole table up front.
 ///
 /// Per workspace the rule is the scan form's exact (anchored or visible): an
 /// occupant claims its anchor slot AND every workspace its mask makes it

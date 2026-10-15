@@ -71,9 +71,9 @@ fn admit(win: u32) void {
 }
 
 test "EWMH: a browser's fullscreen REQUEST covers the window" {
-    // The regression itself. Mod+F (a keybinding -> actions) works, so the model
-    // path is healthy; the browser button arrives as this ClientMessage and
-    // used to be dropped, leaving the player windowed.
+    // The regression itself: Mod+F (a keybinding) reaches the model path and
+    // works; this ClientMessage is the same request in EWMH form, and dropping
+    // it leaves the player windowed.
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
     const m = pipeline.state();

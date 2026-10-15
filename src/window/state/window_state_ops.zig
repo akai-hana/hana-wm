@@ -1,9 +1,8 @@
 //! Window-state admission mutations over the model: `register` (adopt a new
 //! window into the store + a tiled slot), `unregister` (drop it everywhere),
 //! and `applyParamsDelta` (apply a layout module's pre-reconcile params
-//! delta). Moved out of `model.zig` (Option A of the op migration): the model
-//! keeps the struct and pure queries; these mutations live with the window
-//! state that owns admission.
+//! delta). The model keeps the struct and pure queries; these mutations live
+//! with the window state that owns admission.
 
 const std = @import("std");
 const model = @import("model");
@@ -47,10 +46,9 @@ pub fn unregister(m: *model.Model, win: model.WindowId) void {
 /// Applies a layout module's pre-reconcile delta to `ws`'s params, IN PLACE,
 /// through the model.
 ///
-/// The hook is value-in/value-out (`old -> new`), and the pipeline used to
-/// write the result straight back through a raw `*LayoutParams` it took from
-/// the model. That pointer was an un-gated mutation channel into the model:
-/// anything holding it could rewrite a field the model owns (or reach another
+/// The hook is value-in/value-out (`old -> new`): a raw `*LayoutParams` taken
+/// from the model would be an un-gated mutation channel into it -- anything
+/// holding it could rewrite a field the model owns (or reach another
 /// workspace) with no check. Routing the write through here means the model
 /// decides whether `ws` is addressable, and the pipeline holds no pointer
 /// into model state at all.

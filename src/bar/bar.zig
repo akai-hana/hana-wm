@@ -54,9 +54,9 @@ const contract = @import("bar_contract");
 const dispatch = @import("contract_dispatch");
 
 const state = @import("state");
-// The state itself now lives in state.zig (a leaf, so the render /
-// input_events satellites can read it without importing this file back
-// that import was the cycle). Aliased here
+// The state itself lives in state.zig (a leaf, so the render /
+// input_events satellites can read it without importing this file back --
+// that import would be a cycle). Aliased here
 // so this file's own call sites keep their vocabulary; `gBar` is a
 // POINTER to the shared handle, because a struct-by-value alias would
 // silently copy it.
@@ -275,11 +275,10 @@ fn applyReload(old: *State, m: Metrics) !void {
     const cs = core.getState();
     // The reload tears down and rebuilds the bar window, so the whole swap has
     // to be atomic: without a grab the old bar can be destroyed and the new one
-    // not yet mapped, which shows as a blank shelf. This path used to call
-    // ungrabAndFlush() at the end while NOTHING here took a grab -- an unpaired
-    // xcb_ungrab_server. grabOnly (not grabScoped) because the reload runs no
-    // geometry pass: building a ctx here would run the pre-reconcile duties,
-    // and with no reconcile to follow they would mutate the model for nothing.
+    // not yet mapped, which shows as a blank shelf. grabOnly (not grabScoped)
+    // because the reload runs no geometry pass: building a ctx here would run
+    // the pre-reconcile duties, and with no reconcile to follow they would
+    // mutate the model for nothing.
     const grab = pipeline.grabOnly();
     defer grab.deinit();
     // Module caches (font widths, caret geometry) are built against the old
@@ -294,9 +293,8 @@ fn applyReload(old: *State, m: Metrics) !void {
     const new_bar = createBar(m, barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, height)) catch |err| {
         // The caller has already swapped cs.config to the new config and frees
         // the OLD config when this returns. The old bar survives this failed
-        // reload; it used to need its cached config copy re-pointed here or the
-        // next draw would read freed memory. It reads the live config now
-        // (renderBar), so there is nothing to repair.
+        // reload; it reads the live config (renderBar), so there is nothing to
+        // repair.
         return err;
     };
     const new_state = new_bar.state;
@@ -307,7 +305,7 @@ fn applyReload(old: *State, m: Metrics) !void {
     syncScreenClaim();
     render.submitDrawBlockingFull();
     if (new_state.vis.shown) _ = xcb.xcb_map_window(cs.conn, new_bar.setup.win_id);
-    // No explicit destroy: `deinit` now owns the window and its colormap.
+    // No explicit destroy: `deinit` owns the window and its colormap.
     old.render.dc.deinit();
     old.deinit();
 }
@@ -316,10 +314,9 @@ fn applyReload(old: *State, m: Metrics) !void {
 //
 // The apply* family plus the prompt's present/dismiss pair: these turn the
 // policy's decisions (visibility.zig) into X11 map/unmap + screen-claim
-// writes, and the reconcile that reacts to a claim change. Moved here from
-// `wire/visibility.zig` in Phase 3 of the bar refactor: they are bar
-// self-management, bar.zig was already the Rule-1 allowlisted home for it,
-// and the policy half stays pure in `visibility.zig`.
+// writes, and the reconcile that reacts to a claim change. They are bar
+// self-management -- bar.zig is the Rule-1 allowlisted home for it -- and the
+// policy half stays pure in `visibility.zig`.
 
 /// Pushes the bar's current screen-space claim to core.screen. Called
 /// at each point where the bar's occupancy of the screen changes
@@ -408,20 +405,19 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
     s.vis.shown = should_be_visible;
     const conn = core.getState().conn;
     // Optional token: the workspace-switch path (do_reconcile false) must NOT
-    // grab, and the conditional used to be two hand-matched sites (grab here,
-    // ungrabAndFlush at the bottom) that a new early return could unpair.
+    // grab; the grab and its ungrabAndFlush are one token, so no early return
+    // can unpair them.
     // Publish the claim BEFORE the grab, because `grabScoped` snapshots the
     // reconcile ctx and the ctx carries `usable_area.workArea`. Claiming after
-    // the snapshot meant the reconcile that reacted to the claim change
-    // re-derived geometry from the workarea it was about to invalidate: on
-    // fullscreen exit the bar came back and took its pixels while the windows
-    // were re-tiled against the FULL screen -- "the bar is back but the layout
-    // still ignores it" -- and the next workspace switch, which rebuilds the
-    // ctx from scratch, was what finally corrected the geometry.
+    // the snapshot would make the reconcile that reacts to the claim change
+    // re-derive geometry from the workarea it just invalidated: on fullscreen
+    // exit the bar would come back and take its pixels while the windows are
+    // re-tiled against the FULL screen -- "the bar is back but the layout
+    // still ignores it".
     //
-    // `syncScreenClaim` is a pure in-memory write (no wire traffic), so moving
-    // it above the grab costs nothing and does not reorder any X request: the
-    // map/unmap below is still queued before the geometry sends.
+    // `syncScreenClaim` is a pure in-memory write (no wire traffic), so
+    // publishing it above the grab costs nothing and does not reorder any X
+    // request: the map/unmap below is still queued before the geometry sends.
     syncScreenClaim();
     var grab: ?pipeline.ScopedGrab = null;
     if (do_reconcile) grab = pipeline.grabScoped();
@@ -430,10 +426,10 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
     // Draw AFTER the map request so the blit lands in an already-mapped
     // window. A copy queued to an unmapped window is discarded by the server
     // (and, under a compositor, the view of a freshly remapped window starts
-    // blank until the first damage), which is what left the bar invisible --
-    // a bare gap in the shelf -- until an unrelated later redraw happened to
-    // repaint it. Ordering the map before the draw in this same flush closes
-    // that gap on every show (boot, workspace switch, fullscreen exit, Mod+B).
+    // blank until the first damage), leaving the bar invisible -- a bare gap
+    // in the shelf -- until some unrelated redraw repaints it. Ordering the
+    // map before the draw in this same flush closes that gap on every show
+    // (boot, workspace switch, fullscreen exit, Mod+B).
     if (should_be_visible) {
         // Tell continuous-motion segments the bar is (re)appearing, so the
         // title marquee resumes from its last shown offset instead of
@@ -528,7 +524,7 @@ fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
 /// Strictly the renderer's half of a position change: it moves its own window
 /// and reports its new occupancy. It does NOT decide which edge that is (core
 /// owns that flip), and it does NOT reconcile -- reconciling takes the X grab,
-/// and doing that from a rendering module was the layering violation this
+/// and doing that from a rendering module is the layering violation this
 /// split exists to remove. The caller reconciles, after this has
 /// published the claim, so window placement is re-derived from the new usable
 /// area.
@@ -613,10 +609,9 @@ pub fn updateIfDirty() void {
     const window_rev = core.window.rev();
     const layout_rev = core.layout.rev();
     if (s.facts.focus_rev != focus_rev) render.markDirtySource(s, .focus);
-    // window_rev previously skipped through blanket `markDirty()` even though
-    // title and tags declare they want `.frame` dirtying; using the frame
-    // source keeps the non-frame segments (clock, carousel, systatus) from
-    // being swept along on every window churn fact bump.
+    // window_rev marks the `.frame` source (title and tags declare they want
+    // it), which keeps the non-frame segments (clock, carousel, systatus)
+    // from being swept along on every window churn fact bump.
     if (s.facts.window_rev != window_rev) render.markDirtySource(s, .frame);
     if (s.facts.layout_rev != layout_rev) {
         render.requestFullRedraw();
@@ -666,10 +661,10 @@ pub fn updateClock() void {
         // Re-lay and repaint the row in this same call, then ship it. updateClock
         // is the last statement of the event loop body, i.e. it runs AFTER the
         // end-of-batch flush and after the batch's own updateIfDirty, so merely
-        // flagging the redraw left the reflow to the next loop iteration --
-        // up to a whole second on an idle bar, which is exactly the stale-length
-        // window this path exists to close. performDraw queues its blit, so the
-        // flush is ours to make.
+        // flagging the redraw would leave the reflow to the next loop iteration
+        // -- up to a whole second on an idle bar, which is exactly the
+        // stale-length window this path exists to close. performDraw queues its
+        // blit, so the flush is ours to make.
         render.requestFullRedraw();
         render.performDraw();
         _ = xcb.xcb_flush(core.getState().conn);

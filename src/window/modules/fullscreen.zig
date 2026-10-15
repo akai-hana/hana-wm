@@ -35,17 +35,17 @@ pub const PendingBar = struct {
 /// exclusive PER WINDOW (arming one clears the other for that window), so one
 /// entry per window carries both.
 ///
-/// PER WINDOW, not one slot. A single optional slot meant arming a
-/// second window's intent silently DISCARDED the first: that window's
-/// ConfigureNotify then found nothing pending, never bumped the fact, and its
-/// bar state stayed whatever the second window decided -- a hide that never
+/// PER WINDOW, not one slot. With a single optional slot, arming a
+/// second window's intent silently DISCARDS the first: that window's
+/// ConfigureNotify then finds nothing pending, never bumps the fact, and its
+/// bar state stays whatever the second window decided -- a hide that never
 /// hides, or a show that never shows, with nothing in the log. A covering
 /// transition is in flight for at most one window per workspace, so a handful
 /// of entries is ample.
 ///
 /// AT THE BOUND: the new arm takes the last slot, so the window that held that
 /// slot loses its transition. That is a real (if far-out-of-range) loss, and
-/// it is why `max` is 8 rather than 2: the single-slot bug dropped a transition
+/// it is why `max` is 8 rather than 2: a single slot drops a transition
 /// on the SECOND concurrent arm, and 8 keeps the practical path at zero loss.
 /// The bound is a memory ceiling, not a silent-drop budget.
 pub const PendingBarTable = struct {
@@ -236,10 +236,10 @@ pub fn moveFullscreenTo(m: *model.Model, win: model.WindowId, ws: model.WSId) vo
 pub fn setEwmhFullscreenState(win: u32, is_fullscreen: bool) void {
     if (g_net_wm_state == xcb.XCB_ATOM_NONE or g_net_wm_state_fullscreen == xcb.XCB_ATOM_NONE) return;
     // currentCtx, NOT a fresh ctx: this hook runs inside the fullscreen
-    // operation's grab, and the doc says so. Asking for a new ctx here (the
-    // old grabCtx) rebuilt `.workarea`/`.bar_win` mid-grab and re-ran the
-    // pre-reconcile duties after geometry had already been applied, so the
-    // model and the server could disagree before the single ungrabAndFlush.
+    // operation's grab, and the doc says so. Asking for a new ctx here would
+    // rebuild `.workarea`/`.bar_win` mid-grab and re-run the pre-reconcile
+    // duties after geometry has already been applied, so the model and the
+    // server could disagree before the single ungrabAndFlush.
     pipeline.currentCtx().sink.setStateAtom(
         win,
         g_net_wm_state,
@@ -343,8 +343,8 @@ pub fn onWindowGone(win: u32) void {
 }
 
 /// Covering commands: the enter/exit/switch transition for an arbitrary window
-/// in ONE model transition + ONE reconcile. The old `src/actions/covering.zig`
-/// group, moved beside the covering record it writes.
+/// in ONE model transition + ONE reconcile, beside the covering record it
+/// writes.
 ///
 /// The covering winner renders on the full screen edge-to-edge (screen rect,
 /// bw=0, pixel=0, ABOVE merged); everyone else parks off-screen in the same
@@ -437,10 +437,8 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
         // fullscreen, set for entrant. All fire-and-forget
         // (xcb_change_property). Uniform loop over the sub-system set:
         // each module that provides the hook runs it. In practice only
-        // fullscreen does, preserving the old gated single hook call
-        // exactly; the loop just makes the dispatch mechanism uniform
-        // rather than a merged struct. Ordering and the
-        // kind/prev_fs_win/m.focused logic is unchanged.
+        // fullscreen does; the loop keeps the dispatch mechanism uniform
+        // rather than a merged struct.
         // Not registry.dispatchAll, despite being a fan-out over window_mods:
         // callAll passes ONE argument set to every binder, and this needs
         // two calls with different arguments (clear the previous
@@ -470,7 +468,7 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
             // Immediate bar unmap when fullscreen claims the usable area.
             surfaces.hideBarForFullscreen();
         } else {
-            // Exit: deferred bar show (unchanged path).
+            // Exit: deferred bar show.
             if (m.focused) |w| {
                 registry.dispatchAll(.armPendingBarShow, .{w});
             }

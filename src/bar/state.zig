@@ -150,7 +150,7 @@ const Dirty = struct {
     segments: [segmod.all().len]bool = @splat(true),
     /// Left edge (inclusive) of the current draw's dirty span: the bounding
     /// x/w of every repainted segment + gap, tracked by extendDirtySpan so
-    /// flushRender copies only the changed region.
+    /// the blit copies only the changed region.
     span_x: u16 = 0,
     /// Width of the current draw's dirty span. 0 = empty span (nothing to
     /// blit); set non-zero by the first extendDirtySpan of a draw.

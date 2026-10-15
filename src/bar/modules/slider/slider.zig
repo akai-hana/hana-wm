@@ -27,9 +27,9 @@
 //!     the poll loop (per-control cadence + owed-sweep), the commit
 //!     scheduler, and the per-segment lifecycle (arm-on-first-draw, poll
 //!     deadline, dirty redraw marking, painted-width tracking);
-//!   - `bar/spawn_capture.zig` -- the `/bin/sh` racers each control runs its
+//!   - `spawn_capture.zig` -- the `/bin/sh` racers each control runs its
 //!     spawned commands through (allocation-free, inlined);
-//!   - `bar/drawing.zig` -- the format walker (`renderLineValue`) and the
+//!   - `bar/render/drawing.zig` -- the format walker (`renderLineValue`) and the
 //!     `Label` a control renders with.
 //! A control keeps its OWN truth (backend handles, cached state, format); the
 //! core addresses it through hooks -- `read`/`pct`/`preview`/`commit`/`apply`

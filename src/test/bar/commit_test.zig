@@ -1,4 +1,4 @@
-//! Unit tests for the shared commit throttle state machine, which now lives
+//! Unit tests for the shared commit throttle state machine, which lives
 //! in the slider core (slider.zig). White-box where the window needs to be
 //! closed: the scheduler reads the wall clock, so tests fast-forward
 //! `Throttle.last_ms` instead of sleeping.

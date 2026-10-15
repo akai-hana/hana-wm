@@ -1,13 +1,13 @@
 //! X request primitives: the allowlisted home for raw `xcb_*` calls, plus the
 //! documented EWMH/geometry/policy requests that sit above them.
 //!
-//! Split out of the former `wire` module. XCB is a request/reply protocol, so
+//! XCB is a request/reply protocol, so
 //! this is the request layer: `raiseWindow`,
 //! `setBorderPixel`, the server grab pair, the poll-first reply collector, the
 //! EWMH root advertisement, and the one xcb-typed geometry adapter. Atom ids
 //! come from `atoms.zig`; dispatch of these requests happens in `sink.zig`,
 //! which is the sanctioned seam (see dev/scripts/check-layers.sh Rules 1-2).
-//! Geometry itself stays in `architecture/model.zig` so the pure layers never
+//! Geometry itself stays in `core/model.zig` so the pure layers never
 //! import this file.
 
 const std = @import("std");

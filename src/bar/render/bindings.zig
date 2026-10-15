@@ -187,7 +187,7 @@ pub extern fn pango_attr_list_unref(list: *PangoAttrList) void;
 pub extern fn pango_layout_set_attributes(layout: *PangoLayout, attrs: ?*PangoAttrList) void;
 
 /// The Pango layout does NOT take ownership of the list; the list must stay
-/// alive while set, and be unref'd afterwards. A `TextRun` now owns both
+/// alive while set, and be unref'd afterwards. A `TextRun` owns both
 /// the list and the layout it is attached to and unrefs them together in
 /// `deinit`, so that lifetime is structural rather than a pairing callers have
 /// to remember.

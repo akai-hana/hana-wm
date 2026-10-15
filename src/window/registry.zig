@@ -3,12 +3,12 @@
 //! named reads (covering occupant, parked predicate) that wrap one-line
 //! provider lookups every consumer would otherwise restate.
 //!
-//! BINDING-LAYER SURFACE (KISS audit note): the five dispatch wrappers below
+//! BINDING-LAYER SURFACE: the five dispatch wrappers below
 //! (providerOf/callHook/callHookBool/dispatchAll/dispatchFirstTrue) are thin
 //! on purpose. Collapsing them would spread providerOf + @call pairs across
 //! every dispatch call site, and folding them back into contract would
-//! re-create the comptime-generic helpers the contract 6->2 dispatch
-//! collapse deliberately removed. Further collapse: considered, rejected.
+//! re-create comptime-generic helpers that the two-primitive dispatch family
+//! deliberately does not carry. They stay five: do not collapse further.
 //!
 //! Within `src/window/**` callers import `registry` directly (one hop to the
 //! definition); outside the layer `window.zig` re-exports them so
@@ -36,7 +36,7 @@ pub fn providerOf(
 /// when none does (the "adopt by name" path for single-binder hooks, see
 /// `single_binder_hooks`). providerOf + invoke stated here -- the shape had
 /// this one consumer, so it lives at the binding layer rather than as a
-/// comptime-generic helper in contract (the 6->2 collapse).
+/// comptime-generic helper in contract).
 pub fn callHook(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,

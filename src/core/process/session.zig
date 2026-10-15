@@ -30,7 +30,7 @@ const MAX_WS = model.max_workspaces;
 /// files are accepted. The header's own format is versioned SEPARATELY
 /// (`ext_format_version`), because changing it does not change the durable
 /// record shape: a v5 file stamped with a v1 (ordinal) blob header is still a
-/// v5 file and is still read, so this constant did NOT move.
+/// v5 file and is still read.
 const handoff_version: u32 = 5;
 
 /// The per-window feature blob header format. Every blob this module stores is

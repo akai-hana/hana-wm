@@ -346,7 +346,7 @@ pub const Document = struct {
 /// The named color-palette slots a theme declares once and any color-valued
 /// knob may reference by full name (`border_focused = primary_color`,
 /// `title = secondary_color`, ...). `primary_color` doubles as the bar's
-/// default accent knob (the former `accent_color`); the other three are pure
+/// default accent knob; the other three are pure
 /// palette declarations currently consumed by the fallback chain and the
 /// theme's `[bar.properties]` entries. `pub` because the palette
 /// collection lives in color.zig (the color sub-language's home).

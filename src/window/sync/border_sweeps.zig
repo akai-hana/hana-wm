@@ -14,8 +14,8 @@ const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const requests = @import("requests");
 const query = @import("query");
-const ledger = @import("ledger");
 const borders = @import("borders");
+const reconcile = @import("reconcile");
 
 inline fn tilingActive() bool {
     return build_options.has_tiling;
@@ -65,7 +65,7 @@ fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
         // unchanged (per the ledger's record) skips the XCB call outright.
         // One record has to answer this for both the sweep and the
         // reconcile -- see applyWith.
-        if (ledger.markSentBorderPixelIfChanged(win, color))
+        if (reconcile.markSentBorderPixelIfChanged(win, color))
             requests.setBorderPixel(core.getState().conn, win, color);
     }
 }

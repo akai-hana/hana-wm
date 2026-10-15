@@ -11,11 +11,8 @@
 //! with the rest of the bar's X traffic (see the check-layers.sh Rule-1
 //! allowlist entry).
 //!
-//! (History: formerly split into `visibility.zig` + `visibility_glue.zig`,
-//! merged back 2026-10-09 as one "bar visibility" unit, then split again
-//! in Phase 3 of the bar refactor when the glue moved home to `bar.zig`.
 //! The host state (`State`, `gBar`) lives in `state.zig` and the draw
-//! submission in `render.zig`; neither is imported by this file.)
+//! submission in `render.zig`; neither is imported by this file.
 
 const build_options = @import("build_options");
 const model = @import("model");
@@ -23,14 +20,10 @@ const model = @import("model");
 /// Policy (pure): decisions over the model, no wire.
 /// True when a fullscreen window on `ws` forces the bar hidden (shared-screen
 /// reaction). Compile-time folded when the fullscreen module is absent: the
-/// model read is comptime-unreachable, matching the inlined guards that used
-/// to live at each decision site.
+/// model read is comptime-unreachable.
 /// `m` is the model the decision is made AGAINST, passed in rather than
-/// reached for through pipeline. visibility.zig no longer imports the pipeline
-/// at all, so a decision can no longer be computed against a model that is not
-/// the one its caller is about to act on -- the two used to be reached
-/// independently, and the bar's own comment noted the dependency was the only
-/// thing keeping the partition honest.
+/// reached for through pipeline, so a decision can never be computed against
+/// a model that is not the one its caller is about to act on.
 pub fn barForcedHiddenByFullscreen(m: *const model.Model, ws: u8) bool {
     return if (build_options.has_fullscreen)
         model.coveringOccupantOnWs(m, model.WSId.fromIndex(ws)) != null
@@ -68,12 +61,11 @@ const DesiredVisibility = struct {
 /// orchestrator, because that comparison reads live window state and is
 /// the thing that decides whether any wire request happens.
 ///
-/// `is_visible` (the bar's mapped state) is deliberately NOT a parameter.
-/// `desiredVisibility` used to take it and return `needs_change`, making one
-/// function both the policy and the comparator, so the bar then early-returned
-/// on a field the policy had already folded in. Asking the policy for the
-/// target and reason, and letting the caller compare, is one step instead of
-/// two and keeps the mapped state at the one place that can see it.
+/// `is_visible` (the bar's mapped state) is deliberately NOT a parameter:
+/// asking the policy for the target and reason and letting the caller compare
+/// keeps the mapped state at the one place that can see it, instead of making
+/// one function both the policy and the comparator (the bar would then
+/// early-return on a field the policy had already folded in).
 pub fn desiredVisibility(m: *const model.Model, ws: u8, is_globally_visible: bool) DesiredVisibility {
     // Short-circuit the model walk when the user toggle already hides the bar:
     // `shouldBeVisible` ignores `forced_hidden` on that row of its truth table,

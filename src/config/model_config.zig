@@ -1,8 +1,8 @@
 //! Config → model seeding: stamps every workspace's tiling params from the
 //! live config at boot and on reload. Owns the name/variant resolution
 //! (layout registry ids, per-layout `variant_parse`), the primary-count
-//! clamp, and the two-arg `applyConfigReload` stamping loop (moved here from
-//! `model.zig` — Option A of the op migration; config owns seeding). The
+//! clamp, and the two-arg `applyConfigReload` stamping loop (config owns
+//! seeding). The
 //! reload reconcile is `pipeline.reconcileGrab`. Callers: `main` (boot, before
 //! the first reconcile) and `config/reload` (post-swap re-seed via
 //! `reloadAndReconcile`). The window-layer command half — layout cycling,
@@ -102,8 +102,8 @@ pub fn seedParamsFromConfig() void {
 
 /// Stamp one `LayoutParams` template across every workspace (the config
 /// reload/seeding path — `templateFrom` supplies the template; at-zone tests
-/// use it too). Moved here from `model.zig` (Option A of the op migration):
-/// config owns seeding, so the stamping loop lives beside the resolution.
+/// use it too). Config owns seeding, so the stamping loop lives beside the
+/// resolution.
 pub fn applyConfigReload(m: *model_mod.Model, tpl: model_mod.LayoutParams) void {
     for (&m.ws) |*s| {
         // Viewport state is RUNTIME state, not config: preserving it prevents

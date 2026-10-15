@@ -221,9 +221,9 @@ pub fn init(
 /// in -- changes the screen's real size, and that setup-time struct never
 /// learns about it. Every consumer then reasons from the size the display had
 /// at startup: the work area, percentage bar heights, font scaling, the
-/// surface claim. A resolution change therefore left the whole bar sized for
-/// the old screen with nothing to indicate it, which is why this belongs here
-/// in core, once, rather than patched per consumer.
+/// surface claim. A resolution change would therefore leave the whole bar
+/// sized for the old screen with nothing to indicate it, which is why this
+/// belongs here in core, once, rather than patched per consumer.
 ///
 /// Only the pixel dimensions are re-read. Root depth, the root visual and the
 /// allowed-depth list are properties of the screen's visual class, not of the

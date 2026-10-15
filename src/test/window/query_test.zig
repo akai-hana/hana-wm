@@ -27,7 +27,6 @@ const build_options = @import("build_options");
 const focus = @import("focus");
 const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
-const ledger = @import("ledger");
 const recon = @import("reconcile");
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 
@@ -55,11 +54,11 @@ fn pipelineModel() *model.Model {
     core.markModelReady();
     const m = pipeline.mut();
     m.* = helpers.makeModel(); // makeModel already re-arms the module stores
-    ledger.init();
+    recon.init();
     return m;
 }
 
-fn reconcile(m: *model.Model, rec: *Recorder, opts: recon.Opts) void {
+fn runReconcile(m: *model.Model, rec: *Recorder, opts: recon.Opts) void {
     var ctx = helpers.makeCtx(rec.sink(), testColor, helpers.std_wa);
     recon.run(m, &ctx, opts);
 }
@@ -80,9 +79,9 @@ test "facade agrees with ledger on managed set, masks, and workspace visibility"
     focus.setFocus(m, 101);
 
     // Ledger-first preconditions: nothing sent yet, nothing visible.
-    try testing.expect(ledger.lastRectFor(101) == null);
+    try testing.expect(recon.lastRectFor(101) == null);
 
-    reconcile(m, &rec, .{});
+    runReconcile(m, &rec, .{});
 
     // Managed set parity: every store window has a ledger record, and the
     // facade store count equals the ledger's (each reconcile reconciles all).
@@ -90,7 +89,7 @@ test "facade agrees with ledger on managed set, masks, and workspace visibility"
     const wins = [_]model.WindowId{ 101, 102, 201 };
     for (wins) |w| {
         try testing.expect(query.isManaged(w));
-        try testing.expect(ledger.sentGet(w) != null);
+        try testing.expect(recon.sentGet(w) != null);
     }
 
     // Mask parity: the facade's current-workspace test matches the model's
@@ -106,11 +105,11 @@ test "facade agrees with ledger on managed set, masks, and workspace visibility"
     // and were placed (ledger visible); the ws1 window is parked on the wire
     // (ledger has no visible rect) and the facade agrees.
     try testing.expect(query.isOnCurrentWorkspace(101));
-    try testing.expect(ledger.lastRectFor(101) != null);
+    try testing.expect(recon.lastRectFor(101) != null);
     try testing.expect(query.isOnCurrentWorkspace(102));
-    try testing.expect(ledger.lastRectFor(102) != null);
+    try testing.expect(recon.lastRectFor(102) != null);
     try testing.expect(!query.isOnCurrentWorkspace(201));
-    try testing.expect(ledger.lastRectFor(201) == null);
+    try testing.expect(recon.lastRectFor(201) == null);
 }
 
 test "facade tracks the workspace switch exactly like the ledger" {
@@ -121,22 +120,22 @@ test "facade tracks the workspace switch exactly like the ledger" {
     try reg(m, 101, 0);
     try reg(m, 201, 1);
     focus.setFocus(m, 101);
-    reconcile(m, &rec, .{});
+    runReconcile(m, &rec, .{});
 
     // Baseline on ws0: 101 placed, 201 parked.
-    try testing.expect(ledger.lastRectFor(101) != null);
-    try testing.expect(ledger.lastRectFor(201) == null);
+    try testing.expect(recon.lastRectFor(101) != null);
+    try testing.expect(recon.lastRectFor(201) == null);
 
     // Switch to ws1: leavers park on the wire, arrivers place; the facade
     // must flip in lockstep.
     m.current = model.WSId.fromIndex(1);
-    reconcile(m, &rec, .{ .force_restack = true });
+    runReconcile(m, &rec, .{ .force_restack = true });
 
     try testing.expectEqual(@as(u8, 1), query.getCurrentWorkspace().?);
     try testing.expect(!query.isOnCurrentWorkspace(101));
-    try testing.expect(ledger.lastRectFor(101) == null);
+    try testing.expect(recon.lastRectFor(101) == null);
     try testing.expect(query.isOnCurrentWorkspace(201));
-    try testing.expect(ledger.lastRectFor(201) != null);
+    try testing.expect(recon.lastRectFor(201) != null);
 }
 
 test "minimized windows are invisible to both facade and ledger" {
@@ -147,22 +146,22 @@ test "minimized windows are invisible to both facade and ledger" {
     try reg(m, 101, 0);
     try reg(m, 102, 0);
     focus.setFocus(m, 101);
-    reconcile(m, &rec, .{}); // baseline: both placed
+    runReconcile(m, &rec, .{}); // baseline: both placed
 
     // Minimize the stack: presence flips to .parked, reconcile parks it.
     try minimize.minimize(m, 102);
-    reconcile(m, &rec, .{});
+    runReconcile(m, &rec, .{});
 
     // The window is still managed and tagged on ws0...
     try testing.expect(query.isManaged(102));
     try testing.expect(query.isOnCurrentWorkspace(102));
     // ...but not visible: facade sees the parked presence, ledger has no
     // visible rect (the park was actually sent).
-    try testing.expect(ledger.lastRectFor(102) == null);
+    try testing.expect(recon.lastRectFor(102) == null);
 
     // The sibling keeps full visibility on both sides of the boundary.
     try testing.expect(query.isOnCurrentWorkspace(101));
-    try testing.expect(ledger.lastRectFor(101) != null);
+    try testing.expect(recon.lastRectFor(101) != null);
 }
 
 test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
@@ -173,10 +172,10 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
     try reg(m, 101, 0);
     try reg(m, 102, 0);
     focus.setFocus(m, 101);
-    reconcile(m, &rec, .{}); // baseline: both placed
+    runReconcile(m, &rec, .{}); // baseline: both placed
 
     _ = fullscreen.toggleFullscreen(m, 101);
-    reconcile(m, &rec, .{ .force_restack = true });
+    runReconcile(m, &rec, .{ .force_restack = true });
 
     // The covering winner owns the screen: the ledger placed it (visible
     // rect) and the facade reads it as on the current workspace. The sibling
@@ -186,8 +185,8 @@ test "facade and ledger agree on presence-driven hiding (fullscreen park)" {
     // the model-truth read cannot leak a parked window into focus recovery.
     try testing.expect(query.isManaged(101));
     try testing.expect(query.isOnCurrentWorkspace(101));
-    try testing.expect(ledger.lastRectFor(101) != null);
+    try testing.expect(recon.lastRectFor(101) != null);
     try testing.expect(query.isManaged(102));
     try testing.expect(query.isOnCurrentWorkspace(102));
-    try testing.expect(ledger.lastRectFor(102) == null);
+    try testing.expect(recon.lastRectFor(102) == null);
 }

@@ -1,7 +1,7 @@
 //! Model-pipeline glue: owns the global Model, builds reconcile.Ctx per tick,
 //! exposes slot entry points and reconcile hooks. X-aware (it dispatches
 //! through the sink and consults the display facts); the X-free half of the
-//! model pipeline lives in architecture/model.zig and tiling/.
+//! model pipeline lives in core/model.zig and tiling/.
 
 const std = @import("std");
 const model_mod = @import("model");
@@ -22,7 +22,6 @@ const contract = @import("tiling_contract");
 const tiling = @import("tiling_seam").tiling;
 const scaling = @import("scaling");
 
-const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
 
@@ -31,7 +30,7 @@ pub fn init() void {
     instance = .{}; // bounded lists: no allocator inside the model
     g_sink = .{ .conn = core.getState().conn };
     core.markModelReady();
-    ledger.init();
+    reconcile.init();
 }
 
 /// Clear every workspace's focus MRU (index 0 = most recent; see
@@ -241,9 +240,9 @@ var grab_depth: u32 = 0;
 ///
 /// The ctx is built when the grab is TAKEN, not on demand, so every wire write
 /// and every reconcile inside the bracket is computed against one ctx. It
-    /// carries its own `reconcileNow` for exactly that reason: a caller cannot
-    /// reconcile against a different ctx than the one its geometry is bracketed
-    /// by.
+/// carries its own `reconcileNow` for exactly that reason: a caller cannot
+/// reconcile against a different ctx than the one its geometry is bracketed
+/// by.
 pub const ScopedGrab = struct {
     /// The ctx this bracket reconciles against, or null for a grab that was
     /// only ever for wire writes.

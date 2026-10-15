@@ -42,8 +42,8 @@ const idmap = @import("idmap");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
-const ledger = @import("ledger");
 const reconcile_tails = @import("reconcile_tails");
+const reconcile = @import("reconcile");
 
 // Window-module hook dispatch lives in registry.zig (the binding layer);
 // window.zig re-exports the five wrappers so `window.*` stays the stable
@@ -54,9 +54,9 @@ pub const callHookBool = registry.callHookBool;
 pub const dispatchAll = registry.dispatchAll;
 pub const dispatchFirstTrue = registry.dispatchFirstTrue;
 
-// The command surface the dissolved `src/actions` hub used to re-export.
-// Always-present transitions are re-exported as the concrete functions they
-// are; optional-module commands are reached through `callHook` above, so this
+// The command surface, re-exported through this facade. Always-present
+// transitions are re-exported as the concrete functions they are;
+// optional-module commands are reached through `callHook` above, so this
 // facade never names an optional module. Tests and the bar import `window`
 // and never the owning file.
 pub const mapRequest = admission.mapRequest;
@@ -81,11 +81,11 @@ pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
 pub const sendWMTakeFocusKnown = focus.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
-// Event handlers and border sweeps split out of this file:
+// Event handlers and border sweeps live beside this file:
 // client_events.zig (ConfigureRequest, EWMH ClientMessage, Enter/Leave),
-// protocol/borders.zig (per-batch sweeps).
+// border_sweeps.zig (per-batch sweeps).
 // window.* stays the dispatch surface events.zig, input, reload and the
-// tests import, so their call sites are untouched.
+// tests import, so they reach the handlers without naming those files.
 pub const handleConfigureRequest = client_events.handleConfigureRequest;
 pub const handleEnterNotify = client_events.handleEnterNotify;
 pub const handleLeaveNotify = client_events.handleLeaveNotify;
@@ -109,11 +109,10 @@ pub fn getGeometry(conn: core.Connection, win: u32) ?model_mod.Rect {
     return requests.rectFromXcb(reply);
 }
 
-/// Child XID -> managed toplevel cache (former child_cache.zig, merged
-/// 2026-10-10), backing findManagedWindow's fast path below. A fixed flat
-/// array (Electron nests at most 3-5 children per app); keyed storage makes
-/// the hit O(1) with no capacity cliff, since the lookup sits on the slow
-/// path of a BLOCKING xcb_query_tree round trip.
+/// Child XID -> managed toplevel cache, backing findManagedWindow's fast path
+/// below. A fixed flat array (Electron nests at most 3-5 children per app);
+/// keyed storage makes the hit O(1) with no capacity cliff, since the lookup
+/// sits on the slow path of a BLOCKING xcb_query_tree round trip.
 /// Child-window cache ceiling: bounds findManagedWindow's child->toplevel
 /// rows (a flat array; Electron/Qt nest at most a handful of children per app).
 const capacity: usize = 64;
@@ -205,7 +204,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     // runs, absent modules aren't in the array, so nothing else needs
     // a has_* guard. The fallible fan-out is stated here (init is its
     // only user; contract's two dispatch primitives are providerOf +
-    // callAll, per the 6->2 collapse).
+    // callAll).
     for (window_mods) |wm| if (wm.init) |f| try f();
     focus.reset();
     // Admission sub-state (spawn queue, rules maps): reset and rules-map
@@ -240,7 +239,7 @@ pub fn deinit() void {
 /// The "is this window ours" predicates live in query.zig (the state/query
 /// facade); window.zig re-exports the manage predicate so `window.*` keeps
 /// the API events.zig routes through from outside the layer. isInvalidWindow
-/// has no window.zig consumer left (focus and configure reach query.zig).
+/// is not re-exported (focus and configure reach query.zig).
 pub const isValidManagedWindow = query.isValidManagedWindow;
 
 // Button grab management is owned by focus.zig (a focus-protocol concern).
@@ -254,7 +253,7 @@ pub const clampToValidWorkspace = admission.clampToValidWorkspace;
 /// Handles a MapRequest by firing ALL property query cookies up-front, then
 /// draining replies sequentially. Firing all five cookies before draining any
 /// lets the X server process them in parallel, saving 2-3 blocking round trips
-/// compared to the previous fire-then-drain-per-property approach.
+/// over a fire-then-drain-per-property approach.
 ///
 /// TIMING (gated by `-Dprofile-key`, mirroring workspaces.switchWorkspace): measures
 /// MapRequest receipt -> the map queued by the reconcile inside
@@ -330,7 +329,7 @@ pub fn unmanage(win: model_mod.WindowId) void {
     const was_focused = m.focused == win;
 
     window_state_ops.unregister(m, win);
-    ledger.forget(win); // X ids recycle; stale LastSent must not survive
+    reconcile.forget(win); // X ids recycle; stale LastSent must not survive
 
     // Closing the current workspace's covering occupant releases the area;
     // retileWithFallback bumps the core fact so the bar reacts.
@@ -388,7 +387,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 
     // Window title (_NET_WM_NAME / WM_NAME): refresh the WM-owned title cache
     // and bump the window fact so surfaces reading titles from the cache (the
-    // bar) repaint. The WM is now the sole owner of title freshness; the bar
+    // bar) repaint. The WM is the sole owner of title freshness; the bar
     // does no title property fetching at all.
     const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {

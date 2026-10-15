@@ -62,7 +62,7 @@ var g: RenderState = .{};
 /// Called from bar.applyReload: these module globals are built against the
 /// OLD config's fonts and bar height, and a reload can change both. Without
 /// this the prompt renders with stale widths/geometry until its next full
-/// cycle (the old "constant between reloads" assumption was wrong).
+/// cycle.
 pub fn invalidateReloadCaches() void {
     g.cached_prompt_w = null;
     g.cached_mode_w = .{null} ** num_modes;
@@ -111,9 +111,8 @@ const WidthRel = enum { ge, gt };
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])`
 /// is `>= t` (ge) or `> t` (gt). Returns `text.len` when no index satisfies
-/// it. Mapped a pixel scroll offset to a character boundary (ge) or finds the
-/// first index overflowing a width cap (gt); moved here from drawing.zig
-/// (prompt is its only consumer).
+/// it. Maps a pixel scroll offset to a character boundary (ge), or finds the
+/// first index overflowing a width cap (gt). The prompt is its only consumer.
 fn measureBound(dc: *drawing.DrawContext, text: []const u8, t: u16, comptime rel: WidthRel) usize {
     var lo: usize = 0;
     var hi: usize = text.len;

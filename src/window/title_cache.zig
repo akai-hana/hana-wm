@@ -7,8 +7,8 @@
 //! fires _NET_WM_NAME + WM_NAME as part of the pipelined admission cookie
 //! batch and caches the winner per window id; a title PropertyNotify
 //! re-fetches that one window. The bar reads via peekTitle() -- a cache hit,
-//! no X11 in the draw path, and no positional title slot anywhere, so the old
-//! fetch-to-wrong-window scramble cannot recur.
+//! no X11 in the draw path, and no positional title slot anywhere, so a fetch
+//! can never land on the wrong window.
 
 const std = @import("std");
 
@@ -60,11 +60,10 @@ var cache: idmap.IdMap(WindowData, max_entries) = .{};
 
 /// How many windows currently hold a cache entry (0 before init).
 ///
-/// This replaces the test's `getOpt() |c| c.count()`, which forced
-/// the map type out of the file as an unnameable pointer in the API surface.
-/// The test wanted one integer -- the evidence that the ceiling actually
-/// dropped an entry rather than overwriting one -- so the integer is what
-/// is exposed.
+/// Exposed as a bare integer so the map type stays private to this file
+/// instead of leaking through the API as an unnameable pointer; a test that
+/// needs evidence that the ceiling actually dropped an entry rather than
+/// overwriting one reads this one integer.
 pub fn cachedWindowCount() usize {
     return cache.count();
 }

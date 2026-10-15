@@ -9,15 +9,14 @@ const std = @import("std");
 
 /// Dispatch primitives for every generated registry element type
 /// (`WindowModule`, `Segment`, ...): exactly TWO -- `providerOf` (first-match
-/// lookup) and `callAll` (fan-out). Everything else the dispatch family used
-/// to carry has collapsed: `callFirst`/`callFirstBool` were one-line
-/// providerOf applications with a single consumer each (their bodies live in
-/// the window layer's callHook/callHookBool now), and the fallible fan-out /
-/// any-true shapes had one consumer per owner layer -- each states its
-/// 3-line `for` where it binds, against the registry it owns, rather than
-/// through a comptime-generic helper whose doc cost exceeded its body. All
-/// scans honor the registry's deterministic scan order. (The KISS audit's
-/// 6->2 collapse; the per-contract classification asserts live with each
+/// lookup) and `callAll` (fan-out). Every other shape the family offers is a
+/// one-line providerOf application or a 3-line `for` that its owner states
+/// where it binds, against the registry it owns: the first-match-with-bool
+/// shape lives in the window layer's callHook/callHookBool (one consumer
+/// each), and the fallible fan-out / any-true shapes live with their single
+/// consumer layer. Nothing here is a comptime-generic helper whose doc cost
+/// exceeds its body. All scans honor the registry's deterministic scan order.
+/// (The per-contract classification asserts live with each
 /// engine contract — window_contract, bar_contract.)
 ///
 /// The single canonical registry-lookup entry: the first module in `registry`
