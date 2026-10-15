@@ -2,7 +2,7 @@
 //!
 //! COPY ME: the fastest way to start a new prompt addon is
 //!
-//!     cp dev/plugin-template/prompt-addon.zig src/bar/modules/prompt/myaddon.zig
+//!     cp contrib/plugin-template/prompt-addon.zig src/bar/modules/prompt/myaddon.zig
 //!
 //! then edit the TODO markers. Nothing else needs to change:
 //! build.zig's sub-registry generation (`prompt_subs`) picks the

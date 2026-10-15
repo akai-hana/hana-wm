@@ -2,7 +2,7 @@
 //!
 //! COPY ME: the fastest way to start a new readout is
 //!
-//!     cp dev/plugin-template/readout.zig src/bar/modules/systatus/myreadout.zig
+//!     cp contrib/plugin-template/readout.zig src/bar/modules/systatus/myreadout.zig
 //!
 //! then edit the TODO markers. Nothing else needs to change:
 //! build.zig's sub-registry generation (`systatus_subs`) picks the
