@@ -1,10 +1,11 @@
 //! Floating window interaction and geometry management.
 //! Handles drag-to-move and per-corner drag-to-resize for floating windows,
-//! including work-area snapping, size-hint and minimum-dimension constraints,
-//! and display refresh-rate throttled geometry commits. Tiled windows detach
-//! to floating on first motion. Also updates floating rects on the model and
-//! honors configure requests for floating windows, exposing operations via
-//! the floating window module contract.
+//! including work-area snapping, size-hint constraints (PMin/PMax envelope
+//! plus PAspect ratio-accurate resize, Shift to break the band), and display
+//! refresh-rate throttled geometry commits. Tiled windows detach to floating
+//! on first motion. Also updates floating rects on the model and honors
+//! configure requests for floating windows, exposing operations via the
+//! floating window module contract.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -32,12 +33,18 @@ const DragMode = enum { move, resize };
 
 /// Corner closest to the cursor at drag-start; the opposite corner is the
 /// anchor that stays fixed during the resize. Crossing the anchor on an axis
-/// wraps the resize to grow the opposite way instead of collapsing.
-const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
+/// wraps the resize to grow the opposite way instead of collapsing. `pub`
+/// alongside DragState as the vocabulary of the pure test seams.
+pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
 
-const WaEdges = struct { left: i32, right: i32, top: i32, bottom: i32 };
+/// Work-area edges struct. `pub` alongside DragState/HintLimits as the
+/// vocabulary of the pure `computeResizeRect` test seam.
+pub const WaEdges = struct { left: i32, right: i32, top: i32, bottom: i32 };
 
-const DragState = struct {
+/// Snapshot of one drag's state. `pub` as the vocabulary of the pure
+/// `computeResizeRect` test seam (production code reaches the live drag only
+/// through g_state).
+pub const DragState = struct {
     active: bool = false,
     window: core.WindowId = 0,
     mode: DragMode = .move,
@@ -48,10 +55,6 @@ const DragState = struct {
     start_win_y: i16 = 0,
     start_win_width: u16 = 0,
     start_win_height: u16 = 0,
-    /// Geometry from the last updateDrag call. Zero means no motion event
-    /// arrived; consumed by the resize ConfigureRequest deny while the
-    /// drag is active.
-    last_rect: model.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     /// Resolved once at drag start: snap distance in pixels (0 = disabled) and
     /// the work-area edges used for snapping. Both are constant for the whole
     /// drag, so re-resolving them on every motion event would be wasted work.
@@ -98,29 +101,20 @@ inline fn snapAxis(pos: i32, dim: i32, near: i32, far: i32, snap: i32) i32 {
     return pos;
 }
 
-/// Resize corner nearest the cursor at a given point, for the
-/// 8-directional resize grip. corners win when two orthogonal edges are
-/// near; a lone edge resolves to the corner at its handled end; anything
-/// well inside the window falls back to bottom_right (dwm's conventional
-/// button-3 corner).
-fn nearestResizeCorner(x: i16, y: i16, rect: model.Rect, border_width: u32) ResizeCorner {
-    const left: i32 = rect.x;
-    const top: i32 = rect.y;
-    const right: i32 = rect.x + @as(i32, rect.width);
-    const bottom: i32 = rect.y + @as(i32, rect.height);
-    const bw: i32 = @intCast(border_width);
-
-    const near_left = @abs(x - left) <= bw;
-    const near_right = @abs(x - right) <= bw;
-    const near_top = @abs(y - top) <= bw;
-    const near_bottom = @abs(y - bottom) <= bw;
-
-    if (near_left and near_top) return .top_left;
-    if (near_right and near_top) return .top_right;
-    if (near_left and near_bottom) return .bottom_left;
-    if (near_right and near_bottom) return .bottom_right;
-    if (near_top or near_left) return .top_left;
-    if (near_bottom or near_right) return .bottom_right;
+/// Resize corner nearest the cursor at a given point: the corners'
+/// nearest-point cells are the quadrants through the window's center, so
+/// the press quadrant names the corner. Every press maps to a corner —
+/// border, edge, or interior — rather than only border-adjacent grabs
+/// resolving off the bottom-right fallback. `pub` as the vocabulary of
+/// the pure corner-selection test seam.
+pub fn nearestResizeCorner(x: i16, y: i16, rect: model.Rect) ResizeCorner {
+    const mid_x: i32 = rect.x + @divTrunc(@as(i32, rect.width), 2);
+    const mid_y: i32 = rect.y + @divTrunc(@as(i32, rect.height), 2);
+    const west: bool = @as(i32, x) < mid_x;
+    const north: bool = @as(i32, y) < mid_y;
+    if (west and north) return .top_left;
+    if (!west and north) return .top_right;
+    if (west and !north) return .bottom_left;
     return .bottom_right;
 }
 
@@ -180,7 +174,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const resize_corner: ResizeCorner = if (button == 1)
         .bottom_right
     else
-        nearestResizeCorner(x, y, cur, core.borderWidth());
+        nearestResizeCorner(x, y, cur);
 
     // Snap distance and work area are resolved here so updateDrag's per-event
     // path only does arithmetic. They are constant for the duration of a drag.
@@ -256,8 +250,11 @@ fn computeMoveRect(
 }
 
 /// Min/max outer size envelope for `win` (the drag-resize / configure-request
-/// clamp bounds).
-const HintLimits = struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 };
+/// clamp bounds), plus the full hints record for the aspect fit (the one
+/// store lookup serves both policies, so they cannot see different snapshots
+/// of the same window's hints). `pub` as the vocabulary of the pure
+/// `computeResizeRect` test seam.
+pub const HintLimits = struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32, hints: model.SizeHints };
 
 /// The ONE PMin/PMax clamp policy, shared by the drag-resize path and the
 /// ConfigureRequest path so the two cannot drift: separate clamps could
@@ -276,6 +273,7 @@ fn sizeEnvelope(hints: model.SizeHints, bw2: i32, min_dim: i32) HintLimits {
         .min_h = @max(min_dim, if (hints.min_height == 0) 0 else @as(i32, hints.min_height) + bw2),
         .max_w = if (hints.max_width == 0) unbounded else @as(i32, hints.max_width) + bw2,
         .max_h = if (hints.max_height == 0) unbounded else @as(i32, hints.max_height) + bw2,
+        .hints = hints,
     };
 }
 
@@ -293,11 +291,24 @@ fn sizeHintLimits(win: u32) HintLimits {
         .min_h = min_dim,
         .max_w = @as(i32, std.math.maxInt(u16)),
         .max_h = @as(i32, std.math.maxInt(u16)),
+        .hints = .{},
     }).size_hints;
     return sizeEnvelope(hints, bw2, min_dim);
 }
 
-fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) model.Rect {
+/// Resize-drag geometry, pure over its inputs (the one impure half, the
+/// hint lookup, is resolved by the caller and passed in as `limits`). `pub`
+/// as the headless test seam for the drag math.
+/// `break_aspect` (Shift held) frees the PAspect band for this tick; the
+/// PMin/PMax envelope still applies.
+pub fn computeResizeRect(
+    drag: DragState,
+    dx: i32,
+    dy: i32,
+    wa: WaEdges,
+    limits: HintLimits,
+    break_aspect: bool,
+) model.Rect {
     const snap = drag.snap_px;
     // Max outer size from the window's PMaxSize hints. X11 configure
     // width/height excludes the frame, so the outer ceiling is the hint
@@ -305,7 +316,6 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) model.Rect 
     // would let the user grow a hint-constrained window past what its
     // client declared, then fight the client's own configure-request
     // reduction on every later drag tick.
-    const limits = sizeHintLimits(drag.window);
     // Anchor = corner opposite the grabbed one, fixed; the moving
     // corner follows the cursor. min/max(anchor, moving) per axis
     // makes crossing the anchor flip growth automatically.
@@ -339,8 +349,20 @@ fn computeResizeRect(drag: DragState, dx: i32, dy: i32, wa: WaEdges) model.Rect 
     // floor plus the PMin/PMax + border envelope (sizeEnvelope), and the
     // `@max(floor, ...)` ceiling keeps a client whose declared max is below its
     // min from inverting the clamp range.
-    const clamped_w: i32 = std.math.clamp(new_right - new_left, limits.min_w, @max(limits.min_w, limits.max_w));
-    const clamped_h: i32 = std.math.clamp(new_bottom - new_top, limits.min_h, @max(limits.min_h, limits.max_h));
+    var clamped_w: i32 = std.math.clamp(new_right - new_left, limits.min_w, @max(limits.min_w, limits.max_w));
+    var clamped_h: i32 = std.math.clamp(new_bottom - new_top, limits.min_h, @max(limits.min_h, limits.max_h));
+    // PAspect band (the ratio-accurate resize): shrink the excess dimension
+    // into the declared ratio so a fixed-shape client (video player) never
+    // drags into letterboxing. AFTER the PMin/PMax clamp (the ratio wins over
+    // a declared minimum on the derived axis, per aspectFit) and BEFORE the
+    // anchor pin (so the fixed corner stays fixed through the shrink). The
+    // clamped dims are non-negative and within the u16 wire ceiling, so the
+    // narrowing cast is safe.
+    if (!break_aspect) {
+        const fit = limits.hints.aspectFit(@intCast(clamped_w), @intCast(clamped_h));
+        clamped_w = fit.width;
+        clamped_h = fit.height;
+    }
     const pinned_x: i32 = if (moving_x < anchor_x) anchor_x - clamped_w else new_left;
     const pinned_y: i32 = if (moving_y < anchor_y) anchor_y - clamped_h else new_top;
 
@@ -380,7 +402,9 @@ fn dragRect(win: core.WindowId, r: model.Rect) void {
 }
 
 /// Applies pointer motion to the active drag. No-op if no drag is active.
-pub fn updateDrag(x: i16, y: i16) void {
+/// `break_aspect` (Shift held at the motion event) frees the resize from the
+/// window's PAspect band for this tick; it is ignored for move drags.
+pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
     if (!g_state.drag.active) return;
     const drag = &g_state.drag;
 
@@ -407,9 +431,8 @@ pub fn updateDrag(x: i16, y: i16) void {
 
     const rect = switch (drag.mode) {
         .move => computeMoveRect(drag.*, dx, dy, wa, was_pending_float),
-        .resize => computeResizeRect(drag.*, dx, dy, wa),
+        .resize => computeResizeRect(drag.*, dx, dy, wa, sizeHintLimits(drag.window), break_aspect),
     };
-    drag.last_rect = rect;
     drag.pending_rect = rect;
 
     // Throttle commits to display refresh rate; still track latest position
@@ -438,7 +461,6 @@ pub fn stopDrag() void {
         if (drag.pending_rect) |r| {
             dragRect(drag.window, r);
             drag.pending_rect = null;
-            drag.last_rect = r;
         }
     }
     g_state = .{};
@@ -456,16 +478,10 @@ pub fn isDragging() bool {
     return g_state.drag.active;
 }
 
-/// True when a resize drag is active on `win`; used to deny min-size
-/// configure requests from the window being resized, preventing flicker.
+/// True when a resize drag is active on `win`; used to deny configure
+/// requests from the window being resized, preventing flicker.
 pub fn isResizingWindow(win: u32) bool {
     return g_state.drag.active and g_state.drag.mode == .resize and g_state.drag.window == win;
-}
-
-/// model.Rect last applied during the active drag. Only meaningful while
-/// isDragging() and after at least one motion event.
-pub fn getDragLastRect() model.Rect {
-    return g_state.drag.last_rect;
 }
 
 /// Updates a floating window's rect on the model, no-op for tiled/unknown.
@@ -507,6 +523,15 @@ pub fn honorConfigureRequest(
                 r.width = @intCast(std.math.clamp(@as(i32, v), limits.min_w, @max(limits.min_w, limits.max_w)));
             if (req.height) |v|
                 r.height = @intCast(std.math.clamp(@as(i32, v), limits.min_h, @max(limits.min_h, limits.max_h)));
+            // Aspect band (ratio-accurate, same shared fit the drag path
+            // uses): only when the request actually carries a size -- a
+            // position-only configure must NOT re-lock a rect the user freed
+            // with Shift.
+            if (req.width != null or req.height != null) {
+                const fit = e.size_hints.aspectFit(r.width, r.height);
+                r.width = fit.width;
+                r.height = fit.height;
+            }
             // NOTE: a requested border_width is not stored here (the
             // floating rect has no bw field); the entry point sends and
             // caches it alongside the geometry it applies.
@@ -574,7 +599,6 @@ pub const module: @import("window_contract").WindowModule = .{
     .updateDrag = updateDrag,
     .isDragging = isDragging,
     .isResizingWindow = isResizingWindow,
-    .getDragLastRect = getDragLastRect,
     .cancelDragForWindow = cancelDragForWindow,
     .setFloatingRect = setFloatingRect,
     .honorConfigureRequest = honorConfigureRequest,

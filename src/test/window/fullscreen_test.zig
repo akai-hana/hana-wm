@@ -9,8 +9,9 @@ const std = @import("std");
 const testing = std.testing;
 
 // Overflow tests (MRU/order/max budgets) deliberately trip BoundedList's
-// warn-level overflow diagnostic; src/core/debug/log.zig silences all
-// std.log diagnostics in test binaries, so this stays quiet on success.
+// warn-level overflow diagnostic; the vendored test runner captures
+// std.log output into the diagnostics bag instead of printing, so this
+// stays quiet on success.
 const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
