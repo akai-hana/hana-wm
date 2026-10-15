@@ -5,10 +5,11 @@
 //! No wire traffic: a key press either resolves to an action through
 //! keybinds' dispatch map or is dropped, and the action itself runs in
 //! dispatch.zig.
+const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const masks = @import("masks");
-const log = @import("log");
+const log = std.log.scoped(.keys);
 const profile = @import("profile");
 const focus = @import("focus");
 const build_options = @import("build_options");

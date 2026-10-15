@@ -10,7 +10,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const log = @import("log");
+const log = std.log.scoped(.icccm);
 /// Maximum number of 32-bit words to request when fetching an XCB window property.
 /// 256 words = 1 KiB, sufficient for all fixed-size properties the WM reads.
 pub const property_max_length: u32 = 256;

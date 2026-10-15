@@ -3,11 +3,10 @@
 
 const std = @import("std");
 const model = @import("model");
-const log = @import("log");
+const log = std.log.scoped(.tiling);
 
 const contract = @import("tiling_contract");
 
-const scaling = @import("scaling");
 /// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
 /// clamp, then aspect clamp (with a re-snap, since a client may declare both).
 /// Declared minimums are intentionally NOT enforced: tiling owns window size
@@ -24,28 +23,13 @@ pub fn applyHints(rect: model.Rect, h: model.SizeHints) model.Rect {
     if (h.max_height > 0) height = @min(height, h.max_height);
 
     // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
-    // convention); cross-multiplied to avoid FP division per retile.
-    //
-    // BOTH OR NEITHER: one bound alone is not a weaker constraint here,
-    // it is a DIFFERENT one, and applying it alone is a trap worth naming. A
-    // max bound alone clamps the offending DIMENSION, so a 200x50 window under
-    // `max_aspect = 4` would become 200x50 still (200/50 = 4, at the limit) but
-    // a 400x50 one would have its WIDTH clamped to 200 -- the window gets
-    // narrower instead of taller, so the client is told to resize its content
-    // area rather than being given a shape closer to its ratio. With the pair
-    // present, the SAME window is fixed through the axis the ratio says is
-    // wrong (its height, here). So the gate is `min > 0 AND max > 0`, not
-    // "each independently": the two halves of one rule.
-    if (h.min_aspect > 0.0 and h.max_aspect > 0.0) {
-        const fw: f32 = @floatFromInt(width);
-        const fh: f32 = @floatFromInt(height);
-        // Clamp to u16 range before narrowing so a huge aspect ratio caps.
-        if (fw > fh * h.max_aspect) {
-            width = @min(clampAspectDim(fh, h.max_aspect, h.inc_width), width);
-        } else if (fh > fw * h.min_aspect) {
-            height = @min(clampAspectDim(fw, h.min_aspect, h.inc_height), height);
-        }
-    }
+    // convention); the shrink-only band fit is the ONE shared spelling on
+    // model.SizeHints (.aspectFit), which also carries the both-or-neither
+    // rationale. Re-snap to the increments since the shared fit rounds
+    // freely (the old inline clamp folded the increment snap in itself).
+    const fit = h.aspectFit(width, height);
+    width = snapDimToIncrement(fit.width, h.inc_width);
+    height = snapDimToIncrement(fit.height, h.inc_height);
 
     // Centre the (possibly shrunk) window inside its allocated slot. A positive
     // slot must never resolve to 0: the aspect re-snap can round a dimension
@@ -60,14 +44,6 @@ pub fn applyHints(rect: model.Rect, h: model.SizeHints) model.Rect {
         .width = width,
         .height = height,
     };
-}
-
-/// Clamp `other * ratio` (a cross-multiplied aspect product) into u16 range,
-/// then snap down to the increment. No max cap here: callers already clamp
-/// against the max dimension via `@min` (and pre-clamped width in `applyHints`).
-inline fn clampAspectDim(other: f32, ratio: f32, inc: u16) u16 {
-    const aspect = scaling.roundToU16(other * ratio, 0.0);
-    return snapDimToIncrement(aspect, inc);
 }
 
 /// Snap `dim` down to the nearest multiple of `inc`.

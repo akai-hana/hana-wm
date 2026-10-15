@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const core = @import("core");
-const log = @import("log");
+const log = std.log.scoped(.drawing);
 const types = @import("types");
 const bar_config = @import("bar_config");
 const fonts = @import("fonts");

@@ -10,7 +10,7 @@
 //! absent; only the LIST owner lives here.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.workspaces_config);
 const model = @import("model");
 const parser = @import("parser");
 const types = @import("types");

@@ -10,7 +10,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const log = @import("log");
+const log = std.log.scoped(.cursor);
 const mouse = @import("mouse");
 
 /// Root-window cursor theming via libxcb-cursor: one startup call that

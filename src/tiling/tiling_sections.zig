@@ -7,7 +7,7 @@
 //! parsed document so it outlives the load-scoped arena.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.tiling_sections);
 const model = @import("model");
 const parser = @import("parser");
 const types = @import("types");

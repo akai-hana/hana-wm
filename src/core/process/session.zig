@@ -6,7 +6,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const config_mod = @import("config");
 const core = @import("core");
-const log = @import("log");
+const log = std.log.scoped(.session);
 const model = @import("model");
 const snapshot = @import("snapshot");
 /// Layout registry (build-generated); the active layout is a `u8` index into

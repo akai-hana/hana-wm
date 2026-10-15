@@ -14,7 +14,7 @@
 //! same table.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.knob);
 const parser = @import("parser");
 const types = @import("types");
 const scaling = @import("scaling");

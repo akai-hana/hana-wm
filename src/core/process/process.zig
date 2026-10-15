@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const log = @import("log");
+const log = std.log.scoped(.process);
 
 const builtin = @import("builtin");
 

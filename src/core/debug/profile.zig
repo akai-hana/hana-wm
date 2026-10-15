@@ -3,10 +3,9 @@
 //! paths (src/core/input/keys.zig, src/core/loop/pipeline.zig). Compiles out
 //! entirely when `enabled` is false (callers still reference `.enabled`).
 //!
-//! Detached from the log module: the log module is the diagnostics sink every
-//! module imports, while this is an optional instrumentation helper -- a
-//! separate concern that happens to report through a caller-supplied log
-//! function (usually `log.info`).
+//! Detached from diagnostics capture: this is an optional instrumentation
+//! helper that reports through a caller-supplied log function (usually a
+//! `std.log.scoped(...).info`), not part of the warn/err capture bag.
 
 const std = @import("std");
 

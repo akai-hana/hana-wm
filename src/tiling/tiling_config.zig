@@ -14,7 +14,7 @@ const parser = @import("parser");
 const scaling = @import("scaling");
 const types = @import("types");
 const knob = @import("knob");
-const log = @import("log");
+const log = std.log.scoped(.tiling_config);
 const tiling_sections = @import("tiling_sections");
 
 /// Which side of the screen the master column occupies.

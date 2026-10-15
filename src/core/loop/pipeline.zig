@@ -12,7 +12,7 @@ const window_state_ops = @import("window_state_ops");
 const xcb_sink = @import("sink");
 const usable_area = @import("usable_area");
 const build_options = @import("build_options");
-const log = @import("log");
+const log = std.log.scoped(.pipeline);
 const profile = @import("profile");
 
 /// Layout registry (build-generated); the active layout is a `u8` index into

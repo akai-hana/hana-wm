@@ -42,7 +42,7 @@ fn ensureSubreaper() void {
 var subreaper_installed: bool = false;
 
 const core = @import("core");
-const log = @import("log");
+const log = std.log.scoped(.spawn);
 const query = @import("query");
 const window = @import("window");
 const admission = @import("admission");

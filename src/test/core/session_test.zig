@@ -16,9 +16,9 @@
 const std = @import("std");
 const testing = std.testing;
 
-// Some restore/save paths log warn-level diagnostics; core/debug/log.zig
-// silences all std.log diagnostics in test binaries, so this stays quiet
-// on success.
+// Some restore/save paths log warn-level diagnostics; the vendored test
+// runner captures std.log output into the diagnostics bag instead of
+// printing, so this stays quiet on success.
 const model = @import("model");
 const window_state_ops = @import("window_state_ops");
 const focus = @import("focus");

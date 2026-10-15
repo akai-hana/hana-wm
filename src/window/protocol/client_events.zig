@@ -25,7 +25,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const log = @import("log");
+const log = std.log.scoped(.client_events);
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const reconcile = @import("reconcile");
@@ -161,14 +161,6 @@ fn noteHonoredBorderWidth(win: u32, bw: u16) void {
     if (build_options.has_tiling) reconcile.markSentBorderWidth(win, bw);
 }
 
-/// Last committed drag rect, for resize-path geometry replay. Zero rect when
-/// no floating module provides the hook, matching the no-floating default.
-fn dragLastRect() model_mod.Rect {
-    const wm = registry.providerOf(.getDragLastRect) orelse
-        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-    return wm.getDragLastRect.?();
-}
-
 pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) void {
     const win = event.window;
 
@@ -177,20 +169,15 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     const mask = event.value_mask & geometry_mask;
     if (mask == 0) return;
 
-    // Deny min-size ConfigureRequests from the window being drag-resized.
+    // Deny ConfigureRequests from the window being drag-resized. Echo the
+    // COMMITTED geometry (model truth / last-sent ledger), never the live
+    // drag prediction: last_rect advances on every motion while the wire
+    // configure is throttled to refresh rate, so telling the client an
+    // uncommitted size makes it size its buffers to geometry the X window
+    // does not have yet -- the thrash that freezes video players like mpv
+    // mid-resize. sendSyntheticConfigureNotify resolves exactly that truth.
     if (registry.dispatchFirstTrue(.isResizingWindow, .{win})) {
-        const last = dragLastRect();
-        if (last.width != 0) {
-            sendConfigureNotify(win, .{
-                .x = last.x,
-                .y = last.y,
-                .width = last.width,
-                .height = last.height,
-                .border_width = core.borderWidth(),
-            });
-        } else {
-            sendSyntheticConfigureNotify(win);
-        }
+        sendSyntheticConfigureNotify(win);
         return;
     }
 

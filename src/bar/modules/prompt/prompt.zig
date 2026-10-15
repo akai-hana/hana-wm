@@ -5,7 +5,7 @@ const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
-const log = @import("log");
+const log = std.log.scoped(.prompt);
 
 const types = @import("types");
 const contract = @import("bar_contract");

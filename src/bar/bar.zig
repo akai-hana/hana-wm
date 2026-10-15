@@ -23,7 +23,7 @@ const std = @import("std");
 const core = @import("core");
 const xcb = core.xcb;
 const usable_area = @import("usable_area");
-const log = @import("log");
+const log = std.log.scoped(.bar);
 
 const types = @import("types");
 
@@ -78,6 +78,11 @@ pub fn onPollWakeup() void {
     // the cadence here is what would put a dead-module background wake up at
     // the frame rate.
     const s = gBar.state orelse return;
+    // This wake is the one owed frame's landing (pollTimeoutMs's 0-deadline
+    // report). Clear the debt before folding: one-shot, so a module that
+    // keeps re-requesting gets the ordinary timer cadence from here rather
+    // than a self-wake that never lets the poll sleep.
+    s.owed_redraw = false;
     runVoidHook(.onPollWakeup);
     // A module's poll hook (e.g. the prompt's caret-blink toggle) must reach
     // the draw's repaint gate: fold any queued module redraw request into the
@@ -115,6 +120,12 @@ pub fn pollTimeoutMs() ?i32 {
             if (t >= 0 and (nearest == null or t < nearest.?)) nearest = t;
         }
     }
+    // ...and the bar's own debt outranks them all: a frame a capped batch
+    // still owes must land NOW, not at the nearest module deadline (idle:
+    // the clock's second boundary -- the "the bar only settles when the
+    // clock ticks" symptom). After the hidden-bar gate above, because a
+    // bar that paints nothing owes no wake.
+    if (s.owed_redraw) return 0;
     return nearest;
 }
 
@@ -200,6 +211,15 @@ pub fn init() !void {
     // blank until first damage).
     _ = xcb.xcb_map_window(cs.conn, bar.setup.win_id);
     render.performDraw();
+    // That first paint reserved row slots from the startup probes; every
+    // segment it painted whose measured width differs owes one re-layout
+    // redraw (the first-paint settle). Fold and draw them HERE, before the
+    // flush, so both copy_areas ship in this one batch and the compositor's
+    // first presented frame is the settled row -- not the probe layout that
+    // a later event batch or timer tick has to correct. Without this the
+    // settle rode the cap (`max_batched_redraws`) and, on an idle bar, the
+    // leftover frame waited for the clock's next whole-second wakeup.
+    if (render.foldModuleRedraw(bar.state)) render.performDraw();
     _ = xcb.xcb_flush(cs.conn);
     // Uniform lifecycle: every registered mechanism segment (incl. the prompt,
     // whose init owns the vim addon lifecycle) is initialised with the
@@ -395,13 +415,18 @@ fn dismissAfterPrompt() void {
 /// shown, maps/unmaps, and re-derives the screen claim. `do_reconcile`
 /// additionally grabs the server, reconciles (the usable area changed with
 /// the claim) and flushes -- used by the fullscreen-fact reaction path, not
-/// by the workspace-switch path whose caller runs its own reconcile. The
-/// reconcile-show path also re-raises the bar LAST (inside the same flush,
-/// after the reconcile's geometry sends), so a moved winner that got raised
-/// above it (sync raises a placing winner on motion even without
+/// by the workspace-switch path whose caller runs its own reconcile. When it
+/// reconciles, `resize_parked` is passed through to the reconciler: true only
+/// for the user toggle, which pre-resizes every OTHER workspace's parked
+/// windows to the new workarea so a later switch is a pure position change
+/// (the fullscreen reaction must NOT do that -- its workarea change is
+/// local to the fullscreen workspace and is recomputed at every switch).
+/// The reconcile-show path also re-raises the bar LAST (inside the same
+/// flush, after the reconcile's geometry sends), so a moved winner that got
+/// raised above it (sync raises a placing winner on motion even without
 /// force_restack) cannot leave a freshly shown bar buried under the window
 /// it just stopped covering.
-fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void {
+fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool, resize_parked: bool) void {
     s.vis.shown = should_be_visible;
     const conn = core.getState().conn;
     // Optional token: the workspace-switch path (do_reconcile false) must NOT
@@ -451,7 +476,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
         }
     }
     if (grab) |g| {
-        g.reconcileNow(.{});
+        g.reconcileNow(.{ .resize_parked = resize_parked });
         if (should_be_visible) raiseBar();
     }
 }
@@ -464,7 +489,7 @@ fn applyVisibility(s: *State, should_be_visible: bool, do_reconcile: bool) void 
 /// visibility update. The reconcile comes from the caller's own switch
 /// reconcile; the bar merely updates its occupancy state here.
 fn updateBarVisibilityForWorkspace(ws: u8) void {
-    applyVisibilityDecision(ws, false);
+    applyVisibilityDecision(ws, false, false);
 }
 
 /// Immediately unmaps the bar and updates the screen claim, without a
@@ -479,7 +504,7 @@ fn hideBarForFullscreen() void {
     // since the user is typing into a chrome state that expects the overlay.
     // dismissAfterPrompt recomputes the natural decision at exit.
     if (gBar.prompt_forced_visible) return;
-    applyVisibility(s, false, false);
+    applyVisibility(s, false, false, false);
 }
 
 /// Reacts to a change in core's fullscreen-occupancy fact: recomputes whether
@@ -488,16 +513,19 @@ fn hideBarForFullscreen() void {
 /// the fact revision; the bar merely reads the model & screen facts it already
 /// consumes. Calls `reconcileNow` after a visibility claim change because the
 /// usable area geometry changed (a write-path side effect from a rendering
-/// module: documented in the check-layers.sh allowlist).
-fn applyFullscreenVisibility() void {
-    applyVisibilityDecision(query.getCurrentWorkspace() orelse 0, true);
+/// module: documented in the check-layers.sh allowlist). `resize_parked`
+/// selects whether that reconcile also pre-resizes other workspaces'
+/// parked windows (true only for the user toggle -- see applyVisibility).
+fn applyFullscreenVisibility(resize_parked: bool) void {
+    applyVisibilityDecision(query.getCurrentWorkspace() orelse 0, true, resize_parked);
 }
 
 /// Computes the desired visibility for `ws` via the shared visibility policy
 /// and, when it differs from current state, applies the change. `do_reconcile`
 /// selects the workspace-switch flavor (no reconcile; the caller reconciles)
 /// vs the fullscreen-fact reaction (reconciles inside the claim).
-fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
+/// `resize_parked` is passed through to that reconcile (see applyVisibility).
+fn applyVisibilityDecision(ws: u8, do_reconcile: bool, resize_parked: bool) void {
     const s = gBar.state orelse return;
     // While the inline prompt has forced the bar above everything, any
     // natural-visibility recompute (workspace switch, fullscreen fact tick)
@@ -509,7 +537,7 @@ fn applyVisibilityDecision(ws: u8, do_reconcile: bool) void {
     // the policy's: the policy returns the target and why, and deciding whether
     // to touch the wire stays here.
     if (decision.should_be_visible == s.vis.shown) return;
-    applyVisibility(s, decision.should_be_visible, do_reconcile);
+    applyVisibility(s, decision.should_be_visible, do_reconcile, resize_parked);
     log.info(
         "Bar {s} for workspace {d} ({s})",
         .{ if (decision.should_be_visible) "shown" else "hidden", ws, @tagName(decision.reason) },
@@ -579,10 +607,19 @@ pub fn isBarWindow(win: u32) bool {
 /// arrives here (keybind / config action). Fullscreen-driven hide/show is NOT
 /// a named call: the bar derives it reactively from the core fullscreen fact
 /// revision in `applyFullscreenVisibility`, so no subsystem pokes the bar.
+///
+/// The toggle is the ONE path that passes `resize_parked = true`: its
+/// workarea change persists across workspace switches (the preferred flag is
+/// global), so every other workspace's parked windows must be pre-resized now
+/// or they re-size visibly at their next show. The fullscreen reaction
+/// (updateIfDirty) passes false: that change is local to the fullscreen
+/// workspace and is recomputed at every switch, so pre-sizing parked windows
+/// to the full screen there would only make the switch size them back on show
+/// -- the flicker the toggle's pass exists to remove.
 pub fn setBarState(action: types.Action) void {
     const s = gBar.state orelse return;
     if (action == .toggle_bar_visibility) s.vis.preferred = !s.vis.preferred;
-    applyFullscreenVisibility();
+    applyFullscreenVisibility(true);
 }
 
 pub fn updateIfDirty() void {
@@ -595,7 +632,10 @@ pub fn updateIfDirty() void {
     const fullscreen_rev = core.fullscreen.rev();
     if (s.facts.fullscreen_rev != fullscreen_rev) {
         s.facts.fullscreen_rev = fullscreen_rev;
-        applyFullscreenVisibility();
+        // resize_parked false: the fullscreen reaction's workarea change is
+        // local to this workspace and recomputed at every switch; only the
+        // user toggle pre-resizes parked workspaces (see setBarState).
+        applyFullscreenVisibility(false);
     }
     if (!s.vis.shown) return;
 
@@ -635,8 +675,16 @@ pub fn updateIfDirty() void {
         if (!s.dirty.flag) break;
         render.performDraw();
     }
-    if (redraw_iter == max_batched_redraws)
-        log.info("bar: updateIfDirty redraw loop hit its iteration cap, stalling re-request", .{});
+    if (redraw_iter == max_batched_redraws) {
+        // The cap protects one batch from a runaway re-request loop; it must
+        // not strand the frame it stopped mid-settle. Consume the overflow
+        // into the dirty state and owe the WAKE that lands it, so the
+        // redraw completes immediately instead of at the next module
+        // deadline -- on an idle bar that is the clock tick, which is what
+        // made a capped boot settle "when the clock fires".
+        if (render.foldModuleRedraw(s)) s.owed_redraw = true;
+        log.info("bar: updateIfDirty redraw loop hit its iteration cap; owed frame deferred to self-wake", .{});
+    }
 }
 
 /// Redraws just the clock segment when its on-screen content is stale

@@ -7,7 +7,7 @@
 //! arena.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.bar_sections);
 const model = @import("model");
 const parser = @import("parser");
 const knob = @import("knob");
