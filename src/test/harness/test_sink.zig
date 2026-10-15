@@ -18,6 +18,7 @@ pub const TestOp = union(enum) {
     configure: struct {
         win: model.WindowId,
         rect: ?model.Rect,
+        size: ?model.Dims,
         bw: ?u16,
         stack: ?sinkmod.Stack,
     },
@@ -93,7 +94,7 @@ pub fn TestSink(comptime mode: SinkMode) type {
         // encoding the production shim does not have.
         fn configureShim(self_ptr: *anyopaque, win: model.WindowId, c: sinkmod.Configure) void {
             const self: *Self = @ptrCast(@alignCast(self_ptr));
-            self.bump(.configure, .{ .configure = .{ .win = win, .rect = c.rect, .bw = c.bw, .stack = c.stack } });
+            self.bump(.configure, .{ .configure = .{ .win = win, .rect = c.rect, .size = c.size, .bw = c.bw, .stack = c.stack } });
         }
 
         fn pixelShim(self_ptr: *anyopaque, win: model.WindowId, p: u32) void {
@@ -204,6 +205,30 @@ pub fn TestSink(comptime mode: SinkMode) type {
         ) !void {
             comptime if (mode != .record) @compileError("expectGeomRect requires record mode");
             try self.expectGeom(i, win, rect.x, rect.y, rect.width, rect.height, stack);
+        }
+
+        /// Asserts op `i` is the size-only configure (WIDTH/HEIGHT, no X/Y):
+        /// the resize-parked shape. A `rect` would move the window back on
+        /// screen, which is exactly what this request must not do.
+        pub fn expectSize(
+            self: *const Self,
+            i: usize,
+            win: model.WindowId,
+            w: u16,
+            h: u16,
+        ) !void {
+            comptime if (mode != .record) @compileError("expectSize requires record mode");
+            const op = self.ops.items[i];
+            try std.testing.expect(op == .configure);
+            const c = op.configure;
+            try std.testing.expectEqual(win, c.win);
+            try std.testing.expect(c.size != null);
+            try std.testing.expectEqual(w, c.size.?.width);
+            try std.testing.expectEqual(h, c.size.?.height);
+            // Size-only means size-only: no rect, no border, no stack.
+            try std.testing.expect(c.rect == null);
+            try std.testing.expect(c.bw == null);
+            try std.testing.expect(c.stack == null);
         }
 
         /// Asserts op `i` is the MERGED geometry+border-width request.

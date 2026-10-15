@@ -33,7 +33,7 @@ const xcb = core.xcb;
 // screen estate. -30000 clears any realistic combined desktop while leaving
 // headroom below the INT16 floor.
 pub const offscreen_x_position: i32 = -30000;
-const log = @import("log");
+const log = std.log.scoped(.sink);
 
 const model = @import("model");
 const requests = @import("requests");
@@ -41,35 +41,46 @@ const requests = @import("requests");
 /// the WM emits.
 pub const Stack = enum { above };
 
-/// The X11 wire form of one configure: a value array whose slots are ordered
-/// by the protocol (X, Y, WIDTH, HEIGHT, BORDER_WIDTH, STACK_MODE) plus the
-/// mask naming the live ones. X consumes value slots by mask bit, so the array
-/// is always full width and only the mask varies -- which is exactly why the
-/// slot order is positional magic and worth testing directly.
+/// The X11 wire form of one configure: a mask naming the live fields plus a
+/// value list. X does NOT index the value list by mask bit -- it consumes
+/// slots SEQUENTIALLY, lowest set bit first (mask WIDTH|HEIGHT reads
+/// values[0] as width, values[1] as height; a lone STACK_MODE reads
+/// values[0]). Packing at absolute protocol slot indices therefore sends zeros
+/// for every partial mask and gets rejected (width/height 0 is a BadValue).
+/// The park shim is the working proof: mask X|STACK_MODE with a 2-element
+/// list.
 const ConfigureWire = struct { mask: u16, values: [6]u32 };
 
-/// Assembles the configure request body. Pure (no X connection), so the slot
-/// order is assertable directly: swapping slots 2 and 3 sends width as height,
-/// which X accepts and the WM discovers as every window rendered at the wrong
-/// aspect.
+/// Assembles the configure request body. Pure (no X connection). Values are
+/// packed sequentially in mask-bit order (X, Y, WIDTH, HEIGHT, BORDER_WIDTH,
+/// STACK_MODE), skipping unset fields -- not at absolute protocol slots.
 pub fn configureWire(c: Configure) ConfigureWire {
     var mask: u16 = 0;
     var values = [_]u32{ 0, 0, 0, 0, 0, 0 };
+    var n: usize = 0;
     if (c.rect) |r| {
         mask |= xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_Y |
             xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
-        values[0] = model.toXcbCoord(r.x);
-        values[1] = model.toXcbCoord(r.y);
-        values[2] = r.width;
-        values[3] = r.height;
+        values[n] = model.toXcbCoord(r.x);
+        values[n + 1] = model.toXcbCoord(r.y);
+        values[n + 2] = r.width;
+        values[n + 3] = r.height;
+        n += 4;
+    } else if (c.size) |d| {
+        mask |= xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
+        values[n] = d.width;
+        values[n + 1] = d.height;
+        n += 2;
     }
     if (c.bw) |bw| {
         mask |= xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH;
-        values[4] = bw;
+        values[n] = bw;
+        n += 1;
     }
     if (c.stack) |s| {
         mask |= xcb.XCB_CONFIG_WINDOW_STACK_MODE;
-        values[5] = stackMode(s);
+        values[n] = stackMode(s);
+        n += 1;
     }
     return .{ .mask = mask, .values = values };
 }
@@ -79,6 +90,13 @@ pub fn configureWire(c: Configure) ConfigureWire {
 /// configure mask bit, expressed instead of implied by which shim was called.
 pub const Configure = struct {
     rect: ?model.Rect = null,
+    /// Width/height WITHOUT X/Y: the resize-while-parked shape. A parked
+    /// window must re-render at the new workarea size while staying offscreen
+    /// (the bar-toggle pre-resize), and a `rect` would move it back over the
+    /// live workspace. Wire-wise it is mutually exclusive with `rect` (the
+    /// encoder takes `else if`), so WIDTH/HEIGHT are never emitted twice; no
+    /// caller sets both, and the packed-slot tests pin the encoding either way.
+    size: ?model.Dims = null,
     bw: ?u16 = null,
     stack: ?Stack = null,
 };
