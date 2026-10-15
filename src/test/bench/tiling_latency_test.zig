@@ -25,7 +25,6 @@ const focus = @import("focus");
 const window_state_ops = @import("window_state_ops");
 
 const core = @import("core");
-const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const sink = @import("sink");
 // Latency instrumentation only runs its full loops + timing output under
@@ -53,8 +52,8 @@ test "tiling: reconcile CPU cost + request count, all-on-1-workspace, 1..50 win"
         for (0..n) |i| regCur(&m, @intCast(i + 1));
         focus.setFocus(&m, 1);
 
-        ledger.init();
-        defer ledger.init();
+        reconcile.init();
+        defer reconcile.init();
 
         // Warm: seed steady-state ledger, then measure one steady-state reconcile
         // (all desire compute + ledger scans; sends mostly elided).
@@ -92,7 +91,7 @@ test "tiling: reconcile CPU cost + request count, all-on-1-workspace, 1..50 win"
 
         // Follow-up pass: the changed reconcile left true steady state, so a
         // fresh one sends NOTHING. A regression to full-state re-send (the
-        // cost center before the fix this file exists to quantify) fails here.
+        // cost center this file exists to quantify) fails here.
         var steady = CountingSink{};
         var steady_ctx = makeCtx(steady.sink(), colorOfFocused, helpers.std_wa);
         reconcile.run(&m, &steady_ctx, .{});
@@ -126,8 +125,8 @@ test "tiling: reconcile cost with windows spread across 10 workspaces" {
         }
         focus.setFocus(&m, 1);
 
-        ledger.init();
-        defer ledger.init();
+        reconcile.init();
+        defer reconcile.init();
 
         // Warm, then measure one steady-state reconcile.
         const per_pass_ns = helpers.benchReconcile(&m, if (bench) 5_000 else 1);
@@ -157,8 +156,8 @@ test "tiling: decompose layout.compute vs full reconcile walk" {
     for (0..n) |i| regCur(&m, @intCast(i + 1));
     focus.setFocus(&m, 1);
 
-    ledger.init();
-    defer ledger.init();
+    reconcile.init();
+    defer reconcile.init();
 
     // Same work area the reconcile bench (helpers.benchReconcile) runs on: the
     // "% of reconcile" ratio only measures the same pipeline when both terms
@@ -213,8 +212,8 @@ test "tiling: XCB request count on a changing retile (layout switch)" {
         for (0..n) |i| regCur(&m, @intCast(i + 1));
         focus.setFocus(&m, 1);
 
-        ledger.init();
-        defer ledger.init();
+        reconcile.init();
+        defer reconcile.init();
 
         var warm = CountingSink{};
         var warm_ctx = makeCtx(warm.sink(), colorOfFocused, helpers.std_wa);

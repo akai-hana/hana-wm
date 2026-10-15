@@ -18,7 +18,6 @@ const focus = @import("focus");
 const window_state_ops = @import("window_state_ops");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
-const ledger = @import("ledger");
 const recon = @import("reconcile");
 
 const cfg_bw = helpers.cfg_bw;
@@ -83,14 +82,14 @@ const Fixture = struct {
             .rec = .{},
             .ctx = undefined,
         };
-        ledger.init();
+        recon.init();
         self.ctx = helpers.makeCtx(self.rec.sink(), testColor, helpers.std_wa);
     }
 
     fn deinit(self: *Fixture) void {
         self.rec.deinit();
         minimize.deinit();
-        ledger.init();
+        recon.init();
     }
 
     fn reconcile(self: *Fixture, opts: recon.Opts) void {
@@ -381,7 +380,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     fx.reconcile(.{}); // baseline: placed at master slot on workspace 0
 
     // The live rect IS what we last sent (ledger read #3 feeds assertions).
-    const real_rect = ledger.lastRectFor(701).?;
+    const real_rect = recon.lastRectFor(701).?;
     try testing.expectEqual(@as(i32, golden.single.x), @as(i32, real_rect.x));
     try testing.expectEqual(@as(u16, golden.single.width), real_rect.width);
 
@@ -397,7 +396,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     // the window is already mapped at that rect with that color, so there is
     // nothing to emit.
     try fx.rec.expectLen(0);
-    try testing.expectEqual(real_rect, ledger.lastRectFor(701).?);
+    try testing.expectEqual(real_rect, recon.lastRectFor(701).?);
 
     // History-less variant: registered here with mask bit for workspace 1 but NEVER
     // reconciled on its home workspace (nothing ever sent): first sighting as an
@@ -415,7 +414,7 @@ test "all-view orphan resurfaces at last real rect; history-less orphan parks" {
     try fx.rec.expectLen(2);
     try fx.rec.expectMap(0, 702);
     try fx.rec.expectPark(1, 702);
-    try testing.expectEqual(@as(?model.Rect, null), ledger.lastRectFor(702));
+    try testing.expectEqual(@as(?model.Rect, null), recon.lastRectFor(702));
 }
 
 // forget() / ledger lifecycle (X ids recycle)
@@ -428,7 +427,7 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     helpers.regCur(&fx.m, 801);
     focus.setFocus(&fx.m, 801);
     fx.reconcile(.{});
-    try testing.expect(ledger.lastRectFor(801) != null);
+    try testing.expect(recon.lastRectFor(801) != null);
 
     // truthRect prefers the floating anchor once the model says floating
     // (ledger read #3 contract: actions' detach base).
@@ -437,8 +436,8 @@ test "forget clears the sent ledger; next pass treats the window as first sight"
     try testing.expectEqual(@as(?model.Rect, float_rect), recon.truthRect(&fx.m, 801));
     fx.m.store.getPtr(801).?.anchor = .tiled;
 
-    ledger.forget(801);
-    try testing.expectEqual(@as(?model.Rect, null), ledger.lastRectFor(801));
+    recon.forget(801);
+    try testing.expectEqual(@as(?model.Rect, null), recon.lastRectFor(801));
 
     // Ledger gone => first_send => moved => winner raise replays exactly
     // like first sight. This is why stale records MUST die with unmanage:
@@ -503,22 +502,22 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
 // never be set at all. `has_rect` is what distinguishes "we know the server's
 // current pixel" from "we have never sent one".
 test "ledger: the border-pixel dedup does not swallow a real black border" {
-    ledger.init();
+    recon.init();
 
     // Blank record, black border: MUST send, even though the stored default
     // already reads 0.
-    try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0));
+    try testing.expect(recon.markSentBorderPixelIfChanged(900, 0));
 
     // Now the record exists but no visible geometry was ever sent, so the
     // stored 0 is still not an assertion about the server.
-    try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0));
+    try testing.expect(recon.markSentBorderPixelIfChanged(900, 0));
 
     // A real geometry send records the pixel, and from here the dedup works.
-    const e = ledger.sentGetOrPut(900).?;
-    ledger.markSentVisible(e, .{ .x = 0, .y = 0, .width = 10, .height = 10 }, 2, 0);
-    try testing.expect(!ledger.markSentBorderPixelIfChanged(900, 0)); // elided
-    try testing.expect(ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // changed
-    try testing.expect(!ledger.markSentBorderPixelIfChanged(900, 0x11223344)); // elided
+    const e = recon.sentGetOrPut(900).?;
+    recon.markSentVisible(e, .{ .x = 0, .y = 0, .width = 10, .height = 10 }, 2, 0);
+    try testing.expect(!recon.markSentBorderPixelIfChanged(900, 0)); // elided
+    try testing.expect(recon.markSentBorderPixelIfChanged(900, 0x11223344)); // changed
+    try testing.expect(!recon.markSentBorderPixelIfChanged(900, 0x11223344)); // elided
 }
 
 // Layout activation is ONE question, and "no active layout" still has to
@@ -557,7 +556,7 @@ test "An inactive layout floats every window at the work area" {
 
     // The inactive path: same model, same windows, only the resolved flag off.
     fx.rec.clear();
-    ledger.init();
+    recon.init();
     fx.ctx.layout_active = false;
     fx.reconcile(.{});
 
