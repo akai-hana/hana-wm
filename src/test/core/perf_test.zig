@@ -232,16 +232,19 @@ test "bench: drag tick full reconcile vs targeted reconcileDragTick" {
     // Warm once so the sent ledger is seeded (steady-state drag).
     reconcile.run(&m, &ctx, .{});
 
-    // One motion event's wire shape, pinned before timing: exactly one op —
-    // the dragged window's geometry — which is the whole claim of the
-    // targeted path this bench measures against a full reconcile.
+    // One motion event's wire shape, pinned before timing: the dragged
+    // window's geometry plus the immediate flush that pushes it to the wire
+    // (so a swapchain-recreating client resizes without waiting for the end
+    // of the event batch) — the whole claim of the targeted path this bench
+    // measures against a full reconcile.
     const probe_rect: model.Rect = .{ .x = 101, .y = 101, .width = 300, .height = 200 };
     m.store.getPtr(dragged).?.anchor = .{ .floating = probe_rect };
     var probe = test_sink.TestSink(.record){};
     defer probe.deinit();
     reconcile.reconcileDragTick(&m, probe.sink(), dragged);
-    try probe.expectLen(1);
+    try probe.expectLen(2);
     try probe.expectGeomRect(0, dragged, probe_rect, null);
+    try probe.expectFlush(1);
 
     const iterations: usize = if (bench) 100_000 else 1;
 
