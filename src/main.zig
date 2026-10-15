@@ -41,14 +41,15 @@ const focus = @import("focus");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
-// Always keep Zig's crash handler armed, even though this project defaults to
-// the release profile (ReleaseFast strips DWARF and disables runtime safety,
-// so an uncaught SIGSEGV/SIGBUS would otherwise abort with zero trace, the
-// "silent death" misdiagnosed as a hang). With the handler, the fault address
-// lands in ~/hana-crash.log (and full symbolized stacks in Debug builds).
+// Crash machinery is off by default: both flags cost ~12s of LLVM optimize
+// time and ~14.5% of the release binary, because they pull std's DWARF/ELF
+// symbol lookup (2.1 MB of sort kernels) into the link. The tradeoff is that
+// an uncaught SIGSEGV/SIGBUS in a ReleaseFast build aborts with no trace —
+// diagnose those with `-Doptimize=Debug`, which keeps symbolized stacks.
+// Flip both to `true` to restore ~/hana-crash.log fault reports.
 pub const std_options: std.Options = .{
-    .enable_segfault_handler = true,
-    .allow_stack_tracing = true,
+    .enable_segfault_handler = false,
+    .allow_stack_tracing = false,
     .logFn = logFn,
 };
 

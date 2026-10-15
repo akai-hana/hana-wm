@@ -393,6 +393,11 @@ pub fn reconcileDragTick(m: *const model.Model, snk: sink.Sink, win: model.Windo
     };
 
     snk.configure(win, .{ .rect = rect });
+    // Flush immediately: a video player (mpv) recreates its swapchain on every
+    // size change, and leaving the configure in XCB's buffer until the end of
+    // the event batch delays that work into a burst. Flushing here lets the
+    // client start the resize as soon as the size is committed.
+    snk.flush();
 
     // Update sent ledger so lastRectFor / toggleFloating see the live position.
     // Carry the last real border width/pixel across the drag. Writing
