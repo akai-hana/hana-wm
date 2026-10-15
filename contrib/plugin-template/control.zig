@@ -2,7 +2,7 @@
 //!
 //! COPY ME: the fastest way to start a new control is
 //!
-//!     cp dev/plugin-template/control.zig src/bar/modules/slider/mycontrol.zig
+//!     cp contrib/plugin-template/control.zig src/bar/modules/slider/mycontrol.zig
 //!
 //! then edit the TODO markers. Nothing else needs to change:
 //! build.zig's sub-registry generation (`slider_subs`) picks the

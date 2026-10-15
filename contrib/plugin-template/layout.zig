@@ -2,7 +2,7 @@
 //!
 //! COPY ME: the fastest way to start a new layout is
 //!
-//!     cp dev/plugin-template/layout.zig src/tiling/modules/mylayout.zig
+//!     cp contrib/plugin-template/layout.zig src/tiling/modules/mylayout.zig
 //!
 //! then edit the TODO markers. Nothing else needs to change: build.zig's
 //! directory scan picks the file up, wires your `pub const module` into the

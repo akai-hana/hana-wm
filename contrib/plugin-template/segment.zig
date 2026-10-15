@@ -2,7 +2,7 @@
 //!
 //! COPY ME: the fastest way to start a new segment is
 //!
-//!     cp dev/plugin-template/segment.zig src/bar/modules/mysegment.zig
+//!     cp contrib/plugin-template/segment.zig src/bar/modules/mysegment.zig
 //!
 //! then edit the TODO markers and rename the `module` export's fields you
 //! don't need. Nothing else needs to change: build.zig's directory scan

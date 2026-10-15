@@ -2,7 +2,7 @@
 //!
 //! COPY ME: the fastest way to start a new feature is
 //!
-//!     cp dev/plugin-template/provider.zig src/window/modules/myfeature.zig
+//!     cp contrib/plugin-template/provider.zig src/window/modules/myfeature.zig
 //!
 //! then edit the TODO markers. Nothing else needs to change: build.zig's
 //! directory scan (`src/<owner>/modules/` -> <owner>_modules registry) picks

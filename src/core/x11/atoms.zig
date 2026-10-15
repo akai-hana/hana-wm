@@ -1,7 +1,6 @@
 //! X atom interning: the name -> atom-id table every property request reads.
 //!
-//! Split out of the former `wire` module, which named a transport but held a
-//! client-side memo table for 40% of its length. Interning is a round trip
+//! Interning is a round trip
 //! with the server's atom table, not wire I/O, and it is a distinct concern
 //! from the request shims that consume the ids.
 

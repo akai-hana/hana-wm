@@ -3,7 +3,7 @@
 //!
 //! COPY ME: the fastest way to start a new title decoration is
 //!
-//!     cp dev/plugin-template/title-addon.zig src/bar/modules/title/myscroller.zig
+//!     cp contrib/plugin-template/title-addon.zig src/bar/modules/title/myscroller.zig
 //!
 //! then edit the TODO markers. Nothing else needs to change:
 //! build.zig's sub-registry generation (`title_subs`) picks the file

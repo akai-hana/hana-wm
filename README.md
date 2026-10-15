@@ -85,7 +85,7 @@ All of these are linked unconditionally; they make up `build.zig.zon`'s `.links`
 - Swap-able themes _(by default, split-config pallete files under `config/themes/`)_
 - Advanced binding: `{...}` glob expansion, ranged-keys, multi-action arrays, mouse bindings, placeholder substitution...
 - WM scaling across any display resolution _(DPI & resolution detection)_
-- Drop-in module templates for community extensions _(see [`dev/plugin-template/`](dev/plugin-template/))_
+- Drop-in module templates for community extensions _(see [`contrib/plugin-template/`](contrib/plugin-template/))_
 
 **On hana's bar:**
 
@@ -164,7 +164,7 @@ Finally, I wanted foundational source code **cleanness** and **flexibility**, bo
 - **On flexibility**, the ability for users to extend hana by their own modules should be the bestest possible. \
   The general interfaces that keep cores closed to modules _also_ allow new modules to be created under those same interfaces.
   
-  This means that community extendability is first-class (also including drop-in module templates over at [`dev/plugin-template/`](dev/plugin-template/): [`layout.zig`](dev/plugin-template/layout.zig) for a new tiling layout, [`provider.zig`](dev/plugin-template/provider.zig) for a new window sub-system, and [`segment.zig`](dev/plugin-template/segment.zig) for a new bar segment. These are also enforced by `zig build check`, compiling them against the contracts (`check-plugin-template`). 
+  This means that community extendability is first-class (also including drop-in module templates over at [`contrib/plugin-template/`](contrib/plugin-template/): [`layout.zig`](contrib/plugin-template/layout.zig) for a new tiling layout, [`provider.zig`](contrib/plugin-template/provider.zig) for a new window sub-system, and [`segment.zig`](contrib/plugin-template/segment.zig) for a new bar segment. These are also enforced by `zig build check`, compiling them against the contracts (`check-plugin-template`). 
 
 ---
 
