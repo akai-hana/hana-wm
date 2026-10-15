@@ -75,8 +75,8 @@ pub const EventMasks = struct {
     //  - KEY_PRESS: our keybind grabs land on root via xcb_grab_key.
     //  - POINTER_MOTION (raw): the server reports every pointer move; raw
     //    volume is bounded by motion coalescing in events.handleXcbEvents,
-    //    which collapses runs to the last event per poll wakeup (replaces
-    //    the old POINTER_MOTION_HINT + per-tick QueryPointer re-arm).
+    //    which collapses runs to the last event per poll wakeup (rather than
+    //    a POINTER_MOTION_HINT + per-tick QueryPointer re-arm).
     //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer +
     //    XMaskEvent loop, so root never needs it. Ours are async; the
     //    Super+Button grab from grabs.grabMouseButtons stays engaged for the
@@ -149,8 +149,7 @@ pub const BindingMods = packed struct(u4) {
 /// leaving only the modifier bits the WM uses for keybind matching.
 ///
 /// A mask operation, so it lives with the masks it filters: the input layer
-/// is the only caller and needed it from a general-purpose utility module
-/// before the module was dissolved.
+/// is the only caller.
 pub inline fn normalizeModifiers(state: u16) BindingMods {
     return .{
         .shift = state & mod_shift != 0,

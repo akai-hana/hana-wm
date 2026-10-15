@@ -15,8 +15,7 @@ const focus = @import("focus");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
 const requests = @import("requests");
-
-const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 /// Pure covering-occupant borderless rule: true when `win` must render
 /// borderless because a covering (fullscreen) occupant holds the workspace it
 /// actually lives on. `current` is the current workspace for the
@@ -60,22 +59,21 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
     // covering occupant.
     if (isBehindCoveringWindowWith(m, win, m.current, build_options.has_fullscreen, occupants)) return 0;
     // The model is the focus source, so this cannot drift from the
-    // pipeline's own pick (which used to be a second copy of this ternary).
+    // pipeline's own pick.
     return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
 /// Applies the configured border width to `win`, skipping the configure when
 /// the sync ledger shows that exact width is already the last one sent.
-/// (The ledger is the sole "last border width sent" owner; title_cache
-/// no longer mirrors it.)
+/// (The ledger is the sole "last border width sent" owner.)
 pub fn applyWidth(conn: core.Connection, win: u32) void {
     const w = core.borderWidth();
     if (w == 0) return;
-    if (ledger.sentGet(win)) |e| {
+    if (reconcile.sentGet(win)) |e| {
         if (e.bw == w) return;
     }
     _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{w});
-    if (build_options.has_tiling) ledger.markSentBorderWidth(win, w);
+    if (build_options.has_tiling) reconcile.markSentBorderWidth(win, w);
 }
 
 /// Applies border width + color to `win` against a PRECOMPUTED occupant table,
@@ -87,10 +85,10 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
 /// The color dedup lives in the SENT LEDGER, beside the width record and
 /// the reconcile's own `need_pixel` check, so the sweep and the reconcile derive
 /// "has this pixel already gone out" from one record. Deriving it from the
-/// title_cache entry instead is what let a pixel sent by the reconcile go
+/// title_cache entry instead would let a pixel sent by the reconcile go
 /// unrecorded for the sweep (and vice versa).
 pub fn applyWith(conn: core.Connection, win: u32, occupants: []const ?model.WindowId) void {
     applyWidth(conn, win);
     const c = resolveBorderColorWith(win, occupants);
-    if (ledger.markSentBorderPixelIfChanged(win, c)) requests.setBorderPixel(conn, win, c);
+    if (reconcile.markSentBorderPixelIfChanged(win, c)) requests.setBorderPixel(conn, win, c);
 }

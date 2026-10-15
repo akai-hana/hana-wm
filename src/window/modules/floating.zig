@@ -21,7 +21,6 @@ const query = @import("query");
 const hz = @import("hz");
 
 const pipeline = @import("pipeline");
-const ledger = @import("ledger");
 const usable_area = @import("usable_area");
 const reconcile_tails = @import("reconcile_tails");
 
@@ -221,7 +220,7 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // still-tiled window is fine: the order's replay filters by anchor, so
     // the slot stays inert until the detach, which then inherits the top
     // position the drag deserves.
-    ledger.floatRaise(win);
+    reconcile.floatRaise(win);
     s.flush();
 }
 
@@ -261,8 +260,8 @@ fn computeMoveRect(
 const HintLimits = struct { min_w: i32, min_h: i32, max_w: i32, max_h: i32 };
 
 /// The ONE PMin/PMax clamp policy, shared by the drag-resize path and the
-/// ConfigureRequest path so the two cannot drift (they already had: the
-/// request path was free to disagree about borders or the global floor).
+/// ConfigureRequest path so the two cannot drift: separate clamps could
+/// disagree about borders or the global floor.
 ///
 /// Units are OUTER: an X11 configured width/height excludes the frame, so each
 /// non-zero hint grows by both border widths (`bw2`). `min_dim` is the global
@@ -364,13 +363,13 @@ fn detachToFloating(win: core.WindowId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (model.isCovering(m, win)) return false;
     if (e.anchor != .tiled) return false;
-    const r = ledger.lastRectFor(win) orelse return false;
+    const r = reconcile.lastRectFor(win) orelse return false;
     model.detachTiledToFloating(m, e, win, r);
     pipeline.reconcileGrab(.{});
     return true;
 }
 
-/// Drag tick (no grab; E.6): targeted reconcile — sends ONLY the dragged
+/// Drag tick (no grab): targeted reconcile — sends ONLY the dragged
 /// window's geometry (1 XCB call) instead of replaying all windows. On every
 /// motion event; the rect lands through this module's own setFloatingRect
 /// hook (we ARE the provider, so no providerOf round trip).
@@ -519,8 +518,8 @@ pub fn honorConfigureRequest(
 
 /// This module's window sub-system contribution: the floating drag/resize
 /// commands floating owns.
-/// tiling<->floating command: the old `src/actions/geometry.zig` toggle, moved
-/// beside the drag/rect state it transitions against.
+/// tiling<->floating command: lives beside the drag/rect state it transitions
+/// against.
 /// toggle_floating_window. Tiled->floating seeds the rect from the window's
 /// current on-screen geometry (LastSent); floating->tiled re-enters the home
 /// list at the primary-column head via the ordinary tiling order.
@@ -534,7 +533,7 @@ pub fn toggleFloating(win: model.WindowId) void {
     if (model.isCovering(m, win)) return;
     switch (e.anchor) {
         .tiled => {
-            const r = ledger.lastRectFor(win) orelse return;
+            const r = reconcile.lastRectFor(win) orelse return;
             model.detachTiledToFloating(m, e, win, r);
         },
         .floating => |r| {

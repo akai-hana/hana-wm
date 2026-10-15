@@ -32,8 +32,7 @@ const usable_area = @import("usable_area");
 const sink = @import("sink");
 const tiling = if (build_options.has_tiling) @import("tiling") else @import("std");
 const helpers = @import("helpers");
-
-const ledger = @import("ledger");
+const reconcile = @import("reconcile");
 
 /// Why the fixture refused to connect, so setUp can pick the right banner.
 const SkipReason = enum { no_x, live_wm };
@@ -237,9 +236,9 @@ pub const Fx = struct {
     /// (see above); the connection is kept for the process lifetime.
     pub fn reset(self: *Fx) void {
         // Destroy every window createWindow made -- not only the ones the model
-        // admitted (newer contract fact: the old drain walked the model, and a
-        // test-added stray like ewmh_test's `stranger` was never registered, so
-        // it stayed effective over the shared display after its test). The
+        // admitted: a test-added stray like ewmh_test's `stranger` is never
+        // registered, so draining the model alone would leave it effective over
+        // the shared display after its test. The
         // model/ledger re-arms via pipeline.init() which both clear the
         // admitted-composition too.
         for (self.tracked_wins[0..self.tracked_count]) |win| {
@@ -407,7 +406,7 @@ pub const Fx = struct {
     /// are the geometry the server has.
     pub fn sentGeometry(self: *const Fx, win: u32) ?model.Rect {
         _ = self;
-        return ledger.lastRectFor(win);
+        return reconcile.lastRectFor(win);
     }
 
     /// Asserts the X server's geometry for `win` equals the geometry hana

@@ -16,8 +16,8 @@ const pipeline = @import("pipeline");
 const window = @import("window");
 const fixture = @import("fixture");
 const xcb = core.xcb;
-const ledger = @import("ledger");
 const usable_area = @import("usable_area");
+const reconcile = @import("reconcile");
 const fullscreen = if (@import("build_options").has_fullscreen) @import("fullscreen") else struct {};
 
 /// Two mapped windows, the arrangement most pipeline tests seed.
@@ -47,7 +47,7 @@ test "pipeline: reconcile tiles to engine placements and records LastSent" {
     try fx.expectTiledGeometry(w2);
 
     // The sent ledger matches the actual server geometry.
-    const lr = ledger.lastRectFor(w1) orelse return error.NoLedgerEntry;
+    const lr = reconcile.lastRectFor(w1) orelse return error.NoLedgerEntry;
     const g1 = fx.geometry(w1) orelse return error.ClosedWindow;
     try std.testing.expectEqual(lr.width, g1.width);
     try std.testing.expectEqual(lr.height, g1.height);

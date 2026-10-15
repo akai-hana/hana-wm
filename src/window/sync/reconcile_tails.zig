@@ -6,8 +6,8 @@
 //! because each is one MODEL transition plus one RECONCILE entry: the pure
 //! tiling layer may not import `pipeline`/`core` (build.zig's
 //! `assertPureLayerImports`), so a transition that reaches a server grab
-//! cannot sit under it. The tiling ENGINE is still reached the same way as
-//! before — through the build-generated `tiling_seam`, never by naming
+//! cannot sit under it. The tiling ENGINE is still reached the same way —
+//! through the build-generated `tiling_seam`, never by naming
 //! `src/tiling/` — so a tree without the tiling subsystem keeps compiling
 //! behind the `has_tiling` gates that already guard every one of these.
 
@@ -29,10 +29,10 @@ const tiling = tiling_seam.tiling;
 
 /// The four reconcile shapes a tiling action can ask for, as ONE axis.
 ///
-/// This was a four-bool bag (`restack` / `full_redraw` / `with_focus` /
-/// `bump_fullscreen`) resolved by a three-way if-chain, which let a caller name
-/// a combination that meant nothing -- `with_focus` with no focus transition to
-/// apply, or `restack` silently ignored on the plain path -- and made the
+/// A four-bool bag (`restack` / `full_redraw` / `with_focus` /
+/// `bump_fullscreen`) resolved by a three-way if-chain would let a caller name
+/// a combination that means nothing -- `with_focus` with no focus transition to
+/// apply, or `restack` silently ignored on the plain path -- and would make the
 /// dispatch unreadable without re-deriving the truth table. All four reachable
 /// combinations are enumerated here instead, so the compiler rejects the
 /// impossible ones and a reader sees the dispatch without reading the chain.
@@ -80,9 +80,9 @@ pub fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
         .plain => pipeline.reconcileGrab(.{}),
         .restack => pipeline.reconcileGrab(.{ .force_restack = true }),
         // Focus lands before geometry (focus-before). A null transition for a
-        // focus mode used to @panic via ft.?; treat it as the no-op transition
-        // instead, so a caller that forgets the FocusTransition degrades to a
-        // plain focus-mode retile rather than a crash.
+        // focus mode is treated as the no-op transition instead of a panic, so
+        // a caller that forgets the FocusTransition degrades to a plain
+        // focus-mode retile rather than a crash.
         .focus => pipeline.reconcileGrabFocus(.{}, ft orelse .none, .before, null),
         .focus_restack => pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft orelse .none, .before, null),
     }
@@ -111,9 +111,9 @@ pub fn cycleLayoutKind(dir: i32) void {
 }
 
 /// Step the active layout within the config layout-name list (config order
-/// is the cycle order), reproducing the old model.cycleLayout
-/// wrap-around while resetting the variant index. Defaults/overrides always
-/// come from config names, so the active kind is always resolvable.
+/// is the cycle order), wrapping around while resetting the variant index.
+/// Defaults/overrides always come from config names, so the active kind is
+/// always resolvable.
 fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     if (!build_options.has_tiling) return;
     const cfg = &core.getState().config.tiling;

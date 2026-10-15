@@ -31,11 +31,9 @@ pub fn deinit() void {
     resetState();
 }
 
-/// Maximum number of concurrently minimized windows. Hoisted from here into
-/// the old constants module so the model layer could reach it; folded back
-/// when that module was dissolved -- this module owns the buffer it bounds.
-/// Distinct from `model.max_tiled_windows`: this bounds the minimized-window
-/// buffer, not the tiled-window pool.
+/// Maximum number of concurrently minimized windows. This module owns the
+/// buffer it bounds. Distinct from `model.max_tiled_windows`: this bounds the
+/// minimized-window buffer, not the tiled-window pool.
 pub const max_minimized: usize = 32;
 
 pub const MinimizeError = error{CapacityFull};
@@ -152,8 +150,8 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // again as the screen owner. Plain windows restore to `.present`.
     // Read the core intent off the entry rather than asking the fullscreen
     // module: a peer-module hop is a second source of truth that a session
-    // restore can disagree with, which is exactly how a minimized fullscreen
-    // window used to come back as a plain tiled one.
+    // restore can disagree with, letting a minimized fullscreen window come
+    // back as a plain tiled one.
     e.presence = if (e.covering_ws != null) .covering else .present;
     _ = g_recs.orderedRemove(idx);
 }
@@ -193,9 +191,9 @@ fn bestSeq(
             // Read the model's covering intent directly instead of
             // asking a PEER MODULE through the contract hook. The hook's
             // answer is only right when the covering module is compiled in --
-            // `isCoveringMode` is null otherwise, so this scan silently kept
-            // picking screen-covering windows as restore candidates in a build
-            // without that module. `covering_ws` is the model-side truth,
+            // `isCoveringMode` is null otherwise, and a hook-based scan would
+            // silently pick screen-covering windows as restore candidates in a
+            // build without that module. `covering_ws` is the model-side truth,
             // written on capture, cleared on release, and PERSISTED (handoff
             // restores it), so it is also the right answer during a session
             // restore, before the covering module has rebuilt its own state.
@@ -222,8 +220,8 @@ pub fn restoreCandidate(
     return bestSeq(m, ws, order, false);
 }
 
-/// Most recently minimized PLAIN window on `ws` (fullscreen-carrying cars
-/// excluded, matching the old prev != .base exclusion).
+/// Most recently minimized PLAIN window on `ws` (fullscreen-carrying windows
+/// excluded).
 pub fn latestMinimizedBase(m: *const model.Model, ws: model.WSId) ?model.WindowId {
     return bestSeq(m, ws, .lifo, true);
 }
@@ -305,9 +303,9 @@ pub fn deserializeWindow(win: u32, bytes: []const u8, m: *model.Model) bool {
     if (m.store.getPtr(win) == null) return true; // window gone; claim the blob, nothing to park
     if (g_recs.len >= max_minimized) {
         // Still claim the blob (true), just without adopting the record.
-        // Returning false said "not my blob", so the restore loop kept asking
-        // every other module, none matched, and the window was left in
-        // whatever presence the model had -- parked, i.e. permanently
+        // Returning false means "not my blob": the restore loop would keep
+        // asking every other module, none match, and the window is left in
+        // whatever presence the model has -- parked, i.e. permanently
         // invisible, with no way to recover until the next full restart.
         log.warn("minimize: record list full; window 0x{x} not restored minimized", .{win});
         return true;
@@ -336,10 +334,10 @@ pub fn onWindowGone(win: u32) void {
     _ = g_recs.removeById(.win, win);
 }
 
-/// Parked-window commands: the old `src/actions/parked.zig` group, moved
-/// beside the record table it fills. Each is one model transition plus one
-/// reconcile entry, bound on `module` so the core reaches it through the
-/// registry. Deleting this file drops hide/restore along with the records.
+/// Parked-window commands, living beside the record table they fill. Each is
+/// one model transition plus one reconcile entry, bound on `module` so the
+/// core reaches it through the registry. Deleting this file drops
+/// hide/restore along with the records.
 /// Atomicity: hide + fallback-focus + retile land under one grab.
 ///
 /// Focus policy reads MODEL truth (`m.focused`): hiding the focused

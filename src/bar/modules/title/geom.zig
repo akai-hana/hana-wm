@@ -1,13 +1,10 @@
 //! Title-segment geometry: the pure layout kernel behind both the title
 //! module's split-view draw and the bar's click hit-test.
 //!
-//! It lived in bar/segment.zig next to the shared segment vocabulary, which
-//! made that file read as "one thing" while mixing three unrelated concerns:
-//! the vocabulary every segment imports, the title's window list and its
-//! pixel-perfect tiling, and the registry helpers. None of this needs
-//! `DrawCtx`, `BarHandlers` or any X connection -- it is geometry over a
-//! snapshot -- so it is split out and owned by the title module, which
-//! is the only thing that renders it.
+//! None of it needs `DrawCtx`, `BarHandlers` or any X connection -- it is
+//! geometry over a snapshot -- so it is owned by the title module, the only
+//! thing that renders it, rather than sharing bar/segment.zig's segment
+//! vocabulary.
 //!
 //! `segmentBounds` and its inverse are the load-bearing pair: the draw and the
 //! hit-test MUST agree on which pixels belong to which window, or a click

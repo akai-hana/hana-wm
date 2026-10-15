@@ -1,6 +1,5 @@
 //! Unit tests for the ICCCM 4.1.7 focus-model resolution over the
-//! focus-property cache (owned by focus.zig since the merge from
-//! icccm.zig): the (take_focus × accepts_input) matrix, the cache-miss
+//! focus-property cache (owned by focus.zig): the (take_focus × accepts_input) matrix, the cache-miss
 //! contract, and the provisional fallback. The queries themselves are
 //! X-gated and covered by the admission/focus integration paths; this pins
 //! the pure verdict half they all share.

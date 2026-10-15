@@ -66,8 +66,7 @@ pub const Surface = struct {
         const screen = core.xcb.xcb_setup_roots_iterator(setup).data;
 
         // CreatePixmap requires a concrete depth: XCB_COPY_FROM_PARENT (0) is
-        // only valid for CreateWindow and fails here with BadValue, which
-        // silently killed opaque-bar init (default transparency = 1.0).
+        // only valid for CreateWindow and fails here with BadValue.
         const depth: u8 = if (is_argb) 32 else screen.*.root_depth;
         const visual_type = try resolveVisualType(conn, screen, visual_id, depth);
 

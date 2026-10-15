@@ -16,7 +16,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-// Some restore/save paths log warn-level diagnostics; core/pure/log.zig
+// Some restore/save paths log warn-level diagnostics; core/debug/log.zig
 // silences all std.log diagnostics in test binaries, so this stays quiet
 // on success.
 const model = @import("model");

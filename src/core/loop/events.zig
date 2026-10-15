@@ -19,10 +19,10 @@ const keybinds = @import("keybinds");
 const keys = @import("keys");
 const mouse = @import("mouse");
 const window = @import("window");
-const ledger = @import("ledger");
 const focus = @import("focus");
 
 const pipeline = @import("pipeline");
+const reconcile = @import("reconcile");
 const session = @import("session");
 const spawn = @import("spawn");
 const build_options = @import("build_options");
@@ -89,16 +89,16 @@ fn handleConfigureNotify(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_configure_notify_event_t, event);
     // A client that resizes itself while we had it parked offscreen has undone
     // our park, and the off-workspace elision would not notice. Flag it so the
-    // next reconcile re-parks it (ledger.markParkedDirty).
+    // next reconcile re-parks it (reconcile.markParkedDirty).
     //
     // The managed-window filter is load-bearing, not an optimization: this
     // event fires for every client on the display, including the ones we do
     // not manage, and markParkedDirty already ignores anything not currently
-    // parked -- so an unfiltered call would be a wasted ledger lookup per
+    // parked -- so an unfiltered call would be a wasted reconcile lookup per
     // configure event on the whole session. It also means a managed window's
     // OWN configure (the echo of a park we just sent) sets a flag we then
     // clear, costing one extra park resend per workspace switch and no more.
-    if (window.isValidManagedWindow(e.window)) ledger.markParkedDirty(e.window);
+    if (window.isValidManagedWindow(e.window)) reconcile.markParkedDirty(e.window);
     window.dispatchAll(.notifyConfigureIfPending, .{ e.window, e.width, e.height });
 }
 

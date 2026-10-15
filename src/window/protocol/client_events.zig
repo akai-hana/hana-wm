@@ -1,4 +1,4 @@
-//! Window-layer event handlers, split out of `window.zig`.
+//! Window-layer event handlers.
 //!
 //! Three event classes in one file, each self-contained:
 //!
@@ -19,10 +19,7 @@
 //!      policy (spawn-crossing guard, hover focus) live in protocol/focus.zig.
 //!
 //! `window.zig` re-exports the four public handlers as the event dispatch
-//! surface events.zig's table binds. (Formerly three separate files
-//! merged back 2026-10-09: all three were window-internal, consumed only
-//! by window.zig, and split for event-class organization rather than any
-//! cycle or layer boundary.)
+//! surface events.zig's table binds.
 
 const std = @import("std");
 
@@ -31,7 +28,6 @@ const xcb = core.xcb;
 const log = @import("log");
 const pipeline = @import("pipeline");
 const build_options = @import("build_options");
-const ledger = @import("ledger");
 const reconcile = @import("reconcile");
 const model_mod = @import("model");
 const atoms = @import("atoms");
@@ -85,7 +81,7 @@ fn resolveConfigureGeometry(win: u32) ?model_mod.Rect {
         const border: u16 = if (!build_options.has_tiling)
             0
         else
-            ledger.lastBorderWidthFor(win) orelse core.borderWidth();
+            reconcile.lastBorderWidthFor(win) orelse core.borderWidth();
         return .{
             .x = rect.x,
             .y = rect.y,
@@ -162,7 +158,7 @@ fn handleManagedConfigureRequest(
 /// doesn't re-assert the WM default (reverting the honored value). No-op on
 /// non-tiling builds.
 fn noteHonoredBorderWidth(win: u32, bw: u16) void {
-    if (build_options.has_tiling) ledger.markSentBorderWidth(win, bw);
+    if (build_options.has_tiling) reconcile.markSentBorderWidth(win, bw);
 }
 
 /// Last committed drag rect, for resize-path geometry replay. Zero rect when
@@ -239,7 +235,7 @@ const State = struct {
     // Warn-once latches for client-message diagnostics (see
     // handleClientMessage): a looping pager would otherwise flood the log.
     // One latch per message class -- two unrelated warnings sharing a latch
-    // meant whichever fired first silenced the other for the process's life.
+    // mean whichever fires first silences the other for the process's life.
     // Reset together via reset() so an init() re-arms every diagnostic.
     warned_unmanaged_fs_request: bool = false,
     warned_active_ignore: bool = false,
@@ -256,8 +252,8 @@ pub fn reset() void {
 /// Logs `fmt` at warn level at most once per process, arming `latch` (a field
 /// of `State`, so a reset() re-arms every diagnostic together). The
 /// client-message handlers are fed by EWMH pagers that can loop forever, and
-/// one shared latch between two message classes meant the second warning could
-/// never fire after the first.
+/// one shared latch between two message classes means the second warning
+/// can never fire after the first.
 fn warnOnce(latch: *bool, comptime fmt: []const u8, args: anytype) void {
     if (latch.*) return;
     latch.* = true;
@@ -272,9 +268,8 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     // `_NET_WM_FULLSCREEN_REQUEST` is a SEPARATE EWMH message from
     // `_NET_WM_STATE`, and it is the one browsers use for native video
     // fullscreen. Its layout is: window field = the window, data32[0] = the
-    // intended end state (1 enter, 0 leave). Dropping it -- as the pre-fix
-    // handler did, since the atom appeared nowhere in the tree -- is why F
-    // did nothing in a YouTube player while hana's own Mod+F worked.
+    // intended end state (1 enter, 0 leave). Left unanswered, this is why F
+    // does nothing in a YouTube player while hana's own Mod+F works.
     const net_fs_request = atoms.getAtomOrZero("_NET_WM_FULLSCREEN_REQUEST");
     if (net_fs_request != 0 and event.type == net_fs_request) {
         const win = event.window;

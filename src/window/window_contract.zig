@@ -46,7 +46,7 @@ pub const WindowModule = struct {
     /// and every one is adopted. Together with `single_binder_hooks` this is a
     /// PARTITION of the contract, asserted below -- which is the point. The
     /// at-most-one check for a newly added first-match hook only runs if the
-    /// name is listed, so an unlisted new hook silently escaped it; naming both
+    /// name is listed, so an unlisted new hook escapes it; naming both
     /// halves makes a new hook a compile error instead.
     pub const multi_binder_hooks = [_][]const u8{
         "init",                     "deinit",
@@ -60,13 +60,10 @@ pub const WindowModule = struct {
     /// in neither cardinality list: nothing dispatches them, and they have no
     /// binder count.
     ///
-    /// This exists because the partition assert below used to be stated as
-    /// "every field is a hook", which was true while the type carried nothing
-    /// but hooks, and stopped being true the moment a stable identity field
-    /// was added for persistence. The honest form of the invariant is "every
-    /// field is classified, as single-dispatch, multi-dispatch, or data" --
-    /// and a field still has to be classified to get here, so adding one
-    /// without a decision is still a compile error.
+    /// The partition invariant therefore has to account for data fields: the
+    /// honest form is "every field is classified, as single-dispatch,
+    /// multi-dispatch, or data" -- and a field still has to be classified to
+    /// get here, so adding one without a decision is still a compile error.
     pub const non_hook_fields = [_][]const u8{"name"};
 
     /// Stable identity for this module, used by persistence to stamp a saved
@@ -151,21 +148,18 @@ pub const WindowModule = struct {
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
     toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
-    // `isCoveringMode`, `coveringWsOf` and `isCoveringOnWs` are GONE.
-    // Each body was a pure read of the model's `covering_ws` field, so the
-    // three hooks were three copies of a model query behind a dispatch that
-    // returns null when no covering module is bound -- meaning "is this window
-    // covering" answered FALSE in such a build while the model held the
-    // intent. The queries are now `model.coveringWsOf` / `model.isCovering` /
-    // `model.isCoveringOn`, which cannot be unbound.
+    // The covering reads are model queries, not hooks: a hook behind the
+    // registry returns null when no covering module is bound -- meaning "is
+    // this window covering" would answer FALSE in such a build while the model
+    // held the intent. `model.coveringWsOf` / `model.isCovering` /
+    // `model.isCoveringOn` cannot be unbound.
     /// The STRICT covering occupant on `ws`: covering AND anchored AND visible
     /// (an AND of all three, where the model's `coveringOccupantOnWs` is an
     /// anchor-or-visible OR). Both exist and both are used: the model scan
     /// answers "who owns the screen", the strict one answers "which covering
-    /// window is actually usable here". Renamed from `coveringOccupantOnWs`
-    /// Because sharing a name with the model scan is what let the two
-    /// different semantics read as interchangeable. At most one module binds
-    /// this.
+    /// window is actually usable here". Named apart from the model scan:
+    /// sharing its name would let the two different semantics read as
+    /// interchangeable. At most one module binds this.
     visibleCoveringOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
     /// One-way covering release: clear `win`'s covering intent and presence.
     /// Unlike `toggleCovering` this never ENTERS covering mode, so a peer that
@@ -214,15 +208,13 @@ pub const WindowModule = struct {
     getDragLastRect: ?*const fn () model.Rect = null,
     cancelDragForWindow: ?*const fn (u32) void = null,
 
-    // User-facing commands (the dissolved action layer).
+    // User-facing commands.
     //
-    // The old `src/actions/` hub held each command's WHOLE transition -- one
-    // model write plus the reconcile that follows it -- split off from the
-    // module that owns the state it writes. The commands now live in that
-    // module, and these hooks are how the core/input and bar call sites
-    // reach them: the core never names an optional module directly, so a
-    // tree without the module simply has no binder and the command no-ops
-    // (exactly what the old `providerOf(...) orelse return` guards did).
+    // Each command's WHOLE transition -- one model write plus the reconcile
+    // that follows it -- lives in the module that owns the state it writes;
+    // these hooks are how the core/input and bar call sites reach them: the
+    // core never names an optional module directly, so a tree without the
+    // module simply has no binder and the command no-ops.
     // Command hooks take no `*model.Model`: the command resolves the live
     // model through the pipeline itself, which is what makes it a command
     // rather than a model transition.
@@ -266,15 +258,12 @@ pub const WindowModule = struct {
 comptime {
     // 36 fields x up to 27 names, twice over.
     @setEvalBranchQuota(20_000);
-    // KEPT by the KISS audit's judgment (the "drop the validation layer"
-    // option was considered and rejected): the lists are not documentation
-    // dressed as code -- build.zig's generated registry consumes
-    // `single_binder_hooks` to reject a second binder at comptime, and that
-    // check only runs for names the lists contain. The partition below is
-    // what makes "added a hook, forgot to classify it" a compile error
-    // instead of an escape from the at-most-one enforcement. ~40 lines of
-    // comptime is cheap for that; the dispatch COLLAPSE (6->2) is where the
-    // machinery went.
+    // The lists are not documentation dressed as code -- build.zig's generated
+    // registry consumes `single_binder_hooks` to reject a second binder at
+    // comptime, and that check only runs for names the lists contain. The
+    // partition below is what makes "added a hook, forgot to classify it" a
+    // compile error instead of an escape from the at-most-one enforcement.
+    // ~40 lines of comptime is cheap for that.
     //
     // Every `WindowModule` field is classified exactly once across the two
     // cardinality lists plus the data list, and no list names a field that no
