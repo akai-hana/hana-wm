@@ -396,7 +396,8 @@ fn deactivate() void {
     g.is_active = false;
     // on_deactivate must be called in exactly the situations dispatch routed
     // key input through the vim/normal handlers -- which is gated on
-    // editor.addon_active, not the vim_mode config key.
+    // editor.addon_active (whether a modal handler set is installed), not on
+    // any config key.
     if (editor.addon_active) editor.handlers.on_deactivate(&g.vim_state);
     const conn = core.getState().conn;
     _ = xcb.xcb_ungrab_keyboard(conn, xcb.XCB_CURRENT_TIME);

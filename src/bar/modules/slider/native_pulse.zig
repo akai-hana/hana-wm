@@ -24,10 +24,16 @@
 //! added in pulse 16.0, moving `default_sink_name` from offset 40 to 48; both
 //! are tried, selecting the first that looks like a sink name.
 //!
-//! Lifecycle: attach is attempted once and cached by the volume segment. All
-//! operations are issued under the mainloop lock with a bounded wait, so a
-//! dead daemon cannot hang the WM's event loop. One-shot ops never overlap
-//! (single-threaded event loop), so per-op state lives in module globals.
+//! Lifecycle: attach is attempted once and cached by the volume segment; a
+//! failed attach tears every handle down so the next probe starts clean.
+//! All operations are issued under the mainloop lock with a wait bounded by
+//! the deadline AND the context state: the wait can only re-check those on a
+//! wake, so every callback contract branch (including the terminal
+//! `info == NULL` ones) must signal `done` -- see `sinkInfoCb`. One-shot ops
+//! never overlap (single-threaded event loop), so per-op state lives in
+//! module globals, and each op's userdata carries its generation so a callback
+//! arriving after its waiter timed out is dropped instead of writing into the
+//! next op's result.
 
 const std = @import("std");
 const core = @import("core");
@@ -98,6 +104,7 @@ const SinkInfoResult = struct {
 const FnMainloopNew = *const fn () callconv(.c) ?*anyopaque;
 const FnMainloopFree = *const fn (?*anyopaque) callconv(.c) void;
 const FnMainloopStart = *const fn (?*anyopaque) callconv(.c) c_int;
+const FnMainloopStop = *const fn (?*anyopaque) callconv(.c) void;
 const FnMainloopGetApi = *const fn (?*anyopaque) callconv(.c) ?*anyopaque;
 const FnMainloopSignal = *const fn (?*anyopaque, c_int) callconv(.c) void;
 const FnMainloopWait = *const fn (?*anyopaque) callconv(.c) c_int;
@@ -106,6 +113,7 @@ const FnMainloopUnlock = *const fn (?*anyopaque) callconv(.c) void;
 const FnContextNew = *const fn (?*anyopaque, [*:0]const u8) callconv(.c) ?*anyopaque;
 const FnContextFree = *const fn (?*anyopaque) callconv(.c) void;
 const FnContextConnect = *const fn (?*anyopaque, ?[*:0]const u8, c_int, ?*const anyopaque) callconv(.c) c_int;
+const FnContextDisconnect = *const fn (?*anyopaque) callconv(.c) void;
 const FnContextGetState = *const fn (?*anyopaque) callconv(.c) c_int;
 const FnServerInfoCb = *const fn (?*anyopaque, ?*const anyopaque, ?*anyopaque) callconv(.c) void;
 const FnSinkInfoCb = *const fn (?*anyopaque, ?*const anyopaque, c_int, ?*anyopaque) callconv(.c) void;
@@ -123,6 +131,7 @@ const Lib = struct {
     mainloop_new: FnMainloopNew,
     mainloop_free: FnMainloopFree,
     mainloop_start: FnMainloopStart,
+    mainloop_stop: FnMainloopStop,
     mainloop_get_api: FnMainloopGetApi,
     mainloop_signal: FnMainloopSignal,
     mainloop_wait: FnMainloopWait,
@@ -131,6 +140,7 @@ const Lib = struct {
     context_new: FnContextNew,
     context_free: FnContextFree,
     context_connect: FnContextConnect,
+    context_disconnect: FnContextDisconnect,
     context_get_state: FnContextGetState,
     get_server_info: FnGetServerInfo,
     get_sink_info_by_name: FnGetSinkInfoByName,
@@ -244,15 +254,44 @@ pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
 
 // Operation plumbing
 
-/// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`.
+/// Generation of the newest op, bumped (under the mainloop lock) each time an
+/// op is issued or the backend is torn down. Carried into every callback as
+/// the userdata value, so a callback whose waiter already timed out -- and
+/// which may fire while a NEWER op owns the result globals -- identifies
+/// itself as stale and is dropped before it can write or signal.
+var g_active_gen: usize = 0;
+
+fn genUserdata(gen: usize) ?*anyopaque {
+    // +1 keeps a live gen distinct from a null userdata.
+    return @ptrFromInt(gen + 1);
+}
+
+fn genIsCurrent(ud: ?*anyopaque) bool {
+    const p = @intFromPtr(ud);
+    // A null userdata is not something this module ever issues; treat it as
+    // current rather than stale, because dropping the signal of a callback a
+    // waiter IS parked on is the failure mode this gate exists to prevent.
+    if (p == 0) return true;
+    return p - 1 == g_active_gen;
+}
+
+/// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`
+/// and by the context leaving a dead state. The deadline and the state are
+/// both only re-checked when the wait wakes, so correctness of the bound
+/// depends on every terminal callback path signaling `done` (libpulse
+/// guarantees one invocation per op; `sinkInfoCb` covers the `info == NULL`
+/// terminal forms).
 fn waitDone(done: *bool, timeout_ms: i64) bool {
     const lib = g_oplib.?;
     const m = g_mainloop.?;
+    const ctx = g_ctx.?;
     const deadline = core.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
     while (!done.*) {
         if (core.realtimeMs() >= deadline) return false;
+        const st = lib.context_get_state(ctx);
+        if (st == PA_STATE_FAILED or st == PA_STATE_TERMINATED) return false;
         _ = lib.mainloop_wait(m);
     }
     return true;
@@ -266,35 +305,45 @@ fn runOp(issue: IssueFn, done: *bool, timeout_ms: i64) bool {
     const lib = g_oplib.?;
     const m = g_mainloop.?;
     lib.mainloop_lock(m);
+    g_active_gen += 1;
     const op = issue(g_ctx.?);
     if (op == null) {
+        // Op creation failed => libpulse registered no callback, so nothing
+        // can signal; report failure without waiting out the deadline.
         lib.mainloop_unlock(m);
         return false;
     }
     lib.mainloop_unlock(m);
     const ok = waitDone(done, timeout_ms);
+    // Re-take the lock before unref so the unref cannot interleave with an
+    // in-flight callback's final writes; a stale post-timeout callback is
+    // rejected by its generation, not by this unref.
+    lib.mainloop_lock(m);
     lib.operation_unref(op);
+    lib.mainloop_unlock(m);
     return ok;
 }
 
-// Issue stubs (params from the module globals).
+// Issue stubs (params from the module globals). Each op's userdata is the
+// generation current at issue time (stubs run synchronously under the lock
+// right after `runOp`'s bump).
 fn issueServerInfo(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_server_info(ctx, serverInfoCb, null);
+    return g_oplib.?.get_server_info(ctx, serverInfoCb, genUserdata(g_active_gen));
 }
 fn issueSinkByName(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_sink_info_by_name(ctx, g_op_name[0..g_op_name_len :0], sinkInfoCb, null);
+    return g_oplib.?.get_sink_info_by_name(ctx, g_op_name[0..g_op_name_len :0], sinkInfoCb, genUserdata(g_active_gen));
 }
 fn issueSinkByIndex(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_sink_info_by_index(ctx, g_op_index, sinkInfoCb, null);
+    return g_oplib.?.get_sink_info_by_index(ctx, g_op_index, sinkInfoCb, genUserdata(g_active_gen));
 }
 fn issueSinkList(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_sink_info_list(ctx, sinkInfoCb, null);
+    return g_oplib.?.get_sink_info_list(ctx, sinkInfoCb, genUserdata(g_active_gen));
 }
 fn issueSetVolume(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.set_sink_volume(ctx, g_op_index, @ptrCast(&g_op_vol), successCb, null);
+    return g_oplib.?.set_sink_volume(ctx, g_op_index, @ptrCast(&g_op_vol), successCb, genUserdata(g_active_gen));
 }
 fn issueSetMute(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.set_sink_mute(ctx, g_op_index, g_op_mute, successCb, null);
+    return g_oplib.?.set_sink_mute(ctx, g_op_index, g_op_mute, successCb, genUserdata(g_active_gen));
 }
 
 fn signalDone(done: *bool) void {
@@ -302,7 +351,8 @@ fn signalDone(done: *bool) void {
     if (g_mainloop) |m| if (g_oplib) |lib| lib.mainloop_signal(m, 0);
 }
 
-fn serverInfoCb(_: ?*anyopaque, info: ?*const anyopaque, _: ?*anyopaque) callconv(.c) void {
+fn serverInfoCb(_: ?*anyopaque, info: ?*const anyopaque, userdata: ?*anyopaque) callconv(.c) void {
+    if (!genIsCurrent(userdata)) return;
     if (info) |i| {
         const ptr = @as([*]const u8, @ptrCast(@constCast(i)));
         if (readDefaultSink(ptr[0..512])) |name| {
@@ -315,8 +365,17 @@ fn serverInfoCb(_: ?*anyopaque, info: ?*const anyopaque, _: ?*anyopaque) callcon
     signalDone(&g_server.done);
 }
 
-fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, _: ?*anyopaque) callconv(.c) void {
-    if (info == null) return;
+fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, userdata: ?*anyopaque) callconv(.c) void {
+    if (!genIsCurrent(userdata)) return;
+    if (info == null) {
+        // The terminal callback arrives as `info == NULL, eol != 0` for BOTH
+        // an empty list and an operation error. Returning here without
+        // signaling would leave `waitDone` parked in `mainloop_wait` with no
+        // wake to re-check its deadline -- i.e. a frozen WM. Signal on every
+        // terminal form; `found` stays as whatever a prior entry set.
+        if (eol != 0) signalDone(&g_sink.done);
+        return;
+    }
     if (eol != 0) {
         // List exhaustion: no more entries; the first guarded entry (set
         // above on a non-eol call) is what `found` keeps.
@@ -343,7 +402,8 @@ fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, _: ?*anyopaqu
     }
 }
 
-fn successCb(_: ?*anyopaque, success: c_int, _: ?*anyopaque) callconv(.c) void {
+fn successCb(_: ?*anyopaque, success: c_int, userdata: ?*anyopaque) callconv(.c) void {
+    if (!genIsCurrent(userdata)) return;
     g_sink.found = success != 0;
     signalDone(&g_sink.done);
 }
@@ -351,31 +411,40 @@ fn successCb(_: ?*anyopaque, success: c_int, _: ?*anyopaque) callconv(.c) void {
 // Attach
 
 fn openLib() ?Lib {
-    var lib = std.DynLib.open("libpulse.so.0") catch return null;
+    var dl = std.DynLib.open("libpulse.so.0") catch return null;
     return .{
-        ._lib = lib,
-        .mainloop_new = lookupKnown(&lib, FnMainloopNew, "pa_threaded_mainloop_new") orelse return null,
-        .mainloop_free = lookupKnown(&lib, FnMainloopFree, "pa_threaded_mainloop_free") orelse return null,
-        .mainloop_start = lookupKnown(&lib, FnMainloopStart, "pa_threaded_mainloop_start") orelse return null,
-        .mainloop_get_api = lookupKnown(&lib, FnMainloopGetApi, "pa_threaded_mainloop_get_api") orelse return null,
-        .mainloop_signal = lookupKnown(&lib, FnMainloopSignal, "pa_threaded_mainloop_signal") orelse return null,
-        .mainloop_wait = lookupKnown(&lib, FnMainloopWait, "pa_threaded_mainloop_wait") orelse return null,
-        .mainloop_lock = lookupKnown(&lib, FnMainloopLock, "pa_threaded_mainloop_lock") orelse return null,
-        .mainloop_unlock = lookupKnown(&lib, FnMainloopUnlock, "pa_threaded_mainloop_unlock") orelse return null,
-        .context_new = lookupKnown(&lib, FnContextNew, "pa_context_new") orelse return null,
-        .context_free = lookupKnown(&lib, FnContextFree, "pa_context_free") orelse return null,
-        .context_connect = lookupKnown(&lib, FnContextConnect, "pa_context_connect") orelse return null,
-        .context_get_state = lookupKnown(&lib, FnContextGetState, "pa_context_get_state") orelse return null,
-        .get_server_info = lookupKnown(&lib, FnGetServerInfo, "pa_context_get_server_info") orelse return null,
-        .get_sink_info_by_name = lookupKnown(&lib, FnGetSinkInfoByName, "pa_context_get_sink_info_by_name") orelse return null,
-        .get_sink_info_by_index = lookupKnown(&lib, FnGetSinkInfoByIndex, "pa_context_get_sink_info_by_index") orelse return null,
-        .get_sink_info_list = lookupKnown(&lib, FnGetSinkInfoList, "pa_context_get_sink_info_list") orelse return null,
-        .set_sink_volume = lookupKnown(&lib, FnSetSinkVolume, "pa_context_set_sink_volume_by_index") orelse return null,
-        .set_sink_mute = lookupKnown(&lib, FnSetSinkMute, "pa_context_set_sink_mute_by_index") orelse return null,
-        .operation_unref = lookupKnown(&lib, FnOperationUnref, "pa_operation_unref") orelse return null,
+        ._lib = dl,
+        .mainloop_new = lookupKnown(&dl, FnMainloopNew, "pa_threaded_mainloop_new") orelse return missOpen(dl),
+        .mainloop_free = lookupKnown(&dl, FnMainloopFree, "pa_threaded_mainloop_free") orelse return missOpen(dl),
+        .mainloop_start = lookupKnown(&dl, FnMainloopStart, "pa_threaded_mainloop_start") orelse return missOpen(dl),
+        .mainloop_stop = lookupKnown(&dl, FnMainloopStop, "pa_threaded_mainloop_stop") orelse return missOpen(dl),
+        .mainloop_get_api = lookupKnown(&dl, FnMainloopGetApi, "pa_threaded_mainloop_get_api") orelse return missOpen(dl),
+        .mainloop_signal = lookupKnown(&dl, FnMainloopSignal, "pa_threaded_mainloop_signal") orelse return missOpen(dl),
+        .mainloop_wait = lookupKnown(&dl, FnMainloopWait, "pa_threaded_mainloop_wait") orelse return missOpen(dl),
+        .mainloop_lock = lookupKnown(&dl, FnMainloopLock, "pa_threaded_mainloop_lock") orelse return missOpen(dl),
+        .mainloop_unlock = lookupKnown(&dl, FnMainloopUnlock, "pa_threaded_mainloop_unlock") orelse return missOpen(dl),
+        .context_new = lookupKnown(&dl, FnContextNew, "pa_context_new") orelse return missOpen(dl),
+        .context_free = lookupKnown(&dl, FnContextFree, "pa_context_free") orelse return missOpen(dl),
+        .context_connect = lookupKnown(&dl, FnContextConnect, "pa_context_connect") orelse return missOpen(dl),
+        .context_disconnect = lookupKnown(&dl, FnContextDisconnect, "pa_context_disconnect") orelse return missOpen(dl),
+        .context_get_state = lookupKnown(&dl, FnContextGetState, "pa_context_get_state") orelse return missOpen(dl),
+        .get_server_info = lookupKnown(&dl, FnGetServerInfo, "pa_context_get_server_info") orelse return missOpen(dl),
+        .get_sink_info_by_name = lookupKnown(&dl, FnGetSinkInfoByName, "pa_context_get_sink_info_by_name") orelse return missOpen(dl),
+        .get_sink_info_by_index = lookupKnown(&dl, FnGetSinkInfoByIndex, "pa_context_get_sink_info_by_index") orelse return missOpen(dl),
+        .get_sink_info_list = lookupKnown(&dl, FnGetSinkInfoList, "pa_context_get_sink_info_list") orelse return missOpen(dl),
+        .set_sink_volume = lookupKnown(&dl, FnSetSinkVolume, "pa_context_set_sink_volume_by_index") orelse return missOpen(dl),
+        .set_sink_mute = lookupKnown(&dl, FnSetSinkMute, "pa_context_set_sink_mute_by_index") orelse return missOpen(dl),
+        .operation_unref = lookupKnown(&dl, FnOperationUnref, "pa_operation_unref") orelse return missOpen(dl),
     };
-    // A missing symbol leaks the opened handle on the failure path -- the
-    // module is attached once per session and the leak is one dlopen.
+    // A missing symbol closes the handle before giving up: attach can now
+    // retry after a teardown, and an unclosed miss would leak one dlopen per
+    // probe instead of one per session.
+}
+
+fn missOpen(dl: std.DynLib) ?Lib {
+    var handle = dl;
+    handle.close();
+    return null;
 }
 
 fn lookupKnown(lib: *std.DynLib, comptime ftype: type, name: [:0]const u8) ?ftype {
@@ -399,27 +468,71 @@ fn waitReady(timeout_ms: i64) bool {
     }
 }
 
+/// Tears down a failed attach so no worker thread, context, mainloop or
+/// dlopen handle outlives the failure: a retry starts from zero, and
+/// stopping the worker FIRST guarantees no callback is in flight while the
+/// objects it would touch are freed. Returns null for `return abortAttach(...)`
+/// call sites.
+fn abortAttach(lib: Lib, m: ?*anyopaque, ctx: ?*anyopaque, started: bool) ?Backend {
+    if (ctx != null and started) {
+        // Disconnect under the lock (the worker is still alive and owns the
+        // connection), then stop the worker before any free.
+        lib.mainloop_lock(m.?);
+        lib.context_disconnect(ctx.?);
+        lib.mainloop_unlock(m.?);
+    }
+    if (started) lib.mainloop_stop(m.?);
+    if (ctx) |ctxp| lib.context_free(ctxp);
+    if (m) |mm| lib.mainloop_free(mm);
+    g_oplib = null;
+    g_mainloop = null;
+    g_ctx = null;
+    // Invalidate any straggler callback of the dead backend: its generation
+    // can no longer match, so it can neither write results nor signal a
+    // future waiter.
+    g_active_gen += 1;
+    var handle = lib._lib;
+    handle.close();
+    return null;
+}
+
 /// Attempts to attach to the local PulseAudio/PipeWire daemon. Returns null
-/// (never crashes) when the library, daemon, or ABI guards are unavailable.
+/// (never crashes) when the library, daemon, or ABI guards are unavailable,
+/// with every partially-built object torn down first.
 pub fn attach() ?Backend {
     if (!pulseReachable()) return null;
     const lib = openLib() orelse return null;
 
-    const m = lib.mainloop_new() orelse return null;
-    const api = lib.mainloop_get_api(m) orelse return null;
-    const ctx = lib.context_new(api, "hana") orelse return null;
+    const m = lib.mainloop_new() orelse {
+        var handle = lib._lib;
+        handle.close();
+        return null;
+    };
+    const api = lib.mainloop_get_api(m) orelse {
+        lib.mainloop_free(m);
+        var handle = lib._lib;
+        handle.close();
+        return null;
+    };
+    const ctx = lib.context_new(api, "hana") orelse {
+        lib.mainloop_free(m);
+        var handle = lib._lib;
+        handle.close();
+        return null;
+    };
 
     g_oplib = lib;
     g_mainloop = m;
     g_ctx = ctx;
+    g_active_gen += 1;
 
     lib.mainloop_lock(m);
     const rc = lib.context_connect(ctx, null, 0, null);
     lib.mainloop_unlock(m);
-    if (rc < 0) return null;
+    if (rc < 0) return abortAttach(lib, m, ctx, false);
 
-    if (lib.mainloop_start(m) < 0) return null;
-    if (!waitReady(2000)) return null;
+    if (lib.mainloop_start(m) < 0) return abortAttach(lib, m, ctx, false);
+    if (!waitReady(2000)) return abortAttach(lib, m, ctx, true);
 
     // Resolve the default sink: server_info first, then the list fallback.
     var index: u32 = PA_INVALID_INDEX;
@@ -446,7 +559,7 @@ pub fn attach() ?Backend {
                 channels = g_sink.channels;
             }
         }
-        if (index == PA_INVALID_INDEX) return null;
+        if (index == PA_INVALID_INDEX) return abortAttach(lib, m, ctx, true);
     }
 
     return .{
@@ -467,6 +580,15 @@ pub const Backend = struct {
     index: u32,
     channels: u8,
     muted: bool,
+
+    /// Detaches the backend: stop the worker, disconnect, free everything,
+    /// clear the module globals. The single-backend module's globals ARE the
+    /// handles this `Backend` was built from, so the caller must drop its own
+    /// copy immediately after -- the `lib` function pointers inside it are
+    /// dead once the dlopen handle closes.
+    pub fn deinit(_: *Backend) void {
+        _ = abortAttach(g_oplib.?, g_mainloop, g_ctx, true);
+    }
 
     /// In-process volume commit: one native-protocol round trip.
     pub fn setVolumePct(self: *const Backend, pct: u8) bool {

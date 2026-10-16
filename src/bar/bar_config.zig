@@ -130,11 +130,6 @@ inline fn freeOwnedStrings(self: *Config, allocator: std.mem.Allocator) void {
 pub const Config = struct {
     enabled: bool = true,
 
-    /// true = full vim modal editing in the prompt; false = basic
-    /// single-line editing (arrows, Home/End, Backspace/Delete) via the
-    /// existing fallback path.
-    vim_mode: bool = true,
-
     bar_position: BarScreenPosition = .top,
     // Configured bar height: absolute pixel value or percentage of screen height.
     // null = auto-calculate from font metrics alone.
@@ -405,7 +400,6 @@ fn barColorOpt(key: []const u8, target: []const u8, sibling: []const u8) knob.Kn
 pub const knobs = [_]knob.Knob{
     // [bar]
     barBool("enabled"),
-    barBool("vim_mode"),
     barBool("carousel_enabled"),
     barScalable("font_size", "font_size"),
     // per_segment_padding feeds Config.spacing.

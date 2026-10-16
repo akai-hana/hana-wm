@@ -55,9 +55,10 @@ var g_has_value: bool = false;
 var g_ladder_failed_at_ms: ?i64 = null;
 
 /// Attached handles for the two in-process rungs. Non-null means the rung won
-/// the ladder walk and is latched. Probed lazily and never given up on: a
-/// `null` here only means "not attached yet", and the reachability recheck in
-/// `probeDue` is what allows a late-appearing daemon to be picked up.
+/// the ladder walk and is latched. Probed lazily; given up on when a read
+/// fails (the native pulse backend is torn down so the next walk attaches
+/// fresh), and `probeDue`'s reachability recheck is what allows a
+/// late-appearing daemon to be picked up.
 var g_native_pulse: ?native_pulse.Backend = null;
 var g_native_alsa: ?native_alsa.Master = null;
 /// When the daemon is next re-checked for having come back. Separate from the
@@ -72,9 +73,10 @@ pub const reprobe_interval_ms: i64 = 15_000;
 
 /// What the negative cache says about one poll: whether the ladder may be
 /// walked. One bool, because there is now exactly one thing to forget: the
-/// latched backend. (The native rungs' one-shot attach is un-latched by a
-/// daemon-reachability CHANGE instead -- see `probeDue` -- which is what
-/// finds a daemon that started after this cache wrote the machine off.)
+/// latched backend. (A failed native read un-latches its attach directly --
+/// `readLatched`/`tryRungNativePulse` tear the backend down -- while a
+/// daemon-reachability CHANGE is what grants the walk that finds a daemon
+/// started after this cache wrote the machine off. See `probeDue`.)
 pub const Probe = struct { walk: bool };
 
 /// The pure re-probe decision. All the timing policy, with no clock and
@@ -233,7 +235,15 @@ fn readLatched() ?bool {
     // two rungs share a shape but not a body.
     switch (latchedRung(g_backend)) {
         .native_pulse => {
-            const sink = g_native_pulse.?.readSink() orelse return null;
+            const sink = g_native_pulse.?.readSink() orelse {
+                // The native backend stopped answering (daemon died or
+                // restarted): tear it DOWN and forget it, so the next ladder
+                // walk attaches fresh instead of holding a dead context --
+                // and its worker thread -- for the rest of the session.
+                g_native_pulse.?.deinit();
+                g_native_pulse = null;
+                return null;
+            };
             g_pct = sink.pct;
             g_muted = sink.muted;
         },
@@ -354,6 +364,11 @@ fn tryRungNativePulse() bool {
             g_muted = sink.muted;
             return true;
         }
+        // Attached but unresponsive: tear down and forget, mirroring the
+        // readLatched failure path -- a fresh attach is the only way back to
+        // the native rung after a daemon restart.
+        np.deinit();
+        g_native_pulse = null;
     }
     return false;
 }

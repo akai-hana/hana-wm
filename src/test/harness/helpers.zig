@@ -163,9 +163,13 @@ pub const std_layout_names = [_][]const u8{ "master", "monocle", "grid", "fibona
 /// append mode, so every fresh handle starts writing at offset 0 and each
 /// record overwrites the head of the last one -- a timing truncated to its
 /// own tail ("...=130 (configure=50,map=40)" with the label and the numbers
-/// before it gone). Holding the handle for the run makes the position
-/// advance naturally, and the test runner executes a binary's tests
-/// sequentially, so there is no concurrent writer.
+/// before it gone). Holding the handle for the run keeps ONE process
+/// sequential, but `build.zig` compiles one test binary PER `*_test` module
+/// and runs those in parallel -- all appending here. That position is stable
+/// only until another process writes, so every record re-seeks to EOF under
+/// an exclusive lock: with a stale offset a line lands on another process's
+/// tail, and `perf_test`'s selftest (which pins `size_before` at EOF) fails
+/// because its own marker arrives before it.
 ///
 /// The handle is intentionally never closed: this is a short-lived test
 /// process, and a close would need a teardown hook the test protocol does not
@@ -181,15 +185,6 @@ pub fn benchLog(comptime fmt: []const u8, args: anytype) void {
             .truncate = false,
             .permissions = @enumFromInt(0o644),
         }) catch return;
-        // createFile leaves the shared handle positioned at START OF FILE, so
-        // every new process run writes from offset 0 and clobbers the tail of
-        // the previous one. Advance to EOF so this process appends after it.
-        // std.os.linux wraps no lseek at 0.16, so we reach for it through the
-        // fused built-in end endpoints; wrap the syscall for plain
-        // portability to our Linux-only test harness.
-        if (@import("builtin").os.tag == .linux) {
-            _ = std.os.linux.lseek(bench_file.?.handle, 0, std.os.linux.SEEK.END);
-        }
     }
     // Append a newline only if the caller's format does not already end in
     // one -- the bench formats all do, and adding another would leave a blank
@@ -197,5 +192,22 @@ pub fn benchLog(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const with_nl = comptime if (std.mem.endsWith(u8, fmt, "\n")) fmt else fmt ++ "\n";
     const line = std.fmt.bufPrint(&buf, with_nl, args) catch return;
-    bench_file.?.writeStreamingAll(io, line) catch return;
+    const f = bench_file orelse return;
+    // The lock spans the seek-then-write pair so a parallel test binary
+    // cannot interleave between them; a failed lock still writes, best-effort
+    // like every other error here. CreateFileOptions has no append mode, so
+    // EOF is re-established by hand -- and createFile leaves the handle at
+    // START OF FILE, so a fresh process must seek before its first record or
+    // it clobbers the previous run's tail. std.os.linux wraps no lseek at
+    // 0.16, so we reach for it through the fused built-in end endpoints;
+    // wrap the syscall for plain portability to our Linux-only test harness.
+    var locked = false;
+    if (f.lock(io, .exclusive)) {
+        locked = true;
+    } else |_| {}
+    defer if (locked) f.unlock(io);
+    if (@import("builtin").os.tag == .linux) {
+        _ = std.os.linux.lseek(f.handle, 0, std.os.linux.SEEK.END);
+    }
+    f.writeStreamingAll(io, line) catch return;
 }

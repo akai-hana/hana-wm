@@ -294,7 +294,13 @@ fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
         // uses rather than workspace_count * 0, which showed a visible
         // zero-width tags slot on the very first layout.
         const cell_w = cellWidth();
-        if (cell_w > 0) return @intCast(f.workspace_count * cell_w);
+        if (cell_w > 0) {
+            // u16 * u16 arithmetic would overflow (and panic in Debug) on a
+            // very large font at a very wide cell; the reservation is a bar
+            // width, so clamp to the representable max instead.
+            const total: u32 = @as(u32, f.workspace_count) * @as(u32, cell_w);
+            return @intCast(@min(total, std.math.maxInt(u16)));
+        }
         return fallback_width;
     }
     return fallback_width;

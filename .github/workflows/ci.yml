@@ -74,15 +74,51 @@ jobs:
       - name: Type-check + plugin-template + layer guards
         run: zig build check -Doptimize=Debug
 
-      # Debug: several times cheaper than the ReleaseFast default (resolveOptimize)
-      # and it also runs the std.debug.assert coverage ReleaseFast compiles out.
+      # xtest.sh starts an isolated Xvfb and sets HANA_REQUIRE_X=1 so every
+      # display-gated test actually runs instead of self-skipping (a bare
+      # `zig build test` reports green with ~40 tests silently skipped).
+      # Debug is several times cheaper than the ReleaseFast default
+      # (resolveOptimize) and it also runs the std.debug.assert coverage
+      # ReleaseFast compiles out.
       - name: Unit tests (model / tiling / sync / config / workspaces / input)
-        run: zig build test -Doptimize=Debug
+        run: ./dev/scripts/xtest.sh zig build test -Doptimize=Debug
 
       # Bare `zig build` = ReleaseFast (resolveOptimize): this is the codegen +
       # link proof the no-emit check step deliberately does not do.
       - name: Build
         run: zig build
+
+  # End-to-end X scenarios on their own isolated Xvfb, against recorded
+  # goldens under dev/harness/golden/. PRs get the fast smoke subset so a
+  # break in the real event loop / reconcile path fails the PR without paying
+  # the full 23-scenario wall-clock; the full run belongs to the default
+  # branch (a scheduled/merge job can widen this list).
+  e2e-smoke:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # xdotool drives the synthetic input, x11-utils provides xprop/xwininfo
+      # for the golden diff, xvfb is the server the harness starts per
+      # scenario (run-scenario.sh owns its lifetime).
+      - name: Install X11 dev dependencies + harness tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev xvfb xdotool x11-utils
+
+      - name: Build (the harness runs the installed binary)
+        run: zig build
+
+      - name: E2E smoke subset (S01 spawn-tiled / S02 close / S11 configure-honored / S18 ewmh-fullscreen / S22 restore)
+        run: |
+          cd dev/harness
+          ./run-scenario.sh --compare S01-spawn-tiled S02-close S11-configure-honored S18-ewmh-fullscreen S22-restore
 
   # Feature-deletion matrix: each optional subsystem is removed and the tree
   # must still compile. Own job rather than part of the default `check`
