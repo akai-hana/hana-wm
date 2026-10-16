@@ -106,6 +106,11 @@ pub fn build(b: *std.Build) !void {
     // any generated source references it.
     const config_fragments = try discoverConfigFragments(b, &discovery);
 
+    // Knob-has-a-reader: a knob target that is parsed but never read silently
+    // drops the user's setting; fail the build instead. Configure-time, like
+    // the orphan-fragment check above.
+    try checkKnobReaders(b, &discovery);
+
     const fallback_toml = filterFallbackToml(b, readFallbackToml(b), &discovery);
     const fallback_toml_mod = buildFallbackTomlModule(b, fallback_toml, target, optimize);
 
@@ -953,6 +958,158 @@ fn discoverConfigFragments(
         }
     }.less);
     return list.toOwnedSlice(b.allocator);
+}
+
+/// Knob-has-a-reader check: every knob target that names a field of a
+/// discovered config fragment must be READ somewhere, not merely written.
+///
+/// `knob.validateTable` (comptime) proves the reverse direction -- every
+/// scalar field is claimed by a knob or bespoke entry, so no field goes
+/// unwritten. This closes the loop: a target that appears only as its own
+/// field declaration and inside the knob table is parsed and then dropped on
+/// the floor, the same class of dead code an unwritten field is.
+///
+/// The check is a source scan, and deliberately so: comptime cannot inspect
+/// method bodies, so "is `self.<target>` ever evaluated" is not answerable
+/// from the type system. The scan errs toward FALSE NEGATIVES (a mention in
+/// a doc comment counts as a reader) because a false alarm would block every
+/// build over prose; the property it pins is "the name appears outside its
+/// own declaration and knob entry", which a genuinely dead target cannot
+/// satisfy.
+fn checkKnobReaders(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+) !void {
+    var it = discovery.source_paths.iterator();
+    while (it.next()) |entry| {
+        const stem = entry.key_ptr.*;
+        if (!std.mem.endsWith(u8, stem, "_config")) continue;
+        if (std.mem.eql(u8, stem, "composed")) continue;
+        try checkFragmentKnobReaders(b, discovery, entry.value_ptr.*);
+    }
+}
+
+fn checkFragmentKnobReaders(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+    frag_rel: []const u8,
+) !void {
+    var scan = try SourceScanner.open(b, frag_rel);
+    defer scan.close();
+    const src = scan.src;
+
+    const table_marker = "pub const knobs";
+    const table_start = std.mem.indexOf(u8, src, table_marker) orelse return;
+    const table_end = knobTableEnd(src, table_start) orelse return;
+    const table = src[table_start..table_end];
+    const outside = src[0..table_start];
+
+    // Field declarations: an indented `name:` line outside the knob table.
+    // (`pub fn`/`fn`/local `var` lines put a space after the first token,
+    // so they cannot match the `name:` shape; enum members and calls have
+    // no `:` either.)
+    var fields: std.StringHashMap(void) = .init(b.allocator);
+    {
+        var rest = outside;
+        while (rest.len > 0) {
+            const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+            const line = rest[0..nl];
+            rest = if (nl == rest.len) rest[nl..] else rest[nl + 1 ..];
+            if (line.len == 0) continue;
+            if (line[0] != ' ' and line[0] != '\t') continue;
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '/') continue;
+            const name_end = identEnd(trimmed);
+            if (name_end == 0 or name_end >= trimmed.len or trimmed[name_end] != ':') continue;
+            try fields.put(try b.allocator.dupe(u8, trimmed[0..name_end]), {});
+        }
+    }
+
+    // Candidates: a double-quoted table string that names a field. Alias
+    // keys (drun_bg), key-only names (position -> bar_position), and
+    // comptime-const targets (palette colors) all fall out here: the check
+    // is about a target the fragment itself declares.
+    var pending: std.ArrayList([]const u8) = .empty;
+    defer pending.deinit(b.allocator);
+    var seen: std.StringHashMap(void) = .init(b.allocator);
+    var rest = table;
+    while (rest.len > 0) {
+        const q = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+        rest = rest[q + 1 ..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+        const s = rest[0..end];
+        rest = rest[end + 1 ..];
+        if (fields.get(s) == null) continue;
+        if (seen.contains(s)) continue;
+        try seen.put(try b.allocator.dupe(u8, s), {});
+        // A reader is any mention of the name outside the table beyond the
+        // declaration itself.
+        if (wordCount(outside, s) >= 2) continue;
+        try pending.append(b.allocator, s);
+    }
+    if (pending.items.len == 0) return;
+
+    // One pass over the other production sources settles the remainder;
+    // test files don't count (a knob only a test reads is still dead prod).
+    var it2 = discovery.source_paths.valueIterator();
+    outer: while (it2.next()) |rel| {
+        if (std.mem.eql(u8, rel.*, frag_rel)) continue;
+        if (std.mem.startsWith(u8, rel.*, "test/")) continue;
+        var other = SourceScanner.open(b, rel.*) catch continue;
+        defer other.close();
+        var keep: std.ArrayList([]const u8) = .empty;
+        defer keep.deinit(b.allocator);
+        for (pending.items) |word| {
+            if (wordCount(other.src, word) == 0) try keep.append(b.allocator, word);
+        }
+        pending.clearRetainingCapacity();
+        try pending.appendSlice(b.allocator, keep.items);
+        if (pending.items.len == 0) break :outer;
+    }
+    if (pending.items.len == 0) return;
+
+    var names: std.ArrayList(u8) = .empty;
+    defer names.deinit(b.allocator);
+    for (pending.items) |word| try names.print(b.allocator, "{s} ", .{word});
+    std.debug.print(
+        "Error: config knob target(s) parsed but never read: {s}\n" ++
+            "  Each name appears only as its field declaration and knob-table entry,\n" ++
+            "  so the user's setting is silently dropped. Add a reader or delete the\n" ++
+            "  knob (fragment: {s}).\n",
+        .{ names.items, frag_rel },
+    );
+    return error.DeadKnobTarget;
+}
+
+/// End offset (exclusive) of the `};` line closing the knobs table that
+/// starts at `start`.
+fn knobTableEnd(src: []const u8, start: usize) ?usize {
+    var rest = src[start..];
+    while (rest.len > 0) {
+        const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+        const line = std.mem.trim(u8, rest[0..nl], " \t\r");
+        if (std.mem.eql(u8, line, "};")) return src.len - rest.len + nl;
+        rest = if (nl == rest.len) rest[nl..] else rest[nl + 1 ..];
+    }
+    return null;
+}
+
+fn identEnd(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len and (std.ascii.isAlphanumeric(s[i]) or s[i] == '_')) : (i += 1) {}
+    return i;
+}
+
+fn wordCount(haystack: []const u8, word: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + word.len <= haystack.len) : (i += 1) {
+        if (!std.mem.startsWith(u8, haystack[i..], word)) continue;
+        const before_ok = i == 0 or !isIdentByte(haystack[i - 1]);
+        const after_ok = i + word.len == haystack.len or !isIdentByte(haystack[i + word.len]);
+        if (before_ok and after_ok) n += 1;
+    }
+    return n;
 }
 
 /// Generates the build-owned `composed` config facade alongside its source
