@@ -239,9 +239,10 @@ pub const max_read_fds: usize = max_pending_spawns;
 /// hand-off free of unbounded latency: without that, a spawn whose output is
 /// ready but which produced no X event and no signal would wait for the next
 /// unrelated wakeup, because the pipe is only drained from inside the X event
-/// batch (`drainPendingSpawns` at the end of `handleXcbEvents`) and from
-/// SIGCHLD. A command that prints and exits while the X socket stays silent
-/// would then stall until some other client happens to talk to the server.
+/// batch (`drainPendingSpawns` at the end of `handleXcbEvents`), from
+/// SIGCHLD, and on poll timeouts (the `nextDeadlineMs` stuck-entry wakeup).
+/// A command that prints and exits while the X socket stays silent would
+/// then stall until some other client happens to talk to the server.
 pub fn readFds(buf: []std.posix.fd_t) []std.posix.fd_t {
     var n: usize = 0;
     for (g_pending.slice()) |*entry| {
@@ -253,8 +254,33 @@ pub fn readFds(buf: []std.posix.fd_t) []std.posix.fd_t {
     return buf[0..n];
 }
 
+/// Nearest stuck-entry deadline across `g_pending`, in ms from now, or null
+/// when nothing is pending with a start time. Fed into the core Timers list
+/// (events.zig) so an idle event loop still wakes in time for
+/// `drainPendingSpawns` to drop a wedged entry at `spawn_timeout_ms`; without
+/// this the sweep only ran when some spawn fd happened to go ready, and a
+/// fully wedged queue stayed wedged behind `SpawnQueueFull` until unrelated
+/// X traffic arrived.
+pub fn nextDeadlineMs() ?i32 {
+    if (g_pending.len == 0) return null;
+    const now = core.monotonicMs();
+    var nearest: ?i64 = null;
+    for (g_pending.slice()) |*entry| {
+        if (entry.started_ms == 0) continue;
+        const remaining = spawn_timeout_ms - (now - entry.started_ms);
+        if (nearest == null or remaining < nearest.?) nearest = remaining;
+    }
+    if (nearest == null) return null;
+    // Already overdue: wake on the next poll turn (0), never negative.
+    const ms = nearest.?;
+    if (ms <= 0) return 0;
+    if (ms > std.math.maxInt(i32)) return std.math.maxInt(i32);
+    return @intCast(ms);
+}
+
 /// Drains pending spawn entries non-blockingly (every event batch, on SIGCHLD,
-/// and on spawn-pipe readiness), until EOF or a full buffer; a full buffer
+/// on spawn-pipe readiness, and on poll timeouts that the `nextDeadlineMs`
+/// stuck-entry deadline produced), until EOF or a full buffer; a full buffer
 /// already holds both possible messages, so EOF needn't be awaited.
 /// finishSpawn() classifies.
 pub fn drainPendingSpawns() void {

@@ -418,7 +418,9 @@ fn isMotion(e: *xcb.xcb_generic_event_t) bool {
 /// from `pending` and charges it there (or, at the cap, the caller dispatches
 /// it as the leftover tail), so `newest`-before-`pause` ordering holds
 /// either way. Exactly one charge policy: pull-when-re-pulled.
-fn collapseMotionRun(
+/// `pub` for the display-free coalescing test (motion_collapse_test); only
+/// drainEvents and that test call it.
+pub fn collapseMotionRun(
     newest: anytype,
     pause: *?*xcb.xcb_generic_event_t,
     conn: core.Connection,
@@ -568,11 +570,20 @@ pub fn run() void {
     // Core owns the timer list; the surfaces hook is one entry in it (see
     // Timers). Built once, outside the loop, because the source set
     // cannot change while the loop runs.
-    var source_buf: [1]Source = undefined;
-    const n_sources: usize = if (build_options.has_bar) blk: {
-        source_buf[0] = surfaces.pollTimeoutMs;
-        break :blk 1;
-    } else 0;
+    var source_buf: [2]Source = undefined;
+    var n_sources: usize = 0;
+    // Pending-spawn stuck deadlines are a CORE timer, not a bar one: the
+    // sweep inside drainPendingSpawns drops a wedged entry at
+    // spawn_timeout_ms, but that sweep only ran when a spawn fd went ready,
+    // and on an idle loop no fd ever fires. The deadline itself becomes a
+    // poll wakeup (and the timeout wake below re-drains), so 16 wedged
+    // entries cannot sit on SpawnQueueFull until unrelated X traffic.
+    source_buf[n_sources] = spawn.nextDeadlineMs;
+    n_sources += 1;
+    if (build_options.has_bar) {
+        source_buf[n_sources] = surfaces.pollTimeoutMs;
+        n_sources += 1;
+    }
     const loop_timers: Timers = .{ .sources = source_buf[0..n_sources] };
 
     while (process.running.load(.acquire)) {
@@ -581,13 +592,12 @@ pub fn run() void {
         for (rds, 2..) |fd, i| poll_buf[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
         const fds: []std.posix.pollfd = poll_buf[0 .. 2 + rds.len];
 
-        // No built-in deadline: with no timer sources the loop blocks until
-        // an X event or signal arrives. Timer sources today are exclusively a
-        // bar concern (clock segment, prompt cursor blink, carousel marquee),
-        // and the bar contributes exactly ONE entry -- it reduces over its own
-        // modules. A second core-side timer is a new list entry here, not a
-        // new branch at the call site, and a timeout wake must be handed to
-        // the bar for repaint rather than worked around in core.
+        // No deadline only when no timer source answers: with none the loop
+        // blocks until an X event or signal arrives. Sources today are the
+        // core spawn-stuck deadline and the bar's one reduced entry (clock
+        // segment, prompt cursor blink, carousel marquee). A timeout wake
+        // re-drains pending spawns below so a deadline-only wake still gets
+        // its sweep.
         const poll_timeout_ms: i32 = loop_timers.deadlineMs() orelse -1;
 
         const poll_rc = std.os.linux.poll(fds.ptr, fds.len, poll_timeout_ms);
@@ -614,12 +624,15 @@ pub fn run() void {
         // the next X event or SIGCHLD. POLL.ERR/POLL.HUP count too, because a
         // child that exits without writing still has to be read to EOF for
         // finishSpawn to classify the result. Non-blocking by construction.
+        // A poll TIMEOUT drains too: that is how a spawn.nextDeadlineMs
+        // wakeup delivers its stuck-entry sweep (drain is a no-op on an
+        // empty table).
         var spawn_ready = false;
         for (fds[2..]) |pf| {
             if ((pf.revents & (std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0)
                 spawn_ready = true;
         }
-        if (spawn_ready) spawn.drainPendingSpawns();
+        if (spawn_ready or poll_rc == 0) spawn.drainPendingSpawns();
 
         // The reload flag is set by SIGHUP and the reload_config keybinding
         // (proc.reload, which writes a wake byte to the pipe; the byte can be

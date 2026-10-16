@@ -67,11 +67,19 @@ pub fn isListed(list: []const []const u8, name: []const u8) bool {
 /// contract, and must appear once. A renamed hook left behind in a list would
 /// otherwise turn into an `@hasField` that quietly skips -- the exact "unlisted
 /// new hook silently escaped" failure the lists exist to prevent, just pointing
-/// the other way.
+/// the other way. A WITHIN-list duplicate is rejected too: it is always a
+/// copy-paste bug, and on the generated registry's at-most-one pass it would
+/// double-count nothing (the count is per-hook, computed once) while making
+/// the list lie about its own size.
 pub fn assertListedFields(comptime T: type, comptime list_name: []const u8, list: []const []const u8) void {
-    for (list) |hook| {
+    for (list, 0..) |hook, i| {
         if (!@hasField(T, hook)) @compileError(
             "T." ++ list_name ++ " lists '" ++ hook ++ "', which is not a " ++ @typeName(T) ++ " field",
         );
+        for (list[i + 1 ..]) |later| {
+            if (std.mem.eql(u8, hook, later)) @compileError(
+                "T." ++ list_name ++ " lists '" ++ hook ++ "' twice; a binder list is a set, not a bag",
+            );
+        }
     }
 }
