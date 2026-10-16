@@ -277,7 +277,7 @@ fn lintDocument(doc: *parser.Document) void {
 /// Known section names hana recognizes (case-sensitively) at their exact
 /// spelling. A section header that differs from one of these only by case is
 /// almost certainly a typo that silently drops the whole section.
-const known_sections = std.StaticStringMap(void).initComptime(.{
+const known_section_entries = .{
     .{ types.section_binds, {} },                                   .{ types.section_binds_alt, {} },
     .{ types.section_workspace_rules, {} },                         .{ types.section_rules, {} },
     .{ types.section_drag, {} },                                    .{ types.section_fullscreen, {} },
@@ -287,7 +287,25 @@ const known_sections = std.StaticStringMap(void).initComptime(.{
     .{ types.section_prefix_bar_layout ++ "center", {} },           .{ types.section_prefix_bar_layout ++ "right", {} },
     .{ types.section_bar_modules_workspaces, {} },                  .{ types.section_tiling_layouts_master_stack, {} },
     .{ types.section_prefix_tiling_layouts ++ "master_stack", {} },
-});
+};
+const known_sections = std.StaticStringMap(void).initComptime(known_section_entries);
+
+comptime {
+    // Two `types.section_*` constants accidentally equal (a copy-paste rename
+    // that forgot one site) would silently collapse inside the map above: one
+    // real section would go unlisted and its mis-case warning would fire on
+    // its own twin. Pairwise-distinct at comptime; ~16 entries, so O(n^2) is
+    // free next to the parser's other comptime work.
+    @setEvalBranchQuota(20_000);
+    for (known_section_entries, 0..) |ea, i| {
+        for (known_section_entries, 0..) |eb, j| {
+            if (i != j and std.mem.eql(u8, ea[0], eb[0])) @compileError(
+                "known_sections: section name '" ++ ea[0] ++ "' is listed twice " ++
+                    "(two types.section_* constants collapsed to the same spelling)",
+            );
+        }
+    }
+}
 
 /// Section families whose parent section must exist for their knobs to do
 /// anything; a mis-cased or missing parent leaves them inert.

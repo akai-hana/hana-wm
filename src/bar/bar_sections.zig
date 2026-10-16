@@ -162,6 +162,50 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar
             try appendDupedStrings(warn_bad_segment_entries, false, allocator, seg_arr, &bar_layout.segments);
         if (bar_layout.segments.items.len > 0) try cfg.layout.append(allocator, bar_layout) else bar_layout.deinit(allocator);
     }
+    rejectDuplicateSegments(allocator, cfg);
 
     if (cfg.layout.items.len == 0) try initDefaultBarLayout(allocator, cfg);
+}
+
+/// Rejects a segment listed more than once across the whole configured
+/// layout. A second instance is dropped with a warning: it would paint twice
+/// but live in the FIRST-match click-bound table (the later instance's hit
+/// test resolves to the earlier slot) and a self-ticking duplicate would
+/// region-repaint only its last-recorded slot, leaving the other stale.
+/// Warn-and-skip matches how an unknown segment name is treated; the rest of
+/// the row still renders.
+fn rejectDuplicateSegments(allocator: std.mem.Allocator, cfg: *bar_config.Config) void {
+    for (cfg.layout.items, 0..) |*lay, ri| {
+        var keep: usize = 0;
+        for (lay.segments.items) |name| {
+            var dup = false;
+            rows: for (cfg.layout.items[0..ri]) |prior_row| {
+                for (prior_row.segments.items) |prior| {
+                    if (std.mem.eql(u8, prior, name)) {
+                        dup = true;
+                        break :rows;
+                    }
+                }
+            }
+            if (!dup) {
+                for (lay.segments.items[0..keep]) |prior| {
+                    if (std.mem.eql(u8, prior, name)) {
+                        dup = true;
+                        break;
+                    }
+                }
+            }
+            if (dup) {
+                log.warn(
+                    "Bar: segment '{s}' is listed more than once; keeping only its first occurrence",
+                    .{name},
+                );
+                allocator.free(name);
+                continue;
+            }
+            lay.segments.items[keep] = name;
+            keep += 1;
+        }
+        lay.segments.shrinkRetainingCapacity(keep);
+    }
 }

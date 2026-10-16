@@ -268,7 +268,7 @@ pub fn expectedForm(err: ParseError) []const u8 {
         error.InvalidSyntax => "a bare key (letters, digits, '_', '-', '+', '/', '.'), optionally quoted",
         error.InvalidSection => "a section header of the form [name] (one level, no quotes needed)",
         error.InvalidValue => "a value: a number, true/false, a quoted string, a [list], " ++
-            "a color (#RRGGBB / 0xRRGGBB), or a size with a unit (10, 10%, 10px)",
+            "a color (#RRGGBB / 0xRRGGBB), or a size (10 for px, 10% of base; no px suffix)",
         error.InvalidColor => "a 24-bit color: #RRGGBB, 0xRRGGBB, or a 6/8-digit hex number",
         error.OutOfMemory => "enough memory to continue parsing",
     };

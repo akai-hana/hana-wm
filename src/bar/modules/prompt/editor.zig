@@ -259,9 +259,8 @@ pub var handlers: Handlers = .{};
 pub fn registerHandlers(h: Handlers) void {
     handlers = h;
     // Registering a handler set is what MAKES this a modal prompt. The flag
-    // is the honest answer to "is a handler installed", and it leaves
-    // `vim_mode` a policy input a handler may consult instead of a second
-    // dispatch mode the host switches on.
+    // is the honest answer to "is a handler installed", so a handler may
+    // consult it instead of a second dispatch mode the host switches on.
     addon_active = true;
 }
 

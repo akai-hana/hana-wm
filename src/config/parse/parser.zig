@@ -23,8 +23,11 @@
 //! REJECTED, with the error each produces:
 //!
 //!   inline tables (`{ a = 1 }`), dotted keys (`a.b = 1`), array-of-tables
-//!   (`[[x]]`), date/time literals, floats, multi-line/basic strings,
-//!   escapes beyond the supported set  -> InvalidValue
+//!   (`[[x]]`), date/time literals, multi-line/basic strings, escapes beyond
+//!   the supported set -> InvalidValue
+//!   a bare decimal where an integer is expected (e.g. `tag_count = 2.5`)
+//!   -> InvalidValue at the consuming knob, not the parser (bare decimals
+//!   tokenize as a scalable absolute; the whole-number case stays an int)
 //!   a key or table name the reader cannot lex               -> InvalidSyntax
 //!   a `[header]` that does not open a section the reader accepts -> InvalidSection
 //!   a color token that is not a valid 24-bit hex              -> InvalidColor
