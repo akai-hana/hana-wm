@@ -4,6 +4,7 @@
 //! and enters the event loop.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -41,15 +42,25 @@ const focus = @import("focus");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
-// Crash machinery is off by default: both flags cost ~12s of LLVM optimize
-// time and ~14.5% of the release binary, because they pull std's DWARF/ELF
-// symbol lookup (2.1 MB of sort kernels) into the link. The tradeoff is that
-// an uncaught SIGSEGV/SIGBUS in a ReleaseFast build aborts with no trace —
-// diagnose those with `-Doptimize=Debug`, which keeps symbolized stacks.
-// Flip both to `true` to restore ~/hana-crash.log fault reports.
+// Build-mode policy: a Debug build carries every diagnostic facility and a
+// release build carries none of them.
+//
+//   .debug level + segfault handler + stack traces  -> Debug
+//   .err only, no handler, no stack traces          -> every release mode
+//
+// The win is ~35s of LLVM optimize time and ~0.9 MB of ReleaseFast binary:
+// warn/info formatting (177 call sites) and std's DWARF/ELF symbol lookup
+// (2.1 MB of sort kernels) dominate both. The cost is that a release crash
+// aborts with no trace, and a release build cannot SEE config warnings --
+// which is why `--check-config` refuses to answer there instead of claiming a
+// config is clean.
+const log_warn_available = builtin.mode == .Debug;
+
 pub const std_options: std.Options = .{
-    .enable_segfault_handler = false,
-    .allow_stack_tracing = false,
+    .log_level = if (log_warn_available) .debug else .err,
+    .enable_segfault_handler = log_warn_available,
+    .allow_stack_tracing = log_warn_available,
+    .signal_stack_size = if (log_warn_available) (1 << 18) else null,
     .logFn = logFn,
 };
 
@@ -88,6 +99,18 @@ fn checkConfigRequested(args: std.process.Args) bool {
 }
 
 fn runCheckConfig() !void {
+    // Outside Debug, `log_level` comptime-elides every warn site, so the bag
+    // below would always be empty and this would exit 0 on a config the WM
+    // would reject. Refuse instead: a check that cannot check must not look
+    // clean. Exit 2 rather than 1 so a caller can tell "bad config" from
+    // "cannot validate".
+    if (comptime !log_warn_available) {
+        std.debug.print(
+            "hana --check-config: config diagnostics are compiled out of this build ({s}); rebuild with -Doptimize=Debug to validate\n",
+            .{@tagName(builtin.mode)},
+        );
+        std.process.exit(2);
+    }
     var diag: diagnostics.Diagnostics = .{ .allocator = alloc };
     defer diag.deinit();
     try config.checkConfig(alloc, &diag);
