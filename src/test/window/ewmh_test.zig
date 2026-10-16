@@ -17,6 +17,9 @@
 //!   message's action code as a SET (`data32[0]`) rather than a toggle, and
 //!   must not consume an unmanaged window's request in a way that leaves the
 //!   once-per-process warning latched against later legitimate requests.
+//!   The `_NET_SUPPORTED` root property must round-trip the advertised list
+//!   exactly (the behavioural audit of that list is the display-free
+//!   ewmh_supported_test).
 
 const std = @import("std");
 const core = @import("core");
@@ -24,6 +27,7 @@ const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
 const atoms = @import("atoms");
+const requests = @import("requests");
 const fixture = @import("fixture");
 const xcb = core.xcb;
 
@@ -283,4 +287,37 @@ test "EWMH: a _NET_WM_STATE request naming another atom changes nothing" {
 
     try std.testing.expect(covering(m) == null);
     try std.testing.expectEqual(model.Presence.present, (m.store.get(w1) orelse return error.UnknownWindow).presence);
+}
+
+test "EWMH: _NET_SUPPORTED on the root round-trips the advertised list" {
+    // The publish path main takes at startup, then a client-style read of the
+    // property: what the root ends up holding is EXACTLY supported_atoms, one
+    // interned (non-NONE) atom per entry, no truncation. The behavioural half
+    // of the audit -- every advertised atom is handled, unimplemented hints
+    // stay absent -- is the display-free ewmh_supported_test; this guards the
+    // wiring between that list and the wire.
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+    const st = core.getState();
+    requests.advertiseEwmhSupport(st.conn, st.screen, st.root);
+    fx.flush();
+
+    const net_supported = atoms.getAtomOrZero("_NET_SUPPORTED");
+    try std.testing.expect(net_supported != xcb.XCB_ATOM_NONE);
+    const reply = xcb.xcb_get_property_reply(
+        st.conn,
+        xcb.xcb_get_property(st.conn, 0, st.root, net_supported, xcb.XCB_ATOM_ATOM, 0, 64),
+        null,
+    ) orelse return error.NoPropertyReply;
+    defer std.c.free(reply);
+
+    try std.testing.expectEqual(@as(u8, 32), reply.*.format);
+    const n: usize = @intCast(@divTrunc(xcb.xcb_get_property_value_length(reply), 4));
+    try std.testing.expectEqual(@as(usize, requests.supported_atoms.len), n);
+    const values: [*]const u32 = @ptrCast(@alignCast(xcb.xcb_get_property_value(reply)));
+    inline for (requests.supported_atoms, 0..) |name, i| {
+        const interned = atoms.getAtomOrZero(name);
+        try std.testing.expect(interned != xcb.XCB_ATOM_NONE);
+        try std.testing.expectEqual(interned, values[i]);
+    }
 }
