@@ -1,8 +1,9 @@
 //! Floating window interaction and geometry management.
 //! Handles drag-to-move and per-corner drag-to-resize for floating windows,
 //! including work-area snapping, size-hint constraints (PMin/PMax envelope
-//! plus PAspect ratio-accurate resize, Shift to break the band), and display
-//! refresh-rate throttled geometry commits. Tiled windows detach to floating
+//! plus PAspect ratio-accurate resize, Shift to break the band), and paced
+//! geometry commits (resize capped to the client repaint budget; moves at
+//! display rate). Tiled windows detach to floating
 //! on first motion. Also updates floating rects on the model and honors
 //! configure requests for floating windows, exposing operations via the
 //! floating window module contract.
@@ -60,13 +61,28 @@ pub const DragState = struct {
     /// drag, so re-resolving them on every motion event would be wasted work.
     snap_px: i32 = 0,
     workarea: WaEdges = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
-    /// Throttle geometry commits to display refresh rate to cut redundant
+    /// Throttle geometry commits to the commit rate below to cut redundant
     /// configures on high-poll mice. We still compute the latest rect from
     /// every motion event (preserving responsiveness), but only push to X
-    /// when at least one display period has elapsed since the last commit.
+    /// when at least one commit period has elapsed since the last commit.
     last_commit_ns: u64 = 0,
     pending_rect: ?model.Rect = null,
+    /// Last rect actually pushed to X this drag; a pending rect equal to it
+    /// is a sub-pixel jiggle and is dropped -- re-sending the same size would
+    /// only make the client repaint for a frame that shows nothing new.
+    last_committed: ?model.Rect = null,
 };
+
+/// Client repaint budget for resize commits, in Hz.
+///
+/// Every resize commit forces the client to repaint (video players like mpv
+/// recreate their swapchain per size change). Client repaint capacity -- not
+/// display refresh -- is the binding constraint: pacing resize to a high-Hz
+/// panel's rate buries clients in work they cannot finish, so stale content
+/// and border strips pile up along the drag path until the button is
+/// released. 60 Hz is the rate every client can sustain; move drags need no
+/// client repaint (pure server-side copy) and keep the full refresh rate.
+const max_resize_commit_hz: f64 = 60.0;
 
 /// Snap distance from config, resolved to pixels (0 = disabled).
 /// Percentages are relative to screen width.
@@ -435,9 +451,16 @@ pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
     };
     drag.pending_rect = rect;
 
-    // Throttle commits to display refresh rate; still track latest position
-    // for responsiveness. If a mode switch happens mid-drag, we adapt live.
-    const rate = hz.detectedHz();
+    // Throttle commits: resize is capped at the client repaint budget (see
+    // max_resize_commit_hz) -- clients repaint on every size we send, and a
+    // high-Hz panel must not turn a drag into an impossible repaint storm.
+    // Moves are server-side copies and keep the full refresh rate. Still
+    // track latest position for responsiveness. If a mode switch happens
+    // mid-drag, we adapt live.
+    const rate: f64 = switch (drag.mode) {
+        .move => hz.detectedHz(),
+        .resize => @min(hz.detectedHz(), max_resize_commit_hz),
+    };
     const now = core.monotonicNs();
     const min_period_ns: u64 = 1_000_000_000 / 1000; // cap at 1000Hz max commit rate
     const period_ns: u64 = if (rate <= 0.0) min_period_ns else blk: {
@@ -445,9 +468,15 @@ pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
         break :blk @max(@as(u64, @intFromFloat(@ceil(p))), min_period_ns);
     };
     if (now - drag.last_commit_ns >= period_ns) {
-        drag.last_commit_ns = now;
         if (drag.pending_rect) |r| {
-            dragRect(drag.window, r);
+            // Drop same-size commits (sub-pixel jiggle): a re-send of the
+            // committed rect only costs the client a pointless repaint.
+            const same = if (drag.last_committed) |last| std.meta.eql(last, r) else false;
+            if (!same) {
+                drag.last_commit_ns = now;
+                drag.last_committed = r;
+                dragRect(drag.window, r);
+            }
             drag.pending_rect = null;
         }
     }
@@ -459,7 +488,8 @@ pub fn stopDrag() void {
     if (g_state.drag.active) {
         const drag = &g_state.drag;
         if (drag.pending_rect) |r| {
-            dragRect(drag.window, r);
+            const same = if (drag.last_committed) |last| std.meta.eql(last, r) else false;
+            if (!same) dragRect(drag.window, r);
             drag.pending_rect = null;
         }
     }
