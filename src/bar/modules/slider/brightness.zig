@@ -30,6 +30,7 @@
 //! without touching the host's backlight.
 
 const std = @import("std");
+const core = @import("core");
 const types = @import("types");
 const bar_config = @import("bar_config");
 const slider = @import("slider");
@@ -54,8 +55,30 @@ pub const Class = enum { backlight, leds };
 
 /// Read/write resolution, mirroring the volume sub's auto-detection: sysfs
 /// first, brightnessctl as the no-sysfs fallback, `unknown` while nothing has
-/// answered (re-probed on every poll).
+/// answered (re-probed while within the absent backoff, see below).
 var g_backend: Backend = .unknown;
+
+/// Consecutive total failures (no sysfs device AND no brightnessctl answer)
+/// tolerated before the module counts itself absent. Mirrors systatus'
+/// `miss_tolerance`: a single transient miss (driver rebind, a tool missing
+/// for one poll) must not freeze the readout for a whole backoff window.
+const miss_tolerance: u8 = 3;
+
+/// How long an absent module goes unattempted before one more try. Without
+/// this, a machine with no backlight at all pays a device-tree scan plus two
+/// `brightnessctl` spawns every `read_interval_ms` (1 s) for the entire
+/// session -- the second-busiest spawn pattern in the bar after volume's
+/// pre-cache probe. With it the absent module is silent but not abandoned:
+/// one slow re-probe keeps a hot-plugged panel or a since-boot missing tool
+/// visible.
+const absent_reprobe_ms: i64 = 30_000;
+
+/// Consecutive total failures; reset by the first success.
+var g_misses: u8 = 0;
+/// Realtime deadline before the next total-failure attempt; 0 = not backed
+/// off. Set when `g_misses` exhausts `miss_tolerance`, re-armed on every
+/// failed re-probe, cleared by any success.
+var g_absent_until_ms: i64 = 0;
 var g_class: Class = .backlight;
 var g_dev: [max_dev_len]u8 = undefined;
 var g_dev_len: usize = 0;
@@ -250,6 +273,11 @@ fn readBrightness() bool {
     const had_value = g_has_value;
     const old_pct = g_pct;
 
+    // Absent backoff: while the last attempts total-failed past tolerance,
+    // skip discovery and both fallback spawns entirely until the slow
+    // re-probe is due (clock compare only -- the wakeup itself stays cheap).
+    if (core.realtimeMs() < g_absent_until_ms) return false;
+
     // Re-discover while the device is unresolved and we are not already on
     // the brightnessctl fallback (which means no sysfs device answered); the
     // scan cost is a handful of tiny file reads, once per poll.
@@ -259,6 +287,7 @@ fn readBrightness() bool {
             g_backend = .sysfs;
             g_pct = p;
             g_has_value = true;
+            noteProbe(true);
             return !had_value or g_pct != old_pct;
         }
     }
@@ -266,11 +295,28 @@ fn readBrightness() bool {
         g_backend = .brightnessctl;
         g_pct = p;
         g_has_value = true;
+        noteProbe(true);
         return !had_value or g_pct != old_pct;
     }
     g_backend = .unknown;
     g_dev_len = 0;
+    noteProbe(false);
     return false;
+}
+
+/// Miss accounting after one whole read attempt: a success resets the
+/// absent window, while failures count up and, once `miss_tolerance` is
+/// exhausted, arm the slow re-probe (re-armed by every failed re-probe, so a
+/// permanently backlight-less machine settles into one try per
+/// `absent_reprobe_ms` instead of a spawn per second).
+fn noteProbe(ok: bool) void {
+    if (ok) {
+        g_misses = 0;
+        g_absent_until_ms = 0;
+        return;
+    }
+    if (g_misses < std.math.maxInt(u8)) g_misses += 1;
+    if (g_misses >= miss_tolerance) g_absent_until_ms = core.realtimeMs() + absent_reprobe_ms;
 }
 
 /// Reads the level through `brightnessctl` when no sysfs device answers
@@ -361,10 +407,19 @@ fn renderDisplay(config: bar_config.Config, pct: u8, buf: []u8) drawing.Label {
 
 /// Copies the config's `brightness_device` pin into the owned buffer (config
 /// string slices are freed on reload; poll-time reads need a stable copy).
+/// A pin change also drops the absent backoff: a reload that names a
+/// different device must be probed immediately, not after the previous
+/// device's window.
 fn cacheConfigPin(config: bar_config.Config) void {
     const pin = config.brightness_device orelse "";
-    g_pin_len = @min(pin.len, max_dev_len);
+    const new_len = @min(pin.len, max_dev_len);
+    const changed = g_pin_len != new_len or !std.mem.eql(u8, g_pin[0..g_pin_len], pin[0..new_len]);
+    g_pin_len = new_len;
     @memcpy(g_pin[0..g_pin_len], pin[0..g_pin_len]);
+    if (changed) {
+        g_misses = 0;
+        g_absent_until_ms = 0;
+    }
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
