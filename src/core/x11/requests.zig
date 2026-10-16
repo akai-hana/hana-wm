@@ -97,7 +97,13 @@ inline fn changeProperty(
 
 /// EWMH atoms hana declares via `_NET_SUPPORTED`. Every entry must correspond
 /// to a protocol hana genuinely honours; clients use this list to decide what
-/// they can rely on.
+/// they can rely on. ADVERTISED IMPLIES HANDLED: the list is deliberately
+/// narrow, because advertising a hint whose requests hana drops sends pagers
+/// and taskbars into UI whose clicks land in a warn-once-ignored branch. The
+/// audit (each entry paired with the site that honours it, and the known-
+/// unimplemented hints pinned as absent) lives in
+/// `src/test/window/ewmh_supported_test.zig`; extending this list without a
+/// handling claim there fails the suite.
 ///
 /// Notably fixes GLFW's "Iconification of full screen windows requires a WM
 /// that supports EWMH full screen" error (Minecraft and other LWJGL games):
@@ -105,22 +111,13 @@ inline fn changeProperty(
 /// listed here; otherwise it falls back to a raw override-redirect window that
 /// bypasses the WM and can't be iconified through it, so the next
 /// XIconifyWindow() throws that error.
-const supported_atoms = [_][]const u8{
+pub const supported_atoms = [_][]const u8{
     "_NET_SUPPORTED",
     "_NET_SUPPORTING_WM_CHECK",
     "_NET_WM_NAME",
     "_NET_WM_STATE",
     "_NET_WM_STATE_FULLSCREEN",
-    "_NET_WM_STATE_ABOVE",
-    "_NET_WM_STATE_STICKY",
-    "_NET_WM_ALLOWED_ACTIONS",
-    "_NET_WM_ACTION_CLOSE",
-    "_NET_WM_ACTION_ABOVE",
-    "_NET_WM_ACTION_STICK",
     "_NET_WM_PID",
-    "_NET_WM_WINDOW_TYPE",
-    "_NET_WM_WINDOW_TYPE_DOCK",
-    "_NET_WM_STRUT_PARTIAL",
 };
 
 // Both lists must stay in sync at compile time: a misspelt/advertised atom
@@ -151,16 +148,28 @@ comptime {
 /// Must run once at startup, after atoms.initAtomCache() and before any client
 /// can map a window.
 ///
-/// Known gaps between `_NET_SUPPORTED` and full behaviour: document, don't
-/// narrow; external tools key on the listed hints, and the list above is
-/// what keeps GLFW/Qt/Chromium out of their broken fallback paths.
+/// The advertised set is the NARROW reading of the spec: only hints hana
+/// actually implements appear above, and the complement is the honest gap
+/// list. What hana does NOT implement stays off `_NET_SUPPORTED` rather than
+/// documented as aspirational -- an absent atom makes pagers/clients take
+/// their conservative path, while a listed-but-dropped request leaves them
+/// waiting on a click that will never land:
 ///
-/// - The only client messages answered are `_NET_WM_STATE` with the
-///   fullscreen atom (ADD/REMOVE/TOGGLE). `_NET_ACTIVE_WINDOW`,
-///   `_NET_CLOSE_WINDOW`, `_NET_CURRENT_DESKTOP`, and `_NET_WM_DESKTOP`
-///   requests are ignored.
-/// - `_NET_ACTIVE_WINDOW` is written (root property tracks our focus) but
-///   never read or requested via client message.
+/// - `_NET_ACTIVE_WINDOW`, `_NET_CLOSE_WINDOW`, `_NET_CURRENT_DESKTOP` and
+///   `_NET_WM_DESKTOP` requests are answered with a once-per-process warning
+///   and ignored; `_NET_ACTIVE_WINDOW` is nevertheless WRITTEN to the root
+///   (focus advertisement, see atoms.zig) so EWMH clients can track our focus.
+/// - `_NET_WM_STATE_ABOVE`/`_NET_WM_STATE_STICKY` are preserved when WE
+///   mutate `_NET_WM_STATE` (the sink's read-merge-write must not nuke a
+///   client's own atoms) but neither state changes stacking or workspace
+///   placement, so neither the states nor their `_NET_WM_ACTION_*` hints are
+///   advertised. The bar window declaring them on itself (bar/wire/win.zig)
+///   is us-as-client, unrelated to this claim.
+/// - `_NET_WM_ALLOWED_ACTIONS` is never written on managed windows; the
+///   per-window property and its `_NET_WM_ACTION_*` atoms stay unadvertised.
+/// - `_NET_WM_WINDOW_TYPE`/`_NET_WM_WINDOW_TYPE_DOCK`/`_NET_WM_STRUT_PARTIAL`
+///   are never READ for managed windows (the bar manages its own space; its
+///   strut is published for external compositors, not for us to parse).
 /// - `_NET_CLIENT_LIST`/`_NET_CLIENT_LIST_STACKING` are not maintained;
 ///   pagers cannot enumerate clients.
 /// - `_NET_WM_STATE_HIDDEN`/`_NET_WM_STATE_DEMANDS_ATTENTION` are neither
