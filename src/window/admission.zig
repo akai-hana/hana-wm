@@ -44,6 +44,7 @@ const types = @import("types");
 const window = @import("window");
 const session = @import("session");
 const pipeline = @import("pipeline");
+const reconcile = @import("reconcile");
 const usable_area_mod = @import("usable_area");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
@@ -52,11 +53,44 @@ const registry = @import("registry");
 // consumed by mapRequest below at admission. Capped at spawn_queue_capacity;
 // overflow logs and drops the entry rather than growing unbounded.
 
-const SpawnEntry = struct {
+pub const SpawnEntry = struct {
     workspace: u8,
     /// _NET_WM_PID of the grandchild; 0 for daemon-mode terminals.
     pid: u32,
 };
+
+/// One spawn-queue match: the INDEX of the entry to consume (swapRemove
+/// order, which carries no meaning) and WHETHER it matched by exact PID or
+/// by the sole-entry heuristic (the caller logs the two differently).
+pub const SpawnMatch = struct {
+    index: usize,
+    heuristic: bool,
+};
+
+/// The spawn-queue match POLICY, split from the XCB reply drain below so it
+/// is testable without a server (P1-19): returns which pending entry this
+/// window's PID claims, or null when nothing unambiguously matches.
+///
+///   - Exact PID hit, gated on `win_pid != 0`: a window without
+///     _NET_WM_PID must never consume a daemon entry (pid == 0) by exact
+///     match — that would conflate "terminal that will fork a grandchild"
+///     with "app that simply doesn't set the property".
+///   - Sole-entry fallback: with exactly one pending entry there is no
+///     ambiguity (the app was launched via `sh -c "cmd"` and the window
+///     reports a grandchild PID), so it is consumed whatever the PID
+///     says — including when that one entry is a daemon entry, since a
+///     single pending spawn still has no rival to be mis-routed against.
+///   - Ambiguous (0 or >1 entries with no exact hit): null, and the caller
+///     falls back to the current workspace rather than guessing
+///     oldest-first (consuming items[0] would mis-route the window to the
+///     oldest pending spawn's workspace).
+pub fn spawnQueueMatch(queue: []const SpawnEntry, win_pid: u32) ?SpawnMatch {
+    for (queue, 0..) |e, i| {
+        if (win_pid != 0 and e.pid == win_pid) return .{ .index = i, .heuristic = false };
+    }
+    if (queue.len != 1) return null;
+    return .{ .index = 0, .heuristic = true };
+}
 
 // Bounds pending spawns awaiting their first map, not the tiled-window pool.
 const spawn_queue_capacity: usize = 64;
@@ -206,7 +240,8 @@ pub fn matchRule(
 
 /// Tries an exact PID match first, then falls back to the sole-pending-entry
 /// heuristic. The caller only fires `c_net_wm_pid` when the queue is non-empty,
-/// so no empty-queue case is handled here.
+/// so no empty-queue case is handled here. The POLICY itself lives in
+/// spawnQueueMatch (pure, headless-tested); this half only drains the reply.
 fn findSpawnQueueWorkspace(
     c_net_wm_pid: xcb.xcb_get_property_cookie_t,
 ) ?u8 {
@@ -221,37 +256,22 @@ fn findSpawnQueueWorkspace(
         break :pid icccm.u32Values(pid_reply)[0];
     };
 
-    // Exact PID match only. Daemon-mode entries (pid == 0) are intentionally
-    // NOT matched against windows without _NET_WM_PID (win_pid == 0): that
-    // would conflate "terminal that will fork a grandchild" with "app that
-    // simply doesn't set _NET_WM_PID", letting an unrelated app silently
-    // consume the daemon entry and route to the wrong workspace.
-    for (state.?.spawn_queue.items, 0..) |e, i| {
-        if (win_pid != 0 and e.pid == win_pid) {
-            _ = state.?.spawn_queue.swapRemove(i);
-            return e.workspace;
-        }
-    }
-
-    // Sole-entry fallback: with exactly one pending entry there's no ambiguity
-    // (the app was launched via `sh -c "cmd"` and reports a grandchild PID).
-    // With multiple entries we can't know which one this window belongs to;
-    // consuming items[0] would mis-route it to the oldest pending spawn's
-    // workspace, so return null and let handleMapRequest fall back to current_ws.
-    if (state.?.spawn_queue.items.len != 1) {
+    const match = spawnQueueMatch(state.?.spawn_queue.items, win_pid) orelse {
         log.debug(
             "spawn: no exact PID match for pid={d}, {d} pending; routing to current workspace",
             .{ win_pid, state.?.spawn_queue.items.len },
         );
         return null;
+    };
+    if (match.heuristic) {
+        log.debug(
+            "spawn: no exact PID match for pid={d}, sole entry ws={d}, using heuristic",
+            .{ win_pid, state.?.spawn_queue.items[match.index].workspace },
+        );
     }
-    log.debug(
-        "spawn: no exact PID match for pid={d}, sole entry ws={d}, using heuristic",
-        .{ win_pid, state.?.spawn_queue.items[0].workspace },
-    );
-    const ws = state.?.spawn_queue.items[0].workspace;
-    _ = state.?.spawn_queue.swapRemove(0); // order has no semantic meaning
-    return ws;
+    // swapRemove returns the removed entry; order has no semantic meaning.
+    const removed = state.?.spawn_queue.swapRemove(match.index);
+    return removed.workspace;
 }
 
 /// The admission policy for a brand-new spawn: the target workspace (class
@@ -314,6 +334,10 @@ pub const AdmissionCookies = struct {
     normal_hints_cookie: xcb.xcb_get_property_cookie_t,
     protocols_cookie: xcb.xcb_get_property_cookie_t,
     hints_cookie: xcb.xcb_get_property_cookie_t,
+    /// ICCCM WM_TRANSIENT_FOR (dialog parent). Always fired with the rest so
+    /// the server processes it in parallel; drained by drainAdmissionCookies
+    /// into the AdmissionDrain's transient_for.
+    transient_cookie: xcb.xcb_get_property_cookie_t,
     title_cookies: title_cache.TitleCookies,
 };
 
@@ -349,6 +373,7 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
     const protocols_cookie = icccm.fireWMProtocolsQuery(conn, win) orelse
         icccm.firePropQuery(conn, win, 0, xcb.XCB_ATOM_ATOM, icccm.property_max_length);
     const hints_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_HINTS, xcb.XCB_ATOM_WM_HINTS, icccm.wm_hints_long_length);
+    const transient_cookie = icccm.firePropQuery(conn, win, xcb.XCB_ATOM_WM_TRANSIENT_FOR, xcb.XCB_ATOM_WINDOW, 1);
 
     return .{
         .c_wm_class = c_wm_class,
@@ -356,6 +381,7 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
         .normal_hints_cookie = normal_hints_cookie,
         .protocols_cookie = protocols_cookie,
         .hints_cookie = hints_cookie,
+        .transient_cookie = transient_cookie,
         .title_cookies = title_cache.fireTitleCookies(conn, win),
     };
 }
@@ -371,14 +397,25 @@ pub fn claimManagedEventMask(conn: core.Connection, win: u32) void {
     );
 }
 
-/// Drains the three unconditionally-fired admission cookies; with
-/// `discard_workspace` the two conditional workspace-resolution replies are
-/// discarded instead (adoption never resolves from them; the MapRequest path
-/// has already drained them via mapRequest). Returns the parsed
-/// WM_NORMAL_HINTS for the caller to thread into registration: the model
-/// entry does not exist yet when the reply drains, so the value travels as a
-/// parameter (single store -- the model; there is no staging copy).
-pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: AdmissionCookies, comptime discard_workspace: bool) ?model_mod.SizeHints {
+/// Everything drainAdmissionCookies extracts from a fired cookie batch: the
+/// parsed size hints and the ICCCM transient parent (dialog placement).
+pub const AdmissionDrain = struct {
+    size_hints: ?model_mod.SizeHints,
+    /// WM_TRANSIENT_FOR's parent window id, or null for a non-transient
+    /// window. The id is unvalidated here; admitWindow resolves it against
+    /// the model (preferred) or the X server (unmanaged parent).
+    transient_for: ?u32,
+};
+
+/// Drains the three unconditionally-fired admission cookies plus the
+/// transient cookie; with `discard_workspace` the two conditional
+/// workspace-resolution replies are discarded instead (adoption never
+/// resolves from them; the MapRequest path has already drained them via
+/// mapRequest). Returns the parsed WM_NORMAL_HINTS for the caller to thread
+/// into registration (the model entry does not exist yet when the reply
+/// drains, so the value travels as a parameter -- single store: the model;
+/// there is no staging copy) and the transient parent.
+pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: AdmissionCookies, comptime discard_workspace: bool) AdmissionDrain {
     if (comptime discard_workspace) {
         icccm.discardProtocolCookie(conn, cookies.c_wm_class);
         icccm.discardProtocolCookie(conn, cookies.c_net_wm_pid);
@@ -386,7 +423,20 @@ pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: Admission
     const size_hints = window.parseSizeHints(cookies.normal_hints_cookie);
     icccm.populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
     title_cache.collectTitleCookies(conn, win, cookies.title_cookies);
-    return size_hints;
+    return .{
+        .size_hints = size_hints,
+        .transient_for = drainTransientFor(conn, cookies.transient_cookie),
+    };
+}
+
+/// Drains WM_TRANSIENT_FOR: a WINDOW-typed property holding the dialog's
+/// parent id. Absent, empty, or wrong-typed means non-transient.
+fn drainTransientFor(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) ?u32 {
+    const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return null;
+    defer std.c.free(reply);
+    if (reply.*.format != 32 or reply.*.value_len == 0) return null;
+    const parent = icccm.u32Values(reply)[0];
+    return if (parent == xcb.XCB_WINDOW_NONE) null else parent;
 }
 
 /// Discards every cookie in a fired AdmissionCookies batch without parsing it.
@@ -403,6 +453,7 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
         cookies.normal_hints_cookie,
         cookies.protocols_cookie,
         cookies.hints_cookie,
+        cookies.transient_cookie,
     }) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
 }
 
@@ -425,6 +476,30 @@ pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies)
 /// `size_hints` is the admission drain's parsed WM_NORMAL_HINTS, threaded
 /// through as a parameter because no model entry exists when the reply
 /// drains. The model entry is the single store for size hints.
+/// Where a freshly-admitted tiled window should be reordered to on `home`:
+/// the primary-column head slot (index 0) under the active layout's fifo
+/// variant, null otherwise (lifo, single-window lists, non-fifo layouts).
+///
+/// Pure and headless: the whole spawn-placement decision, extracted so
+/// admission_test can pin both variants without an X server. The policy is
+/// metadata-driven — the active module declares which of its variant indices
+/// is the fifo one (`fifo_variant`), and the new window only takes the head
+/// when that variant is active AND a previous window already holds the slot
+/// (`tiled_order.len > 1`), so the first window on an empty column is never
+/// reordered.
+pub fn spawnPlacementTarget(m: *const model_mod.Model, home: model_mod.WSId) ?usize {
+    if (!build_options.has_tiling) return null;
+    const p = &m.ws[home.index].params;
+    const mv = contract.moduleOf(p.kind) orelse return null;
+    const v = mv.fifo_variant orelse return null;
+    if (p.variant_idx != v) return null;
+    if (m.ws[home.index].tiled_order.len <= 1) return null;
+    return 0; // fifo: the new window lands at the head; the old head drops one slot
+}
+
+/// The map front-end for one MapRequest: resolve the admission cookies'
+/// replies, then admit. The window is mapped under the same grab that does
+/// the model write, so a tiled spawn never flashes at its default position.
 pub fn mapRequest(
     win: model_mod.WindowId,
     target_ws: u8,
@@ -434,6 +509,15 @@ pub fn mapRequest(
 ) void {
     const m = pipeline.mut();
     if (query.isManaged(win)) return; // double-manage guard, see query.isManaged
+
+    // Mirror of handleMapRequest's preamble: claim the managed event mask so
+    // a window admitted through this DIRECT entry (the tests' admission
+    // path -- production arrives via handleMapRequest, which claims before
+    // it gets here) delivers the same PropertyNotify/StructureNotify/
+    // FocusChange stream a production window does. Without it a test could
+    // assert focus/property behaviour that never sees the events production
+    // acts on (the P1-09 FocusIn reassert is exactly that class).
+    claimManagedEventMask(core.getState().conn, win);
 
     // A defined refusal (store or home-list full) leaves the window
     // unmanaged.
@@ -462,7 +546,8 @@ pub fn mapRequest(
         // Primary-fifo variant spawn placement (it is SPAWN policy, not
         // membership policy — register itself lives in window_state_ops):
         // a new window takes the primary-column head slot, and the previous
-        // head window drops one slot.
+        // head window drops one slot. Pinned headlessly by
+        // spawnPlacementTarget (admission_test), which is the whole decision.
         {
             // Clamp the requested home workspace so a misconfigured target
             // can't index past the `ws` array in ReleaseFast (defense in depth;
@@ -471,16 +556,8 @@ pub fn mapRequest(
                 m.current
             else
                 window.clampToValidWorkspace(target_ws, model_mod.WSId.fromIndex(m.current.index));
-            const p = &m.ws[home.index].params;
-            // Same policy restated at the spawn site: driven by the active
-            // module's fifo_variant metadata (the head slot binds variant
-            // index 1).
-            if (contract.moduleOf(p.kind)) |mv| {
-                if (mv.fifo_variant) |v| {
-                    if (p.variant_idx == v and m.ws[home.index].tiled_order.len > 1)
-                        tiling_seam.reorderTiled(m, win, 0);
-                }
-            }
+            if (spawnPlacementTarget(m, home)) |head_slot|
+                tiling_seam.reorderTiled(m, win, head_slot);
         }
     }
     focus.initWindowGrabs(win); // protocol-side keygrabs, both paths do this
@@ -523,10 +600,39 @@ pub fn focusAfterGeometry() void {
 /// and its keyboard grabs seeded. One map-request path, one adoption path, one
 /// admission policy.
 ///
-pub fn admitWindow(win: u32, target_ws: u8, on_current: bool, float: bool, size_hints: ?model_mod.SizeHints) void {
+pub fn admitWindow(
+    win: u32,
+    target_ws: u8,
+    on_current: bool,
+    float: bool,
+    size_hints: ?model_mod.SizeHints,
+    transient_for: ?u32,
+) void {
     const cs = core.getState();
-    const float_rect: ?model_mod.Rect = if (float) window.getGeometry(cs.conn, win) else null;
+    // A transient (dialog) is floating by definition, rule or not: tiling a
+    // dialog against its neighbors is not a placement any toolkit asks for,
+    // and the centered-over-parent placement below only has meaning on a
+    // floating anchor.
+    const as_float = float or transient_for != null;
+    var float_rect: ?model_mod.Rect = if (as_float) window.getGeometry(cs.conn, win) else null;
+    if (float_rect) |*fr| {
+        if (transient_for) |parent| {
+            if (parentCenteredRect(parent, fr.*)) |centered| fr.* = centered;
+        }
+    }
     mapRequest(win, target_ws, on_current, float_rect, size_hints);
+}
+
+/// Center a dialog over its WM_TRANSIENT_FOR parent, clamped to the work
+/// area. Parent truth comes from the model when the parent is managed (no
+/// round trip); an unmanaged-but-live parent falls back to one geometry
+/// query; a vanished parent means no centering and the dialog keeps its own
+/// pre-map position (float_rect's client-side geometry).
+fn parentCenteredRect(parent: u32, dialog: model_mod.Rect) ?model_mod.Rect {
+    const m = pipeline.state();
+    const parent_rect: model_mod.Rect = reconcile.truthRect(m, parent) orelse
+        window.getGeometry(core.getState().conn, parent) orelse return null;
+    return model_mod.centerRectIn(parent_rect, dialog.width, dialog.height, usable_area_mod.workArea(core.getState().screen));
 }
 
 /// Resolves only the float bit of a class rule (adoption never relocates a
@@ -589,16 +695,22 @@ fn restoredOrCurrent(record: ?*const session.WindowRecord) u8 {
     return query.getCurrentWorkspace() orelse 0;
 }
 
-/// Re-applies a restore record's mask, anchor, and presence onto an
+/// Re-applies a restore record's mask, anchor, and ext-driven presence onto an
 /// already-registered model entry. Registration (admitWindow ->
 /// mapRequest) creates the entry as a present tiled-anchored window on
 /// its target workspace; this overwrites the per-window state that survived
 /// the re-exec so the caller's reconcile can place it exactly as before.
 /// Presence bookkeeping that would otherwise drift is routed through the owning
-/// window module's deserialize hook rather than patched by hand.
-fn applyRestoredRecord(win: u32, record: *const session.WindowRecord) void {
-    const model = pipeline.mut();
-    const e = model.store.getPtr(win) orelse return;
+/// window module's deserialize hook rather than patched by hand (the record's
+/// own `presence`/`covering_ws` fields are deliberately NOT read here: the
+/// model-authoritative covering phase is `session.applyModelLevel`, pinned in
+/// session_test's F10 — this fn owns mask/anchor/ext only).
+///
+/// Takes the model as a parameter (the `buildRulesMapFrom`/`matchRule` split)
+/// so the whole policy is testable headlessly against a local model; the
+/// single production call site passes `pipeline.mut()`.
+pub fn applyRestoredRecord(m: *model_mod.Model, win: u32, record: *const session.WindowRecord) void {
+    const e = m.store.getPtr(win) orelse return;
 
     e.mask = record.mask;
 
@@ -640,14 +752,14 @@ fn applyRestoredRecord(win: u32, record: *const session.WindowRecord) void {
             for (window_mods) |mod| {
                 if (!std.mem.eql(u8, mod.name, name)) continue;
                 if (mod.deserializeWindow) |f| {
-                    if (f(win, payload, model)) return;
+                    if (f(win, payload, m)) return;
                 }
                 break; // named claimant found; the scan below is the fallback
             }
         } else if (header.legacy_ordinal) |ordinal| {
             if (ordinal < window_mods.len) {
                 if (window_mods[ordinal].deserializeWindow) |f| {
-                    if (f(win, payload, model)) return;
+                    if (f(win, payload, m)) return;
                 }
             }
         }
@@ -655,7 +767,7 @@ fn applyRestoredRecord(win: u32, record: *const session.WindowRecord) void {
         // a chance; the first hook to claim (return true) ends the scan, so
         // this is dispatchFirstTrue's stop-at-first-true shape rather than a
         // full fan-out.
-        _ = registry.dispatchFirstTrue(.deserializeWindow, .{ win, payload, model });
+        _ = registry.dispatchFirstTrue(.deserializeWindow, .{ win, payload, m });
     }
 }
 
@@ -798,15 +910,15 @@ fn adoptRootWindows() !usize {
         // c_wm_class stays live and is discarded here as before.
         var drain_cookies = entry.cookies;
         if (entry.record == null) drain_cookies.c_wm_class = null;
-        const size_hints = drainAdmissionCookies(conn, win, drain_cookies, true);
+        const drain = drainAdmissionCookies(conn, win, drain_cookies, true);
 
         // Register on the restored-or-current workspace. on_current=false so
         // mapRequest does NOT reconcile per-window (the caller owns
         // the single end-of-adoption reconcile) or steal model focus before
         // applyModelLevel restores the session's focus.
-        admitWindow(win, restoredOrCurrent(entry.record), false, float, size_hints);
+        admitWindow(win, restoredOrCurrent(entry.record), false, float, drain.size_hints, drain.transient_for);
 
-        if (entry.record) |r| applyRestoredRecord(win, r);
+        if (entry.record) |r| applyRestoredRecord(pipeline.mut(), win, r);
 
         adopted += 1;
     }
