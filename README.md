@@ -220,6 +220,7 @@ zig fmt --check .
 zig build check -Doptimize=Debug      # no-emit: full Sema, no codegen
 dev/scripts/xtest.sh zig build test -Doptimize=Debug   # THE test command: Xvfb-backed
 zig build                             # bare = ReleaseFast binary (codegen/link proof)
+zig build -Dconfig-warn               # release that keeps config warn diagnostics (~+145 KB)
 
 # everything above + tests + the 31-scenario feature-deletion matrix
 dev/scripts/check-before-commit.sh --all

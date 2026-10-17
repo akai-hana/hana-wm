@@ -127,6 +127,37 @@ check_borders() {
 	[ "$_fail" = "0" ] || return 1
 }
 
+# P1-11 server-truth gate: the named dialog's client rect must equal the
+# dialog centered over the named parent's client rect -- the
+# WM_TRANSIENT_FOR placement (the centering math itself is pinned
+# headlessly by model_test's centerRectIn test). Fail-loud like check_borders.
+check_centered_over() {
+	_dlg="$1"; _par="$2"
+	_did=$(client_id "$_dlg"); _pid=$(client_id "$_par")
+	[ -n "$_did" ] || { echo "FAIL: check_centered_over: no window '$_dlg'" >&2; return 1; }
+	[ -n "$_pid" ] || { echo "FAIL: check_centered_over: no window '$_par'" >&2; return 1; }
+	set -- $(DISPLAY="$HW_DISPLAY" xwininfo -id "$_did" | awk '
+		/Absolute upper-left X:/ {x=$NF}
+		/Absolute upper-left Y:/ {y=$NF}
+		/Width:/ {w=$NF}
+		/Height:/ {h=$NF}
+		END {print x, y, w, h}')
+	_dx=$1 _dy=$2 _dw=$3 _dh=$4
+	set -- $(DISPLAY="$HW_DISPLAY" xwininfo -id "$_pid" | awk '
+		/Absolute upper-left X:/ {x=$NF}
+		/Absolute upper-left Y:/ {y=$NF}
+		/Width:/ {w=$NF}
+		/Height:/ {h=$NF}
+		END {print x, y, w, h}')
+	_px=$1 _py=$2 _pw=$3 _ph=$4
+	_ex=$(( _px + (_pw - _dw) / 2 ))
+	_ey=$(( _py + (_ph - _dh) / 2 ))
+	if [ "$_dx" != "$_ex" ] || [ "$_dy" != "$_ey" ]; then
+		echo "FAIL: $_dlg at $_dx,$_dy is not centered over $_par at $_px,$_py ($_pw x $_ph): expected $_ex,$_ey" >&2
+		return 1
+	fi
+}
+
 compile_tool() {
 	_tool="$1"; shift
 	_src="$1"; shift
@@ -167,4 +198,31 @@ client_geom() {
 	else
 		DISPLAY="$HW_DISPLAY" "$_tool" "$_win" "$_x" "$_y" "$_w" "$_h"
 	fi
+}
+
+# P1-21 golden-pixel gate: capture the bar window as a normalized cell-ink
+# grid -> $HW_OUT/bar.norm (compared against golden/<sc>/bar.norm by
+# run-scenario.sh's semantic diff, same as the borders assertion).
+#
+# The bar paints its first frame asynchronously; probe until a grid with any
+# ink appears (deadline 5s) so the scenario cannot capture the pre-paint
+# window. A bar that NEVER paints (fonts not pinned, no segments) fails
+# loudly rather than recording an all-background golden.
+bar_shot() {
+	compile_tool "$HARNESS_ROOT/.cache/barshot" "$HARNESS_ROOT/tools/barshot.c" -lX11 || return 1
+	_deadline=$(( $(date +%s) + 5 ))
+	while :; do
+		if DISPLAY="$HW_DISPLAY" "$HARNESS_ROOT/.cache/barshot" \
+			>"$HW_OUT/bar.norm" 2>"$HW_OUT/barshot.err"; then
+			# A pure-hex row with any non-zero cell = a painted frame
+			# (the "bar WxH ..." header line can never match: it has spaces).
+			grep -q '^[0-9a-f]*[1-9a-f][0-9a-f]*$' "$HW_OUT/bar.norm" && return 0
+		fi
+		if [ "$(date +%s)" -ge "$_deadline" ]; then
+			echo "FAIL bar_shot: no painted bar frame on $HW_DISPLAY" >&2
+			cat "$HW_OUT/barshot.err" >&2 2>/dev/null || :
+			return 1
+		fi
+		sleep 0.2
+	done
 }

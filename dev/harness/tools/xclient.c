@@ -1,13 +1,16 @@
 /* xclient [--name NAME] [--class CLASS] [--w W] [--h H] [--fixed] [--noinput]
+ *         [--transient NAME]
  *
  * Minimal deterministic X client for hana's smoke-test harness.
  * - Creates one top-level window, maps it, and serves events until killed
  *   or deleted via WM_DELETE_WINDOW.
  * - Advertises WM_HINTS(input=True) + WM_TAKE_FOCUS by default, so the WM
- *   focuses it (unlike xeyes, which is a no-input client).
+ *   focuses it (unlike xeyes, a no-input client).
  * - Default size hints are unconstrained (layouts may fill freely).
  *   --fixed pins min=max=w,h (exercises hint-clamping paths).
  * - --noinput reproduces xeyes-style Input=False clients.
+ * - --transient NAME sets WM_TRANSIENT_FOR to the existing window named NAME
+ *   (S24 dialog placement; parent is searched among current root children).
  * Built on demand by run-scenario.sh; needs only libX11.
  */
 #include <X11/Xlib.h>
@@ -21,6 +24,7 @@
 int main(int argc, char **argv) {
     const char *name = "A";
     const char *class_name = "XClient";
+    const char *transient_name = NULL;
     int w = 400, h = 300, noinput = 0, fixed = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -30,6 +34,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--h") && i + 1 < argc) h = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fixed")) fixed = 1;
         else if (!strcmp(argv[i], "--noinput")) noinput = 1;
+        else if (!strcmp(argv[i], "--transient") && i + 1 < argc) transient_name = argv[++i];
         else { fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
     }
 
@@ -65,6 +70,28 @@ int main(int argc, char **argv) {
         sh.width = w;
         sh.height = h;
         XSetWMNormalHints(d, win, &sh);
+    }
+
+    /* WM_TRANSIENT_FOR: S24 dialog placement. The parent is an EXISTING
+     * root child named transient_name (spawned earlier by the scenario). */
+    if (transient_name) {
+        Window rr, par, *kids = NULL;
+        unsigned nkids = 0;
+        if (XQueryTree(d, root, &rr, &par, &kids, &nkids)) {
+            int found = 0;
+            for (unsigned k = 0; k < nkids && !found; k++) {
+                char *nm = NULL;
+                if (XFetchName(d, kids[k], &nm) && nm) {
+                    if (!strcmp(nm, transient_name)) {
+                        XSetTransientForHint(d, win, kids[k]);
+                        found = 1;
+                    }
+                    XFree(nm);
+                }
+            }
+            if (!found) fprintf(stderr, "xclient: --transient parent '%s' not found\n", transient_name);
+            if (kids) XFree(kids);
+        }
     }
 
     /* WM_PROTOCOLS: WM_DELETE_WINDOW + WM_TAKE_FOCUS */

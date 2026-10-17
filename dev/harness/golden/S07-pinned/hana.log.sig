@@ -1,16 +1,18 @@
-info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W01
-info: [debug] Total windows:  2
-info: [debug] Suppress focus: none
-info: [debug]   WS1: 2 windows
-info: [debug]   WS2: 1 windows
-info: [debug]   WS3: 1 windows
-info: [debug]   WS4: 1 windows
-info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W01
-info: [debug] Total windows:  2
-info: [debug] Suppress focus: none
-info: [debug]   WS1: 2 windows
-info: [debug]   WS2: 1 windows
-info: [debug]   WS3: 1 windows
-info: [debug]   WS4: 1 windows
+# sig-format: 3
+warning: [document] Unrecognized key 'enabled' in section [tiling] (line 9); ignoring
+info: [diagnostic] ========== STATE DUMP ==========
+info: [diagnostic] Focused:        W01
+info: [diagnostic] Total windows:  2
+info: [diagnostic] Suppress focus: none
+info: [diagnostic]   WS1: 2 windows
+info: [diagnostic]   WS2: 1 windows
+info: [diagnostic]   WS3: 1 windows
+info: [diagnostic]   WS4: 1 windows
+info: [diagnostic] ========== STATE DUMP ==========
+info: [diagnostic] Focused:        W01
+info: [diagnostic] Total windows:  2
+info: [diagnostic] Suppress focus: none
+info: [diagnostic]   WS1: 2 windows
+info: [diagnostic]   WS2: 1 windows
+info: [diagnostic]   WS3: 1 windows
+info: [diagnostic]   WS4: 1 windows

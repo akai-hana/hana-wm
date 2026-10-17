@@ -1,13 +1,15 @@
-# S15 config override: monocle everywhere, gapless default variant.
+# S15 config override: master + monocle everywhere (P1-15 needs >= 2 layouts
+# so a real cycle exists), gapless monocle variant.
 [tiling]
 enabled = true
 border_width = 4
 gap_width = 8
+# Two compiled layouts so super+space has somewhere to cycle TO (cycling is
+# what exercises global_layout = true below).
+layouts = ["master-stack", "monocle"]
 # Per-workspace layouts default every ws to the comptime first layout
-# (master), so force the global path for this monocle-only scenario.
+# (master-stack), so force the global path for this monocle-only scenario.
 global_layout = true
-
-layouts = ["monocle"]
 
 [tiling.layouts.monocle]
 variants = "gapless"

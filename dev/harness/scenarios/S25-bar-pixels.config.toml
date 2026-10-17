@@ -1,0 +1,73 @@
+# S25 config override: a FIXED bar for the P1-21 golden-pixel scenario.
+# Everything that reaches the pixmap is pinned here: absolute height and
+# font size (no font-metrics-derived auto sizing), an explicit font family
+# (the harness fonts/ dir is the ONLY font source -- run-scenario.sh points
+# FONTCONFIG_FILE at a private fontconfig), explicit colors, and a
+# segment set with zero dynamic readouts (no clock, no cpu/ram/batt, no
+# sliders) so the bar is pixel-stable from the first frame.
+
+[tiling]
+enabled = true
+border_width = 4
+gap_width = 8
+layouts = ["master-stack", "monocle"]
+[tiling.layouts.master-stack]
+count = 1
+side = "left"
+width = 50%
+variants = "lifo"
+
+[bar]
+enabled = true
+position = "bottom"
+# Absolute px everywhere: height/size must not depend on font metrics or
+# screen size, or the grid shifts between environments.
+height = 32
+font_size = 12
+fonts = ["Hana Harness Mono"]
+per_segment_padding = 6
+carousel_enabled = false
+bg = "#222222"
+fg = "#bbbbbb"
+selected_bg = "#005577"
+selected_fg = "#eeeeee"
+primary_color = "#005577"
+secondary_color = "#222222"
+alternative_color = "#005577"
+text_color = "#bbbbbb"
+indicator_size = 4
+
+[bar.layout.left]
+segments = ["workspaces", "layout"]
+
+[bar.layout.center]
+segments = ["title"]
+
+[bar.layout.right]
+segments = ["variants"]
+
+[workspaces]
+count = 4
+
+[binds]
+Mod = "Super"
+Mod+Return = "auto_terminal"
+Mod+F = "toggle_fullscreen"
+Mod+Shift+F = "close_window"
+Mod+S = "toggle_floating_window"
+Mod+T = "minimize_window"
+Mod+Shift+T = "unminimize_lifo"
+Mod+Alt+T = "unminimize_fifo"
+Mod+Shift+Alt+T = "unminimize_all"
+Mod+{1-4} = "workspace"
+Mod+Shift+{1-4} = "move_to_workspace"
+Mod+A = "all_workspaces"
+Mod+P = "pin_window"
+Mod+W = "swap_master"
+Mod+J = "focus_next_window"
+Mod+K = "focus_prev_window"
+Mod+Space = "toggle_layout"
+Mod+E = "cycle_variants"
+Mod+Shift+Y = "reload_config"
+Mod+Shift+R = "reload_hana"
+Mod+Q = "dump_state"
