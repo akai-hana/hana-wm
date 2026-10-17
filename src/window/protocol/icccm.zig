@@ -114,6 +114,32 @@ pub fn supportsWMDeleteCached(conn: core.Connection, win: u32) bool {
     return getOrQueryCachedProps(conn, win).wm_delete;
 }
 
+/// ICCCM §4.1.2.7 close: the WM_DELETE_WINDOW client message (timestamp in
+/// data32[1] per §4.1.2.7), falling back to xcb_destroy_window for clients
+/// that don't advertise the protocol. The ONE close path: the close_window
+/// keybind (dispatch.zig) and EWMH's _NET_CLOSE_WINDOW (client_events.zig)
+/// both land here, so "close" cannot mean two different things depending on
+/// who asked.
+pub fn closeViaProtocol(win: u32) void {
+    const conn = core.getState().conn;
+    if (supportsWMDeleteCached(conn, win)) blk: {
+        const protocols_atom = atoms.getAtomCached("WM_PROTOCOLS") orelse break :blk;
+        const delete_atom = atoms.getAtomCached("WM_DELETE_WINDOW") orelse break :blk;
+
+        var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
+        event.response_type = xcb.XCB_CLIENT_MESSAGE;
+        event.format = 32;
+        event.window = win;
+        event.type = protocols_atom;
+        event.data.data32[0] = delete_atom;
+        event.data.data32[1] = focus.getLastEventTime();
+
+        _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
+        return;
+    }
+    _ = xcb.xcb_destroy_window(conn, win);
+}
+
 pub const WMProtocolsProps = struct { take_focus: bool = false, wm_delete: bool = false };
 
 /// Alignment-cast to the u32 value array of a format-32 get_property reply.

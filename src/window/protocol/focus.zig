@@ -77,6 +77,11 @@ const State = struct {
     /// SpawnCursor). Recorded in handleMapRequest; consumed by the
     /// window module's spawn-crossing suppression.
     spawn_cursor: SpawnCursor = .{},
+
+    /// FocusIn-reassert warn latch (handleFocusIn): once per process, so a
+    /// looping focus-stealer cannot flood the log. Re-armed by init()'s full
+    /// State reset.
+    warned_focus_steal: bool = false,
 };
 
 // PATTERN: module-global state with explicit init/deinit lifecycle (called
@@ -315,17 +320,6 @@ pub fn snapshotSpawnCursor(conn: core.Connection) void {
     if (reply) |r| {
         state.?.spawn_cursor = .{ .x = r.*.root_x, .y = r.*.root_y };
     }
-}
-
-/// Debug/test invariant: the private protocol cache (`last_applied`) must
-/// equal focus truth (`model.focused`) once a transition has SETTLED. The two
-/// legitimately differ only while a two-phase prepare/apply is in flight
-/// (apply updates the cache before the caller's model write lands). Before
-/// pipeline.init there is no model truth, so the cache is the only record and
-/// the invariant is vacuously true. Lives in-module (not the test) because it
-/// reads the private `state`.
-pub fn protocolParityHolds() bool {
-    return getFocused() == state.?.last_applied;
 }
 
 /// True when an incoming EnterNotify should be silently ignored.
@@ -824,6 +818,75 @@ pub fn applyPendingFocus(t: FocusTransition) void {
             clearTail();
         },
         .no_input, .none => {},
+    }
+}
+
+/// FocusIn reassert (P1-09 / D7).
+///
+/// FocusChange is selected on every managed window (masks.managed_window),
+/// but nothing consumed the events: a client that calls XSetInputFocus on its
+/// own toplevel (Electron, terminals, games -- legal, the server obeys) moved
+/// the SERVER focus while model.focused, the border colors, and the root's
+/// _NET_ACTIVE_WINDOW kept naming the old window until the next hover/click
+/// happened to re-sync them.
+///
+/// The response REASSERTS the model's focus rather than adopting the steal:
+/// the model is the single source of truth, and adopting would hand every
+/// client a focus-steal primitive. The push-back goes through the existing
+/// apply path (applyPendingFocus / clearTail) but bypasses prepareFocus's
+/// dedup on purpose: the protocol cache still (correctly) says the model's
+/// window holds applied focus, yet the server has moved behind our back, so
+/// only a real set_input_focus restores it. Fire-and-forget -- safe from the
+/// event loop -- and terminating: the FocusIn this generates carries the
+/// model's window and drops out at the `m.focused == win` dedup below.
+/// Warn-once per process (a looping stealer must not flood the log); init()'s
+/// full State reset re-arms the latch.
+pub fn handleFocusIn(event: *const xcb.xcb_focus_in_event_t) void {
+    if (event.mode != xcb.XCB_NOTIFY_MODE_NORMAL) return;
+    // The binding spells the target field `event`, not `window` (see the
+    // events_test offset pin for the same shape).
+    const win = event.event;
+    if (!query.isValidManagedWindow(win)) return;
+    const m = pipeline.state();
+    if (m.focused == win) return;
+    if (!state.?.warned_focus_steal) {
+        state.?.warned_focus_steal = true;
+        log.warn(
+            "focus: 0x{x} stole input focus (model.focused=0x{x}); reasserting",
+            .{ win, m.focused orelse xcb.XCB_WINDOW_NONE },
+        );
+    }
+    reassertFocus(m);
+}
+
+/// Push the model's focus verdict back to the server after a steal. No raise
+/// (stacking is not what a steal broke), suppression untouched, and
+/// set_input_focus forced even for globally_active targets -- the steal
+/// already moved the server, and WM_TAKE_FOCUS self-focus alone would leave
+/// it stranded on the stealer.
+fn reassertFocus(m: *const model_mod.Model) void {
+    if (m.focused) |target| {
+        if (!m.store.has(target)) {
+            // The model's window died without the teardown running yet:
+            // hand focus to root rather than ping a dead id.
+            const cs = core.getState();
+            focusNow(cs.conn, cs.root);
+            core.focus.bump();
+            return;
+        }
+        const resolved = peekInputModelResolved(target) orelse provisionalResolution();
+        applyPendingFocus(.{ .set = .{
+            .win = target,
+            .old = null,
+            .flags = .{
+                .set_input_focus = true,
+                .raise = false,
+                .take_focus_known = resolved.take_focus,
+                .new_suppress = state.?.suppress_reason,
+            },
+        } });
+    } else {
+        clearTail();
     }
 }
 

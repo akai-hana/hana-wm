@@ -7,12 +7,16 @@
 //!      Honored requests route through the window-module hook
 //!      (`honorConfigureRequest`); denied/tiled requests echo the applied
 //!      geometry with a synthetic ConfigureNotify (ICCCM 4.1.5).
-//!   2. CLIENT_MESSAGE — EWMH fullscreen requests from applications (the
-//!      pager / native-fullscreen side of the fullscreen protocol; the
-//!      model transition itself is modules/fullscreen.zig). Owns the
-//!      warn-once latches: a looping pager would otherwise flood the log,
-//!      and the latches reset with the rest of the window layer's init
-//!      discipline (window.init calls `reset`).
+//!   2. CLIENT_MESSAGE — EWMH messages: fullscreen requests from
+//!      applications (the pager / native-fullscreen side of the fullscreen
+//!      protocol; the model transition itself is modules/fullscreen.zig) and
+//!      the pager's close/switch-desktop/move-desktop messages
+//!      (_NET_CLOSE_WINDOW → shared ICCCM closeViaProtocol,
+//!      _NET_CURRENT_DESKTOP → switchWorkspace hook, _NET_WM_DESKTOP →
+//!      moveToWorkspace hook; advertised in requests.supported_atoms).
+//!      Owns the warn-once latches: a looping pager would otherwise flood
+//!      the log, and the latches reset with the rest of the window layer's
+//!      init discipline (window.init calls `reset`).
 //!   3. CROSSING — Enter/LeaveNotify handling: event-shape filtering, then a
 //!      hand-off to focus.zig's crossing policy (crossingShouldDrop /
 //!      maybeFocusWindow). The focus protocol itself AND the suppression
@@ -115,7 +119,17 @@ fn handleManagedConfigureRequest(
         else
             null,
     };
-    const wm = registry.providerOf(.honorConfigureRequest) orelse return;
+    const wm = registry.providerOf(.honorConfigureRequest) orelse {
+        // Floating-less build (floating.zig deleted): every managed window
+        // is tiled, so every ConfigureRequest is DENIED -- but ICCCM 4.1.5
+        // still requires the synthetic ConfigureNotify echo of the geometry
+        // the window actually has. Without the echo a self-resizing client
+        // (GTK/Qt sizing to its own idea of its size) never learns the WM
+        // overruled it and can wedge mid-resize. Same shape as the .ignored
+        // limb below; the early `orelse return` used to skip it.
+        sendSyntheticConfigureNotify(win);
+        return;
+    };
     switch (wm.honorConfigureRequest.?(pipeline.mut(), win, req)) {
         .geometry_applied => {
             // ICCCM 4.1.5: a border-width-only request applied by the module
@@ -289,6 +303,50 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
             "Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented",
             .{event.window},
         );
+        return;
+    }
+
+    // _NET_CLOSE_WINDOW: the pager/taskbar close button. Same ICCCM deletion
+    // path the close_window keybind takes (shared closeViaProtocol), and
+    // guarded to a managed window: event.window is content of a spoofable
+    // message, so honoring it for an arbitrary id would let any client ask
+    // hana to close someone else's toplevel.
+    const net_close = atoms.getAtomOrZero("_NET_CLOSE_WINDOW");
+    if (net_close != 0 and event.type == net_close) {
+        const win = event.window;
+        if (query.isValidManagedWindow(win)) window.closeViaProtocol(win);
+        return;
+    }
+
+    // _NET_CURRENT_DESKTOP: pager tab click -- switch to workspace N.
+    // data32[0] is the 0-based EWMH desktop index, which matches hana's
+    // internal index directly. Out of range means the pager asked for a
+    // workspace that doesn't exist here; dropped rather than clamped,
+    // because guessing which existing workspace it meant is not ours to
+    // make (switchWorkspace on a bad index has no defined behavior).
+    const net_current_desktop = atoms.getAtomOrZero("_NET_CURRENT_DESKTOP");
+    if (net_current_desktop != 0 and event.type == net_current_desktop) {
+        const ws = event.data.data32[0];
+        if (ws < query.getWorkspaceCount()) {
+            registry.callHook(.switchWorkspace, .{@as(u8, @intCast(ws))});
+        }
+        return;
+    }
+
+    // _NET_WM_DESKTOP: pager drag -- move a managed window to another
+    // workspace. data32[0] = 0-based target; 0xFFFFFFFF means "all
+    // workspaces", which hana has no per-window membership for (the
+    // all-workspaces VIEW is a global mode, not a tag), so that limb is
+    // dropped the same way an out-of-range target is.
+    const net_wm_desktop = atoms.getAtomOrZero("_NET_WM_DESKTOP");
+    if (net_wm_desktop != 0 and event.type == net_wm_desktop) {
+        const win = event.window;
+        if (query.isValidManagedWindow(win)) {
+            const ws = event.data.data32[0];
+            if (ws != 0xFFFFFFFF and ws < query.getWorkspaceCount()) {
+                registry.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(ws)) });
+            }
+        }
         return;
     }
 

@@ -72,7 +72,8 @@ pub fn applyWidth(conn: core.Connection, win: u32) void {
     if (reconcile.sentGet(win)) |e| {
         if (e.bw == w) return;
     }
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{w});
+    const ck = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_BORDER_WIDTH, &[_]u32{w});
+    requests.noteSequence(win, ck.sequence);
     if (build_options.has_tiling) reconcile.markSentBorderWidth(win, w);
 }
 
