@@ -78,6 +78,7 @@ pub const snapViewportFocusedDuty = reconcile_tails.snapViewportFocusedDuty;
 pub const peekInputModelResolved = focus.peekInputModelResolved;
 pub const provisionalResolution = focus.provisionalResolution;
 pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
+pub const closeViaProtocol = icccm.closeViaProtocol;
 pub const sendWMTakeFocusKnown = focus.sendWMTakeFocusKnown;
 pub const discardProtocolCookie = icccm.discardProtocolCookie;
 
@@ -89,6 +90,10 @@ pub const discardProtocolCookie = icccm.discardProtocolCookie;
 pub const handleConfigureRequest = client_events.handleConfigureRequest;
 pub const handleEnterNotify = client_events.handleEnterNotify;
 pub const handleLeaveNotify = client_events.handleLeaveNotify;
+// FocusIn reassert lives with the focus protocol (focus.zig owns the
+// prepare/apply machinery it drives); re-exported here like the rest of the
+// event surface.
+pub const handleFocusIn = focus.handleFocusIn;
 pub const handleClientMessage = client_events.handleClientMessage;
 pub const updateWorkspaceBorders = border_sweeps.updateWorkspaceBorders;
 pub const updateFloatingWindowBorders = border_sweeps.updateFloatingWindowBorders;
@@ -123,6 +128,7 @@ var cache: idmap.IdMap(u32, capacity) = .{};
 /// Re-arm for a deinit()+init() cycle (window.init's reset discipline).
 pub fn reset() void {
     cache = .{};
+    prop_dirty = .{};
 }
 
 /// Record that `child` resolves to `managed` so future tree walks are skipped.
@@ -290,14 +296,14 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const target_ws = decision.workspace;
     const on_current = target_ws.eql(current_ws);
 
-    const size_hints = admission.drainAdmissionCookies(conn, win, cookies, false);
+    const drain = admission.drainAdmissionCookies(conn, win, cookies, false);
     const t_drain: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
     // model registration + grabs + child-cache seeding) is identical to the
     // boot-time adoption path, so it lives in admission.admitWindow.
-    admission.admitWindow(win, target_ws.index, on_current, decision.float, size_hints);
+    admission.admitWindow(win, target_ws.index, on_current, decision.float, drain.size_hints, drain.transient_for);
 
     if (build_options.profile_key) {
         const t_map = core.monotonicNs();
@@ -357,10 +363,11 @@ fn unmanageWindow(win: u32) void {
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
     // per-window bookkeeping (e.g. the minimize module's parked record) is
-    // dropped with the window. This is the ONLY fire on the withdraw route
-    // (UnmapNotify / wm_close, XID still alive); a DestroyNotify already
-    // fired it from events.zig first, and every hook is idempotent
-    // (find-then-clear), so the repeat for the same window is harmless.
+    // dropped with the window. This is the ONLY fire: DestroyNotify used to
+    // pre-fire from events.zig as well (double fan-out, harmless because
+    // every hook is idempotent find-then-clear) — that pre-fire is gone
+    // (P1-40/D28) and the exactly-once contract is pinned by the P1-19
+    // X-gated destroy test through registry.onWindowGone_fires.
     dispatchAll(.onWindowGone, .{win});
 
     // Drop the MODEL entry, resolve the post-close focus target (fallback
@@ -385,13 +392,21 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     if (!isValidManagedWindow(event.window)) return;
     const conn = core.getState().conn;
 
-    // Window title (_NET_WM_NAME / WM_NAME): refresh the WM-owned title cache
-    // and bump the window fact so surfaces reading titles from the cache (the
-    // bar) repaint. The WM is the sole owner of title freshness; the bar
-    // does no title property fetching at all.
+    // Window title (_NET_WM_NAME / WM_NAME) and WM_NORMAL_HINTS are MARKED
+    // here, not refreshed: a rename-looping client would otherwise pay two
+    // blocking round trips per PropertyNotify, serialized in the event loop.
+    // flushPropertyRefresh (batch end) fetches each marked window once,
+    // converging on the property's final state. The WM remains the sole
+    // owner of title freshness; the bar does no title property fetching.
     const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        if (title_cache.refreshTitle(conn, event.window)) core.window.bump();
+        if (prop_dirty.getPtr(event.window)) |bits| {
+            bits.* |= prop_dirty_title;
+        } else if (!prop_dirty.put(event.window, prop_dirty_title)) {
+            // Set full (pathological): fall back to the immediate refresh so
+            // the title still converges.
+            if (title_cache.refreshTitle(conn, event.window)) core.window.bump();
+        }
         return;
     }
 
@@ -400,7 +415,11 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // update hints after map time (e.g. terminal emulators adjusting their
     // increment grid when the font changes).
     if (event.atom == xcb.XCB_ATOM_WM_NORMAL_HINTS) {
-        refreshSizeHints(event.window);
+        if (prop_dirty.getPtr(event.window)) |bits| {
+            bits.* |= prop_dirty_hints;
+        } else if (!prop_dirty.put(event.window, prop_dirty_hints)) {
+            refreshSizeHints(event.window);
+        }
         return;
     }
 
@@ -409,6 +428,46 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     {
         focus.refreshCachedPropHalf(conn, event.window, event.atom);
     }
+}
+
+// P1-12 coalesced property refresh: a PropertyNotify storm (rename-looping
+// clients, hint-flapping toolkits) marks the window in this fixed-capacity
+// set instead of paying a blocking round trip per event; flushPropertyRefresh
+// runs once per event batch (events.zig's post-batch housekeeping, before the
+// bar repaint) and refreshes each marked window exactly once, converging on
+// the property's final state. The set mirrors title_cache's discipline:
+// allocation-free IdMap, ceiling above the model store, set-full drops the
+// mark and falls back to an immediate refresh so correctness never depends
+// on capacity.
+const prop_dirty_title: u2 = 1;
+const prop_dirty_hints: u2 = 2;
+var prop_dirty: idmap.IdMap(u2, idmap.max_window_cache) = .{};
+
+/// Batch-end flush: one title refresh + one size-hints refresh per window
+/// marked during the batch, then the set is cleared. A window unmapped or
+/// destroyed mid-batch (no longer managed at flush time) is dropped without
+/// a round trip -- the unmap path already cleared its title cache entry.
+pub fn flushPropertyRefresh() void {
+    if (prop_dirty.count() == 0) return;
+    const conn = core.getState().conn;
+    var it = prop_dirty.iterator();
+    while (it.next()) |item| {
+        const win = item.key;
+        const bits = item.val.*;
+        if (!query.isValidManagedWindow(win)) continue;
+        if (bits & prop_dirty_title != 0) {
+            if (title_cache.refreshTitle(conn, win)) core.window.bump();
+        }
+        if (bits & prop_dirty_hints != 0) refreshSizeHints(win);
+    }
+    // Full clear after iteration (IdMap iteration is slot-walking; removing
+    // mid-loop would tombstone slots it still walks).
+    prop_dirty.clear();
+}
+
+/// Test seam: how many windows the live dirty set covers (pre-flush).
+pub fn pendingPropertyRefreshCount() usize {
+    return prop_dirty.count();
 }
 
 fn refreshSizeHints(win: u32) void {

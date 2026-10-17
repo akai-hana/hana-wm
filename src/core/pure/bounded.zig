@@ -14,6 +14,11 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         items: [capacity]T = undefined,
         len: usize = 0,
 
+        /// One-shot overflow latch (per list type): the first dropped append
+        /// warns; later ones stay silent. Keeps the unconditional warn from
+        /// flooding a hot retry loop.
+        var overflow_reported: bool = false;
+
         const Self = @This();
 
         pub fn slice(self: *Self) []T {
@@ -75,8 +80,13 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         /// collection is worth a warning or a silent fallback.
         pub fn append(self: *Self, item: T) bool {
             if (self.len >= capacity) {
-                if (std.debug.runtime_safety) {
-                    log.warn("BoundedList overflow: capacity={d}", .{capacity});
+                // Unconditional (not `runtime_safety`-gated): a dropped
+                // element is real protection in the shipped ReleaseFast
+                // build, not a debug nicety. Latched once per list type so a
+                // hot retry loop cannot flood the log.
+                if (!overflow_reported) {
+                    overflow_reported = true;
+                    log.warn("BoundedList({s}) overflow: capacity={d}; element dropped, further overflows silent", .{ @typeName(T), capacity });
                 }
                 return false;
             }
