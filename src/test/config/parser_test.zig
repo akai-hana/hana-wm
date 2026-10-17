@@ -411,3 +411,52 @@ test "color-mix: literal arrays parse with accumulated=false, mixing stays intac
     try testing.expect(x6 == .array);
     try testing.expect(!x6.array.accumulated);
 }
+
+// P1-17: the three header-contract rejection guards (D9). Each construct
+// must flag had_errors, drop its line, and report file:line:col through the
+// diagnostics bag (the runner's logFn captures warn lines there).
+test "rejects inline tables, dotted keys, and date-shaped bare tokens" {
+    const diagnostics = @import("diagnostics");
+    var diag: diagnostics.Diagnostics = .{ .allocator = testing.allocator };
+    defer diag.deinit();
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = null;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Inline table at the value head: rejected (was silently a string array).
+    var doc = try parse(arena.allocator(), "x = { a = 1 }\n");
+    try testing.expect(doc.had_errors);
+    try testing.expect(doc.root.get("x") == null);
+
+    // Dotted key: rejected (dotted names exist only as section headers).
+    doc = try parse(arena.allocator(), "a.b = 1\n");
+    try testing.expect(doc.had_errors);
+    try testing.expect(doc.root.get("a.b") == null);
+    try testing.expect(doc.root.get("a") == null);
+
+    // Date-shaped bare token: rejected (no date type; string fallback
+    // would swallow it silently).
+    doc = try parse(arena.allocator(), "d = 2024-01-01\n");
+    try testing.expect(doc.had_errors);
+    try testing.expect(doc.root.get("d") == null);
+
+    // Syntax-tier messages, each carrying file:line:col ("<test>:1:").
+    try testing.expectEqual(@as(usize, 3), diag.count());
+    const needles = [_][]const u8{
+        "invalid value for key 'x'", // inline table -> InvalidValue
+        "InvalidSyntax", // dotted key
+        "invalid value for key 'd'", // date -> InvalidValue
+    };
+    for (needles) |needle| {
+        var found = false;
+        for (diag.items.items) |d| {
+            if (std.mem.indexOf(u8, d.message, needle) != null) found = true;
+        }
+        try testing.expect(found);
+    }
+    for (diag.items.items) |d| {
+        try testing.expect(std.mem.indexOf(u8, d.message, "<test>:1:") != null);
+    }
+}

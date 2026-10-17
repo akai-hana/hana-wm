@@ -265,7 +265,7 @@ pub const Section = struct {
 /// retryable allocator failure, and no amount of "expected" text helps.
 pub fn expectedForm(err: ParseError) []const u8 {
     return switch (err) {
-        error.InvalidSyntax => "a bare key (letters, digits, '_', '-', '+', '/', '.'), optionally quoted",
+        error.InvalidSyntax => "a bare key (letters, digits, '_', '-', '+', '/'; no dots — dotted names belong in section headers), optionally quoted",
         error.InvalidSection => "a section header of the form [name] (one level, no quotes needed)",
         error.InvalidValue => "a value: a number, true/false, a quoted string, a [list], " ++
             "a color (#RRGGBB / 0xRRGGBB), or a size (10 for px, 10% of base; no px suffix)",
