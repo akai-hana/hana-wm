@@ -17,6 +17,7 @@
 const std = @import("std");
 
 const core = @import("core");
+const xcb = core.xcb;
 const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
@@ -26,6 +27,9 @@ const floating = @import("floating");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
 const reconcile = @import("reconcile");
+const title_cache = @import("title_cache");
+const events = @import("events");
+const registry = @import("registry");
 test "actions: mapRequest admits, maps, and focuses a window" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
@@ -483,4 +487,235 @@ test "actions: a workspace switch bumps the layout fact only when the variant di
     workspaces.switchWorkspace(other);
     fx.flush();
     try std.testing.expectEqual(stepped + 2, core.layout.rev());
+}
+
+// P1-10 / ICCCM 4.1.5: a DENIED ConfigureRequest must still be answered with
+// a synthetic ConfigureNotify carrying the geometry the window actually has,
+// so a self-resizing client learns the WM overruled it instead of wedging
+// mid-resize against its own idea of its size. The denial branch this pins is
+// the one every tiled window takes -- and, in a floating-less build with no
+// honorConfigureRequest provider, the ONLY managed branch there is (see the
+// floating scenario note in check-modularity.sh).
+test "actions: a denied ConfigureRequest gets a synthetic ConfigureNotify" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+
+    const win = fx.createWindow();
+    window.mapRequest(win, 0, true, null, null);
+    fx.flush();
+    const sent = fx.sentGeometry(win) orelse return error.NoLedgerEntry;
+
+    // A self-resizing tiled client asking for a size the layout owns.
+    var ev: xcb.xcb_configure_request_event_t = std.mem.zeroes(xcb.xcb_configure_request_event_t);
+    ev.response_type = xcb.XCB_CONFIGURE_REQUEST;
+    ev.window = win;
+    ev.value_mask = xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT;
+    ev.width = sent.width + 100;
+    ev.height = sent.height + 100;
+    window.handleConfigureRequest(&ev);
+    fx.flush();
+
+    // Round trip so the synthetic event is sitting in our own queue (the
+    // connection selected StructureNotify on the window at admission).
+    _ = fx.inputFocus();
+    var echoed: ?xcb.xcb_configure_notify_event_t = null;
+    while (xcb.xcb_poll_for_event(fx.conn)) |raw| {
+        defer std.c.free(raw);
+        if (raw.*.response_type & 0x7F != xcb.XCB_CONFIGURE_NOTIFY) continue;
+        const n: *const xcb.xcb_configure_notify_event_t = @ptrCast(@alignCast(raw));
+        if (n.window == win) echoed = n.*;
+    }
+    const n = echoed orelse return error.NoSyntheticConfigureNotify;
+
+    // The echo is the DENIED truth (layout geometry), not the request.
+    try std.testing.expectEqual(sent.width, n.width);
+    try std.testing.expectEqual(sent.height, n.height);
+    try std.testing.expectEqual(sent.x, n.x);
+    try std.testing.expectEqual(sent.y, n.y);
+    // And the request really was denied: the window kept its layout size.
+    try fx.expectTiledGeometry(win);
+}
+
+// P1-11: a dialog (WM_TRANSIENT_FOR) must map floating and centered over its
+// parent -- the placement toolkits expect when they set the ICCCM hint
+// before mapping a dialog. Drives the PRODUCTION event entry
+// (handleMapRequest), which fires and drains the transient cookie; the
+// centering arithmetic itself is pinned headlessly by model_test's
+// centerRectIn test.
+test "actions: a WM_TRANSIENT_FOR dialog maps floating, centered over its parent" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const parent = fx.createWindow();
+    window.mapRequest(parent, 0, true, null, null);
+    fx.flush();
+    const parent_rect = fx.sentGeometry(parent) orelse return error.NoLedgerEntry;
+
+    // The dialog's own pre-map size, like a toolkit sizing its toplevel
+    // before mapping.
+    const dialog = fx.createWindow();
+    const size = [_]u32{ 400, 300 };
+    _ = xcb.xcb_configure_window(fx.conn, dialog, xcb.XCB_CONFIG_WINDOW_WIDTH | xcb.XCB_CONFIG_WINDOW_HEIGHT, &size);
+    // WM_TRANSIENT_FOR = parent, set before the MapRequest.
+    _ = xcb.xcb_change_property(
+        fx.conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        dialog,
+        xcb.XCB_ATOM_WM_TRANSIENT_FOR,
+        xcb.XCB_ATOM_WINDOW,
+        32,
+        1,
+        &[_]u32{parent},
+    );
+    fx.flush();
+
+    var ev: xcb.xcb_map_request_event_t = std.mem.zeroes(xcb.xcb_map_request_event_t);
+    ev.response_type = xcb.XCB_MAP_REQUEST;
+    ev.window = dialog;
+    window.handleMapRequest(&ev);
+    fx.flush();
+
+    // Floating anchor, and the centered-over-parent rect on the wire.
+    const e = m.store.get(dialog) orelse return error.UnknownDialog;
+    try std.testing.expect(e.anchor == .floating);
+    const want = model.centerRectIn(parent_rect, 400, 300, fx.workArea());
+    try std.testing.expect(want.eqlGeom(fx.sentGeometry(dialog) orelse return error.NoLedgerEntry));
+}
+
+// P1-12: a rename-looping client's PropertyNotify storm must coalesce into
+// ONE title fetch per event batch: each notify only MARKS the window, the
+// cache is untouched until the batch-end flush, and the flush converges on
+// the property's FINAL value (not an intermediate one).
+test "actions: title PropertyNotify storms coalesce into one batch refresh" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+
+    const win = fx.createWindow();
+    window.mapRequest(win, 0, true, null, null);
+    fx.flush();
+
+    // Rename-loop: several writes + notifies before any batch end.
+    const titles = [_][]const u8{ "one", "two", "three" };
+    for (titles) |t| {
+        _ = xcb.xcb_change_property(
+            fx.conn,
+            xcb.XCB_PROP_MODE_REPLACE,
+            win,
+            xcb.XCB_ATOM_WM_NAME,
+            xcb.XCB_ATOM_STRING,
+            8,
+            @intCast(t.len),
+            t.ptr,
+        );
+        fx.flush();
+        var ev: xcb.xcb_property_notify_event_t = std.mem.zeroes(xcb.xcb_property_notify_event_t);
+        ev.response_type = xcb.XCB_PROPERTY_NOTIFY;
+        ev.window = win;
+        ev.atom = xcb.XCB_ATOM_WM_NAME;
+        window.handlePropertyNotify(&ev);
+    }
+
+    // Marked, not fetched: one dirty window, cache still at the admission
+    // default (no title was ever fetched for this window).
+    try std.testing.expectEqual(@as(usize, 1), window.pendingPropertyRefreshCount());
+    try std.testing.expectEqualStrings("", title_cache.peekTitle(win));
+
+    // Batch end: one refresh per dirty window, converging on "three".
+    window.flushPropertyRefresh();
+    try std.testing.expectEqual(@as(usize, 0), window.pendingPropertyRefreshCount());
+    try std.testing.expectEqualStrings("three", title_cache.peekTitle(win));
+}
+
+// P1-15: global_layout must make a layout cycle propagate to EVERY
+// workspace; with the flag off, only the current workspace changes. This
+// pins the flag as real behavior (it was a parsed-but-inert knob before).
+test "actions: global_layout propagates a layout cycle to all workspaces" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+    const cfg_layouts = core.getState().config.tiling.layouts.items;
+    if (cfg_layouts.len < 2) return error.SkipZigTest; // need something to cycle to
+
+    // global_layout = true: every workspace's kind follows the current one.
+    core.getState().config.tiling.global_layout = true;
+    const start_kind = m.ws[m.current.index].params.kind;
+    window.cycleLayoutKind(1);
+    const cycled = m.ws[m.current.index].params.kind;
+    try std.testing.expect(cycled != start_kind);
+    for (m.ws, 0..) |s, i| {
+        if (i == m.current.index) continue;
+        try std.testing.expectEqual(cycled, s.params.kind);
+        try std.testing.expectEqual(@as(u8, 0), s.params.variant_idx);
+    }
+
+    // global_layout = false: only the current workspace moves; the rest keep
+    // the kind the previous (global) cycle stamped.
+    core.getState().config.tiling.global_layout = false;
+    const before = m.ws[m.current.index].params.kind;
+    const other_idx = (m.current.index + 1) % m.ws.len;
+    const other_before = m.ws[other_idx].params.kind;
+    window.cycleLayoutKind(1);
+    try std.testing.expect(m.ws[m.current.index].params.kind != before);
+    try std.testing.expectEqual(other_before, m.ws[other_idx].params.kind);
+}
+
+// P1-19 / P1-40: onWindowGone must fan out EXACTLY once per window
+// lifecycle. Every hook binding it is idempotent (find-then-clear), so
+// module state alone cannot show a double fire -- only registry's dispatch
+// fire count can. The events.zig pre-fire that used to fire BEFORE
+// delegating to the destroy path is gone; this test drives THAT handler (the
+// events-level entry), so re-adding a second fire site regresses it even
+// though every hook would stay happy.
+test "actions: a managed destroy fires onWindowGone exactly once" {
+    var fx = try fixture.setUp("actions_destroy");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const win = fx.createWindow();
+    window.mapRequest(win, 0, true, null, null);
+    fx.flush();
+    try std.testing.expect(m.store.has(win));
+
+    registry.onWindowGone_fires = 0;
+    var e: xcb.xcb_destroy_notify_event_t = std.mem.zeroes(xcb.xcb_destroy_notify_event_t);
+    e.response_type = xcb.XCB_DESTROY_NOTIFY;
+    e.event = win;
+    e.window = win;
+    events.handleDestroyNotify(@ptrCast(&e));
+    fx.flush();
+
+    try std.testing.expectEqual(@as(usize, 1), registry.onWindowGone_fires);
+    try std.testing.expect(!m.store.has(win));
+}
+
+test "actions: the withdraw route fires onWindowGone once; its later destroy adds none" {
+    var fx = try fixture.setUp("actions_withdraw");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const win = fx.createWindow();
+    window.mapRequest(win, 0, true, null, null);
+    fx.flush();
+
+    registry.onWindowGone_fires = 0;
+    var unmap: xcb.xcb_unmap_notify_event_t = std.mem.zeroes(xcb.xcb_unmap_notify_event_t);
+    unmap.response_type = xcb.XCB_UNMAP_NOTIFY;
+    unmap.event = win;
+    unmap.window = win;
+    window.handleUnmapNotify(&unmap); // the ONLY fire on the withdraw route
+    fx.flush();
+    try std.testing.expectEqual(@as(usize, 1), registry.onWindowGone_fires);
+    try std.testing.expect(!m.store.has(win));
+
+    // The DestroyNotify that follows a withdraw must add NO second fire:
+    // the entry is already gone (handleDestroyNotify's managed gate) and
+    // events no longer pre-fires.
+    var d: xcb.xcb_destroy_notify_event_t = std.mem.zeroes(xcb.xcb_destroy_notify_event_t);
+    d.response_type = xcb.XCB_DESTROY_NOTIFY;
+    d.event = win;
+    d.window = win;
+    events.handleDestroyNotify(@ptrCast(&d));
+    fx.flush();
+    try std.testing.expectEqual(@as(usize, 1), registry.onWindowGone_fires);
 }

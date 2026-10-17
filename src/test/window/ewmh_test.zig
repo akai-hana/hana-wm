@@ -17,6 +17,11 @@
 //!   message's action code as a SET (`data32[0]`) rather than a toggle, and
 //!   must not consume an unmanaged window's request in a way that leaves the
 //!   once-per-process warning latched against later legitimate requests.
+//!   The `_NET_CLOSE_WINDOW` / `_NET_CURRENT_DESKTOP` / `_NET_WM_DESKTOP`
+//!   pager messages (P1-08: advertised, so they must actually work) must
+//!   reach the shared ICCCM close path, the switchWorkspace hook, and the
+//!   moveToWorkspace hook respectively, with their guards: no close of an
+//!   unmanaged window, no workspace index hana doesn't have.
 //!   The `_NET_SUPPORTED` root property must round-trip the advertised list
 //!   exactly (the behavioural audit of that list is the display-free
 //!   ewmh_supported_test).
@@ -320,4 +325,151 @@ test "EWMH: _NET_SUPPORTED on the root round-trips the advertised list" {
         try std.testing.expect(interned != xcb.XCB_ATOM_NONE);
         try std.testing.expectEqual(interned, values[i]);
     }
+}
+
+/// The shape of a pager ClientMessage with a single-index payload (the
+/// close/switch-desktop/move-desktop family). EWMH delivers these to the
+/// root; the window field names the TARGET for _NET_CLOSE_WINDOW and
+/// _NET_WM_DESKTOP, and is the root for _NET_CURRENT_DESKTOP.
+fn pagerRequest(win: u32, comptime atom_name: []const u8) xcb.xcb_client_message_event_t {
+    var ev: xcb.xcb_client_message_event_t = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    ev.format = 32;
+    ev.window = win;
+    ev.response_type = xcb.XCB_CLIENT_MESSAGE;
+    ev.type = atoms.getAtomOrZero(atom_name);
+    return ev;
+}
+
+test "EWMH: _NET_CLOSE_WINDOW sends WM_DELETE to a protocol-aware client" {
+    // The pager's close BUTTON (a taskbar X) must not force-destroy a client
+    // that follows ICCCM: the request goes as WM_DELETE_WINDOW, exactly like
+    // the close_window keybind, and the window survives until the client
+    // decides otherwise. Asserted by reading the fixture connection's own
+    // queue for the outgoing client message -- the same connection created
+    // the window, so a send_event to it lands here.
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+
+    const polite = fx.createWindow();
+    fx.setWmTakeFocus(polite); // WM_PROTOCOLS = [WM_TAKE_FOCUS, WM_DELETE_WINDOW]
+    admit(polite);
+    fx.flush();
+    try std.testing.expect(fx.geometry(polite) != null);
+
+    var ev = pagerRequest(polite, "_NET_CLOSE_WINDOW");
+    window.handleClientMessage(&ev);
+    fx.flush();
+
+    // Deletion REQUEST, not a destroy: the server still has the window.
+    try std.testing.expect(fx.geometry(polite) != null);
+
+    // Round trip so the server has processed (and queued to us) the send,
+    // then drain the queue looking for the outgoing ICCCM message. Bit 7 is
+    // the SendEvent flag the server sets on every sent event.
+    const sync = fx.inputFocus();
+    _ = sync;
+    const wm_protocols = atoms.getAtomOrZero("WM_PROTOCOLS");
+    const wm_delete = atoms.getAtomOrZero("WM_DELETE_WINDOW");
+    var saw_delete = false;
+    while (xcb.xcb_poll_for_event(fx.conn)) |raw| {
+        defer std.c.free(raw);
+        if (raw.*.response_type & 0x7F != xcb.XCB_CLIENT_MESSAGE) continue;
+        const cm: *const xcb.xcb_client_message_event_t = @ptrCast(@alignCast(raw));
+        if (cm.window == polite and
+            cm.type == wm_protocols and
+            cm.data.data32[0] == wm_delete)
+        {
+            saw_delete = true;
+        }
+    }
+    try std.testing.expect(saw_delete);
+}
+
+test "EWMH: _NET_CLOSE_WINDOW destroys a protocol-less client, never an unmanaged one" {
+    // The fallback half: a client with no WM_DELETE_WINDOW cannot be asked
+    // politely, so closeViaProtocol destroys it -- the same last resort the
+    // keybind takes. And the guard half: event.window is spoofable content
+    // of the message, so an id hana doesn't manage must not be touched.
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+
+    const rude = fx.createWindow(); // no WM_PROTOCOLS -> destroy fallback
+    admit(rude);
+    const stranger = fx.createWindow(); // never admitted
+    fx.flush();
+    try std.testing.expect(fx.geometry(stranger) != null);
+
+    var probe = pagerRequest(stranger, "_NET_CLOSE_WINDOW");
+    window.handleClientMessage(&probe);
+    fx.flush();
+    // Unmanaged: not destroyed.
+    try std.testing.expect(fx.geometry(stranger) != null);
+
+    var ev = pagerRequest(rude, "_NET_CLOSE_WINDOW");
+    window.handleClientMessage(&ev);
+    fx.flush();
+    try std.testing.expect(fx.geometry(rude) == null);
+}
+
+test "EWMH: _NET_CURRENT_DESKTOP switches workspace; an unknown desktop is dropped" {
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+    try std.testing.expectEqual(@as(u8, 0), m.current.index);
+
+    var ev = pagerRequest(fx.root, "_NET_CURRENT_DESKTOP");
+    ev.data.data32[0] = 2;
+    window.handleClientMessage(&ev);
+    fx.flush();
+    try std.testing.expectEqual(@as(u8, 2), m.current.index);
+
+    // data32[0] beyond the configured workspace count: dropped, not clamped
+    // or wrapped -- the pager asked for something this hana doesn't have.
+    ev.data.data32[0] = 99;
+    window.handleClientMessage(&ev);
+    fx.flush();
+    try std.testing.expectEqual(@as(u8, 2), m.current.index);
+}
+
+test "EWMH: _NET_WM_DESKTOP moves a managed window; guards drop the rest" {
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const w1 = fx.createWindow();
+    admit(w1);
+    fx.flush();
+    const before = m.store.get(w1) orelse return error.UnknownWindow;
+    try std.testing.expect(model.taggedOn(before, model.WSId.fromIndex(0)));
+
+    var ev = pagerRequest(w1, "_NET_WM_DESKTOP");
+    ev.data.data32[0] = 3;
+    window.handleClientMessage(&ev);
+    fx.flush();
+    const after = m.store.get(w1) orelse return error.UnknownWindow;
+    try std.testing.expect(model.taggedOn(after, model.WSId.fromIndex(3)));
+    try std.testing.expect(!model.taggedOn(after, model.WSId.fromIndex(0)));
+
+    // Unknown target: dropped, window keeps its current workspace.
+    ev.data.data32[0] = 99;
+    window.handleClientMessage(&ev);
+    fx.flush();
+    const still = m.store.get(w1) orelse return error.UnknownWindow;
+    try std.testing.expect(model.taggedOn(still, model.WSId.fromIndex(3)));
+
+    // 0xFFFFFFFF ("all workspaces") has no per-window meaning in hana's
+    // model (all-view is a global mode), so it must not clear the tag either.
+    ev.data.data32[0] = 0xFFFFFFFF;
+    window.handleClientMessage(&ev);
+    fx.flush();
+    const sticky = m.store.get(w1) orelse return error.UnknownWindow;
+    try std.testing.expect(model.taggedOn(sticky, model.WSId.fromIndex(3)));
+
+    // Unmanaged target: the hook is never called, nothing enters the store.
+    const stranger = fx.createWindow();
+    var probe = pagerRequest(stranger, "_NET_WM_DESKTOP");
+    probe.data.data32[0] = 3;
+    window.handleClientMessage(&probe);
+    fx.flush();
+    try std.testing.expect(m.store.get(stranger) == null);
 }
