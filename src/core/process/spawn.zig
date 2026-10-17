@@ -413,14 +413,24 @@ pub fn reapPendingChildren() void {
 /// Unlike executeShellCommand (fire-and-forget detach), this single-fork keeps
 /// the child a direct child and BLOCKS the caller -- and therefore the WM
 /// event loop -- on waitpid until the command exits. That is the whole point:
-/// a `,` sequence step is only "done" once its exec has fully finished, so
-/// the next step starts against a completed state. The WM is frozen for the
-/// duration; an exec that never exits (a terminal emulator, a game) freezes
-/// hana until it does. This is deliberately a config-author opt-in, never the
-/// path for a bare single-action binding.
-pub fn execSynchronous(cmd: []const u8) void {
-    const alloc = core.getState().alloc;
+/// a `,` sequence step is only "done" once its exec has fully finished, so the
+/// next step starts against a completed state. The WM is frozen for the
+/// duration, so the wait is WALL-CLOCK CAPPED: at `sync_exec_timeout_ms` the
+/// child is SIGKILLed and a warn is logged (a `sleep 60` bind can no longer
+/// freeze hana past the cap). The killed child is reaped here on a short
+/// grace loop, and by the normal waitpid(-1) sweep if it lingers in
+/// uninterruptible sleep. This is deliberately a config-author opt-in, never
+/// the path for a bare single-action binding; config lint warns when a bind
+/// routes here (binds.zig's containsSyncExec).
+pub const sync_exec_timeout_ms = 5000;
 
+pub fn execSynchronous(alloc: std.mem.Allocator, cmd: []const u8) void {
+    execSynchronousBounded(alloc, cmd, sync_exec_timeout_ms);
+}
+
+/// The timeout-injectable wait behind execSynchronous (test seam: a `sleep 60`
+/// must not cost a 5s stall in the suite). See execSynchronous for the policy.
+pub fn execSynchronousBounded(alloc: std.mem.Allocator, cmd: []const u8, timeout_ms: i64) void {
     var cmd_buf: [stack_cmd_capacity]u8 = undefined;
     const resolved = resolveCmdZ(alloc, cmd, &cmd_buf) catch return;
     defer if (resolved.heap) |h| alloc.free(h);
@@ -440,15 +450,43 @@ pub fn execSynchronous(cmd: []const u8) void {
     }
 
     var status: c_int = 0;
+    const deadline_ms = core.monotonicMs() + timeout_ms;
     while (true) {
-        const rc = c.waitpid(pid, &status, 0);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => break,
-            .INTR => continue, // SIGCHLD from an unrelated child interrupts; retry.
-            else => {
-                log.err("waitpid failed (synchronous exec): {s}", .{cmd});
-                return;
-            },
+        const rc = c.waitpid(pid, &status, c.WNOHANG);
+        if (rc == pid) return; // exited and reaped
+        if (rc < 0) {
+            switch (std.posix.errno(rc)) {
+                .INTR => continue,
+                else => {
+                    log.err("waitpid failed (synchronous exec): {s}", .{cmd});
+                    return;
+                },
+            }
         }
+        // rc == 0: still running. Enforce the deadline.
+        if (core.monotonicMs() >= deadline_ms) {
+            log.warn("sync_exec timed out after {d}ms; killing: '{s}'", .{ timeout_ms, cmd });
+            _ = c.kill(pid, c.SIGKILL);
+            // Bounded reap grace: SIGKILL lands unless the child is stuck in
+            // uninterruptible sleep; in that case the waitpid(-1) sweep in
+            // reapPendingChildren collects it later, so we must not block
+            // the WM again waiting for it here.
+            var grace: usize = 0;
+            while (grace < 50) : (grace += 1) { // ~500ms of 10ms naps
+                const r2 = c.waitpid(pid, &status, c.WNOHANG);
+                if (r2 == pid or r2 < 0) return;
+                syncNap();
+            }
+            return;
+        }
+        syncNap();
     }
+}
+
+/// One 10ms pause between sync_exec waitpid polls. nanosleep directly (the
+/// XKB retry path sleeps the same way); EINTR just re-polls sooner.
+fn syncNap() void {
+    var req = std.os.linux.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+    var rem = std.os.linux.timespec{ .sec = 0, .nsec = 0 };
+    _ = std.os.linux.nanosleep(&req, &rem);
 }

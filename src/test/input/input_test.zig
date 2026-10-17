@@ -13,6 +13,7 @@ const testing = std.testing;
 const action_mod = @import("action");
 const types = @import("types");
 const keybinds = @import("keybinds");
+const keys = @import("keys");
 const mouse = @import("mouse");
 const masks = @import("masks");
 const diagnostics = @import("diagnostics");
@@ -320,4 +321,42 @@ test "mouse bind shadowing: last entry wins and every shadowed entry is reported
     const miss = mouse.findMouseBindShadowed(&binds, masks.mod_alt, B1, &shadowed);
     try testing.expect(miss.bind == null);
     try testing.expectEqual(@as(usize, 0), miss.shadowed_len);
+}
+
+// Auto-repeat re-delivers KeyPress with no interleaved release (detectable
+// auto-repeat, xkb.zig), so a held combo would re-fire side-effecting
+// actions at ~30 Hz without the pressed-key set. The transition rule is the
+// whole of the suppression: fire on false→true only, and honor the
+// `[core] key_repeat` knob that restores universal repeat.
+test "pressed-key set: one action per physical press unless repeat allowed" {
+    var pk: keys.PressedKeys = .{};
+
+    // First press fires; repeats of the held key are suppressed.
+    try testing.expect(pk.press(36, false));
+    try testing.expect(!pk.press(36, false));
+    try testing.expect(!pk.press(36, false));
+
+    // The real release re-arms the keycode.
+    pk.release(36);
+    try testing.expect(pk.press(36, false));
+    try testing.expect(!pk.press(36, false));
+    pk.release(36);
+
+    // key_repeat = true restores universal repeat: every press fires.
+    try testing.expect(pk.press(36, true));
+    try testing.expect(pk.press(36, true));
+    try testing.expect(pk.press(36, true));
+    pk.release(36);
+
+    // Keycodes are independent: a held keycode does not suppress another.
+    try testing.expect(pk.press(38, false));
+    try testing.expect(pk.press(36, false));
+    try testing.expect(!pk.press(38, false));
+    try testing.expect(!pk.press(36, false));
+
+    // Release of an unheld keycode is harmless; reset clears everything.
+    pk.release(40);
+    pk.reset();
+    try testing.expect(pk.press(36, false));
+    try testing.expect(pk.press(38, false));
 }

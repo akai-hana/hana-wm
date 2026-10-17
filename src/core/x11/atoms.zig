@@ -47,6 +47,14 @@ pub const AtomCache = struct {
     _NET_WM_PID: u32,
     // Root-window focus advertisement: read by focus.zig's setFocus path.
     _NET_ACTIVE_WINDOW: u32,
+    // Pager/taskbar messages handled in client_events.handleClientMessage:
+    // _NET_CLOSE_WINDOW is the close BUTTON (ICCCM deletion request),
+    // _NET_CURRENT_DESKTOP switches workspace, _NET_WM_DESKTOP moves a
+    // managed window. All three are advertised in requests.supported_atoms,
+    // which comptime-requires the AtomCache field.
+    _NET_CLOSE_WINDOW: u32,
+    _NET_CURRENT_DESKTOP: u32,
+    _NET_WM_DESKTOP: u32,
     // X resource-database atom: read by display/dpi.zig for Xft.dpi.
     RESOURCE_MANAGER: u32,
 };

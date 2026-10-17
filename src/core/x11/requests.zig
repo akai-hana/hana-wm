@@ -27,6 +27,63 @@ const log = std.log.scoped(.requests);
 
 // Geometry <-> wire conversions
 
+/// P1-18: last OUTBOUND SEQUENCE per window, for type-0 error attribution.
+///
+/// Unchecked requests never produce a reply; their only trace is the error
+/// pseudo-event (type 0) the server sends back, which carries the failed
+/// request's sequence -- but nothing else in that event says WHICH window the
+/// send was for unless the resource_id happens to be the window. Every send
+/// site therefore records its cookie sequence here at send time (cookies are
+/// assigned at queue time, so this costs no round-trip), and the type-0
+/// handler maps the sequence back through `windowForSequence` to name the
+/// window. Best-effort by contract: only the LAST sequence per window is
+/// kept (a batched earlier failure to the same window may miss and fall back
+/// to the anonymous line), and a full ledger silently drops new entries.
+var last_outbound: model.Store(model.WindowId, u16, model.store_capacity) = .{};
+
+/// Record that `win`'s most recent outbound request took sequence `seq`
+/// (the cookie's full unsigned sequence; XCB cookies are `unsigned int`
+/// while error events echo only the low 16 bits, so the tracker stores the
+/// same `@truncate` both sides compare on).
+pub fn noteSequence(win: model.WindowId, seq: u32) void {
+    const seq16: u16 = @truncate(seq);
+    if (last_outbound.getPtr(win)) |p| {
+        p.* = seq16;
+        return;
+    }
+    _ = last_outbound.put(win, seq16) catch return;
+}
+
+/// The sequence of the last request sent to `win`, or null when nothing has
+/// been sent (or the ledger was reset). Test seam: reconcile_test-style
+/// assertions record and read back.
+pub fn lastSequence(win: model.WindowId) ?u16 {
+    return last_outbound.get(win);
+}
+
+/// Reverse lookup for the type-0 handler: which window's last outbound
+/// request carried `seq`? The first match wins (sequence space is 16-bit and
+/// wraps; a collision would only mislabel diagnostics, never state).
+pub fn windowForSequence(seq: u16) ?model.WindowId {
+    for (last_outbound.keys[0..last_outbound.len], last_outbound.vals[0..last_outbound.len]) |w, s| {
+        if (s == seq) return w;
+    }
+    return null;
+}
+
+/// Drop `win`'s record. X ids recycle: a stale sequence could mislabel a
+/// future window's error. Called from reconcile.forget (the ledger's own
+/// forget) so both stores live and die together.
+pub fn forgetSequence(win: model.WindowId) void {
+    _ = last_outbound.remove(win);
+}
+
+/// Test seam: process-lifetime state needs the same re-arm between tests
+/// that reconcile.init gives its ledger.
+pub fn resetOutboundTracking() void {
+    last_outbound = .{};
+}
+
 /// Builds a model.Rect from a get_geometry reply. Deliberately on the xcb side of
 /// the boundary so `model.Rect` itself stays xcb-free and the pure layers can
 /// hold one; the wire border_width feeds the model.Rect's border_width.
@@ -43,11 +100,13 @@ pub inline fn rectFromXcb(reply: *const xcb.xcb_get_geometry_reply_t) model.Rect
 // Configure/raise/park primitives
 
 pub inline fn raiseWindow(conn: Connection, win: u32) void {
-    _ = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    const ck = xcb.xcb_configure_window(conn, win, xcb.XCB_CONFIG_WINDOW_STACK_MODE, &[_]u32{xcb.XCB_STACK_MODE_ABOVE});
+    noteSequence(win, ck.sequence);
 }
 
 pub inline fn setBorderPixel(conn: Connection, win: u32, pixel: u32) void {
-    _ = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
+    const ck = xcb.xcb_change_window_attributes(conn, win, xcb.XCB_CW_BORDER_PIXEL, &[_]u32{pixel});
+    noteSequence(win, ck.sequence);
 }
 
 // X server grab state
@@ -118,6 +177,9 @@ pub const supported_atoms = [_][]const u8{
     "_NET_WM_STATE",
     "_NET_WM_STATE_FULLSCREEN",
     "_NET_WM_PID",
+    "_NET_CLOSE_WINDOW",
+    "_NET_CURRENT_DESKTOP",
+    "_NET_WM_DESKTOP",
 };
 
 // Both lists must stay in sync at compile time: a misspelt/advertised atom
@@ -155,10 +217,12 @@ comptime {
 /// their conservative path, while a listed-but-dropped request leaves them
 /// waiting on a click that will never land:
 ///
-/// - `_NET_ACTIVE_WINDOW`, `_NET_CLOSE_WINDOW`, `_NET_CURRENT_DESKTOP` and
-///   `_NET_WM_DESKTOP` requests are answered with a once-per-process warning
-///   and ignored; `_NET_ACTIVE_WINDOW` is nevertheless WRITTEN to the root
-///   (focus advertisement, see atoms.zig) so EWMH clients can track our focus.
+/// - `_NET_ACTIVE_WINDOW` requests are answered with a once-per-process
+///   warning and ignored; `_NET_ACTIVE_WINDOW` is nevertheless WRITTEN to the
+///   root (focus advertisement, see atoms.zig) so EWMH clients can track our
+///   focus. (`_NET_CLOSE_WINDOW`/`_NET_CURRENT_DESKTOP`/`_NET_WM_DESKTOP`
+///   requests, once ignored beside it, are now handled in
+///   client_events.handleClientMessage and are advertised above.)
 /// - `_NET_WM_STATE_ABOVE`/`_NET_WM_STATE_STICKY` are preserved when WE
 ///   mutate `_NET_WM_STATE` (the sink's read-merge-write must not nuke a
 ///   client's own atoms) but neither state changes stacking or workspace
