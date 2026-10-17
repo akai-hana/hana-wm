@@ -379,6 +379,15 @@ run_scenarios() {
     # Each behavior's `*_config.zig` fragment is part of the subsystem: the
     # build fails loudly (OrphanConfigFragment) if a fragment outlives its
     # owner, so every removal path takes the pair.
+    #
+    # Behavior note (P1-10): with floating.zig gone there is no
+    # honorConfigureRequest provider, so every managed window is tiled and
+    # every ConfigureRequest is DENIED -- client_events' no-provider limb
+    # must still send the ICCCM 4.1.5 synthetic ConfigureNotify echo. The
+    # X-gated "denied ConfigureRequest gets a synthetic ConfigureNotify"
+    # test in actions_test.zig asserts that echo against a tiled window and
+    # is the same observable in this build (it is the no-provider limb that
+    # produces it there).
     run_scenario \
         "floating (behavior module)" \
         "src/window/modules/floating.zig" \

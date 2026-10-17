@@ -105,20 +105,24 @@ jobs:
           version: 0.16.0
 
       # xdotool drives the synthetic input, x11-utils provides xprop/xwininfo
-      # for the golden diff, xvfb is the server the harness starts per
-      # scenario (run-scenario.sh owns its lifetime).
+      # for the golden diff, x11-xserver-utils provides xset for the display
+      # preflight, xvfb is the server the harness starts per scenario
+      # (run-scenario.sh owns its lifetime).
       - name: Install X11 dev dependencies + harness tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev xvfb xdotool x11-utils
+          sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev xvfb xdotool x11-utils x11-xserver-utils
 
-      - name: Build (the harness runs the installed binary)
-        run: zig build
+      # Debug build (D2): the log-based golden assertions (STATE DUMP,
+      # Focused:, S22/S23 greps) need the info/debug log sites a release
+      # build comptime-elides.
+      - name: Build Debug (the harness runs the installed binary)
+        run: zig build -Doptimize=Debug
 
-      - name: E2E smoke subset (S01 spawn-tiled / S02 close / S11 configure-honored / S18 ewmh-fullscreen / S22 restore)
+      - name: E2E smoke subset (S01 spawn-tiled / S02 close / S11 configure-honored / S18 ewmh-fullscreen / S22 restore / S24 dialog-float)
         run: |
           cd dev/harness
-          ./run-scenario.sh --compare S01-spawn-tiled S02-close S11-configure-honored S18-ewmh-fullscreen S22-restore
+          ./run-scenario.sh --compare S01-spawn-tiled S02-close S11-configure-honored S18-ewmh-fullscreen S22-restore S24-dialog-float
 
   # Feature-deletion matrix: each optional subsystem is removed and the tree
   # must still compile. Own job rather than part of the default `check`
@@ -165,7 +169,7 @@ jobs:
   # against recorded goldens. Runs on pushes to dev only (slow), and only when
   # the push touched more than markdown.
   #
-  # GATING: all S01–S23 goldens were recaptured against the current
+  # GATING: all S01–S24 goldens were recaptured against the current
   # focus/stacking behavior and `./dev/harness/run-scenario.sh --compare` is
   # green locally, so parity drift now fails CI.
   harness:
@@ -182,13 +186,12 @@ jobs:
       - name: Install X11 + harness tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xdotool x11-utils libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev perl
+          sudo apt-get install -y xvfb xdotool x11-utils x11-xserver-utils libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev perl
 
-      # Default `zig build` is Debug here (the optimize option is `-Drelease`,
-      # and Debug is the default), which the scenarios need for dump_state/
-      # info-level logs.
-      - name: Build
-        run: zig build
+      # Debug build (D2): the scenarios' log-based assertions need the
+      # info/debug log sites a release build comptime-elides.
+      - name: Build Debug
+        run: zig build -Doptimize=Debug
 
       - name: Golden parity replay
         working-directory: dev/harness
