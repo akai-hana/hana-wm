@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -56,8 +57,31 @@ const requests = @import("requests");
 // config is clean.
 const log_warn_available = builtin.mode == .Debug;
 
+/// Config-family scopes whose warn sites a `-Dconfig-warn` release build
+/// retains (D1). Debug already logs everything via `log_level = .debug`, so
+/// the map stays empty there; the shipped default release binary is
+/// byte-identical to the pre-flag behavior because `config_warn` defaults
+/// off (the always-on experiment cost +145 KB, see REFACTOR-PLAN.md §3).
+/// These scopes only run during config load/reload/parse, so the retained
+/// sites have zero hot-path cost.
+const config_warn_scopes: []const std.log.ScopeLevel = if (build_options.config_warn and !log_warn_available) &.{
+    .{ .scope = .config, .level = .warn },
+    .{ .scope = .parser, .level = .warn },
+    .{ .scope = .document, .level = .warn },
+    .{ .scope = .knob, .level = .warn },
+    .{ .scope = .color, .level = .warn },
+    .{ .scope = .discover, .level = .warn },
+    .{ .scope = .fallback, .level = .warn },
+    .{ .scope = .binds, .level = .warn },
+    .{ .scope = .action_names, .level = .warn },
+    .{ .scope = .reload, .level = .warn },
+    .{ .scope = .snapshot, .level = .warn },
+    .{ .scope = .model_config, .level = .warn },
+} else &.{};
+
 pub const std_options: std.Options = .{
     .log_level = if (log_warn_available) .debug else .err,
+    .log_scope_levels = config_warn_scopes,
     .enable_segfault_handler = log_warn_available,
     .allow_stack_tracing = log_warn_available,
     .signal_stack_size = if (log_warn_available) (1 << 18) else null,
@@ -99,14 +123,16 @@ fn checkConfigRequested(args: std.process.Args) bool {
 }
 
 fn runCheckConfig() !void {
-    // Outside Debug, `log_level` comptime-elides every warn site, so the bag
-    // below would always be empty and this would exit 0 on a config the WM
-    // would reject. Refuse instead: a check that cannot check must not look
-    // clean. Exit 2 rather than 1 so a caller can tell "bad config" from
-    // "cannot validate".
-    if (comptime !log_warn_available) {
+    // Outside Debug (and outside a `-Dconfig-warn` build), `log_level`
+    // comptime-elides every warn site, so the bag below would always be empty
+    // and this would exit 0 on a config the WM would reject. Refuse instead:
+    // a check that cannot check must not look clean. Exit 2 rather than 1 so
+    // a caller can tell "bad config" from "cannot validate". A `-Dconfig-warn`
+    // build retains the config-family warn scopes, so the diagnostics ARE
+    // visible there and the check proceeds (D1).
+    if (comptime !log_warn_available and !build_options.config_warn) {
         std.debug.print(
-            "hana --check-config: config diagnostics are compiled out of this build ({s}); rebuild with -Doptimize=Debug to validate\n",
+            "hana --check-config: config diagnostics are compiled out of this build ({s}); rebuild with -Doptimize=Debug or -Dconfig-warn to validate\n",
             .{@tagName(builtin.mode)},
         );
         std.process.exit(2);

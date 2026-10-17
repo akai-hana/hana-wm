@@ -23,6 +23,7 @@ const focus = @import("focus");
 
 const pipeline = @import("pipeline");
 const reconcile = @import("reconcile");
+const requests = @import("requests");
 const session = @import("session");
 const spawn = @import("spawn");
 const build_options = @import("build_options");
@@ -102,12 +103,15 @@ fn handleConfigureNotify(event: *anyopaque) void {
     window.dispatchAll(.notifyConfigureIfPending, .{ e.window, e.width, e.height });
 }
 
-// Notifies fullscreen of the destroyed window before delegating to window.zig.
-// This clears any pending deferred bar-show for a window that exits fullscreen
-// and is then destroyed before it can send a ConfigureNotify.
-fn handleDestroyNotify(event: *anyopaque) void {
+// Delegates to window.zig's destroy path. The `onWindowGone` PRE-fire that
+// used to live here is gone (P1-40/D28, pinned by P1-19's X-gated test):
+// unmanageWindow fires the hook itself before unregistering, so a managed
+// destroy fans out EXACTLY once (the count lives in registry.dispatchAll,
+// which this delegation and every other path share), and an unmanaged
+// window never holds module records for the hook to clear. `pub` so the
+// destroy test can drive THIS call site — the one that used to double-fire.
+pub fn handleDestroyNotify(event: *anyopaque) void {
     const e = core.eventCast(*xcb.xcb_destroy_notify_event_t, event);
-    window.dispatchAll(.onWindowGone, .{e.window});
     window.handleDestroyNotify(e);
 }
 
@@ -129,7 +133,7 @@ fn handleMappingNotify(event: *anyopaque) void {
 // This and eventWindowFor's offset switch below answer different questions --
 // "is there a handler?" vs "where in the struct is the window id?" -- and their
 // code sets are NOT the same, in both directions: MAPPING_NOTIFY has a handler
-// and no window field at all, while VISIBILITY_NOTIFY, FOCUS_IN/OUT,
+// and no window field at all, while VISIBILITY_NOTIFY, FOCUS_OUT,
 // REPARENT/CREATE/GRAVITY/CIRCULATE carry a window and have no handler. Merging
 // them would trade two flat lookups for one wider struct over a hot path, to
 // save a handful of lines, and would need a sentinel for the offset-less case.
@@ -138,6 +142,10 @@ const dispatch_table = blk: {
 
     table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
     table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
+    // P1-09: a client XSetInputFocus-ing its own toplevel is reasserted back
+    // to the model's focus (focus.zig's handleFocusIn), so FocusChange no
+    // longer lands unhandled.
+    table[xcb.XCB_FOCUS_IN] = asHandler(window.handleFocusIn);
 
     table[xcb.XCB_MAP_REQUEST] = asHandler(window.handleMapRequest);
     table[xcb.XCB_CONFIGURE_REQUEST] = asHandler(window.handleConfigureRequest);
@@ -216,7 +224,17 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     // X11 failures (bad grabs, stale window ids, wrong atoms) undiagnosable.
     if (event_type == 0) {
         const e = core.eventCast(*xcb.xcb_generic_error_t, event);
-        log.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
+        // P1-18: the failed request's sequence matches the last outbound
+        // sequence recorded for exactly the window it went to (send sites
+        // note their cookie at queue time -- see requests.noteSequence), so
+        // a hit names the window this otherwise anonymous error belongs to.
+        // A miss (older-than-last send to that window, or a non-window
+        // resource) falls back to the generic line.
+        if (requests.windowForSequence(e.sequence)) |win| {
+            log.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}: last outbound to window {x} @ seq {}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id, win, e.sequence });
+        } else {
+            log.warn("Unchecked XCB request failed: code={} major={} minor={} resource={x}", .{ e.error_code, e.major_code, e.minor_code, e.resource_id });
+        }
         return;
     }
 
@@ -520,6 +538,12 @@ fn handleXcbEvents() void {
     // because they are three statements in order, and each one keeps its reason
     // for sitting where it does.
 
+    // 0. Coalesced property refresh (P1-12). Title/hint PropertyNotifies
+    //    marked windows during the batch above; this fetches each marked
+    //    window exactly once. Before the bar repaint below, because a title
+    //    refresh bumps the window fact that repaint reads.
+    window.flushPropertyRefresh();
+
     // 1. Repaint the bar. Before the focus settle below, because that lift can
     //    generate the EnterNotify this repaint needs to reflect.
     surfaces.updateIfDirty();
@@ -540,6 +564,53 @@ fn handleXcbEvents() void {
 
     _ = xcb.xcb_flush(conn);
 }
+
+/// Poll-error burst latch (P1-13): a non-INTR poll failure (EMFILE, EINVAL,
+/// ...) used to `continue` straight into another failing poll — a tight
+/// 100%-CPU spin with an unbounded log.err flood. The latch is pure state so
+/// the once-per-burst rule is testable without forcing a real poll failure;
+/// run()'s error branch sleeps on EVERY failed iteration (the anti-spin
+/// measure) but only logs on the burst's leading edge, and the next SUCCESS
+/// resets the latch so a later independent burst logs again.
+pub const PollBackoff = struct {
+    latched: bool = false,
+
+    /// Records one poll outcome; returns true exactly once per burst — the
+    /// first failure after a success (or boot) — so the caller logs only on
+    /// the leading edge. Every failure still sleeps; the return value only
+    /// gates the log line.
+    pub fn note(self: *PollBackoff, failed: bool) bool {
+        if (!failed) {
+            self.latched = false;
+            return false;
+        }
+        if (self.latched) return false;
+        self.latched = true;
+        return true;
+    }
+};
+
+/// One backoff pause after a failed poll. Uses nanosleep directly (the XKB
+/// retry path sleeps the same way); resumes on EINTR so a signal doesn't
+/// skip the delay — the loop re-polls either way.
+fn pollBackoffSleep() void {
+    const ns = poll_error_backoff_ms * std.time.ns_per_ms;
+    var req = std.os.linux.timespec{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    var rem = std.os.linux.timespec{ .sec = 0, .nsec = 0 };
+    while (true) {
+        const rc = std.os.linux.nanosleep(&req, &rem);
+        if (std.posix.errno(rc) != .INTR) break;
+        req = rem;
+    }
+}
+
+/// Backoff delay between failed poll iterations: long enough to break a
+/// 100%-CPU spin on a persistent error (EMFILE storm, bad fd), short enough
+/// to be invisible when the error clears on the next retry.
+const poll_error_backoff_ms = 75;
 
 pub fn run() void {
     const cs = core.getState();
@@ -564,6 +635,7 @@ pub fn run() void {
     // spawn_ready branch below could never fire for them).
     var poll_buf: [2 + spawn.max_read_fds]std.posix.pollfd = undefined;
     var spawn_fds: [spawn.max_read_fds]std.posix.fd_t = undefined;
+    var poll_backoff: PollBackoff = .{};
     poll_buf[fd_xcb] = .{ .fd = x_fd, .events = std.posix.POLL.IN, .revents = 0 };
     poll_buf[fd_signal] = .{ .fd = signal_fd, .events = std.posix.POLL.IN, .revents = 0 };
 
@@ -605,10 +677,18 @@ pub fn run() void {
             .SUCCESS => @intCast(poll_rc),
             .INTR => continue,
             else => |err| {
-                log.err("poll error: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+                if (poll_backoff.note(true)) {
+                    log.err("poll error: {s}; backing off {d}ms per failed iteration", .{
+                        @errorName(std.posix.unexpectedErrno(err)),
+                        poll_error_backoff_ms,
+                    });
+                }
+                pollBackoffSleep();
                 continue;
             },
         };
+        // A successful poll ends the burst: the next failure logs again.
+        _ = poll_backoff.note(false);
 
         // Drain signals BEFORE the reload/reexec flags are consumed below. A
         // signal byte (SIGUSR1/SIGHUP) dispatches the matching request, which

@@ -179,3 +179,73 @@ test "routeFor: events hana never subscribes to are ignored, and type 0 is not a
     // Type 0 is an X error pseudo-event, handled before routeFor is reached.
     try testing.expectEqual(events.Route.ignore, events.routeFor(0));
 }
+
+test "routeFor: FOCUS_IN routes to core; FOCUS_OUT stays unhandled (P1-09)" {
+    // FocusChange is selected on every managed window (masks.managed_window),
+    // but the dispatch table had no FOCUS_IN entry until the reassert handler
+    // landed -- which is how a client's XSetInputFocus moved the server focus
+    // while the model silently disagreed. FocusOut is deliberately still
+    // unhandled: only the steal (FocusIn) is acted on.
+    try testing.expectEqual(events.Route.core, events.routeFor(xcb.XCB_FOCUS_IN));
+    try testing.expectEqual(events.Route.core, events.routeFor(xcb.XCB_FOCUS_IN | 0x80));
+    try testing.expectEqual(events.Route.ignore, events.routeFor(xcb.XCB_FOCUS_OUT));
+}
+
+// P1-13: the poll-error burst latch logs once per burst (the sleep itself
+// runs on every failed iteration; only the log line is leading-edge). Pure
+// state, so this pins the rule without forcing a real poll failure.
+test "events: poll-error latch fires once per burst" {
+    var pb: events.PollBackoff = .{};
+
+    // Boot: the first failure is the burst's leading edge.
+    try testing.expect(pb.note(true));
+    // Sustained failure: no second log.
+    try testing.expect(!pb.note(true));
+    try testing.expect(!pb.note(true));
+
+    // A success ends the burst and re-arms the latch.
+    try testing.expect(!pb.note(false));
+    try testing.expect(pb.note(true));
+
+    // INTR-only outcomes never reach the latch (run() continues before it);
+    // the public surface is exactly note(true/false) as wired in run().
+}
+
+// P1-18: type-0 error attribution. Send sites note their cookie sequence at
+// queue time (requests.noteSequence); the type-0 handler in events.zig maps
+// the failed request's sequence back through windowForSequence to name the
+// window an otherwise anonymous unchecked-request error belongs to.
+test "requests: outbound sequence tracking names the window for a type-0 error" {
+    const requests = @import("requests");
+    const reconcile = @import("reconcile");
+
+    requests.resetOutboundTracking();
+    defer requests.resetOutboundTracking();
+
+    // Nothing sent yet: no attribution either way.
+    try testing.expectEqual(@as(?u16, null), requests.lastSequence(0x1111));
+    try testing.expect(requests.windowForSequence(42) == null);
+
+    // Two windows' last outbound sequences resolve to their windows.
+    requests.noteSequence(0x1111, 42);
+    requests.noteSequence(0x2222, 43);
+    try testing.expectEqual(@as(?u16, 42), requests.lastSequence(0x1111));
+    try testing.expectEqual(@as(?u16, 43), requests.lastSequence(0x2222));
+    try testing.expectEqual(@as(?u32, 0x1111), requests.windowForSequence(42));
+    try testing.expectEqual(@as(?u32, 0x2222), requests.windowForSequence(43));
+    try testing.expect(requests.windowForSequence(44) == null);
+
+    // Re-send to the same window: only the LAST outbound sequence is kept,
+    // so the old one stops resolving and the new one takes over. This is
+    // the documented best-effort contract (an older failure in the same
+    // batch falls back to the generic line).
+    requests.noteSequence(0x1111, 44);
+    try testing.expect(requests.windowForSequence(42) == null);
+    try testing.expectEqual(@as(?u32, 0x1111), requests.windowForSequence(44));
+
+    // X ids recycle: reconcile.forget must drop the sequence record too, or
+    // the next window with this id could be mislabeled by a stale sequence.
+    reconcile.forget(0x1111);
+    try testing.expect(requests.lastSequence(0x1111) == null);
+    try testing.expect(requests.windowForSequence(44) == null);
+}

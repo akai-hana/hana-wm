@@ -141,7 +141,7 @@ fn ctx() *reconcile.Ctx {
     // the pre-reconcile duties after geometry was already applied, leaving
     // the model and the server disagreeing. Inside a grab, read the in-flight
     // ctx via currentCtx(); to start a new operation, call prepare().
-    std.debug.assert(grab_depth == 0);
+    assertGrab(grab_depth == 0);
     const cs = core.getState();
     const screen_h = cs.screen.height_in_pixels;
     const env = tilingEnv();
@@ -220,7 +220,7 @@ fn prepare() *reconcile.Ctx {
 /// named entry point. Deliberately does NOT run the pre-reconcile duties --
 /// the enclosing operation already ran them.
 pub fn currentCtx() *reconcile.Ctx {
-    std.debug.assert(grab_depth > 0);
+    assertGrab(grab_depth > 0);
     return &g_ctx;
 }
 
@@ -232,6 +232,18 @@ pub fn currentCtx() *reconcile.Ctx {
 /// at the single choke point every grab goes through turns that into an assert at the
 /// point of the mistake.
 var grab_depth: u32 = 0;
+
+/// The grab-depth invariant check, kept in EVERY build profile (default
+/// `-Dstrict-grabs=true`): these are cheap integer compares, and the shipped
+/// ReleaseFast binary must not silently lose premature-ungrab / nested-grab
+/// protection to `std.debug.assert` elision. Panics on violation like a
+/// safety-mode assert would. Opt out with `-Dstrict-grabs=false` (measured
+/// builds only).
+inline fn assertGrab(cond: bool) void {
+    if (comptime build_options.strict_grabs) {
+        if (!cond) std.debug.panic("grab-depth invariant violated (pipeline)", .{});
+    }
+}
 
 /// Server-grab ownership as a token: taking it grabs, dropping it ungrabs AND
 /// flushes. Every exit path releases it, including an early return or a failed
@@ -252,7 +264,7 @@ pub const ScopedGrab = struct {
     /// Releases the grab and flushes. Asserts rather than tolerating a double
     /// release: an extra release would ungrab a grab this token does not own.
     pub fn deinit(self: ScopedGrab) void {
-        std.debug.assert(grab_depth > 0);
+        assertGrab(grab_depth > 0);
         grab_depth -= 1;
         self.s.ungrabAndFlush();
     }
@@ -264,7 +276,7 @@ pub const ScopedGrab = struct {
     /// cannot reconcile against a ctx its geometry writes are not bracketed
     /// by.
     pub fn reconcileNow(self: ScopedGrab, o: reconcile.Opts) void {
-        std.debug.assert(self.c != null);
+        assertGrab(self.c != null);
         // Refresh the screen-derived fields from LIVE state immediately before
         // geometry is emitted, rather than trusting the snapshot taken when
         // the grab was acquired. A surface can change what it claims of the
@@ -292,7 +304,7 @@ pub const ScopedGrab = struct {
 /// Takes the server grab, building the reconcile ctx first (ctx() refuses to
 /// build under a grab) and returning the token that owns it.
 pub fn grabScoped() ScopedGrab {
-    std.debug.assert(grab_depth == 0);
+    assertGrab(grab_depth == 0);
     const c = prepare();
     const s = syncSink();
     s.grabServer();
@@ -308,7 +320,7 @@ pub fn grabScoped() ScopedGrab {
 /// the server disagreeing -- the exact hazard ScopedGrab.reconcileNow exists
 /// to prevent. Use grabScoped() when a reconcile is coming.
 pub fn grabOnly() ScopedGrab {
-    std.debug.assert(grab_depth == 0);
+    assertGrab(grab_depth == 0);
     const s = syncSink();
     s.grabServer();
     grab_depth += 1;

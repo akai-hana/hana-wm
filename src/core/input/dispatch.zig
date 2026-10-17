@@ -1,15 +1,14 @@
 //! Action dispatch: `executeAction` + `grafted`, the single router every
 //! configured action ends in. The one module both the key path (keys.zig) and
 //! the mouse path (mouse.zig) must reach, so giving it a home of its own keeps
-//! those two from importing each other. Wire traffic: the ICCCM `WM_DELETE_WINDOW`
-//! client message (closeWindow) and the `xcb_destroy_window` fallback; protocol
-//! text and a last-resort close, not sync-bound geometry, which is why this file
-//! carries its own allowlist entry.
+//! those two from importing each other. No wire traffic of its own anymore:
+//! the close action delegates to the shared ICCCM close path in icccm.zig
+//! (whose file carries the allowlist entry for the sends), and everything
+//! else routes through the model/hooks.
 const std = @import("std");
 const build_options = @import("build_options");
 
 const core = @import("core");
-const xcb = core.xcb;
 const types = @import("types");
 const log = std.log.scoped(.dispatch);
 const focus = @import("focus");
@@ -23,7 +22,6 @@ const query = @import("query");
 const window = @import("window");
 const diagnostic = @import("diagnostic");
 const surfaces = @import("surfaces").Surfaces;
-const atoms = @import("atoms");
 const spawn = @import("spawn");
 const process = @import("process");
 
@@ -64,27 +62,13 @@ fn toggleBarPosition() void {
 
 // Window operations
 
-/// Closes a window gracefully via WM_DELETE_WINDOW (ICCCM §4.1.2.7), falling
-/// back to xcb_destroy_window for clients that don't advertise the protocol.
-/// The timestamp in data32[1] is the time passed to the client per §4.1.2.7.
+/// Closes a window via the shared ICCCM close path (icccm.closeViaProtocol:
+/// WM_DELETE_WINDOW, destroy fallback). Kept as the action's named handler so
+/// the close_window arm reads as its own intent; the protocol body lives with
+/// the other WM_DELETE/WM_TAKE_FOCUS sends in icccm.zig, next to the verdict
+/// query it uses.
 fn closeWindow(win: u32) void {
-    const conn = core.getState().conn;
-    if (window.supportsWMDeleteCached(conn, win)) blk: {
-        const protocols_atom = atoms.getAtomCached("WM_PROTOCOLS") orelse break :blk;
-        const delete_atom = atoms.getAtomCached("WM_DELETE_WINDOW") orelse break :blk;
-
-        var event = std.mem.zeroes(xcb.xcb_client_message_event_t);
-        event.response_type = xcb.XCB_CLIENT_MESSAGE;
-        event.format = 32;
-        event.window = win;
-        event.type = protocols_atom;
-        event.data.data32[0] = delete_atom;
-        event.data.data32[1] = focus.getLastEventTime();
-
-        _ = xcb.xcb_send_event(conn, 0, win, xcb.XCB_EVENT_MASK_NO_EVENT, @ptrCast(&event));
-        return;
-    }
-    _ = xcb.xcb_destroy_window(conn, win);
+    window.closeViaProtocol(win);
 }
 
 // Action dispatch
@@ -107,7 +91,7 @@ pub fn executeAction(action: *const types.Action) void {
         // (for a raw exec step, that means waiting until the command exits,
         // see spawn.execSynchronous) before the next one begins.
         .sequence => |acts| for (acts) |*a|
-            if (a.* == .exec) spawn.execSynchronous(a.exec) else executeAction(a),
+            if (a.* == .exec) spawn.execSynchronous(core.getState().alloc, a.exec) else executeAction(a),
         // Core
         .close_window => if (focus.getFocused()) |win| closeWindow(win),
         .reload_config => process.reload(),

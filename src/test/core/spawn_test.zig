@@ -8,6 +8,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const spawn = @import("spawn");
+const core = @import("core");
 
 test "a clean EOF is success" {
     // A successful execvp closes the O_CLOEXEC write end, so the parent reads
@@ -47,4 +48,25 @@ test "the fixtures above use the real wire tag" {
     // BECAUSE that is the tag byte. Pin the value itself -- the predicate call
     // was byte-identical to the case above and proved nothing new.
     try testing.expectEqual(@as(u8, 1), spawn.tag_failed);
+}
+
+// P1-14: a wedged sync_exec (`sleep 60`) must not freeze the caller past
+// the deadline: killed + reaped, prompt return. Uses the timeout-injectable
+// seam so the suite doesn't pay the production 5s cap.
+test "sync_exec kills a wedged command at the deadline" {
+    const start = core.monotonicMs();
+    spawn.execSynchronousBounded(testing.allocator, "sleep 60", 50);
+    const elapsed = core.monotonicMs() - start;
+    // 50ms cap + 10ms nap granularity + bounded reap grace; orders of
+    // magnitude under `sleep 60` and well under a second.
+    try testing.expect(elapsed < 2000);
+}
+
+// The happy path still completes: a fast command is waited to exit, no kill,
+// no timeout warn.
+test "sync_exec waits out a fast command without timing out" {
+    const start = core.monotonicMs();
+    spawn.execSynchronousBounded(testing.allocator, "true", 5000);
+    const elapsed = core.monotonicMs() - start;
+    try testing.expect(elapsed < 2000);
 }
