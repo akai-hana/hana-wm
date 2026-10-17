@@ -1,30 +1,26 @@
-warning: [debug] Unchecked XCB request failed: code=8 major=42 minor=0 resource=W01
-info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W01
-info: [debug] Total windows:  2
-info: [debug] Suppress focus: window_spawn
-info: [debug]   WS1: 2 windows
-info: [debug]   WS2: 0 windows
-info: [debug]   WS3: 0 windows
-info: [debug]   WS4: 0 windows
-warning: [debug] Unchecked XCB request failed: code=8 major=42 minor=0 resource=W01
-warning: [debug] Unchecked XCB request failed: code=8 major=42 minor=0 resource=W01
-warning: [debug] Unchecked XCB request failed: code=8 major=42 minor=0 resource=W01
-info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W01
-info: [debug] Total windows:  2
-info: [debug] Suppress focus: none
-info: [debug]   WS1: 2 windows
-info: [debug]   WS2: 0 windows
-info: [debug]   WS3: 0 windows
-info: [debug]   WS4: 0 windows
-warning: [debug] Unchecked XCB request failed: code=8 major=42 minor=0 resource=W01
-info: [debug] ========== STATE DUMP ==========
-info: [debug] Focused:        W01
-info: [debug] Total windows:  2
-info: [debug] Suppress focus: none
-info: [debug]   WS1: 2 windows
-info: [debug]   WS2: 0 windows
-info: [debug]   WS3: 0 windows
-info: [debug]   WS4: 0 windows
-warning: [debug] Unchecked XCB request failed: code=8 major=42 minor=0 resource=W01
+# sig-format: 3
+warning: [document] Unrecognized key 'enabled' in section [tiling] (line 4); ignoring
+info: [diagnostic] ========== STATE DUMP ==========
+info: [diagnostic] Focused:        W01
+info: [diagnostic] Total windows:  2
+info: [diagnostic] Suppress focus: window_spawn
+info: [diagnostic]   WS1: 2 windows
+info: [diagnostic]   WS2: 0 windows
+info: [diagnostic]   WS3: 0 windows
+info: [diagnostic]   WS4: 0 windows
+info: [diagnostic] ========== STATE DUMP ==========
+info: [diagnostic] Focused:        W01
+info: [diagnostic] Total windows:  2
+info: [diagnostic] Suppress focus: window_spawn
+info: [diagnostic]   WS1: 2 windows
+info: [diagnostic]   WS2: 0 windows
+info: [diagnostic]   WS3: 0 windows
+info: [diagnostic]   WS4: 0 windows
+info: [diagnostic] ========== STATE DUMP ==========
+info: [diagnostic] Focused:        W01
+info: [diagnostic] Total windows:  2
+info: [diagnostic] Suppress focus: window_spawn
+info: [diagnostic]   WS1: 2 windows
+info: [diagnostic]   WS2: 0 windows
+info: [diagnostic]   WS3: 0 windows
+info: [diagnostic]   WS4: 0 windows
