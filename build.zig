@@ -86,6 +86,17 @@ pub fn build(b: *std.Build) !void {
     // Build options
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "profile_key", b.option(bool, "profile-key", "Instrument the key dispatch path to log receive->action latency") orelse false);
+    // Grab-depth and overflow guards stay in EVERY build profile by default:
+    // they are cheap integer compares, and the shipped ReleaseFast binary must
+    // not silently lose premature-ungrab / dropped-window protection to
+    // `std.debug.assert` elision. `-Dstrict-grabs=false` restores the old
+    // elision for a measured build.
+    build_opts.addOption(bool, "strict_grabs", b.option(bool, "strict-grabs", "Keep grab-depth invariant checks in every build profile (default on; cheap integer compares)") orelse true);
+    // D1: retain warn-level diagnostics for the 12 config-family scopes in
+    // release builds. Default off: always-on costs +145 KB (+15.7%) of
+    // ReleaseFast binary (measured; see REFACTOR-PLAN.md §3), and the shipped
+    // default must stay unchanged. Debug already logs everything.
+    build_opts.addOption(bool, "config_warn", b.option(bool, "config-warn", "Release builds retain warn-level diagnostics for the config-family scopes (default off; Debug already has everything)") orelse false);
     // Latency/benchmark tests record their timings to `.zig-cache/bench/
     // timings.txt` and run their full loops only when `-Dbench` is passed;
     // the default suite keeps them as cheap smoke runs so a passing
