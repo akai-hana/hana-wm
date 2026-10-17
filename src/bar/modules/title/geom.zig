@@ -96,8 +96,10 @@ pub const GatherScratch = struct {
     }
 };
 
-/// A window resolved from a click inside the title segment.
-const ClickTarget = struct {
+/// A window resolved from a click inside the title segment: the hit-tested
+/// window and whether the snapshot has it minimized. Public because it rides
+/// `hitTest`'s return into the bar's click trampoline.
+pub const ClickTarget = struct {
     window: u32,
     minimized: bool,
 };

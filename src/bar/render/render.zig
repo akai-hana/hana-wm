@@ -613,7 +613,7 @@ const RightCluster = struct {
 /// these, and paint walks them, so adding a segment does not mean editing
 /// one loop that measures it, records its click bound, scopes its ticker,
 /// clears its region and draws it, all interleaved.
-const RowSlot = struct {
+pub const RowSlot = struct {
     /// Registry id, resolved ONCE when the slot is pushed (the layout stores
     /// names; every downstream consumer -- measure, paint, click bound, dirty
     /// clear -- works on the id, so a name is never resolved twice in one
@@ -651,7 +651,7 @@ const RowSlot = struct {
 /// cluster is measured forwards but painted right-to-left, so it is reversed
 /// into paint order here rather than at draw time. Reversing once in solve is
 /// what lets paint be a single flat loop with no backward cursor.
-const RowPlan = struct {
+pub const RowPlan = struct {
     slots: [max_row_slots]RowSlot = undefined,
     len: usize = 0,
     /// The right cluster's reserved width, subtracted from left/center budgets.
@@ -804,7 +804,7 @@ fn drawAllInner(s: *State, ctx: *segmod.DrawCtx) void {
 /// left/center rows forwards. Records nothing on `s` -- the click and
 /// ticker-scope bookkeeping belongs to paint, which is the only half that
 /// knows a slot actually got drawn.
-fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
+pub fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
     const r = &s.render;
     const fr = &ctx.frame;
     const scaled_spacing = state.renderBar().scaledSpacing(r.height);
@@ -920,7 +920,7 @@ fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
 /// Walks the solved plan in paint order and draws it. The loop is flat: the
 /// backward right-cluster cursor is already baked into the plan's slot
 /// positions.
-fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_redraw: bool) void {
+pub fn paintRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *const RowPlan, is_full_redraw: bool) void {
     const scaled_spacing = state.renderBar().scaledSpacing(s.render.height);
     // Left/center advance, threaded separately from the plan's right-cluster
     // positions: a right slot's `x` is final, but a left/center slot's is

@@ -130,6 +130,35 @@ pub const Surface = struct {
         if (self.pixmap != 0) _ = core.xcb.xcb_free_pixmap(self.conn, self.pixmap);
     }
 
+    /// Image-backed surface with the XCB half inert: no pixmap, no GCs, so
+    /// every wire path in this struct short-circuits on its zero handle
+    /// (`fillRect` falls back to cairo, `blitImpl` returns after the flush).
+    /// The test-only constructor for a headless DrawContext -- same cairo
+    /// surface type the font probe already measures against, no display.
+    pub fn initImage(width: u16, height: u16) !Surface {
+        const cairo_surface = bindings.cairo_image_surface_create(
+            .ARGB32,
+            @intCast(width),
+            @intCast(height),
+        ) orelse return error.CairoSurfaceCreateFailed;
+        errdefer bindings.cairo_surface_destroy(cairo_surface);
+
+        const ctx = bindings.cairo_create(cairo_surface) orelse return error.CairoCreateFailed;
+        errdefer bindings.cairo_destroy(ctx);
+
+        return .{
+            .conn = undefined,
+            .window = 0,
+            .pixmap = 0,
+            .width = width,
+            .height = height,
+            .cairo_surface = cairo_surface,
+            .ctx = ctx,
+            .gc = 0,
+            .copy_gc = 0,
+        };
+    }
+
     pub inline fn setColor(self: *Surface, color: u32) void {
         if (self.last_color == color) return;
         setCairoColor(self.ctx, color);
@@ -158,6 +187,21 @@ pub const Surface = struct {
     /// quiesces cairo first, so no cairo operation can be left pending across
     /// the boundary where the two orderings diverge.
     pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {
+        // Image surface (no pixmap): the same pixels via cairo, so a headless
+        // frame still paints a background. The wire-only state below is skipped
+        // entirely -- there is no GC to arm and no ordering to enforce.
+        if (self.pixmap == 0) {
+            self.setColor(color);
+            bindings.cairo_rectangle(
+                self.ctx,
+                @floatFromInt(x),
+                @floatFromInt(y),
+                @floatFromInt(width),
+                @floatFromInt(height),
+            );
+            bindings.cairo_fill(self.ctx);
+            return;
+        }
         if (!self.xcb_filled_this_frame) {
             // Quiesce before the first wire write of the frame.
             bindings.cairo_surface_flush(self.cairo_surface);
