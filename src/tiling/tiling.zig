@@ -123,6 +123,18 @@ pub inline fn insetRect(x: i32, y: i32, w: u16, h: u16, margin: u16, min_dim: u1
     };
 }
 
+/// Can a region of `w x h` host an inset-by-`margin` placement at a positive
+/// size? Exactly the condition under which `insetRect`'s min_dim floor stays
+/// inside the region: `shrinkClamped` only takes the floor branch when
+/// `dim <= margin`, and a floor-sized rect at the region origin is then free
+/// to flare past the workarea edge (a 0x0 workarea would show a min_dim
+/// rectangle off-screen). Every `insetRect` emission site parks the window
+/// instead of emitting when this is false -- the one spelling of the
+/// degenerate-region guard.
+pub inline fn insetFits(w: u16, h: u16, margin: u16) bool {
+    return w > margin and h > margin;
+}
+
 /// Clamp a signed y coordinate to a non-negative u16.
 inline fn clampYToU16(y: i32) u16 {
     return @intCast(@max(y, 0));
@@ -223,7 +235,15 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
     // exists to handle could even be reached.
     if (windows.len == 0) return;
     const top = focusedElse(ctx.v, windows, windows[0]);
-    emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, model.doubledBorder(ctx.m), ctx.min_dim));
+    const margin = model.doubledBorder(ctx.m);
+    if (insetFits(r.w, r.h, margin)) {
+        emitView(ctx.v, ctx.out, top, insetRect(r.x, r.y, r.w, r.h, margin, ctx.min_dim));
+    } else {
+        // Region cannot hold even one pixel after the border: the min_dim
+        // floor would flare off the workarea, and a parked placement is the
+        // honest rendering of a place that cannot be shown.
+        emitHidden(ctx.out, top);
+    }
     // The "show one, hide the rest" fan-out. It appends unconditionally, which
     // the monocle shape cannot use: monocle must land emitView for its top
     // window at that window's own position in v.order.

@@ -54,12 +54,26 @@ pub fn callHookBool(
     return false;
 }
 
+/// Fan-out FIRE COUNT for the `onWindowGone` lifecycle audit: every hook
+/// binding that name is idempotent (find-then-clear), so MODULE STATE cannot
+/// distinguish one fire from two — only a count can pin "a managed destroy
+/// fires the hook exactly once" (P1-19's X-gated test, which is what makes
+/// P1-40's removal of the events.zig pre-fire checkable: a re-added second
+/// fire site regresses this counter even though every hook stays happy). The
+/// count lives at the dispatch PRIMITIVE so it sees every path — the
+/// `window.*` facade re-export, in-layer direct `registry.dispatchAll`
+/// calls, and module-to-module re-dispatch — however the next call site is
+/// written. Increment is comptime-gated on this one field (every other hook
+/// pays nothing), and no production code reads the counter (test seam).
+pub var onWindowGone_fires: usize = 0;
+
 /// Runs a hook on EVERY module that binds it, not just the first (callHook
 /// returns after the first provider).
 pub fn dispatchAll(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
 ) void {
+    if (comptime field == .onWindowGone) onWindowGone_fires += 1;
     dispatch.callAll(contract.WindowModule, window_mods[0..], field, args);
 }
 

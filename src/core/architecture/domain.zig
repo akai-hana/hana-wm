@@ -177,6 +177,23 @@ pub inline fn satI16(v: i32) i16 {
     return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
 }
 
+/// Centers a `w`x`h` box over `parent`, clamped inside `bounds` (the work
+/// area): the dialog-over-parent placement ICCCM's WM_TRANSIENT_FOR asks
+/// for. The clamp wins when centering would hang the box off an edge; a box
+/// larger than `bounds` pins to the bounds origin rather than producing an
+/// inverted clamp range.
+pub fn centerRectIn(parent: Rect, w: u16, h: u16, bounds: Rect) Rect {
+    const bx: i32 = bounds.x;
+    const by: i32 = bounds.y;
+    const cx: i32 = @as(i32, parent.x) + @divTrunc(@as(i32, parent.width) - @as(i32, w), 2);
+    const cy: i32 = @as(i32, parent.y) + @divTrunc(@as(i32, parent.height) - @as(i32, h), 2);
+    const max_x: i32 = bx + @as(i32, bounds.width) - @as(i32, w);
+    const max_y: i32 = by + @as(i32, bounds.height) - @as(i32, h);
+    const x: i32 = if (max_x <= bx) bx else std.math.clamp(cx, bx, max_x);
+    const y: i32 = if (max_y <= by) by else std.math.clamp(cy, by, max_y);
+    return .{ .x = satI16(x), .y = satI16(y), .width = w, .height = h, .border_width = 0 };
+}
+
 /// Reinterprets a signed X11 coordinate (i16 on the wire) as the u32 value
 /// XCB's configure_window value array expects.
 pub inline fn toXcbCoord(v: i16) u32 {

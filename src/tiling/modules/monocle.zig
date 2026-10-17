@@ -45,8 +45,12 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // window's stacking position dependent on where focus sat in the list.
     // (Emitting every window at the shared rect and hiding afterwards does not
     // work: appendPlacement only ever appends, so that shape double-counts.)
+    // A workarea that cannot hold the inset at a positive size parks every
+    // window including the top one -- the min_dim floor would flare the rect
+    // past the workarea edge.
+    const fits = tiling.insetFits(v.workarea.width, v.workarea.height, total_margin);
     for (v.order) |win| {
-        if (win == top_win) tiling.emitView(v, out, win, top_rect) else tiling.emitHidden(out, win);
+        if (win == top_win and fits) tiling.emitView(v, out, win, top_rect) else tiling.emitHidden(out, win);
     }
 }
 

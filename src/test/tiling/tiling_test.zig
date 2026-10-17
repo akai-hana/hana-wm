@@ -605,25 +605,61 @@ fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
     }
 }
 
-// The sweep: every registered layout x every variant x n = 0..12, at the
-// standard work area AND at a deliberately hostile 120x120 one (where
-// min_dim floors and clamps actually engage instead of being no-ops).
+// The sweep: every registered layout x every variant x n over 0..12 (all)
+// and 14..64 (stride 2, up to `model.max_tiled_per_ws`), across five work
+// areas (incl. the degenerate 0x0 and a smaller-than-margins one) and five
+// environments (the standard gap-heavy one, a border-dominated one that
+// exercises the fibonacci fence at 2*border >= gap, a collapsed min_dim
+// floor, an odd gap for the half-gap rounding paths, and the standard one
+// mirrored by Env.primary_on_right).
 test "Every layout satisfies the placement invariants at every size" {
     if (!build_options.has_tiling) return error.SkipZigTest;
     // The workarea injections for the invariant sweep, extended beyond the
     // origin case: a side-claimed origin (`x=40, y=50`) catches the missing
-    // wa.x placements, and the 120x120 hostile one keeps the clamps turning on.
+    // wa.x placements; the 120x120 hostile one keeps the clamps turning on;
+    // the fully degenerate 0x0 and the 16x16 (smaller than 2*(gap+border) =
+    // 20px of margins, so the inner area is negative) pin that a layout
+    // degrades to hidden placements instead of emitting out-of-bounds or
+    // zero-area rects.
     const areas = [_]model.Rect{
         helpers.std_wa,
         .{ .x = 0, .y = 0, .width = 120, .height = 120 },
         .{ .x = 40, .y = 50, .width = 800, .height = 600 },
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        .{ .x = 7, .y = 9, .width = 16, .height = 16 },
     };
-    // The two environments the layout modules have to survive: the standard
-    // gap-heavy one, and a border-dominated one (5px border > 2px gap) that
-    // exercises the fibonacci fence at 2*border >= gap.
+    // The environments the layout modules have to survive: the standard
+    // gap-heavy one; a border-dominated one (5px border > 2px gap) that
+    // exercises the fibonacci fence at 2*border >= gap; a collapsed min_dim
+    // floor (every cell may take any size, so clamps stop protecting and the
+    // rounding has to stand alone); an ODD gap (layouts that halve the gap --
+    // grid/leaf gutters -- round, and an odd gap is the only way the two
+    // sides of a gutter can disagree); and the standard one mirrored by
+    // primary_on_right.
     const envs = [_]contract.Env{
         helpers.std_env,
         .{ .margins = .{ .gap = 2, .border = 5 }, .min_dim = 50 },
+        .{ .margins = .{ .gap = 8, .border = 2 }, .min_dim = 1 },
+        .{ .margins = .{ .gap = 1, .border = 2 }, .min_dim = 50 },
+        .{ .margins = helpers.std_env.margins, .min_dim = helpers.std_env.min_dim, .primary_on_right = true },
+    };
+    // n: every size 0..12, then stride 2 up to max_tiled_per_ws (64) --
+    // the full range costs one extra loop level and still finishes fast,
+    // while small-n (0..3) keeps the degenerate-count paths dense.
+    const n_list = n: {
+        var l: [39]usize = undefined;
+        var idx: usize = 0;
+        var i: usize = 0;
+        while (i <= 12) : (i += 1) {
+            l[idx] = i;
+            idx += 1;
+        }
+        i = 14;
+        while (i <= 64) : (i += 2) {
+            l[idx] = i;
+            idx += 1;
+        }
+        break :n l;
     };
     var kinds: usize = 0;
     for (contract.tiling_mods, 0..) |lm, kind| {
@@ -631,8 +667,8 @@ test "Every layout satisfies the placement invariants at every size" {
         kinds += 1;
         const vcount: usize = if (lm.variant_count == 0) 1 else lm.variant_count;
         for (0..vcount) |vi| {
-            for (0..13) |n| {
-                var wins: [12]model.WindowId = undefined;
+            for (n_list) |n| {
+                var wins: [64]model.WindowId = undefined;
                 for (wins[0..n], 0..) |*w, i| w.* = @intCast(100 + i);
                 var fx: Fixture = undefined;
                 for (areas) |wa| {
@@ -643,7 +679,7 @@ test "Every layout satisfies the placement invariants at every size" {
                         fx.m.ws[0].params.variant_idx = @intCast(vi);
                         // A primary_count that can exceed the master pane's fit
                         // at the sweep sizes, so the master-column cap actually
-                        // fires (n up to 12).
+                        // fires.
                         fx.m.ws[0].params.primary_count = 12;
                         var v = fx.view();
                         v.env = env;
@@ -651,8 +687,8 @@ test "Every layout satisfies the placement invariants at every size" {
                         assertInvariants(&out, v, wa) catch |err| {
                             // Dump both sequences: an order mismatch is only
                             // actionable next to the two lists that disagree.
-                            std.debug.print("FAIL {s} variant={d} n={d} wa=({d},{d}) {d}x{d} env=(gap={d},border={d},min={d}): {s}\n", .{
-                                lm.name, vi, n, wa.x, wa.y, wa.width, wa.height, env.margins.gap, env.margins.border, env.min_dim, @errorName(err),
+                            std.debug.print("FAIL {s} variant={d} n={d} wa=({d},{d}) {d}x{d} env=(gap={d},border={d},min={d},right={any}): {s}\n", .{
+                                lm.name, vi, n, wa.x, wa.y, wa.width, wa.height, env.margins.gap, env.margins.border, env.min_dim, env.primary_on_right, @errorName(err),
                             });
                             std.debug.print("  order   :", .{});
                             for (v.order) |w| std.debug.print(" {d}", .{w});
@@ -667,6 +703,76 @@ test "Every layout satisfies the placement invariants at every size" {
                             std.debug.print("\n", .{});
                             return err;
                         };
+                    }
+                }
+            }
+        }
+    }
+    try testing.expect(kinds >= 6); // the six layouts the tree ships
+}
+
+// P1-22: the tuning axes that split/weight the panes rather than the frame --
+// Env.primary_on_right and params.{primary_width, secondary_balance} -- swept
+// as their own cross product over a reduced n/area set. The main sweep pins
+// them at their defaults, which is exactly where a bug in the 0.05/0.95 split
+// or a balance-pinned water fill would hide: every axis combination gets the
+// same five properties, and the degenerate 0x0 workarea stays in the set so
+// the axes cannot turn a hidden placement into an out-of-bounds one.
+test "Placement invariants hold across the primary/secondary param axes" {
+    if (!build_options.has_tiling) return error.SkipZigTest;
+    const areas = [_]model.Rect{
+        helpers.std_wa,
+        .{ .x = 0, .y = 0, .width = 120, .height = 120 },
+        .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    };
+    // Sizes chosen around the split arithmetic: empty, single (no split at
+    // all), the 2-window threshold, mid-stack, past the master-column cap
+    // fit, and the full max_tiled_per_ws.
+    const ns = [_]usize{ 0, 1, 2, 3, 6, 12, 64 };
+    const widths = [_]f32{ 0.05, 0.5, 0.95 };
+    const balances = [_]f32{ -1.0, 0.0, 1.0 };
+    const rights = [_]bool{ false, true };
+    var kinds: usize = 0;
+    for (contract.tiling_mods, 0..) |lm, kind| {
+        if (lm.compute == null) continue;
+        kinds += 1;
+        for (rights) |right| {
+            for (balances) |bal| {
+                for (widths) |pw| {
+                    for (ns) |n| {
+                        var wins: [64]model.WindowId = undefined;
+                        for (wins[0..n], 0..) |*w, i| w.* = @intCast(100 + i);
+                        var fx: Fixture = undefined;
+                        for (areas) |wa| {
+                            fx.initAt(wins[0..n], wa) catch |err| return err;
+                            fx.m.ws[0].params.primary_count = 12;
+                            fx.m.ws[0].params.primary_width = pw;
+                            fx.m.ws[0].params.secondary_balance = bal;
+                            var v = fx.view();
+                            v.env = .{
+                                .margins = helpers.std_env.margins,
+                                .min_dim = helpers.std_env.min_dim,
+                                .primary_on_right = right,
+                            };
+                            const out = computeOf(@intCast(kind), v);
+                            assertInvariants(&out, v, wa) catch |err| {
+                                std.debug.print("FAIL-AXES {s} n={d} wa=({d},{d}) {d}x{d} width={d} balance={d} right={any}: {s}\n", .{
+                                    lm.name, n, wa.x, wa.y, wa.width, wa.height, pw, bal, right, @errorName(err),
+                                });
+                                std.debug.print("  order   :", .{});
+                                for (v.order) |w| std.debug.print(" {d}", .{w});
+                                std.debug.print("\n  emitted :", .{});
+                                for (out.constSlice()) |p| std.debug.print(" {d}", .{p.win});
+                                std.debug.print("\n  rects   :", .{});
+                                for (out.constSlice()) |p|
+                                    std.debug.print(" ({d},{d} {d}x{d}{s})", .{
+                                        p.rect.x,                         p.rect.y, p.rect.width, p.rect.height,
+                                        if (p.visible) "" else " hidden",
+                                    });
+                                std.debug.print("\n", .{});
+                                return err;
+                            };
+                        }
                     }
                 }
             }
