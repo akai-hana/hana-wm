@@ -828,6 +828,23 @@ test "display.dpi: integer and fractional spellings both widen; absent stays nul
     try testing.expectEqual(@as(?f32, null), absent.core.dpi);
 }
 
+test "[core] key_repeat: explicit true lands; absent keeps the suppress-all default" {
+    // The default is the whole point of the knob: held combos must not
+    // re-fire side-effecting actions, so a config that never mentions
+    // key_repeat has to load with suppression on.
+    var absent = try loadToml(testing.allocator, "key-repeat-absent", "[bar]\nenabled = true\n");
+    defer absent.deinit(testing.allocator);
+    try testing.expectEqual(false, absent.core.key_repeat);
+
+    var on = try loadToml(testing.allocator, "key-repeat-on", "[core]\nkey_repeat = true\n");
+    defer on.deinit(testing.allocator);
+    try testing.expectEqual(true, on.core.key_repeat);
+
+    var off = try loadToml(testing.allocator, "key-repeat-off", "[core]\nkey_repeat = false\n");
+    defer off.deinit(testing.allocator);
+    try testing.expectEqual(false, off.core.key_repeat);
+}
+
 test "legacy drun_* keys still parse after the rename to run_*" {
     // An UNEDITED existing config must keep working, so the alias path is
     // pinned here rather than assumed: these are the exact key spellings hana

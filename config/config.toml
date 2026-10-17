@@ -18,6 +18,13 @@
 # - Files are unified at runtime in list order; later files win on scalar conflicts.
 include = ["binds.toml", "themes/akai.toml"]
 
+# Keyboard
+
+[core]
+# true  = a held keybinding re-fires at the X auto-repeat rate (old behavior).
+# false = auto-repeat never re-fires a held binding: one action per press.
+key_repeat = false
+
 # Tiling
 
 [tiling]
@@ -40,7 +47,7 @@ min_window_dim = 50
 #   workspace_list Comma-separated 1-based indices restricting the layout to specific workspaces (optional)
 #
 # Variant reference:
-#   master-stack  "lifo" (default) | "fifo"  — new window lands in master or stack
+#   master-stack  "lifo" (default) | "fifo"  — new window appends to stack (tail) or takes master (head)
 #   monocle       "gapless" (default) | "gaps"   — honour window gaps like other layouts
 #   grid          "rigid" (default) | "relaxed"  — incomplete last row: leave gaps or expand
 #   fibonacci     (no variants)
@@ -60,7 +67,7 @@ layouts = [
 count    = 1        # Number of windows in the master area [1..]
 side     = "left"   # "left" / "right" — master area on this side of the screen
 width    = 50%      # Master area width [5%-95%] or exact pixels (0, N] px
-variants = "lifo"   # "lifo" = new window spawns in master; "fifo" = spawns in stack
+variants = "lifo"   # "lifo" = new window appends to the stack (tail); "fifo" = new window takes the master (head) slot
 
 [tiling.layouts.monocle]
 variants = "gaps"   # "gapless" (true fullscreen) | "gaps" (honour gap settings)

@@ -13,6 +13,8 @@ const binds = @import("binds");
 pub const knobs = [_]knob.Knob{
     // [display]
     knob.knob(&.{knob.place(types.section_display, "dpi")}, "dpi", .{ .opt_float = .{ .min = 20.0, .max = 1000.0 } }),
+    // [core]
+    knob.knob(&.{knob.place(types.section_core, "key_repeat")}, "key_repeat", .b),
 };
 
 comptime {

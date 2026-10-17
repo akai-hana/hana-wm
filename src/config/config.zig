@@ -278,15 +278,15 @@ fn lintDocument(doc: *parser.Document) void {
 /// spelling. A section header that differs from one of these only by case is
 /// almost certainly a typo that silently drops the whole section.
 const known_section_entries = .{
-    .{ types.section_binds, {} },                                   .{ types.section_binds_alt, {} },
-    .{ types.section_workspace_rules, {} },                         .{ types.section_rules, {} },
-    .{ types.section_drag, {} },                                    .{ types.section_fullscreen, {} },
-    .{ types.section_display, {} },                                 .{ types.section_tiling, {} },
-    .{ types.section_workspaces, {} },                              .{ types.section_bar, {} },
-    .{ types.section_bar_properties, {} },                          .{ types.section_prefix_bar_layout ++ "left", {} },
-    .{ types.section_prefix_bar_layout ++ "center", {} },           .{ types.section_prefix_bar_layout ++ "right", {} },
-    .{ types.section_bar_modules_workspaces, {} },                  .{ types.section_tiling_layouts_master_stack, {} },
-    .{ types.section_prefix_tiling_layouts ++ "master_stack", {} },
+    .{ types.section_binds, {} },                        .{ types.section_binds_alt, {} },
+    .{ types.section_workspace_rules, {} },              .{ types.section_rules, {} },
+    .{ types.section_drag, {} },                         .{ types.section_fullscreen, {} },
+    .{ types.section_display, {} },                      .{ types.section_core, {} },
+    .{ types.section_tiling, {} },                       .{ types.section_workspaces, {} },
+    .{ types.section_bar, {} },                          .{ types.section_bar_properties, {} },
+    .{ types.section_prefix_bar_layout ++ "left", {} },  .{ types.section_prefix_bar_layout ++ "center", {} },
+    .{ types.section_prefix_bar_layout ++ "right", {} }, .{ types.section_bar_modules_workspaces, {} },
+    .{ types.section_tiling_layouts_master_stack, {} },  .{ types.section_prefix_tiling_layouts ++ "master_stack", {} },
 };
 const known_sections = std.StaticStringMap(void).initComptime(known_section_entries);
 
@@ -408,7 +408,11 @@ fn loadFor(allocator: std.mem.Allocator, snapshot: bool) !composed.Config {
         // On reload the same errors propagate instead, so the live config is
         // kept -- `isFatalLoadError` in discover.zig is the shared list.
         error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes, error.InvalidConfig => blk2: {
-            log.warn("Unusable config at startup ({s}); using the embedded fallback", .{@errorName(err)});
+            // `log.err`, not `log.warn` (D1): this is the one diagnostic a
+            // user MUST see even in a default release build -- their entire
+            // config was replaced by the embedded fallback. One format
+            // string; the log_level = .err release policy retains err sites.
+            log.err("Unusable config at startup ({s}); using the embedded fallback", .{@errorName(err)});
             break :blk2 try loadFallbackConfig(allocator);
         },
         else => return err,

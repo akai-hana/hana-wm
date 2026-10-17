@@ -14,6 +14,7 @@ const keymap = @import("keymap");
 const masks = @import("masks");
 const parser = @import("parser");
 const types = @import("types");
+const diagnostics = @import("diagnostics");
 
 fn load(a: std.mem.Allocator, cfg: *types.CoreConfig, src: []const u8) !void {
     var doc = try parser.parse(a, src, "<binds-test>");
@@ -278,4 +279,32 @@ test "a sectionless document binds nothing" {
 
     try testing.expectEqual(@as(usize, 0), cfg.keybindings.items.len);
     try testing.expectEqual(@as(usize, 0), cfg.mouse_bindings.items.len);
+}
+
+// P1-14 config lint: a `,`-sequence exec step routes through
+// spawn.execSynchronous (WM-blocking, deadline-capped) and must be reported
+// at parse time. A non-exec sequence and a bare fire-and-forget exec stay
+// silent.
+test "sync-exec lint warns on a `,`-sequence exec bind only" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var cfg: types.CoreConfig = .{};
+    defer cfg.deinit(testing.allocator);
+
+    var diag: diagnostics.Diagnostics = .{ .allocator = testing.allocator };
+    defer diag.deinit();
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = null;
+
+    try load(arena.allocator(), &cfg,
+        \\[binds]
+        \\Super+e = ["exec step one", "exec step two"]
+        \\Super+r = "close_window"
+        \\Super+m = ["minimize_window", "close_window"]
+        \\Super+p = "exec fire and forget"
+    );
+
+    // Exactly one bind trips the lint (the `,`-sequence with an exec step).
+    try testing.expect(diag.contains("blocks the WM"));
+    try testing.expectEqual(@as(usize, 1), diag.count());
 }

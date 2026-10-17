@@ -43,8 +43,8 @@ Mod+O       = "stack_bottom"         # Grow bottommost slave, shrink the rest ev
 # -- Focus cycling --
 Mod+j         = "focus_prev_window"
 Mod+k         = "focus_next_window"
-Mod+Shift+j   = "move_window_next"
-Mod+Shift+k   = "move_window_prev"
+Mod+Shift+j   = "move_window_prev"
+Mod+Shift+k   = "move_window_next"
 
 # -- Workspaces --
 # Glob expansion: Mod+{1-4,Q,W,E,R} expands into individual binds.

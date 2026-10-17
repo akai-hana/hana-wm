@@ -199,6 +199,28 @@ fn actionFromValue(
     };
 }
 
+/// True when `a` contains a `,`-sequence step that dispatch will run through
+/// spawn.execSynchronous -- the WM-blocking sync-exec path. Nested sequences
+/// and parallel members count; a bare (non-sequence) exec is fire-and-forget
+/// and does not.
+fn containsSyncExec(a: *const types.Action) bool {
+    switch (a.*) {
+        .sequence => |acts| {
+            for (acts) |*s| {
+                if (s.* == .exec) return true;
+                if (containsSyncExec(s)) return true;
+            }
+        },
+        .parallel => |acts| {
+            for (acts) |*s| {
+                if (containsSyncExec(s)) return true;
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
 /// A `+` is a parallel separator only when whitespace sits on at least one
 /// side, so literal plus signs in exec commands (`xdotool key ctrl+plus`)
 /// are never split.
@@ -295,6 +317,15 @@ pub fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg
                 action.deinit(allocator);
                 continue;
             };
+            // Config lint (P1-14): a `,`-sequence exec step runs through
+            // spawn.execSynchronous, which BLOCKS the WM event loop until the
+            // command exits (wall-clock capped at spawn.sync_exec_timeout_ms
+            // since P1-14, but a long step still freezes the WM for the cap).
+            // Warn at parse time so the cost is visible where the bind is
+            // written, not when it first fires.
+            if (containsSyncExec(&action)) {
+                log.warn("Keybind '{s}': a `,`-sequence exec step blocks the WM until the command exits (bounded, but avoid long-running commands here)", .{keybind_str});
+            }
             switch (bind) {
                 .mouse => |mb| try cfg.mouse_bindings.append(allocator, .{ .modifiers = mb.modifiers, .button = mb.button, .action = action }),
                 .keyboard => |kb| try cfg.keybindings.append(allocator, .{ .modifiers = kb.modifiers, .keysym = kb.keysym, .action = action }),
