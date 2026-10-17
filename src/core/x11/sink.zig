@@ -171,7 +171,8 @@ pub const XcbSink = struct {
     }
 
     fn mapShim(ptr: *anyopaque, win: u32) void {
-        _ = xcb.xcb_map_window(XcbSink.fromPtr(ptr).conn, win);
+        const ck = xcb.xcb_map_window(XcbSink.fromPtr(ptr).conn, win);
+        requests.noteSequence(win, ck.sequence);
     }
 
     fn configureShim(ptr: *anyopaque, win: u32, c: Configure) void {
@@ -179,7 +180,10 @@ pub const XcbSink = struct {
         // Nothing to say: an all-zero mask is a no-op request at best and a
         // protocol error at worst, so drop it rather than send it.
         if (w.mask == 0) return;
-        _ = xcb.xcb_configure_window(XcbSink.fromPtr(ptr).conn, win, w.mask, &w.values);
+        const ck = xcb.xcb_configure_window(XcbSink.fromPtr(ptr).conn, win, w.mask, &w.values);
+        // P1-18: record the cookie so a type-0 error for this unchecked
+        // configure can name its window (see requests.noteSequence).
+        requests.noteSequence(win, ck.sequence);
     }
 
     fn borderPixelShim(ptr: *anyopaque, win: u32, pixel: u32) void {
@@ -198,7 +202,7 @@ pub const XcbSink = struct {
     /// been sent geometry), so collapsing this would turn a pure hide into a
     /// speculative move. Keeping it separate is what makes that impossible.
     fn parkShim(ptr: *anyopaque, win: u32) void {
-        _ = xcb.xcb_configure_window(
+        const ck = xcb.xcb_configure_window(
             XcbSink.fromPtr(ptr).conn,
             win,
             xcb.XCB_CONFIG_WINDOW_X | xcb.XCB_CONFIG_WINDOW_STACK_MODE,
@@ -207,6 +211,7 @@ pub const XcbSink = struct {
                 xcb.XCB_STACK_MODE_BELOW,
             },
         );
+        requests.noteSequence(win, ck.sequence);
     }
 
     fn stackOnlyShim(ptr: *anyopaque, win: u32, s: Stack) void {

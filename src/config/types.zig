@@ -72,6 +72,7 @@ pub const section_bar = "bar";
 pub const section_bar_properties = "bar.properties";
 pub const section_rules = "rules";
 pub const section_workspace_rules = "workspace.rules";
+pub const section_core = "core";
 pub const section_tiling_layouts_master_stack = "tiling.layouts.master-stack";
 pub const section_binds = "binds";
 pub const section_binds_alt = "Keybindings";
@@ -212,6 +213,13 @@ pub const CoreConfig = struct {
     /// by. The value is validated for reasonableness on load, exactly like a
     /// detected one, so a typo cannot buy a font the size of a billboard.
     dpi: ?f32 = null,
+
+    /// Allow held keybindings to re-fire at the X auto-repeat rate
+    /// (universal repeat, the pre-0.x behavior). Default false: a bound
+    /// combo fires exactly once per physical press (a false→true keycode
+    /// transition), so side-effecting actions (exec / reload / close) cannot
+    /// trigger at ~30 Hz while a combo is held.
+    key_repeat: bool = false,
 
     pub fn deinit(self: *CoreConfig, allocator: std.mem.Allocator) void {
         for (self.keybindings.items) |*kb| kb.action.deinit(allocator);

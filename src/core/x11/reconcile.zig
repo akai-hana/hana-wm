@@ -205,6 +205,7 @@ pub fn sentGetOrPut(win: model.WindowId) ?*SentEntry {
 /// stale stacking position.
 pub fn forget(win: model.WindowId) void {
     _ = st.sent.remove(win);
+    requests.forgetSequence(win);
     if (floatIndexOf(win)) |i| floatRemoveAt(i);
 }
 
@@ -332,6 +333,7 @@ pub fn floatRaise(win: model.WindowId) void {
 /// armed for this window, so the common path never touches it.
 var trace_buf: [96]u8 = undefined;
 const sink = @import("sink");
+const requests = @import("requests");
 
 pub const Ctx = struct {
     sink: sink.Sink,

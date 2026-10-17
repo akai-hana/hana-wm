@@ -4,6 +4,9 @@ spawn_client A
 spawn_client_hidden B   # layout parks one of the two (hidden, not viewable)
 dump two                # both exist; only one is shown
 state_dump
+key super+space     # P1-15: cycle layout; global_layout=true must apply it
+settle 300              #   to every workspace, so the still-hidden window on
+dump cycled             #   another ws would follow (kind is in the state dump)
 key super+t          # minimize the shown one; focus falls back to a hidden one
 settle 300
 dump minimized       # monocle must show the fallback window now

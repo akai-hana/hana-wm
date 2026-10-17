@@ -118,8 +118,22 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     if (!build_options.has_tiling) return;
     const cfg = &core.getState().config.tiling;
     const p = &m.ws[m.current.index].params;
-    p.kind = tiling.cycleKind(p.kind, dir, cfg.layouts.items);
+    const next_kind = tiling.cycleKind(p.kind, dir, cfg.layouts.items);
+    p.kind = next_kind;
     p.variant_idx = 0;
+    // global_layout (P1-15): the flag is a real behavior, not just a parsed
+    // knob — when set, the cycled kind propagates to every workspace so a
+    // layout change is machine-wide. Mirrors the config-reload stamping
+    // (model_config.applyConfigReload) but touches only `kind`/`variant_idx`,
+    // leaving per-workspace master counts and viewport state alone. The
+    // active workspace is stamped above; this loop covers the rest.
+    if (cfg.global_layout) {
+        for (&m.ws, 0..) |*s, i| {
+            if (i == m.current.index) continue;
+            s.params.kind = next_kind;
+            s.params.variant_idx = 0;
+        }
+    }
 }
 
 pub fn stepVariantDir(dir: i32) void {

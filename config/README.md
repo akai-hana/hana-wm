@@ -90,7 +90,12 @@ exact pixels.
   touches it, so literal plus signs in commands (`xdotool key ctrl+plus`)
   survive intact. The WM is single-threaded: a "parallel" batch is dispatched
   before the next step runs, sync actions completing back-to-back and `exec`
-  children running as concurrent processes.
+  children running as concurrent processes. One caveat: an `exec` step inside
+  a **comma sequence** is run synchronously — the WM blocks until the command
+  exits, so avoid long-running commands there. That wait is deadline-capped
+  (`spawn.sync_exec_timeout_ms`, default 5 s): a wedged command is killed and
+  logged rather than freezing hana, and the parser warns at load time for any
+  bind that routes a command through this blocking path.
 
 ## Sections
 

@@ -36,6 +36,14 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const cell_w = paneCell(screen_w, grid.cols, m.gap);
     const cell_h = paneCell(screen_h, grid.rows, m.gap);
+    // A cell that cannot host a border-inset window (the panes saturate to
+    // zero when the workarea is smaller than the seams need, or sit under the
+    // border) would have shrinkCapped's >=1 floor flare the window out of its
+    // own cell and, on a degenerate workarea, off the screen: park everything.
+    if (!tiling.insetFits(cell_w, cell_h, bm)) {
+        for (v.order) |win| tiling.emitHidden(out, win);
+        return;
+    }
     const win_h = tiling.shrinkCapped(cell_h, bm, ctx.min_dim);
     const win_w = tiling.shrinkCapped(cell_w, bm, ctx.min_dim);
     const wa_y = tiling.waY(v);

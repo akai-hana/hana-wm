@@ -63,6 +63,12 @@ const date_format: []const u8 = "%Y-%m-%d";
 /// Current on-screen clock mode. Plain var -- only the main thread touches it.
 var mode: DisplayMode = .date_time;
 
+/// The live display mode: how a test observes that a click actually reached
+/// `onClickHook` (the cycle itself has no other externally visible effect).
+pub inline fn displayMode() DisplayMode {
+    return mode;
+}
+
 /// The format `m` maps `base` (the configured format) to: the config format
 /// unchanged in date_time mode, a fixed built-in otherwise. Pure, so tests can
 /// pin each mode's format.

@@ -28,6 +28,40 @@ const key_profile = profile.WindowedProfiler(
     log.info,
 );
 
+/// The pressed-key set, keyed by keycode: an action fires only on the
+/// false→true transition, so a held combo cannot re-trigger side-effecting
+/// actions (exec / reload / close_window) at the X auto-repeat rate. The
+/// `[core] key_repeat` knob (default false) restores universal repeat by
+/// making every press fire; this also lays the foundation for future
+/// chord/hold features. Pure on purpose: the X-facing handlers only feed it
+/// keycodes, so the transition rule is unit-testable headless.
+pub const PressedKeys = struct {
+    down: [256]bool = .{false} ** 256,
+
+    /// Records a press of `keycode`; returns true when the action should
+    /// fire (a fresh press, or any press when repeat is allowed).
+    pub fn press(self: *PressedKeys, keycode: u8, repeat_allowed: bool) bool {
+        const was_down = self.down[keycode];
+        self.down[keycode] = true;
+        return repeat_allowed or !was_down;
+    }
+
+    /// Records a release, re-arming the keycode's next press.
+    pub fn release(self: *PressedKeys, keycode: u8) void {
+        self.down[keycode] = false;
+    }
+
+    /// Clears every held keycode (a full reset; the set has no other writer).
+    pub fn reset(self: *PressedKeys) void {
+        self.down = .{false} ** 256;
+    }
+};
+
+/// Singleton pressed set for the live keyboard. With detectable auto-repeat
+/// enabled (xkb.zig), a held key re-delivers KeyPress with no interleaved
+/// release, so the false→true transition is exactly "physically pressed again".
+pub var pressed: PressedKeys = .{};
+
 pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     // Timing: wall-clock from event receipt to the bound action's dispatch.
     // Compiled out when `build_options.profile_key` is false.
@@ -55,6 +89,15 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     if (surfaces.chromeHandleKeypress(event, matched)) return;
 
     if (matched) |action| {
+        // Transition gate (D3): with `[core] key_repeat = false` (the
+        // default) an action fires only on the false→true keycode
+        // transition, so a held combo cannot re-trigger side-effecting
+        // actions at auto-repeat rate. `key_repeat = true` restores the
+        // universal-repeat behavior by firing on every press.
+        if (!pressed.press(event.detail, core.getState().config.core.key_repeat)) {
+            log.debug("[KEY] mods=0x{x} keysym=0x{x} repeat of held combo suppressed", .{ masks.toMask(mods), keysym });
+            return;
+        }
         // Per-key dispatch logs are `.debug` so release WMs (default log
         // level `.info`) compile them out of the hot path; folding them into
         // a summary keeps tracing available without per-key formatting+write.
@@ -70,9 +113,11 @@ pub fn handleKeyPress(event: *const xcb.xcb_key_press_event_t) void {
     }
 }
 
-/// Tracks the event timestamp for focus machinery on release.
-/// (Held-key auto-repeat semantics live in xkb's detectable
-/// auto-repeat; see there.)
+/// Tracks the event timestamp for focus machinery on release, and re-arms
+/// the keycode in the pressed set so the next press is a fresh transition.
+/// (With detectable auto-repeat a held key delivers repeat presses with no
+/// interleaved release, so the release here is only ever a real one.)
 pub fn handleKeyRelease(event: *const xcb.xcb_key_release_event_t) void {
+    pressed.release(event.detail);
     focus.setLastEventTime(event.time);
 }

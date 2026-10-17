@@ -253,7 +253,13 @@ const Parser = struct {
         // A slice into `content` (arena-backed by the caller), like every
         // parsed string: nothing is duped or freed.
         const key = self.content[start..self.pos];
-        return if (key.len > 0) key else ParseError.InvalidSyntax;
+        if (key.len == 0) return ParseError.InvalidSyntax;
+        // Dotted key (`a.b = 1`): rejected per the header contract (D9). The
+        // reader has no dotted-key namespace — dotted NAMES only exist as
+        // section headers ([a.b], parseSection) — so a dot here is always a
+        // typo'd path, not a loadable key.
+        if (std.mem.indexOfScalar(u8, key, '.') != null) return ParseError.InvalidSyntax;
+        return key;
     }
 
     fn parseString(self: *Parser) ParseError![]const u8 {
@@ -315,6 +321,21 @@ const Parser = struct {
         return array;
     }
 
+    // True when `raw` has the exact `dddd-dd-dd` date shape (e.g.
+    // "2024-01-01"): ten bytes, digits everywhere except '-' at index 4 and
+    // 7. Shape only — 2024-13-45 is rejected too (there is no date type to
+    // validate against, which is exactly why the shape is rejected at all).
+    fn isDateShaped(raw: []const u8) bool {
+        if (raw.len != 10) return false;
+        for (raw, 0..) |c, i| {
+            switch (i) {
+                4, 7 => if (c != '-') return false,
+                else => if (!std.ascii.isDigit(c)) return false,
+            }
+        }
+        return true;
+    }
+
     // True when `raw` is an optionally-signed bare decimal literal: digits,
     // exactly one '.', at least one digit (e.g. "2.5", "-0.3"). Whole numbers
     // and malformed tokens return false, falling through to the existing
@@ -371,6 +392,12 @@ const Parser = struct {
         // otherwise fall into the percentage branch below and, having a
         // non-numeric prefix, error the whole line.
         if (isWeightToken(raw)) return .{ .string = raw };
+
+        // Date-shaped bare token (`d = 2024-01-01`): rejected per the header
+        // contract (D9). The reader has no date type; without this guard the
+        // string fallback would silently swallow a date (or a typo'd numeric
+        // value shaped like one) as a valid string.
+        if (isDateShaped(raw)) return ParseError.InvalidValue;
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
             const f = std.fmt.parseFloat(
@@ -440,6 +467,11 @@ const Parser = struct {
     fn parseValue(self: *Parser, in_array: bool) ParseError!Value {
         self.skipWhitespace();
         const c = self.peek() orelse return ParseError.InvalidValue;
+
+        // Inline table at the value head (`x = { a = 1 }`): rejected per the
+        // header contract (D9). Without this arm the '{' would tokenize as a
+        // bare token and the whole line would silently become a string array.
+        if (c == '{') return ParseError.InvalidValue;
 
         if (c == '[') return .{ .array = .{ .list = try self.parseArray() } };
         if (c == '"' or c == '\'') return .{ .string = try self.parseString() };

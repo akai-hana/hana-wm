@@ -1042,3 +1042,42 @@ test "fixture: makeBareModel deliberately leaves module stores alone" {
     floating.resetState(); // leave the global clean for the next test
     try testing.expect(!floating.isDragging());
 }
+
+// P1-11: the dialog-over-parent placement arithmetic (WM_TRANSIENT_FOR
+// centering), pinned headlessly so the X-gated dialog test only has to prove
+// the admission plumbing reaches it.
+test "centerRectIn: centers a box over its parent, clamped to the bounds" {
+    const bounds = model.Rect{ .x = 0, .y = 0, .width = 1280, .height = 800 };
+
+    // Plain centering when there is room on every side.
+    const mid = model.centerRectIn(
+        .{ .x = 100, .y = 100, .width = 600, .height = 400 },
+        200,
+        100,
+        bounds,
+    );
+    try testing.expectEqual(@as(i16, 300), mid.x);
+    try testing.expectEqual(@as(i16, 250), mid.y);
+    try testing.expectEqual(@as(u16, 200), mid.width);
+    try testing.expectEqual(@as(u16, 100), mid.height);
+
+    // Near the right/bottom edge the clamp wins over the centering.
+    const clamped = model.centerRectIn(
+        .{ .x = 1200, .y = 750, .width = 100, .height = 80 },
+        400,
+        300,
+        bounds,
+    );
+    try testing.expectEqual(@as(i16, 880), clamped.x); // 1280 - 400
+    try testing.expectEqual(@as(i16, 500), clamped.y); // 800 - 300
+
+    // A box larger than the bounds pins to the origin (no inverted clamp).
+    const oversized = model.centerRectIn(
+        .{ .x = 10, .y = 10, .width = 50, .height = 50 },
+        2000,
+        2000,
+        bounds,
+    );
+    try testing.expectEqual(@as(i16, 0), oversized.x);
+    try testing.expectEqual(@as(i16, 0), oversized.y);
+}

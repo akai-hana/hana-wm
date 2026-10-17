@@ -30,6 +30,9 @@ code_lines() { # strip comment-only lines from grep output on stdin
 # policy. Each case documents the surviving wire traffic and why it has not
 # (yet) moved behind the reconciler.
 wire_allowed() {
+    # (No entry for src/core/input/dispatch.zig: its closeWindow now
+    # delegates to the shared ICCCM path in icccm.zig, allowlisted below,
+    # and the file matches no wire pattern at all.)
     case "$1" in
         # Bar's OWN window lifecycle: map on show, Y-reposition on height
         # change, raise-above-others, map/unmap in setBarState; win.zig holds
@@ -86,7 +89,13 @@ wire_allowed() {
         # -- it is the pure `sink.configureWire` assembly, which is why the
         # order is testable at all -- but the pattern cannot tell a constant
         # from a call, so the assertion needs the explicit entry.
-        src/test/core/sink_test.zig) ;;
+        #
+        # actions_test.zig's "denied ConfigureRequest" test (P1-10) is the
+        # same warrant for the same reason: it names XCB_CONFIG_WINDOW_* to
+        # SHAPE a synthetic xcb_configure_request_event_t fed straight to
+        # window.handleConfigureRequest. The configure it elicits goes out
+        # through the handler's own send path, never through this file.
+        src/test/core/sink_test.zig|src/test/window/actions_test.zig) ;;
 
         # Detectable auto-repeat enablement (enableDetectableAutoRepeat in
         # src/core/input/xkb.zig): a ONE-SHOT, STARTUP-ONLY XKB negotiation
@@ -108,13 +117,6 @@ wire_allowed() {
         # core/x11/requests.zig (claimWindowManagerRole + flush), so the
         # composition root no longer names xcb.
         #
-        # The action dispatcher (executeAction/grafted/closeWindow/
-        # toggleBarPosition/dirSign): the ICCCM WM_DELETE_WINDOW client
-        # message plus its xcb_destroy_window fallback. Client protocol
-        # text, not sync-bound wire mutation. Re-split out of input.zig into
-        # src/core/input/dispatch.zig during the src/core/input refactor.
-        src/core/input/dispatch.zig) ;;
-
         # Root-window cursor theming (setupRoot in src/core/input/cursor.zig):
         # one xcb_change_window_attributes on the root taken at startup,
         # decoration rather than per-window mutation — same "startup, not
@@ -143,9 +145,10 @@ wire_allowed() {
         # (icccm.zig hands focus to windows that advertise the protocol),
         # the synthetic ConfigureNotify (client_events.zig reports back the
         # geometry it actually applied after honoring a ConfigureRequest), and
-        # WM_DELETE_WINDOW (core/input/dispatch.zig's closeWindow closes a
-        # client gracefully, ICCCM §4.1.2.7 — allowlisted as
-        # src/core/input/dispatch.zig above for the same family). These are
+        # the shared close path (icccm.closeViaProtocol: the WM_DELETE_WINDOW
+        # client message plus its xcb_destroy_window fallback, once dispatched
+        # from core/input/dispatch.zig's closeWindow; both the close_window
+        # keybind and EWMH's _NET_CLOSE_WINDOW land here). These are
         # client protocol text, not sync-bound wire mutations.
         # client_events.zig is allowlisted above for the ConfigureRequest
         # family; icccm.zig joins them here for this family.

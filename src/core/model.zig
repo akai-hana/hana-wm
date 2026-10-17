@@ -48,6 +48,7 @@ pub const max_master_width = domain.max_master_width;
 pub const isValidWorkspaceIndex = domain.isValidWorkspaceIndex;
 pub const doubledBorder = domain.doubledBorder;
 pub const satI16 = domain.satI16;
+pub const centerRectIn = domain.centerRectIn;
 pub const toXcbCoord = domain.toXcbCoord;
 pub const wrapIndex = domain.wrapIndex;
 pub const bit = domain.bit;

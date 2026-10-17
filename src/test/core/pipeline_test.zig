@@ -344,3 +344,58 @@ test "pipeline: an explicit fullscreen SET still switches an existing occupant" 
     // of "parked" -- the model marks presence itself.
     try fx.expectParked(w1);
 }
+
+test "pipeline: a client's XSetInputFocus is reasserted back to model focus" {
+    // P1-09/D7: FocusChange was selected on every managed window but nothing
+    // consumed the events, so a client that legally XSetInputFocus-ed its own
+    // toplevel left the SERVER focus stranded on the stealer while the model
+    // (the truth source for borders and _NET_ACTIVE_WINDOW) kept naming the
+    // old window -- keystrokes landed on the wrong client until the next
+    // hover/click. The handler must push the server focus back without the
+    // model ever adopting the steal.
+    var fx = try fixture.setUp("pipeline_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const w1, const w2 = seedTwo(fx); // w2 is the newest admit: model.focused
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
+
+    // The steal: a client moves the server's input focus behind the WM's
+    // back. The server obeys (it is a legal request); the model does not move.
+    _ = xcb.xcb_set_input_focus(fx.conn, xcb.XCB_INPUT_FOCUS_POINTER_ROOT, w1, 0);
+    fx.flush();
+    try std.testing.expectEqual(w1, fx.inputFocus());
+    try std.testing.expectEqual(w2, m.focused.?);
+
+    // Deliver the FocusIn the server generated for the steal, through the
+    // same handler the production dispatch table routes it to. Round trip
+    // first so the event is sitting in the connection's queue.
+    const sync = fx.inputFocus();
+    _ = sync;
+    try std.testing.expect(deliverNormalFocusIn(fx, w1));
+    fx.flush();
+
+    // Reasserted: server focus and the EWMH advertisement agree with the
+    // model again, and the model itself never moved.
+    try std.testing.expectEqual(w2, m.focused.?);
+    try std.testing.expectEqual(w2, fx.inputFocus());
+    try std.testing.expectEqual(@as(?u32, w2), fx.rootActiveWindow());
+}
+
+/// Drains the connection's event queue (every event freed) and feeds each
+/// NORMAL-mode FocusIn naming `win` through `window.handleFocusIn` -- the
+/// production handler, on the production event shape. Returns whether at
+/// least one such event was seen.
+fn deliverNormalFocusIn(fx: *const fixture.Fx, win: u32) bool {
+    var seen = false;
+    while (xcb.xcb_poll_for_event(fx.conn)) |raw| {
+        defer std.c.free(raw);
+        if (raw.*.response_type & 0x7F != xcb.XCB_FOCUS_IN) continue;
+        const e: *const xcb.xcb_focus_in_event_t = @ptrCast(@alignCast(raw));
+        if (e.event != win or e.mode != xcb.XCB_NOTIFY_MODE_NORMAL) continue;
+        window.handleFocusIn(e);
+        seen = true;
+    }
+    return seen;
+}

@@ -31,6 +31,9 @@ const handled = [_]struct { name: []const u8, where: []const u8 }{
     .{ .name = "_NET_WM_STATE", .where = "client_events.zig state branch + sink merge" },
     .{ .name = "_NET_WM_STATE_FULLSCREEN", .where = "client_events.zig / fullscreen.zig" },
     .{ .name = "_NET_WM_PID", .where = "admission.zig pid prop query" },
+    .{ .name = "_NET_CLOSE_WINDOW", .where = "client_events.zig -> window.closeViaProtocol (icccm.zig)" },
+    .{ .name = "_NET_CURRENT_DESKTOP", .where = "client_events.zig -> switchWorkspace hook" },
+    .{ .name = "_NET_WM_DESKTOP", .where = "client_events.zig -> moveToWorkspace hook" },
 };
 
 /// Hints hana does NOT implement. Advertising any of these would be a lie;
@@ -42,11 +45,10 @@ const unhandled = [_][]const u8{
     "_NET_WM_STATE_STICKY",
     "_NET_WM_STATE_HIDDEN",
     "_NET_WM_STATE_DEMANDS_ATTENTION",
-    // Client-message requests answered only with a warning-and-ignore.
+    // Client-message request answered only with a warning-and-ignore
+    // (_NET_CLOSE_WINDOW/_NET_CURRENT_DESKTOP/_NET_WM_DESKTOP used to sit
+    // here too; they are implemented now and advertised above).
     "_NET_ACTIVE_WINDOW",
-    "_NET_CLOSE_WINDOW",
-    "_NET_CURRENT_DESKTOP",
-    "_NET_WM_DESKTOP",
     // Action/type/strut hints: declared on the bar's own window as a client,
     // never read for managed windows.
     "_NET_WM_ALLOWED_ACTIONS",
