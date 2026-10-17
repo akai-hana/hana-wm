@@ -73,6 +73,16 @@ pub fn handleExpose(event: *const xcb.xcb_expose_event_t) void {
 
 // Mouse click handling
 
+/// Scroll direction for a ButtonPress detail: wheel-up is +1, wheel-down is
+/// −1, and every other button is not a scroll at all (null). Split out of
+/// `handleButtonPress` so the mapping is testable without an `onScroll`
+/// binder in the build.
+pub fn scrollDir(detail: u8) ?i8 {
+    if (detail == masks.mouse_button_scroll_up) return 1;
+    if (detail == masks.mouse_button_scroll_down) return -1;
+    return null;
+}
+
 /// Routes a ButtonPress on the bar window to whichever segment was clicked.
 /// Called from core/input/mouse.zig before its managed-window click path: the bar is
 /// never a managed window, so that path would just replay and swallow it.
@@ -123,11 +133,8 @@ pub fn handleButtonPress(event: *const xcb.xcb_button_press_event_t) void {
     // a button-1 drag currently in flight has its anchor here, and clearing
     // it would lose the anchor, so handleButtonRelease's `orelse return`
     // drops onDragEnd (throttled commit unflushed, drag render mode stuck).
-    if (detail == masks.mouse_button_scroll_up or
-        detail == masks.mouse_button_scroll_down)
-    {
+    if (scrollDir(detail)) |dir| {
         if (segmod.segmentAt(id).onScroll) |scroll| {
-            const dir: i8 = if (detail == masks.mouse_button_scroll_up) 1 else -1;
             s.scroll_segment = id;
             _ = scroll(dir, render.redrawScopedSegment);
             s.scroll_segment = null;
@@ -165,10 +172,24 @@ pub fn handleButtonRelease(_: *const xcb.xcb_button_release_event_t) void {
     if (segmod.segmentAt(id).onDragEnd) |end| end(render.redrawInsideGrab);
 }
 
+/// Which title-click hook fires for a hit-tested target. The priority
+/// contract in one place: a minimized window always restores -- even when it
+/// is ALSO the focused window -- a focused window minimizes, anything else
+/// takes focus. Pure over its inputs, so the ordering is testable without the
+/// reconcile-bound hooks it selects.
+pub const TitleAction = enum { unminimize, minimize, focus };
+
+pub fn titleClickAction(target: title_geom.ClickTarget, focused: ?u32) TitleAction {
+    if (target.minimized) return .unminimize;
+    if (focused != null and focused.? == target.window) return .minimize;
+    return .focus;
+}
+
 /// `offset` is the click position relative to the title segment's start.
 /// Resolves which window is under the click via the title snapshot captured
-/// by the last draw (title_geom.hitTest never touches X11: titles/geoms come from the
-/// frame's in-process per-window caches), then:
+/// by the last draw (title_geom.hitTest never touches X11: titles/geoms come from
+/// the frame's in-process per-window caches), then dispatches the branch
+/// `titleClickAction` picks:
 ///   - no window under the click -> no-op (empty title is handled by the
 ///     right-click prompt path in `handleButtonPress`, before this is called)
 ///   - the window is minimized -> unminimizes that window
@@ -182,12 +203,11 @@ fn handleTitleClick(s: *State, offset: u16) void {
 
     // `target.minimized` comes from the title snapshot's minimized set, which
     // the title addon synthesizes fresh; bar.zig never names minimize.
-    if (target.minimized)
-        window.callHook(.unminimize, .{target.window})
-    else if (focus.getFocused() == target.window)
-        window.callHook(.minimizeWindow, .{target.window})
-    else
-        focus.grabFocus(target.window, .mouse_click);
+    switch (titleClickAction(target, focus.getFocused())) {
+        .unminimize => window.callHook(.unminimize, .{target.window}),
+        .minimize => window.callHook(.minimizeWindow, .{target.window}),
+        .focus => focus.grabFocus(target.window, .mouse_click),
+    }
 }
 
 fn titleClickTrampoline(ptr: *anyopaque, offset: u16) void {

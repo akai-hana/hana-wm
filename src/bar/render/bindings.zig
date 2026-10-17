@@ -56,6 +56,7 @@ pub extern fn cairo_move_to(cr: *cairo_t, x: f64, y: f64) void;
 pub extern fn cairo_save(cr: *cairo_t) void;
 pub extern fn cairo_restore(cr: *cairo_t) void;
 pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: f64) void;
+pub extern fn cairo_fill(cr: *cairo_t) void;
 pub extern fn cairo_clip(cr: *cairo_t) void;
 
 // Pango

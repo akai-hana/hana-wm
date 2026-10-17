@@ -184,6 +184,27 @@ pub const DrawContext = struct {
         return dc;
     }
 
+    /// Headless construction: the same font book over an image surface, no X
+    /// resources anywhere. Mirror of `initWithVisual` for tests that paint a
+    /// frame without a display (the font probe precedent, one level up).
+    pub fn initImage(
+        allocator: std.mem.Allocator,
+        width: u16,
+        height: u16,
+        dpi: f32,
+    ) !*DrawContext {
+        var sfc = try surface.Surface.initImage(width, height);
+        errdefer sfc.deinit();
+
+        const books = try fonts.FontBook.initBook(allocator, sfc.ctx, dpi);
+        errdefer bindings.g_object_unref(books.pango_layout);
+
+        const dc = try allocator.create(DrawContext);
+        errdefer allocator.destroy(dc);
+        dc.* = .{ .surface = sfc, .fonts = books };
+        return dc;
+    }
+
     pub fn deinit(self: *DrawContext) void {
         self.fonts.deinit();
         bindings.g_object_unref(self.fonts.pango_layout);
