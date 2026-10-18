@@ -564,12 +564,14 @@ pub fn fuzz(
                 error.SkipZigTest => return true,
                 else => {
                     const stderr = std.debug.lockStderr(&.{}).terminal();
-                    p: {
-                        if (@errorReturnTrace()) |trace| {
-                            std.debug.writeStackTrace(trace, stderr) catch break :p;
-                        }
-                        stderr.writer.print("failed with error.{t}\n", .{err}) catch break :p;
+                    if (@errorReturnTrace()) |trace| {
+                        // dumpErrorReturnTrace, not writeStackTrace: the
+                        // latter wants debug.StackTrace while
+                        // @errorReturnTrace hands back builtin.StackTrace
+                        // (this site is only analyzed in fuzz builds).
+                        std.debug.dumpErrorReturnTrace(trace);
                     }
+                    stderr.writer.print("failed with error.{t}\n", .{err}) catch {};
                     std.process.exit(1);
                 },
             };

@@ -74,14 +74,18 @@ const Aspect = struct { min: f32, max: f32 };
 /// SizeHints, or null when no constraint flag is set.
 ///
 /// PMinSize/PBaseSize feed the floating drag-resize floor: tiling
-/// ignores declared minimums outright (policy on model.SizeHints), but
-/// when both are declared the effective floor is the larger, so a
-/// client can never be dragged smaller than either it or its base
-/// declares. The max/increment/aspect constraints are forwarded so
-/// hint-constrained windows behave correctly in both modes.
+/// does not ENFORCE declared minimums outright (policy on
+/// model.SizeHints), but when both are declared the effective floor
+/// is the larger, so a client can never be dragged smaller than
+/// either it or its base declares. PBaseSize is ALSO forwarded
+/// separately (`base_width`/`base_height`) so the tiling increment
+/// snap can anchor at the ICCCM grid origin even when a larger
+/// PMinSize wins the floor. The max/increment/aspect constraints are
+/// forwarded so hint-constrained windows behave correctly in both
+/// modes.
 ///
 /// PAspect: fields[11..14] = min_aspect.x/y, max_aspect.x/y. dwm
-/// convention: min_aspect = y/x (lower bound on h/w), max_aspect =
+/// convention: min_aspect = y/x (upper bound on h/w), max_aspect =
 /// x/y (upper bound on w/h).
 pub fn parse(fields: [*]const u32, field_count: u32) ?model.SizeHints {
     const flags = fields[0];
@@ -110,6 +114,8 @@ pub fn parse(fields: [*]const u32, field_count: u32) ?model.SizeHints {
     return .{
         .min_width = @max(min_pair.width, base_pair.width),
         .min_height = @max(min_pair.height, base_pair.height),
+        .base_width = base_pair.width,
+        .base_height = base_pair.height,
         .max_width = max_pair.width,
         .max_height = max_pair.height,
         .inc_width = inc_pair.width,

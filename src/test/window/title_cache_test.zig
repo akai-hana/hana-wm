@@ -50,6 +50,34 @@ test "title store: overwrite replaces in place, remove clears, oversize truncate
     try testing.expectEqualStrings("short", title_cache.peekTitle(7));
 }
 
+test "title store: an oversize title never ends mid-character" {
+    const alloc = std.testing.allocator;
+    title_cache.init(alloc);
+    defer title_cache.deinit();
+
+    // The cap's last byte is the lead byte of a 3-byte character: a plain
+    // byte cut would store an invalid UTF-8 tail, which Pango rejects by
+    // painting nothing -- the blank title segment this guards against.
+    var long: [300]u8 = @splat('a');
+    long[255] = 0xE2; // U+2192 RIGHTWARDS ARROW, split by the 256-byte cap
+    long[256] = 0x86;
+    long[257] = 0x92;
+    title_cache.storeTitle(3, &long);
+    const got = title_cache.peekTitle(3);
+    try testing.expectEqual(@as(usize, 255), got.len);
+    try testing.expectEqualSlices(u8, long[0..255], got);
+    try testing.expect(std.unicode.utf8ValidateSlice(got));
+
+    // An ASCII-only oversize title still uses the full buffer: the trim only
+    // ever removes a partial trailing character.
+    var ascii: [300]u8 = @splat('x');
+    ascii[0] = 'z';
+    title_cache.storeTitle(4, &ascii);
+    const got_ascii = title_cache.peekTitle(4);
+    try testing.expectEqual(@as(usize, 256), got_ascii.len);
+    try testing.expectEqual(@as(u8, 'z'), got_ascii[0]);
+}
+
 test "at-capacity cache drops new entries but keeps overwrites" {
     const alloc = std.testing.allocator;
     title_cache.init(alloc);

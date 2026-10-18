@@ -98,35 +98,48 @@ fn eqModel(a: *const Model, b: *const Model) bool {
     return true;
 }
 
-/// Every window whose anchor is tiled AND present appears in EXACTLY ONE workspace's
-/// list; every listed id exists in the store (single-membership invariant).
-/// Floating and parked (minimized) windows are home-free.
+/// Single-membership invariant (P1-31). The ported copy used to live here;
+/// it now delegates to `model.checkInvariants`, the same pure fn the
+/// Debug-only `model.debugCheckInvariants` boundary hook panics on, so a
+/// test and the live reconcile boundary assert one source of truth.
 fn assertSingleMembership(m: *const Model) !void {
-    for (0..m.store.count()) |i| {
-        const it = m.store.at(i);
-        // A parked window keeps its anchor but has no tiled slot by design.
-        const tiled = (it.val.anchor == .tiled and it.val.presence == .present);
-        if (!tiled) continue;
-        var homes: usize = 0;
-        var actual_home: WSId = undefined;
-        for (&m.ws, 0..) |*s, wi| {
-            if (s.tiled_order.indexOfScalar(it.key) != null) {
-                homes += 1;
-                actual_home = WSId.fromIndex(wi);
-            }
-        }
-        try testing.expectEqual(@as(usize, 1), homes);
-        // The cached home_ws must name the workspace that ACTUALLY holds
-        // the window. The single-membership count above only proves exactly
-        // one list mentions it; a stale home_ws pointing elsewhere is the
-        // "stranded home" bug, and the count check cannot see it.
-        try testing.expectEqual(actual_home, it.val.home_ws);
-    }
-    for (&m.ws) |*s| {
-        for (s.tiled_order.constSlice()) |w| {
-            try testing.expect(m.store.has(w));
-        }
-    }
+    try model.checkInvariants(m);
+}
+
+test "checkInvariants passes on a clean model and on home-free windows" {
+    var m = makeModel();
+    regCur(&m, 1);
+    regCur(&m, 2);
+    try assertSingleMembership(&m); // the two tiled windows, home-correct
+    // A floating window is home-free by design and must not trip the sweep.
+    try addFloating(&m, 9, .{ .x = 0, .y = 0, .width = 1, .height = 1 });
+    try assertSingleMembership(&m);
+}
+
+test "checkInvariants reports stranded, duplicated, stale and orphaned membership" {
+    // Stranded: a present tiled window evicted from every workspace list.
+    var m = makeModel();
+    regCur(&m, 1);
+    m.ws[0].tiled_order.clear();
+    try testing.expectError(error.StrandedWindow, model.checkInvariants(&m));
+
+    // Duplicated: the same window home-listed on two workspaces at once.
+    var d = makeModel();
+    regCur(&d, 1);
+    try testing.expect(d.ws[1].tiled_order.append(1));
+    try testing.expectError(error.DuplicateMembership, model.checkInvariants(&d));
+
+    // Stale: the window sits on workspace 0 but home_ws names workspace 1.
+    var s = makeModel();
+    regCur(&s, 1);
+    s.store.getPtr(1).?.home_ws = WSId.fromIndex(1);
+    try testing.expectError(error.StaleHomeWs, model.checkInvariants(&s));
+
+    // Orphaned: an id listed on a workspace that has no store entry.
+    var o = makeModel();
+    regCur(&o, 1);
+    try testing.expect(o.ws[0].tiled_order.append(999));
+    try testing.expectError(error.OrphanedListEntry, model.checkInvariants(&o));
 }
 
 test "register tiles on current workspace, sets mask, is idempotent" {

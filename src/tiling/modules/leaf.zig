@@ -54,7 +54,12 @@ fn tileRegion(
     // so leaf overflows instead. Gate is a min_dim floor, unlike fibonacci's
     // gap+border spiral gate. Hand the whole region to the focused window and
     // park the rest, the same overflow-share shape fibonacci uses.
-    if (dim < @as(u32, ctx.min_dim) * 2 +| @as(u32, gap)) {
+    // The split's own positivity floor (`gap + 2`, so bisectRegion's first
+    // half is >= 1; a zero first half would emit through shrinkCapped's >= 1
+    // floor while the second half keeps the whole pane, stacking siblings).
+    // max_dim-floor and positivity: the larger bound wins; for any min_dim >=
+    // 1 the floor already dominates, so batching is unchanged.
+    if (dim < @max(@as(u32, ctx.min_dim) * 2 +| @as(u32, gap), @as(u32, gap) + 2)) {
         // focusedElse falls back to the list head (first window).
         tiling.emitOverflowShare(ctx, windows, r);
         return;
