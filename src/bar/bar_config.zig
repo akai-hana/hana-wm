@@ -357,107 +357,134 @@ pub const Config = struct {
 /// The knob table: every bar scalar knob, exactly once. Targets are relative
 /// to THIS Config. The `needs` ordering (base palette before the
 /// [bar.properties] color_from chain) is enforced by validateTable.
-/// Plain [bar] boolean.
-fn barBool(key: []const u8) knob.Knob {
-    return knob.knob(&.{knob.place(types.section_bar, key)}, key, .b);
+/// Plain [bar] boolean. `reader` names the optional module that reads it
+/// (see Knob.reader) -- empty means a reader must exist in the tree.
+fn barBool(key: []const u8, reader: []const u8) knob.Knob {
+    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, key, .b), reader);
 }
 
 /// Plain [bar] scalable (px or %), rejecting negative raw values.
-fn barScalable(key: []const u8, target: []const u8) knob.Knob {
-    return knob.knob(&.{knob.place(types.section_bar, key)}, target, .{ .scalable = 0.0 });
+fn barScalable(key: []const u8, target: []const u8, reader: []const u8) knob.Knob {
+    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, target, .{ .scalable = 0.0 }), reader);
 }
 
 /// Plain [bar] color (base palette, no gate).
-fn barPlainColor(key: []const u8) knob.Knob {
-    return knob.knob(&.{knob.place(types.section_bar, key)}, key, .color);
+fn barPlainColor(key: []const u8, reader: []const u8) knob.Knob {
+    return readerOr(knob.knob(&.{knob.place(types.section_bar, key)}, key, .color), reader);
+}
+
+/// Stamp a module-owned reader onto an otherwise plain knob (`reader` empty
+/// = no ownership). One place so every helper below can thread it without a
+/// second family of constructors.
+fn readerOr(k_in: knob.Knob, reader: []const u8) knob.Knob {
+    var k = k_in;
+    if (reader.len != 0) k.reader = reader;
+    return k;
 }
 
 /// [bar.properties] color_from chain: reads a sibling bar field as fallback,
 /// gated on "bar". `copy_when_absent` (title variant) also assigns the
 /// fallback when [bar.properties] is absent; the run variant keeps null so
-/// the read-time fallbacks in Config apply.
-fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool) knob.Knob {
-    return .{
+/// the read-time fallbacks in Config apply. `reader` = owning module stem.
+fn barColor(key: []const u8, target: []const u8, sibling: []const u8, copy_when_absent: bool, reader: []const u8) knob.Knob {
+    return readerOr(.{
         .places = &.{knob.place(types.section_bar_properties, key)},
         .target = target,
         .kind = .{ .color_from = sibling },
         .requires = types.section_bar,
         .copy_when_absent = copy_when_absent,
         .needs = &.{sibling},
-    };
+    }, reader);
 }
 
 /// Same dependency, declared the same way, for the `color_opt` kind.
-fn barColorOpt(key: []const u8, target: []const u8, sibling: []const u8) knob.Knob {
-    return .{
+fn barColorOpt(key: []const u8, target: []const u8, sibling: []const u8, reader: []const u8) knob.Knob {
+    return readerOr(.{
         .places = &.{knob.place(types.section_bar, key)},
         .target = target,
         .kind = .{ .color_opt = sibling },
         .needs = &.{sibling},
-    };
+    }, reader);
 }
 
 pub const knobs = [_]knob.Knob{
     // [bar]
-    barBool("enabled"),
-    barBool("carousel_enabled"),
-    barScalable("font_size", "font_size"),
-    // per_segment_padding feeds Config.spacing.
-    barScalable("per_segment_padding", "spacing"),
-    barScalable("indicator_size", "indicator_size"),
-    barScalable("workspace_tag_width", "workspace_tag_width"),
+    barBool("enabled", ""),
+    // carousel_enabled is read only by the title module (title.zig); deleting
+    // title drops the knob with it (Knob.reader).
+    barBool("carousel_enabled", "title"),
+    barScalable("font_size", "font_size", ""),
+    // per_segment_padding feeds Config.spacing (read via the Config helper
+    // from every segment, so no single owning module).
+    barScalable("per_segment_padding", "spacing", ""),
+    barScalable("indicator_size", "indicator_size", ""),
+    barScalable("workspace_tag_width", "workspace_tag_width", ""),
     // height: null = auto-calculate from font metrics alone.
-    knob.knob(&.{knob.place(types.section_bar, "height")}, "height", .auto_scalable),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "height")}, "height", .auto_scalable), ""),
     // Case-insensitive enum (types.enumFromString over BarScreenPosition's
     // string_map); unrecognized spellings warn and keep .top.
-    knob.knob(&.{knob.place(types.section_bar, "position")}, "bar_position", .{ .enum_read = .{ .T = BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }),
-    knob.knob(&.{knob.place(types.section_bar, "carousel_speed_px_s")}, "carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "position")}, "bar_position", .{ .enum_read = .{ .T = BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }), ""),
+    // carousel_speed_px_s: title module only.
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "carousel_speed_px_s")}, "carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }), "title"),
 
     // Base palette: read before every color_from consumer below. The three
     // window-state colors (primary/secondary/alternative) plus text_color are
     // also the document-global palette variables: color knobs may name them
     // by full reference from any section (resolved from parser.Document's
     // collected palette in getColorFromValue).
-    barPlainColor("bg"),
-    barPlainColor("fg"),
-    barPlainColor("selected_bg"),
-    barPlainColor("selected_fg"),
-    barPlainColor(types.palette_primary_color),
-    barPlainColor(types.palette_secondary_color),
-    barPlainColor(types.palette_alternative_color),
-    barPlainColor(types.palette_text_color),
+    barPlainColor("bg", ""),
+    barPlainColor("fg", ""),
+    // tags.zig is the only consumer of selected_bg (Config.selectedTagBg is
+    // inlined into it); deleting tags drops the knob with it.
+    barPlainColor("selected_bg", "tags"),
+    // selected_fg is read by title.zig (window-title colouring of the
+    // selected workspace's tag).
+    barPlainColor("selected_fg", "title"),
+    barPlainColor(types.palette_primary_color, ""),
+    barPlainColor(types.palette_secondary_color, ""),
+    barPlainColor(types.palette_alternative_color, ""),
+    barPlainColor(types.palette_text_color, ""),
 
-    knob.knob(&.{knob.place(types.section_bar, "clock_format")}, "clock_format", .str),
-    knob.knob(&.{knob.place(types.section_bar, "run_prompt")}, "run_prompt", .str),
-    knob.knob(&.{knob.place(types.section_bar, "volume_format")}, "volume_format", .str),
-    knob.knob(&.{knob.place(types.section_bar, "volume_muted_format")}, "volume_muted_format", .str),
-    knob.knob(&.{knob.place(types.section_bar, "brightness_format")}, "brightness_format", .str),
-    knob.knob(&.{knob.place(types.section_bar, "brightness_device")}, "brightness_device", .str),
-    knob.knob(&.{knob.place(types.section_bar, "indicator_location")}, "indicator_location", .{ .enum_read = .{ .T = IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }),
-    knob.knob(&.{knob.place(types.section_bar, "indicator_padding")}, "indicator_padding", .ratio),
-    knob.knob(&.{knob.place(types.section_bar, "transparency")}, "transparency", .ratio_strict),
+    // clock_format is read by both clock.zig and the core render/drawing.zig
+    // (formatString), so it stays tree-read: deleting the clock module leaves
+    // a reader in core.
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "clock_format")}, "clock_format", .str), ""),
+    // run_prompt: prompt/overlay.zig only (prompt package core).
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "run_prompt")}, "run_prompt", .str), "prompt"),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "volume_format")}, "volume_format", .str), "volume"),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "volume_muted_format")}, "volume_muted_format", .str), "volume"),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "brightness_format")}, "brightness_format", .str), "brightness"),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "brightness_device")}, "brightness_device", .str), "brightness"),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "indicator_location")}, "indicator_location", .{ .enum_read = .{ .T = IndicatorLocation, .ci = true, .warn = true, .default_label = "up-left" } }), "tags"),
+    // indicator_padding is read by tags.zig (via Config.indicatorPadding).
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "indicator_padding")}, "indicator_padding", .ratio), "tags"),
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "transparency")}, "transparency", .ratio_strict), ""),
     // Falls back to the bar-wide fg (its historical default) -- but only
-    // when the key is present; absent keeps the field null.
-    barColorOpt("indicator_color", "indicator_color", "fg"),
+    // when the key is present; absent keeps the field null. Read via the
+    // Config.indicatorColor() helper, inlined into tags.zig.
+    barColorOpt("indicator_color", "indicator_color", "fg", "tags"),
     // Selected workspace tag: an individually-set indicator glyph color for the
     // current tag. It falls back at read time to indicator_color, then the
     // tag's text color. The selected tag's icon TEXT color/styles are NOT a
     // scalar knob -- they use the same color+underline/bold/italic composite
     // path as any segment, via the [bar.properties] entry "workspaces_selected"
-    // (see Config.workspaceTextFg/workspaceIconProps).
-    barColorOpt("selected_indicator_color", "selected_indicator_color", "fg"),
+    // (see Config.workspaceTextFg/workspaceIconProps). Read via the
+    // Config.selectedIndicatorColor() helper, inlined into tags.zig.
+    barColorOpt("selected_indicator_color", "selected_indicator_color", "fg", "tags"),
 
     // [bar.properties] chain. Gated on [bar] because parseBar always returned
     // before reaching these when the section was missing entirely. The
     // title accents additionally COPY their fallback when [bar.properties] is
     // absent (they were unconditionally assigned); the run trio stay null
     // so the read-time fallbacks in Config apply.
-    barColor("title", "title_accent_color", types.palette_primary_color, true),
-    barColor("title_unfocused", "title_unfocused_accent", types.palette_secondary_color, true),
-    barColor("title_minimized", "title_minimized_accent", types.palette_alternative_color, true),
-    barColor("run_bg", "run_bg", "bg", false),
-    barColor("run_fg", "run_fg", "fg", false),
-    barColor("run_prompt_color", "run_prompt_color", types.palette_primary_color, false),
+    barColor("title", "title_accent_color", types.palette_primary_color, true, "title"),
+    barColor("title_unfocused", "title_unfocused_accent", types.palette_secondary_color, true, "title"),
+    barColor("title_minimized", "title_minimized_accent", types.palette_alternative_color, true, "title"),
+    // run_bg/run_fg/run_prompt_color: read via Config.run*Color() helpers,
+    // inlined into prompt/overlay.zig (the prompt package core).
+    barColor("run_bg", "run_bg", "bg", false, "prompt"),
+    barColor("run_fg", "run_fg", "fg", false, "prompt"),
+    barColor("run_prompt_color", "run_prompt_color", types.palette_primary_color, false, "prompt"),
 
     // Legacy spellings, kept working. The `drun_*` keys were named for
     // a desktop-file launcher; the segment resolves a `$PATH` executable and
@@ -466,10 +493,50 @@ pub const knobs = [_]knob.Knob{
     // setting one assigns exactly the field the other would. A config that
     // used the old keys keeps working with no edit, which is the whole reason
     // this is a rename-with-alias rather than a rename.
-    knob.knob(&.{knob.place(types.section_bar, "drun_prompt")}, "run_prompt", .str),
-    barColor("drun_bg", "run_bg", "bg", false),
-    barColor("drun_fg", "run_fg", "fg", false),
-    barColor("drun_prompt_color", "run_prompt_color", types.palette_primary_color, false),
+    // Aliases share the canonical knob's target, so each carries the same
+    // Knob.reader ownership (a deleted module drops the field with it, and
+    // no alias resurrects it).
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "drun_prompt")}, "run_prompt", .str), "prompt"),
+    barColor("drun_bg", "run_bg", "bg", false, "prompt"),
+    barColor("drun_fg", "run_fg", "fg", false, "prompt"),
+    barColor("drun_prompt_color", "run_prompt_color", types.palette_primary_color, false, "prompt"),
+};
+
+/// Module ownership for knobs whose only reader lives in an OPTIONAL module.
+/// Each entry is `("target", "module_stem")`: the target's reader is that
+/// module, so when the tree has no such module the knob is legitimately
+/// unread (the modularity matrix deletes a module together with its config
+/// consumer -- see Knob.reader). The build's knob-reader scan consults this
+/// table before failing, so a module-owned knob never trips DeadKnobTarget
+/// on a tree that simply lacks the module.
+///
+/// Every target here is verified against the modules table: a stem that is
+/// NOT a discovered module is a build error, so a typo cannot silence the
+/// check. A target absent from this table must have a reader somewhere in
+/// the tree (the core check).
+///
+/// The set is closed under alias: `drun_*` keys share the canonical
+/// `run_*` targets, so ownership is expressed once per target, not once per
+/// key.
+pub const knob_reader_modules = [_]knob.Knob{
+    knob.readerOf("carousel_enabled", "zzz_typo_module"),
+    knob.readerOf("selected_bg", "tags"),
+    knob.readerOf("selected_fg", "title"),
+    knob.readerOf("run_prompt", "prompt"),
+    knob.readerOf("volume_format", "volume"),
+    knob.readerOf("volume_muted_format", "volume"),
+    knob.readerOf("brightness_format", "brightness"),
+    knob.readerOf("brightness_device", "brightness"),
+    knob.readerOf("indicator_location", "tags"),
+    knob.readerOf("indicator_padding", "tags"),
+    knob.readerOf("indicator_color", "tags"),
+    knob.readerOf("selected_indicator_color", "tags"),
+    knob.readerOf("title_accent_color", "title"),
+    knob.readerOf("title_unfocused_accent", "title"),
+    knob.readerOf("title_minimized_accent", "title"),
+    knob.readerOf("run_bg", "prompt"),
+    knob.readerOf("run_fg", "prompt"),
+    knob.readerOf("run_prompt_color", "prompt"),
 };
 
 /// Config fields that are legitimately NOT knobs: the pair-interaction

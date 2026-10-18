@@ -25,6 +25,7 @@ const testing = std.testing;
 // diagnostics; src/core/debug/log.zig silences all std.log diagnostics in
 // test binaries, so this stays quiet on success.
 const config = @import("config");
+const diagnostics = @import("diagnostics");
 const knob = @import("knob");
 const types = @import("types");
 const composed = @import("composed");
@@ -591,15 +592,25 @@ test "layouts array caps at 256 entries" {
 
 test "config/fallback.toml loads cleanly through the real pipeline" {
     // The shipped fallback doubles as a fixture: it must parse and apply with
-    // no skipped lines (no source_path/fallback drift) and produce sane values.
+    // no skipped lines (no source_path/fallback drift) and produce sane
+    // values. "Cleanly" is asserted, not assumed: every warn the load emits
+    // lands in the bag, so a knob renamed out from under the fallback (the
+    // segment_spacing -> per_segment_padding drift, caught by --check-config)
+    // fails here instead of silently reverting to a default.
     const io = std.Options.debug_io;
     const repo_path = try std.Io.Dir.cwd().realPathFileAlloc(io, "config/fallback.toml", testing.allocator);
     defer testing.allocator.free(repo_path);
+    var diag: diagnostics.Diagnostics = .{ .allocator = testing.allocator };
+    defer diag.deinit();
+    const saved = diagnostics.diagnostics;
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = saved;
     var cfg = try config.loadConfig(testing.allocator, repo_path);
     defer cfg.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u16, 50), cfg.tiling.min_window_dim);
     try testing.expectEqual(bar_config.BarScreenPosition.bottom, cfg.bar.bar_position);
+    try testing.expectEqual(@as(usize, 0), diag.count());
 }
 
 test "getRatio: bare integers are percentages (indicator_padding)" {

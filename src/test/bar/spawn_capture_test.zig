@@ -43,7 +43,19 @@ test "runOk is true iff the command exits 0" {
 test "runOk reports a missing binary as not-ok" {
     // execvp fails in the child -> exit 127; the runner must reap that as a
     // completed run, not hang waiting for a process that already exited.
-    try std.testing.expect(!spawn_capture.runOk("/nonexistent-binary-definitely"));
+    //
+    // The missing command is named INSIDE `sh -c`, so the failure comes from
+    // the shell, not from execvp: `sh` writes its own "not found" diagnostic
+    // to inherited stderr and then exits 127. Production deliberately leaves
+    // that stderr inherited (a control command's diagnostics belong on the
+    // terminal, exactly as `popen` left them), so the runner still reaps a
+    // clean 127 -- but a test must not leak ANY stderr, because the build
+    // runner treats stderr from a passing test as a failed command (see the
+    // `bench` step note in build.zig). Grouping the command under
+    // `{ ...; }` and redirecting the GROUP's stderr to the pipe captures the
+    // shell's diagnostic, so nothing reaches the terminal; the child's exit
+    // status is unchanged, which is what this test pins.
+    try std.testing.expect(!spawn_capture.runOk("{ /nonexistent-binary-definitely; } 2>&1"));
 }
 
 test "an expired deadline SIGKILLs the child instead of waiting it out" {

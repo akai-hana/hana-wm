@@ -627,9 +627,9 @@ test "checkConfig collects the loader's own diagnostics" {
     // stderr path would have written -- that is what the mode prints.
     var buf: [256]u8 = undefined;
     for (diag.items.items) |d| {
-        const line = try diagnostics.Diagnostics.line(d, &buf);
-        try testing.expect(line.len > "[x] ".len);
-        try testing.expect(std.mem.startsWith(u8, line, "["));
+        const line = diagnostics.Diagnostics.line(d, &buf);
+        try testing.expect(line.text.len > "[x] ".len);
+        try testing.expect(std.mem.startsWith(u8, line.text, "["));
     }
 
     // A config the loader cannot parse at all: still diagnostics, and still no
@@ -648,4 +648,128 @@ test "checkConfig collects the loader's own diagnostics" {
     // snapshot re-exec needs it after the parse arena is gone), so the load
     // allocator is still the owner of those bytes until this releases them.
     config.deinitGoodSource(alloc);
+}
+
+test "checkConfig reports the lint warns (mis-cased section, inert family)" {
+    // The three lint observations in lintDocument run inside the same load
+    // the mode counts diagnostics from; each case below names the SPECIFIC
+    // warn it expects, so a bag that counted only the unconsumed-key sweep
+    // (already covered above) cannot make these pass by noise.
+    const alloc = testing.allocator;
+    var box = try snapshot_test.Sandbox.init(alloc, "checkcfglint");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+
+    // Case-only miss on a known section header: the section would otherwise
+    // parse with zero content and look like an empty config.
+    try box.write("hana/config.toml", "[Tiling]\ngap = 9\n");
+    var mis: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer mis.deinit();
+    try config.checkConfig(alloc, &mis);
+    try testing.expect(mis.count() > 0);
+    try testing.expect(mis.contains("[Tiling]"));
+    try testing.expect(mis.contains("mis-cased"));
+    config.deinitGoodSource(alloc);
+
+    // A tiling.* family section without its bare [tiling] parent: the knobs
+    // parse but do nothing, which is silent without this warn.
+    try box.write("hana/config.toml", "[tiling.foo]\nwhatever = 1\n");
+    var inert: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer inert.deinit();
+    try config.checkConfig(alloc, &inert);
+    try testing.expect(inert.count() > 0);
+    try testing.expect(inert.contains("inert"));
+    config.deinitGoodSource(alloc);
+
+    // The same for [bar.properties] without [bar].
+    try box.write("hana/config.toml", "[bar.properties]\nfont_size = 12\n");
+    var bar_inert: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer bar_inert.deinit();
+    try config.checkConfig(alloc, &bar_inert);
+    try testing.expect(bar_inert.count() > 0);
+    try testing.expect(bar_inert.contains("[bar.properties]"));
+    try testing.expect(bar_inert.contains("inert"));
+    config.deinitGoodSource(alloc);
+
+    // The collector is restored on every path (same invariant the main
+    // checkConfig test pins).
+    try testing.expect(diagnostics.diagnostics == null);
+}
+
+test "the shipped example config loads cleanly through the real pipeline" {
+    // The repo's config/ tree is the documented user experience (README
+    // points at it): if config.toml / binds.toml / themes/akai.toml drift
+    // into something the loader rejects, this is the test that says so --
+    // the same load a user's first run performs, includes and merge order
+    // included, not a hand-picked fragment. This is the CI gate P1-26 asks
+    // for; `--check-config` is the heavier manual cousin (it needs a
+    // -Dconfig-warn build to see warns).
+    const alloc = testing.allocator;
+    var box = try snapshot_test.Sandbox.init(alloc, "shipped");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+
+    // Stage the three shipped files at the paths config.toml's include list
+    // names (includes resolve relative to the entry file's dir). Only these:
+    // config/ may hold files the loader must NOT see, and the entry-file
+    // rule means anything else there is inert by design.
+    const io = std.Options.debug_io;
+    inline for (.{ "config.toml", "binds.toml", "themes/akai.toml" }) |rel| {
+        const src_path = try std.Io.Dir.cwd().realPathFileAlloc(io, "config/" ++ rel, alloc);
+        defer alloc.free(src_path);
+        const bytes = try config.readFileAlloc(alloc, src_path);
+        defer alloc.free(bytes);
+        try box.write("hana/" ++ rel, bytes);
+    }
+
+    var source: config.DefaultSource = .fallback;
+    var cfg = try config.loadConfigDefault(alloc, &source, false);
+    defer cfg.deinit(alloc);
+
+    // Loaded from the user tree (not the fallback), the include merged
+    // binds.toml in, and the theme's [bar] bg won the merge -- one assert
+    // per contributing file, so a dropped include fails on the file that
+    // went missing rather than only on the overall parse.
+    try testing.expectEqual(config.DefaultSource.user, source);
+    try testing.expect(cfg.core.keybindings.items.len > 0);
+    try testing.expectEqual(@as(u32, 0x0d0d14), cfg.bar.bg);
+    try testing.expectEqual(@as(u16, 50), cfg.tiling.min_window_dim);
+
+    config.deinitGoodSource(alloc);
+}
+
+test "Diagnostics.line clips an over-long diagnostic instead of erroring" {
+    // bufPrint refuses rather than truncating; line() must swallow that and
+    // report it, because --check-config printing a >1KiB diagnostic used to
+    // abort the whole check with a propagated NoSpaceLeft.
+    const long_msg = "y" ** 4096;
+    const d: diagnostics.Diagnostic = .{
+        .level = .warn,
+        .module = "mod",
+        .message = long_msg,
+    };
+    var buf: [64]u8 = undefined;
+    const clipped = diagnostics.Diagnostics.line(d, &buf);
+    try testing.expect(clipped.truncated);
+    try testing.expectEqual(buf.len, clipped.text.len);
+    try testing.expect(std.mem.startsWith(u8, clipped.text, "[mod] "));
+
+    // A line that fits EXACTLY is not marked truncated (the old
+    // len == buf.len heuristic would have been).
+    var exact_buf: [7]u8 = undefined;
+    const exact: diagnostics.Diagnostic = .{ .level = .warn, .module = "m", .message = "abc" };
+    const whole = diagnostics.Diagnostics.line(exact, &exact_buf);
+    try testing.expect(!whole.truncated);
+    try testing.expectEqualStrings("[m] abc", whole.text);
+
+    // An empty buffer yields an empty, truncated result -- no panic, no
+    // write out of bounds.
+    var empty: [0]u8 = undefined;
+    const none = diagnostics.Diagnostics.line(exact, &empty);
+    try testing.expect(none.truncated);
+    try testing.expectEqual(@as(usize, 0), none.text.len);
 }
