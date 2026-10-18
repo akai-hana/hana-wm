@@ -235,17 +235,27 @@ pub const ALL_MASK: Mask = ~@as(Mask, 0);
 /// the parsed WM_NORMAL_HINTS to mapRequest as a parameter (there is no
 /// staging copy anywhere). Do NOT import layouts from here (layer rule).
 pub const SizeHints = struct {
-    /// PMinSize / PBaseSize floor. Policy: TILING deliberately ignores
-    /// declared minimums -- the layout engine owns tiled dimensions, and
-    /// honouring them would pin the rect and block mod_h/mod_l resizing
-    /// (`tiling.applyHints` is the tiled-side delegate). Only the floating
-    /// drag-resize path honours this as a user-facing floor.
+    /// PMinSize / PBaseSize floor. Policy: TILING deliberately does not
+    /// ENFORCE declared minimums -- the layout engine owns tiled dimensions,
+    /// and honouring them would pin the rect and block mod_h/mod_l resizing
+    /// (`tiling.applyHints` is the tiled-side delegate). It does participate
+    /// as the ICCCM increment-snap fallback base when PBaseSize is absent
+    /// (see `base_width`); that anchors the snap, it does not floor the
+    /// result. Only the floating drag-resize path honours this as a
+    /// user-facing floor.
     min_width: u16 = 0,
     min_height: u16 = 0,
     max_width: u16 = 0, // PMaxSize limit
     max_height: u16 = 0,
     inc_width: u16 = 0, // PResizeInc: w = base_width + N * inc_width
     inc_height: u16 = 0,
+    /// PBaseSize: the snap origin for PResizeInc (ICCCM 4.1.2.3 sizes are
+    /// base + N*inc). 0 when undeclared, in which case the increment snap
+    /// falls back to `min_width` (the standard's own fallback). NOT a floor:
+    /// tiling stays shrink-only around it, so a slot smaller than the base
+    /// passes through instead of being pinned up to it.
+    base_width: u16 = 0,
+    base_height: u16 = 0,
     min_aspect: f32 = 0.0, // PAspect (dwm convention)
     max_aspect: f32 = 0.0,
 
@@ -254,6 +264,7 @@ pub const SizeHints = struct {
         return self.min_width == 0 and self.min_height == 0 and
             self.max_width == 0 and self.max_height == 0 and
             self.inc_width == 0 and self.inc_height == 0 and
+            self.base_width == 0 and self.base_height == 0 and
             self.min_aspect == 0.0 and self.max_aspect == 0.0;
     }
 

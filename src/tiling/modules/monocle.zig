@@ -32,9 +32,9 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // edge whenever the workarea started off-origin.
     const top_rect = tiling.insetRect(
         tiling.waX(v.workarea) + @as(i32, inset),
-        tiling.waY(v) +| inset,
-        v.workarea.width,
-        v.workarea.height,
+        tiling.waY(v.workarea) +| @as(i32, inset),
+        tiling.waWidth(v.workarea),
+        tiling.waHeight(v.workarea),
         total_margin,
         ctx.min_dim,
     );
@@ -48,7 +48,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // A workarea that cannot hold the inset at a positive size parks every
     // window including the top one -- the min_dim floor would flare the rect
     // past the workarea edge.
-    const fits = tiling.insetFits(v.workarea.width, v.workarea.height, total_margin);
+    const fits = tiling.insetFits(tiling.waWidth(v.workarea), tiling.waHeight(v.workarea), total_margin);
     for (v.order) |win| {
         if (win == top_win and fits) tiling.emitView(v, out, win, top_rect) else tiling.emitHidden(out, win);
     }

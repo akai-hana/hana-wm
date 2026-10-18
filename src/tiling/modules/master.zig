@@ -30,8 +30,16 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
 
-    const screen_w = v.workarea.width;
-    const screen_h = v.workarea.height;
+    const screen_w = tiling.waWidth(v.workarea);
+    const screen_h = tiling.waHeight(v.workarea);
+    // A workarea smaller than the edge-gap plus a border-inset pane on either
+    // axis (including the degenerate 0x0) cannot host a single placement:
+    // shrinkClamped's min_dim floor and the water-fill's height floor would
+    // flare windows off the workarea. Park everything.
+    if (!tiling.insetFits(screen_w, screen_h, tiling.totalInset(m.gap, m))) {
+        for (windows) |win| tiling.emitHidden(ctx.out, win);
+        return;
+    }
     // Row-fit count: how many windows fit in one column at min pane height.
     // Fits per window = min pane dim plus row pitch (gap + doubled border).
     // A zero min_dim+gap+border Env would make the denominator 0 and the
@@ -49,7 +57,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     const master_n: u16 = @intCast(@max(1, @min(@min(v.params.primary_count, n), row_fit)));
     const stack_n: u16 = @intCast(n - master_n);
     const stack_windows = windows[master_n..];
-    const y = tiling.waY(v);
+    const y: u16 = @intCast(tiling.waY(v.workarea));
 
     // When no stack exists the master pane takes the full width.
     const master_w_frac: u16 = if (stack_n > 0)
@@ -72,22 +80,25 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     // The master column gets a full gap on its screen edge and a half-gap
     // toward the stack; with no stack both edges carry a full gap. Borders
-    // are then subtracted from the width.
-    const master_inner_w = tiling.shrinkClamped(
-        master_w,
-        if (stack_n > 0) stackSeamMargin(m) else tiling.totalInset(m.gap, m),
-        ctx.min_dim,
-    );
-
-    tileColumn(
-        ctx,
-        windows[0..master_n],
-        master_x +| m.gap,
-        y,
-        screen_h,
-        master_inner_w,
-        .{},
-    );
+    // are then subtracted from the width. A pane no wider than those margins
+    // cannot host the column: shrinkClamped's min_dim floor would flare it
+    // over the stack (primary_width near 0 is enough to get here). Park the
+    // master; the stack survives.
+    const master_margin = if (stack_n > 0) stackSeamMargin(m) else tiling.totalInset(m.gap, m);
+    if (master_w > master_margin) {
+        const master_inner_w = tiling.shrinkClamped(master_w, master_margin, ctx.min_dim);
+        tileColumn(
+            ctx,
+            windows[0..master_n],
+            master_x +| m.gap,
+            y,
+            screen_h,
+            master_inner_w,
+            .{},
+        );
+    } else {
+        for (windows[0..master_n]) |win| tiling.emitHidden(ctx.out, win);
+    }
 
     if (stack_n == 0) return;
 
@@ -121,6 +132,22 @@ fn tileColumn(
     var heights_buf: [model.max_tiled_windows]u16 = undefined;
     const heights = heights_buf[0..windows.len];
     const used = fillHeights(ctx, windows, avail, boost, heights);
+    // Every water-filled height floors at min_dim, so the total can exceed
+    // avail when a boosted share starves a sibling below its floor (or the
+    // fair shares were already under it): parking the column beats flaring
+    // its bottom rows off the workarea. Subsumes the old avail <
+    // count * min_dim pre-check -- the even-floor case overflows the same
+    // way. A zero height in the mix (min_dim=0 splits rounding a share down
+    // to 0) is the unmappable twin: park rather than hand the server a
+    // zero-area rect.
+    var any_zero = false;
+    for (heights) |hi| {
+        if (hi == 0) any_zero = true;
+    }
+    if (used > avail or any_zero) {
+        for (windows) |win| tiling.emitHidden(ctx.out, win);
+        return;
+    }
 
     // If every window is capped, sum(heights) < avail; centre the stack in
     // the column instead of stranding the slack at the bottom.
@@ -264,6 +291,13 @@ fn tileStack(
     const stack_n: u16 = @intCast(windows.len);
 
     if (stack_n <= row_fit) {
+        // A stack pane no wider than its seam+border margins cannot host a
+        // column: shrinkClamped's min_dim floor would flare it over the
+        // master (or the screen edge). Park the stack; the master survives.
+        if (w <= stackSeamMargin(ctx.m)) {
+            for (windows) |win| tiling.emitHidden(ctx.out, win);
+            return;
+        }
         const stack_inner_w = tiling.shrinkClamped(w, stackSeamMargin(ctx.m), ctx.min_dim);
         tileColumn(ctx, windows, x +| tiling.seamGap(ctx.m), y_offset, h, stack_inner_w, boost);
         return;
@@ -283,7 +317,24 @@ fn tileStackExtra(
     max_fit: u16,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
+    // Same seam-margin floor as the single-column path: a stack pane no
+    // wider than its seam+border margins cannot host even one column (the
+    // min_col_w floor below would otherwise inflate a column past the pane
+    // and off the workarea). Park the stack; the master survives.
+    if (w <= stackSeamMargin(ctx.m)) {
+        for (windows) |win| tiling.emitHidden(ctx.out, win);
+        return;
+    }
     const row_avail = calcAvailableHeight(h, max_fit, ctx.m, ctx.min_dim);
+    // Row heights floor at min_dim too: rows whose share cannot hold
+    // max_fit * min_dim would spill the bottom row off the workarea.
+    // Each row takes an integer share of row_avail (windowHeight), so every
+    // row is >= 1 only while row_avail >= max_fit; the min_dim floor is the
+    // stronger bound whenever min_dim >= 1.
+    if (row_avail < @max(max_fit, max_fit *| ctx.min_dim)) {
+        for (windows) |win| tiling.emitHidden(ctx.out, win);
+        return;
+    }
 
     const min_col_w: u16 = ctx.min_dim +| model.doubledBorder(ctx.m);
 
@@ -293,12 +344,29 @@ fn tileStackExtra(
         // leaves the stack pane; surplus (a row narrower than the column count)
         // has no free row to spill into and is parked instead.
         const cols_by_count: u16 = (stack_n - row + max_fit - 1) / max_fit;
-        const cols_by_width: u16 = @max(1, (w +| ctx.m.gap) / @max(1, min_col_w +| ctx.m.gap));
+        // The width budget is the pane minus the LEADING seam: column k
+        // starts at seam + k * (col_w + gap), so the last column needs
+        // seam + cols * min_col_w + (cols - 1) * gap <= w. Budgeting the
+        // seam out let a narrow pane claim one column too many and the
+        // stride pushed it off the workarea (fuzz-found: w=24, seam=5,
+        // cols_by_width=2 -> second column 2px past the pane edge).
+        const usable_w = w -| tiling.seamGap(ctx.m);
+        const cols_by_width: u16 = @max(1, (usable_w +| ctx.m.gap) / @max(1, min_col_w +| ctx.m.gap));
         const cols_in_row: u16 = @max(1, @min(cols_by_count, cols_by_width));
 
         const gaps_in_row = tiling.seamGap(ctx.m) +| ctx.m.gap *| cols_in_row;
-        const row_total_w = if (w > gaps_in_row) w - gaps_in_row else cols_in_row *| min_col_w;
+        // The min_col_w floor is capped by the pane: a count-driven column
+        // count can ask for more pixels than a narrow pane has.
+        const row_total_w: u16 = if (w > gaps_in_row) w - gaps_in_row else @min(cols_in_row *| min_col_w, w);
         const col_w = row_total_w / cols_in_row;
+        // A column narrower than the doubled border: the shrink's min_dim
+        // floor would flare the window over its neighbour. Park the row's
+        // windows (the col >= cols_in_row park below is the sibling guard).
+        if (col_w <= model.doubledBorder(ctx.m)) {
+            var park_idx: u16 = row;
+            while (park_idx < stack_n) : (park_idx += max_fit) tiling.emitHidden(ctx.out, windows[park_idx]);
+            continue;
+        }
         const col_inner_w = tiling.shrinkClamped(col_w, model.doubledBorder(ctx.m), ctx.min_dim);
 
         const y_pos = y_offset +| ctx.m.gap +|
@@ -332,12 +400,15 @@ inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, 
 }
 
 /// Total pixel height available for window content after gaps and borders.
-/// Falls back to count * min_dim when margins exceed total_h.
+/// Saturates to 0 when the margins exceed total_h (the degenerate case the
+/// callers' min_dim-fit guards turn into a park: the old count * min_dim
+/// fallback here produced heights that flared off the workarea instead).
 inline fn calcAvailableHeight(total_h: u16, count: u16, m: model.Margins, min_dim: u16) u16 {
+    _ = min_dim;
     // gap + count * rowPitch: the row seam gaps (one leading, count+1 with the
     // trailing gap folded in) plus each row's doubled border.
     const overhead = m.gap +| count *| rowPitch(m);
-    return if (total_h > overhead) total_h - overhead else @min(count *| min_dim, total_h);
+    return total_h -| overhead;
 }
 
 /// Height of window `i` out of `count`, distributing `available` pixels via

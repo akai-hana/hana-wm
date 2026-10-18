@@ -32,10 +32,17 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const m = ctx.m;
 
-    const screen_w = v.workarea.width;
-    const screen_h = v.workarea.height;
+    const screen_w = tiling.waWidth(v.workarea);
+    const screen_h = tiling.waHeight(v.workarea);
 
     const slot_w: i32 = slotWidth(screen_w);
+    // A workarea under two pixels wide has no slot at all (slotWidth
+    // truncates to 0): every window would clip to the same 1px column.
+    // Park the strip instead.
+    if (slot_w < 1) {
+        for (windows) |win| tiling.emitHidden(out, win);
+        return;
+    }
 
     const sw_i32: i32 = @intCast(screen_w);
 
@@ -43,9 +50,16 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // described at the module header.
     const scroll: i32 = clampOffset(v.params.viewport_offset, windows.len, screen_w);
 
+    // A workarea smaller than the edge-gap plus a border-inset pane on either
+    // axis cannot host a slot: shrinkClamped's min_dim floor would flare the
+    // content rect off the workarea (the width path already clips to hidden).
+    if (!tiling.insetFits(screen_w, screen_h, tiling.totalInset(m.gap, m))) {
+        for (windows) |win| tiling.emitHidden(out, win);
+        return;
+    }
     // Border subtracted here (once); emitView's applyHints never touches it.
     const content_h: u16 = tiling.shrinkClamped(screen_h, tiling.totalInset(m.gap, m), ctx.min_dim);
-    const win_y: i32 = @as(i32, tiling.waY(v) +| m.gap);
+    const win_y: i32 = tiling.waY(v.workarea) +| @as(i32, m.gap);
 
     // Full gap at screen edges; half-gap at interior slot boundaries so that
     // adjacent windows together share exactly one full gap.
