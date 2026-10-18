@@ -43,6 +43,18 @@ pub fn knobGated(places: []const Placement, target: []const u8, kind: Kind, requ
     return .{ .places = places, .target = target, .kind = kind, .requires = requires };
 }
 
+/// Knob whose only reader is the optional module `reader` (see Knob.reader).
+/// This is how a module-owned setting declares itself: the build may delete
+/// the module, and the knob goes with it rather than looking dead.
+pub fn readerOf(places: []const Placement, target: []const u8, kind: Kind, reader: []const u8) Knob {
+    return .{ .places = places, .target = target, .kind = kind, .reader = reader };
+}
+
+/// Knob both gated on `requires` and owned by the optional module `reader`.
+pub fn readerOfGated(places: []const Placement, target: []const u8, kind: Kind, requires: []const u8, reader: []const u8) Knob {
+    return .{ .places = places, .target = target, .kind = kind, .requires = requires, .reader = reader };
+}
+
 /// How an enum-valued knob is parsed.
 pub const EnumRead = struct {
     T: type,
@@ -113,6 +125,16 @@ pub const Knob = struct {
     requires: []const u8 = "",
     /// Assign the fallback default even when no placement matched.
     copy_when_absent: bool = false,
+    /// Module stem whose source reads this target (e.g. "tags", "master").
+    /// Non-empty means the knob's only reader lives in that OPTIONAL module:
+    /// when the tree has no such module the knob is legitimately unwritten
+    /// (the modularity matrix deletes a module and its consumers together),
+    /// so the build's knob-reader scan accepts an absent module instead of
+    /// failing. A stem that is NOT a discovered module at all -- so neither
+    /// present nor a valid deletion -- is still a build error: the knob would
+    /// be dead by typo. Empty means "a reader must exist in the tree", the
+    /// behaviour every core-owned knob relies on. `readerOf` sets it.
+    reader: []const u8 = "",
     /// Targets this knob READS to resolve its value (the sibling a
     /// `color_from`/`color_opt` kind falls back to), by dotted path relative
     /// to the fragment root. This is the ORDERING constraint stated as data:

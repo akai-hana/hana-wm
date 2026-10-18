@@ -49,9 +49,36 @@ pub const Diagnostics = struct {
         return false;
     }
 
-    /// The "[module] message" line the stderr path would have written.
-    pub fn line(d: Diagnostic, buf: []u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, "[{s}] {s}", .{ d.module, d.message });
+    /// Result of `line`: the reconstructed text plus whether bytes were
+    /// dropped to make it fit the buffer.
+    pub const Line = struct {
+        text: []const u8,
+        truncated: bool,
+    };
+
+    /// The "[module] message" line the stderr path would have written,
+    /// clipped to `buf` when it does not fit. `bufPrint` REFUSES to truncate
+    /// (error.NoSpaceLeft), so the overflow case is clipped by hand and
+    /// reported via `truncated` instead of erroring: one over-long
+    /// diagnostic must not abort the check that is printing it, and the
+    /// exact flag beats the `len == buf.len` heuristic (false positive on a
+    /// perfectly-fitting line, false negative if a clip ever reserved marker
+    /// room).
+    pub fn line(d: Diagnostic, buf: []u8) Line {
+        if (std.fmt.bufPrint(buf, "[{s}] {s}", .{ d.module, d.message })) |text| {
+            return .{ .text = text, .truncated = false };
+        } else |_| {
+            // NoSpaceLeft: write the prefix of the same "[module] message"
+            // shape, piece by piece, stopping when the buffer is full.
+            const pieces = [_][]const u8{ "[", d.module, "] ", d.message };
+            var pos: usize = 0;
+            for (pieces) |piece| {
+                const n = @min(buf.len - pos, piece.len);
+                @memcpy(buf[pos..][0..n], piece[0..n]);
+                pos += n;
+            }
+            return .{ .text = buf[0..pos], .truncated = true };
+        }
     }
 };
 

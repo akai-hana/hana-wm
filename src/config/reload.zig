@@ -24,6 +24,40 @@ const seed = @import("model_config");
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
 
+/// The reload decision table, pure. Given how the load went, this is the
+/// whole accept/reject surface of `handleConfigReload`: extract the decision
+/// from the side-effecting orchestration so it is testable without
+/// `core.getState()` or an X connection (P1-25). `handleConfigReload` is the
+/// only caller and keeps every side effect (reporting, freeing, swapping,
+/// rebuilding) to itself.
+///
+/// The detectChanges-timing half of the table is a property of `.apply_new`
+/// only: it runs PRE-swap (it reads both config boxes, and the swap below
+/// releases the old one), while every rebuild below the swap (buildKeybinds,
+/// grabKeybindings, reloadBorders, ...) runs POST-swap so it stamps the
+/// config_rev the swap just bumped (see the ordering doc on
+/// `handleConfigReload`).
+pub const Decision = enum {
+    /// Load failed (parse error, too many files, ...): the live config stays
+    /// put, nothing was allocated here, the keybind regrab is skipped, and
+    /// the caller reports the error once (the sole reload reporter).
+    fail_keep_old,
+    /// Load succeeded but not from a user file (the embedded fallback, which
+    /// is boot-only): soft-reject, keep the live config, and free the
+    /// short-lived load. Not an error, but nothing is rebuilt.
+    reject_keep_old,
+    /// Load succeeded from the user's files: detectChanges pre-swap, then the
+    /// atomic swap, then the rebuild chain post-swap.
+    apply_new,
+};
+
+/// Pure decision: `loaded` is whether `loadConfigDefault` returned a config;
+/// `source` is the out-param it filled (meaningful only when it did).
+pub fn decide(loaded: bool, source: config.DefaultSource) Decision {
+    if (!loaded) return .fail_keep_old;
+    return if (source == .user) .apply_new else .reject_keep_old;
+}
+
 /// Loads and validates a new config, then applies it atomically via pointer
 /// swap. On failure the old config remains active.
 ///
@@ -60,6 +94,9 @@ pub fn handleConfigReload() !void {
         // new_ptr existed, and the load path's own errdefers released its
         // internals. The early return also skips keybind regrabbing. The
         // failure is reported once, at the caller (the sole reload reporter).
+        // The decision is `fail_keep_old` regardless of whatever the failed
+        // load left in `source`: load-ok-ness dominates the table.
+        std.debug.assert(decide(false, source) == .fail_keep_old);
         return err;
     };
     // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
@@ -82,13 +119,19 @@ pub fn handleConfigReload() !void {
     // source (user vs fallback) directly, so no second existence probe is
     // needed. This plain return is NOT an error, but the defer still fires
     // (not committed) and frees the short-lived fallback allocation.
-    if (source != .user) {
-        log.err(
-            "Config reload rejected: no user config file found. " ++
-                "Keeping current config (the embedded fallback is boot-only)",
-            .{},
-        );
-        return;
+    switch (decide(true, source)) {
+        // Only reachable with a FAILED load; that path returns from the catch
+        // above and never gets here.
+        .fail_keep_old => unreachable,
+        .reject_keep_old => {
+            log.err(
+                "Config reload rejected: no user config file found. " ++
+                    "Keeping current config (the embedded fallback is boot-only)",
+                .{},
+            );
+            return;
+        },
+        .apply_new => {},
     }
 
     // Domain invariants and the warn-only checks run INSIDE composed.parse
