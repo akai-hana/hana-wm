@@ -31,6 +31,10 @@ const std = @import("std");
 
 const core = @import("core");
 const segment = @import("segment");
+// Contract vocabulary, imported the way every shipped segment imports it
+// (clock.zig is the reference). `segment` re-exports only `Frame`; `Painted`
+// and `ClickCtx` are read off the contract directly.
+const contract = @import("bar_contract");
 
 // Segment-owned state. Same discipline as every addon: file-scope statics,
 // allocation-free, reset by init/deinit (tests init/deinit per fixture).
@@ -107,43 +111,66 @@ pub fn measureString() []const u8 {
     return ""; // TODO: your display string when reserved at row width.
 }
 
-/// Reserved width in the row (`frame` is `*const segment.Frame`, `clock_width`
-/// the measured clock width for segments that need it).
-pub fn naturalWidth(frame: *const anyopaque, clock_width: u16) u16 {
+/// Reserved width in the row (`frame` is a real `*const segment.Frame`, the
+/// live workspace facts the bar passes to every segment; `clock_width` is the
+/// measured clock width for segments that need it).
+pub fn naturalWidth(frame: *const segment.Frame, clock_width: u16) u16 {
     _ = frame;
     _ = clock_width;
     return 0; // TODO: your segment's reserved width.
 }
 
-/// Draw at `x`, return the advanced x. `ctx` is `*segment.DrawCtx` (bar-built
-/// per-frame scratch: dc, config, conn, allocator, width, minimized_api,
-/// frame, title snapshots). Draw with the ctx.dc primitives the same way the
-/// shipped segments do — the bar only blits what you drew.
-pub fn draw(ctx: *anyopaque, x: u16) anyerror!u16 {
+/// Draw at `x`, return what you painted. `ctx` is `*segment.DrawCtx`
+/// (bar-built per-frame scratch: dc, config, conn, allocator, width,
+/// minimized_api, frame, title snapshots). Draw with the ctx.dc primitives
+/// the same way the shipped segments do — the bar only blits what you drew.
+/// The return is the bar's `Painted` record, not an advanced x: `.span(x, x+n)`
+/// for content that occupied `n` pixels, or `.nothing(x)` for the valid
+/// "drew an empty cell, keep my slot" outcome the bar must tell apart from a
+/// caught draw error.
+pub fn draw(ctx: *anyopaque, x: u16) anyerror!contract.Painted {
     const dctx: *segment.DrawCtx = @ptrCast(@alignCast(ctx));
     _ = dctx;
-    return x; // TODO: paint via dctx.dc and return your advanced x.
+    return contract.Painted.nothing(x); // TODO: `.span(x, x + painted_width)`.
 }
 
-/// Click dispatch for recorded bounds (mirrors the chrome-surface input
-/// routing; state/title_click/redraw are bar-provided fn pointers). Return
-/// true when the click was consumed.
-pub fn onClick(
-    offset: u16,
-    left: bool,
-    right: bool,
-    state: *anyopaque,
-    title_click: *const fn (*anyopaque, u16) void,
-    redraw: *const fn () void,
-) bool {
-    _ = offset;
-    _ = left;
-    _ = right;
-    _ = title_click;
-    _ = redraw;
-    _ = state;
+/// Click dispatch for recorded bounds. Every field arrives NAMED in one
+/// `*const contract.ClickCtx` (`offset` from the segment's left edge, the
+/// `is_left`/`is_right` button flags, the bar `state` handle, and the
+/// `title_click`/`redraw` callbacks) — the positional form this replaced
+/// type-checked a transposed pair of bools, and there was no room to add a
+/// modifier mask without touching every implementation. Return true when the
+/// click was consumed.
+pub fn onClick(ctx: *const contract.ClickCtx) bool {
+    _ = ctx;
     return false; // TODO: your click handling; false = not ours.
 }
+
+/// Scroll-wheel dispatch for recorded bounds (`dir` is +1 for wheel up / -1
+/// for wheel down, `redraw` the bar's region-scoped repaint hook). Return true
+/// when the scroll was consumed. Declared but deliberately NOT bound in
+/// `module` below: the bar routes a wheel event to the FIRST scroll-binding
+/// segment at those bounds and stops, so an inert stub would shadow a real
+/// one. Bind `.onScroll = onScroll` when your segment actually scrolls —
+/// `zig build check-plugin-template` checks this signature either way.
+pub fn onScroll(dir: i8, redraw: *const fn () void) bool {
+    _ = dir;
+    _ = redraw;
+    return false;
+}
+
+/// Width-report sink: the bar tells you the width it actually painted after
+/// every draw, so your reservation follows your content. Only bind it if you
+/// remember a painted width — the bar records it for you when you don't.
+/// Checked by the template gate either way.
+pub fn onPainted(width: u16) void {
+    _ = width;
+}
+
+// Press-hold scrub dispatch, same first-binder routing as onScroll: declared
+// for signature-checking, unbound until your segment really scrubs.
+//   pub fn onDragMotion(motion_x: u16, redraw: *const fn () void) bool { ... }
+//   pub fn onDragEnd(redraw: *const fn () void) void { ... }
 
 // Prompt chrome-surface extras. ONLY the prompt overlay binds these; if you
 // bind them, the bar will treat your segment as the chrome-surface input
@@ -176,11 +203,21 @@ pub const module: @import("bar_contract").Segment = .{
     .onPollWakeup = onPollWakeup,
     .secondsElapsed = secondsElapsed,
     .invalidate = invalidate,
-    // Configured-segment hooks — bind + add the name to a config when ready:
-    //   .measureString = measureString,   // (clock convention) reserved width
-    //   .naturalWidth = naturalWidth,
-    //   .draw = draw,
-    //   .onClick = onClick,
+    // Configured-segment hooks. Bound here (not left commented) because
+    // `zig build check-plugin-template` compiles this file and the generated
+    // wrapper only reaches the fields a `module` value actually BINDS: a
+    // hook left commented has its signature never checked, so it can silently
+    // drift from `bar_contract` — which is what left `draw` returning an
+    // advanced x for years while the contract wanted `anyerror!Painted`, and
+    // `onClick` positional while every caller passed one `*const ClickCtx`.
+    // Binding them makes that class of drift a configure error. A real
+    // segment is config-selectable only when its `.name` appears in
+    // `[bar] segments`, so binding here changes no shipped behaviour; drop a
+    // field you do not want and you are back to the unchecked state.
+    .measureString = measureString, // (clock convention) reserved width
+    .naturalWidth = naturalWidth,
+    .draw = draw,
+    .onClick = onClick,
     // Prompt extras — bind only for a chrome-surface overlay:
     //   .handleKeypress = handleKeypress,
     //   .consumeRedrawRequest = consumeRedrawRequest,

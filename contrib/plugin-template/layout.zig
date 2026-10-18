@@ -46,7 +46,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     const inset = tiling.totalInset(m.gap, m);
     const rect = model.Rect{
         .x = @intCast(area.x),
-        .y = @intCast(tiling.waY(v)),
+        .y = @intCast(tiling.waY(v.workarea)),
         .width = tiling.shrinkClamped(area.w, inset, v.env.min_dim),
         .height = tiling.shrinkClamped(area.h, inset, v.env.min_dim),
     };

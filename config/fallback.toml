@@ -49,7 +49,7 @@ Mod+Shift+T = "reload_config"
 [bar]
 position = "bottom"
 font_size = 12
-segment_spacing = 6
+per_segment_padding = 6
 
 bg              = "#222222"
 fg              = "#bbbbbb"
