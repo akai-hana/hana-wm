@@ -9,49 +9,60 @@ const contract = @import("tiling_contract");
 
 /// ICCCM section 4.1.2.3 size-hint application: increment snap, max-size
 /// clamp, then aspect clamp (with a re-snap, since a client may declare both).
-/// Declared minimums are intentionally NOT enforced: tiling owns window size
-/// (the policy lives on `model.SizeHints.min_width`).
+/// Declared minimums are intentionally NOT enforced as floors: tiling owns
+/// window size (the policy lives on `model.SizeHints.min_width`). The minimum
+/// still serves as the increment snap's base when the client declared no
+/// PBaseSize, which is the standard's own fallback and anchors the grid
+/// without pinning the rect.
 pub fn applyHints(rect: model.Rect, h: model.SizeHints) model.Rect {
     if (h.isEmpty()) return rect;
-    var width: u16 = rect.width;
-    var height: u16 = rect.height;
+    // Snap origin per axis: PBaseSize when declared, else the declared
+    // minimum (ICCCM: valid sizes are base + N*inc, base defaults to min).
+    const base_w: u16 = if (h.base_width > 0) h.base_width else h.min_width;
+    const base_h: u16 = if (h.base_height > 0) h.base_height else h.min_height;
 
-    width = snapDimToIncrement(width, h.inc_width);
-    height = snapDimToIncrement(height, h.inc_height);
+    var width = snapDimToIncrement(rect.width, base_w, h.inc_width);
+    var height = snapDimToIncrement(rect.height, base_h, h.inc_height);
 
     if (h.max_width > 0) width = @min(width, h.max_width);
     if (h.max_height > 0) height = @min(height, h.max_height);
 
-    // min_aspect = h/w lower bound, max_aspect = w/h upper bound (dwm
+    // min_aspect = h/w upper bound, max_aspect = w/h upper bound (dwm
     // convention); the shrink-only band fit is the ONE shared spelling on
     // model.SizeHints (.aspectFit), which also carries the both-or-neither
     // rationale. Re-snap to the increments since the shared fit rounds
-    // freely (the old inline clamp folded the increment snap in itself).
+    // freely.
     const fit = h.aspectFit(width, height);
-    width = snapDimToIncrement(fit.width, h.inc_width);
-    height = snapDimToIncrement(fit.height, h.inc_height);
+    width = snapDimToIncrement(fit.width, base_w, h.inc_width);
+    height = snapDimToIncrement(fit.height, base_h, h.inc_height);
 
     // Centre the (possibly shrunk) window inside its allocated slot. A positive
     // slot must never resolve to 0: the aspect re-snap can round a dimension
     // out entirely, so floor both dims after every clamp/snap.
     if (width == 0 and rect.width > 0) width = 1;
     if (height == 0 and rect.height > 0) height = 1;
+    // dx/dy top out at (65535 - 1) / 2 = 32767 (the dims floor at 1 above),
+    // so the i16 narrowing cannot overflow. The adds saturate: rect.x/y come
+    // in already satI16-clamped, and a saturated origin plus a large centre
+    // offset would wrap in ReleaseFast under a plain `+`.
     const dx: i16 = @intCast((rect.width -| width) / 2);
     const dy: i16 = @intCast((rect.height -| height) / 2);
     return .{
-        .x = rect.x + dx,
-        .y = rect.y + dy,
+        .x = rect.x +| dx,
+        .y = rect.y +| dy,
         .width = width,
         .height = height,
     };
 }
 
-/// Snap `dim` down to the nearest multiple of `inc`.
-inline fn snapDimToIncrement(dim: u16, inc: u16) u16 {
-    if (inc == 0) return dim;
-    // Floor the result so a positive slot never snaps to a 0 dimension
-    // (sub-increment leftover collapses to 1 instead).
-    const snapped = (dim / inc) * inc;
+/// Snap `dim` down onto the ICCCM increment grid `base + N*inc`. A `dim` at
+/// or below the base passes through (tiling is shrink-only; the snap never
+/// grows a window up to the grid). With a zero base the sub-increment
+/// leftover collapses to 1 instead of 0, so a positive slot never snaps to
+/// a zero dimension.
+inline fn snapDimToIncrement(dim: u16, base: u16, inc: u16) u16 {
+    if (inc == 0 or dim <= base) return dim;
+    const snapped = base + (dim - base) / inc * inc;
     return if (snapped == 0 and dim > 0) 1 else snapped;
 }
 
@@ -93,7 +104,12 @@ pub inline fn totalInset(gap_amount: u16, m: model.Margins) u16 {
 }
 
 /// Interior-boundary half-gap: the seam between two adjacent panes carries
-/// half a gap per side so neighboring windows together share one full gap.
+/// half a gap per side (floored) so neighboring windows together share one
+/// full gap — one pixel less when the gap is odd, the unavoidable cost of
+/// the two integer halves. Master/scroll interior seams are spelled through
+/// this; the recursive splits (leaf, fibonacci) keep the FULL gap at their
+/// seam via `bisectRegion`, so the two seam styles differ by at most that
+/// pixel on an odd gap.
 pub inline fn seamGap(m: model.Margins) u16 {
     return m.gap / 2;
 }
@@ -104,13 +120,16 @@ pub inline fn shrinkClamped(dim: u16, margin: u16, min_dim: u16) u16 {
     return if (dim > margin) dim - margin else min_dim;
 }
 
-/// `shrinkClamped` additionally capped at the space left after the margin,
-/// then floored at 1: the min_dim floor alone can flare a window past its
-/// own cell/strip in a congested layout (overlapping neighbours), and the
-/// emission needs at least one pixel. The single spelling of the
-/// `@max(@min(shrinkClamped(dim, margin, min_dim), dim -| margin), 1)` idiom.
-pub inline fn shrinkCapped(dim: u16, margin: u16, min_dim: u16) u16 {
-    return @max(@min(shrinkClamped(dim, margin, min_dim), dim -| margin), 1);
+/// `shrinkClamped` capped at the space left after the margin, then floored
+/// at 1: the min_dim floor alone can flare a window past its own cell/strip
+/// in a congested layout (overlapping neighbours), and the emission needs at
+/// least one pixel -- so a cell that cannot hold its margins collapses to
+/// 1px instead. Callers that must NOT collapse this way gate the emission
+/// on `insetFits` first. The single spelling of the `@max(dim -| margin, 1)`
+/// idiom (note there is no min_dim here: under the cap it had no effect --
+/// the `dim <= margin` branch always collapsed to 1 regardless).
+pub inline fn shrinkCapped(dim: u16, margin: u16) u16 {
+    return @max(dim -| margin, 1);
 }
 
 /// Full-rect inset by `margin` (shrinkClamped width/height at fixed origin).
@@ -135,11 +154,6 @@ pub inline fn insetFits(w: u16, h: u16, margin: u16) bool {
     return w > margin and h > margin;
 }
 
-/// Clamp a signed y coordinate to a non-negative u16.
-inline fn clampYToU16(y: i32) u16 {
-    return @intCast(@max(y, 0));
-}
-
 /// A two-dimensional screen region in tiling coordinates (x/y are i32, w/h
 /// u16). The shared shape for outerArea and the layout modules' recursion.
 pub const Region = struct {
@@ -156,12 +170,13 @@ pub inline fn outerArea(wa: model.Rect, gap: u16) Region {
         // Both edges take the work area's own origin plus the gap, not the gap
         // alone: without the origin, a work area that does not start at x=0 (a
         // side claim) would be silently placed back at the screen's left edge.
-        // The origins take the shared non-negative floors (waX for x,
-        // clampYToU16 for y).
+        // The origins take the shared non-negative floors (waX for x, waY for
+        // y); the sizes take the matching shrink (waWidth / waHeight) so a
+        // floored origin cannot push the far edge past the workarea.
         .x = waX(wa) +| @as(i32, gap),
-        .y = clampYToU16(wa.y) +| gap,
-        .w = wa.width -| gap *| 2,
-        .h = wa.height -| gap *| 2,
+        .y = waY(wa) +| @as(i32, gap),
+        .w = waWidth(wa) -| gap *| 2,
+        .h = waHeight(wa) -| gap *| 2,
     };
 }
 
@@ -176,18 +191,40 @@ pub inline fn bisectRegion(dim: u16, gap: u16) struct { first: u16, second: u16 
     return .{ .first = first, .second = second };
 }
 
-/// Work-area origin y clamped to >= 0, as u16.
-pub inline fn waY(v: *const View) u16 {
-    return clampYToU16(v.workarea.y);
+/// Work-area origin y clamped to >= 0, as i32 — the y twin of `waX` (same
+/// shape: Rect in, non-negative i32 out). Layout modules take every y origin
+/// through it, so a negative-origin workarea (latent; one sign flip of a
+/// future claim bug must not produce negative-y placements) can never place
+/// a window off the screen's top edge. The result is also always in u16
+/// range (wa.y is i16), so u16-layout callers can narrow it unchecked.
+pub inline fn waY(wa: model.Rect) i32 {
+    return @max(0, wa.y);
 }
 
 /// Work-area origin x clamped to >= 0, as i32 — the one home for the x
 /// floor. outerArea's inset and every layout module's origin offset take it,
 /// so a negative-origin workarea (latent; one sign flip of a future claim
 /// bug must not produce negative-x placements) can never place a window off
-/// the screen's left edge. The y floor lives in clampYToU16 (via waY).
+/// the screen's left edge. The y floor is `waY`.
 pub inline fn waX(wa: model.Rect) i32 {
     return @max(0, wa.x);
+}
+
+/// Workarea width after the x-origin floor (`waX`): a negative wa.x is
+/// floored to 0 for placement, so the width shrinks by the same amount or
+/// every right edge overshoots the workarea by |wa.x|. Horizontal twin of
+/// `waHeight`.
+pub inline fn waWidth(wa: model.Rect) u16 {
+    return wa.width -| @as(u16, @intCast(@max(0, -@as(i32, wa.x))));
+}
+
+/// Workarea height after the y-origin floor (`waY`): the
+/// vertical twin of `waWidth`. Layouts that size panes from the workarea
+/// dimensions MUST take them through this (or outerArea) -- sizing from the
+/// raw height while placing at the floored origin flares the bottom edge
+/// past the workarea by |wa.y|.
+pub inline fn waHeight(wa: model.Rect) u16 {
+    return wa.height -| @as(u16, @intCast(@max(0, -@as(i32, wa.y))));
 }
 
 /// Position of cell `i` along an axis of `cell`-sized cells separated by
@@ -196,9 +233,12 @@ pub inline fn cellStride(cell: u16, gap: u16, i: u16) u16 {
     return i *| (cell +| gap);
 }
 
-/// Append one placement. If the list is already at capacity this is a silent
-/// skip (drop the new placement) rather than an overflow — ReleaseFast never
-/// traps, and a full list means we're already showing the outer edges.
+/// Append one placement. An already-full list drops the new placement
+/// (BoundedList latches one overflow warning per list type, so the drop is
+/// reported once, not silent); the engine's emission is one append per
+/// window in `v.order`, which a store-capacity list always has room for, so
+/// the drop is a backstop against a future capacity contract change rather
+/// than a control-flow path.
 inline fn appendPlacement(out: *List, win: model.WindowId, rect: model.Rect, visible: bool) void {
     _ = out.append(.{ .win = win, .rect = rect, .visible = visible });
 }
@@ -259,11 +299,16 @@ pub inline fn emitOverflowShare(ctx: LayoutCtx, windows: []const model.WindowId,
 const tiling_mods = contract.tiling_mods;
 
 comptime {
-    // The kind is a u8 index and the config list is sized max_layouts, so a
-    // registry that outgrows either would truncate or overrun at runtime. The
-    // u8 bound is the stronger of the two (255 < max_layouts), so asserting it
-    // alone still implies the other.
-    std.debug.assert(tiling_mods.len <= std.math.maxInt(u8));
+    // The kind is a u8 index and the config list is capped at
+    // model.max_layouts, so a registry past either bound would truncate the
+    // kind or overrun the config list at runtime. Both are asserted, not
+    // just the u8 one: the u8 bound only implies the config cap while
+    // max_layouts stays >= 256, and a bare assert would report as a panic
+    // with no registry context.
+    if (tiling_mods.len > std.math.maxInt(u8))
+        @compileError("tiling registry exceeds the u8 kind index (max 255 layouts)");
+    if (tiling_mods.len > model.max_layouts)
+        @compileError("tiling registry exceeds model.max_layouts");
 }
 
 /// Resolve a config layout name to its registry index (case-insensitive match
@@ -283,6 +328,12 @@ pub fn layoutByName(name: []const u8) ?u8 {
 /// neutral default (index 0) or a caller-chosen seed kind.
 pub fn layoutKindFallingBack(name: []const u8, fallback: u8) u8 {
     if (layoutByName(name)) |k| return k;
+    // The fallback is the caller's choice (the neutral default or a
+    // caller-chosen seed kind); an out-of-range one would warn about "" and
+    // hand every degraded workspace a kind that resolves to nothing, so it
+    // is a caller bug, pinned here. The empty-registry (no-tiling) build is
+    // exempt: there is no kind that resolves there.
+    std.debug.assert(contract.tiling_mods.len == 0 or contract.moduleOf(fallback) != null);
     log.warn(
         "Config: layout name '{s}' did not resolve to a registered layout; " ++
             "using layout '{s}'",
@@ -316,6 +367,15 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
     var indices: [model.max_layouts]u8 = undefined;
     var n: usize = 0;
     for (names) |nm| if (layoutByName(nm)) |idx| {
+        // A repeated name (the config parse de-duplicates, but a duplicate
+        // from any other source) would otherwise make the value-equality
+        // search below bounce between the two rows and never reach the rest
+        // of the ring — skip it so every DISTINCT layout stays reachable.
+        var seen = false;
+        for (indices[0..n]) |prev| {
+            if (prev == idx) seen = true;
+        }
+        if (seen) continue;
         if (n < indices.len) {
             indices[n] = idx;
             n += 1;
@@ -343,8 +403,19 @@ pub fn cycleKind(cur: u8, dir: i32, names: []const []const u8) u8 {
 /// slicing seam.
 pub fn compute(kind: u8, v: *const View, out: *List) void {
     out.clear();
-    const m = contract.moduleOf(kind) orelse return;
     if (v.order.len == 0) return;
+    // An unregistered kind (a restored `kind` whose registry entry is gone,
+    // or a corrupted index) cannot dispatch. Emitting nothing would break
+    // the one-placement-per-window contract the sink consumes positionally
+    // against a per-slot table already built from `order` — so fall back to
+    // the neutral layout instead. The empty registry (no-tiling build) has
+    // no kind to fall back to and stays empty; reconcile gates the call on a
+    // resolved kind there.
+    const m = contract.moduleOf(kind) orelse blk: {
+        if (contract.tiling_mods.len == 0) return;
+        std.debug.assert(contract.moduleOf(contract.default_kind) != null);
+        break :blk contract.moduleOf(contract.default_kind) orelse return;
+    };
     // layoutModule assigns `compute` unconditionally, so null can only come
     // from a misbuilt registry entry — panic loudly instead of silently
     // parking the whole workspace.
@@ -362,20 +433,39 @@ pub fn compute(kind: u8, v: *const View, out: *List) void {
         // reintroduce it by choosing a tidier traversal than a row-major one.
         var scratch: List = .{};
         f(v, &scratch);
+        // The module-side half of the contract: one placement per window.
+        // emitInOrder REPAIRS a reordering but cannot invent a window a
+        // module dropped or split one it emitted twice, so those violations
+        // are caught HERE (debug builds; the raw-hook coverage check in the
+        // invariant sweep carries the same property into ReleaseFast test
+        // runs) instead of surfacing as a silently parked window.
+        std.debug.assert(scratchCoversOrder(v, &scratch));
         emitInOrder(v, &scratch, out);
     }
-    // One placement per window, in View.order order (asserted, and now
-    // GUARANTEED by emitInOrder above). The length check catches a dropped or
-    // doubled window; comparing the window id at each index catches a
-    // REORDERED one, which keeps the length while swapping whose rect is
-    // whose. Both are std.debug.assert: no release cost.
-    //
-    // Note these asserts are only live in Debug/ReleaseSafe. The unit tests
-    // build ReleaseFast by default (build.zig resolveOptimize), where they
-    // compile out -- which is why the placement-invariant sweep exists as an
-    // ordinary test rather than only as asserts.
+    // One placement per window, in View.order order — emitInOrder's
+    // guarantee, pinned here as the cheap invariant on the engine's own
+    // reordering pass (a failure below is a bug in emitInOrder, not in a
+    // layout module). Length first, then ids: a length-equal but reordered
+    // `out` is the same wrong-screen outcome the repair exists to prevent.
+    // std.debug.assert: no release cost.
     std.debug.assert(out.len == v.order.len);
     for (out.constSlice(), v.order) |p, win| std.debug.assert(p.win == win);
+}
+
+/// Whether `scratch` holds exactly one placement per window of `v.order`
+/// (count and set; order is emitInOrder's business to repair). O(n^2), but
+/// only ever called under a debug assert.
+fn scratchCoversOrder(v: *const View, scratch: *const List) bool {
+    const ps = scratch.constSlice();
+    if (ps.len != v.order.len) return false;
+    for (v.order) |win| {
+        var seen: usize = 0;
+        for (ps) |p| {
+            if (p.win == win) seen += 1;
+        }
+        if (seen != 1) return false;
+    }
+    return true;
 }
 
 /// Re-emit `scratch` into `out` in `v.order` position.
@@ -415,8 +505,12 @@ fn emitInOrder(v: *const View, scratch: *const List, out: *List) void {
             break;
         }
         // No match for this position: emit a placeholder so the placement
-        // COUNT still matches and the caller's per-index assert names the
-        // missing window, instead of a count mismatch that names nothing.
+        // COUNT still matches and the sink's positional indexing never runs
+        // off the end of `out`. A window can only be missing here when a
+        // module violated the one-placement-per-window contract (dropped or
+        // doubled it) — caught by the scratch coverage assert in debug
+        // builds; the placeholder is what keeps the release build's screen
+        // merely degraded (one parked window) instead of misindexed.
         if (!found) _ = out.append(.{ .win = win, .rect = contract.parked_rect, .visible = false });
     }
 }
@@ -500,6 +594,23 @@ pub fn layoutModule(
     comptime variants: []const Variant,
     comptime extra: contract.Layout,
 ) contract.Layout {
+    comptime {
+        // One table, checked: a duplicated value-string would shadow its twin
+        // in variantParse/variantIndex (first match wins), and a second fifo
+        // row would be unreachable through fifo_variant — both silent
+        // mis-parses of a hand-edited table. The count itself must fit the
+        // u8 `variant_count`/`variant_idx` fields.
+        if (variants.len > std.math.maxInt(u8))
+            @compileError("layout '" ++ name ++ "' has more than 255 variants");
+        for (variants, 0..) |a, i| {
+            for (variants[i + 1 ..]) |b| {
+                if (std.mem.eql(u8, a.name, b.name))
+                    @compileError("layout '" ++ name ++ "' has duplicate variant name '" ++ a.name ++ "'");
+                if (a.fifo and b.fifo)
+                    @compileError("layout '" ++ name ++ "' marks more than one fifo variant");
+            }
+        }
+    }
     var m = extra;
     m.name = name;
     m.icon = icon;
@@ -572,6 +683,10 @@ pub fn swapFocusedWithPrevious(m: *model.Model) void {
     const list = &ws.tiled_order;
     const mru = ws.focus_mru.constSlice();
     if (list.len < 2 or mru.len < 2) return;
+    // MRU[0] is maintained as the focused window (focus.setFocus front-
+    // inserts). If the two ever diverge, mru[1] is NOT "the previously
+    // focused window" and swapping with it would move an unrelated slot.
+    if (mru[0] != focused) return;
     const prev = mru[1];
     if (prev == focused) return;
     const i = list.indexOfScalar(focused) orelse return;

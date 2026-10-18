@@ -191,8 +191,11 @@ const max_layouts = model.max_layouts;
 /// element is a variants word or a workspace list ("1,3,5"); a third may
 /// follow as a workspace list when the second was a variants. Plain
 /// single-name format ("master-stack") is fully backward-compatible. Names
-/// are stored lowercased and de-duplicated case-insensitively; an overlong
-/// name is skipped with a warning (resolution, not spelling, is authoritative).
+/// are stored lowercased, canonicalized (master aliases fold onto "master"),
+/// and de-duplicated case-insensitively ON THE CANONICAL form — comparing the
+/// raw spelling would let "master" and "master-stack" both land in the ring
+/// as two "master" rows; an overlong name is skipped with a warning
+/// (resolution, not spelling, is authoritative).
 /// The optional trailing group after an appended layout name: a workspace
 /// list and/or a variants word, consumed in either order. A variants word
 /// is stored into `cfg.variants` under the canonical layout name and
@@ -246,30 +249,34 @@ fn parseLayoutsArray(
             log.warn("layouts array: layout name '{s}' at index {} is longer than the {d}-byte limit, skipping", .{ raw_name, i, layout_names.max_layout_name });
             continue;
         };
+        // Canonicalize BEFORE the dedup check: the stored entries are
+        // canonical, so comparing the raw spelling would let an alias pair
+        // ("master" + "master-stack") past the check and land two "master"
+        // rows in the cycle ring.
+        const name_canon = layout_names.canonicalLayoutName(name_lower);
         const is_dup = for (cfg.layouts.items) |existing| {
-            if (std.mem.eql(u8, existing, name_lower)) break true;
+            if (std.mem.eql(u8, existing, name_canon)) break true;
         } else false;
         if (is_dup) {
-            log.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_lower, i });
+            log.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_canon, i });
             continue;
         }
-        // Stored canonical (config.canonicalLayoutName) so every downstream
-        // resolution -- the global default, per-workspace overrides, and the
-        // cycle ring -- sees the registry's canonical spelling. The cycle
-        // ring is capped at max_layouts (the overrides index into it via a
-        // u8), checked BEFORE the cast so an overlong config can't trap in
-        // ReleaseFast.
+        // Stored canonical so every downstream resolution -- the global
+        // default, per-workspace overrides, and the cycle ring -- sees the
+        // registry's canonical spelling. The cycle ring is capped at
+        // max_layouts (the overrides index into it via a u8), checked BEFORE
+        // the cast so an overlong config can't trap in ReleaseFast.
         if (cfg.layouts.items.len >= max_layouts) {
             log.warn("layouts array: maximum of {d} unique layouts reached, skipping '{s}'", .{ max_layouts, raw_name });
             continue;
         }
         const layout_idx: u8 = @intCast(cfg.layouts.items.len);
-        try cfg.layouts.append(allocator, try allocator.dupe(u8, layout_names.canonicalLayoutName(name_lower)));
+        try cfg.layouts.append(allocator, try allocator.dupe(u8, name_canon));
 
         // Optional trailing group: a workspace list and/or variants word.
-        if (try parseLayoutTrailing(allocator, cfg, name_lower, arr, &i)) |trail| {
+        if (try parseLayoutTrailing(allocator, cfg, name_canon, arr, &i)) |trail| {
             if (trail.ws_list) |ws_str| {
-                try parseWorkspaceListInto(allocator, ws_str, name_lower, layout_idx, trail.variants, &cfg.workspace_layout_overrides);
+                try parseWorkspaceListInto(allocator, ws_str, name_canon, layout_idx, trail.variants, &cfg.workspace_layout_overrides);
             }
         }
     }

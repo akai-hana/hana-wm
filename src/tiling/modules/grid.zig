@@ -31,8 +31,8 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // Both sides of each window's border, used to shrink usable cell dimensions.
     const bm = model.doubledBorder(m);
 
-    const screen_w = v.workarea.width;
-    const screen_h = v.workarea.height;
+    const screen_w = tiling.waWidth(v.workarea);
+    const screen_h = tiling.waHeight(v.workarea);
 
     const cell_w = paneCell(screen_w, grid.cols, m.gap);
     const cell_h = paneCell(screen_h, grid.rows, m.gap);
@@ -44,9 +44,9 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
         for (v.order) |win| tiling.emitHidden(out, win);
         return;
     }
-    const win_h = tiling.shrinkCapped(cell_h, bm, ctx.min_dim);
-    const win_w = tiling.shrinkCapped(cell_w, bm, ctx.min_dim);
-    const wa_y = tiling.waY(v);
+    const win_h = tiling.shrinkCapped(cell_h, bm);
+    const win_w = tiling.shrinkCapped(cell_w, bm);
+    const wa_y: u16 = @intCast(tiling.waY(v.workarea));
 
     // In relaxed mode a partial last row shares the full screen width.
     const last_row_count = n % grid.cols;
@@ -54,7 +54,7 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
         paneCell(screen_w, @intCast(last_row_count), m.gap)
     else
         cell_w;
-    const partial_win_w: u16 = tiling.shrinkCapped(partial_cell_w, bm, ctx.min_dim);
+    const partial_win_w: u16 = tiling.shrinkCapped(partial_cell_w, bm);
 
     for (v.order, 0..) |win, i| {
         const col: u16 = @intCast(i % grid.cols);

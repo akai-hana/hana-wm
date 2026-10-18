@@ -14,12 +14,22 @@ const bounded = @import("bounded");
 
 /// The tiling registry (build-generated). Re-exported here so consumers share
 /// one conditional-import definition instead of copy-pasting the
-/// `has_tiling` guard across files. Empty when the tiling subsystem is absent.
+/// `has_tiling_registry` guard across files. Empty when the tiling subsystem
+/// is absent.
+///
+/// Gated on `has_tiling_registry`, NOT `has_tiling`: the registry module is
+/// generated only while at least one layout module binds the `Layout`
+/// contract (see build.zig `hasTilingRegistry`). Deleting every layout file
+/// -- which the modularity matrix does in its "all tiling layouts removed"
+/// scenario -- leaves the engine source in place (`has_tiling` true) but
+/// emits no `tiling_modules` module, so importing it behind `has_tiling`
+/// would fail to resolve. An empty registry is the same degradation path the
+/// absent subsystem takes: `moduleOf` returns null and everything floats.
 ///
 /// This is the file's ONE edge into a generated implementation module, and it
 /// is deliberate -- see `activeLayoutKind` for why.
 pub const tiling_mods =
-    if (build_options.has_tiling) @import("tiling_modules").modules else &[_]Layout{};
+    if (build_options.has_tiling_registry) @import("tiling_modules").modules else &[_]Layout{};
 
 /// The neutral layout: registry index 0, the fallback for an unresolvable
 /// config layout name and for a restored `kind` that no longer resolves.

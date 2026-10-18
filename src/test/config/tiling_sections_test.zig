@@ -55,6 +55,25 @@ test "layouts array: lowercase storage, case-insensitive dedup, junk skipped" {
     try testing.expectEqualStrings("monocle", cfg.layouts.items[1]);
 }
 
+// The dedup runs on the CANONICAL form: the master aliases fold onto
+// "master" at storage time, so an alias pair must not slip past a
+// raw-spelling comparison and land two "master" rows in the cycle ring
+// (which would trap layout cycling between them).
+test "layouts array: master aliases dedupe onto their canonical spelling" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var cfg: tiling_config.Config = .{};
+    defer cfg.deinit(testing.allocator);
+    try load(arena.allocator(), &cfg,
+        \\[tiling]
+        \\layouts = ["master", "master-stack", "MASTER_STACK", "monocle"]
+    );
+
+    try testing.expectEqual(@as(usize, 2), cfg.layouts.items.len);
+    try testing.expectEqualStrings("master", cfg.layouts.items[0]);
+    try testing.expectEqualStrings("monocle", cfg.layouts.items[1]);
+}
+
 test "trailing variants word stores under the canonical layout name" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

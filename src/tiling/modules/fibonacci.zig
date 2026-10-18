@@ -44,13 +44,18 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     // how the same fact ends up with two homes.
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
-    // NOTE: the overflow gate deliberately stays border-only (geometry of what
-    // the strip can carry). The min_dim requirement is handled AT EMISSION by
+    // NOTE: the overflow gate deliberately stays geometry-only (what the
+    // strip can carry). The min_dim requirement is handled AT EMISSION by
     // capping w/h to the strip's content area, so raising this gate to include
     // min_dim is redundant with the emission cap and only moves the overflow
     // threshold -- a stricter gate trips overflow earlier and changes layout
-    // batching.
-    const min_region = tiling.totalInset(m.gap, m);
+    // batching. The `gap + 2` floor is the positivity requirement of the split
+    // itself: bisectRegion's first half is (dim - gap) / 2, which is 0 when
+    // dim <= gap + 1, and a zero-width strip would emit through shrinkCapped's
+    // >= 1 floor while the remainder stays put -- stacking every later window
+    // on the same cell. totalInset dominates for any border >= 1; the floor
+    // only bites the borderless zero/one-gap configs.
+    const min_region = @max(tiling.totalInset(m.gap, m), m.gap + 2);
 
     const outer = tiling.outerArea(v.workarea, m.gap);
     var cur = outer;
@@ -96,8 +101,8 @@ inline fn splitAndAdvance(
 
     const strip_w = if (split_x) win_dim else cur.w;
     const strip_h = if (split_x) cur.h else win_dim;
-    const w = shrinkCapped(strip_w, border2, ctx.min_dim);
-    const h = shrinkCapped(strip_h, border2, ctx.min_dim);
+    const w = shrinkCapped(strip_w, border2);
+    const h = shrinkCapped(strip_h, border2);
     tiling.emitRect(ctx.v, ctx.out, win, cur.x + off_x, cur.y + off_y, w, h);
     // Advance the remainder origin along the split axis (forward only), then
     // shrink the remainder along that axis by the taken strip.

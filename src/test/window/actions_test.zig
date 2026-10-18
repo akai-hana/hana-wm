@@ -30,6 +30,7 @@ const reconcile = @import("reconcile");
 const title_cache = @import("title_cache");
 const events = @import("events");
 const registry = @import("registry");
+const atoms = @import("atoms");
 test "actions: mapRequest admits, maps, and focuses a window" {
     var fx = try fixture.setUp("actions_test");
     defer fx.deinit();
@@ -625,6 +626,94 @@ test "actions: title PropertyNotify storms coalesce into one batch refresh" {
     window.flushPropertyRefresh();
     try std.testing.expectEqual(@as(usize, 0), window.pendingPropertyRefreshCount());
     try std.testing.expectEqualStrings("three", title_cache.peekTitle(win));
+}
+
+/// Writes an 8-bit string property on `win` the way a client sets a title.
+fn setTitleProperty(fx: *fixture.Fx, win: u32, prop: u32, prop_type: u32, data: []const u8) void {
+    _ = xcb.xcb_change_property(
+        fx.conn,
+        xcb.XCB_PROP_MODE_REPLACE,
+        win,
+        prop,
+        prop_type,
+        8,
+        @intCast(data.len),
+        data.ptr,
+    );
+    fx.flush();
+}
+
+/// Marks `win`'s title dirty through the production event entry point, then
+/// runs the batch-end flush that actually fetches it.
+fn refreshTitleOverWire(fx: *fixture.Fx, win: u32) void {
+    var ev: xcb.xcb_property_notify_event_t = std.mem.zeroes(xcb.xcb_property_notify_event_t);
+    ev.response_type = xcb.XCB_PROPERTY_NOTIFY;
+    ev.window = win;
+    ev.atom = atoms.getAtomOrZero("_NET_WM_NAME");
+    window.handlePropertyNotify(&ev);
+    window.flushPropertyRefresh();
+    fx.flush();
+}
+
+// The title fetch asks for `max_title_len` 32-bit units -- four bytes each --
+// so the server returns up to 1024 bytes and the reply can outrun the 256-byte
+// cache buffer. Rejecting that reply (the old `len > buf.len` guard) refused
+// BOTH properties, pickTitle fell through to "", and the bar painted a blank
+// title segment for exactly the windows with the longest titles. The reply
+// must be truncated instead of dropped.
+test "actions: an over-long title is cached truncated instead of dropped" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+
+    const win = fx.createWindow();
+    window.mapRequest(win, 0, true, null, null);
+    fx.flush();
+
+    // Both properties past the cap, so the WM_NAME fallback cannot mask a
+    // _NET_WM_NAME miss (that is the real-world shape: toolkits set both).
+    var long: [400]u8 = undefined;
+    @memset(&long, 'a');
+    long[0] = 'A';
+    const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
+    const utf8_string = atoms.getAtomOrZero("UTF8_STRING");
+    try std.testing.expect(net_wm_name != 0 and utf8_string != 0);
+    setTitleProperty(fx, win, net_wm_name, utf8_string, &long);
+    setTitleProperty(fx, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, &long);
+    refreshTitleOverWire(fx, win);
+
+    const got = title_cache.peekTitle(win);
+    try std.testing.expectEqual(@as(usize, title_cache.max_title_len), got.len);
+    try std.testing.expectEqualStrings(long[0..title_cache.max_title_len], got);
+}
+
+// The byte cap can land inside a multi-byte UTF-8 character (the arrow's lead
+// byte sits exactly on the cap's last byte here). Pango rejects invalid UTF-8
+// outright and paints NOTHING, so a truncated title must end on a whole
+// character -- otherwise the fix for the blank segment would just move the
+// blank from "no bytes" to "invalid bytes".
+test "actions: a title cut mid-character caches the last whole character" {
+    var fx = try fixture.setUp("actions_test");
+    defer fx.deinit();
+
+    const win = fx.createWindow();
+    window.mapRequest(win, 0, true, null, null);
+    fx.flush();
+
+    var long: [300]u8 = undefined;
+    @memset(&long, 'a');
+    long[255] = 0xE2; // U+2192 RIGHTWARDS ARROW, lead byte on the cap's last byte
+    long[256] = 0x86;
+    long[257] = 0x92;
+    const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
+    const utf8_string = atoms.getAtomOrZero("UTF8_STRING");
+    try std.testing.expect(net_wm_name != 0 and utf8_string != 0);
+    setTitleProperty(fx, win, net_wm_name, utf8_string, &long);
+    refreshTitleOverWire(fx, win);
+
+    const got = title_cache.peekTitle(win);
+    try std.testing.expectEqual(@as(usize, 255), got.len);
+    try std.testing.expectEqualStrings(long[0..255], got);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(got));
 }
 
 // P1-15: global_layout must make a layout cycle propagate to EVERY

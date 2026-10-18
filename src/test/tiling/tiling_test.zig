@@ -62,18 +62,18 @@ fn variantOrdinal(kind: u8, vname: []const u8) u8 {
 const GRID_RELAX_VARIANT: u8 = variantOrdinal(K_GRID, "relaxed");
 const MONOCLE_GAP_VARIANT: u8 = variantOrdinal(K_MONOCLE, "gaps");
 
-const Fixture = struct {
+pub const Fixture = struct {
     m: model.Model,
     hv: contract.HintsView,
     hint_buf: [model.store_capacity]model.SizeHints = undefined,
     wa: model.Rect,
 
-    fn init(self: *Fixture, wins: []const model.WindowId) !void {
+    pub fn init(self: *Fixture, wins: []const model.WindowId) !void {
         try self.initAt(wins, helpers.std_wa);
     }
 
     /// init with an explicit work area, for the non-standard-geometry cases.
-    fn initAt(self: *Fixture, wins: []const model.WindowId, wa: model.Rect) !void {
+    pub fn initAt(self: *Fixture, wins: []const model.WindowId, wa: model.Rect) !void {
         self.* = .{
             .m = .{},
             .hv = undefined,
@@ -89,7 +89,7 @@ const Fixture = struct {
         self.hv = self.hint_buf[0..n];
     }
 
-    fn view(self: *Fixture) tiling.View {
+    pub fn view(self: *Fixture) tiling.View {
         const s = &self.m.ws[0];
         return .{
             .order = s.tiled_order.constSlice(),
@@ -110,7 +110,7 @@ fn tuned(fx: *Fixture) tiling.View {
 
 /// One compute into a fresh list (a BoundedList, so returning by value
 /// is allocation-free).
-fn computeOf(kind: u8, v: tiling.View) List {
+pub fn computeOf(kind: u8, v: tiling.View) List {
     var list: List = .{};
     tiling.compute(kind, &v, &list);
     return list;
@@ -366,15 +366,59 @@ test "hints applied at emit" {
     const out = computeOf(K_MASTER, tuned(&fx));
 
     // Raw master rect is {8,8,780,580}; snapped down to 700x500 and centred
-    // back into its slot: dx = (780-700)/2 = 40, dy = 40.
+    // back into its slot: dx = (780-700)/2 = 40, dy = 40. Zero base (no
+    // PBaseSize/PMinSize): the snap anchors at 0, raw multiples of inc.
     try expectP(&out, 0, 11, 48, 48, 700, 500, true);
 }
 
-// Tiling deliberately ignores PMinSize/PBaseSize: the layout engine owns all
-// tiled dimensions, so honouring a client minimum would pin the rect and block
-// mod_h/mod_l. The same hints ARE honoured by the floating drag-resize floor
-// (floating.sizeHintLimits); this guards against min enforcement leaking into
-// the shared hint path.
+// ICCCM 4.1.2.3: valid sizes are base + N*inc, so the increment snap anchors
+// at PBaseSize, NOT at 0. A terminal declaring base 10x10 with 20x20 cells
+// must land on the client's grid; snapping from 0 would leave a partial cell
+// at the slot's edge (the very thing the snap exists to prevent).
+test "applyHints snaps increments from the declared base" {
+    const rect: model.Rect = .{ .x = 8, .y = 8, .width = 781, .height = 583 };
+    const h: model.SizeHints = .{
+        .base_width = 10,
+        .base_height = 10,
+        .inc_width = 20,
+        .inc_height = 20,
+    };
+    // w: 10 + (781-10)/20*20 = 770; h: 10 + (583-10)/20*20 = 570.
+    // Centred: dx = (781-770)/2 = 5, dy = (583-570)/2 = 6.
+    try testing.expectEqual(
+        model.Rect{ .x = 13, .y = 14, .width = 770, .height = 570 },
+        tiling.applyHints(rect, h),
+    );
+}
+
+// When PBaseSize is absent the snap falls back to the declared minimum
+// (the standard's own fallback). The minimum anchors the GRID; it is not
+// enforced as a floor -- a slot below it still passes through shrink-only.
+test "applyHints falls back to the declared minimum as snap base" {
+    const rect: model.Rect = .{ .x = 0, .y = 0, .width = 781, .height = 583 };
+    const h: model.SizeHints = .{
+        .min_width = 10,
+        .min_height = 10,
+        .inc_width = 20,
+        .inc_height = 20,
+    };
+    try testing.expectEqual(
+        model.Rect{ .x = 5, .y = 6, .width = 770, .height = 570 },
+        tiling.applyHints(rect, h),
+    );
+    // A slot at or below the base snaps to nothing and passes through:
+    // shrink-only, never a grow-up to the grid.
+    const small: model.Rect = .{ .x = 0, .y = 0, .width = 8, .height = 8 };
+    try testing.expectEqual(small, tiling.applyHints(small, h));
+}
+
+// Tiling deliberately does not ENFORCE PMinSize/PBaseSize as floors: the
+// layout engine owns all tiled dimensions, so a declared minimum would pin
+// the rect and block mod_h/mod_l. (The minimum still serves as the ICCCM
+// increment-snap base when PBaseSize is absent -- see the test above --
+// which anchors the grid without pinning the result.) The same hints ARE
+// honoured by the floating drag-resize floor (floating.sizeHintLimits);
+// this guards against min enforcement leaking into the shared hint path.
 test "applyHints ignores declared minimums" {
     const rect: model.Rect = .{ .x = 8, .y = 8, .width = 780, .height = 580 };
     try testing.expectEqual(rect, tiling.applyHints(rect, .{ .min_width = 1000, .min_height = 1000 }));
@@ -404,6 +448,82 @@ test "master swallows freed space from a narrow dialog slave" {
     try expectP(&out, 0, 11, 8, 8, 568, 580, true);
     // stack_x = master_w = 584; x=584+4=588, inner=shrink(216,16)=200.
     try expectP(&out, 1, 12, 588, 8, 200, 580, true);
+}
+
+// Water-fill goldens (fillHeights): a window whose max_height sits at or
+// below its fair share is PINNED to that height and its surplus redistributes
+// across the rest. Three windows, no stack (primary_count = n), so the whole
+// work area is one master column: avail = 600 - (gap 8 + 3*12) = 556.
+// Pin pass (zero boost, fair = rem/3): 80 <= 185 pins, then 120 <= (476/2 =
+// 238) pins; the uncapped middle takes the leftover 356. Heights sum to
+// avail, so pad_top is 0.
+test "master column water-fill pins max_height and redistributes the slack" {
+    var fx: Fixture = undefined;
+    try fx.init(&.{ 11, 12, 13 });
+    fx.m.ws[0].params.primary_count = 3;
+
+    fx.m.store.getPtr(11).?.size_hints = .{ .max_height = 80 };
+    fx.hint_buf[0] = fx.m.store.getPtr(11).?.size_hints;
+    fx.m.store.getPtr(13).?.size_hints = .{ .max_height = 120 };
+    fx.hint_buf[2] = fx.m.store.getPtr(13).?.size_hints;
+
+    const out = computeOf(K_MASTER, tuned(&fx));
+
+    // master full width: inner = shrink(800, 2*gap 16 + 2*border 4) = 780.
+    // Heights 80 / 356 / 120 at row pitch 12 from y = 8.
+    try expectP(&out, 0, 11, 8, 8, 780, 80, true);
+    try expectP(&out, 1, 12, 8, 100, 780, 356, true);
+    try expectP(&out, 2, 13, 8, 468, 780, 120, true);
+}
+
+// StackBoost goldens: secondary_balance boosts the FIRST stack slot (positive)
+// or the LAST (negative) via cumulative rounded boundaries. Stack column
+// avail = 556, rem_weight = 2 + boost = 3. balance=-1: boundaries
+// round(568/3)=189 then 568 -> heights 189/379 (the bottom slot gets the
+// larger share); balance=+1 mirrors them to 379/189. (avail here is the
+// column's 568 = 600 - gap 8 - 2*12.)
+test "stack column balance boosts the top or bottom slot" {
+    var fx: Fixture = undefined;
+    try fx.init(&.{ 11, 12, 13 });
+
+    // Master column: count 1, avail 580 -> full-height pane.
+    // Stack: x = master_w 400 + seam 4, inner = shrink(400, 16) = 384.
+    fx.m.ws[0].params.secondary_balance = -1.0;
+    var out = computeOf(K_MASTER, tuned(&fx));
+    try expectP(&out, 0, 11, 8, 8, 384, 580, true);
+    try expectP(&out, 1, 12, 404, 8, 384, 189, true);
+    try expectP(&out, 2, 13, 404, 209, 384, 379, true);
+
+    fx.m.ws[0].params.secondary_balance = 1.0;
+    out = computeOf(K_MASTER, tuned(&fx));
+    try expectP(&out, 0, 11, 8, 8, 384, 580, true);
+    try expectP(&out, 1, 12, 404, 8, 384, 379, true);
+    try expectP(&out, 2, 13, 404, 399, 384, 189, true);
+}
+
+// The primary_width split off 0.5: master pane = round(800 * width), stack
+// takes the rest, each inset by the seam/edge margins. 3 windows, primary
+// count 1 -> one master window + a two-high stack column (even split of the
+// stack's 556: 278/278? -- no: the stack's avail is 600-(8+2*12) = 568, and
+// the zero-boost even split is 284/284).
+test "primary_width splits the master pane at 0.25 and 0.75" {
+    var fx: Fixture = undefined;
+    try fx.init(&.{ 11, 12, 13 });
+
+    fx.m.ws[0].params.primary_width = 0.25;
+    var out = computeOf(K_MASTER, tuned(&fx));
+    // master_w = 200, inner = shrink(200, 16) = 184; stack pane 600,
+    // inner = 584 at x = 200 + 4.
+    try expectP(&out, 0, 11, 8, 8, 184, 580, true);
+    try expectP(&out, 1, 12, 204, 8, 584, 284, true);
+    try expectP(&out, 2, 13, 204, 304, 584, 284, true);
+
+    fx.m.ws[0].params.primary_width = 0.75;
+    out = computeOf(K_MASTER, tuned(&fx));
+    // master_w = 600, inner = 584; stack pane 200, inner = 184 at x = 604.
+    try expectP(&out, 0, 11, 8, 8, 584, 580, true);
+    try expectP(&out, 1, 12, 604, 8, 184, 284, true);
+    try expectP(&out, 2, 13, 604, 304, 184, 284, true);
 }
 
 // purity: compute twice yields identical output and mutates nothing.
@@ -558,6 +678,25 @@ test "layout cycle is config-order and wraps" {
     }
 }
 
+// A repeated ring entry cannot trap the cycle: value-equality search would
+// otherwise bounce between the two rows of the duplicated kind and never
+// reach the layouts past it. cycleKind de-duplicates the resolved indices.
+test "layout cycle skips duplicate ring entries" {
+    const names = [_][]const u8{ "master", "monocle", "master", "grid" };
+    var k = K_MASTER;
+    k = tiling.cycleKind(k, 1, &names);
+    try testing.expectEqual(K_MONOCLE, k);
+    // The duplicate "master" row is skipped: the next step lands on grid.
+    k = tiling.cycleKind(k, 1, &names);
+    try testing.expectEqual(K_GRID, k);
+    // ...and one more wraps back to the (single) master entry.
+    k = tiling.cycleKind(k, 1, &names);
+    try testing.expectEqual(K_MASTER, k);
+    // Backward from master skips the duplicate too and lands on grid.
+    k = tiling.cycleKind(K_MASTER, -1, &names);
+    try testing.expectEqual(K_GRID, k);
+}
+
 /// The shared placement-invariant checker. Every layout's own tests pin
 /// GOLDEN rects, which is exactly the blind spot: a golden test passes when a
 /// layout emits the right numbers for the right window and nothing at all says
@@ -575,7 +714,7 @@ test "layout cycle is config-order and wraps" {
 ///                   shared failure mode, and the one a per-layout golden is
 ///                   least likely to catch because each golden only looks at
 ///                   its own windows.
-fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
+pub fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
     const order = v.order;
     try testing.expectEqual(order.len, out.len);
     const ps = out.constSlice();
@@ -605,6 +744,32 @@ fn assertInvariants(out: *const List, v: tiling.View, wa: model.Rect) !void {
     }
 }
 
+/// The raw-hook coverage check: run a module's own `compute` DIRECTLY
+/// (bypassing the engine's emitInOrder repair) and require exactly one
+/// placement per window. A dropped or duplicated window is repaired into a
+/// parked placement by the engine, so the repaired output cannot see it --
+/// and `tiling.compute`'s matching debug assert is compiled out of
+/// ReleaseFast test builds. This carries the module-side contract check into
+/// every optimize mode the sweep may run under.
+fn assertRawCoverage(lm: contract.Layout, v: tiling.View) !void {
+    // The engine guards the empty order BEFORE any module sees it (grid's
+    // paneCell divides by count, monocle indexes the tail), so the raw-hook
+    // contract starts at n = 1.
+    if (v.order.len == 0) return;
+    const f = lm.compute orelse return;
+    var raw: List = .{};
+    f(&v, &raw);
+    const ps = raw.constSlice();
+    try testing.expectEqual(v.order.len, ps.len);
+    for (v.order) |win| {
+        var seen: usize = 0;
+        for (ps) |p| {
+            if (p.win == win) seen += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), seen);
+    }
+}
+
 // The sweep: every registered layout x every variant x n over 0..12 (all)
 // and 14..64 (stride 2, up to `model.max_tiled_per_ws`), across five work
 // areas (incl. the degenerate 0x0 and a smaller-than-margins one) and five
@@ -627,6 +792,10 @@ test "Every layout satisfies the placement invariants at every size" {
         .{ .x = 40, .y = 50, .width = 800, .height = 600 },
         .{ .x = 0, .y = 0, .width = 0, .height = 0 },
         .{ .x = 7, .y = 9, .width = 16, .height = 16 },
+        // Negative origin: the waX/waY floors keep placements non-negative,
+        // and waWidth/waHeight must shrink to match or the far edge
+        // overshoots (found by the P1-24 fuzzer, monocle at wa.y=-2).
+        .{ .x = -5, .y = -5, .width = 800, .height = 600 },
     };
     // The environments the layout modules have to survive: the standard
     // gap-heavy one; a border-dominated one (5px border > 2px gap) that
@@ -683,6 +852,10 @@ test "Every layout satisfies the placement invariants at every size" {
                         fx.m.ws[0].params.primary_count = 12;
                         var v = fx.view();
                         v.env = env;
+                        // The module's OWN output, pre-repair: the invariant
+                        // pass below runs on the engine-repaired plan, which
+                        // cannot show a dropped or duplicated window.
+                        try assertRawCoverage(lm, v);
                         const out = computeOf(@intCast(kind), v);
                         assertInvariants(&out, v, wa) catch |err| {
                             // Dump both sequences: an order mismatch is only
