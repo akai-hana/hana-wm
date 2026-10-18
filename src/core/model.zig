@@ -6,17 +6,20 @@
 //! vocabulary, records, `Model`, and every state operation — the domain file
 //! stays an implementation detail.
 //!
-//! Layer rule: pure core (no X11, no feature imports). The only imports are
-//! the shared bounded shelf and `domain`, so this file cannot reach
+//! Layer rule: pure core (no X11, no feature imports). The only MODULE
+//! imports are the shared bounded shelf and `domain` (std/builtin are
+//! language-level edges, not module imports, so this file still cannot reach
 //! the connection in `core.zig` — that is what keeps the pure side a DAG
-//! root. Single-threaded.
+//! root). Single-threaded.
 //!
 //! Feature transitions live in the window layer's optional modules and the
 //! tiling engine (`window/protocol/focus.zig`, `window/state/window_state_ops.zig`,
 //! `tiling/tiling.zig` via `tiling_seam`); this file exports only shared
 //! vocabulary re-exports and pure queries.
+const builtin = @import("builtin");
 const bounded = @import("bounded");
 const domain = @import("domain");
+const std = @import("std");
 
 // Re-export vocabulary — EVERY decl of domain, one line each.
 pub const WindowId = domain.WindowId;
@@ -135,6 +138,61 @@ pub fn findHome(m: *const Model, win: WindowId) ?WSId {
         if (m.ws[i].tiled_order.indexOfScalar(win) != null) return WSId.fromIndex(i);
     }
     return null;
+}
+
+/// First-violation form of the single-writer membership invariant (P1-31).
+/// Exactly one workspace list may hold a window whose `anchor` is `.tiled`
+/// and `presence` is `.present`; that list must be the one its cached
+/// `home_ws` names; and every id listed on any workspace must still exist in
+/// the store. Floating and parked windows are home-free by design, so they
+/// are skipped. Returns the violation instead of panicking so a test can trip
+/// the exact logic `debugCheckInvariants` asserts with (Zig cannot catch a
+/// panic, and `std.testing.expect` would abort the run).
+pub const InvariantViolation = error{
+    StrandedWindow,
+    DuplicateMembership,
+    StaleHomeWs,
+    OrphanedListEntry,
+};
+
+pub fn checkInvariants(m: *const Model) InvariantViolation!void {
+    for (0..m.store.count()) |i| {
+        const it = m.store.at(i);
+        if (it.val.anchor != .tiled or it.val.presence != .present) continue;
+        var homes: usize = 0;
+        var actual_home: WSId = undefined;
+        for (&m.ws, 0..) |*s, wi| {
+            if (s.tiled_order.indexOfScalar(it.key) != null) {
+                homes += 1;
+                actual_home = WSId.fromIndex(wi);
+            }
+        }
+        if (homes == 0) return error.StrandedWindow;
+        if (homes > 1) return error.DuplicateMembership;
+        // A missing home_ws on a listed window is stale too: the list IS the
+        // home, so the cache simply failed to record it.
+        const home = it.val.home_ws orelse return error.StaleHomeWs;
+        if (home.index != actual_home.index) return error.StaleHomeWs;
+    }
+    for (&m.ws) |*s| {
+        for (s.tiled_order.constSlice()) |w| {
+            if (!m.store.has(w)) return error.OrphanedListEntry;
+        }
+    }
+}
+
+/// Debug-only boundary hook (P1-31): panics on the first violated
+/// single-writer invariant. The mode check folds at comptime, so Release
+/// builds pay nothing and the call is an inline no-op. The reconcile-grab
+/// boundaries in `core/loop/pipeline.zig` invoke it inside the grab right
+/// after `reconcile.run` mutates the model, so any stray membership write
+/// trips loudly in a Debug session instead of silently corrupting tiling.
+pub fn debugCheckInvariants(m: *const Model) void {
+    if (builtin.mode != .Debug) return;
+    checkInvariants(m) catch |err| std.debug.panic(
+        "model single-writer invariant violated: {s} (debug hook at reconcileGrab)",
+        .{@errorName(err)},
+    );
 }
 
 /// Shared tiled->floating detach (toggle_floating / drag-detach): seeds the
