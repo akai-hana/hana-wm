@@ -298,6 +298,7 @@ pub const ScopedGrab = struct {
         self.c.?.workarea = usable_area.workArea(core.getState().screen);
         self.c.?.bar_win = usable_area.mappedSurfaceWindow();
         reconcile.run(&instance, self.c.?, o);
+        model_mod.debugCheckInvariants(&instance);
     }
 };
 
@@ -363,6 +364,7 @@ pub inline fn reconcileGrab(o: reconcile.Opts) void {
     const g = grabScoped();
     defer g.deinit();
     reconcile.run(&instance, g.c.?, o);
+    model_mod.debugCheckInvariants(&instance);
 }
 
 /// Grab server, run the focus transition, reconcile, then ungrabAndFlush
@@ -403,4 +405,5 @@ pub inline fn reconcileGrabFocus(
     }
     reconcile.run(&instance, g.c.?, o);
     if (order == .after) focus.applyPendingFocus(t);
+    model_mod.debugCheckInvariants(&instance);
 }
