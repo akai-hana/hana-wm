@@ -18,10 +18,14 @@
 #
 # ENV
 #   XTEST_DISPLAY_RANGE  space-separated display numbers to probe (default "99 100 ... 199")
-#   HANA_REQUIRE_X        forced to 1 by default here (fixture fail-mode): the
-#                         whole point of this wrapper is that X IS available, so
-#                         X-gated tests must not silently skip and pass. Set it
-#                         to 0 to override.
+#   HANA_REQUIRE_X        forced on here (fixture fail-mode): the whole point of
+#                         this wrapper is that X IS available, so X-gated tests
+#                         must not silently skip and pass. The fixture checks
+#                         the variable's PRESENCE, so any value -- including 0
+#                         -- means "require"; there is no way to soft-skip
+#                         through this wrapper. To soft-skip locally, run the
+#                         suite unwrapped with the variable UNSET (never on a
+#                         machine with a live hana session; see above).
 #
 # Exit code is the child's exit code.
 set -u

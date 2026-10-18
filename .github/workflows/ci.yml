@@ -76,7 +76,7 @@ jobs:
 
       # xtest.sh starts an isolated Xvfb and sets HANA_REQUIRE_X=1 so every
       # display-gated test actually runs instead of self-skipping (a bare
-      # `zig build test` reports green with ~40 tests silently skipped).
+      # `zig build test` reports green with 48 tests silently skipped).
       # Debug is several times cheaper than the ReleaseFast default
       # (resolveOptimize) and it also runs the std.debug.assert coverage
       # ReleaseFast compiles out.
@@ -118,6 +118,22 @@ jobs:
       # build comptime-elides.
       - name: Build Debug (the harness runs the installed binary)
         run: zig build -Doptimize=Debug
+
+      # The shipped config/ tree IS the documented user experience, so it
+      # gets validated through the real load path (entry file + includes +
+      # merge), not only through the unit test that stages the same three
+      # files in a sandbox. --check-config needs no display (it exits before
+      # any X11 work) and exits 1 on ANY diagnostic, so CI fails on a dead
+      # knob, a mis-cased section, or a parse break. Debug keeps the warn
+      # scopes visible; a release build comptime-elides them and the mode
+      # refuses with exit 2. XDG_CONFIG_HOME points at a tree whose hana/
+      # is the repo's config/ (only config.toml is read from a dir; its
+      # include list names the rest).
+      - name: Validate shipped config (hana --check-config)
+        run: |
+          mkdir -p /tmp/hana-check-home
+          ln -s "$PWD/config" /tmp/hana-check-home/hana
+          XDG_CONFIG_HOME=/tmp/hana-check-home ./zig-out/bin/hana --check-config
 
       - name: E2E smoke subset (S01 spawn-tiled / S02 close / S11 configure-honored / S18 ewmh-fullscreen / S22 restore / S24 dialog-float)
         run: |

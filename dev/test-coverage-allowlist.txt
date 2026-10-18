@@ -1,0 +1,50 @@
+# Test-coverage allowlist (P1-28/D24)
+#
+# Production stems (every src/**/*.zig except *_test.zig and src/test/**)
+# that NO test file directly @imports. Enforced bidirectionally by
+# src/test/core/coverage_test.zig: a production stem missing from this file
+# fails the suite ("add a direct test or list it here with a rationale"),
+# and a listed stem that some test has since imported fails too ("remove
+# the stale entry"), so the list cannot silently rot in either direction.
+#
+# Growth policy: adding a stem here is the deliberate, reviewable act --
+# pair it with WHY the stem is reached some other way (a registry sweep,
+# a seam, e2e goldens) or with a plan to test it directly. Priority stems
+# from the plan (cursor, xkb, keys, dispatch, client_events, reload,
+# diagnostic) that gain direct tests leave this file: keys (input_test),
+# reload (reload_test) and xkb (xkb_test) already did.
+#
+# Format: first token is the stem, the rest of the line is the rationale.
+
+bar             bar composition/draw root; reached via the bar module registry tests and e2e S25 pixel goldens
+bindings        bar render column bindings; needs the cairo surface, covered by e2e bar pixels
+border_sweeps   border X-sync sweeps; X-wire, reached via borders/sync tests through seams and e2e
+client_events   ConfigureRequest/ClientMessage/Crossing handlers; X-event paths covered by e2e S11/S18/S24
+completion      prompt completion; needs the chrome overlay fixture (e2e bar scenarios)
+contract_dispatch  comptime providerOf/callAll over module contracts; exercised via the registries (tiling sweep, window/bar modules)
+cursor          one startup X call (root cursor theme); the pure mouse-bind report is mouse's (mouse_test)
+diagnostic      dumpState over live core state; covered by the e2e STATE DUMP log assertions
+dispatch        action execution against live model/X; covered by e2e and the X-gated action tests through seams
+document        parse document tree; its vocabulary is parser's public surface (parser_test imports parser)
+domain          X11-free vocabulary; reached through model (model_test and most subsystem tests)
+editor          prompt line editor; needs the chrome overlay fixture
+fibonacci       layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+grid            layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+hz              display refresh-rate probe (X RandR); needs a display, covered by e2e boot
+icccm           ICCCM protocol helpers; X-wire, covered by e2e close/fullscreen scenarios
+layout          bar layout segment; reached via the bar module registry and e2e bar pixels
+main            process entry (X connect, config load, event loop); covered by e2e boot scenarios and the --check-config CI step
+leaf            layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+master          layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+monocle         layout module; reached through the registry sweep (tiling_test computeOf), not by direct import
+overlay         prompt overlay chrome; needs the bar surface fixture
+profile         opt-in latency instrumentation; compiled out unless -Dprofile-key/-Dbench
+reconcile_tails window-layer sync tails; reached via reconcile/borders tests through the window seam and e2e
+shell           slider shell segment; reached via the bar module registry and e2e bar scenarios
+snapshot        re-exported through config; its API is driven by the config snapshot tests via config.*
+surface         bar render surface (cairo); covered by e2e S25 pixel goldens
+tags            bar tags segment; reached via the bar module registry and e2e bar scenarios
+trace           debug tracing instrumentation; compiled out by default
+variants        bar layout-variants segment; reached via the bar module registry
+win             bar wire window list; reached via the bar module registry and e2e
+window_contract window-module contract vocabulary; reached via the window module tests and registries

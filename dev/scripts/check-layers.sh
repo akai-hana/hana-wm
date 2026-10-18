@@ -163,13 +163,6 @@ wire_allowed() {
         # the carve-out follows the file.)
         src/test/harness/fixture.zig) ;;
 
-        # src/test/window/focus_test.zig is a TEST DOUBLE: its liveness
-        # ordering test destroys the clicked window through the X-gated
-        # harness's real connection (xcb_destroy_window) so it can assert that
-        # a mouse_click on a window destroyed mid-click is never re-focused.
-        # Same test-double carve-out as fixture.zig; never routes through sync.
-        src/test/window/focus_test.zig) ;;
-
         # src/test/core/pipeline_test.zig is a TEST DOUBLE: it maps two
         # synthetic override-redirect windows through the X-gated harness's
         # real connection so it can assert the pipeline's window-enter /
@@ -308,6 +301,48 @@ fi
 if ! "${fmt_cmd[@]}" >/dev/null 2>&1; then
     viol "rule 4 (zig fmt --check)"
 fi
+
+# Rule 5: the model is the single writer of window state (P1-31). Mutations of
+# a workspace's tiled_order -- the membership list the single-membership
+# invariant is defined over -- are confined to the write API and the handful
+# of callers whose semantics genuinely re-home a window; every other file must
+# go through them rather than touch the list directly. The sanctioned set
+# starts closed and is EDITED HERE WITH A RATIONALE when a new write path
+# lands, which makes "who may write membership" a reviewed fact instead of a
+# convention. Comment-only lines are stripped first (code_lines) so
+# documentation cannot trip the guard. src/test/ is excluded: fixtures build
+# deliberate violations to assert the invariant itself (the logic under test
+# lives in model.checkInvariants, not in this grep).
+tiled_order_allowed() {
+    case "$1" in
+        # The single writer itself: unregister un-homes a window from its
+        # workspace list.
+        src/core/model.zig) ;;
+        # The window layer's register/unregister write API -- the one path
+        # every other file is supposed to call instead of appending itself.
+        src/window/state/window_state_ops.zig) ;;
+        # Workspace moves re-home membership (moveToWorkspace semantics:
+        # remove from the old list, append to the new one).
+        src/window/modules/workspaces.zig) ;;
+        # Park/unpark (minimize) moves membership while keeping the anchor.
+        src/window/modules/minimize.zig) ;;
+        # Float transitions re-home membership in both directions
+        # (detachTiledToFloating routes through model; attach is here).
+        src/window/modules/floating.zig) ;;
+        # Boot/session restore reconstructs membership from the persisted
+        # snapshot -- one-shot, before the event loop ever runs.
+        src/core/process/session.zig) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+pat5='tiled_order\.(append|insert|clear|swapRemove|orderedRemove|pushFrontEvictingTail|removeWhere|removeById|removeValue)|removeValue\(&[^)]*tiled_order|restoreMembers\(&[^)]*tiled_order'
+while IFS= read -r line; do
+    f=${line%%:*}
+    tiled_order_allowed "$f" && continue
+    viol "rule 5 ($f mutates tiled_order outside the single-writer set)"; printf '%s\n' "$line" >&2
+done < <(grep -rnE "$pat5" src/ --include='*.zig' | grep -v '^src/test/' | code_lines)
 
 if [ "$fail" = 0 ]; then say "all layer rules pass"; else say "FAILURES above"; fi
 exit $fail

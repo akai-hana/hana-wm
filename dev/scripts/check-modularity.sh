@@ -194,17 +194,78 @@ declare -a REC_TYPE=()   # header | scenario
 declare -a REC_TEXT=()   # header text (headers only)
 declare -a REC_NAME=()   # scenario name (scenarios only)
 declare -a REC_PATHS=()  # removal paths, space-joined (scenarios only)
+declare -a REC_FAIL=()   # "1" = the build must FAIL (negative scenario)
+
+# The scenario table (Tier 3/4 + the negative case) comes from build.zig's own
+# discovery walk, so the matrix cannot drift from what the registries see: a
+# new layout or segment file adds a row without touching this script. Fetched
+# once, into an array of TSV lines.
+MANIFEST=()
+fetch_manifest() {
+    mapfile -t MANIFEST < <(zig build modularity-manifest 2>/dev/null)
+    if [[ ${#MANIFEST[@]} -eq 0 ]]; then
+        echo "error: 'zig build modularity-manifest' produced no rows" >&2
+        exit 1
+    fi
+}
 
 tier_header() {
     REC_TYPE+=("header")
     REC_TEXT+=("$1")
     REC_NAME+=("")
     REC_PATHS+=("")
+    REC_FAIL+=("")
 }
 
 run_scenario() {
-    local name="$1"
-    shift
+    record_scenario 0 "$@"
+}
+
+# Like run_scenario, but the build is EXPECTED to fail. Used by the negative
+# tier: a tree that still compiles after the deletion is the bug.
+run_scenario_fail() {
+    record_scenario 1 "$@"
+}
+
+# Record one manifest row as a scenario. Layout rows remove just the named
+# file; the single-file bar segments do the same; `all_segments`/`all_tiling`
+# and the group rows already carry their full path list.
+emit_manifest_rows() {
+    local kind="$1" row name paths
+    for row in "${MANIFEST[@]}"; do
+        [[ "$row" == "$kind"$'\t'* ]] || continue
+        IFS=$'\t' read -r _ name paths <<< "$row"
+        # shellcheck disable=SC2086  # paths is a space-joined list by design
+        record_scenario 0 "tier34-$name" $paths
+    done
+}
+
+# Record a manifest row as a build-must-FAIL scenario (negative tier).
+emit_manifest_rows_fail() {
+    local kind="$1" row name paths
+    for row in "${MANIFEST[@]}"; do
+        [[ "$row" == "$kind"$'\t'* ]] || continue
+        IFS=$'\t' read -r _ name paths <<< "$row"
+        # shellcheck disable=SC2086  # paths is a space-joined list by design
+        record_scenario 1 "tier6-$name" $paths
+    done
+}
+
+# Record a single named manifest row (the all-removed composites).
+emit_manifest_row() {
+    local kind="$1" label="$2" row name paths
+    for row in "${MANIFEST[@]}"; do
+        [[ "$row" == "$kind"$'\t'* ]] || continue
+        IFS=$'\t' read -r _ name paths <<< "$row"
+        # shellcheck disable=SC2086
+        record_scenario 0 "$label" $paths
+    done
+}
+
+record_scenario() {
+    local expect_fail="$1"
+    local name="$2"
+    shift 2
 
     # Apply pattern filter
     if [[ -n "$PATTERN" && "$name" != *"$PATTERN"* ]]; then
@@ -227,6 +288,7 @@ run_scenario() {
     REC_TEXT+=("")
     REC_NAME+=("$name")
     REC_PATHS+=("$*")
+    REC_FAIL+=("$expect_fail")
     ((SCENARIO_COUNT++)) || true
 }
 
@@ -290,6 +352,26 @@ run_one_scenario() {
     local build_ok=1
     if ! try_build "$dest"; then
         build_ok=0
+    fi
+
+    if [[ "${REC_FAIL[$i]:-0}" == "1" ]]; then
+        # Negative scenario (orphan config fragment): the build is REQUIRED to
+        # reject the tree, so a successful build is the failure.
+        if [[ "$build_ok" -eq 0 ]]; then
+            printf 'PASS\t%s\n' "$name" > "$out"
+            printf "  %-55s ${GREEN}PASS${RESET} (build rejected the orphan as expected)\n" "$name"
+        else
+            printf 'FAIL\t%s\tbuild succeeded but should have failed\n' "$name" > "$out"
+            printf "  %-55s ${RED}FAIL${RESET} (build accepted a tree it must reject)\n" "$name"
+            if [[ "$VERBOSE" -ne 1 ]]; then
+                printf "       ${YELLOW}last 30 lines:${RESET}\n"
+                tail -30 "$dest/_build.log" 2>/dev/null | sed 's/^/       /' || true
+            fi
+            if [[ "$KEEP_ON_FAILURE" -ne 1 ]]; then
+                rm -rf "$dest"
+            fi
+        fi
+        return 0
     fi
 
     if [[ "$build_ok" -eq 1 ]]; then
@@ -438,65 +520,28 @@ run_scenarios() {
         "src/window/modules/workspaces.zig" \
         "src/window/modules/workspaces_config.zig"
 
-    # Tier 3: Individual tiling layouts
+    # Tier 3: Individual tiling layouts. Derived from the same discovery walk
+    # build.zig runs, so a new layout file adds a scenario on its own.
     tier_header ""
     tier_header "${CYAN}Tier 3: tiling layouts (individual removal)${RESET}"
-
-    local layouts=(master monocle fibonacci grid leaf scroll)
-    for layout in "${layouts[@]}"; do
-        run_scenario \
-            "tiling layout: -$layout" \
-            "src/tiling/modules/${layout}.zig"
-    done
+    emit_manifest_rows layout
 
     run_scenario \
         "tiling layouts: -master -monocle" \
         "src/tiling/modules/master.zig" \
         "src/tiling/modules/monocle.zig"
 
-    # Tier 4: Bar segments (individual removal)
+    run_scenario \
+        "tiling layouts: all removed" \
+        "src/tiling/modules"
+
+    # Tier 4: Bar segments (individual removal). The bar_segment rows list
+    # exactly the BOUND sub-addons (the ones a `segmentFor(i)` entry exposes)
+    # plus the whole-surface modules; multi-file surfaces are bundled so a
+    # helper that only the core imports is never torn out alone.
     tier_header ""
     tier_header "${CYAN}Tier 4: bar segments (individual removal)${RESET}"
-
-    run_scenario \
-        "bar segment: -clock" \
-        "src/bar/modules/clock.zig"
-
-    run_scenario \
-        "bar segment: -tags" \
-        "src/bar/modules/tags.zig"
-
-    run_scenario \
-        "bar segment: -layout+variants" \
-        "src/bar/modules/layout/layout.zig" \
-        "src/bar/modules/layout/variants.zig"
-
-    run_scenario \
-        "bar segment: -title+carousel" \
-        "src/bar/modules/title/title.zig" \
-        "src/bar/modules/title/carousel.zig"
-
-    run_scenario \
-        "bar segment: -prompt (no vim)" \
-        "src/bar/modules/prompt/prompt.zig" \
-        "src/bar/modules/prompt/vim.zig"
-
-    # Systatus readouts and slider controls are their OWN bar segments
-    # (`segmentFor(i)` generated entries), so each is individually removable
-    # while its package core keeps compiling the survivors.
-    run_scenario \
-        "bar segment: -batt (systatus sub)" \
-        "src/bar/modules/systatus/batt.zig"
-
-    run_scenario \
-        "bar segment: -cpu -ram (systatus subs)" \
-        "src/bar/modules/systatus/cpu.zig" \
-        "src/bar/modules/systatus/ram.zig"
-
-    run_scenario \
-        "bar segment: -volume -brightness (slider subs)" \
-        "src/bar/modules/slider/volume.zig" \
-        "src/bar/modules/slider/brightness.zig"
+    emit_manifest_rows bar_segment
 
     run_scenario \
         "bar segment: -systatus package" \
@@ -506,18 +551,7 @@ run_scenarios() {
         "bar segment: -slider package" \
         "src/bar/modules/slider"
 
-    run_scenario \
-        "bar segment: all segments removed" \
-        "src/bar/modules/clock.zig" \
-        "src/bar/modules/tags.zig" \
-        "src/bar/modules/layout/layout.zig" \
-        "src/bar/modules/layout/variants.zig" \
-        "src/bar/modules/title/title.zig" \
-        "src/bar/modules/title/carousel.zig" \
-        "src/bar/modules/prompt/prompt.zig" \
-        "src/bar/modules/prompt/vim.zig" \
-        "src/bar/modules/systatus" \
-        "src/bar/modules/slider"
+    emit_manifest_row all_segments "bar segment: all segments removed"
 
     # Tier 5: Bar internals
     tier_header ""
@@ -534,6 +568,13 @@ run_scenarios() {
     run_scenario \
         "bar internal: -segment dispatch" \
         "src/bar/segment.zig"
+
+    # Tier 6: negative case. Leaving a `*_config` fragment behind its owner is
+    # NOT modular -- the build must refuse it, so this scenario inverts the
+    # outcome: a build that SUCCEEDS here is a failure.
+    tier_header ""
+    tier_header "${CYAN}Tier 6: orphan fragments (must FAIL the build)${RESET}"
+    emit_manifest_rows_fail orphan
 }
 
 # report
@@ -574,6 +615,7 @@ fi
 
 # Record the matrix, then build it (PAR at a time), then fold the per-scenario
 # results back into the report state.
+fetch_manifest
 run_scenarios
 
 echo ""
