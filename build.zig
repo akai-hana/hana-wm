@@ -145,6 +145,78 @@ pub fn build(b: *std.Build) !void {
         modules_step.dependOn(&b.addSystemCommand(&.{ "printf", "%s", buf.items }).step);
     }
 
+    // `zig build modularity-manifest`: the TSV scenario table
+    // check-modularity.sh drives Tier 3/4 (and the all-removed) from, printed
+    // from the SAME discovery walk build.zig runs. One walk, so the manifest
+    // cannot drift from what the registries actually see — adding a layout or
+    // segment file adds a row automatically, and the script's only job left is
+    // to execute them. Columns: kind<TAB>name<TAB>removal paths (space-joined).
+    //   layout       one tiling-layout module file (Tier 3, individual)
+    //   bar_segment  one bar `modules/` file (Tier 4, individual)
+    //   group        a whole directory (package core, render/ or wire/)
+    //   composite    a multi-file segment bundle (Tier 4 pair removals)
+    //   all_tiling   every layout file at once
+    //   all_segments every bar-segment file at once
+    //   orphan       a `*_config` fragment left behind by its owner (negative)
+    {
+        var rows: std.ArrayList(u8) = .empty;
+        defer rows.deinit(b.allocator);
+
+        const layout_rels = try layoutModuleRels(b, &discovery);
+        for (layout_rels.items) |rel| {
+            try rows.print(b.allocator, "layout\t{s}\t{s}\n", .{ std.fs.path.stem(rel), rel });
+        }
+        try rows.print(b.allocator, "all_tiling\t-\t", .{});
+        for (layout_rels.items) |rel| {
+            try rows.print(b.allocator, "{s} ", .{rel});
+        }
+        try rows.append(b.allocator, '\n');
+
+        const seg_rels = try barSegmentRels(b, &discovery);
+        for (seg_rels.items) |rel| {
+            try rows.print(b.allocator, "bar_segment\t{s}\t{s}\n", .{ std.fs.path.stem(rel), rel });
+        }
+        try rows.print(b.allocator, "all_segments\t-\t", .{});
+        for (seg_rels.items) |rel| {
+            try rows.print(b.allocator, "{s} ", .{rel});
+        }
+        try rows.append(b.allocator, '\n');
+
+        var dir_seen: std.StringHashMapUnmanaged(void) = .{};
+        defer dir_seen.deinit(b.allocator);
+        {
+            var it = discovery.source_paths.iterator();
+            while (it.next()) |entry| {
+                const rel = entry.value_ptr.*;
+                var dir: ?[]const u8 = null;
+                if (std.mem.startsWith(u8, rel, "src/bar/modules/")) {
+                    const rest = rel["src/bar/modules/".len..];
+                    const slash = std.mem.indexOfScalar(u8, rest, '/');
+                    if (slash != null) dir = std.fs.path.dirname(rel).?;
+                } else if (std.mem.startsWith(u8, rel, "src/bar/render/")) {
+                    dir = "src/bar/render";
+                } else if (std.mem.startsWith(u8, rel, "src/bar/wire/")) {
+                    dir = "src/bar/wire";
+                }
+                if (dir) |d| {
+                    const gop = try dir_seen.getOrPut(b.allocator, d);
+                    if (gop.found_existing) continue;
+                    gop.key_ptr.* = try b.allocator.dupe(u8, d);
+                    try rows.print(b.allocator, "group\t{s}\t{s}\n", .{ d, d });
+                }
+            }
+        }
+
+        // No `!` prefix: floating_config.zig must exist in the tree for this
+        // scenario to mean anything, and remove_paths fails loudly if it does
+        // not -- a silently-skipped negative case would report green without
+        // ever exercising OrphanConfigFragment.
+        try rows.appendSlice(b.allocator, "orphan\tfloating_config\tsrc/window/modules/floating_config.zig\n");
+
+        const manifest_step = b.step("modularity-manifest", "Print the modularity scenario manifest (TSV) for check-modularity.sh");
+        manifest_step.dependOn(&b.addSystemCommand(&.{ "printf", "%s", rows.items }).step);
+    }
+
     const gen = try buildGeneratedModules(b, &discovery, config_fragments, build_opts, target, optimize);
     const build_opts_mod = gen.build_opts_mod;
     const surfaces_mod = gen.surfaces_mod;
@@ -163,6 +235,71 @@ pub fn build(b: *std.Build) !void {
     buildExeAndRunStep(b, root_mod);
     wireBenchStep(b, bench_enabled, unit_test_step);
     try wireCheckSteps(b, root_mod, &discovery, features, shared_ctx, has_usr, target, optimize);
+}
+
+/// Tiling-layout files the modularity matrix may delete individually: every
+/// `pub const module`-declaring file under src/tiling/modules/ whose contract
+/// is a Layout. Sorted by stem so the manifest (and therefore the matrix's
+/// report order) is stable across runs.
+fn layoutModuleRels(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+) !std.ArrayList([]const u8) {
+    var rels: std.ArrayList([]const u8) = .empty;
+    errdefer rels.deinit(b.allocator);
+    var it = discovery.source_paths.iterator();
+    while (it.next()) |entry| {
+        const rel = entry.value_ptr.*;
+        if (!std.mem.startsWith(u8, rel, "src/tiling/modules/")) continue;
+        const fc = discovery.classified.get(rel) orelse continue;
+        if (!fc.pub_module) continue;
+        if (fc.contract == null) continue;
+        if (!std.mem.eql(u8, fc.contract.?, "Layout")) continue;
+        try rels.append(b.allocator, rel);
+    }
+    std.mem.sort([]const u8, rels.items, {}, lessStrings);
+    return rels;
+}
+
+/// Bar-segment files the modularity matrix may delete individually. A bar
+/// `modules/` file is a segment when it self-declares the bar contract
+/// (`pub const module: @import("bar_contract").Segment`) -- that covers both
+/// whole-surface modules sitting alone in their own directory (clock.zig) and
+/// a package core (systatus.zig). Sub-addon siblings are promoted to segments
+/// only through their package core's `segmentFor(i)` hook, which indexes the
+/// BOUND subs (the ones declaring the package's `Binding`); unbound helpers
+/// in the same directory (slider's shell/spawn_capture backends) are not
+/// segments and stay. `boundSubStems` is the exact filter
+/// buildOwnerRegistries uses, so this matches the registry rows one-for-one.
+fn barSegmentRels(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+) !std.ArrayList([]const u8) {
+    var rels: std.ArrayList([]const u8) = .empty;
+    errdefer rels.deinit(b.allocator);
+    const sub_specs = try discoverSubRegistrySpecs(b, discovery);
+    for (sub_specs) |spec| {
+        if (!spec.bar_segments) continue;
+        var bound: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{};
+        defer bound.deinit(b.allocator);
+        const stems = (try boundSubStems(b, discovery, spec, &bound)) orelse continue;
+        for (stems.items) |stem| {
+            const rel = discovery.source_paths.get(stem) orelse continue;
+            try rels.append(b.allocator, rel);
+        }
+    }
+    var it = discovery.source_paths.iterator();
+    while (it.next()) |entry| {
+        const rel = entry.value_ptr.*;
+        if (!std.mem.startsWith(u8, rel, "src/bar/modules/")) continue;
+        const fc = discovery.classified.get(rel) orelse continue;
+        if (!fc.pub_module) continue;
+        if (fc.contract == null) continue;
+        if (!std.mem.eql(u8, fc.contract.?, "Segment")) continue;
+        try rels.append(b.allocator, rel);
+    }
+    std.mem.sort([]const u8, rels.items, {}, lessStrings);
+    return rels;
 }
 
 // Shared context
@@ -241,6 +378,30 @@ const FeatureSet = struct {
     }
 };
 
+/// True when the build will generate the `tiling_modules` registry: at least
+/// one layout module binds the `Layout` contract. This is NOT `has_tiling`
+/// (which reports that `src/tiling/` was discovered): deleting every layout
+/// file drops `src/tiling/modules/`, so the owner never registers and
+/// `buildOwnerRegistries` emits no `tiling_modules` module at all -- while
+/// the engine source and `has_tiling` stay true. `tiling_contract` imports
+/// the registry behind this flag, so keying it on `has_tiling` would make
+/// the import unresolvable in exactly the "all layouts removed" tree.
+///
+/// The classification test matches `OwnerRegistry`'s member filter
+/// (`pub_module` + the `Layout` contract), so this cannot drift from what
+/// the registry generator actually emits.
+fn hasTilingRegistry(discovery: *const Module.DiscoveryContext) bool {
+    var it = discovery.classified.iterator();
+    while (it.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry.key_ptr.*, "src/tiling/modules/")) continue;
+        const fc = entry.value_ptr.*;
+        if (!fc.pub_module) continue;
+        if (fc.contract == null) continue;
+        if (std.mem.eql(u8, fc.contract.?, "Layout")) return true;
+    }
+    return false;
+}
+
 /// Optional-module detection: every has_* flag is derived from
 /// discovery.modules (the single src/ walk) rather than re-probing the
 /// filesystem, so a flag can never disagree with what was actually
@@ -251,6 +412,9 @@ fn probeFeatures(discovery: *const Module.DiscoveryContext, build_opts: *std.Bui
     // its module files were removed no longer claims the flag.
     const has_tiling = discovery.modules.contains("tiling");
     build_opts.addOption(bool, "has_tiling", has_tiling);
+    // Separate from `has_tiling`: the registry exists only while a layout
+    // module does (see hasTilingRegistry).
+    build_opts.addOption(bool, "has_tiling_registry", hasTilingRegistry(discovery));
     const has_floating = discovery.modules.contains("floating");
     build_opts.addOption(bool, "has_floating", has_floating);
     if (!has_tiling and !has_floating) {
@@ -1009,11 +1173,18 @@ fn checkFragmentKnobReaders(
     defer scan.close();
     const src = scan.src;
 
+    // `outside` is everything that is not the knobs table itself; the
+    // ownership table (`knob_reader_modules`) lives AFTER the knobs table, so
+    // the fragment source must include that trailing region.
     const table_marker = "pub const knobs";
     const table_start = std.mem.indexOf(u8, src, table_marker) orelse return;
     const table_end = knobTableEnd(src, table_start) orelse return;
     const table = src[table_start..table_end];
-    const outside = src[0..table_start];
+    var outside_buf: std.ArrayList(u8) = .empty;
+    defer outside_buf.deinit(b.allocator);
+    try outside_buf.appendSlice(b.allocator, src[0..table_start]);
+    if (table_end < src.len) try outside_buf.appendSlice(b.allocator, src[table_end..]);
+    const outside = outside_buf.items;
 
     // Field declarations: an indented `name:` line outside the knob table.
     // (`pub fn`/`fn`/local `var` lines put a space after the first token,
@@ -1079,6 +1250,30 @@ fn checkFragmentKnobReaders(
     }
     if (pending.items.len == 0) return;
 
+    // Declarative module ownership: a knob whose reader lives in an OPTIONAL
+    // module is legitimately unread when that module is deleted -- the
+    // modularity matrix removes a module and its config consumer together
+    // (see Knob.reader). The fragment declares ownership as a
+    // `pub const knob_reader_modules` table of `readerOf("target", "stem")`
+    // entries; the check validates that table and then excuses any pending
+    // target it owns whose stem is a module the tree simply does not have.
+    // A target owning NO module (or naming a module the tree never had) is
+    // still reported below, so a typo cannot silence the check.
+    {
+        var owned = try knobReaderModulesOf(b, src, frag_rel);
+        defer owned.deinit();
+        var keep: std.ArrayList([]const u8) = .empty;
+        defer keep.deinit(b.allocator);
+        for (pending.items) |word| {
+            const owner = owned.get(word) orelse continue;
+            if (discovery.modules.contains(owner)) continue;
+            try keep.append(b.allocator, word);
+        }
+        pending.clearRetainingCapacity();
+        try pending.appendSlice(b.allocator, keep.items);
+        if (pending.items.len == 0) return;
+    }
+
     var names: std.ArrayList(u8) = .empty;
     defer names.deinit(b.allocator);
     for (pending.items) |word| try names.print(b.allocator, "{s} ", .{word});
@@ -1090,6 +1285,82 @@ fn checkFragmentKnobReaders(
         .{ names.items, frag_rel },
     );
     return error.DeadKnobTarget;
+}
+
+/// Parses a fragment's `pub const knob_reader_modules` table into
+/// target -> owning module stem. A fragment with no such table (core-owned
+/// knobs, or a fragment that has not adopted ownership) yields an empty map.
+///
+/// The table is validated as it is parsed: every target must also be a knob
+/// target of the same fragment, so a renamed or deleted knob cannot leave a
+/// stale ownership entry that silently excuses an unrelated target.
+fn knobReaderModulesOf(
+    b: *std.Build,
+    src: []const u8,
+    frag_rel: []const u8,
+) !std.StringHashMap([]const u8) {
+    var owned: std.StringHashMap([]const u8) = .init(b.allocator);
+    errdefer owned.deinit();
+
+    const marker = "pub const knob_reader_modules";
+    const start = std.mem.indexOf(u8, src, marker) orelse return owned;
+    const end = knobTableEnd(src, start) orelse return owned;
+    const table = src[start..end];
+
+    // The targets of this fragment's knobs table, so ownership entries can
+    // be checked against them.
+    const knobs_marker = "pub const knobs";
+    const knobs_start = std.mem.indexOf(u8, src, knobs_marker) orelse return owned;
+    const knobs_end = knobTableEnd(src, knobs_start) orelse return owned;
+    var targets: std.StringHashMap(void) = .init(b.allocator);
+    defer targets.deinit();
+    {
+        var rest = src[knobs_start..knobs_end];
+        while (rest.len > 0) {
+            const q = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+            rest = rest[q + 1 ..];
+            const e = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+            const s = rest[0..e];
+            rest = rest[e + 1 ..];
+            try targets.put(s, {});
+        }
+    }
+
+    // Each entry is a one-liner `knob.readerOf("target", "stem")` call, so
+    // the parser takes the first two double-quoted strings on the line.
+    var rest = table;
+    while (rest.len > 0) {
+        const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+        const line = rest[0..nl];
+        rest = if (nl == rest.len) rest[nl..] else rest[nl + 1 ..];
+        if (std.mem.indexOf(u8, line, "readerOf") == null) continue;
+
+        var pair: [2]?[]const u8 = .{ null, null };
+        var p = line;
+        var idx: usize = 0;
+        while (idx < 2) {
+            const q = std.mem.indexOfScalar(u8, p, '"') orelse break;
+            p = p[q + 1 ..];
+            const e = std.mem.indexOfScalar(u8, p, '"') orelse break;
+            pair[idx] = p[0..e];
+            p = p[e + 1 ..];
+            idx += 1;
+        }
+        if (pair[0] == null or pair[1] == null) continue;
+        const target = pair[0].?;
+        const stem = pair[1].?;
+        if (targets.get(target) == null) {
+            std.debug.print(
+                "Error: {s}: knob_reader_modules names '{s}', which is not a\n" ++
+                    "  target of this fragment's knobs table. Fix the entry or the\n" ++
+                    "  target; a stale entry would excuse a knob that is now dead.\n",
+                .{ frag_rel, target },
+            );
+            return error.DeadKnobTarget;
+        }
+        try owned.put(try b.allocator.dupe(u8, target), try b.allocator.dupe(u8, stem));
+    }
+    return owned;
 }
 
 /// End offset (exclusive) of the `};` line closing the knobs table that
