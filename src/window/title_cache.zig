@@ -199,10 +199,17 @@ fn takePropertyReply(
     const r = reply.*;
     if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
     const len: usize = @intCast(r.value_len);
-    if (len > buf.len) return null;
+    // The fetch asks for `max_title_len` 32-bit units -- four bytes each --
+    // so a long title's reply can outrun this buffer. Truncate to the buffer
+    // instead of refusing the reply: the old `len > buf.len` guard dropped
+    // BOTH properties (the WM_NAME fallback went through the same check), so
+    // the longest titles -- exactly the ones the bar most needs to show --
+    // got a blank segment. `setTitle` owns the final bound and the
+    // character-boundary trim; this copy just feeds it the head of the value.
+    const n = @min(len, buf.len);
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
-    @memcpy(buf[0..len], value_ptr[0..len]);
-    return buf[0..len];
+    @memcpy(buf[0..n], value_ptr[0..n]);
+    return buf[0..n];
 }
 
 /// Caches `title` for `win` by copying it into the entry's inline buffer
@@ -232,8 +239,36 @@ pub fn storeTitle(win: u32, title: []const u8) void {
 
 /// Copy into the inline buffer, truncating at `max_title_len`. A short title
 /// does NOT need a terminator: `peekTitle` slices by `title_len`.
+///
+/// The cut can land inside a multi-byte UTF-8 sequence (the wire reply is
+/// first truncated to this buffer, and the reply may itself end mid-char).
+/// Pango rejects an invalid UTF-8 slice outright by painting nothing -- the
+/// blank title segment this guards against -- so back the cut up to the last
+/// whole character: walk off any trailing continuation bytes to their lead,
+/// then drop that lead too when its sequence does not fit the kept bytes.
+/// A complete title is returned unchanged (the walk is a no-op on a whole
+/// trailing character); ASCII reaches at most one non-continuation test.
 fn setTitle(wd: *WindowData, title: []const u8) void {
-    const n = @min(title.len, max_title_len);
+    // Completeness is judged against the CUT end, not the source tail: a
+    // source longer than the buffer may well hold the continuation bytes we
+    // already refused to keep.
+    const cut_end: usize = @min(title.len, max_title_len);
+    var n = cut_end;
+    while (n > 0 and (title[n - 1] & 0xC0) == 0x80) n -= 1;
+    if (n > 0) {
+        const lead = title[n - 1];
+        const seq_len: usize = if (lead < 0x80)
+            1
+        else if (lead & 0xE0 == 0xC0)
+            2
+        else if (lead & 0xF0 == 0xE0)
+            3
+        else if (lead & 0xF8 == 0xF0)
+            4
+        else
+            1; // invalid lead: keep the byte; the title is already invalid
+        if (n - 1 + seq_len > cut_end) n -= 1; // incomplete tail: drop the lead
+    }
     @memcpy(wd.title_buf[0..n], title[0..n]);
     wd.title_len = @intCast(n);
 }

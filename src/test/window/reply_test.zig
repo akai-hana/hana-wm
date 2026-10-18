@@ -74,6 +74,8 @@ test "PMinSize only" {
     const h = reply.parse(&arr, 18).?;
     try testing.expectEqual(@as(u16, 100), h.min_width);
     try testing.expectEqual(@as(u16, 200), h.min_height);
+    try testing.expectEqual(@as(u16, 0), h.base_width);
+    try testing.expectEqual(@as(u16, 0), h.base_height);
     try testing.expectEqual(@as(u16, 0), h.max_width);
     try testing.expectEqual(@as(u16, 0), h.max_height);
     try testing.expectEqual(@as(u16, 0), h.inc_width);
@@ -82,13 +84,19 @@ test "PMinSize only" {
     try testing.expectEqual(@as(f32, 0.0), h.max_aspect);
 }
 
-test "PMinSize + PBaseSize: effective floor is the larger" {
+test "PMinSize + PBaseSize: floor is the larger, base stays separate" {
     // min at fields[5..6] (idx 4..5), base at fields[15..16] (idx 14..15).
+    // The floor folds to max(min, base) for the floating drag-resize path,
+    // while base_width/base_height keep the raw PBaseSize so the tiling
+    // increment snap can anchor at the client's grid origin even when a
+    // larger PMinSize wins the floor.
     var arr: [18]u32 = undefined;
     fill18(&arr, 0x10 | 0x100, .{ 0, 0, 0, 0, 50, 50, 0, 0, 0, 0, 0, 0, 0, 0, 80, 60 });
     const h = reply.parse(&arr, 18).?;
     try testing.expectEqual(@as(u16, 80), h.min_width);
     try testing.expectEqual(@as(u16, 60), h.min_height);
+    try testing.expectEqual(@as(u16, 80), h.base_width);
+    try testing.expectEqual(@as(u16, 60), h.base_height);
 }
 
 test "PMaxSize + PResizeInc" {
