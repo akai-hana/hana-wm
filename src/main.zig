@@ -12,8 +12,9 @@ const xcb = core.xcb;
 const events = @import("events");
 const config = @import("config");
 const diagnostics = @import("diagnostics");
-const types = @import("types");
 const composed = @import("composed");
+// The dpi module under the local name `scale`, so the resolved value below
+// can be called `dpi` without shadowing the module it came from.
 const scale = @import("dpi");
 const hz = @import("hz");
 // The optional chrome surface's boot lifecycle (init/deinit) is invoked
@@ -26,6 +27,16 @@ const surfaces = @import("surfaces").Surfaces;
 const xkb = @import("xkb");
 const keybinds = @import("keybinds");
 const cursor = @import("cursor");
+const window = @import("window");
+// The model_config module under the local name `seed` (its role here is
+// boot-time seeding); its log scope stays `.model_config`.
+const seed = @import("model_config");
+const pipeline = @import("pipeline");
+const process = @import("process");
+const admission = @import("admission");
+const session = @import("session");
+const atoms = @import("atoms");
+const requests = @import("requests");
 
 /// The process allocator. One binding: a second `std.heap.c_allocator` spelling
 /// is a second place to change, and two sites can disagree about what they
@@ -33,16 +44,6 @@ const cursor = @import("cursor");
 const alloc = std.heap.c_allocator;
 // Call sites log through this scope; the sink is `logFn` below.
 const log = std.log.scoped(.main);
-const window = @import("window");
-const seed = @import("model_config");
-const pipeline = @import("pipeline");
-const process = @import("process");
-const admission = @import("admission");
-const session = @import("session");
-const focus = @import("focus");
-
-const atoms = @import("atoms");
-const requests = @import("requests");
 // Build-mode policy: a Debug build carries every diagnostic facility and a
 // release build carries none of them.
 //
@@ -139,15 +140,23 @@ fn runCheckConfig() !void {
     }
     var diag: diagnostics.Diagnostics = .{ .allocator = alloc };
     defer diag.deinit();
-    try config.checkConfig(alloc, &diag);
+    // An error here means the check could not LOAD a config (I/O, OOM), not
+    // that the config is bad: exit 2 -- the same "cannot validate" code the
+    // compiled-out-diagnostics guard above uses -- so a caller can tell the
+    // two failures apart instead of seeing one exit 1 for both.
+    config.checkConfig(alloc, &diag) catch |err| {
+        std.debug.print("hana --check-config: could not load config: {}\n", .{err});
+        std.process.exit(2);
+    };
     const n = diag.count();
     var buf: [check_line_buf]u8 = undefined;
     for (diag.items.items) |d| {
         // A diagnostic longer than the buffer is clipped with a marker rather
         // than silently cut, so a truncated line is never mistaken for a
-        // complete one.
-        const line = try diagnostics.Diagnostics.line(d, &buf);
-        std.debug.print("{s}{s}\n", .{ line, if (line.len == buf.len) "  [truncated]" else "" });
+        // complete one. `line` reports the clip via `truncated` (bufPrint
+        // itself REFUSES to truncate, so the clip is hand-rolled there).
+        const line = diagnostics.Diagnostics.line(d, &buf);
+        std.debug.print("{s}{s}\n", .{ line.text, if (line.truncated) "  [truncated]" else "" });
     }
     std.debug.print("hana --check-config: {d} diagnostic(s) in the loaded config\n", .{n});
     // Non-zero ONLY for warn/err: a clean load and a clean check agree, which
@@ -169,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
     try xkb.initXkb(x.conn);
     defer xkb.deinitXkb();
 
-    const loaded_config = try config.load(alloc);
+    var loaded_config = try config.load(alloc);
 
     // DPI is resolved here, once, because it has two possible sources and the
     // winner is a config question: detection reads Xft.dpi and falls back to
@@ -185,8 +194,25 @@ pub fn main(init: std.process.Init) !void {
 
     // Heap-allocate config so core.State holds a pointer; this allows
     // atomic pointer-swap on reload instead of by-value copy aliasing.
-    const config_ptr = try alloc.create(composed.Config);
-    config_ptr.* = loaded_config;
+    const config_ptr = blk: {
+        const p = alloc.create(composed.Config) catch |err| {
+            // OOM at boot: the loaded config's internals would leak with the
+            // box that never came to be, so release them before propagating.
+            loaded_config.deinit(alloc);
+            return err;
+        };
+        // Nothing fallible until core.init below takes ownership, but a
+        // future try would otherwise leak both the box and the config it is
+        // about to hold. Scoped to this block, so it is cancelled the moment
+        // the block completes and can never fire after the ownership
+        // transfer (which would double-free against core.deinitOwnedConfig).
+        errdefer {
+            p.destroy();
+            loaded_config.deinit(alloc);
+        }
+        p.* = loaded_config;
+        break :blk p;
+    };
 
     // core.init() takes ownership of config_ptr; must run before any
     // core.getState() call.
@@ -211,7 +237,12 @@ pub fn main(init: std.process.Init) !void {
     keybinds.buildKeybinds(config_ptr.core.keybindings.items);
 
     // Arm the unified reload: resolve the exec path before any reload/reexec
-    // request can arrive (process.init).
+    // request can arrive (process.init). Infallible by contract (returns
+    // void; a failed /proc read only disables re-exec and warns), so there
+    // is nothing for a defer to undo. The one allocation it makes -- the
+    // dupeZ of the exec path -- is process-lifetime BY DESIGN and never
+    // freed, so the unpaired init is deliberate: process.deinit below pairs
+    // with process.setup's signal pipe alone.
     process.init();
 
     // Drop the Config internals and the heap box core owns. No identity guard:
@@ -242,6 +273,11 @@ pub fn main(init: std.process.Init) !void {
 
     // Direct subsystem init: surfaces is the composition root for chrome;
     // window/tiling/bar hooks dispatch through the build-generated registries.
+    // A failed init is logged, not fatal, and the unconditional defer below
+    // is safe on BOTH paths: the surface's deinit is written to tolerate a
+    // half-completed init (its state slot is optional, so a createBar
+    // failure leaves nothing to tear down, and the usable-area claim release
+    // is null-safe).
     surfaces.init() catch |err| log.err("surface init failed: {}", .{err});
     defer surfaces.deinit();
 
@@ -285,7 +321,7 @@ pub fn main(init: std.process.Init) !void {
 /// down by the server, and `xcb_disconnect` on it can crash inside libxcb's
 /// teardown, while a LIVE connection must be disconnected or the process
 /// leaks the socket (and, for a WM, the root grab survives until the kernel
-/// reaps it). Both facts live in one method.
+/// reaps it). Both facts live in `disconnectIfHealthy` below.
 const XSession = struct {
     conn: core.Connection,
     screen: core.Screen,
@@ -293,10 +329,20 @@ const XSession = struct {
 
     /// Disconnects a healthy connection; a no-op on an errored one.
     fn deinit(self: XSession) void {
-        if (xcb.xcb_connection_has_error(self.conn) != 0) return;
-        xcb.xcb_disconnect(self.conn);
+        disconnectIfHealthy(self.conn);
     }
 };
+
+/// Disconnects a healthy connection; a no-op on an errored one. Shared by
+/// `XSession.deinit` and `connectToX`'s errdefer: a request can fail BECAUSE
+/// the connection died mid-flight (the checked request in
+/// `claimWindowManagerRole` reports connection failures too, not just
+/// another WM's BadAccess), so the errdefer needs the same guard the
+/// success-path teardown has.
+fn disconnectIfHealthy(conn: core.Connection) void {
+    if (xcb.xcb_connection_has_error(conn) != 0) return;
+    xcb.xcb_disconnect(conn);
+}
 
 fn connectToX() !XSession {
     const conn = xcb.xcb_connect(null, null) orelse return error.X11ConnectionFailed;
@@ -311,8 +357,11 @@ fn connectToX() !XSession {
     // From here the connection is LIVE, so every remaining exit must release
     // it, including the two below: a null screen iterator, and a failed
     // WM-role claim (which is the common one -- another WM holding
-    // SubstructureRedirect means we exit right here).
-    errdefer xcb.xcb_disconnect(conn);
+    // SubstructureRedirect means we exit right here). The guard inside
+    // matters for the latter: the claim's checked request can fail because
+    // the CONNECTION errored mid-flight, and disconnecting that would be
+    // the crash XSession.deinit's has-error rule exists to prevent.
+    errdefer disconnectIfHealthy(conn);
 
     const screen = xcb.xcb_setup_roots_iterator(
         xcb.xcb_get_setup(conn),

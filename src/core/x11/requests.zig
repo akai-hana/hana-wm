@@ -254,11 +254,26 @@ pub fn claimWindowManagerRole(conn: Connection, root: u32) !void {
         &[_]u32{masks.EventMasks.root_window},
     );
     if (xcb.xcb_request_check(conn, cookie)) |err| {
+        defer std.c.free(err);
+        // `xcb_request_check` funnels two different failures through this one
+        // pointer: a server-rejected request (response_type 1, error_code a
+        // protocol code -- BadAccess when another WM holds the redirect), and
+        // -- when the stream DIED while the check waited for the reply --
+        // a synthetic error libxcb fabricates from the connection's
+        // XCB_CONN_* state (response_type 0). Only the first is "another WM";
+        // mislabeling a dead server as one sends the user hunting for a
+        // process that no longer exists. The has-error rule -- the same
+        // predicate XSession.deinit's teardown encodes -- tells them apart,
+        // and returning the connection's own error name lets the caller's
+        // errdefer release the socket through the matching guarded path.
+        if (xcb.xcb_connection_has_error(conn) != 0) {
+            log.err("X11 connection failed while claiming the WM role (stream error_code={d})", .{err.*.error_code});
+            return error.X11ConnectionFailed;
+        }
         log.err(
             "Another window manager is already running (error_code={d}, type={d})",
             .{ err.*.error_code, err.*.response_type },
         );
-        std.c.free(err);
         return error.AnotherWMRunning;
     }
 }
