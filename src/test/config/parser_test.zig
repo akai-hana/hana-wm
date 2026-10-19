@@ -460,3 +460,67 @@ test "rejects inline tables, dotted keys, and date-shaped bare tokens" {
         try testing.expect(std.mem.indexOf(u8, d.message, "<test>:1:") != null);
     }
 }
+
+// P1-43: section-level entry diagnostics name the entry's FILE, not just its
+// line, so a key an include/theme file contributed names THAT file. parse
+// labels entries with the parser's source label; the cross-file merge passes
+// the origin entry's label through; all three entry diagnostics (wrong type,
+// scalar duplicate, unconsumed key) print file:line.
+test "entry diagnostics name the source file:line, across merge too" {
+    const diagnostics = @import("diagnostics");
+    var diag: diagnostics.Diagnostics = .{ .allocator = testing.allocator };
+    defer diag.deinit();
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = null;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var doc = try parser.parse(a,
+        \\[bar]
+        \\height = true
+        \\dup = 1
+        \\dup = 2
+        \\heigth = 1
+    , "<theme.toml>");
+
+    // Structural: every entry recorded its source file; a duplicate keeps
+    // the FIRST declaration's line (and file).
+    const bar = doc.sections.getPtr("bar").?;
+    try testing.expectEqualStrings("<theme.toml>", bar.entries.items[0].file);
+    try testing.expectEqual(@as(usize, 3), bar.entries.items[1].line);
+    try testing.expectEqualStrings("<theme.toml>", bar.entries.items[1].file);
+
+    // Wrong-typed value -> getAsOrWarn names file:line.
+    try testing.expect(bar.getAsOrWarn(i64, "height") == null);
+    // Scalar read of the accumulated duplicate -> "first at file:line".
+    _ = bar.get("dup");
+    // The typo'd key nobody consumed -> warnUnconsumed names file:line.
+    bar.warnUnconsumed("bar");
+
+    // Exactly the three entry diagnostics: the parse itself is clean.
+    try testing.expectEqual(@as(usize, 3), diag.count());
+    try testing.expect(diag.contains("(<theme.toml>:2)"));
+    try testing.expect(diag.contains("first at <theme.toml>:3"));
+    try testing.expect(diag.contains("(<theme.toml>:5)"));
+
+    // Cross-file merge: a key NEW in the overlay carries the overlay's file;
+    // a duplicate keeps the first declaration's file (the line the warning
+    // would name stays the first file's too).
+    var overlay = try parser.parse(a,
+        \\[bar]
+        \\height = false
+        \\extra = 1
+    , "<overlay.toml>");
+    try parser.mergeDocumentsInto(a, &doc, &overlay);
+    const merged_bar = doc.sections.getPtr("bar").?;
+    var height_file: ?[]const u8 = null;
+    var extra_file: ?[]const u8 = null;
+    for (merged_bar.entries.items) |e| {
+        if (std.mem.eql(u8, e.key, "height")) height_file = e.file;
+        if (std.mem.eql(u8, e.key, "extra")) extra_file = e.file;
+    }
+    try testing.expectEqualStrings("<theme.toml>", height_file.?);
+    try testing.expectEqualStrings("<overlay.toml>", extra_file.?);
+}

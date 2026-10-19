@@ -215,27 +215,34 @@ pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowI
 
 // This module's window sub-system contribution: the build-generated registry
 // reads this exact export. Only the fields you set are dispatched; changing
-// signatures here breaks EVERY module, so keep them verbatim. The remaining
-// hook families (all optional, bind + delete the ones you don't need):
-//   // Hide/restore family (minimize.zig): the model `.parked` presence.
-//   .hideWindow / .restoreWindow / .restoreCandidateOn / .restoreOnWs /
-//   .latestHiddenOnWs / .isWindowHidden / .collectHiddenSet
-//   // Covering family (fullscreen.zig): toggle + the screen-occupant scan +
-//   // one-way release + retarget. The "is it covering" predicates are NOT
-//   // here: they are model queries (see note above).
-//   .toggleCovering / .visibleCoveringOnWs / .releaseCovering / .moveCoveringTo
-//   // Workspaces family (workspaces.zig): tag/mask mutations.
-//   .sendToWs / .addToWs / .removeFromWs / .togglePin / .toggleAllView
-//   // Floating + pointer drag family (floating.zig).
-//   .setFloatingRect / .honorConfigureRequest / .startDrag ... .cancelDragForWindow
-//   // Protocol-side EWMH/deferred-bar hooks (fullscreen.zig).
-//   .setEwmhFullscreenState / .armPendingBarHide / .armPendingBarShow /
-//   .notifyConfigureIfPending
+// signatures here breaks EVERY module, so keep them verbatim. The single-
+// binder hooks are grouped into per-family structs (bind + delete the
+// families/hook fields you don't need; the family namespaces are how you
+// DISPATCH someone else's binding too — registry.hide/callHook & friends):
+//   // Hide/restore family (registry.hide; minimize.zig): the model
+//   // `.parked` presence: .hideWindow / .restoreWindow / ...
+//   // Covering family (registry.covering; fullscreen.zig): toggle + the
+//   // screen-occupant scan + one-way release + retarget. The "is it
+//   // covering" predicates are NOT here: they are model queries (see note
+//   // above): .toggleCovering / .visibleCoveringOnWs / ...
+//   // Workspaces family (registry.workspaces; workspaces.zig): tag/mask
+//   // mutations: .sendToWs / .addToWs / .removeFromWs / .togglePin /
+//   // .toggleAllView
+//   // Floating + pointer drag families (registry.floating / registry.drag;
+//   // floating.zig): .setFloatingRect / .honorConfigureRequest; .startDrag
+//   // ... .cancelDragForWindow
+//   // Commands (registry.command): the user-facing bind targets
+//   // (.switchWorkspace / .minimizeWindow / ...), one per owning module.
+//   // Protocol-side EWMH/deferred-bar hooks stay TOP-LEVEL and multi-
+//   // binder (fullscreen.zig): .setEwmhFullscreenState /
+//   // .armPendingBarHide / .armPendingBarShow / .notifyConfigureIfPending
 pub const module: @import("window_contract").WindowModule = .{
     .init = init,
     .deinit = deinit,
     .onWindowGone = onWindowGone,
     .serializeWindow = serializeWindow,
     .deserializeWindow = deserializeWindow,
-    .visibleCoveringOnWs = visibleCoveringOnWs,
+    .covering = .{
+        .visibleCoveringOnWs = visibleCoveringOnWs,
+    },
 };

@@ -21,6 +21,13 @@
 # Scenario copies live under /tmp/hana-modularity-test/<scenario> and keep
 # their .zig-cache between runs, so a repeat matrix only rebuilds what the
 # deletion invalidated.
+#
+# Second gate (P1-35): every Tier-1 (subsystem) and Tier-5 (bar-internal)
+# scenario runs `zig build check -Doptimize=Debug` after its build, proving
+# the layer rules and the plugin-template gate still hold on the reduced tree
+# -- a plain compile would miss a layer violation that only appears once a
+# whole subsystem is gone. Cost: +12 scenarios x ~2-4s Sema (no codegen),
+# ~30-50s added to a cold matrix, near-zero on the warm per-scenario caches.
 
 set -euo pipefail
 
@@ -178,6 +185,24 @@ try_build() {
     )
 }
 
+# Second gate (P1-35): type-check + layer rules + plugin-template against the
+# reduced tree, no codegen. Always Debug (the cheap, assert-heavy profile),
+# independent of -O, because the point is Sema + the layer allowlist, not a
+# release link. Throttled the same way the build is.
+try_check() {
+    local root="$1"
+    local log="$root/_check.log"
+    local -a cmd=("${ZIG[@]}" check -Doptimize=Debug -j"$JOBS")
+    (
+        cd "$root"
+        if [[ "$VERBOSE" -eq 1 ]]; then
+            "${cmd[@]}" 2>&1
+        else
+            "${cmd[@]}" >"$log" 2>&1
+        fi
+    )
+}
+
 # Scenario recording + execution.
 #
 # run_scenarios() is pure BOOKKEEPING: it records every tier header and every
@@ -195,6 +220,9 @@ declare -a REC_TEXT=()   # header text (headers only)
 declare -a REC_NAME=()   # scenario name (scenarios only)
 declare -a REC_PATHS=()  # removal paths, space-joined (scenarios only)
 declare -a REC_FAIL=()   # "1" = the build must FAIL (negative scenario)
+declare -a REC_CHECK=()  # "1" = also run `zig build check` after the build
+                         #   (P1-35, Tier 1/5: proves layer rules + the
+                         #   plugin-template gate hold on the reduced tree)
 
 # The scenario table (Tier 3/4 + the negative case) comes from build.zig's own
 # discovery walk, so the matrix cannot drift from what the registries see: a
@@ -215,16 +243,26 @@ tier_header() {
     REC_NAME+=("")
     REC_PATHS+=("")
     REC_FAIL+=("")
+    REC_CHECK+=("")
 }
 
 run_scenario() {
-    record_scenario 0 "$@"
+    record_scenario 0 0 "$@"
+}
+
+# Like run_scenario, but the scenario ALSO runs `zig build check` after the
+# build succeeds (P1-35). Use for subsystem-level removals (Tier 1) and bar
+# internals (Tier 5), where a layer violation or fmt breakage that only
+# manifests once a whole subsystem is gone is exactly what a plain compile
+# would miss.
+run_scenario_check() {
+    record_scenario 0 1 "$@"
 }
 
 # Like run_scenario, but the build is EXPECTED to fail. Used by the negative
 # tier: a tree that still compiles after the deletion is the bug.
 run_scenario_fail() {
-    record_scenario 1 "$@"
+    record_scenario 1 0 "$@"
 }
 
 # Record one manifest row as a scenario. Layout rows remove just the named
@@ -236,7 +274,7 @@ emit_manifest_rows() {
         [[ "$row" == "$kind"$'\t'* ]] || continue
         IFS=$'\t' read -r _ name paths <<< "$row"
         # shellcheck disable=SC2086  # paths is a space-joined list by design
-        record_scenario 0 "tier34-$name" $paths
+        record_scenario 0 0 "tier34-$name" $paths
     done
 }
 
@@ -247,7 +285,7 @@ emit_manifest_rows_fail() {
         [[ "$row" == "$kind"$'\t'* ]] || continue
         IFS=$'\t' read -r _ name paths <<< "$row"
         # shellcheck disable=SC2086  # paths is a space-joined list by design
-        record_scenario 1 "tier6-$name" $paths
+        record_scenario 1 0 "tier6-$name" $paths
     done
 }
 
@@ -258,14 +296,15 @@ emit_manifest_row() {
         [[ "$row" == "$kind"$'\t'* ]] || continue
         IFS=$'\t' read -r _ name paths <<< "$row"
         # shellcheck disable=SC2086
-        record_scenario 0 "$label" $paths
+        record_scenario 0 0 "$label" $paths
     done
 }
 
 record_scenario() {
     local expect_fail="$1"
-    local name="$2"
-    shift 2
+    local do_check="$2"
+    local name="$3"
+    shift 3
 
     # Apply pattern filter
     if [[ -n "$PATTERN" && "$name" != *"$PATTERN"* ]]; then
@@ -289,6 +328,7 @@ record_scenario() {
     REC_NAME+=("$name")
     REC_PATHS+=("$*")
     REC_FAIL+=("$expect_fail")
+    REC_CHECK+=("$do_check")
     ((SCENARIO_COUNT++)) || true
 }
 
@@ -375,6 +415,23 @@ run_one_scenario() {
     fi
 
     if [[ "$build_ok" -eq 1 ]]; then
+        # Second gate (P1-35): the compile is proven, now prove the layer
+        # rules + plugin-template still hold on the reduced tree. Only for
+        # scenarios flagged with run_scenario_check, and only when the build
+        # itself got that far -- a tree that fails to compile has already
+        # failed, and a `check` on it would just re-report the same error.
+        if [[ "${REC_CHECK[$i]:-0}" == "1" ]] && ! try_check "$dest"; then
+            printf 'FAIL\t%s\tbuild ok, check failed\n' "$name" > "$out"
+            printf "  %-55s ${RED}FAIL${RESET} (check: layer/plugin gate)\n" "$name"
+            if [[ "$VERBOSE" -ne 1 ]]; then
+                printf "       ${YELLOW}last 30 lines:${RESET}\n"
+                tail -30 "$dest/_check.log" 2>/dev/null | sed 's/^/       /' || true
+            fi
+            if [[ "$KEEP_ON_FAILURE" -ne 1 ]]; then
+                rm -rf "$dest"
+            fi
+            return 0
+        fi
         printf 'PASS\t%s\n' "$name" > "$out"
         printf "  %-55s ${GREEN}PASS${RESET}\n" "$name"
     else
@@ -450,11 +507,11 @@ run_scenarios() {
     tier_header ""
     tier_header "${CYAN}Tier 1: major subsystems${RESET}"
 
-    run_scenario \
+    run_scenario_check \
         "bar (entire subsystem)" \
         "src/bar"
 
-    run_scenario \
+    run_scenario_check \
         "tiling (entire subsystem)" \
         "src/tiling"
 
@@ -470,21 +527,21 @@ run_scenarios() {
     # test in actions_test.zig asserts that echo against a tiled window and
     # is the same observable in this build (it is the no-provider limb that
     # produces it there).
-    run_scenario \
+    run_scenario_check \
         "floating (behavior module)" \
         "src/window/modules/floating.zig" \
         "src/window/modules/floating_config.zig"
 
-    run_scenario \
+    run_scenario_check \
         "vim (removable)" \
         "src/bar/modules/prompt/vim.zig"
 
-    run_scenario \
+    run_scenario_check \
         "bar + tiling (both)" \
         "src/bar" \
         "src/tiling"
 
-    run_scenario \
+    run_scenario_check \
         "bar + floating" \
         "src/bar" \
         "src/window/modules/floating.zig" \
@@ -557,15 +614,15 @@ run_scenarios() {
     tier_header ""
     tier_header "${CYAN}Tier 5: bar internals${RESET}"
 
-    run_scenario \
+    run_scenario_check \
         "bar internal: -drawing" \
         "src/bar/render/drawing.zig"
 
-    run_scenario \
+    run_scenario_check \
         "bar internal: -win" \
         "src/bar/wire/win.zig"
 
-    run_scenario \
+    run_scenario_check \
         "bar internal: -segment dispatch" \
         "src/bar/segment.zig"
 

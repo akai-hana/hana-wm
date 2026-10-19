@@ -73,15 +73,13 @@ wire_allowed() {
         # _NET_ACTIVE_WINDOW property write).
         src/window/protocol/focus.zig) ;;
 
-        # pipeline.raiseWindowNow and its one caller (the floating drag tick):
-        # raising the dragged window is a STACKING write, and it goes out
-        # through sync's sanctioned `sink.stackOnly` primitive followed by
-        # `sink.flush` -- ungrabbed, which is the drag-tick policy. The guard
-        # matches the literal `raiseWindow` inside the name, so the sanctioned
-        # boundary needs an explicit entry rather than a name that dodges the
-        # pattern. Surviving wire traffic: one stack-mode-above
-        # xcb_configure_window, which is exactly what the primitive exists for.
-        src/core/loop/pipeline.zig|src/window/modules/floating.zig) ;;
+        # (No entry for src/core/loop/pipeline.zig or
+        # src/window/modules/floating.zig: their former raiseWindowNow /
+        # floating-drag-tick raise now routes through sync's sanctioned
+        # `sink.stackOnly` primitive, and neither file matches any pat1 code
+        # line any more, so the entry that existed for them was stale (P1-36a)
+        # and is gone. focus.zig's literal `requests.raiseWindow` call still
+        # matches pat1 and is allowed by its own entry above.)
 
         # sink_test.zig asserts the VALUE SLOT ORDER of one configure_window
         # (X, Y, WIDTH, HEIGHT, BORDER_WIDTH, STACK_MODE) by naming the
@@ -130,8 +128,10 @@ wire_allowed() {
         # home is not a policy violation -- grep cannot distinguish
         # definition from rogue send. These definitions were moved out of
         # the old pure/utils.zig facade so the pure vocabulary only ever sees
-        # xcb-free decls. (Rule 1's grep already exempts src/core/x11/; the
-        # entries stay for documentation.)
+        # xcb-free decls. (Rule 1's grep exempts requests/sink/reconcile by
+        # path as of P1-36a -- the narrow boundary window; the entries here
+        # stay as their documentation, and atoms.zig's is load-bearing: it is
+        # the only reason that file passes if it ever grows a pat1 line.)
         src/core/x11/requests.zig|src/core/x11/atoms.zig) ;;
 
         # Tiled border-width application: borders.zig's xcb_configure_window
@@ -223,8 +223,8 @@ pat1='xcb_configure_window|XCB_CONFIG_WINDOW_|xcb_map_window|xcb_unmap_window|xc
 while IFS= read -r line; do
     f=${line%%:*}
     wire_allowed "$f" && continue
-    viol "rule 1 ($f outside src/core/x11/ and allowlist)"; printf '%s\n' "$line" >&2
-done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -v '^src/core/x11/' | code_lines)
+    viol "rule 1 ($f outside the reconcile boundary and allowlist)"; printf '%s\n' "$line" >&2
+done < <(grep -rnE "$pat1" src/ --include='*.zig' | grep -vE '^src/core/x11/(requests|sink|reconcile)\.zig:' | code_lines)
 
 # Rule 2: server grabs belong behind the reconcile boundary (+ allowlist). Comment
 # mentions of xcb_grab_server are stripped so documentation doesn't trip the
@@ -245,8 +245,12 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # (tiling_contract.zig, contract_dispatch.zig, window_contract.zig,
 # bar_contract.zig), tiling/, or config/. Comments are stripped first so `/* ... */` (incl. multi-line) and
 # `//` commentary that merely names an xcb symbol does not trip the guard. The
-# awk strips comments while preserving each physical line (and its number), so
-# real code references still match and report at their true location.
+# strip runs through the shared build-time scanner
+# (dev/build-support/source_scan.zig, via dev/build-support/rule3.zig) --
+# string-aware, newline-preserving -- so real code references still match
+# and report at their true file:line, and a `"//...xcb"`-shaped string
+# literal can no longer hide following code from the sweep. The tool prints
+# `path:line:content`, the same shape the loop below consumes.
 #
 # This rule is the SOLE body/reference guard on pure-layer xcb contamination:
 # it sweeps for any `xcb` token in the state files, the contract vocabulary,
@@ -268,23 +272,16 @@ done < <(grep -rnE "$pat2" src/ --include='*.zig' | grep -v '^src/core/x11/' | c
 # contract_window.zig / contract_segment.zig into the monolith (2026-10-08)
 # and the monolith's later split into per-engine contracts are both history;
 # the sweep follows the files, not the lineage.)
-hits=$(
-    while IFS= read -r f; do
-        awk '
-            { line=$0; code=0
-              while(1){
-                s=index(line,"/*"); e=index(line,"*/")
-                if(s>0 && e==0){ if(s>1) code=1; line=substr(line,1,s-1); inb=1; break }
-                if(s>0 && e>s){ line=substr(line,1,s-1) substr(line,e+2); continue }
-                if(e>0 && inb){ line=substr(line,e+2); inb=0; continue }
-                break
-              }
-              if(inb==1 && code==0) line=""
-              sub(/\/\/.*$/,"",line)
-              if (line ~ /xcb/) print FILENAME ":" NR ":" line
-            }' "$f"
-    done < <(find src/core/architecture/domain.zig src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig') || true
-)
+mapfile -t rule3_files < <(find src/core/architecture/domain.zig src/core/model.zig src/core/architecture/contract_dispatch.zig src/core/architecture/tiling_contract.zig src/window/window_contract.zig src/bar/bar_contract.zig src/tiling src/config -name '*.zig' 2>/dev/null)
+if [ "${#rule3_files[@]}" -eq 0 ]; then
+    viol "rule 3 (sweep input set is empty)"
+    hits=""
+elif hits=$(zig run dev/build-support/rule3.zig -- "${rule3_files[@]}"); then
+    :
+else
+    viol "rule 3 (sweep tool failed)"
+    hits=""
+fi
 if [ -n "$hits" ]; then
     while IFS= read -r line; do
         f=${line%%:*}
