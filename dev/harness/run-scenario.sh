@@ -188,8 +188,8 @@ run_one() {
 	HW_KEEP_RAW=1 "$HARNESS_ROOT/normalize.sh" "$out"/snap-*.tree.raw "$out"/snap-*.props.raw "$out/hana.log"
 
 	# Signal log (harness hardening): the WM-internal-truth subset of
-	# hana's log. Warnings/errors (dropped requests, BadWindow probes),
-	# state dumps (registry counts, focus) and hover-focus decisions.
+	# hana's log. Warnings/errors (dropped requests, BadWindow probes)
+	# and state dumps (registry counts, focus, tiling layout state).
 	# Included in golden diffs so state divergence can't hide behind tree
 	# snapshots while noisy debug lines stay out of the comparison.
 	# Excluded: bar drawSegment NoFont warnings -- the minimal Xvfb
@@ -200,10 +200,10 @@ run_one() {
 	# log-tag era fails the sentinel check with "re-record" instead of one
 	# confusing diff per compared field. Bump SIG_FORMAT on any change to
 	# the field set or the log-tag format.
-	SIG_FORMAT=3
+	SIG_FORMAT=4
 	{
 		printf '# sig-format: %s\n' "$SIG_FORMAT"
-		grep -E "error:|warning:|STATE DUMP|Focused:|Total windows|WS[0-9]+: |MAYBE_FOCUS|Suppress focus" \
+		grep -E "error:|warning:|STATE DUMP|Focused:|Total windows|WS[0-9]+: |Suppress focus|Tiling enabled:|Tiling layout:|Tiled windows:" \
 			"$out/hana.log.norm" \
 			| grep -v "Best-effort op failed (bar drawSegment): error.NoFont" || :
 	} >"$out/hana.log.sig"

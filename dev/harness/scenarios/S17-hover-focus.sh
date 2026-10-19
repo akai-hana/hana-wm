@@ -16,6 +16,7 @@ _id=$(client_id A)
 # Read B's live geometry from the tree snapshot and move the pointer into it.
 DISPLAY="$HW_DISPLAY" xdotool mousemove 640 400
 state_dump            # focused should now be the window under (640,400)
+focused_mid B || return 1
 
 # Then onto the other half of the split to prove the transition flips back.
 _alt=$(client_id B)
@@ -23,3 +24,4 @@ _alt=$(client_id B)
 
 DISPLAY="$HW_DISPLAY" xdotool mousemove 200 400
 state_dump
+focused_mid A || return 1

@@ -19,6 +19,12 @@ for f in "$@"; do
 		while (<>) {
 			s/\e\[[0-9;]*[A-Za-z]//g;
 			next if /^Fontconfig warning:/;   # intermittent fontconfig init noise
+			# P1-43 entry diagnostics name file:line (an unrecognized key in
+			# an include names THAT include). The harness config-home path
+			# differs per out/<SC> run dir, so reduce it to the basename the
+			# golden pins; the line number after it is untouched. No single
+			# quotes in the classes: this perl program is shell-squoted.
+			s{[^\s"(]*/config-home/hana/([^\s":)]+)(?=:\d+)}{$1}g;
 			# NoFont draw attempts: the minimal Xvfb has no usable fonts, so
 			# how many of these fire depends on where poll wakeups land
 			# relative to scenario timing. Unreachable on real systems.
