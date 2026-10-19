@@ -4,18 +4,33 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  # Weekly full-parity run (P1-41): a scheduled run has no diff for
+  # paths-filter, so `changes` special-cases it to code=true and only the
+  # harness job opts into running on schedule (see its `if:`) -- off-peak
+  # minute chosen to avoid the top-of-hour stampede.
+  schedule:
+    - cron: '17 4 * * 1'
+
+# One run per ref: a newer push to the same branch cancels the stale run
+# instead of letting both burn a 4-core runner to completion (P1-41).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Classify the pushed/PR'd diff. `code` is true when any changed file is not
   # markdown, so a docs-only change skips the heavy jobs below. `test` ignores
-  # this output and always runs.
+  # this output and always runs. On schedule there is no diff at all: the
+  # filter step is skipped and the override step reports code=true so the
+  # opted-in harness job may run.
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      code: ${{ steps.schedule_override.outputs.code || steps.filter.outputs.code }}
     steps:
       # Push: base == head makes the action diff against the event's `before`
       # SHA, i.e. just the pushed commits. PR: `base` is ignored (token is set)
@@ -24,6 +39,7 @@ jobs:
 
       - uses: dorny/paths-filter@v4
         id: filter
+        if: github.event_name != 'schedule'
         with:
           base: ${{ github.event_name == 'push' && github.ref || '' }}
           predicate-quantifier: some-with-excludes
@@ -33,8 +49,14 @@ jobs:
               - '!*.md'
               - '!**/*.md'
 
+      - id: schedule_override
+        if: github.event_name == 'schedule'
+        run: echo "code=true" >> "$GITHUB_OUTPUT"
+
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -95,8 +117,9 @@ jobs:
   # branch (a scheduled/merge job can widen this list).
   e2e-smoke:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -140,14 +163,33 @@ jobs:
           cd dev/harness
           ./run-scenario.sh --compare S01-spawn-tiled S02-close S11-configure-honored S18-ewmh-fullscreen S22-restore S24-dialog-float
 
+      # A red e2e run must leave downloadable diagnosis (P1-41): every
+      # scenario's out/<SC>/ (snapshots, hana.log, xvfb.log, normalized
+      # artifacts) plus the per-scenario golden diffs the compare step writes
+      # to ${TMPDIR:-/tmp}. Absolute paths are fine in upload-artifact, and
+      # both TMPDIR spellings are covered because the runner may or may not
+      # export TMPDIR.
+      - name: Upload diagnosis artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke-diagnosis
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            dev/harness/out/
+            /tmp/hana-diff-*.txt
+            ${{ runner.temp }}/hana-diff-*.txt
+
   # Feature-deletion matrix: each optional subsystem is removed and the tree
   # must still compile. Own job rather than part of the default `check`
   # (independent of the test job, so both run in parallel). Skipped on
   # docs-only changes.
   modularity:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -183,15 +225,18 @@ jobs:
 
   # Behavioral parity harness: boots a private Xvfb and replays the scenarios
   # against recorded goldens. Runs on pushes to dev only (slow), and only when
-  # the push touched more than markdown.
+  # the push touched more than markdown -- plus the weekly scheduled run
+  # (P1-41), which lands on the default branch and carries code=true from the
+  # changes job's override, so the FULL set replays once a week on main.
   #
   # GATING: all S01–S24 goldens were recaptured against the current
   # focus/stacking behavior and `./dev/harness/run-scenario.sh --compare` is
   # green locally, so parity drift now fails CI.
   harness:
     needs: changes
-    if: github.ref == 'refs/heads/dev' && needs.changes.outputs.code == 'true'
+    if: (github.event_name == 'schedule' || github.ref == 'refs/heads/dev') && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -212,3 +257,17 @@ jobs:
       - name: Golden parity replay
         working-directory: dev/harness
         run: ./run-scenario.sh --compare $(ls scenarios/*.sh | sed 's|scenarios/||; s|\.sh$||')
+
+      # Same diagnosis artifacts as e2e-smoke (P1-41): the full run's
+      # out/<SC>/ tree and the golden diffs under ${TMPDIR:-/tmp}.
+      - name: Upload diagnosis artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-diagnosis
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            dev/harness/out/
+            /tmp/hana-diff-*.txt
+            ${{ runner.temp }}/hana-diff-*.txt
