@@ -104,3 +104,42 @@ test "all three parts coexist in one request, each in its own slot" {
 test "an empty configure is mask 0, so the shim drops it" {
     try testing.expectEqual(@as(u16, 0), sink.configureWire(.{}).mask);
 }
+
+// ---------------------------------------------------------------------------
+// _NET_WM_STATE write decision (planStateWrite, P1-36). The shim's guarantee
+// on the dispatch path is what these pin: a toggle that would leave the list
+// identical must send NOTHING (no spurious PropertyNotify), a wire list
+// longer than the read buffer must not be truncated by the REPLACE, and a
+// full buffer must not silently drop an added atom.
+
+test "unchanged toggles decide noop: present+add, absent+remove" {
+    try testing.expectEqual(sink.StateWrite.noop, sink.planStateWrite(0, true, true, 3, 64));
+    try testing.expectEqual(sink.StateWrite.noop, sink.planStateWrite(0, false, false, 3, 64));
+}
+
+test "changed membership decides write" {
+    try testing.expectEqual(sink.StateWrite.write, sink.planStateWrite(0, false, true, 3, 64));
+    try testing.expectEqual(sink.StateWrite.write, sink.planStateWrite(0, true, false, 3, 64));
+}
+
+test "oversize list wins over everything: bytes_after set means never write" {
+    // Even for a request that WOULD change membership (and with a full
+    // buffer): the REPLACE would truncate the wire list, so it is refused
+    // before anything else is considered.
+    try testing.expectEqual(sink.StateWrite.skip_oversize, sink.planStateWrite(1, false, true, 0, 64));
+    try testing.expectEqual(sink.StateWrite.skip_oversize, sink.planStateWrite(99, true, false, 64, 64));
+    // Unchanged toggle on an oversize list still reports oversize (the shim
+    // bails before parsing, so it never learns membership) -- pinned order.
+    try testing.expectEqual(sink.StateWrite.skip_oversize, sink.planStateWrite(1, false, true, 0, 64));
+}
+
+test "full buffer: add is refused, remove still writes" {
+    const cap = 4;
+    try testing.expectEqual(sink.StateWrite.skip_capacity, sink.planStateWrite(0, false, true, cap, cap));
+    // One slot still free: the add fits.
+    try testing.expectEqual(sink.StateWrite.write, sink.planStateWrite(0, false, true, cap - 1, cap));
+    // At capacity but membership unchanged: noop beats capacity (no warn).
+    try testing.expectEqual(sink.StateWrite.noop, sink.planStateWrite(0, true, true, cap, cap));
+    // Removal never grows the list, so capacity is irrelevant to it.
+    try testing.expectEqual(sink.StateWrite.write, sink.planStateWrite(0, true, false, cap, cap));
+}

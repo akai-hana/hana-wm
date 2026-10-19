@@ -720,26 +720,7 @@ fn sendAll(
 
         const tracing = trace.enabled() and trace.watches(win);
         if (parked) {
-            // Re-send on the transition OR when the client moved itself while
-            // parked: `last.parked` stays true across the drift, so without
-            // the dirty term the recompute above would compute a fresh park
-            // and then throw it away.
-            if (!last.parked or last.parked_dirty) {
-                if (tracing) trace.outbound(win, "park", "unpark-then-park");
-                // Map before park: a fresh window's own map request was
-                // redirected by SubstructureRedirect (never performed by the
-                // server), so the offscreen park would otherwise leave it
-                // unmapped, and a focus issued for it (spawn under a covering
-                // winner, cross-workspace spawn) fails with BadMatch.
-                if (!last.has_rect) ctx.sink.map(win);
-                ctx.sink.park(win);
-            } else if (tracing) {
-                // The fast path elided this window entirely: it was already
-                // parked where we put it. Logged because "hana said nothing"
-                // and "hana said nothing BECAUSE it skipped the window" are
-                // different findings, and a trace has to distinguish them.
-                trace.outbound(win, "park-elided", "already parked");
-            }
+            sendParkTransition(ctx.sink, win, last, tracing);
         } else {
             // Raise triggers per the ledger contract (file header read 2): winner
             // .above on geometry motion, unpark, or restack pressure only.
@@ -767,45 +748,13 @@ fn sendAll(
             const need_pixel = !last.has_rect or last.pixel != pixel;
             const need_geom = moved or unpark_transition or raise_winner;
 
-            // Opt-in X trace (see core/debug/trace.zig). Each line is guarded
-            // by the SAME condition as the send it describes, so the log can
-            // never claim a request that did not happen -- a trace that
-            // over-reports is worse than no trace. Recorded before the send so
-            // the order matches what the server sees. This is the outbound half
-            // of the pairing that makes a trace decisive: it shows whether hana
-            // ever re-asserted a geometry, or stayed silent while the window's
-            // on-screen contents diverged from its state.
             if (need_map) {
                 if (tracing) trace.outbound(win, "map", "");
                 ctx.sink.map(win);
             }
-            if (need_pixel) {
-                if (tracing) trace.outbound(win, "border_pixel", "");
-                ctx.sink.borderPixel(win, pixel);
-            }
-            // One configure carrying everything that changed. Border width and
-            // geometry travel together on the common switch/unpark shape, and
-            // this cannot express them as two separate requests. The
-            // trace prints exactly the fields the request below carries.
+            if (need_pixel) sendBorderPixel(ctx.sink, win, pixel, tracing);
             if (need_bw or need_geom) {
-                if (tracing) trace.outbound(win, "configure", switch (need_geom) {
-                    true => if (need_bw) std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
-                        rect.width,                         rect.height, rect.x, rect.y, bw,
-                        if (raise_winner) "above" else "-",
-                    }) catch "rect" else std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} stack={s}", .{
-                        rect.width,                         rect.height, rect.x, rect.y,
-                        if (raise_winner) "above" else "-",
-                    }) catch "rect",
-                    false => std.fmt.bufPrint(&trace_buf, "bw={d} stack={s}", .{
-                        bw,
-                        if (raise_winner) "above" else "-",
-                    }) catch "bw",
-                });
-                ctx.sink.configure(win, .{
-                    .rect = if (need_geom) rect else null,
-                    .bw = if (need_bw) bw else null,
-                    .stack = if (raise_winner) .above else null,
-                });
+                sendConfigure(ctx.sink, win, rect, bw, .{ .geom = need_geom, .bw = need_bw, .raise = raise_winner }, tracing);
             }
         }
 
@@ -820,6 +769,76 @@ fn sendAll(
     }
     if (ledger_overflow) log.err("reconcile: ledger full; some sends applied, records lost", .{});
     return reassert and saw_visible_float;
+}
+
+/// Visibility concern: the park transition. Re-send on the transition OR
+/// when the client moved itself while parked (`last.parked` stays true
+/// across the drift, so without the dirty term the recompute above would
+/// compute a fresh park and then throw it away). A park already recorded as
+/// parked and clean sends nothing — only the trace distinguishes "already
+/// parked where we put it" from "skipped by the fast path above".
+fn sendParkTransition(snk: sink.Sink, win: model.WindowId, last: SentEntry, tracing: bool) void {
+    if (!last.parked or last.parked_dirty) {
+        if (tracing) trace.outbound(win, "park", "unpark-then-park");
+        // Map before park: a fresh window's own map request was redirected
+        // by SubstructureRedirect (never performed by the server), so the
+        // offscreen park would otherwise leave it unmapped, and a focus
+        // issued for it (spawn under a covering winner, cross-workspace
+        // spawn) fails with BadMatch.
+        if (!last.has_rect) snk.map(win);
+        snk.park(win);
+    } else if (tracing) {
+        // The fast path elided this window entirely: it was already
+        // parked where we put it. Logged because "hana said nothing"
+        // and "hana said nothing BECAUSE it skipped the window" are
+        // different findings, and a trace has to distinguish them.
+        trace.outbound(win, "park-elided", "already parked");
+    }
+}
+
+/// Borders concern: the border-pixel delta. Pixel-only (no geometry):
+/// a focus flip recolors without moving. State-atoms are deliberately NOT
+/// a reconcile concern — EWMH fullscreen state rides the fullscreen
+/// module's `setEwmhFullscreenState` through the sink, outside this loop.
+fn sendBorderPixel(snk: sink.Sink, win: model.WindowId, pixel: u32, tracing: bool) void {
+    if (tracing) trace.outbound(win, "border_pixel", "");
+    snk.borderPixel(win, pixel);
+}
+
+/// Geometry+borders concern: ONE configure carrying everything that
+/// changed. Border width and geometry travel together on the common
+/// switch/unpark shape, and this cannot express them as two separate
+/// requests. The trace prints exactly the fields the request carries,
+/// guarded by the same conditions as the send (over-reporting is worse
+/// than silence).
+const ConfigureFlags = struct { geom: bool, bw: bool, raise: bool };
+
+fn sendConfigure(
+    snk: sink.Sink,
+    win: model.WindowId,
+    rect: model.Rect,
+    bw: u16,
+    flags: ConfigureFlags,
+    tracing: bool,
+) void {
+    if (tracing) trace.outbound(win, "configure", switch (flags.geom) {
+        true => if (flags.bw) std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
+            rect.width,                         rect.height, rect.x, rect.y, bw,
+            if (flags.raise) "above" else "-",
+        }) catch "rect" else std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} stack={s}", .{
+            rect.width,                         rect.height, rect.x, rect.y,
+            if (flags.raise) "above" else "-",
+        }) catch "rect",
+        false => std.fmt.bufPrint(&trace_buf, "bw={d} stack={s}", .{
+            bw,
+            if (flags.raise) "above" else "-",
+        }) catch "bw",
+    });
+    snk.configure(win, .{
+        .rect = if (flags.geom) rect else null,
+        .bw = if (flags.bw) bw else null,
+        .stack = if (flags.raise) .above else null,
+    });
 }
 
 /// Phase 4 (conditional): re-assert the floating layer above every tiled

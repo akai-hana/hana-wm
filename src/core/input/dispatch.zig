@@ -111,7 +111,7 @@ pub fn executeAction(action: *const types.Action) void {
         // Fullscreen: keybind path resolves the focused window, then shares
         // the chrome-click transition.
         .toggle_fullscreen => {
-            if (pipeline.state().focused) |win| window.callHook(.toggleFullscreenWindow, .{win});
+            if (pipeline.state().focused) |win| window.command.callHook(.toggleFullscreenWindow, .{win});
         },
 
         .toggle_floating_window => if (focus.getFocused()) |win|
@@ -140,11 +140,11 @@ pub fn executeAction(action: *const types.Action) void {
         // Dispatched through the registry: the workspaces module is optional,
         // so a tree without it has no binder and the command no-ops instead of
         // this file failing to compile.
-        .switch_workspace => |ws| window.callHook(.switchWorkspace, .{ws}),
-        .move_to_workspace => |ws| if (focus.getFocused()) |wid| window.callHook(.moveToWorkspace, .{ wid, ws }),
-        .toggle_tag => |ws| if (focus.getFocused()) |wid| window.callHook(.toggleTag, .{ wid, ws, true }),
-        .all_workspaces => window.callHook(.allWorkspaces, .{}),
-        .pin_window => if (focus.getFocused()) |wid| window.callHook(.pinWindow, .{wid}),
+        .switch_workspace => |ws| window.command.callHook(.switchWorkspace, .{ws}),
+        .move_to_workspace => |ws| if (focus.getFocused()) |wid| window.command.callHook(.moveToWorkspace, .{ wid, ws }),
+        .toggle_tag => |ws| if (focus.getFocused()) |wid| window.command.callHook(.toggleTag, .{ wid, ws, true }),
+        .all_workspaces => window.command.callHook(.allWorkspaces, .{}),
+        .pin_window => if (focus.getFocused()) |wid| window.command.callHook(.pinWindow, .{wid}),
 
         // Bar: visibility toggle, position toggle, and chrome-overlay toggle.
         // The three bar-chrome actions call their hooks directly: each is a
@@ -155,9 +155,9 @@ pub fn executeAction(action: *const types.Action) void {
         .toggle_prompt => surfaces.chromeToggleOverlay(),
 
         // Minimize: minimize, unminimize (LIFO/FIFO), and restore all.
-        .minimize_window => window.callHook(.minimizeWindow, .{focus.getFocused()}),
-        .unminimize => |order| window.callHook(.unminimizeOrdered, .{order}),
-        .unminimize_all => window.callHook(.unminimizeAll, .{}),
+        .minimize_window => window.command.callHook(.minimizeWindow, .{focus.getFocused()}),
+        .unminimize => |order| window.command.callHook(.unminimizeOrdered, .{order}),
+        .unminimize_all => window.command.callHook(.unminimizeAll, .{}),
     }
 }
 
@@ -167,7 +167,7 @@ pub fn executeAction(action: *const types.Action) void {
 /// grafts through this too. The floating module owns the transition; without it
 /// there is no binder and this is a no-op.
 pub fn toggleFloatingWindow(win: u32) void {
-    window.callHook(.toggleFloatingWindow, .{win});
+    window.command.callHook(.toggleFloatingWindow, .{win});
 }
 
 /// The one way to run a scaffolded tiling op. `tag` is the action it runs, and

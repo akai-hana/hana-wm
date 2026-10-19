@@ -149,7 +149,7 @@ fn handleWindowButtonPress(event: *const xcb.xcb_button_press_event_t, super_hel
         // The bind dispatch already released the grab.
         .bound_action => {},
         .start_drag => {
-            window.dispatchAll(.startDrag, .{ managed_window, event.detail, event.root_x, event.root_y });
+            window.drag.dispatchAll(.startDrag, .{ managed_window, event.detail, event.root_x, event.root_y });
             keepDragGrab(event.time);
         },
     }
@@ -163,8 +163,8 @@ pub fn handleButtonRelease(event: *const xcb.xcb_button_release_event_t) void {
     // drag state latches and later un-pressed motions keep moving the window
     // via the still-active updateDrag path. Route to the bar only when no
     // floating drag is in flight.
-    if (window.dispatchFirstTrue(.isDragging, .{})) {
-        window.dispatchAll(.stopDrag, .{});
+    if (window.drag.dispatchFirstTrue(.isDragging, .{})) {
+        window.drag.dispatchAll(.stopDrag, .{});
         return;
     }
     // Releases on the bar window terminate a segment scrub (the bar clears
@@ -187,9 +187,9 @@ pub fn handleMotionNotify(event: *const xcb.xcb_motion_notify_event_t) void {
     // only when no floating drag is in flight. Shift-held at the motion event
     // frees a resize from the window's aspect-ratio band (ratio-lock escape
     // hatch); the drag engine ignores it for move drags.
-    if (window.dispatchFirstTrue(.isDragging, .{})) {
+    if (window.drag.dispatchFirstTrue(.isDragging, .{})) {
         const break_aspect = (event.state & masks.mod_shift) != 0;
-        window.dispatchAll(.updateDrag, .{ event.root_x, event.root_y, break_aspect });
+        window.drag.dispatchAll(.updateDrag, .{ event.root_x, event.root_y, break_aspect });
         return;
     }
 

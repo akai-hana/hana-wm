@@ -255,6 +255,26 @@ pub fn TestSink(comptime mode: SinkMode) type {
             try self.expectStack(i, stack);
         }
 
+        /// Asserts op `i` is the BORDER-WIDTH-ONLY configure: `bw` carried,
+        /// no rect (geometry unchanged), no stack. The shape a config-reload
+        /// border-width change takes through reconcile.
+        pub fn expectBwOnly(
+            self: *const Self,
+            i: usize,
+            win: model.WindowId,
+            bw: u16,
+        ) !void {
+            comptime if (mode != .record) @compileError("expectBwOnly requires record mode");
+            const op = self.ops.items[i];
+            try std.testing.expect(op == .configure);
+            const c = op.configure;
+            try std.testing.expectEqual(win, c.win);
+            try std.testing.expect(c.rect == null);
+            try std.testing.expect(c.bw != null);
+            try std.testing.expectEqual(bw, c.bw.?);
+            try std.testing.expect(c.stack == null);
+        }
+
         pub fn expectPixel(self: *const Self, i: usize, win: model.WindowId, p: u32) !void {
             comptime if (mode != .record) @compileError("expectPixel requires record mode");
             const op = self.ops.items[i];
