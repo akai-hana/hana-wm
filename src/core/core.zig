@@ -236,22 +236,41 @@ pub fn init(
 /// re-entrancy this is meant to remove. It reports the change and the caller
 /// lets the existing debounced re-detect path do the rest of the work at a
 /// controlled point in the loop.
+///
+/// The comparison/apply half is the pure `applyScreenGeometry` below, pulled
+/// out (P1-36) so the burst dedup bounding this dispatch path is testable:
+/// one physical mode change fires an event BURST, and only the first event
+/// may pay (log, state write, and through the `false` return here, the
+/// downstream DPI re-read / re-detect) -- screen_geometry_test.zig pins that.
 pub fn refreshScreenGeometry(conn: Connection) bool {
     const st = getState();
     const cookie = xcb.xcb_get_geometry(conn, st.root);
     const geom = xcb.xcb_get_geometry_reply(conn, cookie, null) orelse return false;
     defer std.c.free(geom);
 
-    const new_w: u16 = @intCast(geom.*.width);
-    const new_h: u16 = @intCast(geom.*.height);
-    if (new_w == st.screen.width_in_pixels and new_h == st.screen.height_in_pixels) return false;
+    return applyScreenGeometry(
+        st.screen,
+        @intCast(geom.*.width),
+        @intCast(geom.*.height),
+    );
+}
+
+/// Comparison+apply half of `refreshScreenGeometry`: true iff `new_w/new_h`
+/// differ from the cached pixel dimensions, in which case they are written
+/// back (and the change logged). The trailing events of a RandR burst return
+/// false here and touch nothing: no state write, no log (P1-36).
+///
+/// Only the pixel dimensions change; see refreshScreenGeometry for why root
+/// depth, visual, millimetre size and origin are deliberately not re-read.
+pub fn applyScreenGeometry(screen: Screen, new_w: u16, new_h: u16) bool {
+    if (new_w == screen.width_in_pixels and new_h == screen.height_in_pixels) return false;
 
     log.info(
         "Screen geometry changed: {d}x{d} -> {d}x{d}",
-        .{ st.screen.width_in_pixels, st.screen.height_in_pixels, new_w, new_h },
+        .{ screen.width_in_pixels, screen.height_in_pixels, new_w, new_h },
     );
-    st.screen.width_in_pixels = new_w;
-    st.screen.height_in_pixels = new_h;
+    screen.width_in_pixels = new_w;
+    screen.height_in_pixels = new_h;
     return true;
 }
 
