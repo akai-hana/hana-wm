@@ -155,6 +155,17 @@ pub const Segment = struct {
     pub const single_binder_hooks = [_][]const u8{
         "measureString", "overlay",
     };
+
+    /// Binder probe for the generated registry's at-most-one check (the
+    /// uniform shape every element contract provides; `WindowModule`'s
+    /// resolves through its hook families). A name that is not a field is a
+    /// compile error, not a silent false.
+    pub fn hookBinds(m: Segment, comptime hook: []const u8) bool {
+        if (!@hasField(Segment, hook)) @compileError(
+            "Segment has no hook '" ++ hook ++ "'; single_binder_hooks must name real fields",
+        );
+        return @field(m, hook) != null;
+    }
     /// Config identity ("workspaces", "title", "clock", "layout", "variants").
     /// Unique across the registry; config text resolves to the module by name.
     name: []const u8 = "",

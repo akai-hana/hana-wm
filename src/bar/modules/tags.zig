@@ -321,10 +321,10 @@ fn resolveWorkspaceClick(offset: u16) ?usize {
 fn onClickHook(ctx: *const contract.ClickCtx) bool {
     const idx = resolveWorkspaceClick(ctx.offset) orelse return true;
     if (ctx.is_left) {
-        window.callHook(.switchWorkspace, .{@as(u8, @intCast(idx))});
+        window.command.callHook(.switchWorkspace, .{@as(u8, @intCast(idx))});
     } else if (ctx.is_right) {
         const win = focus.getFocused() orelse return true;
-        window.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(idx)) });
+        window.command.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(idx)) });
     }
     return true;
 }

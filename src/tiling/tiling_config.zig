@@ -167,6 +167,42 @@ comptime {
     knob.validateTable(Config, &knobs, &.{});
 }
 
+/// The section names the tiling subsystem owns (D13/P2-50): the composed
+/// facade unions every fragment's list into the mis-case lint's inventory.
+/// The two master-stack spellings (hyphen and underscore) are the shipped
+/// dedicated tables; other layout names arrive through the
+/// `section_prefixes` family below, not as exact entries.
+pub const sections = &[_][]const u8{
+    types.section_tiling,
+    types.section_tiling_layouts_master_stack,
+    types.section_prefix_tiling_layouts ++ "master_stack",
+};
+
+/// Mis-case family: `[tiling.layouts.*]` is an open set (any registry
+/// layout name), so a case-variant of the family gets the family warn
+/// rather than needing exact entries.
+pub const section_prefixes = &[_][]const u8{types.section_prefix_tiling_layouts};
+
+/// Inert family (D13/P2-50): `[tiling.*]` sub-tables are read only when
+/// bare `[tiling]` is present; a present family with the parent missing
+/// leaves those knobs inert, which the load warns about.
+pub const inert_families = &[_]types.InertFamily{.{
+    .parent = types.section_tiling,
+    .child_prefix = types.section_prefix_tiling,
+}};
+
+/// `[tiling] layouts` accumulates the layout-name list by design (same
+/// list-reading policy the layout cycle has always had); a scalar read of
+/// it takes the last declaration without a "later wins" warn.
+pub const accumulate_exempt = &[_]types.SectionKey{.{
+    .section = types.section_tiling,
+    .key = "layouts",
+}};
+
+/// The section HEADS whose presence in the embedded fallback TOML is gated
+/// on this fragment's owner module (P2-50).
+pub const fallback_sections = &[_][]const u8{"tiling"};
+
 /// The fragment parse entry: self-seed the owned defaults (so an empty
 /// document still yields a usable single-layout cycle), apply the scalar
 /// knobs, then parse the non-scalar structures.
