@@ -85,6 +85,42 @@ pub fn configureWire(c: Configure) ConfigureWire {
     return .{ .mask = mask, .values = values };
 }
 
+/// Outcome of the `_NET_WM_STATE` read-modify-write decision (see
+/// `planStateWrite`): write the merged list, or one of the three reasons not
+/// to touch the property.
+pub const StateWrite = enum { write, noop, skip_oversize, skip_capacity };
+
+/// Pure decision for the `_NET_WM_STATE` read-modify-write in the
+/// setStateAtomShim, pulled out so the guarantees that bound this
+/// dispatch-path round trip are testable without a server (P1-36;
+/// sink_test.zig):
+///
+/// - `noop`: the request would leave the list identical (adding an atom the
+///   list already carries / removing one it never had) -- publishing would
+///   only fire a spurious PropertyNotify, so no write.
+/// - `skip_oversize`: the list on the wire is longer than the read buffer
+///   (`bytes_after != 0`) -- a REPLACE would truncate it, so no write.
+/// - `skip_capacity`: the preserved set already filled the buffer and the
+///   request wants an add -- the new atom cannot be kept, so no write.
+/// - `write`: membership changes and the write is safe.
+///
+/// Order matters and is pinned: oversize wins over everything (the shim
+/// bails before even parsing), then membership (an unchanged toggle at
+/// capacity is still a noop, not a corruption warn).
+pub fn planStateWrite(
+    bytes_after: u32,
+    has_atom: bool,
+    add: bool,
+    count: usize,
+    capacity: usize,
+) StateWrite {
+    if (bytes_after != 0) return .skip_oversize;
+    const membership_changes = if (add) !has_atom else has_atom;
+    if (!membership_changes) return .noop;
+    if (add and count >= capacity) return .skip_capacity;
+    return .write;
+}
+
 /// One configure request, described by which parts of the window are changing.
 /// A null field means "leave it alone" -- X's own semantics for an unset
 /// configure mask bit, expressed instead of implied by which shim was called.
@@ -233,10 +269,10 @@ pub const XcbSink = struct {
     const max_ewmh_states = 64;
 
     /// Set / clear `atom` on `_NET_WM_STATE` for `win`, preserving the rest of
-    /// the list. A no-op (nothing is written) when the atom's presence already
-    /// matches the request: otherwise every unchanged toggle would send the
-    /// merged list and fire a PropertyNotify with a (possibly re-ordered)
-    /// value for a semantically unchanged state.
+    /// the list. The write/no-write decision (unchanged toggle, oversize
+    /// list, full buffer) is the pure `planStateWrite` above (P1-36), pinned
+    /// in sink_test; this half only reads the property, feeds the plan, and
+    /// publishes when it says `.write`.
     fn setStateAtomShim(
         ptr: *anyopaque,
         win: u32,
@@ -249,46 +285,48 @@ pub const XcbSink = struct {
         var state_atoms: [max_ewmh_states]u32 = undefined;
         var count: usize = 0;
         var has_atom = false;
+        var bytes_after: u32 = 0;
         const get_cookie = xcb.xcb_get_property(conn, 0, win, state_atom, xcb.XCB_ATOM_ATOM, 0, state_atoms.len);
         if (xcb.xcb_get_property_reply(conn, get_cookie, null)) |reply| {
             defer std.c.free(reply);
             if (reply.*.format == 32 and reply.*.type == xcb.XCB_ATOM_ATOM) {
-                // More atoms on the wire than we can preserve: rewriting would
-                // drop them. Leave the property alone.
-                if (reply.*.bytes_after != 0) {
-                    log.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping state-atom update", .{ win, max_ewmh_states });
-                    return;
-                }
-                const raw = xcb.xcb_get_property_value(reply) orelse return;
-                const n: usize = @intCast(reply.*.value_len);
-                const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, state_atoms.len)];
-                for (existing) |a| {
-                    if (a == atom) {
-                        has_atom = true;
-                        continue;
+                bytes_after = reply.*.bytes_after;
+                // Too much on the wire to preserve: leave the property alone
+                // (planStateWrite turns this into .skip_oversize).
+                if (bytes_after == 0) {
+                    const raw = xcb.xcb_get_property_value(reply) orelse return;
+                    const n: usize = @intCast(reply.*.value_len);
+                    const existing = @as([*]const u32, @ptrCast(@alignCast(raw)))[0..@min(n, state_atoms.len)];
+                    for (existing) |a| {
+                        if (a == atom) {
+                            has_atom = true;
+                            continue;
+                        }
+                        if (a == 0) continue;
+                        state_atoms[count] = a;
+                        count += 1;
                     }
-                    if (a == 0) continue;
-                    state_atoms[count] = a;
-                    count += 1;
                 }
             }
         }
 
-        // What the request intends to change about `atom`'s membership. Adding
-        // one the list already carries (or removing one it never had) leaves
-        // the property value identical, so publishing would only fire a
-        // spurious PropertyNotify without any observable change: skip the write.
-        const membership_changes = if (add) !has_atom else has_atom;
-        if (!membership_changes) return;
-
-        if (add) {
-            if (count >= state_atoms.len) {
+        switch (planStateWrite(bytes_after, has_atom, add, count, state_atoms.len)) {
+            .noop => return,
+            .skip_oversize => {
+                log.warn("_NET_WM_STATE on 0x{x} exceeds {d} atoms; skipping state-atom update", .{ win, max_ewmh_states });
+                return;
+            },
+            .skip_capacity => {
                 // The preserved set already filled our buffering capacity; the
                 // add would at best silently no-op (dropping the new atom), at
                 // worst overwrite a slot we dropped. Don't write.
                 log.warn("_NET_WM_STATE on 0x{x} holds {d} atoms; cannot add without corrupting the list", .{ win, max_ewmh_states });
                 return;
-            }
+            },
+            .write => {},
+        }
+
+        if (add) {
             state_atoms[count] = atom;
             count += 1;
         }

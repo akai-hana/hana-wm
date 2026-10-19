@@ -27,7 +27,8 @@ const std = @import("std");
 /// module. The registry is passed in (not captured) so dispatch sites never
 /// depend on the generated-registry layer.
 /// Returns a POINTER into `registry`, not a copy of the element: a
-/// `WindowModule` is 36 function-pointer fields, and returning it by value made
+/// `WindowModule` is 46 function-pointer fields (47 struct fields minus the
+/// `name` data field), and returning it by value made
 /// every single-binder dispatch copy the whole struct to reach one of them.
 /// The registry is build-generated static data (`&[_]WindowModule{...}`), so
 /// the pointer is as long-lived as the program; a caller that outlives the
