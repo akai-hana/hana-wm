@@ -1,70 +1,195 @@
 //! The window sub-system hook set (`WindowModule`): every module under
-//! `src/window/modules/` binds its `pub const module` value to this type.
-//! Engine-local — lives beside the window subsystem, not in core — because
-//! the window engine is never deleted by the modularity matrix and only the
+//! `src/window/modules/` binds its `pub const module` value to this type,
+//! binding only the hooks it owns (everything else stays default). Engine-
+//! local — lives beside the window subsystem, not in core — because the
+//! window engine is never deleted by the modularity matrix and only the
 //! window owner consumes this contract. The shared dispatch primitives
 //! (`providerOf`, `callAll`) live in `contract_dispatch.zig`; the cross-engine
 //! tiling vocabulary lives in `tiling_contract.zig`. Pure vocabulary, no
 //! X11, no feature imports.
+//!
+//! The single-binder hooks are GROUPED into per-family structs (D12/P2-54):
+//! a community module binds one family at a time (`.{ .hide = .{ ... } }`),
+//! the window layer dispatches through the matching family namespace
+//! (`registry.hide.callHook(.hideWindow, ...)`), and the flat
+//! `single_binder_hooks` list is DERIVED from the family structs' fields —
+//! there is no hand-maintained hook-name array left to drift. Lifecycle,
+//! persistence, and the protocol-side hooks stay flat and multi-binder at
+//! the top level, exactly as before.
 
 const std = @import("std");
 const model = @import("model");
 const dispatch = @import("contract_dispatch");
 
-/// The window sub-system hook set. Every module under a window-owner's
-/// `modules/` directory binds its `pub const module` value to this type,
-/// binding only the hooks it owns (everything else stays `null`). Dispatch
-/// order == the generated registry's order == deterministic filesystem scan
-/// order.
+/// Hide/restore family (minimize module; model vocabulary): parking a
+/// window and selecting it back out. The model `.parked` presence IS the
+/// state — these hooks write it.
+pub const HideHooks = struct {
+    /// Hide a window (minimize): parks the model entry and stashes the
+    /// tiled slot. At most one module binds this.
+    hideWindow: ?*const fn (*model.Model, model.WindowId) anyerror!void = null,
+    /// Restore a previously hidden window to its tiled slot (or floating
+    /// rect if it was floating-originated). At most one module binds this.
+    restoreWindow: ?*const fn (*model.Model, model.WindowId) void = null,
+    /// Select the next restore candidate on `ws` in the given order
+    /// (LIFO/FIFO). Returns null when nothing on `ws` is hidden.
+    restoreCandidateOn: ?*const fn (
+        *const model.Model,
+        model.WSId,
+        model.RestoreOrder,
+    ) ?model.WindowId = null,
+    /// Bulk-restore every hidden window on `ws`. At most one module binds
+    /// this.
+    restoreOnWs: ?*const fn (*model.Model, model.WSId) void = null,
+    /// Most-recently-hidden plain window on `ws` (fullscreen-carrying
+    /// windows excluded). Returns null when nothing qualifies.
+    latestHiddenOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
+    /// True when `win` currently holds a hidden record (parked state).
+    isWindowHidden: ?*const fn (*const model.Model, model.WindowId) bool = null,
+    /// Synthesize the full set of currently hidden windows on the model into
+    /// `set` (clearing it first). At most one module binds this; the bar
+    /// consumes it through the cached DrawCtx api so it never names the
+    /// window addon.
+    collectHiddenSet: ?*const fn (
+        *const model.Model,
+        *std.AutoHashMapUnmanaged(model.WindowId, void),
+        std.mem.Allocator,
+    ) void = null,
+};
+
+/// Screen-covering family (fullscreen module; model vocabulary): the
+/// fullscreen capture state. The covering READS are model queries, not
+/// hooks: a hook behind the registry returns null when no covering module
+/// is bound — meaning "is this window covering" would answer FALSE in such
+/// a build while the model held the intent. `model.coveringWsOf` /
+/// `model.isCovering` / `model.isCoveringOn` cannot be unbound.
+pub const CoveringHooks = struct {
+    /// Toggle the covering (fullscreen) capture on/off for `win`.
+    /// Returns true iff a state transition happened.
+    toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
+    /// The STRICT covering occupant on `ws`: covering AND anchored AND visible
+    /// (an AND of all three, where the model's `coveringOccupantOnWs` is an
+    /// anchor-or-visible OR). Both exist and both are used: the model scan
+    /// answers "who owns the screen", the strict one answers "which covering
+    /// window is actually usable here". Named apart from the model scan:
+    /// sharing its name would let the two different semantics read as
+    /// interchangeable. At most one module binds this.
+    visibleCoveringOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
+    /// One-way covering release: clear `win`'s covering intent and presence.
+    /// Unlike `toggleCovering` this never ENTERS covering mode, so a peer that
+    /// means "demote" cannot turn into "promote".
+    releaseCovering: ?*const fn (*model.Model, model.WindowId) void = null,
+    /// Retarget `win`'s covering intent to `ws` without dropping it (a
+    /// covering window stays covering across a workspace move/tag change).
+    /// Peer-service hook for the workspaces module; the binding module owns
+    /// its record guard. At most one module binds this.
+    moveCoveringTo: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
+};
+
+/// Workspaces family (workspaces module): tag/mask mutations on the model.
+pub const WorkspacesHooks = struct {
+    /// Move `win` to a single tag `ws` (mask replaces; home-list
+    /// follows). At most one module binds this.
+    sendToWs: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
+    /// Add tag `ws` to `win`'s mask (protect_current optionally keeps
+    /// the current workspace bit).
+    addToWs: ?*const fn (*model.Model, model.WindowId, model.WSId, bool) void = null,
+    /// Remove tag `ws` from `win`'s mask (last-tag protected; returns
+    /// true on success).
+    removeFromWs: ?*const fn (*model.Model, model.WindowId, model.WSId) bool = null,
+    /// Toggle pin: all-tags <-> current-only.
+    togglePin: ?*const fn (*model.Model, model.WindowId) void = null,
+    /// Toggle all-view mode; returns true when entering.
+    toggleAllView: ?*const fn (*model.Model) bool = null,
+};
+
+/// Floating family (floating module; "floating" is model vocabulary):
+/// the floating window record on the model.
+pub const FloatingHooks = struct {
+    /// Update a floating window's rect on the model (no-op for
+    /// tiled/unknown).
+    setFloatingRect: ?*const fn (*model.Model, model.WindowId, model.Rect) void = null,
+    /// Honor a configure request against a floating window record on the
+    /// model. Returns the decision (geometry_applied / border_only /
+    /// ignored).
+    honorConfigureRequest: ?*const fn (
+        *model.Model,
+        model.WindowId,
+        model.ConfigureReq,
+    ) model.HonorDecision = null,
+};
+
+/// Floating drag/resize family (floating module): the pointer-driven
+/// drag state machine.
+pub const DragHooks = struct {
+    startDrag: ?*const fn (u32, u8, i16, i16) void = null,
+    stopDrag: ?*const fn () void = null,
+    /// Motion tick for the active drag. The bool is Shift-held at the motion
+    /// event: true frees a resize from the window's PAspect band (ratio-lock
+    /// escape hatch); ignored for move drags.
+    updateDrag: ?*const fn (i16, i16, bool) void = null,
+    isDragging: ?*const fn () bool = null,
+    isResizingWindow: ?*const fn (u32) bool = null,
+    cancelDragForWindow: ?*const fn (u32) void = null,
+};
+
+/// User-facing commands. Each command's WHOLE transition — one model write
+/// plus the reconcile that follows it — lives in the module that owns the
+/// state it writes; these hooks are how the core/input and bar call sites
+/// reach them: the core never names an optional module directly, so a tree
+/// without the module simply has no binder and the command no-ops. Command
+/// hooks take no `*model.Model`: the command resolves the live model through
+/// the pipeline itself, which is what makes it a command rather than a model
+/// transition.
+pub const CommandHooks = struct {
+    /// Switch the viewed workspace to `ws` (the `switch_workspace` bind).
+    switchWorkspace: ?*const fn (u8) void = null,
+    /// Move a window to a single tag (`move_to_workspace`).
+    moveToWorkspace: ?*const fn (model.WindowId, u8) void = null,
+    /// Toggle tag `ws` on a window (`toggle_tag`); `protect_current` keeps
+    /// the current-workspace bit on add.
+    toggleTag: ?*const fn (model.WindowId, u8, bool) void = null,
+    /// Pin/unpin a window across all tags (`pin_window`).
+    pinWindow: ?*const fn (model.WindowId) void = null,
+    /// Enter/exit all-workspaces view (`all_workspaces`).
+    allWorkspaces: ?*const fn () void = null,
+    /// Toggle a window between present and covering (`toggle_fullscreen`).
+    toggleFullscreenWindow: ?*const fn (model.WindowId) void = null,
+    /// The SET form of the same transition, for EWMH requests that carry the
+    /// intended end state (`want` null = flip).
+    setFullscreenWindow: ?*const fn (model.WindowId, ?bool) void = null,
+    /// Park the focused window (`minimize_window`); null focus = no-op.
+    minimizeWindow: ?*const fn (?model.WindowId) void = null,
+    /// Restore one specific hidden window (title-bar click path).
+    unminimize: ?*const fn (model.WindowId) void = null,
+    /// Restore the next hidden window in slot order (`unminimize`).
+    unminimizeOrdered: ?*const fn (model.RestoreOrder) void = null,
+    /// Restore every hidden window on the current workspace
+    /// (`unminimize_all`).
+    unminimizeAll: ?*const fn () void = null,
+    /// Toggle a window between tiled and floating (`toggle_floating_window`).
+    toggleFloatingWindow: ?*const fn (model.WindowId) void = null,
+};
+
+/// The (family field name, family struct) pairs, the one place the family
+/// composition is listed. `hookFamily` and `hookBinds` key off it, so a new
+/// family is one entry here plus its field on `WindowModule`.
+const families = .{
+    .{ "hide", HideHooks },
+    .{ "covering", CoveringHooks },
+    .{ "workspaces", WorkspacesHooks },
+    .{ "floating", FloatingHooks },
+    .{ "drag", DragHooks },
+    .{ "command", CommandHooks },
+};
+
+/// The window sub-system hook set: flat lifecycle/persistence/protocol
+/// hooks (multi-binder, dispatched by explicit registry loops) plus one
+/// field per single-binder family. Every module under a window-owner's
+/// `modules/` directory binds its `pub const module` value to this type.
+/// Dispatch order == the generated registry's order == deterministic
+/// filesystem scan order.
 pub const WindowModule = struct {
-    /// The hooks whose contract is "at most one module binds this": dispatch is
-    /// first-match (`providerOf`, invoked inline by the owner's wrapper), so a
-    /// second binder would be silently ignored. Every other hook is adopted by
-    /// explicit registry loops (init/deinit, notifyConfigureIfPending,
-    /// onWindowGone, the serialize/deserialize persistence hooks,
-    /// setEwmhFullscreenState, armPendingBarHide/Show) and may have many
-    /// binders. The build-generated `window_modules` registry asserts at
-    /// comptime that each field below has <= 1 binder.
-    pub const single_binder_hooks = [_][]const u8{
-        "hideWindow",          "restoreWindow",    "restoreCandidateOn",
-        "restoreOnWs",         "latestHiddenOnWs", "isWindowHidden",
-        "collectHiddenSet",    "toggleCovering",   "visibleCoveringOnWs",
-        "releaseCovering",     "moveCoveringTo",   "sendToWs",
-        "addToWs",             "removeFromWs",     "togglePin",
-        "toggleAllView",       "setFloatingRect",  "honorConfigureRequest",
-        "startDrag",           "stopDrag",         "updateDrag",
-        "isDragging",          "isResizingWindow", "cancelDragForWindow",
-        "switchWorkspace",     "moveToWorkspace",  "toggleTag",
-        "pinWindow",           "allWorkspaces",    "toggleFullscreenWindow",
-        "setFullscreenWindow", "minimizeWindow",   "unminimize",
-        "unminimizeOrdered",   "unminimizeAll",    "toggleFloatingWindow",
-    };
-
-    /// The complementary half of the classification: `WindowModule` hooks whose
-    /// dispatch is an explicit registry LOOP, so several modules may bind them
-    /// and every one is adopted. Together with `single_binder_hooks` this is a
-    /// PARTITION of the contract, asserted below -- which is the point. The
-    /// at-most-one check for a newly added first-match hook only runs if the
-    /// name is listed, so an unlisted new hook escapes it; naming both
-    /// halves makes a new hook a compile error instead.
-    pub const multi_binder_hooks = [_][]const u8{
-        "init",                     "deinit",
-        "notifyConfigureIfPending", "onWindowGone",
-        "serializeWindow",          "deserializeWindow",
-        "setEwmhFullscreenState",   "armPendingBarHide",
-        "armPendingBarShow",        "resolvePendingBarNow",
-    };
-
-    /// `WindowModule` fields that are DATA rather than hooks, so they belong
-    /// in neither cardinality list: nothing dispatches them, and they have no
-    /// binder count.
-    ///
-    /// The partition invariant therefore has to account for data fields: the
-    /// honest form is "every field is classified, as single-dispatch,
-    /// multi-dispatch, or data" -- and a field still has to be classified to
-    /// get here, so adding one without a decision is still a compile error.
-    pub const non_hook_fields = [_][]const u8{"name"};
-
     /// Stable identity for this module, used by persistence to stamp a saved
     /// window with its CLAIMANT rather than the claimant's registry position.
     /// Required (non-empty, unique) for any module binding `serializeWindow`;
@@ -111,177 +236,127 @@ pub const WindowModule = struct {
     /// the question itself (the fullscreen exit bump). Distinct from the arm
     /// pair: those DEFER a decision, this one CANCELS one.
     resolvePendingBarNow: ?*const fn (u32) void = null,
-    // Hide/restore family (minimize module; model vocabulary)
-    /// Hide a window (minimize): parks the model entry and stashes the
-    /// tiled slot. At most one module binds this.
-    hideWindow: ?*const fn (*model.Model, model.WindowId) anyerror!void = null,
-    /// Restore a previously hidden window to its tiled slot (or floating
-    /// rect if it was floating-originated). At most one module binds this.
-    restoreWindow: ?*const fn (*model.Model, model.WindowId) void = null,
-    /// Select the next restore candidate on `ws` in the given order
-    /// (LIFO/FIFO). Returns null when nothing on `ws` is hidden.
-    restoreCandidateOn: ?*const fn (
-        *const model.Model,
-        model.WSId,
-        model.RestoreOrder,
-    ) ?model.WindowId = null,
-    /// Bulk-restore every hidden window on `ws`. At most one module binds
-    /// this.
-    restoreOnWs: ?*const fn (*model.Model, model.WSId) void = null,
-    /// Most-recently-hidden plain window on `ws` (fullscreen-carrying
-    /// windows excluded). Returns null when nothing qualifies.
-    latestHiddenOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
-    /// True when `win` currently holds a hidden record (parked state).
-    isWindowHidden: ?*const fn (*const model.Model, model.WindowId) bool = null,
-    /// Synthesize the full set of currently hidden windows on the model into
-    /// `set` (clearing it first). At most one module binds this; the bar
-    /// consumes it through the cached DrawCtx api so it never names the
-    /// window addon.
-    collectHiddenSet: ?*const fn (
-        *const model.Model,
-        *std.AutoHashMapUnmanaged(model.WindowId, void),
-        std.mem.Allocator,
-    ) void = null,
 
-    // Screen-covering family (fullscreen module; model vocabulary)
-    /// Toggle the covering (fullscreen) capture on/off for `win`.
-    /// Returns true iff a state transition happened.
-    toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
-    // The covering reads are model queries, not hooks: a hook behind the
-    // registry returns null when no covering module is bound -- meaning "is
-    // this window covering" would answer FALSE in such a build while the model
-    // held the intent. `model.coveringWsOf` / `model.isCovering` /
-    // `model.isCoveringOn` cannot be unbound.
-    /// The STRICT covering occupant on `ws`: covering AND anchored AND visible
-    /// (an AND of all three, where the model's `coveringOccupantOnWs` is an
-    /// anchor-or-visible OR). Both exist and both are used: the model scan
-    /// answers "who owns the screen", the strict one answers "which covering
-    /// window is actually usable here". Named apart from the model scan:
-    /// sharing its name would let the two different semantics read as
-    /// interchangeable. At most one module binds this.
-    visibleCoveringOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
-    /// One-way covering release: clear `win`'s covering intent and presence.
-    /// Unlike `toggleCovering` this never ENTERS covering mode, so a peer that
-    /// means "demote" cannot turn into "promote".
-    releaseCovering: ?*const fn (*model.Model, model.WindowId) void = null,
-    /// Retarget `win`'s covering intent to `ws` without dropping it (a
-    /// covering window stays covering across a workspace move/tag change).
-    /// Peer-service hook for the workspaces module; the binding module owns
-    /// its record guard. At most one module binds this.
-    moveCoveringTo: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
+    // The single-binder families (see the per-family structs above).
+    hide: HideHooks = .{},
+    covering: CoveringHooks = .{},
+    workspaces: WorkspacesHooks = .{},
+    floating: FloatingHooks = .{},
+    drag: DragHooks = .{},
+    command: CommandHooks = .{},
 
-    // Workspaces family (workspaces module)
-    /// Move `win` to a single tag `ws` (mask replaces; home-list
-    /// follows). At most one module binds this.
-    sendToWs: ?*const fn (*model.Model, model.WindowId, model.WSId) void = null,
-    /// Add tag `ws` to `win`'s mask (protect_current optionally keeps
-    /// the current workspace bit).
-    addToWs: ?*const fn (*model.Model, model.WindowId, model.WSId, bool) void = null,
-    /// Remove tag `ws` from `win`'s mask (last-tag protected; returns
-    /// true on success).
-    removeFromWs: ?*const fn (*model.Model, model.WindowId, model.WSId) bool = null,
-    /// Toggle pin: all-tags <-> current-only.
-    togglePin: ?*const fn (*model.Model, model.WindowId) void = null,
-    /// Toggle all-view mode; returns true when entering.
-    toggleAllView: ?*const fn (*model.Model) bool = null,
+    /// The hooks whose contract is "at most one module binds this": dispatch is
+    /// first-match (`providerOf`/`callHook`, invoked by the owner's family
+    /// or top-level wrapper), so a second binder would be silently ignored.
+    /// DERIVED from the family structs' fields (D12/P2-54) — adding a family
+    /// hook adds it here with no second edit. Every other top-level hook is
+    /// adopted by explicit registry loops (init/deinit,
+    /// notifyConfigureIfPending, onWindowGone, the serialize/deserialize
+    /// persistence hooks, setEwmhFullscreenState, armPendingBarHide/Show,
+    /// resolvePendingBarNow) and may have many binders. The build-generated
+    /// `window_modules` registry asserts at comptime (via `hookBinds`) that
+    /// each name below has <= 1 binder.
+    pub const single_binder_hooks = blk: {
+        @setEvalBranchQuota(20_000);
+        var out: []const []const u8 = &.{};
+        for (families) |fam| {
+            for (std.meta.fields(fam[1])) |f| out = out ++ .{f.name};
+        }
+        break :blk out;
+    };
 
-    // Floating family (floating module; "floating" is model vocabulary)
-    /// Update a floating window's rect on the model (no-op for
-    /// tiled/unknown).
-    setFloatingRect: ?*const fn (*model.Model, model.WindowId, model.Rect) void = null,
-    /// Honor a configure request against a floating window record on the
-    /// model. Returns the decision (geometry_applied / border_only /
-    /// ignored).
-    honorConfigureRequest: ?*const fn (
-        *model.Model,
-        model.WindowId,
-        model.ConfigureReq,
-    ) model.HonorDecision = null,
+    /// The complementary half of the classification: `WindowModule` hooks
+    /// whose dispatch is an explicit registry LOOP, so several modules may
+    /// bind them and every one is adopted. Together with the derived
+    /// `single_binder_hooks` (family fields + `name` in neither list) this
+    /// is a PARTITION of the contract's top-level fields, asserted below --
+    /// which is the point. The at-most-one check for a newly added first-
+    /// match hook only runs if the name is listed, so an unlisted new hook
+    /// escapes it; classifying both halves makes a new hook a compile error
+    /// instead.
+    pub const multi_binder_hooks = [_][]const u8{
+        "init",                     "deinit",
+        "notifyConfigureIfPending", "onWindowGone",
+        "serializeWindow",          "deserializeWindow",
+        "setEwmhFullscreenState",   "armPendingBarHide",
+        "armPendingBarShow",        "resolvePendingBarNow",
+    };
 
-    // Floating drag/resize commands.
-    startDrag: ?*const fn (u32, u8, i16, i16) void = null,
-    stopDrag: ?*const fn () void = null,
-    /// Motion tick for the active drag. The bool is Shift-held at the motion
-    /// event: true frees a resize from the window's PAspect band (ratio-lock
-    /// escape hatch); ignored for move drags.
-    updateDrag: ?*const fn (i16, i16, bool) void = null,
-    isDragging: ?*const fn () bool = null,
-    isResizingWindow: ?*const fn (u32) bool = null,
-    cancelDragForWindow: ?*const fn (u32) void = null,
+    /// `WindowModule` top-level fields that are NOT directly-dispatched
+    /// hooks: the `name` data field plus the six family containers (each
+    /// dispatches THROUGH its own namespace, so no top-level hook lists name
+    /// them). The partition invariant below has to account for them: the
+    /// honest form is "every top-level field is classified, as multi-
+    /// dispatch, or as data/family" -- and a field still has to be classified
+    /// to get here, so adding one without a decision is still a compile error.
+    pub const non_hook_fields = [_][]const u8{
+        "name",     "hide", "covering", "workspaces",
+        "floating", "drag", "command",
+    };
 
-    // User-facing commands.
-    //
-    // Each command's WHOLE transition -- one model write plus the reconcile
-    // that follows it -- lives in the module that owns the state it writes;
-    // these hooks are how the core/input and bar call sites reach them: the
-    // core never names an optional module directly, so a tree without the
-    // module simply has no binder and the command no-ops.
-    // Command hooks take no `*model.Model`: the command resolves the live
-    // model through the pipeline itself, which is what makes it a command
-    // rather than a model transition.
+    /// The family (by `families` index) that owns the flat hook `hook`,
+    /// resolved at comptime. Null when no family declares it — which for a
+    /// name in `single_binder_hooks` is a contract bug, caught by the
+    /// comptime assert below.
+    pub fn hookFamily(comptime hook: []const u8) ?usize {
+        @setEvalBranchQuota(20_000);
+        for (families, 0..) |fam, i| {
+            for (std.meta.fields(fam[1])) |f| {
+                if (std.mem.eql(u8, f.name, hook)) return i;
+            }
+        }
+        return null;
+    }
 
-    // Workspace commands (workspaces module).
-    /// Switch the viewed workspace to `ws` (the `switch_workspace` bind).
-    switchWorkspace: ?*const fn (u8) void = null,
-    /// Move a window to a single tag (`move_to_workspace`).
-    moveToWorkspace: ?*const fn (model.WindowId, u8) void = null,
-    /// Toggle tag `ws` on a window (`toggle_tag`); `protect_current` keeps
-    /// the current-workspace bit on add.
-    toggleTag: ?*const fn (model.WindowId, u8, bool) void = null,
-    /// Pin/unpin a window across all tags (`pin_window`).
-    pinWindow: ?*const fn (model.WindowId) void = null,
-    /// Enter/exit all-workspaces view (`all_workspaces`).
-    allWorkspaces: ?*const fn () void = null,
-
-    // Screen-covering commands (fullscreen module).
-    /// Toggle a window between present and covering (`toggle_fullscreen`).
-    toggleFullscreenWindow: ?*const fn (model.WindowId) void = null,
-    /// The SET form of the same transition, for EWMH requests that carry the
-    /// intended end state (`want` null = flip).
-    setFullscreenWindow: ?*const fn (model.WindowId, ?bool) void = null,
-
-    // Hide/restore commands (minimize module).
-    /// Park the focused window (`minimize_window`); null focus = no-op.
-    minimizeWindow: ?*const fn (?model.WindowId) void = null,
-    /// Restore one specific hidden window (title-bar click path).
-    unminimize: ?*const fn (model.WindowId) void = null,
-    /// Restore the next hidden window in slot order (`unminimize`).
-    unminimizeOrdered: ?*const fn (model.RestoreOrder) void = null,
-    /// Restore every hidden window on the current workspace
-    /// (`unminimize_all`).
-    unminimizeAll: ?*const fn () void = null,
-
-    // Floating commands (floating module).
-    /// Toggle a window between tiled and floating (`toggle_floating_window`).
-    toggleFloatingWindow: ?*const fn (model.WindowId) void = null,
+    /// Binder probe for the generated registry's at-most-one check: does
+    /// this module bind the flat hook `hook` (resolved through its family)?
+    /// An unknown name is a compile error, not a silent false — a renamed
+    /// hook left in a list would otherwise turn the whole claim into a
+    /// no-op. Top-level contracts without families (Segment) provide their
+    /// own flat probe under the same name, so the generated check is
+    /// uniform.
+    pub fn hookBinds(m: WindowModule, comptime hook: []const u8) bool {
+        const fi = hookFamily(hook) orelse @compileError(
+            "WindowModule has no hook '" ++ hook ++ "' in any family; " ++
+                "single_binder_hooks is derived from the family structs, " ++
+                "so this name cannot be dispatched",
+        );
+        inline for (families, 0..) |fam, i| {
+            if (i == fi) return @field(@field(m, fam[0]), hook) != null;
+        }
+        unreachable;
+    }
 };
 
 comptime {
-    // 36 fields x up to 27 names, twice over.
     @setEvalBranchQuota(20_000);
-    // The lists are not documentation dressed as code -- build.zig's generated
-    // registry consumes `single_binder_hooks` to reject a second binder at
-    // comptime, and that check only runs for names the lists contain. The
-    // partition below is what makes "added a hook, forgot to classify it" a
-    // compile error instead of an escape from the at-most-one enforcement.
-    // ~40 lines of comptime is cheap for that.
+    // 47 top-level fields: 1 data + 10 multi + 6 family containers; the 36
+    // single-binder hooks live INSIDE the families. The lists are not
+    // documentation dressed as code -- build.zig's generated registry
+    // consumes `single_binder_hooks` (via `hookBinds`) to reject a second
+    // binder at comptime, and that check only runs for names the list
+    // contains. The partition below is what makes "added a hook, forgot to
+    // classify it" a compile error instead of an escape from the at-most-one
+    // enforcement.
     //
-    // Every `WindowModule` field is classified exactly once across the two
-    // cardinality lists plus the data list, and no list names a field that no
-    // longer exists. `s == m` fails for BOTH the "added a hook, forgot to
-    // classify it" case and the "classified it as both" case; a field in
-    // `non_hook_fields` skips the check and is instead held to the inverse
-    // assert below (a data list naming a removed field is also an error).
+    // Every `WindowModule` TOP-LEVEL field is classified exactly once: either
+    // listed in `multi_binder_hooks`, or in `non_hook_fields` (data or a
+    // family container). A family FIELD lives inside its family struct, where
+    // every field is a single-binder hook by construction. `s == m` fails for
+    // both "added a hook, forgot to classify it" and "classified it as both";
+    // a field in `non_hook_fields` skips the check and is instead held to the
+    // inverse assert below (a data/family list naming a removed field is also
+    // an error).
     //
     // This is a `WindowModule`-only property, unlike the at-most-one binder
-    // count: it holds because every `WindowModule` field is either a hook with
-    // a dispatch cardinality or one of the named data fields. `Segment` carries
-    // data fields too (name, props, dirty_sources, clickable) and is not
-    // partitioned at all -- it declares only the at-most-one hooks and the
+    // count: it holds because every `WindowModule` top-level field is either
+    // a multi-dispatch hook or one of the named data/family fields. `Segment`
+    // carries data fields too (name, props, dirty_sources, clickable) and is
+    // not partitioned at all -- it declares only the at-most-one hooks and the
     // generated registry enforces the count.
     for (std.meta.fields(WindowModule)) |f| {
         if (dispatch.isListed(&WindowModule.non_hook_fields, f.name)) continue;
-        const s = dispatch.isListed(&WindowModule.single_binder_hooks, f.name);
+        const s = dispatch.isListed(WindowModule.single_binder_hooks, f.name);
         const m = dispatch.isListed(&WindowModule.multi_binder_hooks, f.name);
         if (s == m) @compileError(
             "WindowModule hook '" ++ f.name ++ "' must be listed in EXACTLY one of " ++
@@ -290,7 +365,20 @@ comptime {
                 "); it is the dispatch cardinality, not a detail",
         );
     }
-    dispatch.assertListedFields(WindowModule, "single_binder_hooks", &WindowModule.single_binder_hooks);
     dispatch.assertListedFields(WindowModule, "multi_binder_hooks", &WindowModule.multi_binder_hooks);
     dispatch.assertListedFields(WindowModule, "non_hook_fields", &WindowModule.non_hook_fields);
+    // Every derived single-binder name resolves to a family (hookFamily)
+    // and appears once: two families claiming one hook name would make the
+    // derived list contain it twice, and the registry's binder count would
+    // then double-count nothing while the at-most-one claim became ambiguous.
+    for (WindowModule.single_binder_hooks, 0..) |hook, i| {
+        if (WindowModule.hookFamily(hook) == null) @compileError(
+            "single_binder_hooks contains '" ++ hook ++ "', which no family struct declares",
+        );
+        for (WindowModule.single_binder_hooks[i + 1 ..]) |later| {
+            if (std.mem.eql(u8, hook, later)) @compileError(
+                "single_binder_hooks lists '" ++ hook ++ "' twice (two families claim one hook name)",
+            );
+        }
+    }
 }

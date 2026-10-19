@@ -13,6 +13,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const title_cache = @import("title_cache");
+const atoms = @import("atoms");
 
 // The title is a fixed inline buffer, so there is no ownership to free --
 // which is the point. What is pinned here is the copy semantics and the
@@ -101,4 +102,70 @@ test "at-capacity cache drops new entries but keeps overwrites" {
     // Overwrites of an already-cached window remain exempt from the ceiling.
     title_cache.storeTitle(1, "still writable");
     try testing.expectEqualStrings("still writable", title_cache.peekTitle(1));
+}
+
+// ---------------------------------------------------------------------------
+// Title-atom latch (P1-37). `ensureAtoms` used to latch `atoms_resolved = true`
+// BEFORE reading the atom cache, so a null answer (atom cache not ready yet)
+// disabled _NET_WM_NAME for the entire session. The latch rule: only a full
+// answer latches; init/deinit drop the latch with everything else. Both
+// sequences need a primed-then-cleared atom cache, driven through the
+// `atoms.swapAtomCacheForTest` seam (restored on defer, so a real cache a
+// prior test installed in this process survives).
+
+test "title atoms: a null answer never latches; the retry resolves later" {
+    const saved = atoms.swapAtomCacheForTest(null);
+    defer _ = atoms.swapAtomCacheForTest(saved);
+    title_cache.init(std.testing.allocator);
+    defer title_cache.deinit();
+
+    // Atom cache not ready: both lookups answer null. The pre-fix latch
+    // recorded resolved=true HERE and _NET_WM_NAME was dead from then on.
+    const cold = title_cache.resolveTitleAtomsForTest();
+    try testing.expect(!cold.resolved);
+    try testing.expectEqual(@as(?u32, null), cold.net_wm_name);
+    try testing.expectEqual(@as(?u32, null), cold.utf8_string);
+
+    // Cache becomes ready (initAtomCache in production): the next attempt
+    // must pick up what the null attempt gave up on.
+    var primed = std.mem.zeroes(atoms.AtomCache);
+    primed._NET_WM_NAME = 42;
+    primed.UTF8_STRING = 43;
+    _ = atoms.swapAtomCacheForTest(primed);
+    const warm = title_cache.resolveTitleAtomsForTest();
+    try testing.expect(warm.resolved);
+    try testing.expectEqual(@as(?u32, 42), warm.net_wm_name);
+    try testing.expectEqual(@as(?u32, 43), warm.utf8_string);
+}
+
+test "title atoms: a deinit()+init() cycle drops a primed latch (cleared cache)" {
+    const saved = atoms.swapAtomCacheForTest(null);
+    defer _ = atoms.swapAtomCacheForTest(saved);
+
+    title_cache.init(std.testing.allocator);
+    // Prime and resolve: the latch now holds real ids...
+    var primed = std.mem.zeroes(atoms.AtomCache);
+    primed._NET_WM_NAME = 77;
+    primed.UTF8_STRING = 78;
+    _ = atoms.swapAtomCacheForTest(primed);
+    const warm = title_cache.resolveTitleAtomsForTest();
+    try testing.expect(warm.resolved);
+    try testing.expectEqual(@as(?u32, 77), warm.net_wm_name);
+
+    // ...then the cache is cleared and the module cycles. A latch surviving
+    // deinit()/init() would still report the stale ids as resolved; with the
+    // reset it re-asks, sees null, and does not latch again.
+    _ = atoms.swapAtomCacheForTest(null);
+    title_cache.deinit();
+    title_cache.init(std.testing.allocator);
+    defer title_cache.deinit();
+    const cold = title_cache.resolveTitleAtomsForTest();
+    try testing.expect(!cold.resolved);
+    try testing.expectEqual(@as(?u32, null), cold.net_wm_name);
+
+    // And a fresh cycle resolves again once the atoms are back.
+    _ = atoms.swapAtomCacheForTest(primed);
+    const again = title_cache.resolveTitleAtomsForTest();
+    try testing.expect(again.resolved);
+    try testing.expectEqual(@as(?u32, 77), again.net_wm_name);
 }
