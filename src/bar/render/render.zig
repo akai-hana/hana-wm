@@ -47,7 +47,7 @@ const self_ticking_ids = segmod.self_ticking_ids;
 /// The hide-family provider bound to the generated window registry, resolved
 /// once at file scope: the hidden-set synthesis and its collect dispatch
 /// share one lookup (no module is ever named by the bar).
-const collect_hidden_set = window.providerOf(.collectHiddenSet);
+const collect_hidden_set = window.hide.providerOf(.collectHiddenSet);
 
 /// Fills the shared per-frame DrawCtx the bar hands to every segment's
 /// draw hook, including the title snapshot slots.
@@ -159,7 +159,7 @@ fn minimizedCollect(
 ) void {
     const mm: *const model.Model = @ptrCast(@alignCast(m));
     if (collect_hidden_set) |wm|
-        wm.collectHiddenSet.?(mm, set, allocator);
+        wm.hide.collectHiddenSet.?(mm, set, allocator);
 }
 
 // State operations
