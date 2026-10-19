@@ -527,7 +527,7 @@ const Parser = struct {
         //
         // parseKeybindings treats array values as sequences; scalar
         // reads of a repeated key resolve to the last declaration.
-        try document.insertOrAccumulate(self.allocator, section, key, value, self.line);
+        try document.insertOrAccumulate(self.allocator, section, key, value, self.line, self.sourceLabel());
 
         self.skipWhitespace();
         self.advanceAfterPair(key);
@@ -555,7 +555,9 @@ const Parser = struct {
 /// parse/merge error abandons the partial document to the arena reset. The
 /// Document owns nothing; `content` must stay alive (arena-backed) until the
 /// arena reset. `source_path` is the file this content came from, named in
-/// every per-line diagnostic ("" for in-memory/embedded inputs).
+/// every per-line diagnostic AND recorded on every entry it inserts (the
+/// section-level diagnostics later name that file:line too; "" for
+/// in-memory/embedded inputs, which both label "<input>").
 pub fn parse(allocator: std.mem.Allocator, content: []const u8, source_path: []const u8) !Document {
     var doc = Document.init(allocator);
 

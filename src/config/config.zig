@@ -190,7 +190,7 @@ const FallbackInput = struct { toml: []const u8 };
 /// lives in the binary, so it contributes no files to the snapshot.
 fn parseFallbackDoc(a: std.mem.Allocator, read: *discover.ReadSet, in: FallbackInput) !parser.Document {
     _ = read;
-    return try parser.parse(a, in.toml, "<embedded fallback>");
+    return try parser.parse(a, in.toml, types.embedded_fallback_label);
 }
 
 /// Shared tail of the config load pipelines: one load-scoped arena hosts the
@@ -248,6 +248,11 @@ fn buildConfigFromDoc(allocator: std.mem.Allocator, doc: *parser.Document) !comp
     // the load so reload keeps the live config. Boot falls through to
     // the embedded fallback via loadConfigDefault's warn-and-skip.
     if (doc.had_errors) return error.ConfigParseFailed;
+    // The fragment-declared duplicate-accumulate exemptions (D13) must be
+    // installed before the first `get`, and composed.parse does all of the
+    // getting: bind tables and rule tables read their accumulated arrays
+    // there without a "later wins" warn (document.zig owns the check).
+    doc.installAccumulateExempt(composed.accumulate_exempt_list);
     // The composed facade assembles core + every discovered fragment (each
     // self-seeding its defaults); a fragment's `validate` may fail the load
     // with error.InvalidConfig, which loadFor and isFatalLoadError treat like
@@ -276,40 +281,43 @@ fn lintDocument(doc: *parser.Document) void {
 
 /// Known section names hana recognizes (case-sensitively) at their exact
 /// spelling. A section header that differs from one of these only by case is
-/// almost certainly a typo that silently drops the whole section.
-const known_section_entries = .{
-    .{ types.section_binds, {} },                        .{ types.section_binds_alt, {} },
-    .{ types.section_workspace_rules, {} },              .{ types.section_rules, {} },
-    .{ types.section_drag, {} },                         .{ types.section_fullscreen, {} },
-    .{ types.section_display, {} },                      .{ types.section_core, {} },
-    .{ types.section_tiling, {} },                       .{ types.section_workspaces, {} },
-    .{ types.section_bar, {} },                          .{ types.section_bar_properties, {} },
-    .{ types.section_prefix_bar_layout ++ "left", {} },  .{ types.section_prefix_bar_layout ++ "center", {} },
-    .{ types.section_prefix_bar_layout ++ "right", {} }, .{ types.section_bar_modules_workspaces, {} },
-    .{ types.section_tiling_layouts_master_stack, {} },  .{ types.section_prefix_tiling_layouts ++ "master_stack", {} },
+/// almost certainly a typo that silently drops the whole section. D13/P2-50:
+/// the inventory is the composed facade's union of the PRESENT fragments'
+/// `sections` exports plus the always-present core_config's, so a new
+/// fragment's sections join it with zero edits here (and a tree that deleted
+/// a module drops that module's sections from the lint, falling back to the
+/// unconsumed-key warns for its leftover headers).
+const known_sections = blk: {
+    @setEvalBranchQuota(20_000);
+    var entries: []const struct { []const u8, void } = &.{};
+    for (composed.known_section_names) |name| {
+        entries = entries ++ .{.{ name, {} }};
+    }
+    break :blk std.StaticStringMap(void).initComptime(entries);
 };
-const known_sections = std.StaticStringMap(void).initComptime(known_section_entries);
 
 comptime {
-    // Two `types.section_*` constants accidentally equal (a copy-paste rename
-    // that forgot one site) would silently collapse inside the map above: one
-    // real section would go unlisted and its mis-case warning would fire on
-    // its own twin. Pairwise-distinct at comptime; ~16 entries, so O(n^2) is
-    // free next to the parser's other comptime work.
+    // Two section names accidentally equal (a copy-paste rename that forgot
+    // one site, or the same name listed by two fragments) would silently
+    // collapse inside the map above: one real section would go unlisted and
+    // its mis-case warning would fire on its own twin. Pairwise-distinct at
+    // comptime; ~20 entries, so O(n^2) is free next to the parser's other
+    // comptime work.
     @setEvalBranchQuota(20_000);
-    for (known_section_entries, 0..) |ea, i| {
-        for (known_section_entries, 0..) |eb, j| {
-            if (i != j and std.mem.eql(u8, ea[0], eb[0])) @compileError(
-                "known_sections: section name '" ++ ea[0] ++ "' is listed twice " ++
-                    "(two types.section_* constants collapsed to the same spelling)",
+    for (composed.known_section_names, 0..) |ea, i| {
+        for (composed.known_section_names, 0..) |eb, j| {
+            if (i != j and std.mem.eql(u8, ea, eb)) @compileError(
+                "known_sections: section name '" ++ ea ++ "' is listed twice " ++
+                    "(two section_* constants or two fragments collapsed to the same spelling)",
             );
         }
     }
 }
 
 /// Section families whose parent section must exist for their knobs to do
-/// anything; a mis-cased or missing parent leaves them inert.
-const known_section_prefixes = [_][]const u8{ types.section_prefix_tiling_layouts, types.section_prefix_workspace_rules, types.section_prefix_rules };
+/// anything; a mis-cased or missing parent leaves them inert. D13/P2-50:
+/// the union of the present fragments' `section_prefixes` exports.
+const known_section_prefixes = composed.known_section_prefix_names;
 
 fn warnMisCasedSections(doc: *parser.Document) void {
     var iter = doc.sections.iterator();
@@ -334,19 +342,31 @@ fn warnMisCasedSections(doc: *parser.Document) void {
 }
 
 /// Warns once when a section family that requires a parent section is present
-/// without it, which leaves its knobs silently inert.
+/// without it, which leaves its knobs silently inert. D13/P2-50: the parent/
+/// child pairs are the present fragments' `inert_families` exports (tiling's
+/// sub-tables, bar.properties, both rule-table families), so a new family
+/// ships with its fragment instead of an edit here.
 fn warnInertSectionFamilies(doc: *parser.Document) void {
-    if (doc.getSection(types.section_tiling) == null) {
+    for (composed.inert_family_list) |fam| {
+        if (doc.getSection(fam.parent) != null) continue;
         var iter = doc.sections.iterator();
         while (iter.next()) |entry| {
-            if (std.mem.startsWith(u8, entry.key_ptr.*, types.section_prefix_tiling)) {
-                log.warn("[tiling.*] sections present but bare [tiling] is missing; their knobs are inert", .{});
-                break;
-            }
+            const name = entry.key_ptr.*;
+            const child = (fam.child_prefix.len > 0 and std.mem.startsWith(u8, name, fam.child_prefix)) or
+                (fam.child_exact.len > 0 and std.mem.eql(u8, name, fam.child_exact));
+            if (!child) continue;
+            // The family's display shape: an exact child names itself; a
+            // prefix family shows as the wildcard (e.g. [tiling.*]).
+            var display_buf: [max_section_name_bytes]u8 = undefined;
+            const display = if (fam.child_exact.len > 0) fam.child_exact else std.fmt.bufPrint(
+                &display_buf,
+                "{s}*",
+                .{fam.child_prefix},
+            ) catch fam.child_prefix;
+            log.warn("[{s}] present but [{s}] is missing; their knobs are inert", .{ display, fam.parent });
+            break;
         }
     }
-    if (doc.getSection(types.section_bar) == null and doc.getSection(types.section_bar_properties) != null)
-        log.warn("[bar.properties] present but [bar] is missing; its knobs are inert", .{});
 }
 
 /// Canonical startup entry point: load. Re-exec successors find

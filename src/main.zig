@@ -164,8 +164,41 @@ fn runCheckConfig() !void {
     std.process.exit(if (n == 0) 0 else 1);
 }
 
+/// True when the process was asked to dump the knob schema and stop. Checked
+/// before ANY X11 work, like `--check-config`: the dump is a print of a
+/// comptime constant, useful precisely where no display exists (CI, docs
+/// pipelines).
+fn dumpSchemaRequested(args: std.process.Args) bool {
+    var it = std.process.Args.Iterator.init(args);
+    _ = it.skip(); // argv[0]
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--dump-config-schema")) return true;
+    }
+    return false;
+}
+
+/// Prints the composed knob inventory as JSON on stdout and exits 0 (P1-44).
+/// The inventory is the comptime constant `composed.knob_schema_json`, so
+/// this loads no config, reads no file, and needs no display and no
+/// diagnostics -- unlike `--check-config`, it works in EVERY build mode (the
+/// plan's Debug/`-Dconfig-warn` parenthetical covers where the tables behind
+/// it are warn-validated, not where the dump answers).
+fn runDumpConfigSchema() void {
+    const io = std.Options.debug_io;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    // A write that fails (closed pipe, EPIPE) must not exit 0: a caller
+    // piping into `head` sees the reader's exit, but a genuine stdout
+    // failure on our side deserves a non-zero of its own.
+    w.interface.writeAll(composed.knob_schema_json) catch std.process.exit(1);
+    w.interface.writeAll("\n") catch std.process.exit(1);
+    w.flush() catch std.process.exit(1);
+    std.process.exit(0);
+}
+
 pub fn main(init: std.process.Init) !void {
     if (checkConfigRequested(init.minimal.args)) try runCheckConfig();
+    if (dumpSchemaRequested(init.minimal.args)) runDumpConfigSchema();
 
     const x = try connectToX();
     defer x.deinit();

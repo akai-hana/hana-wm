@@ -125,6 +125,14 @@ pub const Section = struct {
     // have no header). Filled by parse() when a section is created; merged
     // sections carry their source name through the shared-value merge.
     name: []const u8 = "",
+    /// Duplicate-accumulate exemptions (D13): the (section, key) pairs where
+    /// accumulating duplicate declarations is the point (bind tables, rule
+    /// tables), so a scalar read of an array must not warn "later wins".
+    /// The parser stays fragment-agnostic: the list is empty at parse time
+    /// and installed on every section by `Document.installAccumulateExempt`
+    /// (config.zig passes the composed union of the present fragments'
+    /// exports) before the first `get`.
+    accumulate_exempt: []const types.SectionKey = &.{},
 
     /// What the parser knows about one declared key.
     pub const Entry = struct {
@@ -136,6 +144,16 @@ pub const Section = struct {
         /// Source line of the FIRST declaration; feeds the unrecognized-key
         /// and duplicate-key diagnostics (best-effort).
         line: usize = 0,
+        /// File the FIRST declaration came from; feeds the same diagnostics
+        /// as `line`, so a key that an include/theme file contributed names
+        /// THAT file, not just a line number. Borrows like `key`/`value`:
+        /// parse labels it with the parser's source label ("<input>" for
+        /// pathless inputs) and the merge passes the origin entry's slice
+        /// through, both of which must outlive the document (source_path,
+        /// the load-arena'd include paths). "" only for entries built
+        /// without one; diagnostics then label it "<input>" like the parser
+        /// does.
+        file: []const u8 = "",
         /// Read by get()/getAs()/markConsumed, or visited by
         /// orderedIterator(). A key no reader examined is reported by
         /// warnUnconsumed (almost always a typo in the key name).
@@ -159,6 +177,12 @@ pub const Section = struct {
         return null;
     }
 
+    /// File label for an entry's diagnostics: "<input>" when the entry was
+    /// built without one, matching the parser's own per-line source label.
+    fn fileLabel(e: Entry) []const u8 {
+        return if (e.file.len == 0) "<input>" else e.file;
+    }
+
     // Iterates pairs in document (insertion) order; deterministic.
     // Values are the live (possibly accumulated) values.
     // Every key the walk visits is marked consumed, so a section read this way
@@ -177,15 +201,16 @@ pub const Section = struct {
 
     // Warns about every key in the section that was never examined via
     // get()/getAs()/markConsumed(); typically a typo in the key name, since
-    // the parser otherwise accepts it silently. Names the source line so a
-    // large config's typos are findable. Iterates `entries`, which IS
-    // document order, so warnings are deterministic and O(n).
+    // the parser otherwise accepts it silently. Names the source file:line so
+    // a large config's typos are findable AND an include file's typos name
+    // that file. Iterates `entries`, which IS document order, so warnings are
+    // deterministic and O(n).
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
         for (self.entries.items) |e| {
             if (e.consumed) continue;
             log.warn(
-                "Unrecognized key '{s}' in section [{s}] (line {d}); ignoring",
-                .{ e.key, section_name, e.line },
+                "Unrecognized key '{s}' in section [{s}] ({s}:{d}); ignoring",
+                .{ e.key, section_name, fileLabel(e), e.line },
             );
         }
     }
@@ -200,27 +225,33 @@ pub const Section = struct {
     // A key that accumulated duplicate declarations reads as an array,
     // but a scalar request resolves to the last declaration. Warn once (per
     // section+key) so silent last-wins isn't a surprise -- except in the
-    // sections where accumulated arrays ARE the point: [binds], rule tables
-    // ([workspace.rules]/[rules]), the root `include` key, and the [tiling]
-    // `layouts` list.
+    // sections where accumulated arrays ARE the point: the fragment-declared
+    // exemption list (bind tables, rule tables; D13 single-sourcing) plus
+    // the root `include` key, which is parser vocabulary and stays here.
     /// Takes the entry's index rather than its key: the caller has just
     /// located it, and a second scan for the same key would be pure waste.
     fn warnScalarDuplicate(self: *Section, i: usize) void {
         const e = &self.entries.items[i];
         if (e.value != .array) return;
         if (!e.duplicated or e.scalar_dup_warned) return;
-        const exempt = std.mem.eql(u8, self.name, types.section_binds) or
-            std.mem.eql(u8, self.name, types.section_workspace_rules) or
-            std.mem.eql(u8, self.name, types.section_rules) or
-            (self.name.len == 0 and std.mem.eql(u8, e.key, "include")) or
-            (std.mem.eql(u8, self.name, types.section_tiling) and std.mem.eql(u8, e.key, "layouts"));
+        var exempt = self.name.len == 0 and std.mem.eql(u8, e.key, "include");
+        if (!exempt) {
+            for (self.accumulate_exempt) |sk| {
+                if (std.mem.eql(u8, sk.section, self.name) and
+                    (sk.key.len == 0 or std.mem.eql(u8, sk.key, e.key)))
+                {
+                    exempt = true;
+                    break;
+                }
+            }
+        }
         if (exempt) return;
         e.scalar_dup_warned = true;
         // Root pairs (no section header) warn under a "[root]" label so one
         // format serves both cases.
         log.warn(
-            "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations, first at line {d}); scalar reads use the last value",
-            .{ e.key, if (self.name.len == 0) "root" else self.name, e.value.array.list.items.len, e.line },
+            "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations, first at {s}:{d}); scalar reads use the last value",
+            .{ e.key, if (self.name.len == 0) "root" else self.name, e.value.array.list.items.len, fileLabel(e.*), e.line },
         );
     }
 
@@ -246,8 +277,8 @@ pub const Section = struct {
             if (self.indexOf(key)) |i| {
                 const e = self.entries.items[i];
                 log.warn(
-                    "Key '{s}' in section [{s}] expects {s}, got {s} (line {d}); ignoring (keeping default)",
-                    .{ key, self.name, typeLabel(T), valueTypeLabel(e.value), e.line },
+                    "Key '{s}' in section [{s}] expects {s}, got {s} ({s}:{d}); ignoring (keeping default)",
+                    .{ key, self.name, typeLabel(T), valueTypeLabel(e.value), fileLabel(e), e.line },
                 );
             }
         }
@@ -343,6 +374,16 @@ pub const Document = struct {
     pub fn getSection(self: *Document, name: []const u8) ?*Section {
         return self.sections.getPtr(name);
     }
+
+    /// Installs the fragment-declared duplicate-accumulate exemptions (D13,
+    /// see `Section.accumulate_exempt`) on the root and every section.
+    /// Called once on the finished (merged) document, before the first
+    /// `get`: all sections exist by then, and none is created afterwards.
+    pub fn installAccumulateExempt(self: *Document, exempt: []const types.SectionKey) void {
+        self.root.accumulate_exempt = exempt;
+        var it = self.sections.valueIterator();
+        while (it.next()) |sec| sec.accumulate_exempt = exempt;
+    }
 };
 
 /// The named color-palette slots a theme declares once and any color-valued
@@ -407,15 +448,17 @@ pub fn accumulate(
 // (mergeSectionsInto), so both paths apply the identical duplicate policy:
 // scalar reads later resolve to the LAST declaration (later file wins), array
 // reads see the full accumulation, and the key is recorded as duplicated for
-// the scalar-read warning. `line` is the source line involved when the
-// key is FIRST inserted; it only feeds the best-effort diagnostic, and
-// duplicate declarations keep the original line.
+// the scalar-read warning. `line`/`file` are the source location involved when
+// the key is FIRST inserted; they only feed the best-effort diagnostics, and
+// duplicate declarations keep the original location (so a cross-file duplicate
+// reports the first file's line, not the later file's).
 pub fn insertOrAccumulate(
     allocator: std.mem.Allocator,
     section: *Section,
     key: []const u8,
     value: Value,
     line: usize,
+    file: []const u8,
 ) !void {
     if (section.indexOf(key)) |i| {
         // The entry's value is where a duplicate accumulates, so the array a
@@ -425,7 +468,7 @@ pub fn insertOrAccumulate(
         try accumulate(allocator, &e.value, value);
         e.duplicated = true;
     } else {
-        try section.entries.append(allocator, .{ .key = key, .value = value, .line = line });
+        try section.entries.append(allocator, .{ .key = key, .value = value, .line = line, .file = file });
     }
 }
 
@@ -445,7 +488,7 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
     // yet is copied over WITH its entries and their flags -- which would
     // silence warnUnconsumed for every key an include file contributes.
     for (src.entries.items) |e| {
-        try insertOrAccumulate(allocator, dst, e.key, e.value, e.line);
+        try insertOrAccumulate(allocator, dst, e.key, e.value, e.line, e.file);
     }
 }
 

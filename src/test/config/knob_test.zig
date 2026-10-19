@@ -907,4 +907,79 @@ test "canonical run_* and legacy drun_* are the same field, not two" {
     try testing.expectEqual(@as(?u32, 0x0a0b0c), canonical.bar.run_bg);
     try testing.expectEqual(@as(?u32, 0x070809), canonical.bar.run_fg);
     try testing.expectEqual(@as(?u32, 0x010203), canonical.bar.run_prompt_color);
+    try testing.expectEqual(@as(u32, 0x0a0b0c), canonical.bar.runBg());
+    try testing.expectEqual(@as(u32, 0x070809), canonical.bar.runFg());
+    try testing.expectEqual(@as(u32, 0x010203), canonical.bar.runPromptColor());
+}
+
+// P1-44: `hana --dump-config-schema`.
+
+/// The schema row whose `places` accept `place`, or null when no knob does.
+fn schemaRow(rows: []const std.json.Value, place: []const u8) ?*const std.json.Value {
+    for (rows) |*row| {
+        const places = row.object.get("places") orelse continue;
+        for (places.array.items) |p| {
+            if (std.mem.eql(u8, p.string, place)) return row;
+        }
+    }
+    return null;
+}
+
+test "composed knob schema: the --dump-config-schema inventory is complete and valid" {
+    // The dump is a comptime constant (composed.knob_schema_json), so the
+    // flag loads no config; this pins that the constant is REAL: it parses
+    // as JSON, carries exactly one row per declared knob, and each row
+    // reports the type, default, range and reader the table guarantees.
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, composed.knob_schema_json, .{});
+    defer parsed.deinit();
+    try testing.expect(std.meta.activeTag(parsed.value) == .array);
+    const rows = parsed.value.array.items;
+    // One row per knob across core + the four discovered fragments
+    // (composed excludes model_config by design): the inventory can neither
+    // invent a row nor drop a declared one.
+    try testing.expectEqual(
+        core_config.knobs.len + tiling_config.knobs.len + bar_config.knobs.len +
+            workspaces_config.knobs.len + floating_config.knobs.len,
+        rows.len,
+    );
+    try testing.expectEqual(composed.knob_schema.len, rows.len);
+
+    const dpi = schemaRow(rows, "display.dpi") orelse return error.DpiMissing;
+    try testing.expectEqualStrings("float", dpi.object.get("type").?.string);
+    try testing.expectEqualStrings("20..1000", dpi.object.get("range").?.string);
+    // `?f32 = null` renders as a bare JSON null: detection, not a number.
+    try testing.expect(std.meta.activeTag(dpi.object.get("default").?) == .null);
+
+    const key_repeat = schemaRow(rows, "core.key_repeat") orelse return error.KeyRepeatMissing;
+    try testing.expectEqualStrings("bool", key_repeat.object.get("type").?.string);
+    try testing.expectEqual(false, key_repeat.object.get("default").?.bool);
+
+    const min_dim = schemaRow(rows, "tiling.min_window_dim") orelse return error.MinDimMissing;
+    try testing.expectEqualStrings("1..", min_dim.object.get("range").?.string);
+    try testing.expectEqualStrings("tiling", min_dim.object.get("requires").?.string);
+    try testing.expectEqual(@as(i64, 50), min_dim.object.get("default").?.integer);
+
+    const position = schemaRow(rows, "bar.position") orelse return error.PositionMissing;
+    try testing.expectEqualStrings("enum", position.object.get("type").?.string);
+    try testing.expectEqualStrings("top", position.object.get("default").?.string);
+    try testing.expectEqual(@as(usize, 2), position.object.get("values").?.array.items.len);
+    try testing.expectEqualStrings("bottom", position.object.get("values").?.array.items[1].string);
+
+    const carousel = schemaRow(rows, "bar.carousel_enabled") orelse return error.CarouselMissing;
+    try testing.expectEqualStrings("title", carousel.object.get("reader").?.string);
+
+    const bg = schemaRow(rows, "bar.bg") orelse return error.BgMissing;
+    try testing.expectEqualStrings("color", bg.object.get("type").?.string);
+    try testing.expectEqualStrings("0x222222", bg.object.get("default").?.string);
+
+    const font_size = schemaRow(rows, "bar.font_size") orelse return error.FontSizeMissing;
+    try testing.expectEqualStrings("scalable", font_size.object.get("type").?.string);
+    try testing.expectEqualStrings("10%", font_size.object.get("default").?.string);
+
+    const master_width = schemaRow(rows, "tiling.master_width") orelse return error.MasterWidthMissing;
+    // .scalable_free: no KIND-local bound (tiling_config.validate owns the
+    // ratio ceiling), so the row reports family and default only.
+    try testing.expectEqualStrings("scalable", master_width.object.get("type").?.string);
+    try testing.expectEqualStrings("", master_width.object.get("range").?.string);
+    try testing.expectEqualStrings("50%", master_width.object.get("default").?.string);
 }

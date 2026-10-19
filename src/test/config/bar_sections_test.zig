@@ -1,9 +1,10 @@
 //! `parseBar` (bar_sections.zig) unit tests: the bar's non-scalar structures
 //! the comptime schema walk does not cover -- fonts, the indicator mirror
-//! pair, workspace icons (array/string/pad forms), and the per-anchor bar
-//! layout columns with the default-layout fallbacks. All owned strings land
-//! on the Config with testing.allocator (leak-checked by cfg.deinit); the
-//! document lives in a per-test arena.
+//! pair, workspace icons (array/string/pad forms), the per-anchor bar layout
+//! columns with the default-layout fallbacks, and the P1-46 fail bar on an
+//! unknown segment name. All owned strings land on the Config with
+//! testing.allocator (leak-checked by cfg.deinit); the document lives in a
+//! per-test arena.
 
 const std = @import("std");
 const testing = std.testing;
@@ -12,6 +13,7 @@ const bar_sections = @import("bar_sections");
 const parser = @import("parser");
 const types = @import("types");
 const bar_config = @import("bar_config");
+const diagnostics = @import("diagnostics");
 
 fn load(a: std.mem.Allocator, cfg: *bar_config.Config, src: []const u8) !void {
     var doc = try parser.parse(a, src, "<bar-sections-test>");
@@ -60,14 +62,14 @@ test "per-anchor layout sections replace defaults in fixed anchor order" {
         \\segments = ["clock", "cpu", true]
         \\
         \\[bar.layout.left]
-        \\segments = ["workspaces", "tags"]
+        \\segments = ["workspaces", "layout"]
     );
 
     try testing.expectEqual(@as(usize, 2), cfg.layout.items.len);
     try testing.expectEqual(bar_config.BarSegmentAnchor.left, cfg.layout.items[0].position);
     try testing.expectEqual(@as(usize, 2), cfg.layout.items[0].segments.items.len);
     try testing.expectEqualStrings("workspaces", cfg.layout.items[0].segments.items[0]);
-    try testing.expectEqualStrings("tags", cfg.layout.items[0].segments.items[1]);
+    try testing.expectEqualStrings("layout", cfg.layout.items[0].segments.items[1]);
     try testing.expectEqual(bar_config.BarSegmentAnchor.right, cfg.layout.items[1].position);
     // The non-string entry is skipped (and warned about), leaving two segments.
     try testing.expectEqual(@as(usize, 2), cfg.layout.items[1].segments.items.len);
@@ -96,6 +98,38 @@ test "empty layout sections and non-anchor names both fall back to defaults" {
     try testing.expectEqual(bar_config.BarSegmentAnchor.left, cfg.layout.items[0].position);
     try testing.expectEqual(bar_config.BarSegmentAnchor.center, cfg.layout.items[1].position);
     try testing.expectEqual(bar_config.BarSegmentAnchor.right, cfg.layout.items[2].position);
+}
+
+test "an unknown layout segment name fails the load with the file:line, once per name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var cfg: bar_config.Config = .{};
+    defer cfg.deinit(testing.allocator);
+
+    // P1-46: a typo'd segment name used to load clean and silently render
+    // nothing. The rejection logs err before returning, and the test
+    // runner's log() hands it to the bag instead of stderr (assertable
+    // needles), so the file:line attribution is part of the contract.
+    var diag = diagnostics.Diagnostics{ .allocator = testing.allocator };
+    defer diag.deinit();
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = null;
+
+    try testing.expectError(error.InvalidConfig, load(arena.allocator(), &cfg,
+        \\[bar]
+        \\
+        \\[bar.layout.left]
+        \\segments = ["workspaces", "workspacs", "cpuo"]
+        \\
+    ));
+
+    // Both bad names reported (one load, all of them), each with the
+    // section and the source line of the `segments` declaration.
+    try testing.expect(diag.contains("workspacs"));
+    try testing.expect(diag.contains("cpuo"));
+    try testing.expect(diag.contains("[bar.layout.left]"));
+    try testing.expect(diag.contains("<bar-sections-test>:4"));
+    try testing.expect(diag.count() >= 2);
 }
 
 test "fonts replace the previous list and silently drop non-string entries" {
