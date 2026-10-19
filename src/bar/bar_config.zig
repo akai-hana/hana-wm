@@ -503,40 +503,44 @@ pub const knobs = [_]knob.Knob{
 };
 
 /// Module ownership for knobs whose only reader lives in an OPTIONAL module.
-/// Each entry is `("target", "module_stem")`: the target's reader is that
+/// Each entry is `.{ "target", "module_stem" }`: the target's reader is that
 /// module, so when the tree has no such module the knob is legitimately
 /// unread (the modularity matrix deletes a module together with its config
-/// consumer -- see Knob.reader). The build's knob-reader scan consults this
-/// table before failing, so a module-owned knob never trips DeadKnobTarget
-/// on a tree that simply lacks the module.
+/// consumer -- see Knob.reader). The build's knob-reader scan reads these
+/// pairs and excuses a target it owns whose stem is a module the tree simply
+/// does not have, so a module-owned knob never trips DeadKnobTarget on a
+/// tree that merely lacks the module.
 ///
-/// Every target here is verified against the modules table: a stem that is
-/// NOT a discovered module is a build error, so a typo cannot silence the
-/// check. A target absent from this table must have a reader somewhere in
-/// the tree (the core check).
+/// These are plain data, not knob constructors, because the build needs a
+/// stable `("target", "stem")` shape to text-scan; the comptime
+/// `validateOwnership` call below pins every pair to the knobs table's own
+/// `reader` fields, so a typo in either table is a build error rather than a
+/// silent re-owning. A target absent from this table must have a reader
+/// somewhere in the tree (the core check).
 ///
 /// The set is closed under alias: `drun_*` keys share the canonical
 /// `run_*` targets, so ownership is expressed once per target, not once per
 /// key.
-pub const knob_reader_modules = [_]knob.Knob{
-    knob.readerOf("carousel_enabled", "zzz_typo_module"),
-    knob.readerOf("selected_bg", "tags"),
-    knob.readerOf("selected_fg", "title"),
-    knob.readerOf("run_prompt", "prompt"),
-    knob.readerOf("volume_format", "volume"),
-    knob.readerOf("volume_muted_format", "volume"),
-    knob.readerOf("brightness_format", "brightness"),
-    knob.readerOf("brightness_device", "brightness"),
-    knob.readerOf("indicator_location", "tags"),
-    knob.readerOf("indicator_padding", "tags"),
-    knob.readerOf("indicator_color", "tags"),
-    knob.readerOf("selected_indicator_color", "tags"),
-    knob.readerOf("title_accent_color", "title"),
-    knob.readerOf("title_unfocused_accent", "title"),
-    knob.readerOf("title_minimized_accent", "title"),
-    knob.readerOf("run_bg", "prompt"),
-    knob.readerOf("run_fg", "prompt"),
-    knob.readerOf("run_prompt_color", "prompt"),
+pub const knob_reader_modules = [_][2][]const u8{
+    .{ "carousel_enabled", "title" },
+    .{ "carousel_speed_px_s", "title" },
+    .{ "selected_bg", "tags" },
+    .{ "selected_fg", "title" },
+    .{ "run_prompt", "prompt" },
+    .{ "volume_format", "volume" },
+    .{ "volume_muted_format", "volume" },
+    .{ "brightness_format", "brightness" },
+    .{ "brightness_device", "brightness" },
+    .{ "indicator_location", "tags" },
+    .{ "indicator_padding", "tags" },
+    .{ "indicator_color", "tags" },
+    .{ "selected_indicator_color", "tags" },
+    .{ "title_accent_color", "title" },
+    .{ "title_unfocused_accent", "title" },
+    .{ "title_minimized_accent", "title" },
+    .{ "run_bg", "prompt" },
+    .{ "run_fg", "prompt" },
+    .{ "run_prompt_color", "prompt" },
 };
 
 /// Config fields that are legitimately NOT knobs: the pair-interaction
@@ -550,7 +554,34 @@ const bespoke_fields = [_][]const u8{
 
 comptime {
     knob.validateTable(Config, &knobs, &bespoke_fields);
+    knob.validateOwnership(&knobs, &knob_reader_modules, "bar");
 }
+
+/// The section names the bar subsystem owns (D13/P2-50): the composed
+/// facade unions every fragment's list into the mis-case lint's inventory.
+/// The layout-anchor and modules tables are consumed by bar_sections.zig
+/// but belong to this subsystem, so they are listed here.
+pub const sections = &[_][]const u8{
+    types.section_bar,
+    types.section_bar_properties,
+    types.section_prefix_bar_layout ++ "left",
+    types.section_prefix_bar_layout ++ "center",
+    types.section_prefix_bar_layout ++ "right",
+    types.section_bar_modules_workspaces,
+};
+
+/// The section HEADS whose presence in the embedded fallback TOML is gated
+/// on this fragment's owner module (P2-50): the build's fallback filter
+/// strips a `[head...]` block when the owner is absent from the tree.
+pub const fallback_sections = &[_][]const u8{"bar"};
+
+/// Inert family (D13/P2-50): `[bar.properties]` is read only when bare
+/// `[bar]` is present; the property maps would otherwise parse and do
+/// nothing, which the load warns about.
+pub const inert_families = &[_]types.InertFamily{.{
+    .parent = types.section_bar,
+    .child_exact = types.section_bar_properties,
+}};
 
 /// The fragment parse entry: self-seed the owned defaults (icon padding to
 /// the workspace count read straight off the document, plus the default

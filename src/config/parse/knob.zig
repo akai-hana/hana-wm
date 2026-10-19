@@ -129,11 +129,12 @@ pub const Knob = struct {
     /// Non-empty means the knob's only reader lives in that OPTIONAL module:
     /// when the tree has no such module the knob is legitimately unwritten
     /// (the modularity matrix deletes a module and its consumers together),
-    /// so the build's knob-reader scan accepts an absent module instead of
-    /// failing. A stem that is NOT a discovered module at all -- so neither
-    /// present nor a valid deletion -- is still a build error: the knob would
-    /// be dead by typo. Empty means "a reader must exist in the tree", the
-    /// behaviour every core-owned knob relies on. `readerOf` sets it.
+    /// so the build's knob-reader scan excuses an absent module instead of
+    /// failing. The stem is pinned to the fragment's `knob_reader_modules`
+    /// entry by `validateOwnership`, so a typo in either table is a build
+    /// error rather than a silent re-owning of the knob. Empty means "a
+    /// reader must exist in the tree", the behaviour every core-owned knob
+    /// relies on. `readerOf` (or a helper's `reader` argument) sets it.
     reader: []const u8 = "",
     /// Targets this knob READS to resolve its value (the sibling a
     /// `color_from`/`color_opt` kind falls back to), by dotted path relative
@@ -311,6 +312,59 @@ pub fn validateTable(
                         "(or fix the sibling name)",
                 );
             }
+        }
+    }
+}
+
+/// The comptime contract between a fragment's knob table and its
+/// `knob_reader_modules` ownership pairs (the build's text scan reads the
+/// pairs to excuse a module-owned knob when the tree lacks the module):
+///   1. every pair names a target of the same fragment's knob table (a
+///      stale entry would excuse a knob that no longer exists);
+///   2. the pair's stem equals the `reader` the knob entry itself declares,
+///      so a typo in EITHER table fails the build instead of silently
+///      re-owning the knob;
+///   3. every knob entry with a non-empty `reader` has a pair, so the
+///      excusal table can never lag the knob table.
+/// Aliases share a target, so every entry for a target is checked in both
+/// directions.
+pub fn validateOwnership(
+    comptime knobs: []const Knob,
+    comptime pairs: []const [2][]const u8,
+    comptime frag: []const u8,
+) void {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        for (pairs) |pair| {
+            const target = pair[0];
+            const stem = pair[1];
+            var matched = false;
+            for (knobs) |k| {
+                if (!std.mem.eql(u8, k.target, target)) continue;
+                matched = true;
+                if (!std.mem.eql(u8, k.reader, stem)) @compileError(
+                    frag ++ ": knob_reader_modules owns '" ++ target ++ "' to '" ++ stem ++
+                        "', but the knob table declares reader '" ++ k.reader ++
+                        "'; one of the two is a typo",
+                );
+            }
+            if (!matched) @compileError(
+                frag ++ ": knob_reader_modules names '" ++ target ++
+                    "', which is not a target of the knob table; a stale entry " ++
+                    "would excuse a knob that is now dead",
+            );
+        }
+        for (knobs) |k| {
+            if (k.reader.len == 0) continue;
+            var claimed = false;
+            for (pairs) |pair| {
+                if (std.mem.eql(u8, pair[0], k.target)) claimed = true;
+            }
+            if (!claimed) @compileError(
+                frag ++ ": knob '" ++ k.target ++ "' is owned by module '" ++ k.reader ++
+                    "' but has no knob_reader_modules entry, so the build cannot " ++
+                    "excuse it when that module is deleted",
+            );
         }
     }
 }
@@ -558,5 +612,206 @@ pub fn applyAll(
                 }
             },
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P1-44: the knob schema dump backing `hana --dump-config-schema`.
+//
+// The tables are comptime data with a validated contract; this renders them
+// -- plus each field's default, which lives in the fragment root's field
+// initializers rather than in the table -- to a machine-readable JSON array
+// at COMPILE time. The flag is then a print of one constant string: no
+// config is loaded, no file is read, no display or diagnostics are needed,
+// and every build mode sees the identical inventory.
+// ---------------------------------------------------------------------------
+
+/// One knob's schema row. `places` are the accepted `section.key` spellings
+/// (first-present-wins at parse time); `default`, `range` and `values` are
+/// pre-rendered JSON (null/number/bool bare, strings quoted+escaped).
+pub const SchemaEntry = struct {
+    places: []const []const u8,
+    target: []const u8,
+    type_label: []const u8,
+    default: []const u8,
+    range: []const u8,
+    values: []const []const u8,
+    requires: []const u8,
+    reader: []const u8,
+};
+
+/// A fragment's knob table paired with the root type that owns the field
+/// defaults the dump reports (the table itself carries no defaults).
+pub const SchemaTable = struct {
+    root: type,
+    knobs: []const Knob,
+};
+
+/// Collects every table's entries in declaration order -- core first, then
+/// the discovered fragments in owner order; the generated composed module
+/// passes exactly that list. A fragment without a `knobs` decl contributes
+/// none, so an optional subsystem's deletion shortens the inventory with the
+/// rest of its config trace.
+pub fn collectSchema(comptime tables: []const SchemaTable) []const SchemaEntry {
+    comptime {
+        @setEvalBranchQuota(400_000);
+        var out: []const SchemaEntry = &.{};
+        for (tables) |t| {
+            for (t.knobs) |k| {
+                out = out ++ &[_]SchemaEntry{schemaEntry(t.root, k)};
+            }
+        }
+        return out;
+    }
+}
+
+/// The inventory as a pretty JSON array, one object per knob. Comptime, so
+/// the flag's runtime cost is a single write of a constant string.
+pub fn schemaJson(comptime entries: []const SchemaEntry) []const u8 {
+    comptime {
+        @setEvalBranchQuota(400_000);
+        var s: []const u8 = "[\n";
+        for (entries, 0..) |e, i| {
+            s = s ++ "  {\"places\":[";
+            for (e.places, 0..) |p, pi| {
+                if (pi != 0) s = s ++ ",";
+                s = s ++ jsonString(p);
+            }
+            s = s ++ "],\"target\":" ++ jsonString(e.target) ++
+                ",\"type\":" ++ jsonString(e.type_label) ++
+                ",\"default\":" ++ e.default ++
+                ",\"range\":" ++ jsonString(e.range) ++
+                ",\"values\":[";
+            for (e.values, 0..) |v, vi| {
+                if (vi != 0) s = s ++ ",";
+                s = s ++ jsonString(v);
+            }
+            s = s ++ "],\"requires\":" ++ jsonString(e.requires) ++
+                ",\"reader\":" ++ jsonString(e.reader) ++ "}";
+            if (i + 1 != entries.len) s = s ++ ",";
+            s = s ++ "\n";
+        }
+        return s ++ "]";
+    }
+}
+
+/// One row: every accepted spelling, the value family, the rendered default,
+/// the local range, and the enum's allowed spellings (empty otherwise).
+fn schemaEntry(comptime root: type, comptime k: Knob) SchemaEntry {
+    comptime {
+        var places: []const []const u8 = &.{};
+        for (k.places) |p| {
+            places = places ++ &[_][]const u8{
+                if (p.section.len == 0) p.key else p.section ++ "." ++ p.key,
+            };
+        }
+        var proto: root = .{};
+        const v = value(root, &proto, k.target);
+        return .{
+            .places = places,
+            .target = k.target,
+            .type_label = typeLabel(k.kind),
+            .default = fmtDefault(k.kind, @TypeOf(v), v),
+            .range = rangeOf(k.kind),
+            .values = valueLabels(k.kind),
+            .requires = k.requires,
+            .reader = k.reader,
+        };
+    }
+}
+
+/// The TOML-level value family: what the user may spell for this knob.
+fn typeLabel(comptime kind: Kind) []const u8 {
+    return switch (kind) {
+        .b => "bool",
+        .int => "int",
+        .str => "string",
+        .opt_float => "float",
+        .scalable, .scalable_free, .auto_scalable => "scalable",
+        .color, .color_from, .color_opt => "color",
+        .ratio, .ratio_strict => "ratio",
+        .enum_read => "enum",
+    };
+}
+
+/// Inclusive bounds as "min..max" (absent side omitted), "" when the kind
+/// has no local bound (the policy lives in validate() instead).
+fn rangeOf(comptime kind: Kind) []const u8 {
+    return switch (kind) {
+        .int => |i| if (i.min != null and i.max != null)
+            std.fmt.comptimePrint("{d}..{d}", .{ i.min.?, i.max.? })
+        else if (i.min != null)
+            std.fmt.comptimePrint("{d}..", .{i.min.?})
+        else if (i.max != null)
+            std.fmt.comptimePrint("..{d}", .{i.max.?})
+        else
+            "",
+        .opt_float => |f| std.fmt.comptimePrint("{d}..{d}", .{ f.min, f.max }),
+        .ratio, .ratio_strict => "0..1",
+        else => "",
+    };
+}
+
+/// The enum type's variant names, the spellings an `enum_read` knob accepts
+/// (exact-case spelling; `ci` aliases resolve case-insensitively on top).
+/// Empty for every non-enum kind.
+fn valueLabels(comptime kind: Kind) []const []const u8 {
+    return switch (kind) {
+        .enum_read => |er| comptime blk: {
+            var out: []const []const u8 = &.{};
+            for (std.meta.fields(er.T)) |f| out = out ++ &[_][]const u8{f.name};
+            break :blk out;
+        },
+        else => &.{},
+    };
+}
+
+/// One default as a JSON token: strings quoted+escaped, null/bool/numbers
+/// bare, enums by tag, ScalableValue in its TOML spelling ("24" / "50%"),
+/// colors as "0xRRGGBB" (the spelling the knob itself accepts).
+fn fmtDefault(comptime kind: Kind, comptime T: type, comptime v: T) []const u8 {
+    comptime {
+        const is_color = switch (kind) {
+            .color, .color_from, .color_opt => true,
+            else => false,
+        };
+        return switch (@typeInfo(T)) {
+            .bool => if (v) "true" else "false",
+            .int => if (is_color)
+                std.fmt.comptimePrint("\"0x{x:0>6}\"", .{v})
+            else
+                std.fmt.comptimePrint("{d}", .{v}),
+            .float => std.fmt.comptimePrint("{d}", .{v}),
+            .optional => if (v) |inner| fmtDefault(kind, @TypeOf(inner), inner) else "null",
+            .@"enum" => jsonString(@tagName(v)),
+            .pointer => jsonString(v),
+            .@"struct" => if (T == types.ScalableValue)
+                jsonString(if (v.is_percentage)
+                    std.fmt.comptimePrint("{d}%", .{v.value})
+                else
+                    std.fmt.comptimePrint("{d}", .{v.value}))
+            else
+                @compileError("knob schema: unsupported default type " ++ @typeName(T)),
+            else => @compileError("knob schema: unsupported default type " ++ @typeName(T)),
+        };
+    }
+}
+
+/// A JSON string token: quoted, with the escapes a config value can need.
+fn jsonString(comptime s: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "\"";
+        for (s) |c| {
+            const piece: []const u8 = switch (c) {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                else => if (c < 0x20) std.fmt.comptimePrint("\\u{x:0>4}", .{c}) else &[_]u8{c},
+            };
+            out = out ++ piece;
+        }
+        return out ++ "\"";
     }
 }
