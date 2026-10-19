@@ -119,7 +119,7 @@ fn handleManagedConfigureRequest(
         else
             null,
     };
-    const wm = registry.providerOf(.honorConfigureRequest) orelse {
+    const wm = registry.floating.providerOf(.honorConfigureRequest) orelse {
         // Floating-less build (floating.zig deleted): every managed window
         // is tiled, so every ConfigureRequest is DENIED -- but ICCCM 4.1.5
         // still requires the synthetic ConfigureNotify echo of the geometry
@@ -130,7 +130,7 @@ fn handleManagedConfigureRequest(
         sendSyntheticConfigureNotify(win);
         return;
     };
-    switch (wm.honorConfigureRequest.?(pipeline.mut(), win, req)) {
+    switch (wm.floating.honorConfigureRequest.?(pipeline.mut(), win, req)) {
         .geometry_applied => {
             // ICCCM 4.1.5: a border-width-only request applied by the module
             // needs the synthetic ConfigureNotify (the width isn't otherwise
@@ -190,7 +190,7 @@ pub fn handleConfigureRequest(event: *const xcb.xcb_configure_request_event_t) v
     // uncommitted size makes it size its buffers to geometry the X window
     // does not have yet -- the thrash that freezes video players like mpv
     // mid-resize. sendSyntheticConfigureNotify resolves exactly that truth.
-    if (registry.dispatchFirstTrue(.isResizingWindow, .{win})) {
+    if (registry.drag.dispatchFirstTrue(.isResizingWindow, .{win})) {
         sendSyntheticConfigureNotify(win);
         return;
     }
@@ -292,7 +292,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         };
         // PIPELINE: model-path transition; the transition stays on the single
         // source of truth.
-        registry.callHook(.setFullscreenWindow, .{ win, target });
+        registry.command.callHook(.setFullscreenWindow, .{ win, target });
         return;
     }
 
@@ -328,7 +328,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     if (net_current_desktop != 0 and event.type == net_current_desktop) {
         const ws = event.data.data32[0];
         if (ws < query.getWorkspaceCount()) {
-            registry.callHook(.switchWorkspace, .{@as(u8, @intCast(ws))});
+            registry.command.callHook(.switchWorkspace, .{@as(u8, @intCast(ws))});
         }
         return;
     }
@@ -344,7 +344,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         if (query.isValidManagedWindow(win)) {
             const ws = event.data.data32[0];
             if (ws != 0xFFFFFFFF and ws < query.getWorkspaceCount()) {
-                registry.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(ws)) });
+                registry.command.callHook(.moveToWorkspace, .{ win, @as(u8, @intCast(ws)) });
             }
         }
         return;
@@ -387,7 +387,7 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
     // itself and computes the covering state inside the same grab, so no
     // covering pre-scan or explicit guard is needed here -- one covering
     // scan per request instead of two.
-    registry.callHook(.setFullscreenWindow, .{ win, want });
+    registry.command.callHook(.setFullscreenWindow, .{ win, want });
 }
 
 /// 3. Enter/Leave crossing.

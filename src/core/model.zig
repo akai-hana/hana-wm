@@ -134,10 +134,24 @@ pub fn removeValue(list: anytype, win: WindowId) void {
 /// cache is null (e.g. a freshly adopted window not yet home-assigned).
 pub fn findHome(m: *const Model, win: WindowId) ?WSId {
     if (m.store.get(win)) |e| if (e.home_ws) |h| return h;
+    var found: ?WSId = null;
     for (0..m.ws.len) |i| {
-        if (m.ws[i].tiled_order.indexOfScalar(win) != null) return WSId.fromIndex(i);
+        if (m.ws[i].tiled_order.indexOfScalar(win) == null) continue;
+        // The scan fallback only answers correctly under single membership:
+        // two lists holding the window means the invariant broke somewhere
+        // upstream, and silently returning the first hit would hand the
+        // caller a plausible-looking wrong answer. Trip loudly in Debug
+        // (folded out of Release; P1-37) -- the reconcile-grab hook checks
+        // this too, but this path runs on queries outside the grab as well.
+        if (builtin.mode == .Debug) {
+            if (found) |prev| std.debug.panic(
+                "findHome: window 0x{x} listed on workspaces {d} and {d} (single-membership violated)",
+                .{ win, prev.index, i },
+            );
+        }
+        found = WSId.fromIndex(i);
     }
-    return null;
+    return found;
 }
 
 /// First-violation form of the single-writer membership invariant (P1-31).
@@ -306,6 +320,7 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
 /// what preserves that; a later covering entry must not displace an earlier
 /// one).
 pub fn coveringOccupants(m: *const Model, buf: []?WindowId) void {
+    if (builtin.mode == .Debug) assertOneAnchorPerWs(m);
     for (buf) |*slot| slot.* = null;
     var it = m.store.iterator();
     while (it.next()) |row| {
@@ -320,5 +335,29 @@ pub fn coveringOccupants(m: *const Model, buf: []?WindowId) void {
             if (slot.* != null) continue;
             if (visibleEntry(m, row.val, WSId.fromIndex(i))) slot.* = row.key;
         }
+    }
+}
+
+/// Debug-only companion to `coveringOccupants` (P1-37): asserts the rule
+/// `coveringOccupantOnWs` documents -- "at most one occupant per workspace
+/// by reconciler" -- for the ANCHORED claim specifically: no two covering
+/// entries may carry the same `covering_ws`. The batch fill's
+/// first-in-store-order tie-break would otherwise silently mask a second
+/// anchor (and a visible-tie can legally collide with an anchor, which is
+/// why the check tracks anchors apart from `buf`). Runs on queries too, so
+/// it covers the window between reconcile grabs. Folded out of Release.
+fn assertOneAnchorPerWs(m: *const Model) void {
+    if (builtin.mode != .Debug) return;
+    var anchored = [_]?WindowId{null} ** max_workspaces;
+    var it = m.store.iterator();
+    while (it.next()) |row| {
+        if (row.val.presence != .covering) continue;
+        const cws = row.val.covering_ws orelse continue;
+        if (cws.index >= anchored.len) continue; // WSId.fromIndex is lenient
+        if (anchored[cws.index]) |prev| std.debug.panic(
+            "two anchored covering occupants on workspace {d}: 0x{x} and 0x{x} (single-anchor rule violated)",
+            .{ cws.index, prev, row.key },
+        );
+        anchored[cws.index] = row.key;
     }
 }

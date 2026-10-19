@@ -63,10 +63,12 @@ pub fn workspaceInRange(ws_1based: usize, max: usize) bool {
 
 /// Config-file section names shared by the parser, the knob tables, and the
 /// config interpreter's sweeps. Single-sourced so a spelling change (and the
-/// case-typo sweep that keys on these) updates one place. Every name stays
-/// here even when its owning fragment is optional: the mis-case lint is a
-/// pure string table and must keep recognizing a section of an absent module
-/// (it warns and ignores, exactly like any unknown section).
+/// case-typo sweep that keys on these) updates one place. A fragment
+/// references the names it owns from here (a local const is what a fork or
+/// plugin fragment may use instead -- the section lists are per-fragment
+/// exports, D13); the mis-case lint's inventory is the union of the PRESENT
+/// fragments' exports, so in a tree that deleted a module its sections drop
+/// out of the mis-case table and fall back to the unconsumed-key warns.
 pub const section_tiling = "tiling";
 pub const section_bar = "bar";
 pub const section_bar_properties = "bar.properties";
@@ -89,6 +91,38 @@ pub const section_prefix_tiling_layouts = "tiling.layouts.";
 pub const section_prefix_workspace_rules = "workspace.rules.";
 pub const section_prefix_rules = "rules.";
 pub const section_prefix_bar_layout = "bar.layout.";
+
+/// A (section, key) pair on a fragment's duplicate-accumulate exemption
+/// list: keys in this section accumulate duplicate declarations BY DESIGN
+/// (bind tables, rule tables), so a scalar read of an accumulated array
+/// must not warn "later wins" the way any other duplicated key does.
+/// `key` = "" exempts every key in the section; a non-empty key exempts
+/// just that key (e.g. `[tiling] layouts`).
+pub const SectionKey = struct {
+    section: []const u8,
+    key: []const u8 = "",
+};
+
+/// A parent-gated section family on a fragment's `inert_families` list: a
+/// child section present while its parent section is absent leaves those
+/// knobs inert, which the load warns about (`warnInertSectionFamilies`).
+/// Exactly one of the child fields is used per family (empty = unused).
+pub const InertFamily = struct {
+    parent: []const u8,
+    /// Any section whose name starts with this prefix (family form).
+    child_prefix: []const u8 = "",
+    /// One exact child section name.
+    child_exact: []const u8 = "",
+};
+
+/// Source label the config load stamps on the EMBEDDED fallback document
+/// (`config.zig` parseFallbackDoc) so its entries carry it like any file
+/// label. Shared vocabulary because a load-time check must RECOGNISE the
+/// build-owned source: the bar's segment-name fail bar skips it (the boot
+/// fallback path falls back to exactly this source, so rejecting its layout
+/// would take the floor down in a build that deleted one of its segments)
+/// while tests that load the same bytes under a file label keep it pinned.
+pub const embedded_fallback_label = "<embedded fallback>";
 
 /// Document-global color-palette variable names declared once and referenced
 /// by any color knob (the color_from chains and the parser's collectPalette).

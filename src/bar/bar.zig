@@ -200,7 +200,6 @@ fn createBar(m: Metrics, y_pos: i16) !BarSetup {
 pub fn init() !void {
     const cs = core.getState();
     std.debug.assert(cs.config.bar.enabled);
-    warnUnknownSegments();
     barwin.initAtoms();
     const m = metrics.resolveBarMetrics();
     const bar = try createBar(m, barwin.calcBarYPos(cs.config.bar.bar_position, cs.screen.height_in_pixels, m.height));
@@ -248,34 +247,9 @@ pub fn deinit() void {
     usable_area.clearSurfaceWindow();
 }
 
-/// Warns about every segment name in the live bar layout that does not resolve
-/// to a registry entry. All four layout consumers skip an unresolvable name
-/// (`segmod.segId(name) orelse continue`), so a typo -- or a segment dropped from the
-/// build -- silently shortens the bar with nothing on stderr to say which entry
-/// is the problem. The layout tree is flat (`BarLayout` is a position plus a
-/// segment list), so one nested loop is the whole walk.
-///
-/// This lives here, not in `config.validate`, because the registry is a
-/// `bar_modules` comptime table: config sits below the bar in the dependency
-/// graph and importing upward would break the no-bar build.
-fn warnUnknownSegments() void {
-    if (comptime !segmod.hasRegisteredSegments()) return;
-    const cfg = &core.getState().config.bar;
-    for (cfg.layout.items) |lay| {
-        for (lay.segments.items) |name| {
-            if (segmod.segId(name) == null) log.warn(
-                "Bar: segment '{s}' is not registered; ignoring it. Check the " ++
-                    "spelling, or whether this build includes the module.",
-                .{name},
-            );
-        }
-    }
-}
-
 pub fn reload() void {
     const old = gBar.state orelse {
         if (core.getState().config.bar.enabled) {
-            warnUnknownSegments();
             init() catch |err| log.err("Bar init failed: {}", .{err});
         }
         return;
@@ -284,7 +258,6 @@ pub fn reload() void {
         deinit();
         return;
     }
-    warnUnknownSegments();
     applyReload(old, metrics.resolveBarMetrics()) catch |err| {
         log.err("Bar reload failed ({s}), keeping old bar", .{@errorName(err)});
     };

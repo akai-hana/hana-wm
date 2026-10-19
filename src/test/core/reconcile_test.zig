@@ -494,6 +494,66 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
     try fx.rec.expectPark(0, 901);
 }
 
+// Per-concern send sequences (P2-47): the fused loop's helpers each own one
+// wire concern — visibility (park), borders (pixel / width), geometry — and
+// these tests pin the sequence each concern emits in isolation.
+
+test "concern/visibility: parked-drift re-parks instead of taking the fast-path elision" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    try window_state_ops.register(&fx.m, 911, model.WSId.fromIndex(0));
+    try window_state_ops.register(&fx.m, 912, model.WSId.fromIndex(1));
+    focus.setFocus(&fx.m, 911);
+    fx.reconcile(.{}); // baseline: 911 placed, 912 parked (map+park first sight)
+
+    // Steady state: 912 is parked and clean, so the off-workspace fast path
+    // elides it entirely.
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(0);
+
+    // The client moved its parked window behind our back: markParkedDirty
+    // arms the repair, and the next reconcile must re-send the park (no map:
+    // it already has a sent rect, so has_rect is true).
+    recon.markParkedDirty(912);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(1);
+    try fx.rec.expectPark(0, 912);
+
+    // The repair cleared dirty: the fast path elides again.
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(0);
+}
+
+test "concern/borders: a border-width-only change sends one bw configure, no raise" {
+    var fx: Fixture = undefined;
+    fx.init();
+    defer fx.deinit();
+
+    helpers.regCur(&fx.m, 921);
+    focus.setFocus(&fx.m, 921);
+    fx.reconcile(.{});
+    try fx.rec.expectLen(3); // map, pixel, geom+bw (cfg_bw)
+
+    // Config reload widens the border: geometry is unchanged, so the merged
+    // configure carries ONLY the new bw (need_geom false, no stack: a
+    // border-only change is not motion and must not raise).
+    fx.ctx.env.margins.border = 5;
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(1);
+    try fx.rec.expectBwOnly(0, 921, 5);
+
+    // Steady state at the new width: elided.
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(0);
+}
+
 // The resize-parked phase (Opts.resize_parked), the bar-visibility-toggle fix.
 //
 // A bar show/hide changes the workarea. The normal reconcile only computes the

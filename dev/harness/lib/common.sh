@@ -87,8 +87,12 @@ settle() {
 	sleep "$(awk "BEGIN{print ${1:-$HW_SETTLE_MS}/1000}")"
 }
 
-# Trigger hana's dump_state action; output lands in $HW_LOG.
+# Trigger hana's dump_state action; output lands in $HW_LOG. Records the
+# pre-key STATE DUMP count in _dump_seq so focused_mid/focused_final can
+# wait for THIS dump to land (a "log is quiet" heuristic races: the
+# previous count is quiet too).
 state_dump() {
+	_dump_seq=$(grep -c 'STATE DUMP' "$HW_LOG" 2>/dev/null) || _dump_seq=0
 	key super+q
 }
 
@@ -175,10 +179,55 @@ client_bw() {
 	DISPLAY="$HW_DISPLAY" "$_tool" "$_win" "$_bw"
 }
 
-# Focused window id parsed from the most recent STATE DUMP in $HW_LOG.
+# Focused window id from the most recent STATE DUMP in $HW_LOG: the bare
+# hex id (e.g. 600001) or `null`. $NF, not $2: the raw line reads
+# `info: [diagnostic] Focused:        <id>`; no `exit` -- the first dump's
+# Focused line would win, so keep the LAST match instead.
 focused_from_dump() {
-	awk '/STATE DUMP/{found=NR} found && /Focused:/ && NR>found {print $2; exit}' "$HW_LOG"
+	awk '/STATE DUMP/{found=NR} found && /Focused:/ && NR>found {got=$NF} END{if (found) print got}' "$HW_LOG"
 }
+
+# Assert the focus captured by the most recent state_dump against a named
+# harness client (or the literal `null`). P1-42: the golden compare checks
+# only the LAST occurrence per field (tail -1), so an intermediate focus
+# flip goes unasserted there -- these helpers pin it at the point of use.
+# focused_mid: an in-scenario (mid-run) expectation; focused_final: an
+# explicit end-of-body expectation. Fail-loud: they return 1, and a
+# mid-body call site must propagate with `|| return 1` (a bare statement
+# would fall through to the scenario's final rc).
+focused_assert() {
+	_want="$1"; _label="$2"
+	if [ "$_want" = "null" ]; then
+		_exp="null"
+	else
+		_id=$(client_id "$_want")
+		[ -n "$_id" ] || { echo "FAIL $_label: no window '$_want'" >&2; return 1; }
+		# client_id is decimal (xdotool); the raw dump prints bare hex.
+		_exp=$(printf '%x' "$_id")
+	fi
+	# Wait for the dump THIS assertion follows: state_dump recorded the
+	# pre-key count in _dump_seq, so require a NEW dump (max ~2s) instead
+	# of a quiet-log heuristic, which would race with the previous dump.
+	_deadline=$(( $(date +%s) + 2 ))
+	_n=0
+	while :; do
+		_n=$(grep -c 'STATE DUMP' "$HW_LOG" 2>/dev/null) || _n=0
+		[ "$_n" -gt "${_dump_seq:-0}" ] && break
+		[ "$(date +%s)" -ge "$_deadline" ] && break
+		sleep 0.1
+	done
+	if [ "$_n" -le "${_dump_seq:-0}" ]; then
+		echo "FAIL $_label: state dump never landed in $HW_LOG" >&2
+		return 1
+	fi
+	_got=$(focused_from_dump)
+	if [ "$_got" != "$_exp" ]; then
+		echo "FAIL $_label: focus is '${_got:-<no dump>}' expected '$_exp' ($_want)" >&2
+		return 1
+	fi
+}
+focused_mid() { focused_assert "$1" focused_mid; }
+focused_final() { focused_assert "$1" focused_final; }
 
 # Send a _NET_WM_STATE fullscreen ClientMessage as a real client would
 # (exercises the WM's client-message path). Cached in .cache/.

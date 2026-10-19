@@ -92,23 +92,81 @@ pub fn dispatchFirstTrue(
     return false;
 }
 
-/// Convenience over `providerOf`: the current workspace's covering occupant
-/// via the module AND hook (anchored AND visible), null without a fullscreen
-/// module. Contrast the model's OR scan `model.coveringOccupantOnWs`.
+/// Per-family dispatch (D12/P2-54): the same five shapes as the top-level
+/// wrappers above, scoped to one `WindowModule` family struct
+/// (`registry.hide.callHook(.hideWindow, ...)`). `get` projects the family
+/// out of an element; `providerOf` returns the WHOLE element (pointer into
+/// the static registry, same lifetime contract as the top-level lookup), so
+/// a caller can still read other fields off it. Stated once per contract
+/// here rather than as a comptime-generic primitive in contract_dispatch:
+/// the window layer is its only consumer.
+fn Family(comptime family_field: []const u8, comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        fn get(m: *const contract.WindowModule) *const F {
+            return &@field(m, family_field);
+        }
+
+        pub fn providerOf(comptime field: std.meta.FieldEnum(F)) ?*const contract.WindowModule {
+            for (&window_mods) |*m| {
+                if (@field(get(m), @tagName(field)) != null) return m;
+            }
+            return null;
+        }
+
+        pub fn callHook(comptime field: std.meta.FieldEnum(F), args: anytype) void {
+            if (Self.providerOf(field)) |m| @call(.auto, @field(get(m), @tagName(field)).?, args);
+        }
+
+        pub fn callHookBool(comptime field: std.meta.FieldEnum(F), args: anytype) bool {
+            if (Self.providerOf(field)) |m| return @call(.auto, @field(get(m), @tagName(field)).?, args);
+            return false;
+        }
+
+        pub fn dispatchAll(comptime field: std.meta.FieldEnum(F), args: anytype) void {
+            for (window_mods) |m| if (@field(get(&m), @tagName(field))) |f| @call(.auto, f, args);
+        }
+
+        pub fn dispatchFirstTrue(comptime field: std.meta.FieldEnum(F), args: anytype) bool {
+            for (window_mods) |m| {
+                if (@field(get(&m), @tagName(field))) |f| if (@call(.auto, f, args)) return true;
+            }
+            return false;
+        }
+    };
+}
+
+/// The six single-binder families, one namespace each (see the family
+/// structs in window_contract). A call site names its family first
+/// (`command.callHook(.switchWorkspace, ...)`) and the hook second, both
+/// enum-checked.
+pub const hide = Family("hide", contract.HideHooks);
+pub const covering = Family("covering", contract.CoveringHooks);
+pub const workspaces = Family("workspaces", contract.WorkspacesHooks);
+pub const floating = Family("floating", contract.FloatingHooks);
+pub const drag = Family("drag", contract.DragHooks);
+pub const command = Family("command", contract.CommandHooks);
+
+/// Convenience over the covering family's `providerOf`: the current
+/// workspace's covering occupant via the module AND hook (anchored AND
+/// visible), null without a fullscreen module. Contrast the model's OR scan
+/// `model.coveringOccupantOnWs`.
 ///
 /// Here rather than in each consumer because two owner modules ask the same
 /// question and neither may name the other: `fullscreen` owns the covering
 /// record, `minimize` must know whether parking freed the screen.
 pub fn currentCoveringOccupant(m: *const model.Model) ?model.WindowId {
-    return if (providerOf(.visibleCoveringOnWs)) |prov|
-        prov.visibleCoveringOnWs.?(m, m.current)
+    return if (covering.providerOf(.visibleCoveringOnWs)) |prov|
+        prov.covering.visibleCoveringOnWs.?(m, m.current)
     else
         null;
 }
 
-/// Convenience over `callHookBool`: is this window parked anywhere in the
-/// model? Asked by the restore path and by the tag-change guard, both of
-/// which need the module-backed answer without naming `minimize`.
+/// Convenience over the hide family's `callHookBool`: is this window parked
+/// anywhere in the model? Asked by the restore path and by the tag-change
+/// guard, both of which need the module-backed answer without naming
+/// `minimize`.
 pub fn isMinimizedOnAnyWs(m: *const model.Model, win: model.WindowId) bool {
-    return callHookBool(.isWindowHidden, .{ m, win });
+    return hide.callHookBool(.isWindowHidden, .{ m, win });
 }

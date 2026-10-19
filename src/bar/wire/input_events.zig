@@ -204,8 +204,8 @@ fn handleTitleClick(s: *State, offset: u16) void {
     // `target.minimized` comes from the title snapshot's minimized set, which
     // the title addon synthesizes fresh; bar.zig never names minimize.
     switch (titleClickAction(target, focus.getFocused())) {
-        .unminimize => window.callHook(.unminimize, .{target.window}),
-        .minimize => window.callHook(.minimizeWindow, .{target.window}),
+        .unminimize => window.command.callHook(.unminimize, .{target.window}),
+        .minimize => window.command.callHook(.minimizeWindow, .{target.window}),
         .focus => focus.grabFocus(target.window, .mouse_click),
     }
 }

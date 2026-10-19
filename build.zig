@@ -10,6 +10,12 @@
 
 const std = @import("std");
 
+/// The shared comment/string-aware source scanners (P2-49), also consumed by
+/// the Rule-3 xcb sweep tool (dev/build-support/rule3.zig): one comment
+/// stripper + one `@import("<name>")` iterator, so configure-time checks and
+/// the layer guard cannot drift apart on comment semantics.
+const source_scan = @import("dev/build-support/source_scan.zig");
+
 /// Shared comparator for the four sorted module/stem name lists in this file,
 /// so their sort bodies cannot drift apart.
 fn lessStrings(_: void, a: []const u8, b_: []const u8) bool {
@@ -122,7 +128,11 @@ pub fn build(b: *std.Build) !void {
     // the orphan-fragment check above.
     try checkKnobReaders(b, &discovery);
 
-    const fallback_toml = filterFallbackToml(b, readFallbackToml(b), &discovery);
+    // D13/P2-50: each fragment's `pub const fallback_sections` list (its
+    // gated section heads), harvested textually from the fragment sources.
+    const fallback_heads = try harvestFallbackHeads(b, &discovery, config_fragments);
+
+    const fallback_toml = try filterFallbackToml(b, readFallbackToml(b), &discovery, &fallback_heads);
     const fallback_toml_mod = buildFallbackTomlModule(b, fallback_toml, target, optimize);
 
     // Restrict the run to one *_test stem. Applied in wireUnitTests, where a
@@ -814,9 +824,21 @@ fn wireCheckSteps(
         // is discovered (a removed package would otherwise fail
         // the template's import).
         .{ .path = "contrib/plugin-template/readout.zig", .import = "readout", .decl = "sub", .present = features.has_seg_systatus },
-        .{ .path = "contrib/plugin-template/control.zig", .import = "control", .decl = "sub", .present = features.has_seg_slider },
+        // control.zig is the one template that pulls in a bar INTERNAL: it
+        // imports `slider`, and slider unconditionally imports `drawing`, so
+        // the template is only compilable while the whole bar is present --
+        // `has_seg_slider` alone stays true when drawing.zig is deleted, and
+        // would fail the check on a reduced tree (caught by the Tier-5
+        // plugin-template gate).
+        .{ .path = "contrib/plugin-template/control.zig", .import = "control", .decl = "sub", .present = features.has_seg_slider and features.has_bar },
         .{ .path = "contrib/plugin-template/title-addon.zig", .import = "title_addon", .decl = "addon", .present = features.has_seg_title },
         .{ .path = "contrib/plugin-template/prompt-addon.zig", .import = "prompt_addon", .decl = "addon", .present = features.has_seg_prompt },
+        // The config-fragment companion every module may ship beside itself
+        // (`<owner>_config.zig`): imports only always-present config modules
+        // (parser/types/knob), so it is compiled in every tree. Its
+        // `binding` names the four-entry contract; the container-level
+        // validateTable/validateOwnership blocks ride the import itself.
+        .{ .path = "contrib/plugin-template/config-fragment.zig", .import = "config_fragment", .decl = "binding", .present = true },
     };
     const plugin_template_check = try buildPluginTemplateCheck(b, &discovery.modules, shared_ctx, has_usr, target, optimize, &plugin_template_specs);
     // `zig build check` type-checks the exe AND runs the layer guards
@@ -1155,11 +1177,30 @@ fn checkKnobReaders(
     b: *std.Build,
     discovery: *const Module.DiscoveryContext,
 ) !void {
+    // A subsystem whose config fragment survives the deletion of one of its
+    // internals takes the whole subsystem with it, so its knobs lose every
+    // reader at once. The bar is gated exactly this way: dropping any one of
+    // its four internals (`has_bar` in build, consumed via `build_options`)
+    // forfeits the whole bar and compiles out every `config.bar.<field>`
+    // read, including the cross-subsystem `bar_position` read in
+    // dispatch.zig (behind `comptime !build_options.has_bar`). Scanning the
+    // bar fragment's knobs against a tree with no bar would report every
+    // knob dead, so bar-owned fragments are checked only while the bar is
+    // present. tiling/window have no module-owned knobs today, so this is a
+    // bar-specific exemption, not a general subsystem table.
+    const has_bar = blk: {
+        var n: usize = 0;
+        for ([_][]const u8{ "bar", "drawing", "win", "segment" }) |stem| {
+            if (discovery.modules.contains(stem)) n += 1;
+        }
+        break :blk n == 4;
+    };
     var it = discovery.source_paths.iterator();
     while (it.next()) |entry| {
         const stem = entry.key_ptr.*;
         if (!std.mem.endsWith(u8, stem, "_config")) continue;
         if (std.mem.eql(u8, stem, "composed")) continue;
+        if (!has_bar and std.mem.eql(u8, stem, "bar_config")) continue;
         try checkFragmentKnobReaders(b, discovery, entry.value_ptr.*);
     }
 }
@@ -1173,18 +1214,36 @@ fn checkFragmentKnobReaders(
     defer scan.close();
     const src = scan.src;
 
-    // `outside` is everything that is not the knobs table itself; the
-    // ownership table (`knob_reader_modules`) lives AFTER the knobs table, so
-    // the fragment source must include that trailing region.
+    // `outside` is everything that is neither the knobs table nor the
+    // ownership table (`knob_reader_modules`, which lives after the knobs
+    // table and merely RESTATES targets for the build's excusal pass -- a
+    // mention there is not a reader). Both regions are spliced out, then
+    // line comments are stripped so a prose mention of a knob name in a
+    // comment cannot masquerade as a reader. Field declarations are scanned
+    // from the unstripped `outside` (a comment never declares a field, and
+    // `isCommentOnlyLine` already skips comment lines); the reader count
+    // uses the stripped copy.
     const table_marker = "pub const knobs";
     const table_start = std.mem.indexOf(u8, src, table_marker) orelse return;
     const table_end = knobTableEnd(src, table_start) orelse return;
     const table = src[table_start..table_end];
+    const own_marker = "pub const knob_reader_modules";
+    const own_start = std.mem.indexOf(u8, src, own_marker);
     var outside_buf: std.ArrayList(u8) = .empty;
     defer outside_buf.deinit(b.allocator);
+    const mid_start = table_end;
+    const mid_end = if (own_start) |os| @min(os, src.len) else src.len;
     try outside_buf.appendSlice(b.allocator, src[0..table_start]);
-    if (table_end < src.len) try outside_buf.appendSlice(b.allocator, src[table_end..]);
+    if (mid_end > mid_start) try outside_buf.appendSlice(b.allocator, src[mid_start..mid_end]);
+    if (own_start) |os| {
+        const own_end = knobTableEnd(src, os) orelse src.len;
+        if (own_end < src.len) try outside_buf.appendSlice(b.allocator, src[own_end..]);
+    }
     const outside = outside_buf.items;
+    var code_buf: std.ArrayList(u8) = .empty;
+    defer code_buf.deinit(b.allocator);
+    try stripLineComments(&code_buf, b.allocator, outside);
+    const outside_code = code_buf.items;
 
     // Field declarations: an indented `name:` line outside the knob table.
     // (`pub fn`/`fn`/local `var` lines put a space after the first token,
@@ -1200,7 +1259,7 @@ fn checkFragmentKnobReaders(
             if (line.len == 0) continue;
             if (line[0] != ' ' and line[0] != '\t') continue;
             const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len == 0 or trimmed[0] == '/') continue;
+            if (source_scan.isCommentOnlyLine(trimmed)) continue;
             const name_end = identEnd(trimmed);
             if (name_end == 0 or name_end >= trimmed.len or trimmed[name_end] != ':') continue;
             try fields.put(try b.allocator.dupe(u8, trimmed[0..name_end]), {});
@@ -1225,24 +1284,30 @@ fn checkFragmentKnobReaders(
         if (seen.contains(s)) continue;
         try seen.put(try b.allocator.dupe(u8, s), {});
         // A reader is any mention of the name outside the table beyond the
-        // declaration itself.
-        if (wordCount(outside, s) >= 2) continue;
+        // declaration itself -- comments stripped, ownership table excluded.
+        if (wordCount(outside_code, s) >= 2) continue;
         try pending.append(b.allocator, s);
     }
     if (pending.items.len == 0) return;
 
     // One pass over the other production sources settles the remainder;
-    // test files don't count (a knob only a test reads is still dead prod).
+    // test files don't count (a knob only a test reads is still dead prod),
+    // and comments in those sources are stripped so prose cannot pass for a
+    // reader either.
     var it2 = discovery.source_paths.valueIterator();
     outer: while (it2.next()) |rel| {
         if (std.mem.eql(u8, rel.*, frag_rel)) continue;
         if (std.mem.startsWith(u8, rel.*, "test/")) continue;
+        if (std.mem.startsWith(u8, rel.*, "src/test/")) continue;
         var other = SourceScanner.open(b, rel.*) catch continue;
         defer other.close();
+        var other_buf: std.ArrayList(u8) = .empty;
+        defer other_buf.deinit(b.allocator);
+        try stripLineComments(&other_buf, b.allocator, other.src);
         var keep: std.ArrayList([]const u8) = .empty;
         defer keep.deinit(b.allocator);
         for (pending.items) |word| {
-            if (wordCount(other.src, word) == 0) try keep.append(b.allocator, word);
+            if (wordCount(other_buf.items, word) == 0) try keep.append(b.allocator, word);
         }
         pending.clearRetainingCapacity();
         try pending.appendSlice(b.allocator, keep.items);
@@ -1254,20 +1319,26 @@ fn checkFragmentKnobReaders(
     // module is legitimately unread when that module is deleted -- the
     // modularity matrix removes a module and its config consumer together
     // (see Knob.reader). The fragment declares ownership as a
-    // `pub const knob_reader_modules` table of `readerOf("target", "stem")`
-    // entries; the check validates that table and then excuses any pending
-    // target it owns whose stem is a module the tree simply does not have.
-    // A target owning NO module (or naming a module the tree never had) is
-    // still reported below, so a typo cannot silence the check.
+    // `pub const knob_reader_modules` table of `.{ "target", "stem" }` pairs
+    // (comptime-pinned to the knobs table's own `reader` fields by
+    // `validateOwnership`, so a typo in either table is already a build
+    // error). The check excuses a pending target it owns whose stem is a
+    // module the tree simply does not have. Everything else is reported
+    // below: a target owning NO module must have a reader in the tree, and
+    // a target whose owner module IS in the tree was already cleared by the
+    // cross-module pass -- a remainder means the declared owner does not
+    // read it after all.
     {
         var owned = try knobReaderModulesOf(b, src, frag_rel);
         defer owned.deinit();
         var keep: std.ArrayList([]const u8) = .empty;
         defer keep.deinit(b.allocator);
         for (pending.items) |word| {
-            const owner = owned.get(word) orelse continue;
-            if (discovery.modules.contains(owner)) continue;
-            try keep.append(b.allocator, word);
+            const owner = owned.get(word) orelse {
+                try keep.append(b.allocator, word);
+                continue;
+            };
+            if (discovery.modules.contains(owner)) try keep.append(b.allocator, word);
         }
         pending.clearRetainingCapacity();
         try pending.appendSlice(b.allocator, keep.items);
@@ -1287,13 +1358,15 @@ fn checkFragmentKnobReaders(
     return error.DeadKnobTarget;
 }
 
-/// Parses a fragment's `pub const knob_reader_modules` table into
+/// Parses a fragment's `pub const knob_reader_modules` pair table into
 /// target -> owning module stem. A fragment with no such table (core-owned
 /// knobs, or a fragment that has not adopted ownership) yields an empty map.
 ///
 /// The table is validated as it is parsed: every target must also be a knob
 /// target of the same fragment, so a renamed or deleted knob cannot leave a
-/// stale ownership entry that silently excuses an unrelated target.
+/// stale ownership entry that silently excuses an unrelated target. (The
+/// stem side is pinned to the knobs table's own `reader` fields at comptime
+/// by `validateOwnership`, which catches a typo in either table.)
 fn knobReaderModulesOf(
     b: *std.Build,
     src: []const u8,
@@ -1326,14 +1399,15 @@ fn knobReaderModulesOf(
         }
     }
 
-    // Each entry is a one-liner `knob.readerOf("target", "stem")` call, so
-    // the parser takes the first two double-quoted strings on the line.
+    // Each entry is a one-liner `.{ "target", "stem" }` pair, so the
+    // parser takes the first two double-quoted strings on the line.
     var rest = table;
     while (rest.len > 0) {
         const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
         const line = rest[0..nl];
         rest = if (nl == rest.len) rest[nl..] else rest[nl + 1 ..];
-        if (std.mem.indexOf(u8, line, "readerOf") == null) continue;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] == '/') continue;
 
         var pair: [2]?[]const u8 = .{ null, null };
         var p = line;
@@ -1394,6 +1468,12 @@ fn wordCount(haystack: []const u8, word: []const u8) usize {
     return n;
 }
 
+/// Copy `src` into `out` with comments cut (the shared scanner's
+/// comment/string-aware stripper; see dev/build-support/source_scan.zig).
+fn stripLineComments(out: *std.ArrayList(u8), alloc: std.mem.Allocator, src: []const u8) !void {
+    try source_scan.stripCommentsInto(out, alloc, src);
+}
+
 /// Generates the build-owned `composed` config facade alongside its source
 /// file, and returns the module to register under that name.
 ///
@@ -1438,6 +1518,7 @@ fn buildComposedModule(
         \\const types = @import("types");
         \\const parser = @import("parser");
         \\const color = @import("color");
+        \\const knob = @import("knob");
         \\const core_config = @import("core_config");
         \\
     ) catch unreachable;
@@ -1498,6 +1579,105 @@ fn buildComposedModule(
         \\    return cfg;
         \\}
         \\
+        \\/// The full knob inventory behind `hana --dump-config-schema` (P1-44):
+        \\/// every discovered fragment's table beside its root type (a fragment
+        \\/// without a `knobs` decl contributes none), rendered to JSON at
+        \\/// comptime -- a constant string the flag prints without loading a
+        \\/// config, reading a file, or touching a display.
+        \\pub const knob_schema = knob.collectSchema(&.{
+        \\    // core_config has no Config struct of its own: its fields live in
+        \\    // types.CoreConfig (the facade's `core` field), so the defaults
+        \\    // are read from there.
+        \\    .{ .root = types.CoreConfig, .knobs = if (@hasDecl(core_config, "knobs")) &core_config.knobs else &[_]knob.Knob{} },
+        \\
+    ) catch unreachable;
+    for (fragments) |f| {
+        src.print(
+            b.allocator,
+            "    .{{ .root = {0s}.Config, .knobs = if (@hasDecl({0s}, \"knobs\")) &{0s}.knobs else &[_]knob.Knob{{}} }},\n",
+            .{f.stem},
+        ) catch unreachable;
+    }
+    src.appendSlice(b.allocator,
+        \\});
+        \\pub const knob_schema_json = knob.schemaJson(knob_schema);
+        \\
+        \\/// The section-knowledge aggregates (D13/P2-50): every present
+        \\/// fragment declares its own sections/prefixes/inert-families/
+        \\/// accumulate-exemptions/fallback-heads; the composed facade unions
+        \\/// them here so the mis-case lint (config.zig), the duplicate-warn
+        \\/// policy (document.zig, installed by config.zig), and the build's
+        \\/// fallback filter all read ONE inventory per tree. A fragment from
+        \\/// an older template without a decl contributes an empty list.
+        \\pub const known_section_names = blk: {
+        \\    @setEvalBranchQuota(50_000);
+        \\    var out: []const []const u8 = &.{};
+        \\
+    ) catch unreachable;
+    src.print(b.allocator, "    for (.{{", .{}) catch unreachable;
+    for (fragments, 0..) |f, i| {
+        if (i != 0) src.appendSlice(b.allocator, ", ") catch unreachable;
+        src.print(b.allocator, "{s}", .{f.stem}) catch unreachable;
+    }
+    // core_config is unconditional (always present, never discovered).
+    src.appendSlice(b.allocator,
+        \\, core_config }) |frag| {
+        \\        if (@hasDecl(frag, "sections")) out = out ++ frag.sections;
+        \\    }
+        \\    break :blk out;
+        \\};
+        \\
+        \\pub const known_section_prefix_names = blk: {
+        \\    @setEvalBranchQuota(20_000);
+        \\    var out: []const []const u8 = &.{};
+        \\
+    ) catch unreachable;
+    src.print(b.allocator, "    for (.{{", .{}) catch unreachable;
+    for (fragments, 0..) |f, i| {
+        if (i != 0) src.appendSlice(b.allocator, ", ") catch unreachable;
+        src.print(b.allocator, "{s}", .{f.stem}) catch unreachable;
+    }
+    src.appendSlice(b.allocator,
+        \\, core_config }) |frag| {
+        \\        if (@hasDecl(frag, "section_prefixes")) out = out ++ frag.section_prefixes;
+        \\    }
+        \\    break :blk out;
+        \\};
+        \\
+        \\pub const inert_family_list = blk: {
+        \\    @setEvalBranchQuota(20_000);
+        \\    var out: []const types.InertFamily = &.{};
+        \\
+    ) catch unreachable;
+    src.print(b.allocator, "    for (.{{", .{}) catch unreachable;
+    for (fragments, 0..) |f, i| {
+        if (i != 0) src.appendSlice(b.allocator, ", ") catch unreachable;
+        src.print(b.allocator, "{s}", .{f.stem}) catch unreachable;
+    }
+    src.appendSlice(b.allocator,
+        \\, core_config }) |frag| {
+        \\        if (@hasDecl(frag, "inert_families")) out = out ++ frag.inert_families;
+        \\    }
+        \\    break :blk out;
+        \\};
+        \\
+        \\pub const accumulate_exempt_list = blk: {
+        \\    @setEvalBranchQuota(20_000);
+        \\    var out: []const types.SectionKey = &.{};
+        \\
+    ) catch unreachable;
+    src.print(b.allocator, "    for (.{{", .{}) catch unreachable;
+    for (fragments, 0..) |f, i| {
+        if (i != 0) src.appendSlice(b.allocator, ", ") catch unreachable;
+        src.print(b.allocator, "{s}", .{f.stem}) catch unreachable;
+    }
+    src.appendSlice(b.allocator,
+        \\, core_config }) |frag| {
+        \\        if (@hasDecl(frag, "accumulate_exempt")) out = out ++ frag.accumulate_exempt;
+        \\    }
+        \\    break :blk out;
+        \\};
+        \\
     ) catch unreachable;
 
     var imports: std.ArrayList(Import) = .empty;
@@ -1505,6 +1685,7 @@ fn buildComposedModule(
     imports.append(b.allocator, .{ .name = "types", .module = discovered.get("types").? }) catch unreachable;
     imports.append(b.allocator, .{ .name = "parser", .module = discovered.get("parser").? }) catch unreachable;
     imports.append(b.allocator, .{ .name = "color", .module = discovered.get("color").? }) catch unreachable;
+    imports.append(b.allocator, .{ .name = "knob", .module = discovered.get("knob").? }) catch unreachable;
     imports.append(b.allocator, .{ .name = "core_config", .module = discovered.get("core_config").? }) catch unreachable;
     for (fragments) |f| {
         imports.append(b.allocator, .{ .name = f.stem, .module = discovered.get(f.stem).? }) catch unreachable;
@@ -1520,12 +1701,15 @@ fn buildComposedModule(
 /// every following line belongs to it until the next section line. The
 /// fallback carries no multi-line arrays, so a line is a safe unit. Returns
 /// `toml` unchanged when present sections all map to present modules; null
-/// stays null.
+/// stays null. An allocation failure used to `catch return raw` (failing
+/// OPEN: the unfiltered text shipped and the warning storm returned); it
+/// now propagates so the configure path fails loudly instead.
 fn filterFallbackToml(
     b: *std.Build,
     toml: ?[]const u8,
     discovery: *const Module.DiscoveryContext,
-) ?[]const u8 {
+    fallback_heads: *const std.StringHashMap([]const u8),
+) !?[]const u8 {
     const raw = toml orelse return null;
     var out: std.ArrayList(u8) = .empty;
     var keep = true;
@@ -1535,24 +1719,62 @@ fn filterFallbackToml(
         if (trimmed.len > 0 and trimmed[0] == '[') {
             const close = std.mem.indexOfScalar(u8, trimmed, ']') orelse trimmed.len;
             const section = std.mem.trim(u8, trimmed[1..close], " \t");
-            keep = fallbackSectionAllowed(section, discovery);
+            // The FIRST dotted component picks the head (`bar.layout.left`
+            // -> `bar`, `workspace.rules.foo` -> `workspace`). A head no
+            // fragment claims is core-owned vocabulary and always stays.
+            const dot = std.mem.indexOfScalar(u8, section, '.');
+            const head = if (dot) |d| section[0..d] else section;
+            keep = blk: {
+                const owner = fallback_heads.get(head) orelse break :blk true;
+                break :blk discovery.modules.contains(owner);
+            };
         }
-        if (keep) out.appendSlice(b.allocator, line) catch return raw;
-        out.append(b.allocator, '\n') catch return raw;
+        if (keep) try out.appendSlice(b.allocator, line);
+        try out.append(b.allocator, '\n');
     }
     return out.items;
 }
 
-/// True when the fallback's `[section]` (or its family prefix) belongs to a
-/// subsystem present in this tree. The FIRST dotted component picks the
-/// owner: `tiling.*`, `bar.*` (incl. bar.properties/layout/modules),
-/// `workspaces`/`workspace.rules.*`/`rules.*` -> workspaces, `drag` ->
-/// floating. Unrecognized sections always stay (core-owned vocabulary).
-fn fallbackSectionAllowed(section: []const u8, discovery: *const Module.DiscoveryContext) bool {
-    const dot = std.mem.indexOfScalar(u8, section, '.');
-    const head = if (dot) |d| section[0..d] else section;
-    const owner = if (std.mem.eql(u8, head, "tiling")) "tiling" else if (std.mem.eql(u8, head, "bar")) "bar" else if (std.mem.eql(u8, head, "workspaces")) "workspaces" else if (std.mem.eql(u8, head, "workspace")) "workspaces" else if (std.mem.eql(u8, head, "rules")) "workspaces" else if (std.mem.eql(u8, head, "drag")) "floating" else return true;
-    return discovery.modules.contains(owner);
+/// D13/P2-50: harvest each fragment's `pub const fallback_sections` string
+/// array from its source -- the configure side cannot evaluate a fragment's
+/// Zig (they import the module-graph names), so the shared comment stripper
+/// plus a quote-literal walk over the decl's span (`... ;`) do it
+/// textually, like the knob scans. A fragment without the decl gates
+/// nothing; a head claimed by two fragments is a configure-time error.
+fn harvestFallbackHeads(
+    b: *std.Build,
+    discovery: *const Module.DiscoveryContext,
+    fragments: []const ConfigFragment,
+) !std.StringHashMap([]const u8) {
+    var map: std.StringHashMap([]const u8) = .init(b.allocator);
+    for (fragments) |f| {
+        const rel_path = discovery.source_paths.get(f.stem) orelse continue;
+        var scan = try SourceScanner.open(b, rel_path);
+        defer scan.close();
+        var stripped: std.ArrayList(u8) = .empty;
+        defer stripped.deinit(b.allocator);
+        try source_scan.stripCommentsInto(&stripped, b.allocator, scan.src);
+        const decl_lit = "pub const fallback_sections";
+        const decl = std.mem.indexOf(u8, stripped.items, decl_lit) orelse continue;
+        const tail = stripped.items[decl + decl_lit.len ..];
+        const semi = std.mem.indexOfScalar(u8, tail, ';') orelse tail.len;
+        var tok_it = std.mem.tokenizeAny(u8, tail[0..semi], "\"");
+        _ = tok_it.next(); // text before the first quote
+        while (tok_it.next()) |head| {
+            _ = tok_it.next() orelse break; // text between this close and the next open
+            if (head.len == 0) continue;
+            const gop = try map.getOrPut(try b.allocator.dupe(u8, head));
+            if (gop.found_existing and !std.mem.eql(u8, gop.value_ptr.*, f.owner)) {
+                std.debug.print(
+                    "Error: fallback section head '{s}' is claimed by both '{s}' and '{s}' config fragments; give each head one owner.\n",
+                    .{ head, gop.value_ptr.*, f.owner },
+                );
+                return error.DuplicateFallbackHead;
+            }
+            gop.value_ptr.* = try b.allocator.dupe(u8, f.owner);
+        }
+    }
+    return map;
 }
 
 /// The per-owner stem registry for every `modules/` directory.
@@ -1749,7 +1971,7 @@ fn classifyFile(b: *std.Build, rel_path: []const u8) !Module.FileClass {
         // line (an example or a cross-reference) would otherwise trip the
         // same saw_unrecognized / wrong-shape guard declaresBinding already
         // escapes with.
-        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        if (source_scan.isCommentOnlyLine(trimmed)) continue;
         for (typed_needles) |typed_needle| {
             if (std.mem.indexOf(u8, trimmed, typed_needle)) |at| {
                 const rest = trimmed[at + typed_needle.len ..];
@@ -2029,28 +2251,19 @@ fn discoverSubRegistrySpecs(
 /// duped into `out` (the scanner's buffer is freed by the caller). A `_subs`
 /// import without the inline `.field` access is rejected here: the field IS
 /// the registry's export name, so without it neither the array nor the
-/// binding can be derived.
+/// binding can be derived. The needle walk is the shared
+/// `source_scan.ImportIterator`; the `).field` validation reads its tail.
 fn parseSubsConsumers(
     b: *std.Build,
     line: []const u8,
     rel_path: []const u8,
     out: *std.ArrayListUnmanaged(SubsConsumer),
 ) !void {
-    const needle = "@import(\"";
-    var i: usize = 0;
-    while (i + needle.len <= line.len) : (i += 1) {
-        if (!std.mem.startsWith(u8, line[i..], needle)) continue;
-        const name_start = i + needle.len;
-        const quote_off = std.mem.indexOfScalar(u8, line[name_start..], '"') orelse {
-            i = name_start;
-            continue;
-        };
-        const name = line[name_start .. name_start + quote_off];
-        const close = name_start + quote_off + 1;
-        if (!std.mem.endsWith(u8, name, "_subs")) {
-            i = close;
-            continue;
-        }
+    var imports: source_scan.ImportIterator = .{ .rest = line };
+    while (imports.next()) |m| {
+        const name = m.name;
+        const after = m.tail;
+        if (!std.mem.endsWith(u8, name, "_subs")) continue;
         if (name.len == "_subs".len) {
             std.debug.print(
                 "Error: {s} imports the bare '_subs' name; expected \"<package>_subs\".\n",
@@ -2058,30 +2271,22 @@ fn parseSubsConsumers(
             );
             return error.BareSubsImport;
         }
-        if (close >= line.len or line[close] != ')') {
-            i = close;
-            continue;
-        }
-        const dot = close + 1;
-        if (dot + 1 > line.len or line[dot] != '.') {
+        if (after.len == 0 or after[0] != ')') continue;
+        if (after.len < 2 or after[1] != '.') {
             std.debug.print(
                 "Error: {s} imports '{s}' without the inline `.array` field access (e.g. `@import(\"{s}\").subs`); the generated registry's array name comes from it.\n",
                 .{ rel_path, name, name },
             );
             return error.SubsWithoutArrayField;
         }
-        const field_start = dot + 1;
-        var field_end = field_start;
-        while (field_end < line.len and isIdentByte(line[field_end])) : (field_end += 1) {}
-        if (field_end == field_start) {
-            i = dot;
-            continue;
-        }
+        const field_src = after[2..];
+        var field_end: usize = 0;
+        while (field_end < field_src.len and isIdentByte(field_src[field_end])) : (field_end += 1) {}
+        if (field_end == 0) continue;
         try out.append(b.allocator, .{
             .package = try b.allocator.dupe(u8, name[0 .. name.len - "_subs".len]),
-            .array = try b.allocator.dupe(u8, line[field_start..field_end]),
+            .array = try b.allocator.dupe(u8, field_src[0..field_end]),
         });
-        i = field_end - 1;
     }
 }
 
@@ -2105,7 +2310,7 @@ fn declaresBinding(b: *std.Build, rel_path: []const u8, binding: []const u8) !bo
     defer b.allocator.free(needle);
     var it = scan.lines();
     while (it.next()) |trimmed| {
-        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        if (source_scan.isCommentOnlyLine(trimmed)) continue;
         if (!std.mem.startsWith(u8, trimmed, needle)) continue;
         const rest = trimmed[needle.len..];
         if (rest.len == 0) continue;
@@ -2125,7 +2330,7 @@ fn declaresSegmentFor(b: *std.Build, rel_path: []const u8) !bool {
     defer scan.close();
     var it = scan.lines();
     while (it.next()) |trimmed| {
-        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        if (source_scan.isCommentOnlyLine(trimmed)) continue;
         if (std.mem.startsWith(u8, trimmed, "pub fn segmentFor")) return true;
     }
     return false;
@@ -2365,15 +2570,14 @@ fn buildOwnerRegistryModule(
         \\    // could match nothing at all -- enforcing nothing, silently.
         \\    if (@hasDecl(T, "single_binder_hooks")) {
         \\        for (T.single_binder_hooks) |hook| {
-        \\            // A name that is not a field of T is a compile error, not a
-        \\            // skip: a renamed hook left in the list would otherwise turn
-        \\            // the whole claim into a silent no-op.
-        \\            if (!@hasField(T, hook)) @compileError(
-        \\                "single_binder_hooks lists '" ++ hook ++ "', which is not a field of the registry element type",
-        \\            );
+        \\            // The element contract's `hookBinds` probe resolves the
+        \\            // hook (WindowModule: through its per-family structs;
+        \\            // Segment: flat @field) and rejects an unknown name at
+        \\            // comptime -- a renamed hook left in a list would
+        \\            // otherwise turn the whole claim into a silent no-op.
         \\            var binders: usize = 0;
         \\            for (modules) |wm| {
-        \\                if (@field(wm, hook) != null) binders += 1;
+        \\                if (T.hookBinds(wm, hook)) binders += 1;
         \\            }
         \\            if (binders > 1)
         \\                @compileError("single-binder hook '" ++ hook ++ "' bound by multiple modules; disallowed");
@@ -2919,27 +3123,19 @@ const Module = struct {
     ) !void {
         var scan = try SourceScanner.open(b, rel_path);
         defer scan.close();
-        const src = scan.src;
 
-        const needle = "@import(\"";
-        var i: usize = 0;
-        while (i + needle.len <= src.len) {
-            if (!std.mem.startsWith(u8, src[i..], needle)) {
-                i += 1;
-                continue;
-            }
-            i += needle.len;
-            const name_start = i;
-            while (i < src.len and src[i] != '"') : (i += 1) {}
-            if (i >= src.len) break;
-            const name = src[name_start..i];
+        // The shared ImportIterator; raw source (comment mentions can only
+        // add a harmless extra edge -- the set is intersected with the
+        // discovered modules below, and std/builtin need no wiring).
+        var imports: source_scan.ImportIterator = .{ .rest = scan.src };
+        while (imports.next()) |m| {
+            const name = m.name;
             if (!std.mem.eql(u8, name, "std") and
                 !std.mem.eql(u8, name, "builtin") and
                 modules.contains(name))
             {
                 try out.append(b.allocator, try b.allocator.dupe(u8, name));
             }
-            i += 1; // move past the closing quote
         }
     }
 

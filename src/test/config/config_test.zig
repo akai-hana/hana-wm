@@ -478,6 +478,33 @@ test "a sibling .toml loads only when config.toml includes it" {
     try testing.expectEqual(@as(u8, 33), cfg2.workspaces.count);
 }
 
+// P1-43 acceptance: a typo in an INCLUDED file is attributed to that file
+// (file:line), not to the entry config.toml -- the whole point of Entry.file.
+// Real files through the real load: config.toml includes theme.toml, the
+// typo'd key lives on theme.toml's line 2, and the captured warn says so.
+test "a typo in an included file is reported against THAT file" {
+    const alloc = testing.allocator;
+    var box = try snapshot_test.Sandbox.init(alloc, "include-typo");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+    defer config.deinitGoodSource(alloc);
+
+    try box.write("hana/config.toml", "include = [\"theme.toml\"]\n");
+    try box.write("hana/theme.toml", "[bar]\nheigth = 24\n");
+
+    var bag: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer bag.deinit();
+    try config.checkConfig(alloc, &bag);
+
+    // The unconsumed-key warning names theme.toml AND its line (heigth is
+    // line 2 there). The include line in config.toml is consumed, so no
+    // config.toml:... attribution exists for this typo.
+    try testing.expect(bag.contains("theme.toml:2"));
+    try testing.expect(!bag.contains("config.toml:"));
+}
+
 // ---------------------------------------------------------------------------
 // Boot degradation, search policy, load ceilings
 // ---------------------------------------------------------------------------
@@ -693,8 +720,59 @@ test "checkConfig reports the lint warns (mis-cased section, inert family)" {
     try testing.expect(bar_inert.contains("inert"));
     config.deinitGoodSource(alloc);
 
+    // The rule-table families (D13 extension, P2-50): [rules.*] without
+    // [rules], and [workspace.rules.*] without [workspace.rules], warn the
+    // same way the tiling family does.
+    try box.write("hana/config.toml", "[rules.foo]\nbogus = 1\n");
+    var rules_inert: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer rules_inert.deinit();
+    try config.checkConfig(alloc, &rules_inert);
+    try testing.expect(rules_inert.count() > 0);
+    try testing.expect(rules_inert.contains("[rules.*]"));
+    try testing.expect(rules_inert.contains("inert"));
+    config.deinitGoodSource(alloc);
+
+    try box.write("hana/config.toml", "[workspace.rules.2]\nbogus = 1\n");
+    var ws_inert: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer ws_inert.deinit();
+    try config.checkConfig(alloc, &ws_inert);
+    try testing.expect(ws_inert.count() > 0);
+    try testing.expect(ws_inert.contains("[workspace.rules.*]"));
+    try testing.expect(ws_inert.contains("inert"));
+    config.deinitGoodSource(alloc);
+
     // The collector is restored on every path (same invariant the main
     // checkConfig test pins).
+    try testing.expect(diagnostics.diagnostics == null);
+}
+
+test "checkConfig: duplicate-accumulate exemptions come from the fragments (D13)" {
+    // A duplicated scalar key NOT on any fragment's exemption list warns
+    // "later wins"; the fragment-declared pairs (here [tiling] layouts,
+    // from tiling_config) accumulate silently. The install path is
+    // buildConfigFromDoc -> composed.parse, so this test pins the plumbing,
+    // not just the table.
+    const alloc = testing.allocator;
+    var box = try snapshot_test.Sandbox.init(alloc, "checkcfgdup");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+
+    try box.write("hana/config.toml", "[display]\ndpi = 96\ndpi = 100\n");
+    var dup: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer dup.deinit();
+    try config.checkConfig(alloc, &dup);
+    try testing.expect(dup.contains("Duplicate key"));
+    try testing.expect(dup.contains("dpi"));
+    config.deinitGoodSource(alloc);
+
+    try box.write("hana/config.toml", "[tiling]\nlayouts = master-stack\nlayouts = master-stack\n");
+    var tiling_dup: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer tiling_dup.deinit();
+    try config.checkConfig(alloc, &tiling_dup);
+    try testing.expect(!tiling_dup.contains("Duplicate key 'layouts'"));
+    config.deinitGoodSource(alloc);
     try testing.expect(diagnostics.diagnostics == null);
 }
 

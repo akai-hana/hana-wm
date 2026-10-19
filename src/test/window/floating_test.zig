@@ -15,6 +15,7 @@ const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const window_state_ops = @import("window_state_ops");
+const window = @import("window");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
 const fullscreen = if (build_options.has_fullscreen) @import("fullscreen") else struct {};
 const floating = if (build_options.has_floating) @import("floating") else struct {};
@@ -207,4 +208,27 @@ test "drag resize: aspect wins over a conflicting PMin floor" {
     const r = floating.computeResizeRect(drag, 180, 120, no_wa, limits, false);
     try testing.expectEqual(@as(u16, 500), r.width);
     try testing.expectEqual(@as(u16, 281), r.height); // round(500 * 9/16) < min_h
+}
+
+// P1-39: floating binds init/deinit into the window lifecycle, so the
+// uniform fan-out window.init/window.deinit perform reaches it like
+// minimize's and fullscreen's. dispatchAll(.deinit, .{}) is the exact call
+// window.deinit makes over the compiled-in window modules.
+test "window lifecycle fan-out resets a leaked floating drag" {
+    try testing.expect(floating.module.init != null);
+    try testing.expect(floating.module.deinit != null);
+
+    // A drag a test never released must not survive the deinit half of a
+    // deinit()+init() cycle: startDrag would stay a no-op for the rest of
+    // the process.
+    floating.seedLeakedDragForTest(5);
+    try testing.expect(floating.isDragging());
+    window.dispatchAll(.deinit, .{});
+    try testing.expect(!floating.isDragging());
+
+    // And the init half re-arms a clean slate (the leak re-seeded first, so
+    // the assertion cannot pass vacuously).
+    floating.seedLeakedDragForTest(5);
+    try floating.module.init.?();
+    try testing.expect(!floating.isDragging());
 }
