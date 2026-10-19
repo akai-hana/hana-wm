@@ -143,14 +143,27 @@ var g_state: State = .{};
 
 /// Re-arms the process-global drag state.
 ///
-/// The test fixture calls this for the same reason it calls minimize's and
-/// fullscreen's deinit/init: `g_state` is process-global state that a test can
-/// leave dirty, and unlike a model store there is no fresh-per-test value to
-/// paper over it. `startDrag` returns early while a drag is active, so a
-/// leaked drag does not merely report a stale `isDragging()` -- it makes every
-/// later startDrag a no-op.
+/// `startDrag` returns early while a drag is active, so a leaked drag does
+/// not merely report a stale `isDragging()` -- it makes every later
+/// startDrag a no-op. This is the shared reset behind the module's
+/// `init`/`deinit` bindings below (window.init / window.deinit's uniform
+/// fan-out, P1-39), and the fixture calls it directly for the same reason
+/// it calls minimize's and fullscreen's: `g_state` is process-global state
+/// a test can leave dirty, and unlike a model store there is no
+/// fresh-per-test value to paper over it.
 pub fn resetState() void {
     g_state = .{};
+}
+
+/// Lifecycle binding (P1-39): mirrors minimize/fullscreen so a leaked drag
+/// cannot survive a deinit()+init() cycle (session restart, test harness) --
+/// `window.init`'s fan-out re-arms a clean slate, `window.deinit`'s clears it.
+pub fn init() anyerror!void {
+    resetState();
+}
+
+pub fn deinit() void {
+    resetState();
 }
 
 /// Test-only seam: leaves a drag ACTIVE, standing in for a test that never
@@ -168,7 +181,6 @@ pub fn seedLeakedDragForTest(win: model.WindowId) void {
 /// No-op if a drag is already active, or for bar/fullscreen windows.
 pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     const cs = core.getState();
-    if (!build_options.has_floating) return;
     if (g_state.drag.active) return;
     if (usable_area.isSurfaceWindow(win)) return;
     if (model.isCovering(pipeline.state(), win)) return;
@@ -527,7 +539,7 @@ pub fn honorConfigureRequest(
     win: model.WindowId,
     req: model.ConfigureReq,
 ) model.HonorDecision {
-    if (registry.callHookBool(.isWindowHidden, .{ m, win })) return .ignored;
+    if (registry.hide.callHookBool(.isWindowHidden, .{ m, win })) return .ignored;
     const e = m.store.getPtr(win) orelse return .ignored;
     if (e.presence == .covering) return .ignored; // fullscreen owns geometry
     switch (e.anchor) {
@@ -624,13 +636,21 @@ fn repairStrandedHome(m: *model.Model, e: *model.Entry, win: model.WindowId) boo
 
 pub const module: @import("window_contract").WindowModule = .{
     .name = "floating",
-    .startDrag = startDrag,
-    .stopDrag = stopDrag,
-    .updateDrag = updateDrag,
-    .isDragging = isDragging,
-    .isResizingWindow = isResizingWindow,
-    .cancelDragForWindow = cancelDragForWindow,
-    .setFloatingRect = setFloatingRect,
-    .honorConfigureRequest = honorConfigureRequest,
-    .toggleFloatingWindow = toggleFloating,
+    .init = init,
+    .deinit = deinit,
+    .drag = .{
+        .startDrag = startDrag,
+        .stopDrag = stopDrag,
+        .updateDrag = updateDrag,
+        .isDragging = isDragging,
+        .isResizingWindow = isResizingWindow,
+        .cancelDragForWindow = cancelDragForWindow,
+    },
+    .floating = .{
+        .setFloatingRect = setFloatingRect,
+        .honorConfigureRequest = honorConfigureRequest,
+    },
+    .command = .{
+        .toggleFloatingWindow = toggleFloating,
+    },
 };

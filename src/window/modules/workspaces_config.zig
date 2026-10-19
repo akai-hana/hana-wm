@@ -41,6 +41,47 @@ comptime {
     knob.validateTable(Config, &knobs, &.{});
 }
 
+/// The section names the workspaces subsystem owns (D13/P2-50): the
+/// composed facade unions every fragment's list into the mis-case lint's
+/// inventory. `[bar.modules.workspaces]` is consumed by this fragment's
+/// count knob but lives in the bar's section namespace, so bar_config
+/// lists it (a name appears in exactly one fragment -- the comptime
+/// pairwise-distinct check pins that).
+pub const sections = &[_][]const u8{
+    types.section_workspaces,
+    types.section_workspace_rules,
+    types.section_rules,
+};
+
+/// Mis-case families: both rule-table families are open sets (one section
+/// per workspace / per rule name), so case-variants get the family warn.
+pub const section_prefixes = &[_][]const u8{
+    types.section_prefix_workspace_rules,
+    types.section_prefix_rules,
+};
+
+/// Inert families (D13/P2-50): the numbered rule tables are read only when
+/// their parent section is present; a present family with the parent
+/// missing leaves those rules inert, which the load warns about.
+pub const inert_families = &[_]types.InertFamily{
+    .{ .parent = types.section_rules, .child_prefix = types.section_prefix_rules },
+    .{ .parent = types.section_workspace_rules, .child_prefix = types.section_prefix_workspace_rules },
+};
+
+/// Both rule-table sections accumulate duplicate declarations by design
+/// (one key per rule; repeated names read as arrays), so scalar reads of
+/// an accumulated rule take the last declaration without a "later wins"
+/// warn.
+pub const accumulate_exempt = &[_]types.SectionKey{
+    .{ .section = types.section_workspace_rules },
+    .{ .section = types.section_rules },
+};
+
+/// The section HEADS whose presence in the embedded fallback TOML is gated
+/// on this fragment's owner module (P2-50): `workspace` heads the
+/// `[workspace.rules*]` family, `rules` the numbered tables.
+pub const fallback_sections = &[_][]const u8{ "workspaces", "workspace", "rules" };
+
 /// The fragment parse entry: apply the scalar knobs, then parse the
 /// workspace-rules families (which bound-check against the freshly parsed
 /// `count`).

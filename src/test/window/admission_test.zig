@@ -9,6 +9,9 @@ const testing = std.testing;
 const admission = @import("admission");
 const types = @import("types");
 const model = @import("model");
+const core = @import("core");
+const composed = @import("composed");
+const focus = @import("focus");
 
 test "admission rules: one map holds float and workspace rules; first rule wins" {
     var map: std.StringHashMapUnmanaged(?u8) = .{};
@@ -370,4 +373,31 @@ test "admission applyRestoredRecord: an unregistered window is a no-op" {
     };
     admission.applyRestoredRecord(&m, 777, &rec); // store miss -> nothing to patch
     try testing.expect(!m.store.has(777));
+}
+
+// P1-40: deinit is idempotent — a second call, or one before the first init,
+// is a no-op, not a null-unwrap panic (`state.?` used to run past the first
+// call's `state = null`). The warm admission cycle is also leak-checked: the
+// spawn queue and rules map allocate against testing.allocator in init and
+// must all come back in the FIRST deinit (the second frees nothing).
+//
+// The core bootstrap mirrors render_core_test exactly: dummy connection never
+// dereferenced on this path (buildRulesMap reads only `config`), page
+// allocator for the config box core holds for the process.
+var g_screen: core.xcb.xcb_screen_t = std.mem.zeroes(core.xcb.xcb_screen_t);
+var g_cfg: composed.Config = .{};
+
+test "admission and focus deinit are idempotent" {
+    core.init(undefined, &g_screen, 0, std.heap.page_allocator, &g_cfg, 96.0);
+
+    // Warm: init allocates, first deinit frees, second must skip cleanly.
+    admission.init(testing.allocator);
+    admission.deinit();
+    admission.deinit();
+
+    // Cold: this headless file never runs focus.init (it needs the live
+    // pieces the X fixture brings), so state is null and both calls must
+    // return without unwrapping or reaching for a connection.
+    focus.deinit();
+    focus.deinit();
 }

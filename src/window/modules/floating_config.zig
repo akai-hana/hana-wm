@@ -27,6 +27,12 @@ comptime {
     knob.validateTable(Config, &knobs, &.{});
 }
 
+/// The section name this fragment owns (D13/P2-50), plus the fallback-TOML
+/// head gating (drag sections are stripped from the embedded fallback when
+/// the floating module is absent from the tree).
+pub const sections = &[_][]const u8{types.section_drag};
+pub const fallback_sections = &[_][]const u8{"drag"};
+
 pub fn parse(allocator: std.mem.Allocator, doc: *parser.Document) !Config {
     var cfg: Config = .{};
     errdefer cfg.deinit(allocator);

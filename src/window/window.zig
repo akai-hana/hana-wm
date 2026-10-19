@@ -46,13 +46,20 @@ const reconcile_tails = @import("reconcile_tails");
 const reconcile = @import("reconcile");
 
 // Window-module hook dispatch lives in registry.zig (the binding layer);
-// window.zig re-exports the five wrappers so `window.*` stays the stable
-// external facade. Inside `src/window/**`, import `registry` directly.
+// window.zig re-exports the five top-level wrappers plus the six family
+// namespaces (D12/P2-54) so `window.*` stays the stable external facade.
+// Inside `src/window/**`, import `registry` directly.
 pub const providerOf = registry.providerOf;
 pub const callHook = registry.callHook;
 pub const callHookBool = registry.callHookBool;
 pub const dispatchAll = registry.dispatchAll;
 pub const dispatchFirstTrue = registry.dispatchFirstTrue;
+pub const hide = registry.hide;
+pub const covering = registry.covering;
+pub const workspaces = registry.workspaces;
+pub const floating = registry.floating;
+pub const drag = registry.drag;
+pub const command = registry.command;
 
 // The command surface, re-exported through this facade. Always-present
 // transitions are re-exported as the concrete functions they are;
@@ -60,7 +67,6 @@ pub const dispatchFirstTrue = registry.dispatchFirstTrue;
 // facade never names an optional module. Tests and the bar import `window`
 // and never the owning file.
 pub const mapRequest = admission.mapRequest;
-pub const focusAfterGeometry = admission.focusAfterGeometry;
 pub const cycleLayoutKind = reconcile_tails.cycleLayoutKind;
 pub const stepVariantDir = reconcile_tails.stepVariantDir;
 pub const adjustPrimaryWidthAction = reconcile_tails.adjustPrimaryWidthAction;
@@ -75,13 +81,8 @@ pub const snapViewportFocusedDuty = reconcile_tails.snapViewportFocusedDuty;
 // focus.zig (the cache's owner); the WM_DELETE verdict and cookie helpers
 // stay in icccm.zig. window.zig re-exports the pub API so `window.*` stays
 // the stable external facade.
-pub const peekInputModelResolved = focus.peekInputModelResolved;
-pub const provisionalResolution = focus.provisionalResolution;
 pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
 pub const closeViaProtocol = icccm.closeViaProtocol;
-pub const sendWMTakeFocusKnown = focus.sendWMTakeFocusKnown;
-pub const discardProtocolCookie = icccm.discardProtocolCookie;
-
 // Event handlers and border sweeps live beside this file:
 // client_events.zig (ConfigureRequest, EWMH ClientMessage, Enter/Leave),
 // border_sweeps.zig (per-batch sweeps).
@@ -100,7 +101,9 @@ pub const updateFloatingWindowBorders = border_sweeps.updateFloatingWindowBorder
 pub const reloadBorders = border_sweeps.reloadBorders;
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
-const max_window_tree_depth: usize = 10;
+/// Public as the CONTRACT the walk is bounded by: find_managed_test pins
+/// one parent-query per level against it (P1-36).
+pub const max_window_tree_depth: usize = 10;
 
 // Live geometry is read straight off the wire via getGeometry(). The
 // last-sent geometry for X-side state (workspace-switch replay, minimize/
@@ -162,13 +165,50 @@ pub fn evictFor(managed_win: u32) void {
     for (stale[0..n]) |child| _ = cache.remove(child);
 }
 
-/// Walks up the X11 window tree from `win` to find the managed toplevel.
+/// One step of a window-tree walk: the parent query for `current` either
+/// failed (`fail`), reached the top of the tree (`stop` -- the parent is the
+/// root or 0), or yields the next level to try.
+///
+/// Test seam (P1-36): the walker core below takes this step function, so the
+/// "at most one blocking round trip per level, none on the fast paths" bound
+/// is pinned in find_managed_test without a server. Production binds
+/// `windowParentOf`, which pays one xcb_query_tree round trip per step.
+pub const ParentStep = union(enum) { fail, stop, parent: u32 };
+
+/// Adapter signature for `findManagedWindowWith`; see `ParentStep`.
+pub const ParentOf = *const fn (ctx: *anyopaque, current: u32) ParentStep;
+
+/// Production adapter for `findManagedWindowWith`: one blocking
+/// xcb_query_tree round trip per step. `ctx` is a `*WalkCtx`.
+fn windowParentOf(raw: *anyopaque, current: u32) ParentStep {
+    const ctx: *WalkCtx = @ptrCast(@alignCast(raw));
+    const tree_reply = xcb.xcb_query_tree_reply(
+        ctx.conn,
+        xcb.xcb_query_tree(ctx.conn, current),
+        null,
+    ) orelse return .fail;
+    defer std.c.free(tree_reply);
+    if (tree_reply.*.parent == tree_reply.*.root or tree_reply.*.parent == 0) return .stop;
+    return .{ .parent = tree_reply.*.parent };
+}
+
+const WalkCtx = struct { conn: core.Connection };
+
+/// The tree-walk core behind `findManagedWindow` with the parent query
+/// injected (P1-36 test seam). Semantics identical to the pre-split
+/// function: a fail/stop/exhaust walk returns the START window untouched,
+/// a managed hit `put`s the start->hit mapping and returns the hit.
 ///
 /// Fast paths: direct managed window (most common), then the child-window
-/// cache above (common for Electron/Qt after the first hover, zero XCB
-/// calls). Slow path: one blocking xcb_query_tree round-trip per level
-/// (2-3 for Electron), only on the first hover over a new child window.
-pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn (u32) bool) u32 {
+/// cache (common for Electron/Qt after the first hover, zero queries).
+/// Slow path: at most `max_window_tree_depth` steps, only on the first
+/// hover over a new child window.
+pub fn findManagedWindowWith(
+    win: u32,
+    is_managed: *const fn (u32) bool,
+    ctx: *anyopaque,
+    parent_of: ParentOf,
+) u32 {
     if (is_managed(win)) return win;
 
     // Cache hit; validate the cached toplevel is still managed (it may have
@@ -179,21 +219,33 @@ pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn 
 
     var current = win;
     for (0..max_window_tree_depth) |_| {
-        const tree_reply = xcb.xcb_query_tree_reply(
-            conn,
-            xcb.xcb_query_tree(conn, current),
-            null,
-        ) orelse return win;
-        defer std.c.free(tree_reply);
-
-        if (tree_reply.*.parent == tree_reply.*.root or tree_reply.*.parent == 0) return win;
-        current = tree_reply.*.parent;
-        if (is_managed(current)) {
-            put(win, current);
-            return current;
+        switch (parent_of(ctx, current)) {
+            .fail => return win,
+            .stop => return win,
+            .parent => |p| {
+                current = p;
+                if (is_managed(current)) {
+                    put(win, current);
+                    return current;
+                }
+            },
         }
     }
     return win;
+}
+
+/// Walks up the X11 window tree from `win` to find the managed toplevel.
+///
+/// Fast paths: direct managed window (most common), then the child-window
+/// cache above (common for Electron/Qt after the first hover, zero XCB
+/// calls). Slow path: one blocking xcb_query_tree round-trip per level
+/// (2-3 for Electron), only on the first hover over a new child window,
+/// bounded by `max_window_tree_depth`. The walk core sits behind the
+/// `findManagedWindowWith` seam so that bound is testable (P1-36;
+/// find_managed_test.zig).
+pub fn findManagedWindow(conn: core.Connection, win: u32, is_managed: *const fn (u32) bool) u32 {
+    var ctx: WalkCtx = .{ .conn = conn };
+    return findManagedWindowWith(win, is_managed, &ctx, windowParentOf);
 }
 
 pub fn init(alloc: std.mem.Allocator) !void {
@@ -384,7 +436,7 @@ pub fn handleUnmapNotify(event: *const xcb.xcb_unmap_notify_event_t) void {
 }
 
 pub fn handleDestroyNotify(event: *const xcb.xcb_destroy_notify_event_t) void {
-    dispatchAll(.cancelDragForWindow, .{event.window});
+    drag.dispatchAll(.cancelDragForWindow, .{event.window});
     if (isValidManagedWindow(event.window)) unmanageWindow(event.window);
 }
 
