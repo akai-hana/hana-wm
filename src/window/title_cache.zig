@@ -69,15 +69,18 @@ pub fn cachedWindowCount() usize {
 }
 
 /// Allocation-free store: nothing to release, so init/deinit only reset
-/// the table (a deinit()+init() cycle — session restart, test harness —
-/// must not carry stale titles over). The ignored allocator keeps the
-/// standard module-lifecycle signature window.init calls.
+/// the table AND the latched title-atom resolution (a deinit()+init() cycle —
+/// session restart, test harness — must not carry stale titles or stale atom
+/// ids over). The ignored allocator keeps the standard module-lifecycle
+/// signature window.init calls.
 pub fn init(_: std.mem.Allocator) void {
     cache.clear();
+    resetAtoms();
 }
 
 pub fn deinit() void {
     cache.clear();
+    resetAtoms();
 }
 
 /// Evict a window's entire cache entry. No-op when never cached.
@@ -102,9 +105,43 @@ pub const TitleCookies = struct {
 
 fn ensureAtoms() void {
     if (atoms_resolved) return;
+    // `getAtomCached` answers null only while the atom cache is NOT READY
+    // yet (a transient boot/test ordering) -- never "the server lacks the
+    // atom": interning is all-or-nothing at `atoms.initAtomCache`, and a
+    // failure there aborts init. Latching that null before success would
+    // permanently disable _NET_WM_NAME for the whole session, so only a
+    // full answer latches and the null is retried next time (P1-37;
+    // title_cache_test's primed-then-cleared latch tests).
+    const name = atoms.getAtomCached("_NET_WM_NAME") orelse return;
+    const utf = atoms.getAtomCached("UTF8_STRING") orelse return;
+    net_wm_name = name;
+    utf8_string = utf;
     atoms_resolved = true;
-    net_wm_name = atoms.getAtomCached("_NET_WM_NAME") orelse null;
-    utf8_string = atoms.getAtomCached("UTF8_STRING") orelse null;
+}
+
+/// Drop the latched title-atom resolution with the rest of the module state
+/// (P1-37): the restart discipline above promises a deinit()+init() cycle
+/// starts empty, and the atom ids belong to that cycle as much as the titles
+/// do — a latch surviving a restart would carry the previous session's
+/// resolution into a fresh one.
+fn resetAtoms() void {
+    atoms_resolved = false;
+    net_wm_name = null;
+    utf8_string = null;
+}
+
+/// Test seam (P1-37): run the lazy atom resolution NOW and report what it
+/// latched. The production callers (`fireTitleCookies`/`pickTitle`) only
+/// reach `ensureAtoms` through a live connection, so the latch rule above
+/// (a null answer must NOT latch) is otherwise unobservable headless.
+/// `title_cache_test` drives this with `atoms.swapAtomCacheForTest`.
+pub fn resolveTitleAtomsForTest() struct { resolved: bool, net_wm_name: ?u32, utf8_string: ?u32 } {
+    ensureAtoms();
+    return .{
+        .resolved = atoms_resolved,
+        .net_wm_name = net_wm_name,
+        .utf8_string = utf8_string,
+    };
 }
 
 /// Fires both title queries without waiting (no flush: the caller's batch

@@ -258,10 +258,10 @@ test "actions: dragging a tiled window out detaches AND reflows the pile (no gap
     // floating (pending-float), ticks move it, release ends the drag.
     const px: i16 = @intCast(@as(i32, g2.x) + @as(i32, g2.width) - 4);
     const py: i16 = @intCast(@as(i32, g2.y) + 4);
-    window.dispatchAll(.startDrag, .{ w2, 1, px, py });
-    window.dispatchAll(.updateDrag, .{ px + 8, py + 8, false }); // first motion: detach + retile
-    window.dispatchAll(.updateDrag, .{ px + 60, py + 60, false }); // subsequent tick
-    window.dispatchAll(.stopDrag, .{});
+    window.drag.dispatchAll(.startDrag, .{ w2, 1, px, py });
+    window.drag.dispatchAll(.updateDrag, .{ px + 8, py + 8, false }); // first motion: detach + retile
+    window.drag.dispatchAll(.updateDrag, .{ px + 60, py + 60, false }); // subsequent tick
+    window.drag.dispatchAll(.stopDrag, .{});
     fx.flush();
 
     // w2 is floating and out of the pile.
