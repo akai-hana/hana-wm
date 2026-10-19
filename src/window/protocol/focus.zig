@@ -99,7 +99,10 @@ pub fn init() void {
 pub fn deinit() void {
     // Discard pending cookies so they don't accumulate across a deinit()+init()
     // cycle; at process exit the connection close handles this implicitly.
-    icccm.discardProtocolCookie(core.getState().conn, state.?.tiling_op_cookie);
+    // Guarded by `if (state)` instead of unwrapping: deinit is idempotent
+    // (P1-40) -- a second call, or one before the first init, never reaches
+    // the connection at all.
+    if (state) |*s| icccm.discardProtocolCookie(core.getState().conn, s.tiling_op_cookie);
     state = null;
 }
 
@@ -607,7 +610,7 @@ inline fn suppressSpawnCrossing(root_x: i16, root_y: i16) bool {
 /// parked cursor) must be suppressed. Returns true when the crossing should
 /// be dropped.
 pub inline fn crossingShouldDrop(root_x: i16, root_y: i16) bool {
-    if (registry.dispatchFirstTrue(.isDragging, .{})) return true;
+    if (registry.drag.dispatchFirstTrue(.isDragging, .{})) return true;
     return suppressSpawnCrossing(root_x, root_y);
 }
 
@@ -621,7 +624,7 @@ pub inline fn maybeFocusWindow(win: u32) void {
     // regardless of its tag mask, so hover must be able to focus it too; a
     // bare membership check made all-view windows un-focusable by ENTER.
     if (!query.isOnCurrentWorkspace(win) and !pipeline.state().all_view_active) return;
-    if (registry.callHookBool(.isWindowHidden, .{ pipeline.state(), win })) return;
+    if (registry.hide.callHookBool(.isWindowHidden, .{ pipeline.state(), win })) return;
     grabFocus(win, .mouse_enter);
 }
 

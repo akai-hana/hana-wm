@@ -139,10 +139,14 @@ pub fn init(alloc: std.mem.Allocator) void {
 pub fn deinit() void {
     // Free heap-backed state before the reset below wipes the struct; a bare
     // `state = .{}` would leak the spawn queue's and rules map's backing
-    // memory.
-    if (state.?.alloc) |a| {
-        state.?.spawn_queue.deinit(a);
-        state.?.rules_map.deinit(a);
+    // memory. Guarded by `if (state)` instead of unwrapping: deinit is
+    // idempotent (P1-40) -- a second call, or one before the first init, is
+    // a no-op rather than a null-unwrap panic.
+    if (state) |*s| {
+        if (s.alloc) |a| {
+            s.spawn_queue.deinit(a);
+            s.rules_map.deinit(a);
+        }
     }
     // Set to null so any accidental post-deinit access null-derefs instead
     // of silently reading freed state. init() restores it to .{}

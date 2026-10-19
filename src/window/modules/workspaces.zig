@@ -27,7 +27,8 @@ const build_options = @import("build_options");
 const log = std.log.scoped(.workspaces);
 const registry = @import("registry");
 const reconcile_tails = @import("reconcile_tails");
-const providerOf = registry.providerOf;
+const covering = registry.covering;
+const wsf = registry.workspaces;
 
 /// Model-only workspace assignment; the production switch path is
 /// `switchWorkspace` below (one model transition + one reconcile).
@@ -72,18 +73,18 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 /// `releaseCovering` only goes one way, so the wrong-direction mistake is
 /// unrepresentable.
 fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
-    const occupant = if (providerOf(.visibleCoveringOnWs)) |wm|
-        wm.visibleCoveringOnWs.?(m, dest)
+    const occupant = if (covering.providerOf(.visibleCoveringOnWs)) |wm|
+        wm.covering.visibleCoveringOnWs.?(m, dest)
     else
         null;
     if (occupant != null and occupant != win) {
-        if (providerOf(.releaseCovering)) |wm| {
-            wm.releaseCovering.?(m, win);
+        if (covering.providerOf(.releaseCovering)) |wm| {
+            wm.covering.releaseCovering.?(m, win);
         }
         return; // a resident owner swallows the transfer
     }
-    if (providerOf(.moveCoveringTo)) |wm| {
-        wm.moveCoveringTo.?(m, win, dest);
+    if (covering.providerOf(.moveCoveringTo)) |wm| {
+        wm.covering.moveCoveringTo.?(m, win, dest);
     }
 }
 
@@ -167,7 +168,7 @@ fn canTagChange(m: *const model.Model, win: model.WindowId) bool {
 /// move_to_workspace. Model moves mask + home list + covering record in one
 /// call; the reconcile's diff parks/repairs geometry globally.
 pub fn moveToWorkspace(win: model.WindowId, ws_idx: u8) void {
-    const wm = providerOf(.sendToWs) orelse {
+    const wm = wsf.providerOf(.sendToWs) orelse {
         log.warn("move_to_workspace: no sendToWs provider bound", .{});
         return;
     };
@@ -177,7 +178,7 @@ pub fn moveToWorkspace(win: model.WindowId, ws_idx: u8) void {
     const was_focused = m.focused == win;
     const was_fs_current = model.isCoveringOn(m, win, m.current);
 
-    wm.sendToWs.?(m, win, model.WSId.fromIndex(ws_idx));
+    wm.workspaces.sendToWs.?(m, win, model.WSId.fromIndex(ws_idx));
     if (m.store.get(win) == null) return; // unknown window: no-op
 
     var ft: focus.FocusTransition = .none;
@@ -206,8 +207,8 @@ pub fn moveToWorkspace(win: model.WindowId, ws_idx: u8) void {
 pub fn toggleTag(win: model.WindowId, ws_idx: u8, protect_current: bool) void {
     // Guard on the two hooks this command actually dispatches: with neither
     // bound there is nothing to toggle (and no reconcile to trigger).
-    const add_prov = providerOf(.addToWs);
-    const rem_prov = providerOf(.removeFromWs);
+    const add_prov = wsf.providerOf(.addToWs);
+    const rem_prov = wsf.providerOf(.removeFromWs);
     if (add_prov == null and rem_prov == null) {
         log.warn("toggle_tag: no addToWs/removeFromWs provider bound", .{});
         return;
@@ -224,13 +225,13 @@ pub fn toggleTag(win: model.WindowId, ws_idx: u8, protect_current: bool) void {
     var ft: focus.FocusTransition = .none;
     if (had_bit) {
         if (rem_prov) |rp| {
-            if (!rp.removeFromWs.?(m, win, model.WSId.fromIndex(ws_idx))) return; // last tag protected
+            if (!rp.workspaces.removeFromWs.?(m, win, model.WSId.fromIndex(ws_idx))) return; // last tag protected
         }
         if (removing_current and m.focused == win) {
             ft = focus.focusFallback(m, .tiling_operation);
         }
     } else {
-        if (add_prov) |ap| ap.addToWs.?(m, win, model.WSId.fromIndex(ws_idx), protect_current);
+        if (add_prov) |ap| ap.workspaces.addToWs.?(m, win, model.WSId.fromIndex(ws_idx), protect_current);
     }
 
     if (removing_current or (!had_bit and ws_idx == m.current.index)) {
@@ -246,25 +247,25 @@ pub fn toggleTag(win: model.WindowId, ws_idx: u8, protect_current: bool) void {
 
 /// move_to_all_workspaces / toggle_tag_all: pinned <-> current-only.
 pub fn pinWindow(win: model.WindowId) void {
-    const wm = providerOf(.togglePin) orelse {
+    const wm = wsf.providerOf(.togglePin) orelse {
         log.warn("pin_window: no togglePin provider bound", .{});
         return;
     };
     const m = pipeline.mut();
     if (!canTagChange(m, win)) return;
-    wm.togglePin.?(m, win);
+    wm.workspaces.togglePin.?(m, win);
     reconcile_tails.retile(.{}, null);
 }
 
 /// all_workspaces (Mod+5): flag flip; the reconciler maps foreign windows on
 /// enter and parks them again on exit through the ordinary diff.
 pub fn allWorkspaces() void {
-    const wm = providerOf(.toggleAllView) orelse {
+    const wm = wsf.providerOf(.toggleAllView) orelse {
         log.warn("all_workspaces: no toggleAllView provider bound", .{});
         return;
     };
     const m = pipeline.mut();
-    const entering = wm.toggleAllView.?(m);
+    const entering = wm.workspaces.toggleAllView.?(m);
     var ft: focus.FocusTransition = .none;
     if (!entering and m.focused != null and !model.visibleOn(m, m.focused.?, m.current)) {
         ft = focus.focusFallback(m, .tiling_operation);
@@ -397,14 +398,18 @@ pub fn switchWorkspace(ws_idx: u8) void {
 /// model state lives in the model.
 pub const module: @import("window_contract").WindowModule = .{
     .name = "workspaces",
-    .sendToWs = moveWindowToWs,
-    .addToWs = tagAdd,
-    .removeFromWs = tagRemove,
-    .togglePin = pinToggle,
-    .toggleAllView = allViewToggle,
-    .switchWorkspace = switchWorkspace,
-    .moveToWorkspace = moveToWorkspace,
-    .toggleTag = toggleTag,
-    .pinWindow = pinWindow,
-    .allWorkspaces = allWorkspaces,
+    .workspaces = .{
+        .sendToWs = moveWindowToWs,
+        .addToWs = tagAdd,
+        .removeFromWs = tagRemove,
+        .togglePin = pinToggle,
+        .toggleAllView = allViewToggle,
+    },
+    .command = .{
+        .switchWorkspace = switchWorkspace,
+        .moveToWorkspace = moveToWorkspace,
+        .toggleTag = toggleTag,
+        .pinWindow = pinWindow,
+        .allWorkspaces = allWorkspaces,
+    },
 };

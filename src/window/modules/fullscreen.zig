@@ -19,7 +19,6 @@ const surfaces = @import("surfaces").Surfaces;
 const window_mods = @import("window_modules").modules;
 const atoms = @import("atoms");
 
-const providerOf = registry.providerOf;
 // Peers reach each other's hooks through the generated window registry,
 // never by naming a sibling module: deleting a sibling only shortens the
 // registry, and capabilities stay provider-agnostic.
@@ -142,7 +141,7 @@ pub fn deinit() void {
 /// feature->feature guard). The model store's capacity is the ceiling, so no
 /// separate fullscreen-store capacity check exists.
 pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
-    if (registry.callHookBool(.isWindowHidden, .{ m, win })) return false;
+    if (registry.hide.callHookBool(.isWindowHidden, .{ m, win })) return false;
     const e = m.store.getPtr(win) orelse return false;
     if (e.covering_ws != null) {
         // OFF: leave fullscreen; clearing the core intent replays the
@@ -386,8 +385,6 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
     // compositor frame. Gated on `-Dprofile-key` like the other profiler
     // sites, so non-profiled builds skip the clock samples.
     const fs_t0: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
-    const wm = providerOf(.toggleCovering) orelse return;
-    if (!build_options.has_fullscreen) return;
     const m = pipeline.mut();
     // Never cover a window off the viewed workspace: the covering
     // record binds the current workspace and would claim it while hidden.
@@ -406,7 +403,11 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
         if (is_fs) .exit else if (prev_fs_win != null) .switch_ else .enter;
     const was_focused = m.focused == win;
 
-    if (!wm.toggleCovering.?(m, win)) return;
+    // Direct call, not covering.providerOf(.toggleCovering): this wrapper lives IN
+    // the fullscreen module and its own `module` binds toggleCovering
+    // unconditionally (single-binder, so no other module can take it) -- the
+    // registry lookup only ever re-found this file's own fn (P1-40).
+    if (!toggleFullscreen(m, win)) return;
 
     // Focus the covering winner unless it already owns focus or the toggle
     // turned fullscreen OFF. A covering window owns the whole screen, so it
@@ -516,10 +517,14 @@ pub const module: @import("window_contract").WindowModule = .{
     .armPendingBarHide = armPendingBarHide,
     .armPendingBarShow = armPendingBarShow,
     .resolvePendingBarNow = resolvePendingBarNow,
-    .toggleCovering = toggleFullscreen,
-    .visibleCoveringOnWs = visibleCoveringOnWs,
-    .releaseCovering = releaseCovering,
-    .moveCoveringTo = moveFullscreenTo,
-    .toggleFullscreenWindow = fullscreenToggleWindow,
-    .setFullscreenWindow = fullscreenSetWindow,
+    .covering = .{
+        .toggleCovering = toggleFullscreen,
+        .visibleCoveringOnWs = visibleCoveringOnWs,
+        .releaseCovering = releaseCovering,
+        .moveCoveringTo = moveFullscreenTo,
+    },
+    .command = .{
+        .toggleFullscreenWindow = fullscreenToggleWindow,
+        .setFullscreenWindow = fullscreenSetWindow,
+    },
 };

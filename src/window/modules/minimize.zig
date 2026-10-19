@@ -354,14 +354,17 @@ pub fn onWindowGone(win: u32) void {
 /// the reconcile because the bar must have updated its screen claim (the
 /// usable-area fact the reconcile reads) before placement is re-derived.
 pub fn minimizeWindow(focused: ?model.WindowId) void {
-    const wm = registry.providerOf(.hideWindow) orelse return;
     const win = focused orelse return;
     const m = pipeline.mut();
     const was_focused = m.focused == win;
     const fs_ws_before =
         model.coveringWsOf(m, win); // Model query
 
-    wm.hideWindow.?(m, win) catch return; // Pre-refusal (CapacityFull)
+    // Direct call, not hide.providerOf(.hideWindow): this wrapper lives IN the
+    // minimize module and its own `module` binds hideWindow unconditionally
+    // (single-binder, so no other module can take it) -- the registry lookup
+    // only ever re-found this file's own fn (P1-40).
+    minimize(m, win) catch return; // Pre-refusal (CapacityFull)
 
     // Hiding the current workspace's covering occupant releases its screen
     // claim; retileWithFallback bumps the core fact so the bar reacts.
@@ -386,7 +389,7 @@ fn armFullscreenBarHideIfNeeded(
 /// and arms the deferred bar-hide when the restore opened a fresh claim.
 fn restoreTarget(m: *model.Model, win: model.WindowId) void {
     const had_occupant_before = registry.currentCoveringOccupant(m) != null;
-    registry.callHook(.restoreWindow, .{ m, win });
+    registry.hide.callHook(.restoreWindow, .{ m, win });
     restoreAndFocus(m, win);
     armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
 }
@@ -401,8 +404,8 @@ pub fn unminimize(win: model.WindowId) void {
 /// Slot-ordered single restore (LIFO/FIFO keybind paths).
 pub fn unminimizeOrdered(order: model.RestoreOrder) void {
     const m = pipeline.mut();
-    const win = (if (registry.providerOf(.restoreCandidateOn)) |wm|
-        wm.restoreCandidateOn.?(m, m.current, order)
+    const win = (if (registry.hide.providerOf(.restoreCandidateOn)) |wm|
+        wm.hide.restoreCandidateOn.?(m, m.current, order)
     else
         null) orelse return;
     restoreTarget(m, win);
@@ -414,11 +417,11 @@ pub fn unminimizeOrdered(order: model.RestoreOrder) void {
 /// covering).
 pub fn unminimizeAll() void {
     const m = pipeline.mut();
-    const wm = registry.providerOf(.latestHiddenOnWs) orelse return;
+    const wm = registry.hide.providerOf(.latestHiddenOnWs) orelse return;
     const ws = m.current;
-    const target = (wm.latestHiddenOnWs.?(m, ws) orelse return);
+    const target = (wm.hide.latestHiddenOnWs.?(m, ws) orelse return);
     const had_occupant_before = registry.currentCoveringOccupant(m) != null;
-    registry.callHook(.restoreOnWs, .{ m, ws });
+    registry.hide.callHook(.restoreOnWs, .{ m, ws });
     restoreAndFocus(m, target);
     if (registry.currentCoveringOccupant(m)) |occ|
         armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
@@ -441,15 +444,19 @@ pub const module: @import("window_contract").WindowModule = .{
     .onWindowGone = onWindowGone,
     .serializeWindow = serializeWindow,
     .deserializeWindow = deserializeWindow,
-    .hideWindow = minimize,
-    .restoreWindow = restore,
-    .restoreCandidateOn = restoreCandidate,
-    .restoreOnWs = restoreAllOnWs,
-    .latestHiddenOnWs = latestMinimizedBase,
-    .isWindowHidden = isMinimized,
-    .collectHiddenSet = collectHiddenSet,
-    .minimizeWindow = minimizeWindow,
-    .unminimize = unminimize,
-    .unminimizeOrdered = unminimizeOrdered,
-    .unminimizeAll = unminimizeAll,
+    .hide = .{
+        .hideWindow = minimize,
+        .restoreWindow = restore,
+        .restoreCandidateOn = restoreCandidate,
+        .restoreOnWs = restoreAllOnWs,
+        .latestHiddenOnWs = latestMinimizedBase,
+        .isWindowHidden = isMinimized,
+        .collectHiddenSet = collectHiddenSet,
+    },
+    .command = .{
+        .minimizeWindow = minimizeWindow,
+        .unminimize = unminimize,
+        .unminimizeOrdered = unminimizeOrdered,
+        .unminimizeAll = unminimizeAll,
+    },
 };
