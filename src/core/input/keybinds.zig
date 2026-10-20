@@ -364,6 +364,7 @@ pub fn reportUnresolved(resolved: []const ResolvedBind) void {
 /// Root-window grab installation
 /// Upper bound for the XCB cookie scratch buffer in grabKeybindings
 /// (max distinct keybindings x lock_modifiers.len combinations).
+/// Unmeasured but DERIVED: 8 lock-modifier combos x 128 keybindings = 1024.
 /// Raise if you ever exceed 128 keybindings.
 const max_keybind_cookies = 1024;
 

@@ -66,7 +66,7 @@ test "pipeline: fullscreen winner covers the screen and parks siblings" {
     fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
 
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
     const e2 = m.store.get(w2) orelse return error.UnknownWindow;
     try std.testing.expect(e2.presence == .covering);
 
@@ -88,7 +88,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
 
     fullscreen.fullscreenToggleWindow(w1);
     fx.flush();
-    try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w1, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
     // The covering winner owns the screen, so it owns keyboard focus too
     // (the toggle ran against an unfocused w1, e.g. an EWMH request).
     try std.testing.expectEqual(w1, m.focused.?);
@@ -97,7 +97,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     // Direct covering hand-off: claiming a second window while occupied.
     fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
     try fx.expectParked(w1);
     // Focus follows the claim: the new occupant must get the screen's
     // keystrokes, not the displaced one.
@@ -107,7 +107,7 @@ test "pipeline: fullscreen switch moves the claim; exit restores tiled" {
     // Exit: both windows return to their tiled placements.
     fullscreen.fullscreenToggleWindow(w2);
     fx.flush();
-    try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
+    try std.testing.expect(model.coveringOccupantOn(m, m.current, .anchored_or_visible) == null);
     try fx.expectTiledGeometry(w1);
     try fx.expectTiledGeometry(w2);
     // Exit leaves focus with the window that left fullscreen.
@@ -138,7 +138,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     fx.flush();
     try std.testing.expectEqual(w1, m.focused.?);
     try std.testing.expectEqual(w1, fx.inputFocus());
-    try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w1, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
 
     // 2. Open w2 while w1 is still fullscreened.
     window.mapRequest(w2, 0, true, null, null);
@@ -151,7 +151,7 @@ test "reported flow: cover w1, spawn w2 under cover, cover w2 keeps focus on w2"
     fx.flush();
     try std.testing.expectEqual(w2, m.focused.?);
     try std.testing.expectEqual(w2, fx.inputFocus());
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
 }
 
 // The deferred bar transition is resolved from MODEL TRUTH, and the
@@ -304,24 +304,24 @@ test "pipeline: an explicit fullscreen SET is a no-op, not a toggle" {
     // Redundant "enter" on a window that is not covering yet.
     fullscreen.fullscreenSetWindow(w2, true);
     fx.flush();
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
 
     // The idempotent repeat: the exact case a browser produces.
     fullscreen.fullscreenSetWindow(w2, true);
     fx.flush();
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
     try std.testing.expectEqual(.covering, (m.store.get(w2) orelse return error.UnknownWindow).presence);
 
     // Redundant "leave" on a window that is not covering.
     fullscreen.fullscreenSetWindow(w1, false);
     fx.flush();
-    try std.testing.expect(w1 != (model.coveringOccupantOnWs(m, m.current) orelse w1));
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expect(w1 != (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse w1));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
 
     // A genuine leave still works, and the occupant is cleared.
     fullscreen.fullscreenSetWindow(w2, false);
     fx.flush();
-    try std.testing.expect(model.coveringOccupantOnWs(m, m.current) == null);
+    try std.testing.expect(model.coveringOccupantOn(m, m.current, .anchored_or_visible) == null);
 }
 
 test "pipeline: an explicit fullscreen SET still switches an existing occupant" {
@@ -335,11 +335,11 @@ test "pipeline: an explicit fullscreen SET still switches an existing occupant" 
 
     fullscreen.fullscreenSetWindow(w1, true);
     fx.flush();
-    try std.testing.expectEqual(w1, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w1, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
 
     fullscreen.fullscreenSetWindow(w2, true);
     fx.flush();
-    try std.testing.expectEqual(w2, (model.coveringOccupantOnWs(m, m.current) orelse return error.NoOccupant));
+    try std.testing.expectEqual(w2, (model.coveringOccupantOn(m, m.current, .anchored_or_visible) orelse return error.NoOccupant));
     // The displaced occupant is moved offscreen, which is the observable form
     // of "parked" -- the model marks presence itself.
     try fx.expectParked(w1);

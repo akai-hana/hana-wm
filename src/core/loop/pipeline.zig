@@ -24,6 +24,12 @@ const scaling = @import("scaling");
 
 const reconcile = @import("reconcile");
 const sink = @import("sink");
+// Cycle-accepted: pipeline -> window -> registry -> window_modules -> any
+// module -> pipeline. Top-level const decls are lazy, so the import cycle
+// compiles; the fallback if it ever stops compiling is runtime slot
+// registration (a module's init registering its color provider into a
+// core-side slot). Needed only for the borders color hook (P2-47).
+const window = @import("window");
 
 var instance: model_mod.Model = undefined;
 pub fn init() void {
@@ -130,8 +136,9 @@ fn tilingEnv() contract.Env {
 }
 
 /// Builds the per-retile Ctx from live state: workarea via bar's helper,
-/// margins/min_dim/master side from config (see tilingEnv), colors from
-/// config.tiling.
+/// margins/min_dim/master side from config (see tilingEnv), border color via
+/// the window layer's borders module (constant 0 when that module is absent,
+/// P2-47).
 /// Only valid after init().
 fn ctx() *reconcile.Ctx {
     // Inside a server grab the ctx belongs to the operation that TOOK the
@@ -155,7 +162,7 @@ fn ctx() *reconcile.Ctx {
         },
         .workarea = usable_area.workArea(cs.screen),
         .env = env,
-        .color_of = colorOf,
+        .color_of = window.borderColorOf,
         .bar_win = usable_area.mappedSurfaceWindow(),
         // Resolved ONCE here, through the same call the bar uses, so
         // geometry and the bar's "no layout" report can never disagree.
@@ -165,16 +172,6 @@ fn ctx() *reconcile.Ctx {
         ) != null,
     };
     return &g_ctx;
-}
-
-/// Focused/unfocused border-pixel pick for the reconcile Ctx. Fullscreen
-/// windows get bw=0/pixel=0 through the fullscreen branch policy in sync
-/// instead. Reads MODEL focus; focus.zig mirrors every transition into
-/// m.focused, so this is the same single source of truth.
-fn colorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
-    if (comptime !build_options.has_tiling) return 0;
-    const cfg = &core.getState().config.tiling;
-    return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
 /// Scroll viewport caller duties applied at the single reconcile choke

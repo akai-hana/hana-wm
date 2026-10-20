@@ -64,8 +64,16 @@ pub const lock_modifiers: [8]u16 = .{
 /// Strips the XCB synthetic-event bit (bit 7) from a raw event `response_type`
 /// to recover the core event code. Core event codes are 0..0x7F; the top bit
 /// marks events delivered via SendEvent. Core events keep their low-7 bits
-/// under a SendEvent, so masking recovers the true code.
+/// under a SendEvent, so masking recovers the true code. Callers fold through
+/// `coreEventType` below rather than spelling the mask themselves.
 pub const core_event_code_mask: u8 = 0x7f;
+
+/// THE one spelling of "strip the SendEvent bit": dispatch routing, window
+/// extraction, trace event naming and the prompt's key filter all fold a raw
+/// `response_type` through here, so the rule exists exactly once (P2-67).
+pub inline fn coreEventType(response_type: u8) u8 {
+    return response_type & core_event_code_mask;
+}
 
 pub const EventMasks = struct {
     // DWM verbatim (setup() in dwm.c): SubstructureRedirect|Notify, ButtonPress,

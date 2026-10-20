@@ -103,7 +103,9 @@ const max_pending_spawns: usize = 16;
 
 /// Commands shorter than this are null-terminated on the stack; longer ones
 /// are copied to the heap so executeShellCommand stays allocation-free for
-/// the common short-command case.
+/// the common short-command case. Unmeasured: chosen generous -- 255 bytes
+/// covers every binding action line hana ships, and longer commands take the
+/// heap path by design rather than failing.
 const stack_cmd_capacity: usize = 256;
 
 /// Nul-terminated command resolved by `resolveCmdZ`. `heap` is the owning
@@ -129,7 +131,9 @@ const spawn_msg_max: usize = 1;
 /// Longest command text kept per pending spawn, for diagnostics. Without it,
 /// a failed spawn would report nothing at all (or, for a wedged pipe,
 /// silence forever), leaving no way to tell "the command failed" from "hana
-/// lost track of the command".
+/// lost track of the command". Unmeasured: 96 bytes wraps a typical action
+/// line into the two-line warn without dominating it; longer commands are
+/// truncated head-first by design.
 const cmd_report_max: usize = 96;
 
 /// How long a pending entry may stay unresolved before it is dropped as stuck

@@ -5,7 +5,7 @@
 const std = @import("std");
 
 /// Upper bound on live cache entries (focus-property cache in focus.zig and
-/// the border/hints/title cache in title_cache.zig). Backing tables are fixed,
+/// the border/hints/title cache in window_facts.zig). Backing tables are fixed,
 /// allocation-free, and O(1) at the cap; windows beyond the ceiling still
 /// work, they just fall through to the live X11 path. Lives here because both
 /// caches are `IdMap` instantiations -- the generic owns its capacity.

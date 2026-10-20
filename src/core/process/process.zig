@@ -332,7 +332,9 @@ fn handleBacktraceRequest(
             // grow down, so every frame pointer is >= the interrupted rsp and
             // the chain strictly increases; bound reads to rsp..rsp+span (the
             // main thread's default 8 MiB stack mapping) so a corrupted chain
-            // can never dereference unrelated memory.
+            // can never dereference unrelated memory. The span NAMES that
+            // platform default (Linux pthread main-stack 8 MiB); it is not a
+            // measured working set.
             const span: usize = 8 << 20;
             // Each saved frame straddles rbp and rbp+8 (saved rbp then return
             // address); +16 bounds the chain strictly within the span.

@@ -1,7 +1,8 @@
 //! Public state facade (MVC): WM state + operations, no I/O. Holds the
 //! per-window store, per-workspace arrays, current workspace, focused id, and
 //! all-view toggle, and re-exports the pure vocabulary that state is built
-//! from (`core/architecture/domain.zig`, private to this file). This is the
+//! from (`core/architecture/domain.zig` — private to this facade plus its
+//! sanctioned `config/model_config.zig` seeding root). This is the
 //! single import surface for state: callers do `@import("model")` and get
 //! vocabulary, records, `Model`, and every state operation — the domain file
 //! stays an implementation detail.
@@ -283,23 +284,58 @@ pub inline fn isCovering(m: *const Model, win: WindowId) bool {
 
 /// Whether `win`'s covering capture targets `ws`. Does NOT consult visibility:
 /// this is pre-toggle classification and was-covering capture, not an
-/// occupancy question (for that see `coveringOccupantOnWs`).
+/// occupancy question (for that see `coveringOccupantOn`).
 pub fn isCoveringOn(m: *const Model, win: WindowId, ws: WSId) bool {
     const fws = coveringWsOf(m, win) orelse return false;
     return fws.eql(ws);
 }
 
-/// The covering occupant owning the screen on `ws`: anchor-or-visibility OR
-/// union. Pure core computation, so sync/bar resolve the screen owner without
-/// enumerating optional subsystems. At most one occupant per workspace by
-/// reconciler. (fullscreen's occupant hook is a stricter AND scan: covering +
-/// anchored + visible — see fullscreen.visibleCoveringOnWs.)
-pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
+/// Which rule decides workspace occupancy for a covering window (P2-51's
+/// one parameter on the one occupant query). The two real questions the
+/// codebase used to spell as two scans:
+pub const OccupantRule = enum {
+    /// Anchor OR visibility union: an occupant claims its anchor workspace
+    /// AND every workspace its mask (or all-view) makes it visible on — a
+    /// covering window whose mask was widened (tagAdd writes mask only)
+    /// covers those workspaces too. The reconciler's rule; also what the
+    /// border sweep's batch table fills.
+    anchored_or_visible,
+    /// Anchor AND visibility: only a covering window whose capture targets
+    /// `ws` AND which is visible there (sync parks strays, so at most one
+    /// such window per workspace). The screen-owner question: "is the
+    /// screen held right now", asked by the fullscreen toggle, the bar
+    /// hide/restore decision, and the workspaces move/tag guard.
+    anchored_and_visible,
+};
+
+/// The covering occupant owning the screen on `ws`, under an EXPLICIT rule
+/// (P2-51: one implementation, both questions — the old OR scan
+/// `coveringOccupantOnWs` and the fullscreen module's AND scan
+/// `visibleCoveringOnWs`). Pure core computation, so sync/bar/minimize
+/// resolve the screen owner without enumerating optional subsystems or
+/// routing a pure model question through a contract hook. At most one
+/// occupant per workspace by reconciler; the anchor invariant itself is
+/// asserted by the batch form (`coveringOccupants`, P1-37) — NOT here,
+/// because this single scan also runs on intermediate states the model
+/// must tolerate before sync parks a stray (a covering record whose base
+/// is tagged elsewhere keeps its anchor until the park lands; the test
+/// suite pins that tolerance).
+pub fn coveringOccupantOn(m: *const Model, ws: WSId, rule: OccupantRule) ?WindowId {
     var it = m.store.iterator();
     while (it.next()) |row| {
         if (row.val.presence != .covering) continue;
-        const anchored = if (row.val.covering_ws) |cws| cws.eql(ws) else false;
-        if (anchored or visibleEntry(m, row.val, ws)) return row.key;
+        switch (rule) {
+            .anchored_or_visible => {
+                const anchored = if (row.val.covering_ws) |cws| cws.eql(ws) else false;
+                if (anchored or visibleEntry(m, row.val, ws)) return row.key;
+            },
+            .anchored_and_visible => {
+                const cws = row.val.covering_ws orelse continue;
+                if (!cws.eql(ws)) continue;
+                if (!visibleEntry(m, row.val, ws)) continue;
+                return row.key;
+            },
+        }
     }
     return null;
 }
@@ -307,10 +343,11 @@ pub fn coveringOccupantOnWs(m: *const Model, ws: WSId) ?WindowId {
 /// Fills `buf` (one slot per workspace, indexed by `WSId.index`) with that
 /// workspace's covering occupant, in ONE store pass.
 ///
-/// Batch form of `coveringOccupantOnWs`, which answers the same question
-/// for a single workspace: that is the right shape for a one-off query and
-/// the wrong one for a sweep (the border sweep asks it once per window, so a
-/// full sweep would be O(N^2) store scans). This fills the whole table up front.
+/// Batch form of `coveringOccupantOn(..., .anchored_or_visible)`, which
+/// answers the same question for a single workspace: that is the right
+/// shape for a one-off query and the wrong one for a sweep (the border
+/// sweep asks it once per window, so a full sweep would be O(N^2) store
+/// scans). This fills the whole table up front.
 ///
 /// Per workspace the rule is the scan form's exact (anchored or visible): an
 /// occupant claims its anchor slot AND every workspace its mask makes it
@@ -339,7 +376,7 @@ pub fn coveringOccupants(m: *const Model, buf: []?WindowId) void {
 }
 
 /// Debug-only companion to `coveringOccupants` (P1-37): asserts the rule
-/// `coveringOccupantOnWs` documents -- "at most one occupant per workspace
+/// `coveringOccupantOn` documents -- "at most one occupant per workspace
 /// by reconciler" -- for the ANCHORED claim specifically: no two covering
 /// entries may carry the same `covering_ws`. The batch fill's
 /// first-in-store-order tie-break would otherwise silently mask a second
