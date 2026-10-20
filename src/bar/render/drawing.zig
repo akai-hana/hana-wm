@@ -316,7 +316,7 @@ pub const DrawContext = struct {
         color: u32,
         props: bar_config.SegmentProps,
     ) void {
-        var run = self.fonts.beginRun(text, props, null);
+        var run = self.fonts.beginRun(text, props, props.size);
         defer run.deinit();
         if (max_width) |w| {
             if (run.layout) |l| {
@@ -365,7 +365,7 @@ pub const DrawContext = struct {
         // styling come from one derivation: measuring and painting through two
         // passes on a shared layout lets a styled segment reserve one width and
         // paint another, because the second pass can re-derive the styling.
-        var run = self.fonts.beginRun(text, props, null);
+        var run = self.fonts.beginRun(text, props, props.size);
         defer run.deinit();
         const text_w = run.measure();
         const width: u16 = (if (min_w) |m| @max(text_w, m) else text_w) + padding * 2;
@@ -385,12 +385,12 @@ pub const DrawContext = struct {
         return self.fonts.measureTextWidth(text);
     }
 
-    /// Measures `text` with `props` styling applied, so a styled draw reserves
-    /// exactly the width it will paint.
+    /// Facade forwarder to `FontBook.measureTextWidthStyled`; the styled
+    /// width comes from the same content-keyed cache as the unstyled one, so
+    /// a styled draw reserves exactly the width it will paint without a fresh
+    /// Pango run per call.
     pub fn measureTextWidthStyled(self: *DrawContext, text: []const u8, props: bar_config.SegmentProps) u16 {
-        var run = self.fonts.beginRun(text, props, null);
-        defer run.deinit();
-        return run.measure();
+        return self.fonts.measureTextWidthStyled(text, props);
     }
 
     /// Facade metrics accessor; the prompt overlay reads the bar's font
@@ -488,7 +488,7 @@ pub fn drawPaddedSegmentValue(
     // run's OWN attribute list, on the run's OWN layout: the run's deinit
     // unrefs the list and the layout together, so there is no restore to
     // forget.
-    var run = dc.fonts.beginRun(text, props, null);
+    var run = dc.fonts.beginRun(text, props, props.size);
     defer run.deinit();
     if (run.layout) |l| {
         if (run.attrs) |a| {
