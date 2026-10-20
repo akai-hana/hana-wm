@@ -343,9 +343,11 @@ pub const Ctx = struct {
     /// bar-offset helper (workArea(ctx)). Used for tiled geometry.
     workarea: model.Rect,
     env: contract.Env = .{},
-    /// Focus/mode border color; same resolution as borders.resolveBorderColorWith,
-    /// minus its fullscreen check (fullscreen zeroes via bw/pixel policy
-    /// instead).
+    /// Focus/mode border color; resolved by the window layer's borders
+    /// module hook (`window.borderColorOf`, P2-47). Same resolution as the
+    /// module's `resolveBorderColorWith`, minus its fullscreen check
+    /// (fullscreen zeroes via bw/pixel policy instead). Constant 0 when the
+    /// borders module is absent (deletion semantics).
     color_of: *const fn (model.WindowId, *const model.Model) u32,
     /// Bar/top window raised by force_restack; null when no bar.
     bar_win: ?model.WindowId = null,
@@ -480,7 +482,7 @@ fn computeLayoutForWs(m: *const model.Model, ctx: *Ctx, plan: *Plan, ws: model.W
     // Work-area (screen minus bar) and coverage winner: see `Plan`.
     const wa = ctx.workarea;
 
-    plan.fs_win = model.coveringOccupantOnWs(m, ws);
+    plan.fs_win = model.coveringOccupantOn(m, ws, .anchored_or_visible);
 
     var order_buf: [model.store_capacity]model.WindowId = undefined;
     var hints_buf: [model.store_capacity]model.SizeHints = undefined;
@@ -569,7 +571,7 @@ fn resizeParkedForWorkspaces(m: *const model.Model, ctx: *Ctx) void {
         if (m.ws[i].tiled_order.len == 0) continue;
         // Covered workspaces compute no placements (and their windows' sizes
         // don't depend on the workarea); skip the compute outright.
-        if (model.coveringOccupantOnWs(m, ws) != null) continue;
+        if (model.coveringOccupantOn(m, ws, .anchored_or_visible) != null) continue;
         plan.placements = .{};
         plan.pl_of_slot = [_]?usize{null} ** model.store_capacity;
         computeLayoutForWs(m, ctx, &plan, ws);
@@ -722,53 +724,89 @@ fn sendAll(
         if (parked) {
             sendParkTransition(ctx.sink, win, last, tracing);
         } else {
-            // Raise triggers per the ledger contract (file header read 2): winner
-            // .above on geometry motion, unpark, or restack pressure only.
-            const first_send = !last.has_rect;
-            // Geometry only: `border_width` is owned by the separate `need_bw`
-            // check below (last.bw), so letting it into `moved` would make a
-            // border-only change look like motion and raise for nothing.
-            const moved = first_send or !last.rect.eqlGeom(rect);
-            const unpark_transition = last.parked;
-            const raise_winner = is_winner and (moved or unpark_transition or opts.force_restack);
+            const p = planShow(last, rect, bw, pixel, is_winner, opts.force_restack);
+            armReassert(e, win, p, &reassert);
 
-            // Raise bookkeeping for the float re-assert (file header):
-            // a raised FLOAT records its new top slot in the ledger; a
-            // raised TILED window, a newly sent tiled frame (X-default
-            // stack position may sit above everything), or a floating
-            // window coming back on screen all arm the re-assert.
-            if (raise_winner) {
-                if (e.anchor == .floating) floatRaise(win) else reassert = true;
-            }
-            if (first_send and e.anchor == .tiled) reassert = true;
-            if (e.anchor == .floating and (first_send or unpark_transition)) reassert = true;
-
-            const need_map = first_send or unpark_transition;
-            const need_bw = !last.has_rect or last.bw != bw;
-            const need_pixel = !last.has_rect or last.pixel != pixel;
-            const need_geom = moved or unpark_transition or raise_winner;
-
-            if (need_map) {
+            if (p.need_map) {
                 if (tracing) trace.outbound(win, "map", "");
                 ctx.sink.map(win);
             }
-            if (need_pixel) sendBorderPixel(ctx.sink, win, pixel, tracing);
-            if (need_bw or need_geom) {
-                sendConfigure(ctx.sink, win, rect, bw, .{ .geom = need_geom, .bw = need_bw, .raise = raise_winner }, tracing);
+            if (p.need_pixel) sendBorderPixel(ctx.sink, win, pixel, tracing);
+            if (p.need_bw or p.need_geom) {
+                sendConfigure(ctx.sink, win, rect, bw, .{ .geom = p.need_geom, .bw = p.need_bw, .raise = p.raise }, tracing);
             }
         }
 
         // Ledger write: record what we actually sent. A park preserves the
         // previous record's rect/has_rect; an unpark overwrites wholesale.
-        if (gop) |g| {
-            // A park (fresh or drift repair) records that the window is where
-            // we want it, which is also what clears the dirty flag.
-            if (parked) g.parked = true else markSentVisible(g, rect, bw, pixel);
-            g.parked_dirty = false;
-        } else ledger_overflow = true;
+        if (recordSent(gop, parked, rect, bw, pixel)) ledger_overflow = true;
     }
     if (ledger_overflow) log.err("reconcile: ledger full; some sends applied, records lost", .{});
     return reassert and saw_visible_float;
+}
+
+/// Ledger-write trailer of the fused loop: a park (fresh or drift repair)
+/// records that the window is where we want it (also clears the dirty
+/// flag); an unpark overwrites the record wholesale. Returns true when the
+/// record was LOST (ledger full and `gop` null) so the caller can warn once
+/// per reconcile.
+fn recordSent(
+    gop: ?*SentEntry,
+    parked: bool,
+    rect: model.Rect,
+    bw: u16,
+    pixel: u32,
+) bool {
+    if (gop) |g| {
+        if (parked) g.parked = true else markSentVisible(g, rect, bw, pixel);
+        g.parked_dirty = false;
+        return false;
+    }
+    return true;
+}
+
+/// What a VISIBLE (non-parked) window's send must carry this pass, derived
+/// from the ledger against this pass's desire. Raise triggers per the ledger
+/// contract (file header read 2): winner .above on geometry motion, unpark,
+/// or restack pressure only. `bw` is owned by the separate need_bw check
+/// (last.bw), so letting it into `moved` would make a border-only change
+/// look like motion and raise for nothing.
+const ShowPlan = struct {
+    first_send: bool,
+    unpark: bool,
+    raise: bool,
+    need_map: bool,
+    need_bw: bool,
+    need_pixel: bool,
+    need_geom: bool,
+};
+
+fn planShow(last: SentEntry, rect: model.Rect, bw: u16, pixel: u32, is_winner: bool, force_restack: bool) ShowPlan {
+    const first_send = !last.has_rect;
+    const moved = first_send or !last.rect.eqlGeom(rect);
+    const unpark = last.parked;
+    const raise = is_winner and (moved or unpark or force_restack);
+    return .{
+        .first_send = first_send,
+        .unpark = unpark,
+        .raise = raise,
+        .need_map = first_send or unpark,
+        .need_bw = !last.has_rect or last.bw != bw,
+        .need_pixel = !last.has_rect or last.pixel != pixel,
+        .need_geom = moved or unpark or raise,
+    };
+}
+
+/// Raise bookkeeping for the float re-assert (file header): a raised FLOAT
+/// records its new top slot in the ledger; a raised TILED window, a newly
+/// sent tiled frame (X-default stack position may sit above everything), or
+/// a floating window coming back on screen all arm the re-assert.
+fn armReassert(e: *const model.Entry, win: model.WindowId, p: ShowPlan, reassert: *bool) void {
+    if (p.raise) {
+        if (e.anchor == .floating) floatRaise(win) else reassert.* = true;
+    }
+    if (p.first_send and e.anchor == .tiled) reassert.* = true;
+    if (e.anchor == .floating and (p.first_send or p.unpark)) reassert.* = true;
 }
 
 /// Visibility concern: the park transition. Re-send on the transition OR
@@ -823,10 +861,10 @@ fn sendConfigure(
 ) void {
     if (tracing) trace.outbound(win, "configure", switch (flags.geom) {
         true => if (flags.bw) std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} bw={d} stack={s}", .{
-            rect.width,                         rect.height, rect.x, rect.y, bw,
+            rect.width,                        rect.height, rect.x, rect.y, bw,
             if (flags.raise) "above" else "-",
         }) catch "rect" else std.fmt.bufPrint(&trace_buf, "{d}x{d}+{d}+{d} stack={s}", .{
-            rect.width,                         rect.height, rect.x, rect.y,
+            rect.width,                        rect.height, rect.x, rect.y,
             if (flags.raise) "above" else "-",
         }) catch "rect",
         false => std.fmt.bufPrint(&trace_buf, "bw={d} stack={s}", .{

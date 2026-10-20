@@ -217,12 +217,6 @@ comptime {
 /// their conservative path, while a listed-but-dropped request leaves them
 /// waiting on a click that will never land:
 ///
-/// - `_NET_ACTIVE_WINDOW` requests are answered with a once-per-process
-///   warning and ignored; `_NET_ACTIVE_WINDOW` is nevertheless WRITTEN to the
-///   root (focus advertisement, see atoms.zig) so EWMH clients can track our
-///   focus. (`_NET_CLOSE_WINDOW`/`_NET_CURRENT_DESKTOP`/`_NET_WM_DESKTOP`
-///   requests, once ignored beside it, are now handled in
-///   client_events.handleClientMessage and are advertised above.)
 /// - `_NET_WM_STATE_ABOVE`/`_NET_WM_STATE_STICKY` are preserved when WE
 ///   mutate `_NET_WM_STATE` (the sink's read-merge-write must not nuke a
 ///   client's own atoms) but neither state changes stacking or workspace

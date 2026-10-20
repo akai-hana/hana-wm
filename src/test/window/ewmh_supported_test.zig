@@ -27,7 +27,7 @@ const requests = @import("requests");
 const handled = [_]struct { name: []const u8, where: []const u8 }{
     .{ .name = "_NET_SUPPORTED", .where = "requests.zig advertiseEwmhSupport" },
     .{ .name = "_NET_SUPPORTING_WM_CHECK", .where = "requests.zig supporting_wm_check" },
-    .{ .name = "_NET_WM_NAME", .where = "title_cache.zig / window.zig title reads" },
+    .{ .name = "_NET_WM_NAME", .where = "window_facts.zig / window.zig title reads" },
     .{ .name = "_NET_WM_STATE", .where = "client_events.zig state branch + sink merge" },
     .{ .name = "_NET_WM_STATE_FULLSCREEN", .where = "client_events.zig / fullscreen.zig" },
     .{ .name = "_NET_WM_PID", .where = "admission.zig pid prop query" },

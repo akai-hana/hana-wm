@@ -100,7 +100,7 @@ pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
 
 /// Test seam (P1-37): install a replacement atom cache and hand back the
 /// one it displaced, so a test can drive the primed-then-cleared sequences
-/// that pin consumers' latch rules (`title_cache_test`) without a connection
+/// that pin consumers' latch rules (`window_facts_test`) without a connection
 /// and still restore whatever real cache a previous test in the same
 /// process had set up. Production only ever writes `atom_cache` in
 /// `initAtomCache`.
