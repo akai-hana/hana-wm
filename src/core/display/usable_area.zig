@@ -186,7 +186,9 @@ pub fn dockClaimOf(win: core.WindowId) ?DockClaim {
 /// usable-area depends on is testable without an X connection.
 fn inset(edge: Edge) u32 {
     var total: u32 = 0;
-    if (claim) |c| if (c.edge == edge) total += c.px;
+    if (claim) |c| {
+        if (c.edge == edge) total += c.px;
+    }
     for (dock_claims) |slot| {
         if (slot) |d| switch (edge) {
             .top => total += d.top,
