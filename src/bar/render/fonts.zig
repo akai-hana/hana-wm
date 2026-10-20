@@ -70,6 +70,60 @@ pub const TextRun = struct {
     }
 };
 
+/// Bound on the text-width cache: a full cache is cleared wholesale rather
+/// than evicted entry-by-entry. A measure is cheap to recompute, the strings
+/// are per-config and few (static labels, prompt prefixes), and the
+/// pathological many-distinct-strings caller merely misses after a clear.
+const measure_cache_max: u32 = 512;
+
+/// `sized_px` sentinel for "no size override" (both measure entry points are
+/// unsized today; the key carries the dimension so a sized measure can join
+/// without colliding with an unsized one).
+const no_sized_px: u16 = std.math.maxInt(u16);
+
+/// Cache key: measured text content plus the style bits and size that derived
+/// its width. Content-keyed, never pointer-keyed (a font swap rebuilds every
+/// description, so pointer identity would alias stale widths -- see the
+/// `FontBook` doc).
+const MeasureKey = struct {
+    /// Borrowed on lookup, owned by the map on insert (`MeasureEntry`).
+    text: []const u8,
+    props: u8,
+    sized_px: u16,
+};
+
+/// Map payload: the width plus the owned text backing `MeasureKey.text`, so
+/// invalidate/deinit need no inference about which slices to free.
+const MeasureEntry = struct {
+    owned_text: []const u8,
+    width: u16,
+};
+
+const MeasureContext = struct {
+    pub fn hash(_: MeasureContext, k: MeasureKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(k.text);
+        h.update(&[_]u8{k.props});
+        h.update(std.mem.asBytes(&k.sized_px));
+        return h.final();
+    }
+    pub fn eql(_: MeasureContext, a: MeasureKey, b: MeasureKey) bool {
+        return a.props == b.props and a.sized_px == b.sized_px and
+            std.mem.eql(u8, a.text, b.text);
+    }
+};
+
+const MeasureCache = std.HashMapUnmanaged(MeasureKey, MeasureEntry, MeasureContext, 80);
+
+/// Packs a segment's style flags into the cache key: underline | bold<<1 |
+/// italic<<2. Two props that share bits measure to the same width, so the
+/// bits (not the struct) are the identity that matters here.
+fn propsBits(props: bar_config.SegmentProps) u8 {
+    return @as(u8, @intFromBool(props.underline)) |
+        (@as(u8, @intFromBool(props.bold)) << 1) |
+        (@as(u8, @intFromBool(props.italic)) << 2);
+}
+
 /// Owns all Pango font state for one draw target: the layout, the resolved
 /// base font description, its cached metrics, and the size-suffixed description
 /// the indicator-glyph path needs.
@@ -78,12 +132,29 @@ pub const TextRun = struct {
 /// swaps the base description, so it invalidates the sized copy directly and
 /// the sized cache key is just `sized_px` -- no pointer comparison against the
 /// base.
+///
+/// The same rule governs the text-width cache below: a measure is keyed by the
+/// TEXT CONTENT plus style bits and size, never by a layout or description
+/// pointer, and a font swap (`loadFont`) drops every cached width, because the
+/// widths were derived from the previous description.
 pub const FontBook = struct {
     allocator: std.mem.Allocator,
     pango_layout: *bindings.PangoLayout,
     current_font_desc: ?*bindings.PangoFontDescription = null,
     /// Cached (ascent, descent) in pixels; invalidated by loadFont.
     cached_metrics: ?struct { i16, i16 } = null,
+    /// Bounded (text, style bits, size) -> pixel width map. Replaces a
+    /// per-call Pango layout alloc for the common case of measuring the same
+    /// label repeatedly (static segments, prompt prefixes). Bounded at
+    /// `measure_cache_max` entries; a full cache is cleared wholesale rather
+    /// than evicted LRU -- a measure is cheap to recompute, and the one
+    /// many-distinct-strings caller (the prompt prefix search) merely misses.
+    measure_cache: MeasureCache = .empty,
+    /// Uncached (real Pango) measures since construction; a test-visible
+    /// counter so the "static label measures once per config" invariant has
+    /// something to assert against. (Struct fields have no `pub` in Zig: the
+    /// type is reachable, so the field is readable wherever it is.)
+    measure_misses: u32 = 0,
     /// Size-suffixed copy of `current_font_desc` for `drawTextSized`, rebuilt
     /// only when `sized_px` differs. Never outlives a base-description swap.
     sized_desc: ?*bindings.PangoFontDescription = null,
@@ -93,6 +164,10 @@ pub const FontBook = struct {
     layout_font: ?*bindings.PangoFontDescription = null,
 
     pub fn deinit(self: *FontBook) void {
+        self.clearMeasureCache();
+        // clearMeasureCache retains the map's metadata allocation; only the
+        // real teardown releases it.
+        self.measure_cache.deinit(self.allocator);
         if (self.sized_desc) |d| bindings.pango_font_description_free(d);
         if (self.current_font_desc) |desc| bindings.pango_font_description_free(desc);
     }
@@ -121,6 +196,7 @@ pub const FontBook = struct {
         bindings.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
         self.layout_font = self.current_font_desc;
         self.cached_metrics = null;
+        self.clearMeasureCache();
         self.invalidateSized();
     }
 
@@ -170,13 +246,58 @@ pub const FontBook = struct {
         return .{ ascent, descent };
     }
 
-    /// Measures `text` in its own run. The run's layout is discarded
-    /// immediately, so this is a pure read of the font state with no lasting
-    /// effect on any later measure or draw.
+    /// Measures `text` with no style, through the bounded width cache. A pure
+    /// read of the font state: a hit returns the stored width, a miss builds a
+    /// throwaway run (discarded immediately) and stores what it measured.
     pub fn measureTextWidth(self: *FontBook, text: []const u8) u16 {
-        var run = self.beginRun(text, .{}, null);
+        return self.measureCached(text, .{}, null);
+    }
+
+    /// Measures `text` with `props` styling applied, through the same cache as
+    /// `measureTextWidth`. Styled and unstyled measures of one string are
+    /// distinct keys (style bits are part of the key), and a sized measure is
+    /// distinct from an unsized one (`sized_px` is part of the key too), so a
+    /// width can never be served from an entry that measured something else.
+    pub fn measureTextWidthStyled(self: *FontBook, text: []const u8, props: bar_config.SegmentProps) u16 {
+        return self.measureCached(text, props, props.size);
+    }
+
+    /// Cache lookup by content; on a miss, measure in a throwaway run and
+    /// store the result. `measure_misses` counts the real Pango measures (the
+    /// misses), which is the observable a "measures once per config" test
+    /// asserts against.
+    fn measureCached(self: *FontBook, text: []const u8, props: bar_config.SegmentProps, sized_px: ?u16) u16 {
+        const key = MeasureKey{ .text = text, .props = propsBits(props), .sized_px = sized_px orelse no_sized_px };
+        if (self.measure_cache.get(key)) |entry| return entry.width;
+        var run = self.beginRun(text, props, sized_px);
         defer run.deinit();
-        return run.measure();
+        const width = run.measure();
+        self.measure_misses +%= 1;
+        self.storeMeasure(key, width);
+        return width;
+    }
+
+    /// Inserts an owned copy of `key`'s text plus the measured width. An
+    /// allocation failure (or a full cache) just leaves the entry unstored:
+    /// the width is still returned to this caller, and the next measure of the
+    /// same string misses again and retries -- a cache that cannot grow must
+    /// never fail a measure.
+    fn storeMeasure(self: *FontBook, key: MeasureKey, width: u16) void {
+        if (self.measure_cache.count() >= measure_cache_max) self.clearMeasureCache();
+        const owned = self.allocator.dupe(u8, key.text) catch return;
+        const entry = MeasureEntry{ .owned_text = owned, .width = width };
+        self.measure_cache.put(self.allocator, key, entry) catch {
+            self.allocator.free(owned);
+        };
+    }
+
+    /// Frees every owned key text and empties the map, retaining capacity for
+    /// reuse. Called on the one thing that invalidates every width: a
+    /// base-description swap (`loadFont`), plus `deinit`.
+    fn clearMeasureCache(self: *FontBook) void {
+        var it = self.measure_cache.valueIterator();
+        while (it.next()) |entry| self.allocator.free(entry.owned_text);
+        self.measure_cache.clearRetainingCapacity();
     }
 
     /// Builds a run for `text` under `props` (and `sized_px` when non-null),
