@@ -9,8 +9,8 @@
 //!
 //! The event handlers themselves live in protocol/ beside this file --
 //! client_events.zig (ConfigureRequest compliance, EWMH ClientMessage,
-//! Enter/Leave) -- with the pure border helpers in protocol/borders.zig and
-//! the per-batch border sweeps in sync/border_sweeps.zig;
+//! Enter/Leave). Border policy (color/width sweeps, the reconcile color
+//! hook) is the optional borders module (modules/borders.zig, P2-47);
 //! window.zig re-exports all of them so `window.*` remains the single
 //! dispatch surface. Also this layer's stable
 //! facade: window.zig re-exports the icccm protocol surface and the
@@ -30,9 +30,7 @@ const reply_mod = @import("reply");
 const build_options = @import("build_options");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
-const title_cache = @import("title_cache");
-const borders = @import("borders");
-const border_sweeps = @import("border_sweeps");
+const window_facts = @import("window_facts");
 const client_events = @import("client_events");
 const pipeline = @import("pipeline");
 const admission = @import("admission");
@@ -44,10 +42,11 @@ const atoms = @import("atoms");
 const requests = @import("requests");
 const reconcile_tails = @import("reconcile_tails");
 const reconcile = @import("reconcile");
+const struts = @import("struts");
 
 // Window-module hook dispatch lives in registry.zig (the binding layer);
-// window.zig re-exports the five top-level wrappers plus the six family
-// namespaces (D12/P2-54) so `window.*` stays the stable external facade.
+// window.zig re-exports the five top-level wrappers plus the seven family
+// namespaces (D12/P2-54, P2-47) so `window.*` stays the stable external facade.
 // Inside `src/window/**`, import `registry` directly.
 pub const providerOf = registry.providerOf;
 pub const callHook = registry.callHook;
@@ -60,6 +59,7 @@ pub const workspaces = registry.workspaces;
 pub const floating = registry.floating;
 pub const drag = registry.drag;
 pub const command = registry.command;
+pub const borders = registry.borders;
 
 // The command surface, re-exported through this facade. Always-present
 // transitions are re-exported as the concrete functions they are;
@@ -83,11 +83,12 @@ pub const snapViewportFocusedDuty = reconcile_tails.snapViewportFocusedDuty;
 // the stable external facade.
 pub const supportsWMDeleteCached = icccm.supportsWMDeleteCached;
 pub const closeViaProtocol = icccm.closeViaProtocol;
-// Event handlers and border sweeps live beside this file:
-// client_events.zig (ConfigureRequest, EWMH ClientMessage, Enter/Leave),
-// border_sweeps.zig (per-batch sweeps).
-// window.* stays the dispatch surface events.zig, input, reload and the
-// tests import, so they reach the handlers without naming those files.
+// Event handlers live beside this file: client_events.zig (ConfigureRequest,
+// EWMH ClientMessage, Enter/Leave). The border sweeps live in the optional
+// borders module (modules/borders.zig), reached through the `borders`
+// family above. window.* stays the dispatch surface events.zig, input,
+// reload and the tests import, so they reach the handlers without naming
+// those files.
 pub const handleConfigureRequest = client_events.handleConfigureRequest;
 pub const handleEnterNotify = client_events.handleEnterNotify;
 pub const handleLeaveNotify = client_events.handleLeaveNotify;
@@ -96,9 +97,35 @@ pub const handleLeaveNotify = client_events.handleLeaveNotify;
 // event surface.
 pub const handleFocusIn = focus.handleFocusIn;
 pub const handleClientMessage = client_events.handleClientMessage;
-pub const updateWorkspaceBorders = border_sweeps.updateWorkspaceBorders;
-pub const updateFloatingWindowBorders = border_sweeps.updateFloatingWindowBorders;
-pub const reloadBorders = border_sweeps.reloadBorders;
+
+/// The three per-batch border sweeps, dispatched through the `borders`
+/// contract family (P2-47): each no-ops when no module binds the hook, so a
+/// tree without the borders module keeps its windows at the configured
+/// width with a constant 0 pixel.
+pub fn updateWorkspaceBorders() void {
+    registry.borders.callHook(.updateWorkspaceBorders, .{});
+}
+pub fn updateFloatingWindowBorders() void {
+    registry.borders.callHook(.updateFloatingWindowBorders, .{});
+}
+pub fn reloadBorders() void {
+    registry.borders.callHook(.reloadBorders, .{});
+}
+
+/// The reconcile delta's border-color pick, dispatched through the
+/// `borders` family hook. A tree without the borders module returns 0
+/// (uncolored/black) — the documented deletion semantics; the configured
+/// WIDTH stays a core knob either way (geometry and layout insets are
+/// coupled to it). The covering/occupant checks live inside the sweeps
+/// themselves (the module's `resolveBorderColorWith`), not here: the
+/// reconciler zeroes covered/parked windows via its own desire policy.
+pub fn borderColorOf(win: model_mod.WindowId, m: *const model_mod.Model) u32 {
+    if (registry.borders.providerOf(.colorOf)) |wm| {
+        const hook = wm.borders.colorOf orelse return 0;
+        return hook(win, m);
+    }
+    return 0;
+}
 
 /// Maximum depth when walking the X11 window tree in findManagedWindow.
 /// Public as the CONTRACT the walk is bounded by: find_managed_test pins
@@ -257,7 +284,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
     reset();
     pipeline.clearFocusMru();
     focus.init();
-    title_cache.init(alloc);
+    window_facts.init(alloc);
     // Uniform lifecycle dispatch: each compiled-in sub-system's init
     // runs, absent modules aren't in the array, so nothing else needs
     // a has_* guard. The fallible fan-out is stated here (init is its
@@ -274,7 +301,7 @@ pub fn init(alloc: std.mem.Allocator) !void {
 }
 
 pub fn deinit() void {
-    title_cache.deinit();
+    window_facts.deinit();
     // Uniform lifecycle dispatch: every compiled-in sub-system's
     // deinit runs, absent modules aren't in the array.
     dispatchAll(.deinit, .{});
@@ -351,11 +378,24 @@ pub fn handleMapRequest(event: *const xcb.xcb_map_request_event_t) void {
     const drain = admission.drainAdmissionCookies(conn, win, cookies, false);
     const t_drain: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
+    // F-80: a DOCK-typed window's strut claim lands in usable_area BEFORE the
+    // admitting reconcile below, so the spawn's own placement (and every
+    // peer's) already sees the shrunk work area. is_dock floats the window
+    // too: a dock sits at its self-chosen edge geometry, never a tiled slot.
+    if (drain.is_dock) _ = struts.publish(win, drain.strut);
+
     // Shared admission policy (MapRequest path). The cookie firing above is
     // specific to the MapRequest event source; everything from here on (the
     // model registration + grabs + child-cache seeding) is identical to the
     // boot-time adoption path, so it lives in admission.admitWindow.
-    admission.admitWindow(win, target_ws.index, on_current, decision.float, drain.size_hints, drain.transient_for);
+    admission.admitWindow(
+        win,
+        target_ws.index,
+        on_current,
+        decision.float or drain.is_dock,
+        drain.size_hints,
+        drain.transient_for,
+    );
 
     if (build_options.profile_key) {
         const t_map = core.monotonicNs();
@@ -405,12 +445,12 @@ fn unmanageWindow(win: u32) void {
     evictFor(win);
 
     // Local bookkeeping, before the grab
-    // title_cache.removeWindow unconditionally evicts the combined cache entry
+    // window_facts.removeWindow unconditionally evicts the combined cache entry
     // (geometry + border + size hints). All three removes are pure local
     // bookkeeping (no X requests), so they run pre-grab, letting the
     // post-close focus target be resolved against win-free query state,
     // with its input model queried BEFORE the grab.
-    title_cache.removeWindow(win);
+    window_facts.removeWindow(win);
 
     // Module cleanup on window drop: each compiled-in window module's
     // onWindowGone fires before the model entry is unregistered below, so
@@ -457,7 +497,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         } else if (!prop_dirty.put(event.window, prop_dirty_title)) {
             // Set full (pathological): fall back to the immediate refresh so
             // the title still converges.
-            if (title_cache.refreshTitle(conn, event.window)) core.window.bump();
+            if (window_facts.refreshTitle(conn, event.window)) core.window.bump();
         }
         return;
     }
@@ -479,6 +519,23 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
         event.atom == xcb.XCB_ATOM_WM_HINTS)
     {
         focus.refreshCachedPropHalf(conn, event.window, event.atom);
+        return;
+    }
+
+    // F-80: a strut (or window-type) change re-reads the dock facts. Coalesced
+    // through the same dirty set as titles: a client that rewrites its strut
+    // in a loop must not pay one blocking round trip per PropertyNotify.
+    const strut_atom = atoms.getAtomOrZero("_NET_WM_STRUT_PARTIAL");
+    const wtype_atom = atoms.getAtomOrZero("_NET_WM_WINDOW_TYPE");
+    if ((strut_atom != 0 and event.atom == strut_atom) or
+        (wtype_atom != 0 and event.atom == wtype_atom))
+    {
+        if (prop_dirty.getPtr(event.window)) |bits| {
+            bits.* |= prop_dirty_strut;
+        } else if (!prop_dirty.put(event.window, prop_dirty_strut)) {
+            // Set full (pathological): refresh immediately, like the title path.
+            if (struts.refresh(conn, event.window)) pipeline.reconcileGrab(.{});
+        }
     }
 }
 
@@ -487,13 +544,14 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
 // set instead of paying a blocking round trip per event; flushPropertyRefresh
 // runs once per event batch (events.zig's post-batch housekeeping, before the
 // bar repaint) and refreshes each marked window exactly once, converging on
-// the property's final state. The set mirrors title_cache's discipline:
+// the property's final state. The set mirrors window_facts's discipline:
 // allocation-free IdMap, ceiling above the model store, set-full drops the
 // mark and falls back to an immediate refresh so correctness never depends
 // on capacity.
-const prop_dirty_title: u2 = 1;
-const prop_dirty_hints: u2 = 2;
-var prop_dirty: idmap.IdMap(u2, idmap.max_window_cache) = .{};
+const prop_dirty_title: u3 = 1;
+const prop_dirty_hints: u3 = 2;
+const prop_dirty_strut: u3 = 4;
+var prop_dirty: idmap.IdMap(u3, idmap.max_window_cache) = .{};
 
 /// Batch-end flush: one title refresh + one size-hints refresh per window
 /// marked during the batch, then the set is cleared. A window unmapped or
@@ -508,7 +566,7 @@ pub fn flushPropertyRefresh() void {
         const bits = item.val.*;
         if (!query.isValidManagedWindow(win)) continue;
         if (bits & prop_dirty_title != 0) {
-            if (title_cache.refreshTitle(conn, win)) core.window.bump();
+            if (window_facts.refreshTitle(conn, win)) core.window.bump();
         }
         if (bits & prop_dirty_hints != 0) refreshSizeHints(win);
     }

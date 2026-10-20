@@ -146,7 +146,7 @@ pub fn restore(m: *model.Model, win: model.WindowId) void {
     // Restore the window's presence pattern. A fullscreen-carrying window
     // restores back into covering (its `covering_ws` core intent was preserved
     // through the minimize — minimize only remapped presence to `.parked`), so
-    // core's model-based coverage read (`coveringOccupantOnWs`) recognizes it
+    // core's model-based coverage read (`coveringOccupantOn`) recognizes it
     // again as the screen owner. Plain windows restore to `.present`.
     // Read the core intent off the entry rather than asking the fullscreen
     // module: a peer-module hop is a second source of truth that a session
@@ -388,7 +388,7 @@ fn armFullscreenBarHideIfNeeded(
 /// Restores `win` via the `restoreWindow` hook, re-focuses it,
 /// and arms the deferred bar-hide when the restore opened a fresh claim.
 fn restoreTarget(m: *model.Model, win: model.WindowId) void {
-    const had_occupant_before = registry.currentCoveringOccupant(m) != null;
+    const had_occupant_before = model.coveringOccupantOn(m, m.current, .anchored_and_visible) != null;
     registry.hide.callHook(.restoreWindow, .{ m, win });
     restoreAndFocus(m, win);
     armFullscreenBarHideIfNeeded(m, win, had_occupant_before);
@@ -420,10 +420,10 @@ pub fn unminimizeAll() void {
     const wm = registry.hide.providerOf(.latestHiddenOnWs) orelse return;
     const ws = m.current;
     const target = (wm.hide.latestHiddenOnWs.?(m, ws) orelse return);
-    const had_occupant_before = registry.currentCoveringOccupant(m) != null;
+    const had_occupant_before = model.coveringOccupantOn(m, m.current, .anchored_and_visible) != null;
     registry.hide.callHook(.restoreOnWs, .{ m, ws });
     restoreAndFocus(m, target);
-    if (registry.currentCoveringOccupant(m)) |occ|
+    if (model.coveringOccupantOn(m, m.current, .anchored_and_visible)) |occ|
         armFullscreenBarHideIfNeeded(m, occ, had_occupant_before);
 }
 
