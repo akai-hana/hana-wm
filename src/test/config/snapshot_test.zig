@@ -386,3 +386,45 @@ test "a single-file config source still snapshots as config.toml" {
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("config.toml", got[0]);
 }
+
+test "P2-66: an unwritable runtime dir logs the failed refresh" {
+    const diagnostics = @import("diagnostics");
+    const alloc = testing.allocator;
+    var box = try Sandbox.init(alloc, "unwritable");
+    defer box.deinit(alloc);
+    const env = try box.redirectEnv(alloc);
+    defer alloc.free(env[0]);
+    defer alloc.free(env[1]);
+
+    // A last-good source with a file to freeze: refreshSnapshot's
+    // precondition (the same setup the success-path tests use).
+    try box.write("hana/config.toml", "[bar]\nvisible = true\n");
+    defer config.deinitGoodSource(alloc);
+    var source: config.DefaultSource = .fallback;
+    var cfg = try config.loadConfigDefault(alloc, &source, false);
+    defer cfg.deinit(alloc);
+    try testing.expectEqual(config.DefaultSource.user, source);
+
+    // Point XDG_RUNTIME_DIR at a path that is a REGULAR FILE: staging
+    // ("<path>/hana-config.new") cannot be created through it (ENOTDIR), so
+    // the copy fails where an unwritable dir would (EACCES/EROFS).
+    try box.write("imnotadir", "x");
+    const bad_runtime = try box.path(alloc, "imnotadir");
+    defer alloc.free(bad_runtime);
+    const bad_runtime_z = try alloc.dupeZ(u8, bad_runtime);
+    defer alloc.free(bad_runtime_z);
+    setEnv("XDG_RUNTIME_DIR", bad_runtime_z);
+
+    var diag: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer diag.deinit();
+    diagnostics.diagnostics = &diag;
+    defer diagnostics.diagnostics = null;
+
+    config.refreshSnapshot(alloc);
+
+    try testing.expect(diag.count() > 0);
+    try testing.expect(diag.contains("Snapshot:"));
+    // Err-only wording: the success paths never say this, so a bag that only
+    // saw unrelated chatter cannot make the assertion pass.
+    try testing.expect(diag.contains("keeping the previous snapshot"));
+}

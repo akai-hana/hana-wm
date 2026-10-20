@@ -3,6 +3,7 @@
 //! Enabled via `HANA_XTRACE=...` or `HANA_XTRACE=*`; zero cost when disabled.
 
 const std = @import("std");
+const masks = @import("masks");
 const log = std.log.scoped(.trace);
 
 /// Arming state: null = not yet resolved from the environment. Resolving it
@@ -84,7 +85,7 @@ pub fn watches(win: u32) bool {
 /// raw byte printed "Other" for every one of them, which is why a trace aimed
 /// at browser fullscreen requests appeared to see no ClientMessage at all.
 fn name(t: u8) []const u8 {
-    return switch (t & 0x7f) {
+    return switch (masks.coreEventType(t)) {
         2 => "KeyPress",
         3 => "KeyRelease",
         4 => "ButtonPress",

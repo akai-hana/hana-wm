@@ -167,10 +167,12 @@ test "routeFor: an XSendEvent core event routes by its masked code, not as an ex
     }
 }
 
-test "routeFor: events hana never subscribes to are ignored, and type 0 is not a route" {
+test "routeFor: events hana never subscribes to are unknown, and type 0 is not a route" {
     // Masking must not turn an unsubscribed code into a live handler. 35 is
-    // above the last real core code and lands outside the dispatch table.
-    try testing.expectEqual(events.Route.ignore, events.routeFor(200));
+    // above the last real core code and lands outside the dispatch table --
+    // an .unknown (past the table), distinct from .ignore (in-table, no
+    // handler), so a bogus code cannot masquerade as a deliberate skip.
+    try testing.expectEqual(events.Route.unknown, events.routeFor(200));
     // 0x88 masks to 8 (LeaveNotify), which hana DOES subscribe to. A client
     // only ever receives what it selected, so this case cannot occur in
     // practice; it is asserted to document that the MASK, not the table size
@@ -248,4 +250,22 @@ test "requests: outbound sequence tracking names the window for a type-0 error" 
     reconcile.forget(0x1111);
     try testing.expect(requests.lastSequence(0x1111) == null);
     try testing.expect(requests.windowForSequence(44) == null);
+}
+
+// P2-73: the post-poll drain predicate. A non-X wake (timeout/signal/spawn)
+// must still drain the X queue in the SAME iteration -- events that arrived
+// while the wake was being handled would otherwise strand until the next
+// poll round reports the fd readable again.
+test "shouldDrainX: non-X wakes drain the X queue in the same iteration" {
+    const poll_in: i16 = @intCast(std.posix.POLL.IN);
+    // X fd readable: the pre-P2-73 path, unchanged.
+    try testing.expect(events.shouldDrainX(poll_in, 0, false, 1));
+    // Timeout wake (ready == 0): the stranded-queue case P2-73 fixes.
+    try testing.expect(events.shouldDrainX(0, 0, false, 0));
+    // Signal-only and spawn-only wakes: same reasoning.
+    try testing.expect(events.shouldDrainX(0, poll_in, false, 1));
+    try testing.expect(events.shouldDrainX(0, 0, true, 1));
+    // ERR/HUP-only on the X fd with no other wake (ready > 0, no IN bits):
+    // the loop breaks before the drain; the predicate must not claim a read.
+    try testing.expect(!events.shouldDrainX(0, 0, false, 1));
 }

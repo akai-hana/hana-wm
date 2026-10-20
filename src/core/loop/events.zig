@@ -40,18 +40,107 @@ const fd_signal = 1;
 
 // Maximum events dispatched per XCB batch before returning to poll, so the
 // signal pipe and timer paths get fair scheduling against a chatty client.
+// Unmeasured: chosen generous -- 128 events is milliseconds of dispatch work
+// and keeps one batch comfortably under a frame; no bench derives it.
 const max_events_per_batch: usize = 128;
 
 // Cap for the post-batch drain of XCB's internal event queue (see the drain
 // loop in handleXcbEvents); a chatty client cannot fill it beyond this.
+// Unmeasured: chosen generous -- XCB's own queue is the real bound, and 256
+// drains it faster than the server refills it within one wakeup.
 const max_queued_drain: usize = 256;
+
+const EventHandler = *const fn (event: *anyopaque) void;
+
+// The one event table (P2-48): every XCB event code hana knows anything
+// about, with its optional handler AND its optional window-field offset.
+// The dispatch table and eventWindowFor's offset table are both GENERATED
+// from this list at comptime, so adding an event type is a one-line edit
+// and the two views can never drift.
+//
+// The handler and offset sets are NOT the same, in both directions:
+// MAPPING_NOTIFY has a handler and no window field at all, while
+// VISIBILITY_NOTIFY, FOCUS_OUT, REPARENT/CREATE/GRAVITY/CIRCULATE carry a
+// window and have no handler (they are watched by the trace filter but
+// deliberately not dispatched). Both are one entry here with one null.
+// Merging the two flat lookups into this wider struct is fine: the list is
+// comptime data, and the generated tables keep both hot paths O(1).
+const EventSpec = struct {
+    code: u8,
+    handler: ?EventHandler,
+    /// Byte offset of the window id in the event struct; null when the
+    /// event carries no window (MappingNotify) or has no entry.
+    window_offset: ?u8,
+};
+
+const event_specs = [_]EventSpec{
+    .{ .code = xcb.XCB_ENTER_NOTIFY, .handler = asHandler(window.handleEnterNotify), .window_offset = 12 },
+    .{ .code = xcb.XCB_LEAVE_NOTIFY, .handler = asHandler(window.handleLeaveNotify), .window_offset = 12 },
+    // P1-09: a client XSetInputFocus-ing its own toplevel is reasserted back
+    // to the model's focus (focus.zig's handleFocusIn), so FocusChange no
+    // longer lands unhandled. FocusOut is deliberately still unhandled:
+    // only the steal (FocusIn) is acted on.
+    .{ .code = xcb.XCB_FOCUS_IN, .handler = asHandler(window.handleFocusIn), .window_offset = 4 },
+    .{ .code = xcb.XCB_FOCUS_OUT, .handler = null, .window_offset = 4 },
+
+    .{ .code = xcb.XCB_MAP_REQUEST, .handler = asHandler(window.handleMapRequest), .window_offset = 8 },
+    .{ .code = xcb.XCB_CONFIGURE_REQUEST, .handler = asHandler(window.handleConfigureRequest), .window_offset = 8 },
+    .{ .code = xcb.XCB_UNMAP_NOTIFY, .handler = asHandler(window.handleUnmapNotify), .window_offset = 8 },
+    .{ .code = xcb.XCB_DESTROY_NOTIFY, .handler = asHandler(handleDestroyNotify), .window_offset = 8 },
+    .{ .code = xcb.XCB_CLIENT_MESSAGE, .handler = asHandler(window.handleClientMessage), .window_offset = 4 },
+    .{ .code = xcb.XCB_CONFIGURE_NOTIFY, .handler = asHandler(handleConfigureNotify), .window_offset = 8 },
+
+    .{ .code = xcb.XCB_KEY_PRESS, .handler = asHandler(keys.handleKeyPress), .window_offset = 12 },
+    .{ .code = xcb.XCB_KEY_RELEASE, .handler = asHandler(keys.handleKeyRelease), .window_offset = 12 },
+    .{ .code = xcb.XCB_BUTTON_PRESS, .handler = asHandler(mouse.handleButtonPress), .window_offset = 12 },
+    .{ .code = xcb.XCB_BUTTON_RELEASE, .handler = asHandler(mouse.handleButtonRelease), .window_offset = 12 },
+    .{ .code = xcb.XCB_MOTION_NOTIFY, .handler = asHandler(mouse.handleMotionNotify), .window_offset = 12 },
+    .{ .code = xcb.XCB_PROPERTY_NOTIFY, .handler = asHandler(handlePropertyNotify), .window_offset = 4 },
+    .{ .code = xcb.XCB_EXPOSE, .handler = asHandler(handleExpose), .window_offset = 4 },
+
+    // MappingNotify has a handler and NO window field: the mapping change
+    // invalidates the keycode->keysym table, so the regrab runs here.
+    .{ .code = xcb.XCB_MAPPING_NOTIFY, .handler = asHandler(handleMappingNotify), .window_offset = null },
+
+    // Offset-only codes (handler = null): these route .ignore but carry a
+    // window the trace watch filter reads.
+    .{ .code = xcb.XCB_VISIBILITY_NOTIFY, .handler = null, .window_offset = 4 },
+    .{ .code = xcb.XCB_REPARENT_NOTIFY, .handler = null, .window_offset = 8 },
+    .{ .code = xcb.XCB_CREATE_NOTIFY, .handler = null, .window_offset = 8 },
+    .{ .code = xcb.XCB_GRAVITY_NOTIFY, .handler = null, .window_offset = 8 },
+    .{ .code = xcb.XCB_CIRCULATE_NOTIFY, .handler = null, .window_offset = 8 },
+};
 
 /// Dispatch table size. Must index every XCB core event code hana dispatches;
 /// the highest is MappingNotify (34), so 36 leaves headroom. The table lookup
 /// is guarded by this bound (dispatch()).
 const dispatch_table_len = 36;
 
-const EventHandler = *const fn (event: *anyopaque) void;
+// Uniqueness and bounds: a duplicate code would silently shadow the first
+// entry in BOTH generated tables, and an out-of-bounds code would panic
+// inside the builders below.
+comptime {
+    for (event_specs, 0..) |a, i| {
+        if (a.code >= dispatch_table_len)
+            @compileError("event spec code exceeds dispatch_table_len");
+        for (event_specs[i + 1 ..]) |b| {
+            if (a.code == b.code)
+                @compileError("duplicate code in the event table");
+        }
+    }
+}
+
+const dispatch_table = blk: {
+    var table = [_]?EventHandler{null} ** dispatch_table_len;
+    for (event_specs) |spec| table[spec.code] = spec.handler;
+    break :blk table;
+};
+
+const window_offset_table = blk: {
+    var table = [_]?u8{null} ** dispatch_table_len;
+    for (event_specs) |spec| table[spec.code] = spec.window_offset;
+    break :blk table;
+};
 
 // Casts a `fn(*T) void` event handler to the generic `EventHandler` pointer
 // type via @ptrCast. Safe only because every registered handler takes a
@@ -128,46 +217,6 @@ fn handleMappingNotify(event: *anyopaque) void {
         keybinds.grabKeybindings(keybinds.resolvedKeybinds());
 }
 
-// O(1) dispatch via a comptime-built table indexed by XCB event type (low 7 bits).
-//
-// This and eventWindowFor's offset switch below answer different questions --
-// "is there a handler?" vs "where in the struct is the window id?" -- and their
-// code sets are NOT the same, in both directions: MAPPING_NOTIFY has a handler
-// and no window field at all, while VISIBILITY_NOTIFY, FOCUS_OUT,
-// REPARENT/CREATE/GRAVITY/CIRCULATE carry a window and have no handler. Merging
-// them would trade two flat lookups for one wider struct over a hot path, to
-// save a handful of lines, and would need a sentinel for the offset-less case.
-const dispatch_table = blk: {
-    var table = [_]?EventHandler{null} ** dispatch_table_len;
-
-    table[xcb.XCB_ENTER_NOTIFY] = asHandler(window.handleEnterNotify);
-    table[xcb.XCB_LEAVE_NOTIFY] = asHandler(window.handleLeaveNotify);
-    // P1-09: a client XSetInputFocus-ing its own toplevel is reasserted back
-    // to the model's focus (focus.zig's handleFocusIn), so FocusChange no
-    // longer lands unhandled.
-    table[xcb.XCB_FOCUS_IN] = asHandler(window.handleFocusIn);
-
-    table[xcb.XCB_MAP_REQUEST] = asHandler(window.handleMapRequest);
-    table[xcb.XCB_CONFIGURE_REQUEST] = asHandler(window.handleConfigureRequest);
-    table[xcb.XCB_UNMAP_NOTIFY] = asHandler(window.handleUnmapNotify);
-    table[xcb.XCB_DESTROY_NOTIFY] = asHandler(handleDestroyNotify);
-    table[xcb.XCB_CLIENT_MESSAGE] = asHandler(window.handleClientMessage);
-
-    table[xcb.XCB_KEY_PRESS] = asHandler(keys.handleKeyPress);
-    table[xcb.XCB_KEY_RELEASE] = asHandler(keys.handleKeyRelease);
-    table[xcb.XCB_MAPPING_NOTIFY] = asHandler(handleMappingNotify);
-    table[xcb.XCB_BUTTON_PRESS] = asHandler(mouse.handleButtonPress);
-    table[xcb.XCB_BUTTON_RELEASE] = asHandler(mouse.handleButtonRelease);
-    table[xcb.XCB_MOTION_NOTIFY] = asHandler(mouse.handleMotionNotify);
-    table[xcb.XCB_PROPERTY_NOTIFY] = asHandler(handlePropertyNotify);
-
-    table[xcb.XCB_EXPOSE] = asHandler(handleExpose);
-
-    table[xcb.XCB_CONFIGURE_NOTIFY] = asHandler(handleConfigureNotify);
-
-    break :blk table;
-};
-
 /// True for the RandR extension-event window (base and base+1): screen/CRTC/
 /// output change notifications. Bar render pacing must track monitor
 /// re-configuration, so any of them triggers re-detection.
@@ -187,8 +236,10 @@ fn isRandrEvent(code: u8) bool {
 
 /// Where a raw event byte routes, kept separate from dispatch so the
 /// SendEvent-bit rule is testable without an X connection: dispatch needs live
-/// core state, but the routing decision itself is pure.
-pub const Route = enum { core, randr, ignore };
+/// core state, but the routing decision itself is pure. `.unknown` is a code
+/// above every core event hana knows (past the table); `.ignore` is a code
+/// hana knows and deliberately does not dispatch (no handler entry).
+pub const Route = enum { core, randr, ignore, unknown };
 
 /// Routes a RAW event byte. Bit 7 is XCB's SendEvent flag, and it is stripped
 /// FIRST, before anything is decided from the code.
@@ -211,9 +262,9 @@ pub const Route = enum { core, randr, ignore };
 /// range, so no extension base can arrive to be aliased onto a core code --
 /// RandR is matched explicitly, on the masked code.
 pub fn routeFor(event_type: u8) Route {
-    const code = event_type & masks.core_event_code_mask;
+    const code = masks.coreEventType(event_type);
     if (isRandrEvent(code)) return .randr;
-    if (code >= dispatch_table.len) return .ignore;
+    if (code >= dispatch_table.len) return .unknown;
     return if (dispatch_table[code] != null) .core else .ignore;
 }
 
@@ -239,7 +290,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
     }
 
     switch (routeFor(event_type)) {
-        .ignore => {},
+        .ignore, .unknown => {},
         // RandR extension events (base and base+1) trigger refresh
         // re-detection here; they sit above the fixed dispatch table.
         .randr => {
@@ -267,7 +318,7 @@ fn dispatch(event_type: u8, event: *anyopaque) void {
             // mode table with zero XCB round-trips (see hz.handleRandrNotifyEvent).
             hz.handleRandrNotifyEvent(event);
         },
-        .core => dispatch_table[event_type & masks.core_event_code_mask].?(event),
+        .core => dispatch_table[masks.coreEventType(event_type)].?(event),
     }
 }
 
@@ -299,44 +350,15 @@ pub fn eventWindowFor(t: u8, event: *anyopaque) u32 {
     // Strip the SendEvent bit first: an EWMH _NET_WM_STATE request arrives as
     // 33 | 0x80, and without this every such event reads as an unknown type
     // (and reports no_window).
-    const code = t & masks.core_event_code_mask;
-    // Three shapes, and MappingNotify is a fourth: it has NO window field at
-    // all, so it must never match a watch.
-    const base: usize = switch (code) {
-        // window-carrying, `window` at offset 4
-        xcb.XCB_CLIENT_MESSAGE,
-        xcb.XCB_PROPERTY_NOTIFY,
-        xcb.XCB_EXPOSE,
-        xcb.XCB_VISIBILITY_NOTIFY,
-        // input, `event` at offset 4 (FocusIn/FocusOut are the odd ones out)
-        xcb.XCB_FOCUS_IN,
-        xcb.XCB_FOCUS_OUT,
-        => 4,
-        // input, `event` at offset 12
-        xcb.XCB_KEY_PRESS,
-        xcb.XCB_KEY_RELEASE,
-        xcb.XCB_BUTTON_PRESS,
-        xcb.XCB_BUTTON_RELEASE,
-        xcb.XCB_MOTION_NOTIFY,
-        xcb.XCB_ENTER_NOTIFY,
-        xcb.XCB_LEAVE_NOTIFY,
-        => 12,
-        // window-carrying, `window` at offset 8
-        xcb.XCB_CONFIGURE_NOTIFY,
-        xcb.XCB_CONFIGURE_REQUEST,
-        xcb.XCB_MAP_REQUEST,
-        xcb.XCB_UNMAP_NOTIFY,
-        xcb.XCB_DESTROY_NOTIFY,
-        xcb.XCB_REPARENT_NOTIFY,
-        xcb.XCB_CREATE_NOTIFY,
-        xcb.XCB_GRAVITY_NOTIFY,
-        xcb.XCB_CIRCULATE_NOTIFY,
-        => 8,
-        // MappingNotify carries only the keyboard mapping, and errors carry a
-        // bad resource id. Neither is about a window, so return a value no
-        // watch can hold rather than reading whatever bytes happen to be there.
-        else => return no_window,
-    };
+    const code = masks.coreEventType(t);
+    // Offset comes from the one event table (P2-48): MappingNotify carries no
+    // window, errors carry a bad resource id, and codes hana never listed
+    // (past the table or only ever dispatched) all read null here -- return a
+    // value no watch can hold rather than whatever bytes happen to be there.
+    const base: usize = if (code < window_offset_table.len)
+        window_offset_table[code] orelse return no_window
+    else
+        return no_window;
     return @as(u32, raw[base]) | (@as(u32, raw[base + 1]) << 8) |
         (@as(u32, raw[base + 2]) << 16) | (@as(u32, raw[base + 3]) << 24);
 }
@@ -421,7 +443,7 @@ fn drainEvents(
 }
 
 fn isMotion(e: *xcb.xcb_generic_event_t) bool {
-    const code = eventType(e) & masks.core_event_code_mask;
+    const code = masks.coreEventType(eventType(e));
     // RandR on the masked code; see isRandrEvent.
     if (isRandrEvent(code)) return false;
     return code == xcb.XCB_MOTION_NOTIFY;
@@ -612,6 +634,20 @@ fn pollBackoffSleep() void {
 /// to be invisible when the error clears on the next retry.
 const poll_error_backoff_ms = 75;
 
+/// P2-73: whether this poll outcome must drain the X queue in the SAME
+/// iteration. True when the xcb fd reported readable (the pre-P2-73 path),
+/// OR when the wake was non-X -- timeout, signal, or spawn -- because events
+/// that arrived while that wake was being handled would otherwise strand in
+/// XCB's queue until the NEXT poll round reported the fd readable again. The
+/// ERR/HUP arm is the loop's own break (it never reaches the drain); this
+/// predicate is the pure truth table so the decision is testable without a
+/// socket.
+pub fn shouldDrainX(xcb_revents: i16, signal_revents: i16, spawn_ready: bool, ready: usize) bool {
+    const poll_in = std.posix.POLL.IN;
+    return (xcb_revents & poll_in) != 0 or
+        (signal_revents & poll_in) != 0 or spawn_ready or ready == 0;
+}
+
 pub fn run() void {
     const cs = core.getState();
     const x_fd: std.posix.fd_t = xcb.xcb_get_file_descriptor(cs.conn);
@@ -739,9 +775,18 @@ pub fn run() void {
         } else if ((fds[fd_xcb].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
             log.err("X11 connection error, shutting down", .{});
             break;
-        } else if ((fds[fd_xcb].revents & std.posix.POLL.IN) != 0) {
-            handleXcbEvents();
         }
+
+        // P2-73: drain X events on EVERY wake whose handling could have let
+        // events queue behind it -- not only when the poll reported the xcb
+        // fd readable. A signal/spawn/timeout wake (reload, spawn sweep,
+        // timer) can take long enough that X events arrive mid-handling;
+        // without this they strand in XCB's queue until the NEXT poll round.
+        // handleXcbEvents pulls via xcb_poll_for_event (nonblocking): an
+        // idle socket is a null return, so the extra drain on a non-X-only
+        // wake costs one failed read at most.
+        if (shouldDrainX(fds[fd_xcb].revents, fds[fd_signal].revents, spawn_ready, ready))
+            handleXcbEvents();
 
         // Run any refresh-rate re-detection deferred by a RandR event. It
         // performs synchronous XCB round-trips, so it must run here, outside

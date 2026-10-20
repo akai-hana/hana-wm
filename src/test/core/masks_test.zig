@@ -114,3 +114,16 @@ test "modifier keysym band is a 16-wide window at the top of the special range" 
     try testing.expectEqual(@as(u32, 0xFFE0), masks.modifier_keysym_lo);
     try testing.expectEqual(@as(u32, 0xFFEF), masks.modifier_keysym_hi);
 }
+
+test "coreEventType strips the SendEvent bit (the one strip spelling)" {
+    // 0xA1 = ClientMessage (33 | 0x80): the GDK fullscreen-request shape
+    // every comment in dispatch/trace names.
+    try testing.expectEqual(@as(u8, 0x21), masks.coreEventType(0xA1));
+    // An already-clean code is untouched, and the two edges of the span fold
+    // to their own low-7 values.
+    try testing.expectEqual(@as(u8, 0x21), masks.coreEventType(0x21));
+    try testing.expectEqual(@as(u8, 0x00), masks.coreEventType(0x80));
+    try testing.expectEqual(@as(u8, 0x7f), masks.coreEventType(0xff));
+    // The helper and the named mask are one definition.
+    try testing.expectEqual(@as(u8, 0x7f), masks.core_event_code_mask);
+}

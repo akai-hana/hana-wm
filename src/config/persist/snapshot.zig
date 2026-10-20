@@ -280,11 +280,16 @@ fn snapshotCurrent(
 /// for why the whole tree is not), and the new snapshot is assembled beside the
 /// old one and swapped in, so a copy that fails part-way leaves the previous
 /// snapshot intact. Best-effort: a failed refresh keeps the previous snapshot,
-/// still self-consistent.
+/// still self-consistent -- and every failure path says so with `log.err`, so
+/// an unwritable runtime dir (or any other cause) is visible instead of a
+/// silently stale hand-off.
 pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
     const g = last_good_source orelse return;
     const io = std.Options.debug_io;
-    const snap = snapshotDirPath(allocator) catch return;
+    const snap = snapshotDirPath(allocator) catch |e| {
+        log.err("Snapshot: cannot resolve the snapshot path ({s}); keeping the previous snapshot", .{@errorName(e)});
+        return;
+    };
     defer allocator.free(snap);
     // A re-exec boot whose own source IS the snapshot has nothing to copy.
     if (std.mem.eql(u8, g.path, snap)) return;
@@ -302,32 +307,49 @@ pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
     const root = if (g.is_dir) g.path else (std.fs.path.dirname(g.path) orelse ".");
     var files: std.ArrayList(SnapFile) = .empty;
     for (g.files) |f| {
-        const rel = (relativeTo(sa, root, f.path) catch return) orelse {
+        const rel = (relativeTo(sa, root, f.path) catch |e| {
+            log.err("Snapshot: cannot relativize '{s}' ({s}); keeping the previous snapshot", .{ f.path, @errorName(e) });
+            return;
+        }) orelse {
             log.warn("Snapshot: '{s}' is outside '{s}'; not freezing it", .{ f.path, root });
             continue;
         };
-        files.append(sa, .{ .rel = rel, .stamp = undefined }) catch return;
+        files.append(sa, .{ .rel = rel, .stamp = undefined }) catch {
+            log.err("Snapshot: out of memory; keeping the previous snapshot", .{});
+            return;
+        };
     }
     if (files.items.len == 0) return;
 
-    const src = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return;
+    const src = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch |e| {
+        log.err("Snapshot: cannot open the config root '{s}' ({s}); keeping the previous snapshot", .{ root, @errorName(e) });
+        return;
+    };
     defer src.close(io);
 
     for (files.items) |*f| {
-        const st = src.statFile(io, f.rel, .{}) catch return;
+        const st = src.statFile(io, f.rel, .{}) catch |e| {
+            log.err("Snapshot: cannot stat '{s}' ({s}); keeping the previous snapshot", .{ f.rel, @errorName(e) });
+            return;
+        };
         f.stamp = .{ .size = st.size, .mtime = st.mtime.nanoseconds };
     }
     if (snapshotCurrent(io, sa, snap, files.items, g.files)) return;
 
-    const staging = std.fmt.allocPrint(sa, "{s}.new", .{snap}) catch return;
+    const staging = std.fmt.allocPrint(sa, "{s}.new", .{snap}) catch {
+        log.err("Snapshot: out of memory; keeping the previous snapshot", .{});
+        return;
+    };
     deleteTreeAbsolute(io, staging);
     if (!writeSnapshot(io, src, staging, files.items)) {
         deleteTreeAbsolute(io, staging);
+        log.err("Snapshot: copy failed (staging '{s}'); keeping the previous snapshot", .{staging});
         return;
     }
     deleteTreeAbsolute(io, snap);
-    std.Io.Dir.renameAbsolute(staging, snap, io) catch {
+    std.Io.Dir.renameAbsolute(staging, snap, io) catch |e| {
         deleteTreeAbsolute(io, staging);
+        log.err("Snapshot: cannot install the new snapshot ({s}); keeping the previous snapshot", .{@errorName(e)});
         return;
     };
 

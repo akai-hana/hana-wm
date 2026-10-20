@@ -14,6 +14,7 @@ const model = @import("model");
 const helpers = @import("helpers");
 const build_options = @import("build_options");
 const focus = @import("focus");
+const focus_select = @import("focus_select");
 const window_state_ops = @import("window_state_ops");
 const seed = @import("model_config");
 const minimize = if (build_options.has_minimize) @import("minimize") else struct {};
@@ -472,6 +473,47 @@ test "cycle pool appends untiled windows and honors visibility" {
     try window_state_ops.register(&other, 6, WSId.fromIndex(1));
     try testing.expectEqual(@as(usize, 1), focus.collectCyclePool(&other, WSId.fromIndex(1), &buf));
     try testing.expectEqual(@as(WindowId, 6), buf[0]);
+}
+
+// cycleTarget is the pure selection step that cycleFocus commits: it resolves
+// which window a forward/backward step lands on, without touching focus. The
+// pool comes from collectCyclePool, so it follows tiled_order and a parked
+// or covering window changes the answer the same way it changes the pool.
+test "cycleTarget: forward/backward step and single-window no-op" {
+    var m = makeModel();
+    const ws = WSId.fromIndex(0);
+
+    regCur(&m, 1);
+    regCur(&m, 2);
+    regCur(&m, 3);
+    focus.setFocus(&m, 2);
+
+    // Forward step from the middle of the tiled run lands on the next slot.
+    try testing.expectEqual(@as(?WindowId, 3), focus_select.cycleTarget(&m, m.focused, .forward));
+    // Backward step lands on the previous slot.
+    try testing.expectEqual(@as(?WindowId, 1), focus_select.cycleTarget(&m, m.focused, .reverse));
+    // Stepping backward from the first slot wraps to the end (and forward
+    // from the last wraps to the front), so the cycle never dead-ends.
+    focus.setFocus(&m, 1);
+    try testing.expectEqual(@as(?WindowId, 3), focus_select.cycleTarget(&m, m.focused, .reverse));
+    focus.setFocus(&m, 3);
+    try testing.expectEqual(@as(?WindowId, 1), focus_select.cycleTarget(&m, m.focused, .forward));
+
+    // A focus id that is not in the pool (e.g. just-parked) still resolves:
+    // the step lands on the pool's front (forward) / back (reverse).
+    try testing.expectEqual(@as(?WindowId, 1), focus_select.cycleTarget(&m, 99, .forward));
+    try testing.expectEqual(@as(?WindowId, 3), focus_select.cycleTarget(&m, 99, .reverse));
+
+    // Single visible window: no-op when already focused, the window otherwise.
+    m.store.getPtr(1).?.presence = .parked;
+    m.store.getPtr(3).?.presence = .parked;
+    try testing.expectEqual(@as(?WindowId, 2), focus_select.cycleTarget(&m, 99, .forward));
+    try testing.expectEqual(@as(?WindowId, null), focus_select.cycleTarget(&m, 2, .forward));
+
+    // Nothing visible at all: no target.
+    m.store.getPtr(2).?.presence = .parked;
+    try testing.expectEqual(@as(?WindowId, null), focus_select.cycleTarget(&m, null, .forward));
+    _ = ws;
 }
 
 // unregister cleans tiled_order/MRU/minimized/fs refs everywhere.

@@ -80,7 +80,7 @@ test "bench: findHome scan (100 wins, 10 workspaces)" {
     }
 }
 
-test "bench: visibleCoveringOnWs store scan (50 wins)" {
+test "bench: coveringOccupantOn AND-rule store scan (50 wins)" {
     var m = makeModel();
     for (0..50) |i| {
         regCur(&m, @intCast(i + 1));
@@ -90,15 +90,15 @@ test "bench: visibleCoveringOnWs store scan (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = fullscreen.visibleCoveringOnWs(&m, model.WSId.fromIndex(0));
+        _ = model.coveringOccupantOn(&m, model.WSId.fromIndex(0), .anchored_and_visible);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) helpers.benchLog("[bench] visibleCoveringOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
-    try testing.expectEqual(@as(?WindowId, 25), fullscreen.visibleCoveringOnWs(&m, model.WSId.fromIndex(0)));
+    if (bench) helpers.benchLog("[bench] coveringOccupantOn AND (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    try testing.expectEqual(@as(?WindowId, 25), model.coveringOccupantOn(&m, model.WSId.fromIndex(0), .anchored_and_visible));
 }
 
-test "bench: coveringOccupantOnWs store scan (50 wins)" {
+test "bench: coveringOccupantOn OR-rule store scan (50 wins)" {
     var m = makeModel();
     for (0..50) |i| {
         regCur(&m, @intCast(i + 1));
@@ -108,12 +108,12 @@ test "bench: coveringOccupantOnWs store scan (50 wins)" {
     const iterations: usize = if (bench) 10_000 else 1;
     const t0 = nowNs();
     for (0..iterations) |_| {
-        _ = model.coveringOccupantOnWs(&m, model.WSId.fromIndex(0));
+        _ = model.coveringOccupantOn(&m, model.WSId.fromIndex(0), .anchored_or_visible);
     }
     const elapsed_ns = nowNs() - t0;
     const per_call_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
-    if (bench) helpers.benchLog("[bench] coveringOccupantOnWs (50 wins): {d:.1} ns/call\n", .{per_call_ns});
-    try testing.expectEqual(@as(?WindowId, 25), model.coveringOccupantOnWs(&m, model.WSId.fromIndex(0)));
+    if (bench) helpers.benchLog("[bench] coveringOccupantOn OR (50 wins): {d:.1} ns/call\n", .{per_call_ns});
+    try testing.expectEqual(@as(?WindowId, 25), model.coveringOccupantOn(&m, model.WSId.fromIndex(0), .anchored_or_visible));
 }
 
 test "bench: moveWindowToWs round-trip (50 wins)" {
