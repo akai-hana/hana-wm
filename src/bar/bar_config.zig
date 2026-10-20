@@ -80,6 +80,12 @@ pub const SegmentProps = struct {
     underline: bool = false,
     bold: bool = false,
     italic: bool = false,
+    /// Absolute text size for the whole segment (label and number alike),
+    /// from a `size=N` token in the entry. null = the configured font size
+    /// (with its percentage scaling) decides; the size bypasses no attribute
+    /// list -- it goes through the same sized font-description path the
+    /// indicator glyphs use, so measure and draw stay in agreement.
+    size: ?u16 = null,
 
     pub fn isDefault(self: SegmentProps) bool {
         return std.meta.eql(self, .{});
@@ -194,6 +200,21 @@ pub const Config = struct {
     carousel_enabled: bool = true,
     /// Marquee scroll speed in pixels per second.
     carousel_speed_px_s: u16 = 125,
+    /// Horizontal gap in pixels between repeating copies of a scrolling title.
+    carousel_gap_px: u16 = 48,
+
+    /// Cadence for the systatus module's readouts (battery/cpu/...): ms
+    /// between polls once a readout is present. Absent readouts back off to
+    /// the module's own slow re-probe regardless of this value.
+    systatus_interval_ms: i64 = 2000,
+    /// Cadence for the volume control's live reads: ms between polls of the
+    /// sink state (the 5 s reconcile that also corrects an optimistic commit).
+    volume_read_interval_ms: i64 = 5000,
+    /// Cap on redraw-settle rounds per event batch: a module that re-requests
+    /// forever degrades to the owed-wake mechanism instead of busy-spinning
+    /// the batch. Bounds keep a typo from disabling settling (min 1) or from
+    /// turning one batch into a long redraw loop (max 64).
+    max_batched_redraws: u8 = 4,
 
     // run segment colors and prompt; all nullable, falling back to bar-wide
     run_bg: ?types.Color = null, // Background; falls back to bg
@@ -426,6 +447,17 @@ pub const knobs = [_]knob.Knob{
     readerOr(knob.knob(&.{knob.place(types.section_bar, "position")}, "bar_position", .{ .enum_read = .{ .T = BarScreenPosition, .ci = true, .warn = true, .default_label = "top" } }), ""),
     // carousel_speed_px_s: title module only.
     readerOr(knob.knob(&.{knob.place(types.section_bar, "carousel_speed_px_s")}, "carousel_speed_px_s", .{ .int = .{ .T = u16, .min = 1, .max = 1000 } }), "title"),
+    // carousel_gap_px: consumed inside the carousel implementation.
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "carousel_gap_px")}, "carousel_gap_px", .{ .int = .{ .T = u16, .min = 0, .max = 1000 } }), "title"),
+    // systatus_interval_ms: the systatus module's poll cadence.
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "systatus_interval_ms")}, "systatus_interval_ms", .{ .int = .{ .T = i64, .min = 250, .max = 3_600_000 } }), "systatus"),
+    // volume_read_interval_ms: read by the volume sub through the slider's
+    // optional read-cadence hook (brightness keeps its static 1000 ms).
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "volume_read_interval_ms")}, "volume_read_interval_ms", .{ .int = .{ .T = i64, .min = 250, .max = 3_600_000 } }), "volume"),
+    // max_batched_redraws: consumed by bar.zig's settle loop (core). Bounds
+    // keep a typo from disabling settling (min 1) or from turning one batch
+    // into a long redraw loop.
+    readerOr(knob.knob(&.{knob.place(types.section_bar, "max_batched_redraws")}, "max_batched_redraws", .{ .int = .{ .T = u8, .min = 1, .max = 64 } }), ""),
 
     // Base palette: read before every color_from consumer below. The three
     // window-state colors (primary/secondary/alternative) plus text_color are
@@ -524,6 +556,9 @@ pub const knobs = [_]knob.Knob{
 pub const knob_reader_modules = [_][2][]const u8{
     .{ "carousel_enabled", "title" },
     .{ "carousel_speed_px_s", "title" },
+    .{ "carousel_gap_px", "title" },
+    .{ "systatus_interval_ms", "systatus" },
+    .{ "volume_read_interval_ms", "volume" },
     .{ "selected_bg", "tags" },
     .{ "selected_fg", "title" },
     .{ "run_prompt", "prompt" },
@@ -578,10 +613,19 @@ pub const fallback_sections = &[_][]const u8{"bar"};
 /// Inert family (D13/P2-50): `[bar.properties]` is read only when bare
 /// `[bar]` is present; the property maps would otherwise parse and do
 /// nothing, which the load warns about.
-pub const inert_families = &[_]types.InertFamily{.{
-    .parent = types.section_bar,
-    .child_exact = types.section_bar_properties,
-}};
+pub const inert_families = &[_]types.InertFamily{
+    .{
+        .parent = types.section_bar,
+        .child_exact = types.section_bar_properties,
+    },
+    // [bar.layout.left|center|right] is read only inside parseBar, which
+    // returns without [bar]: the columns would otherwise be customized into
+    // silence.
+    .{
+        .parent = types.section_bar,
+        .child_prefix = types.section_prefix_bar_layout,
+    },
+};
 
 /// The fragment parse entry: self-seed the owned defaults (icon padding to
 /// the workspace count read straight off the document, plus the default
@@ -697,6 +741,23 @@ fn boolFromEqualsToken(token: []const u8) ?struct { name: []const u8, value: boo
     return null;
 }
 
+/// Bounds for a `size=N` absolute text size in pixels: a bar segment smaller
+/// than a legible glyph or larger than the whole bar is a typo, and the
+/// unsupported spelling then falls through to the normal invalid-token warn
+/// instead of poisoning the layout.
+const size_px_min: u16 = 1;
+const size_px_max: u16 = 255;
+
+/// Parses the `size=N` token spelling of a segment's absolute text size, or
+/// null when the token is not `size=<int in 1..=255>`.
+fn sizeFromEqualsToken(token: []const u8) ?u16 {
+    const eq = std.mem.indexOfScalar(u8, token, '=') orelse return null;
+    if (!std.mem.eql(u8, token[0..eq], "size")) return null;
+    const n = std.fmt.parseInt(u16, token[eq + 1 ..], 10) catch return null;
+    if (n < size_px_min or n > size_px_max) return null;
+    return n;
+}
+
 /// The first color-carrying item of a composite `[bar.properties]` array
 /// value (`#RRGGBB`, `0xRRGGBB`, integer, or palette reference by full name).
 fn firstColorInItems(
@@ -754,7 +815,10 @@ fn applySegmentEntry(
             var props = SegmentProps{};
             var recognized = false;
             if (!is_value) {
-                if (boolFromEqualsToken(s)) |eq| {
+                if (sizeFromEqualsToken(s)) |px| {
+                    props.size = px;
+                    recognized = true;
+                } else if (boolFromEqualsToken(s)) |eq| {
                     if (setStyleFlag(&props, eq.name, eq.value)) recognized = true;
                 } else if (setStyleFlag(&props, s, true)) {
                     recognized = true;
@@ -798,6 +862,13 @@ fn applySegmentEntry(
                 i += 1;
                 continue;
             };
+            // `size=N` is numeric, not a bool spelling: parsed before the
+            // bool path so a valid size never falls through to the style warn.
+            if (sizeFromEqualsToken(token)) |px| {
+                props.size = px;
+                i += 1;
+                continue;
+            }
             // `name=true|false`, `name true`, `name 1|0`, or bare `name`
             // (true by default). Unified so the invalid-style warning lives once.
             const eq = boolFromEqualsToken(token);
