@@ -102,6 +102,10 @@ pub const Sub = struct {
     name: []const u8,
     /// Per-control poll cadence.
     read_interval_ms: i64 = 5000,
+    /// Runtime override of the poll cadence: a control whose cadence is a
+    /// bar-config knob (volume's `volume_read_interval_ms`) supplies a hook
+    /// reading the live config; a null hook keeps the static field.
+    read_interval_ms_of: ?*const fn () i64 = null,
     /// The control's 0-100 level, or null while it has no answer (the control
     /// then renders nothing: zero-width slot, unclickable). Null HOOK = always
     /// present.

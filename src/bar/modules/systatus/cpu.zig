@@ -92,9 +92,14 @@ pub fn bootAverage(cur: Sample) ?u8 {
     return @intCast(@min(busy * 100 / cur.total, 100));
 }
 
-var cpu_prev: ?Sample = null;
-
-var g_num: [16]u8 = undefined;
+/// Owner state (P2-58): the previous /proc/stat sample (for the util delta)
+/// plus the format scratch buffer. Single main-thread instance; no loose
+/// module-level scalars.
+const CpuState = struct {
+    prev: ?Sample = null,
+    num: [16]u8 = undefined,
+};
+var g: CpuState = .{};
 
 /// Whether a short read still yielded a whole aggregate line. PURE, so the
 /// "truncated is fine here, truncated *inside line 1* is not" rule is
@@ -117,12 +122,12 @@ fn read() ?systatus.Sample {
     if (!aggregateLineComplete(r.bytes, r.truncated)) return null;
     const cur = parseCpuLine(r.bytes) orelse return null;
 
-    const pct = if (cpu_prev) |prev|
+    const pct = if (g.prev) |prev|
         utilBetween(prev, cur)
     else
         bootAverage(cur);
-    cpu_prev = cur;
-    return systatus.percentSample(&g_num, pct orelse return null);
+    g.prev = cur;
+    return systatus.percentSample(&g.num, pct orelse return null);
 }
 
 /// This readout's binding to the systatus surface (`systatus.Sub`): the

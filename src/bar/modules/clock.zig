@@ -48,7 +48,7 @@ pub fn measureStringFor(m: DisplayMode) []const u8 {
 /// The clock's reserved-width probe: the string the bar measures at
 /// layout width. At most one module provides a `measureString` hook.
 fn measureString() []const u8 {
-    return measureStringFor(mode);
+    return measureStringFor(g.mode);
 }
 
 /// Display modes cycled by clicking the segment. date_time is the default and
@@ -60,13 +60,32 @@ pub const DisplayMode = enum(u2) { date_time, time, date };
 const time_format: []const u8 = "%H:%M:%S";
 const date_format: []const u8 = "%Y-%m-%d";
 
-/// Current on-screen clock mode. Plain var -- only the main thread touches it.
-var mode: DisplayMode = .date_time;
+/// The format-byte clip shared by the render record's store and compare.
+pub const fmt_limit: usize = 128;
+
+/// Owner state: the live display mode plus the on-screen render record
+/// (the epoch second last rendered, the mode rendered under, and an OWNED
+/// copy of the effective format -- a fixed buffer, never a slice into config
+/// memory; see recordRendered). Single main-thread instance (P2-58); no
+/// loose module-level scalars. Comparing the second catches the passage of
+/// time; the format's BYTES catch config reloads; the mode catches
+/// display-mode cycles whose effective format happens to be byte-identical
+/// (date_time configured as the built-in time format), where the bytes alone
+/// would read "unchanged" even though the mode's width probe -- the
+/// reservation -- moved.
+const ClockState = struct {
+    mode: DisplayMode = .date_time,
+    rendered_sec: i64 = -1,
+    rendered_mode: DisplayMode = .date_time,
+    rendered_fmt_buf: [fmt_limit]u8 = undefined,
+    rendered_fmt_len: usize = 0,
+};
+var g: ClockState = .{};
 
 /// The live display mode: how a test observes that a click actually reached
 /// `onClickHook` (the cycle itself has no other externally visible effect).
 pub inline fn displayMode() DisplayMode {
-    return mode;
+    return g.mode;
 }
 
 /// The format `m` maps `base` (the configured format) to: the config format
@@ -90,21 +109,6 @@ pub fn cycledMode(m: DisplayMode, forward: bool) DisplayMode {
         .date => if (forward) .date_time else .time,
     };
 }
-
-/// What is currently on screen: the epoch second last rendered, the display
-/// mode rendered under, and an OWNED copy of the effective format (a fixed
-/// buffer, never a slice into config memory -- see recordRendered). Plain
-/// vars -- only the main thread touches them. Comparing the second catches
-/// the passage of time; the format's BYTES catch config reloads; the mode
-/// catches display-mode cycles whose effective format happens to be
-/// byte-identical (date_time configured as the built-in time format), where
-/// the bytes alone would read "unchanged" even though the mode's width probe
-/// -- the reservation -- moved.
-pub const fmt_limit: usize = 128;
-var rendered_sec: i64 = -1;
-var rendered_mode: DisplayMode = .date_time;
-var rendered_fmt_buf: [fmt_limit]u8 = undefined;
-var rendered_fmt_len: usize = 0;
 
 /// The record's clip: the store and the compare both truncate `fmt` here, so
 /// they always see the same byte span. formatTime's own stack copy (fmt_z) is
@@ -149,8 +153,8 @@ pub fn stalenessFor(
 /// leaves it stale so the next boundary retries.
 fn secondElapsed(base_fmt: []const u8) bool {
     const sec = currentEpochSeconds();
-    const fmt = effectiveFormatFor(base_fmt, mode);
-    return stalenessFor(sec, rendered_sec, mode, rendered_mode, fmt, rendered_fmt_buf[0..rendered_fmt_len]);
+    const fmt = effectiveFormatFor(base_fmt, g.mode);
+    return stalenessFor(sec, g.rendered_sec, g.mode, g.rendered_mode, fmt, g.rendered_fmt_buf[0..g.rendered_fmt_len]);
 }
 
 /// Records (sec, mode, format) as the on-screen state, copying the format
@@ -161,11 +165,11 @@ fn secondElapsed(base_fmt: []const u8) bool {
 /// formatTime (the storm guard documented there), so a render failure still
 /// records the attempt.
 fn recordRendered(sec: i64, m: DisplayMode, fmt: []const u8) void {
-    rendered_sec = sec;
-    rendered_mode = m;
+    g.rendered_sec = sec;
+    g.rendered_mode = m;
     const src = clip(fmt);
-    rendered_fmt_len = src.len;
-    @memcpy(rendered_fmt_buf[0..src.len], src);
+    g.rendered_fmt_len = src.len;
+    @memcpy(g.rendered_fmt_buf[0..src.len], src);
 }
 
 /// Deadline arithmetic, factored out pure so tests can drive the clock.
@@ -193,14 +197,14 @@ fn tickDeadlineMs() i32 {
 fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_x: u16) !contract.Painted {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
-    const fmt = effectiveFormatFor(drawing.clockFormat(config), mode);
+    const fmt = effectiveFormatFor(drawing.clockFormat(config), g.mode);
     // Record the attempt BEFORE rendering. A persistent render failure (e.g.
     // fonts unavailable) must degrade to one retry per boundary -- the
     // second-boundary cadence -- never to a per-event-batch retry storm, and
     // only an assignment placed ahead of the fallible call can promise that.
     // A genuine transient miss simply shows the previous second for up to one
     // extra second, exactly as the cadence design intends.
-    recordRendered(sec, mode, fmt);
+    recordRendered(sec, g.mode, fmt);
     // Propagation is fine: the record above is already written, so a failure
     // still leaves the next retry one boundary away rather than one event
     // batch away.
@@ -212,7 +216,7 @@ fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_
         start_x,
         "clock",
         str,
-        measureStringFor(mode),
+        measureStringFor(g.mode),
         config.segmentProps("clock"),
     ));
 }
@@ -251,7 +255,7 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
 /// mode's text cannot be blitted into the outgoing mode's wider reservation),
 /// which is why this hook neither redraws nor measures anything itself.
 fn onClickHook(ctx: *const contract.ClickCtx) bool {
-    mode = cycledMode(mode, ctx.is_left);
+    g.mode = cycledMode(g.mode, ctx.is_left);
     return true;
 }
 

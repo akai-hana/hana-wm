@@ -85,9 +85,11 @@ pub inline fn castDraw(ctx: *anyopaque) *DrawCtx {
 /// Per-frame scratch shared by every segment's `draw(ctx, x)` call. Built once
 /// per frame by the bar; `width` is the segment's reserved row width, set by
 /// the bar immediately before invoking each segment's draw hook (needed by the
-/// title renderer to return its advanced x and by nothing else). The title
-/// snapshot slots below are filled by the bar each frame from in-process
-/// caches.
+/// title renderer to return its advanced x and by nothing else). The X-free
+/// frame environment (config/height/allocator/width/name/frame) is also
+/// exposed as a typed `contract.DrawEnv` via `drawEnv()`, so a headless
+/// consumer can read it without the X pieces (`dc`, `conn`), which stay opaque
+/// here exactly as `KeyPressEvent` is opaque in the contract.
 pub const DrawCtx = struct {
     dc: *drawing.DrawContext,
     config: bar_config.Config,
@@ -118,6 +120,21 @@ pub const DrawCtx = struct {
     minimized_title: []const u8 = "",
     current_ws_entries: []const vocab.TitleEntry = &.{},
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void) = &.{},
+
+    /// The X-free frame environment, typed in the contract. Projects the
+    /// non-X fields above; `dc`/`conn` (X) and the title slots are excluded,
+    /// so a headless reader can assemble and consume just this. This is the
+    /// typed `DrawEnv` the bar contract names.
+    pub fn drawEnv(self: *const DrawCtx) contract.DrawEnv {
+        return .{
+            .config = self.config,
+            .height = self.height,
+            .allocator = self.allocator,
+            .width = self.width,
+            .name = self.name,
+            .frame = self.frame,
+        };
+    }
 
     /// The title renderer's stable per-frame context (dc/config/height/
     /// start_x/width/conn). The start_x/width are the segment's on-screen box.

@@ -15,7 +15,7 @@
 //! sysfs device exists; reads prefer sysfs whenever a node is present. The
 //! backend flips to the spawn path permanently on the FIRST denied sysfs
 //! write, not per event. When no backend can write the level still displays
-//! but interactions no-op (`g_read_only`), and a sub whose sysfs device has
+//! but interactions no-op (`g.read_only`), and a sub whose sysfs device has
 //! nothing usable renders nothing (zero-width slot).
 //!
 //! Device selection: auto-discovery scans `/sys/class/backlight/*` and picks
@@ -53,11 +53,6 @@ const default_format = "BRT {pct}%";
 const Backend = enum { unknown, sysfs, brightnessctl };
 pub const Class = enum { backlight, leds };
 
-/// Read/write resolution, mirroring the volume sub's auto-detection: sysfs
-/// first, brightnessctl as the no-sysfs fallback, `unknown` while nothing has
-/// answered (re-probed while within the absent backoff, see below).
-var g_backend: Backend = .unknown;
-
 /// Consecutive total failures (no sysfs device AND no brightnessctl answer)
 /// tolerated before the module counts itself absent. Mirrors systatus'
 /// `miss_tolerance`: a single transient miss (driver rebind, a tool missing
@@ -73,22 +68,31 @@ const miss_tolerance: u8 = 3;
 /// visible.
 const absent_reprobe_ms: i64 = 30_000;
 
-/// Consecutive total failures; reset by the first success.
-var g_misses: u8 = 0;
-/// Realtime deadline before the next total-failure attempt; 0 = not backed
-/// off. Set when `g_misses` exhausts `miss_tolerance`, re-armed on every
-/// failed re-probe, cleared by any success.
-var g_absent_until_ms: i64 = 0;
-var g_class: Class = .backlight;
-var g_dev: [max_dev_len]u8 = undefined;
-var g_dev_len: usize = 0;
-/// `brightness_device` pin copied from config at draw time (config slices are
-/// freed on reload; we keep an owned copy so poll-time reads are safe).
-var g_pin: [max_dev_len]u8 = undefined;
-var g_pin_len: usize = 0;
-var g_pct: u8 = 0;
-var g_has_value: bool = false;
-var g_read_only: bool = false;
+/// Owner state (P2-58): the resolved backend/device, the miss/backoff
+/// bookkeeping, the owned pin copy, and the display value. Read/write
+/// resolution mirrors the volume sub's auto-detection: sysfs first,
+/// brightnessctl as the no-sysfs fallback, `unknown` while nothing has
+/// answered (re-probed while within the absent backoff). `misses` is
+/// consecutive total failures; reset by the first success. `absent_until_ms`
+/// is the realtime deadline before the next total-failure attempt; 0 = not
+/// backed off. Set when `misses` exhausts `miss_tolerance`, re-armed on every
+/// failed re-probe, cleared by any success. `pin` is `brightness_device`
+/// copied from config at draw time (config slices are freed on reload; we
+/// keep an owned copy so poll-time reads are safe).
+const BrightnessState = struct {
+    backend: Backend = .unknown,
+    misses: u8 = 0,
+    absent_until_ms: i64 = 0,
+    class: Class = .backlight,
+    dev: [max_dev_len]u8 = undefined,
+    dev_len: usize = 0,
+    pin: [max_dev_len]u8 = undefined,
+    pin_len: usize = 0,
+    pct: u8 = 0,
+    has_value: bool = false,
+    read_only: bool = false,
+};
+var g: BrightnessState = .{};
 
 const bt_get_cmd = "brightnessctl get";
 const bt_max_cmd = "brightnessctl max";
@@ -260,46 +264,46 @@ pub fn findDevice(base: []const u8, pin: []const u8, out_class: *Class, out_dev:
 }
 
 fn discoverDevice(base: []const u8) void {
-    if (findDevice(base, g_pin[0..g_pin_len], &g_class, &g_dev)) |n| {
-        g_dev_len = n;
+    if (findDevice(base, g.pin[0..g.pin_len], &g.class, &g.dev)) |n| {
+        g.dev_len = n;
     } else {
-        g_dev_len = 0;
+        g.dev_len = 0;
     }
 }
 
 /// Re-reads the level from the live backend (sysfs preferred, brightnessctl
 /// as the no-sysfs fallback). Returns true when this read changed the state.
 fn readBrightness() bool {
-    const had_value = g_has_value;
-    const old_pct = g_pct;
+    const had_value = g.has_value;
+    const old_pct = g.pct;
 
     // Absent backoff: while the last attempts total-failed past tolerance,
     // skip discovery and both fallback spawns entirely until the slow
     // re-probe is due (clock compare only -- the wakeup itself stays cheap).
-    if (core.realtimeMs() < g_absent_until_ms) return false;
+    if (core.realtimeMs() < g.absent_until_ms) return false;
 
     // Re-discover while the device is unresolved and we are not already on
     // the brightnessctl fallback (which means no sysfs device answered); the
     // scan cost is a handful of tiny file reads, once per poll.
-    if (g_dev_len == 0 and g_backend != .brightnessctl) discoverDevice("");
-    if (g_dev_len != 0) {
-        if (readPctFrom("", g_class, g_dev[0..g_dev_len])) |p| {
-            g_backend = .sysfs;
-            g_pct = p;
-            g_has_value = true;
+    if (g.dev_len == 0 and g.backend != .brightnessctl) discoverDevice("");
+    if (g.dev_len != 0) {
+        if (readPctFrom("", g.class, g.dev[0..g.dev_len])) |p| {
+            g.backend = .sysfs;
+            g.pct = p;
+            g.has_value = true;
             noteProbe(true);
-            return !had_value or g_pct != old_pct;
+            return !had_value or g.pct != old_pct;
         }
     }
     if (brightnessctlRead()) |p| {
-        g_backend = .brightnessctl;
-        g_pct = p;
-        g_has_value = true;
+        g.backend = .brightnessctl;
+        g.pct = p;
+        g.has_value = true;
         noteProbe(true);
-        return !had_value or g_pct != old_pct;
+        return !had_value or g.pct != old_pct;
     }
-    g_backend = .unknown;
-    g_dev_len = 0;
+    g.backend = .unknown;
+    g.dev_len = 0;
     noteProbe(false);
     return false;
 }
@@ -311,12 +315,12 @@ fn readBrightness() bool {
 /// `absent_reprobe_ms` instead of a spawn per second).
 fn noteProbe(ok: bool) void {
     if (ok) {
-        g_misses = 0;
-        g_absent_until_ms = 0;
+        g.misses = 0;
+        g.absent_until_ms = 0;
         return;
     }
-    if (g_misses < std.math.maxInt(u8)) g_misses += 1;
-    if (g_misses >= miss_tolerance) g_absent_until_ms = core.realtimeMs() + absent_reprobe_ms;
+    if (g.misses < std.math.maxInt(u8)) g.misses += 1;
+    if (g.misses >= miss_tolerance) g.absent_until_ms = core.realtimeMs() + absent_reprobe_ms;
 }
 
 /// Reads the level through `brightnessctl` when no sysfs device answers
@@ -345,26 +349,26 @@ fn brightnessctlApply(pct: u8) bool {
 /// is microseconds and needs no window, while the `brightnessctl` fallback is
 /// a fork+exec that does (see `slider.CommitCost`).
 fn commitCost() slider.CommitCost {
-    return if (g_backend == .sysfs) .immediate else .rate_limited;
+    return if (g.backend == .sysfs) .immediate else .rate_limited;
 }
 
 /// Applies a level to whatever backend can write: a direct sysfs write when
 /// that backend is live (one tiny file write, un-throttled -- the common case
-/// with a write policy), otherwise a `brightnessctl` spawn. `g_read_only` is
+/// with a write policy), otherwise a `brightnessctl` spawn. `g.read_only` is
 /// set only when every path fails (sysfs denied and no working
 /// brightnessctl). Scheduled by the slider core's throttle, which owns the
 /// commit clock.
 fn commitPct(v: u8) void {
     const pct = slider.clampPct(v);
-    const direct = g_backend == .sysfs;
-    const wrote: WriteResult = if (direct) applyPctTo("", g_class, g_dev[0..g_dev_len], pct) else .transient;
+    const direct = g.backend == .sysfs;
+    const wrote: WriteResult = if (direct) applyPctTo("", g.class, g.dev[0..g.dev_len], pct) else .transient;
     var ok = wrote == .ok;
     if (!ok) {
         // A usable device may still refuse the write (root-only node, no udev
         // rule): fall back to the spawn, and remember the flip so every later
         // commit spawns and stays rate-limited (once per window, not per event).
         if (brightnessctlApply(pct)) {
-            if (direct) g_backend = .brightnessctl;
+            if (direct) g.backend = .brightnessctl;
             ok = true;
         }
     }
@@ -373,7 +377,7 @@ fn commitPct(v: u8) void {
     // vanishing while a driver rebounds, must not turn the module into a
     // permanent silent no-op for the rest of the session while the segment
     // still renders a level the user cannot change.
-    g_read_only = !ok and wrote == .denied;
+    g.read_only = !ok and wrote == .denied;
 }
 
 /// One-shot apply (press, drag end): commit then re-read so the display
@@ -385,7 +389,7 @@ fn write(w: slider.Write, v: u8) void {
     switch (w) {
         // Scroll/drag motion: the label follows immediately, the backend write
         // is the core scheduler's business.
-        .preview => g_pct = slider.clampPct(v),
+        .preview => g.pct = slider.clampPct(v),
         // The scheduler's commit: write, and let the next read reconcile.
         .commit => commitPct(v),
         // Press set / drag end: write, then re-read so the label follows the
@@ -413,40 +417,40 @@ fn renderDisplay(config: bar_config.Config, pct: u8, buf: []u8) drawing.Label {
 fn cacheConfigPin(config: bar_config.Config) void {
     const pin = config.brightness_device orelse "";
     const new_len = @min(pin.len, max_dev_len);
-    const changed = g_pin_len != new_len or !std.mem.eql(u8, g_pin[0..g_pin_len], pin[0..new_len]);
-    g_pin_len = new_len;
-    @memcpy(g_pin[0..g_pin_len], pin[0..g_pin_len]);
+    const changed = g.pin_len != new_len or !std.mem.eql(u8, g.pin[0..g.pin_len], pin[0..new_len]);
+    g.pin_len = new_len;
+    @memcpy(g.pin[0..g.pin_len], pin[0..g.pin_len]);
     if (changed) {
-        g_misses = 0;
-        g_absent_until_ms = 0;
+        g.misses = 0;
+        g.absent_until_ms = 0;
     }
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-/// Test-only seam: the display state `label` reads (`g_pct`) is module-private,
+/// Test-only seam: the display state `label` reads (`g.pct`) is module-private,
 /// and its tests live in `src/test/bar/brightness_test.zig`, which needs this
 /// to set their state: this harness runs tests from the test ROOT, so an
 /// inline test in an imported module is never even ANALYZED. A plain `pub` on
 /// the global would export mutable global state to every importer; this
 /// scopes the write to an obviously test-shaped name.
 pub fn setDisplayForTest(pct: u8) void {
-    g_pct = pct;
+    g.pct = pct;
 }
 
 pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
     cacheConfigPin(config);
-    return renderDisplay(config, g_pct, buf);
+    return renderDisplay(config, g.pct, buf);
 }
 
 // Current level / presence / write-gate hooks for the core.
 
 /// The displayed level, or null while no backlight device has answered.
 fn currentLevel() ?u8 {
-    return if (g_has_value) g_pct else null;
+    return if (g.has_value) g.pct else null;
 }
 
 fn writable() bool {
-    return !g_read_only;
+    return !g.read_only;
 }
 
 pub const sub: slider.Sub = .{

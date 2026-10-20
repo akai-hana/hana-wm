@@ -25,7 +25,12 @@ const segmod = @import("segment");
 const contract = @import("bar_contract");
 
 const core = @import("core");
-const read_interval_ms: i64 = 2000;
+
+/// Present-readout poll cadence, from the bar config knob (default 2000 ms).
+/// Absent readouts back off to `absent_reprobe_ms` regardless.
+fn readIntervalMs() i64 {
+    return core.getState().config.bar.systatus_interval_ms;
+}
 
 /// Length of the per-segment rendered-text buffers: room for "<label> <pct>%"
 /// (worst-case label plus a 3-digit readout). Larger than any rendered slot.
@@ -240,7 +245,7 @@ fn pollDeadlineMsFor(comptime idx: usize) i32 {
     // An absent readout still contributes a wakeup, but only on the slow
     // re-probe cadence: stopping entirely would make a hot-swapped battery or
     // a since-boot /sysfs file invisible forever.
-    const interval: i64 = if (st.absent) absent_reprobe_ms else read_interval_ms;
+    const interval: i64 = if (st.absent) absent_reprobe_ms else readIntervalMs();
     const left = st.next_read_ms - core.realtimeMs();
     if (left <= 0) return 0;
     return @intCast(@min(left, interval));
@@ -253,7 +258,7 @@ fn onPollWakeupFor(comptime idx: usize) void {
     // The next deadline is set from the same absent/present decision the poll
     // itself makes, so the backing-off and the wakeup cannot disagree.
     st.next_read_ms = core.realtimeMs() +
-        (if (st.absent) absent_reprobe_ms else read_interval_ms);
+        (if (st.absent) absent_reprobe_ms else readIntervalMs());
     if (refresh(idx)) st.pending_redraw = true;
 }
 
@@ -273,7 +278,7 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     const st = &g_readouts[idx];
     if (!st.armed) {
         st.armed = true;
-        st.next_read_ms = core.realtimeMs() + read_interval_ms;
+        st.next_read_ms = core.realtimeMs() + readIntervalMs();
         _ = refresh(idx); // prime the text so the first draw isn't empty
     }
 

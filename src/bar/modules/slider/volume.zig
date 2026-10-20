@@ -43,32 +43,40 @@ const default_muted_format = "MUTE";
 
 const Backend = enum { unknown, pulse, alsa };
 
-var g_backend: Backend = .unknown;
-var g_pct: u8 = 0;
-var g_muted: bool = false;
-var g_has_value: bool = false;
-
-/// Negative cache for a ladder that found no working backend. Null
-/// until the first total failure. Without it every read against a dead daemon
-/// re-walks all four rungs -- up to three `popen`s, each blocking the WM
-/// loop -- and the poll, every press and every right-click pays it again.
-var g_ladder_failed_at_ms: ?i64 = null;
-
-/// Attached handles for the two in-process rungs. Non-null means the rung won
-/// the ladder walk and is latched. Probed lazily; given up on when a read
-/// fails (the native pulse backend is torn down so the next walk attaches
-/// fresh), and `probeDue`'s reachability recheck is what allows a
-/// late-appearing daemon to be picked up.
-var g_native_pulse: ?native_pulse.Backend = null;
-var g_native_alsa: ?native_alsa.Master = null;
-/// When the daemon is next re-checked for having come back. Separate from the
-/// negative cache's deadline so the cheap reachability check can trigger a
-/// retry long before the cache expires.
-var g_pulse_recheck_at_ms: i64 = 0;
-/// Last observed daemon reachability, so a CHANGE can be recognised. Null
-/// until first observed.
-var g_pulse_reachable: ?bool = null;
-/// How long a failed ladder is trusted before being re-walked regardless.
+/// Owner state (P2-58): the latched backend, the display value, the ladder
+/// negative cache, the two in-process rung handles, and the optimistic-commit
+/// muted bits. Attached handles for the two in-process rungs: non-null means
+/// the rung won the ladder walk and is latched. Probed lazily; given up on
+/// when a read fails (the native pulse backend is torn down so the next walk
+/// attaches fresh), and `probeDue`'s reachability recheck is what allows a
+/// late-appearing daemon to be picked up. `ladder_failed_at_ms` is the
+/// negative cache for a ladder that found no working backend. Null until the
+/// first total failure. Without it every read against a dead daemon re-walks
+/// all four rungs -- up to three `popen`s, each blocking the WM loop -- and
+/// the poll, every press and every right-click pays it again.
+/// `pulse_recheck_at_ms` is when the daemon is next re-checked for having
+/// come back. Separate from the negative cache's deadline so the cheap
+/// reachability check can trigger a retry long before the cache expires.
+/// `pulse_reachable` is the last observed daemon reachability, so a CHANGE
+/// can be recognised. Null until first observed. `pulse_muted`/`alsa_muted`
+/// are the last muted bit reported by each native rung's ladder walk, used by
+/// the optimistic-commit path to echo the committed state before the next
+/// read lands.
+const VolumeState = struct {
+    backend: Backend = .unknown,
+    pct: u8 = 0,
+    muted: bool = false,
+    has_value: bool = false,
+    ladder_failed_at_ms: ?i64 = null,
+    native_pulse: ?native_pulse.Backend = null,
+    native_alsa: ?native_alsa.Master = null,
+    pulse_recheck_at_ms: i64 = 0,
+    pulse_reachable: ?bool = null,
+    pulse_muted: bool = false,
+    alsa_muted: bool = false,
+    reason_logged: bool = false,
+};
+var g: VolumeState = .{};
 pub const reprobe_interval_ms: i64 = 15_000;
 
 /// What the negative cache says about one poll: whether the ladder may be
@@ -114,18 +122,18 @@ pub fn probeDecision(
 /// edge, and the only place that mutates the cache's own bookkeeping.
 fn probeDue() bool {
     const now = core.realtimeMs();
-    const recheck_window = now >= g_pulse_recheck_at_ms;
+    const recheck_window = now >= g.pulse_recheck_at_ms;
     const reachable = if (recheck_window) native_pulse.pulseReachable() else false;
     const probe = probeDecision(
         now,
-        g_ladder_failed_at_ms,
-        g_pulse_recheck_at_ms,
-        g_pulse_reachable,
+        g.ladder_failed_at_ms,
+        g.pulse_recheck_at_ms,
+        g.pulse_reachable,
         reachable,
     );
     if (recheck_window) {
-        g_pulse_recheck_at_ms = now + reprobe_interval_ms;
-        g_pulse_reachable = reachable;
+        g.pulse_recheck_at_ms = now + reprobe_interval_ms;
+        g.pulse_reachable = reachable;
     }
     // A daemon that appeared (or vanished) is worth a fresh native attach: the
     // one-shot probed flag would otherwise write the machine off for the rest
@@ -141,8 +149,8 @@ pub const Rung = enum { native_pulse, pactl, amixer, native_alsa, none };
 
 pub fn latchedRung(backend: Backend) Rung {
     return switch (backend) {
-        .pulse => if (g_native_pulse != null) .native_pulse else .pactl,
-        .alsa => if (g_native_alsa != null) .native_alsa else .amixer,
+        .pulse => if (g.native_pulse != null) .native_pulse else .pactl,
+        .alsa => if (g.native_alsa != null) .native_alsa else .amixer,
         .unknown => .none,
     };
 }
@@ -188,18 +196,16 @@ pub fn parsePercent(out: []const u8) ?u8 {
     return null;
 }
 
-/// Whether the "no sound system at all" reason has already been logged. Armed
-/// once per process: the poll loop would otherwise repeat the same line every
-/// 5 s for the life of the session, and a bar that says the same thing every
-/// five seconds is how a real fault gets ignored.
-var g_reason_logged: bool = false;
-
 /// The one-time diagnostic for a machine where every rung failed. Distinct
 /// from the MUTE display: MUTE is the steady state (the sink may genuinely be
 /// muted), this is the one line saying *why* there is no level to show.
+/// `reason_logged` (VolumeState) is armed once per process: the poll loop
+/// would otherwise repeat the same line every 5 s for the life of the
+/// session, and a bar that says the same thing every five seconds is how a
+/// real fault gets ignored.
 fn logNoBackend() void {
-    if (g_reason_logged) return;
-    g_reason_logged = true;
+    if (g.reason_logged) return;
+    g.reason_logged = true;
     log.warn(
         "volume: no usable backend (libpulse.so.0, pactl, amixer and " ++
             "/dev/snd/controlC* all failed); showing MUTE",
@@ -214,12 +220,12 @@ fn readVolume() bool {
     // A LATCHED backend is read directly: the latch takes the ladder off the
     // hot path, so a dead daemon does not spawn pactl/amixer on every poll,
     // press and right-click.
-    if (g_backend != .unknown) {
+    if (g.backend != .unknown) {
         if (readLatched()) |changed| return changed;
         // The latched backend stopped answering (daemon restarted, card
         // unplugged). Forget it and let the ladder decide again -- but the
         // negative cache still applies, so this is not a free re-probe either.
-        g_backend = .unknown;
+        g.backend = .unknown;
     }
     if (!probeDue()) return false;
     return runLadder();
@@ -228,51 +234,51 @@ fn readVolume() bool {
 /// Reads only the currently latched backend. Returns null when that backend
 /// does not answer, which tells `readVolume` to fall back to the ladder.
 fn readLatched() ?bool {
-    const had_value = g_has_value;
-    const old_pct = g_pct;
-    const old_muted = g_muted;
+    const had_value = g.has_value;
+    const old_pct = g.pct;
+    const old_muted = g.muted;
     // One read per rung. `pactl` needs two commands (level, then mute), so the
     // two rungs share a shape but not a body.
-    switch (latchedRung(g_backend)) {
+    switch (latchedRung(g.backend)) {
         .native_pulse => {
-            const sink = g_native_pulse.?.readSink() orelse {
+            const sink = g.native_pulse.?.readSink() orelse {
                 // The native backend stopped answering (daemon died or
                 // restarted): tear it DOWN and forget it, so the next ladder
                 // walk attaches fresh instead of holding a dead context --
                 // and its worker thread -- for the rest of the session.
-                g_native_pulse.?.deinit();
-                g_native_pulse = null;
+                g.native_pulse.?.deinit();
+                g.native_pulse = null;
                 return null;
             };
-            g_pct = sink.pct;
-            g_muted = sink.muted;
+            g.pct = sink.pct;
+            g.muted = sink.muted;
         },
         .pactl => {
             var buf: [1024]u8 = undefined;
             const out = spawn_capture.runOut(pactl_vol_cmd, &buf);
-            g_pct = parsePercent(out) orelse return null;
+            g.pct = parsePercent(out) orelse return null;
             const out2 = spawn_capture.runOut(pactl_mute_cmd, &buf);
-            g_muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
+            g.muted = std.mem.indexOf(u8, out2, "Mute: yes") != null;
         },
         .amixer => {
             var buf: [1024]u8 = undefined;
             const out = spawn_capture.runOut(amixer_vol_cmd, &buf);
-            g_pct = parsePercent(out) orelse return null;
-            g_muted = std.mem.indexOf(u8, out, "[off]") != null;
+            g.pct = parsePercent(out) orelse return null;
+            g.muted = std.mem.indexOf(u8, out, "[off]") != null;
         },
         .native_alsa => {
-            g_pct = g_native_alsa.?.readVolumePct() orelse return null;
-            g_muted = g_native_alsa.?.readMuted() orelse false;
+            g.pct = g.native_alsa.?.readVolumePct() orelse return null;
+            g.muted = g.native_alsa.?.readMuted() orelse false;
         },
         .none => return null,
     }
-    g_has_value = true;
-    g_reason_logged = false;
+    g.has_value = true;
+    g.reason_logged = false;
     return changedFrom(had_value, old_pct, old_muted);
 }
 
 fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
-    return !had_value or g_pct != old_pct or g_muted != old_muted;
+    return !had_value or g.pct != old_pct or g.muted != old_muted;
 }
 
 /// The four-rung ladder, reached only when nothing is latched (or the latch
@@ -296,44 +302,42 @@ fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
 /// pulseaudio-utils, or a kernel ALSA box without alsa-utils, has no CLI at all
 /// and is reachable only through them.
 fn runLadder() bool {
-    const had_value = g_has_value;
-    const old_pct = g_pct;
-    const old_muted = g_muted;
+    const had_value = g.has_value;
+    const old_pct = g.pct;
+    const old_muted = g.muted;
     var ok = false;
 
     if (tryRungNativePulse()) {
         ok = true;
     } else if (tryRung(.pulse, pactl_vol_cmd, pactl_mute_cmd, "Mute: yes")) |v| {
-        g_pct = v;
-        g_muted = g_pulse_muted;
-        g_backend = .pulse;
+        g.pct = v;
+        g.muted = g.pulse_muted;
+        g.backend = .pulse;
         ok = true;
     } else if (tryRung(.alsa, amixer_vol_cmd, "", "[off]")) |v| {
-        g_pct = v;
-        g_muted = g_alsa_muted;
-        g_backend = .alsa;
+        g.pct = v;
+        g.muted = g.alsa_muted;
+        g.backend = .alsa;
         ok = true;
     } else if (tryRungNativeAlsa()) {
         ok = true;
     } else {
-        g_backend = .unknown;
+        g.backend = .unknown;
     }
 
-    g_ladder_failed_at_ms = noteLadderResult(ok, core.realtimeMs());
+    g.ladder_failed_at_ms = noteLadderResult(ok, core.realtimeMs());
     if (!ok) {
         logNoBackend();
         return false;
     }
-    g_has_value = true;
-    g_reason_logged = false;
+    g.has_value = true;
+    g.reason_logged = false;
     return changedFrom(had_value, old_pct, old_muted);
 }
 
 /// Mute flag captured alongside the level by `tryRung`: the two subprocess
-/// rungs differ only in their mute token and command set.
-var g_pulse_muted: bool = false;
-var g_alsa_muted: bool = false;
-
+/// rungs differ only in their mute token and command set. Stored in
+/// VolumeState.pulse_muted / alsa_muted.
 /// One subprocess rung: run `vol_cmd`, parse a percentage, then derive the mute
 /// state. `mute_cmd` empty means the mute answer is in the volume output
 /// (`amixer` reports both in one line).
@@ -348,38 +352,38 @@ fn tryRung(backend: Backend, vol_cmd: []const u8, mute_cmd: []const u8, on_token
         break :blk std.mem.indexOf(u8, m, on_token) != null;
     };
     switch (backend) {
-        .pulse => g_pulse_muted = muted,
-        .alsa => g_alsa_muted = muted,
+        .pulse => g.pulse_muted = muted,
+        .alsa => g.alsa_muted = muted,
         .unknown => {},
     }
     return pct;
 }
 
 fn tryRungNativePulse() bool {
-    if (g_native_pulse == null) g_native_pulse = native_pulse.attach();
-    if (g_native_pulse) |*np| {
+    if (g.native_pulse == null) g.native_pulse = native_pulse.attach();
+    if (g.native_pulse) |*np| {
         if (np.readSink()) |sink| {
-            g_backend = .pulse;
-            g_pct = sink.pct;
-            g_muted = sink.muted;
+            g.backend = .pulse;
+            g.pct = sink.pct;
+            g.muted = sink.muted;
             return true;
         }
         // Attached but unresponsive: tear down and forget, mirroring the
         // readLatched failure path -- a fresh attach is the only way back to
         // the native rung after a daemon restart.
         np.deinit();
-        g_native_pulse = null;
+        g.native_pulse = null;
     }
     return false;
 }
 
 fn tryRungNativeAlsa() bool {
-    if (g_native_alsa == null) g_native_alsa = native_alsa.openMaster();
-    if (g_native_alsa) |*na| {
+    if (g.native_alsa == null) g.native_alsa = native_alsa.openMaster();
+    if (g.native_alsa) |*na| {
         if (na.readVolumePct()) |pct| {
-            g_backend = .alsa;
-            g_pct = pct;
-            g_muted = na.readMuted() orelse false;
+            g.backend = .alsa;
+            g.pct = pct;
+            g.muted = na.readMuted() orelse false;
             return true;
         }
     }
@@ -394,7 +398,7 @@ fn tryRungNativeAlsa() bool {
 /// answer to a constant here would push that distinction into every
 /// caller (and let the subprocess rungs commit on every scroll event).
 fn commitCost() slider.CommitCost {
-    return switch (latchedRung(g_backend)) {
+    return switch (latchedRung(g.backend)) {
         .native_pulse, .native_alsa => .immediate,
         .pactl, .amixer, .none => .rate_limited,
     };
@@ -402,9 +406,9 @@ fn commitCost() slider.CommitCost {
 
 fn commitPct(v: u8) void {
     const pct = slider.clampPct(v);
-    switch (latchedRung(g_backend)) {
+    switch (latchedRung(g.backend)) {
         .native_pulse => {
-            _ = g_native_pulse.?.setVolumePct(pct);
+            _ = g.native_pulse.?.setVolumePct(pct);
         },
         .pactl => {
             var buf: [64]u8 = undefined;
@@ -417,7 +421,7 @@ fn commitPct(v: u8) void {
             _ = spawn_capture.runOk(cmd);
         },
         .native_alsa => {
-            _ = g_native_alsa.?.setVolumePct(pct);
+            _ = g.native_alsa.?.setVolumePct(pct);
         },
         .none => return,
     }
@@ -429,7 +433,7 @@ fn write(w: slider.Write, v: u8) void {
     switch (w) {
         // Scroll/drag motion: the label follows immediately while the backend
         // write is the core scheduler's business.
-        .preview => g_pct = optimisticAfter(g_backend, v, g_pct),
+        .preview => g.pct = optimisticAfter(g.backend, v, g.pct),
         .commit => commitPct(v),
         // Press set / drag end. The value just committed IS the display
         // value, so it is shown optimistically and the next poll confirms it
@@ -438,7 +442,7 @@ fn write(w: slider.Write, v: u8) void {
         // level the sink never accepted.
         .apply => {
             commitPct(v);
-            g_pct = optimisticAfter(g_backend, v, g_pct);
+            g.pct = optimisticAfter(g.backend, v, g.pct);
         },
     }
 }
@@ -452,29 +456,29 @@ fn write(w: slider.Write, v: u8) void {
 /// that reads as "muted" to a user while inviting a pointless volume-up scroll.
 /// MUTE is the honest terminal state and matches what the user asked for.
 fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Label {
-    const effective_mute = muted or !g_has_value;
+    const effective_mute = muted or !g.has_value;
     const fmt = if (effective_mute)
         (config.volume_muted_format orelse default_muted_format)
     else
         (config.volume_format orelse default_format);
     const state: []const u8 = if (effective_mute) "mute" else "unmute";
-    return drawing.renderLineValue(fmt, g_pct, state, buf);
+    return drawing.renderLineValue(fmt, g.pct, state, buf);
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-/// Test-only seam: the display state `label` reads (`g_pct`, `g_muted`) is
+/// Test-only seam: the display state `label` reads (`g.pct`, `g.muted`) is
 /// module-private, and its tests live in `src/test/bar/volume_test.zig`,
 /// which needs this to set their state: this harness runs tests from the test
 /// ROOT, so an inline test in an imported module is never even ANALYZED. A
 /// plain `pub` on the globals would export mutable global state to
 /// every importer; this scopes the write to an obviously test-shaped name.
 pub fn setDisplayForTest(pct: u8, muted: bool) void {
-    g_pct = pct;
-    g_muted = muted;
+    g.pct = pct;
+    g.muted = muted;
     // A supplied pct is by definition a level some rung read, so the seam sets
     // the has-value flag with it. Without this the forced-MUTE path in
     // `renderDisplay` would swallow every level these tests are checking.
-    g_has_value = true;
+    g.has_value = true;
 }
 
 /// Paired with `setDisplayForTest` to reach the one state that seam cannot
@@ -482,7 +486,7 @@ pub fn setDisplayForTest(pct: u8, muted: bool) void {
 /// one", which is exactly the no-backend start-up condition the forced-MUTE
 /// path exists for.
 pub fn clearValueForTest() void {
-    g_has_value = false;
+    g.has_value = false;
 }
 
 /// Test seam for the latch/rung mapping: the native backends are process
@@ -490,12 +494,12 @@ pub fn clearValueForTest() void {
 /// backend choice leak into the next test's assertion. Clearing here keeps each
 /// latchedRung decision pinned to this test's own state.
 pub fn clearNativeBackendForTest() void {
-    g_native_pulse = null;
-    g_native_alsa = null;
+    g.native_pulse = null;
+    g.native_alsa = null;
 }
 
 pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
-    return renderDisplay(config, g_muted, buf);
+    return renderDisplay(config, g.muted, buf);
 }
 
 /// Right-click: flip the sink's mute state. Routed through the LATCHED
@@ -506,12 +510,12 @@ pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
 /// Returns through the same follow-up read, so the display reflects what
 /// the sink actually did.
 fn toggleMute() void {
-    switch (latchedRung(g_backend)) {
+    switch (latchedRung(g.backend)) {
         .native_pulse => {
-            if (g_native_pulse) |*np| _ = np.setMuted(!g_muted);
+            if (g.native_pulse) |*np| _ = np.setMuted(!g.muted);
         },
         .native_alsa => {
-            if (g_native_alsa) |*na| _ = na.setMuted(!g_muted);
+            if (g.native_alsa) |*na| _ = na.setMuted(!g.muted);
         },
         .pactl => _ = spawn_capture.runOk("pactl set-sink-mute @DEFAULT_SINK@ toggle"),
         .amixer => _ = spawn_capture.runOk("amixer set Master toggle"),
@@ -523,16 +527,24 @@ fn toggleMute() void {
 /// The displayed level, or null while the backend has never answered, which is
 /// what makes an audio-less machine reserve no slot and take no clicks.
 fn currentLevel() ?u8 {
-    return if (g_has_value) g_pct else null;
+    return if (g.has_value) g.pct else null;
 }
 
 fn writable() bool {
-    return g_has_value;
+    return g.has_value;
+}
+
+/// The volume sub's live poll cadence from the bar config knob (default
+/// 5000 ms). Wired as `Sub.read_interval_ms_of` so the shell picks it up
+/// per wake; the static field below stays as the fallback default.
+fn readIntervalMsFromConfig() i64 {
+    return core.getState().config.bar.volume_read_interval_ms;
 }
 
 pub const sub: slider.Sub = .{
     .name = "volume",
     .read_interval_ms = 5000,
+    .read_interval_ms_of = readIntervalMsFromConfig,
     .level = currentLevel,
     .writable = writable,
     .read = readVolume,

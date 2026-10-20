@@ -1,12 +1,15 @@
-//! The consume-all redraw fold (`segmod.foldProbes`).
+//! The consume-all redraw drain (`segmod.foldProbes`).
 //!
-//! `foldModuleRedraw` walks the registry with this primitive, and its drain
-//! policy is the whole reason a multi-module first-paint settle fits under
-//! `max_batched_redraws`: one fold pass must consume EVERY pending module
-//! request, not just the first. The short-circuiting `anyBoolHook` would
-//! return after the first true probe, stranding each later pending request
-//! behind its own fold round -- five boot segments against a four-round cap
-//! is the stall these tests exist to prevent.
+//! P2-59: `foldModuleRedraw` now drains the registry INLINE (per-segment,
+//! classifying each request width-stable vs width-changing), but it upholds
+//! exactly the drain policy this primitive pins, and the primitive remains
+//! the reference definition of that policy. The drain is the whole reason a
+//! multi-module first-paint settle fits under `max_batched_redraws`: one fold
+//! pass must consume EVERY pending module request, not just the first. The
+//! short-circuiting `anyBoolHook` would return after the first true probe,
+//! stranding each later pending request behind its own fold round -- five
+//! boot segments against a four-round cap is the stall these tests exist to
+//! prevent.
 
 // Declared here, next to the import that makes it necessary, rather than in
 // a build.zig table that had to be kept in agreement with them by hand.

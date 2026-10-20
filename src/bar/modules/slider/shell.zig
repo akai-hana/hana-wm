@@ -67,6 +67,14 @@ const scroll_step: u8 = 2;
 /// how far ahead a single wake can be scheduled.
 const max_cadence_ms: i64 = 5000;
 
+/// The control's effective poll cadence: its runtime hook when it has one
+/// (a bar-config knob such as volume's `volume_read_interval_ms`), otherwise
+/// the static field. One spelling so the two poll sites and the
+/// arm-at-first-draw site cannot drift apart.
+fn readIntervalMs(s: Sub) i64 {
+    return if (s.read_interval_ms_of) |f| f() else s.read_interval_ms;
+}
+
 /// Spawn-commit window DEFAULT for every control. A fork+exec+pipe+waitpid
 /// blocks the WM's event loop for ~1-5 ms, so a per-event spawn throttles the
 /// whole WM under a fast drag or scroll; coalescing onto the newest value
@@ -281,7 +289,7 @@ pub fn onPollWakeupFor(idx: usize) void {
     // the newest value the backend hasn't seen yet).
     st.throttle.flushOwed(subLevelOrZero(subs[idx]));
     if (core.realtimeMs() < st.next_read_ms) return;
-    st.next_read_ms = core.realtimeMs() + subs[idx].read_interval_ms;
+    st.next_read_ms = core.realtimeMs() + readIntervalMs(subs[idx]);
     if (subs[idx].read()) st.pending_redraw = true;
 }
 
@@ -328,7 +336,7 @@ pub fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     if (!st.armed) {
         _ = sub.read();
         st.armed = true;
-        st.next_read_ms = core.realtimeMs() + sub.read_interval_ms;
+        st.next_read_ms = core.realtimeMs() + readIntervalMs(sub);
         applyCommitWindow(idx);
     }
     // Absent backend: nothing to show (a zero-width slot, unclickable, never

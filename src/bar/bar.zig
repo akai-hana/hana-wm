@@ -64,7 +64,6 @@ const Bar = state.Bar;
 const State = state.State;
 const anyBoolHook = segmod.anyBoolHook;
 const gBar = &state.gBar;
-const max_batched_redraws = state.max_batched_redraws;
 const renderBar = state.renderBar;
 const runVoidHook = segmod.runVoidHook;
 const self_ticking_ids = segmod.self_ticking_ids;
@@ -641,14 +640,16 @@ pub fn updateIfDirty() void {
     // the next unrelated event). Each iteration clears the request it
     // consumed, so the loop terminates unless a module genuinely re-requests.
     // Cap the iterations so a misbehaving module that re-requests forever
-    // can't busy-spin this batch.
+    // can't busy-spin this batch. The cap is a bar-config knob (default 4),
+    // read once per batch.
+    const redraw_cap: u8 = core.getState().config.bar.max_batched_redraws;
     var redraw_iter: u8 = 0;
-    while (redraw_iter < max_batched_redraws) : (redraw_iter += 1) {
+    while (redraw_iter < redraw_cap) : (redraw_iter += 1) {
         _ = render.foldModuleRedraw(s);
         if (!s.dirty.flag) break;
         render.performDraw();
     }
-    if (redraw_iter == max_batched_redraws) {
+    if (redraw_iter == redraw_cap) {
         // The cap protects one batch from a runaway re-request loop; it must
         // not strand the frame it stopped mid-settle. Consume the overflow
         // into the dirty state and owe the WAKE that lands it, so the

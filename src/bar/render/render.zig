@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const core = @import("core");
 const drawing = @import("drawing");
 const focus = @import("focus");
 const log = std.log.scoped(.render);
@@ -25,7 +26,7 @@ const query = @import("query");
 const contract = @import("bar_contract");
 const center_row = @import("center_row");
 const segmod = @import("segment");
-const title_cache = @import("title_cache");
+const window_facts = @import("window_facts");
 const window = @import("window");
 const state = @import("state");
 
@@ -69,7 +70,7 @@ pub fn fillDrawCtx(s: *State, ctx: *segmod.DrawCtx) void {
     // post-draw click handling through the cached `frame.last_ctx`.
     const entries = s.frame.entries[0..s.frame.entries_len];
     for (entries) |*e| {
-        e.title = title_cache.peekTitle(e.window);
+        e.title = window_facts.peekTitle(e.window);
         e.geom = titleGeom(e.window, s.title_data.minimized.contains(e.window));
     }
     // Title of the minimized window, used in the single-window title case.
@@ -81,7 +82,7 @@ pub fn fillDrawCtx(s: *State, ctx: *segmod.DrawCtx) void {
     // cache's own storage, and this ctx outlives the draw through
     // `frame.last_ctx`. See focused_title_buf.
     if (ctx.focused_window) |fw| {
-        const src = title_cache.peekTitle(fw);
+        const src = window_facts.peekTitle(fw);
         @memcpy(s.title_data.focused_title_buf[0..src.len], src);
         ctx.focused_title = s.title_data.focused_title_buf[0..src.len];
     } else {
@@ -314,7 +315,7 @@ pub fn recordClickBound(self: *State, id: ?usize, x: u16, w: u16) void {
     const i = id orelse return;
     if (!segmod.segmentAt(i).clickable) return;
     if (self.clicks.len >= max_click_bounds) return;
-    self.clicks.bounds[self.clicks.len] = .{ .id = i, .x = x, .w = w };
+    self.clicks.bounds[self.clicks.len] = .{ .id = i, .x = x, .w = w, .gen = self.layout_gen };
     self.clicks.len += 1;
 }
 
@@ -349,6 +350,7 @@ pub fn recordSelfTickerScope(self: *State, id: ?usize, x: u16, w: u16) void {
             .x = x,
             .width = w,
             .valid = true,
+            .gen = self.layout_gen,
         };
     }
 }
@@ -374,6 +376,10 @@ pub fn drawClockOnly(s: *State) void {
     for (self_ticking_ids, 0..) |cid, i| {
         const sc = s.clock.segs[i];
         if (!sc.valid) continue;
+        // P2-63 tripwire: the tick paints at the scope's coordinates, so a
+        // scope stamped by an older layout pass is stale (same class as
+        // redrawSegmentScoped's bound assert).
+        std.debug.assert(sc.gen == s.layout_gen);
         redrawSlotScoped(s, cid, sc.x, sc.width, null, true);
     }
 }
@@ -434,7 +440,7 @@ pub fn performDraw() void {
     }
     scanLiveFrame(s);
 
-    // Titles/geoms are read from in-process caches (title_cache + sync
+    // Titles/geoms are read from in-process caches (window_facts + sync
     // truth-rect) with no X11 round-trip, so every frame renders inline:
     // there is no async prefetch to fire, defer, or commit.
     var ctx = frameCtx(s);
@@ -470,16 +476,45 @@ pub fn requestFullRedraw() void {
     if (state.gBar.state) |s| markDirty(s);
 }
 
-/// Folds queued module redraw requests into the dirty state as a full
-/// redraw (flag + every slot). Returns true when at least one was pending.
-/// Single shared fold for the poll wakeup, direct-submit, and X-batch paths
-/// so no path can drop a request. One pass consumes EVERY pending request
-/// (`segmod.foldBoolHook`), not just the first: the batched redraw loop
-/// iterates per settle ROUND, so a per-module drain would spend one round
-/// per module and push a multi-module first-paint settle into the cap.
+/// Folds queued module redraw requests into the dirty state. Returns true
+/// when at least one was pending. Single shared fold for the poll wakeup,
+/// direct-submit, and X-batch paths so no path can drop a request. One pass
+/// consumes EVERY pending request, not just the first: the batched redraw
+/// loop iterates per settle ROUND, so a per-module drain would spend one
+/// round per module and push a multi-module first-paint settle into the cap.
+///
+/// D20 width-stable per-segment fast path: a request whose segment's
+/// reservation is unchanged since its last layout (`measureSegmentWidth` ==
+/// the recorded slot width) is a content-only repaint -- set just that
+/// segment's dirty bit, so `paintRowPlan` runs `is_full_redraw = false` and
+/// blits only that slot. A request whose width moved, or that has no recorded
+/// bound yet (never laid out -- the first draw), escalates to a full redraw
+/// (flag + every slot): a width change re-lays the row, so every downstream
+/// slot shifts and must repaint. Fact bumps (`markDirtySource`) are a
+/// separate path and are untouched here.
 pub fn foldModuleRedraw(s: *State) bool {
-    if (!segmod.foldBoolHook(.consumeRedrawRequest)) return false;
-    markDirty(s);
+    if (comptime !segmod.hasRegisteredSegments()) return false;
+    var any = false;
+    var width_changed = false;
+    for (segmod.all(), 0..) |seg, i| {
+        const cr = seg.consumeRedrawRequest orelse continue;
+        if (!cr()) continue;
+        any = true;
+        // Width-stability is read WITHOUT consuming anything extra: the
+        // module's own hook already drained its pending flag above. A missing
+        // bound (segment never laid out) is treated as a width change so the
+        // first paint stays a full redraw.
+        const cur = measureSegmentWidth(s, &s.frame.frame, @as(?usize, i));
+        const rec = recordedBound(s, i);
+        if (rec == null or rec.?.w != cur) {
+            width_changed = true;
+        } else {
+            s.dirty.segments[i] = true;
+        }
+    }
+    if (!any) return false;
+    s.dirty.flag = true;
+    if (width_changed) @memset(&s.dirty.segments, true);
     return true;
 }
 
@@ -491,7 +526,7 @@ pub fn foldModuleRedraw(s: *State) bool {
 /// Phase 2: the caller's ungrabAndFlush() sends configure_window +
 /// copy_area + ungrab in one flush, producing exactly one compositor frame.
 ///
-/// Title data is sourced from in-process caches (title_cache + sync truth-rect),
+/// Title data is sourced from in-process caches (window_facts + sync truth-rect),
 /// so no frame blocks or defers under the grab: a click-triggered redraw here
 /// is as cheap as any other frame.
 pub fn redrawInsideGrab() void {
@@ -513,6 +548,11 @@ fn redrawSegmentScoped(s: *State, id: usize) void {
     if (!s.vis.shown) return;
     if (pendingFullRedraw(s)) return;
     const tb = recordedBound(s, id) orelse return;
+    // P2-63 tripwire: this repaint paints at the bound's coordinates, so a
+    // bound stamped by an older layout pass is stale -- a logic bug (a
+    // re-layout that ran without re-recording), never a config artifact
+    // (reload rebuilds State).
+    std.debug.assert(tb.gen == s.layout_gen);
     redrawSlotScoped(s, id, tb.x, tb.w, tb.w, false);
 }
 
@@ -695,9 +735,13 @@ const Drawn = struct {
 };
 
 /// An unknown or draw-less segment name: nothing was painted, and the
-/// row falls back to the reservation.
-inline fn reportDrewNothing(x: u16) contract.Painted {
-    log.warn("Best-effort op failed (bar drawSegment): {}", .{error.DrewInvalidSegment});
+/// row falls back to the reservation. The warn is rate-limited per segment
+/// id (P2-62): a layout that keeps naming a segment the registry no longer
+/// resolves fails every frame, and one warn per frame is how a real fault
+/// gets drowned in the journal.
+inline fn reportDrewNothing(x: u16, s: *State, id: ?usize) contract.Painted {
+    if (s.drawFailLogDue(id, core.realtimeMs()))
+        log.warn("Best-effort op failed (bar drawSegment): {}", .{error.DrewInvalidSegment});
     return contract.Painted.nothing(x);
 }
 
@@ -716,8 +760,8 @@ inline fn reportDrewNothing(x: u16) contract.Painted {
 /// null (a name that no longer resolves) paints nothing and reports the
 /// fallback the row reserves.
 fn drawSegment(s: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16) Drawn {
-    const i = id orelse return .{ .painted = reportDrewNothing(x), .drew = false };
-    if (segmod.segmentAt(i).draw == null) return .{ .painted = reportDrewNothing(x), .drew = false };
+    const i = id orelse return .{ .painted = reportDrewNothing(x, s, null), .drew = false };
+    if (segmod.segmentAt(i).draw == null) return .{ .painted = reportDrewNothing(x, s, id), .drew = false };
     // The DrawCtx is shared mutable scratch: pin the reserved width into it
     // immediately before the draw so width-reading renderers (the title)
     // advance correctly. The name goes in the same way, so a module can
@@ -727,7 +771,11 @@ fn drawSegment(s: *State, ctx: *segmod.DrawCtx, id: ?usize, x: u16, width: ?u16)
     ctx.name = segmod.segmentAt(i).name;
     ctx.width = width orelse measureSegmentWidth(s, &ctx.frame, id);
     const painted = segmod.segmentAt(i).draw.?(ctx, x) catch |e| {
-        log.warn("Best-effort op failed (bar drawSegment): {}", .{e});
+        // Rate-limited per segment id (P2-62): a permanently broken segment
+        // fails on every dirty frame, and one warn per frame is how a real
+        // fault gets drowned in the journal. The first failure logs at once.
+        if (s.drawFailLogDue(id, core.realtimeMs()))
+            log.warn("Best-effort op failed (bar drawSegment): {}", .{e});
         // A caught error is a broken segment, not a segment with nothing
         // to show: it painted nothing either way, but reporting it as a
         // zero-width PAINT would let the next layout collapse a slot that
@@ -805,6 +853,11 @@ fn drawAllInner(s: *State, ctx: *segmod.DrawCtx) void {
 /// ticker-scope bookkeeping belongs to paint, which is the only half that
 /// knows a slot actually got drawn.
 pub fn solveRowPlan(s: *State, ctx: *segmod.DrawCtx, plan: *RowPlan) void {
+    // Every solve is a new layout generation (P2-63): the scopes and bounds
+    // recorded during the paint of THIS plan stamp it, and region-scoped
+    // repaints assert their stamp still matches before painting at the
+    // recorded coordinates.
+    s.layout_gen +%= 1;
     const r = &s.render;
     const fr = &ctx.frame;
     const scaled_spacing = state.renderBar().scaledSpacing(r.height);

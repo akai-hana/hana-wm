@@ -18,7 +18,7 @@ const types = @import("types");
 const bar_config = @import("bar_config");
 const query = @import("query");
 const model = @import("model");
-const title_cache = @import("title_cache");
+const window_facts = @import("window_facts");
 const drawing = @import("drawing");
 const segmod = @import("segment");
 const vocab = @import("vocab");
@@ -35,6 +35,23 @@ const center_slot_ids = segmod.center_slot_ids;
 /// (click-to-focus, chrome-overlay toggle) route through it; with a single
 /// binder this is exactly the title, with several it is the leftmost one.
 pub const title_id: ?usize = if (center_slot_ids.len != 0) center_slot_ids[0] else null;
+
+/// Minimum spacing between two log lines for the SAME draw failure (P2-62):
+/// a permanently broken segment fails on every dirty frame, and one warn per
+/// frame is how a real fault gets drowned in the journal. The FIRST
+/// occurrence always logs (its stamp is 0); after that at most one line per
+/// interval, per segment id.
+pub const draw_fail_log_interval_ms: i64 = 10_000;
+
+/// Pure rate-limit decision over one failure-log stamp slot: log when the
+/// stamp says "never" (0) or the interval has elapsed, stamping on every
+/// admitted line. Pure in `now` so a test drives synthetic time; `now` is a
+/// realtime-ms clock and must be non-zero (a zero stamp means "never").
+pub fn failLogDue(stamp: *i64, now: i64, interval_ms: i64) bool {
+    if (stamp.* != 0 and now - stamp.* < interval_ms) return false;
+    stamp.* = now;
+    return true;
+}
 
 /// Global bar coordination flags. Read and written exclusively on the main
 /// thread; no mutex protection required.
@@ -90,11 +107,6 @@ pub const max_frame_windows: usize = segmod.max_visible_windows;
 /// simply lose clickability on the extras (rendering is unaffected).
 pub const max_click_bounds: usize = segmod.all().len;
 
-/// Cap on updateIfDirty's re-request redraw loop: a module that keeps
-/// re-requesting a full redraw past this many iterations is treated as a
-/// stall (logged), keeping a rogue module from busy-spinning the batch.
-pub const max_batched_redraws: u8 = 4;
-
 /// On-screen hit-test bound of one segment, recorded by recordClickBound
 /// during the layout pass. THE click-bound storage: hit-testing iterates
 /// these in recorded order (first match wins).
@@ -106,6 +118,11 @@ pub const SegBound = struct {
     id: usize,
     x: u16,
     w: u16,
+    /// The `layout_gen` this bound was solved in (P2-63). A region-scoped
+    /// repaint paints at these coordinates, so a bound stamped by an older
+    /// layout pass than the current one is stale: Debug asserts on it before
+    /// painting, instead of the old comment-only precondition.
+    gen: u64 = 0,
 
     pub inline fn contains(self: SegBound, px: u16) bool {
         return px >= self.x and px < self.x + self.w;
@@ -168,6 +185,11 @@ const SelfTickerScope = struct {
     /// True once a layout pass placed the segment (a self-ticker that never
     /// made it into a layout is never repainted region-scoped).
     valid: bool = false,
+    /// The `layout_gen` this scope was recorded in (P2-63). drawClockOnly's
+    /// region-scoped tick paints at these coordinates, so a scope stamped by
+    /// an older layout pass than the current one is stale: Debug asserts on
+    /// it before painting, instead of the old comment-only precondition.
+    gen: u64 = 0,
 };
 
 pub const Clock = struct {
@@ -219,7 +241,7 @@ const FrameState = struct {
 /// Title-data scratch: the minimized-set service plus the focused-title
 /// copy. The per-window title/geom annotations are NOT here: they live on
 /// `frame.entries` (one record per window, id + title + geom), filled by
-/// fillDrawCtx from the WM-owned title cache (title_cache.peekTitle) and the
+/// fillDrawCtx from the WM-owned title cache (window_facts.peekTitle) and the
 /// sync truth-rect -- never the wire, so no async fetch, no positional slot,
 /// no X11 in the draw path.
 const TitleScratch = struct {
@@ -229,7 +251,7 @@ const TitleScratch = struct {
     /// without bar.zig naming the minimize addon.
     minimized_api: segmod.MinimizedApi = .{},
     /// Storage for the focused window's title. The per-window titles
-    /// on `frame.entries` borrow straight from the title_cache (they are
+    /// on `frame.entries` borrow straight from the window_facts (they are
     /// refreshed every frame before the draw); the focused title is copied
     /// instead, because a borrowed slice would leave the DrawCtx pointing
     /// into a cache that a title change overwrites in place. That is the
@@ -238,7 +260,7 @@ const TitleScratch = struct {
     /// copy -- so the one field with the widest lifetime needs the one byte
     /// copy. Copying costs one memcpy and removes the question of which
     /// readers may hold the slice across a cache write.
-    focused_title_buf: [title_cache.max_title_len]u8 = undefined,
+    focused_title_buf: [window_facts.max_title_len]u8 = undefined,
 };
 
 /// Last-seen core fact revisions (see core.Facts). Each is diffed against the
@@ -286,6 +308,21 @@ pub const State = struct {
     /// forever degrades to the ordinary timer cadence instead of spinning a
     /// 0-timeout poll.
     owed_redraw: bool = false,
+    /// Per-segment last draw-failure log stamp (realtime ms; 0 = never
+    /// logged), plus one trailing slot for failures with no resolvable
+    /// segment id (the `reportDrewNothing` null-id path). Drives the
+    /// `draw_fail_log_interval_ms` rate limit (P2-62): a permanently broken
+    /// segment fails every dirty frame, and one warn per frame is how a real
+    /// fault gets drowned in the journal.
+    draw_fail_log_ms: [segmod.all().len + 1]i64 = @splat(0),
+    /// Layout-pass generation (P2-63): bumped by every `solveRowPlan` and
+    /// stamped into each recorded scope/bound (`SelfTickerScope.gen`,
+    /// `SegBound.gen`). Region-scoped repaints assert (Debug) that the stamp
+    /// matches before painting at the recorded coordinates, turning the old
+    /// comment-only "bound must match the current layout" precondition into a
+    /// tripwire. A reload rebuilds State, so a mismatch can only be a logic
+    /// bug -- never a stale config artifact.
+    layout_gen: u64 = 0,
     clock: Clock = .{},
     clicks: Clicks = .{},
     /// Segment id whose recorded bound owns an in-flight button-1 scrub
@@ -354,5 +391,14 @@ pub const State = struct {
         const alloc = self.render.allocator;
         self.title_data.minimized.deinit(alloc);
         alloc.destroy(self);
+    }
+
+    /// Whether the draw failure for `id` (null = no resolvable segment) is
+    /// DUE a log line at `now`, stamping its slot when it is. A registry
+    /// index maps to its own slot; the null/unresolvable case shares the one
+    /// trailing slot, since there is no segment identity to key on.
+    pub fn drawFailLogDue(s: *State, id: ?usize, now: i64) bool {
+        const slot = if (id) |i| @min(i, s.draw_fail_log_ms.len - 1) else s.draw_fail_log_ms.len - 1;
+        return failLogDue(&s.draw_fail_log_ms[slot], now, draw_fail_log_interval_ms);
     }
 };

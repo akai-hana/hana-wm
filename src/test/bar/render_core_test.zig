@@ -392,6 +392,128 @@ test "performDraw end-to-end: dirty consumed, bounds recorded, frame cached" {
     try testing.expect(render.recordedBound(s, segmod.segId("clock").?) != null);
 }
 
+test "P2-59 width-stable fast path: one dirty segment blits only its slot; fact bump scopes to declared segments" {
+    var fx = try Fixture.setup();
+    defer fx.teardown();
+    const s = fx.s;
+
+    // Establish a laid-out baseline so every segment has a recorded bound and
+    // a valid last_ctx (the scoped path reuses it).
+    renderFull(fx);
+    try testing.expect(!s.dirty.flag);
+    try testing.expect(s.frame.ctx_valid);
+
+    // --- Width-stable single-segment request (the foldModuleRedraw fast
+    // path's dirty shape): exactly ONE segment dirty + the whole-bar flag, but
+    // NOT every slot. paintRowPlan then runs is_full_redraw = false and blits
+    // only that segment's slot, not the whole row. ---
+    for (0..segmod.all().len) |i| render.clearSegmentDirty(s, i);
+    const clock_id = segmod.segId("clock").?;
+    s.dirty.segments[clock_id] = true;
+    s.dirty.flag = true;
+    // Not a full redraw: the fast path must NOT have memset every slot.
+    try testing.expect(!render.isFullDirty(s));
+
+    render.performDraw();
+    // The blit span covers the clock's slot (plus its trailing gap) but is
+    // nowhere near the whole row -- the fast path blitted one region.
+    const cb = render.recordedBound(s, clock_id).?;
+    try testing.expect(s.dirty.span_x <= cb.x);
+    try testing.expect(s.dirty.span_x + s.dirty.span_w >= cb.x + cb.w);
+    try testing.expect(s.dirty.span_w < bar_w);
+    // The draw consumed the flag and the painted segment's dirty bit.
+    try testing.expect(!s.dirty.flag);
+    try testing.expect(!s.dirty.segments[clock_id]);
+
+    // --- Width-change / escalation half: a fact bump (markDirtySource) still
+    // repaints the DECLARED segments (title declares focus+frame). ---
+    render.markDirtySource(s, .focus);
+    try testing.expect(s.dirty.flag);
+    const title_id = state.title_id.?;
+    try testing.expect(s.dirty.segments[title_id]);
+    // A segment that declares no focus source stays clean.
+    try testing.expect(!s.dirty.segments[clock_id]);
+
+    render.performDraw();
+    // Title's slot is inside the blit span; the span covers the declared set.
+    const tb = render.recordedBound(s, title_id).?;
+    try testing.expect(s.dirty.span_x <= tb.x);
+    try testing.expect(s.dirty.span_x + s.dirty.span_w >= tb.x + tb.w);
+    try testing.expect(!s.dirty.flag);
+}
+
+test "P2-62 draw-failure log is rate-limited per segment id: first logs, repeats bounded" {
+    var fx = try Fixture.setup();
+    defer fx.teardown();
+    const s = fx.s;
+
+    const broken_id: usize = 3;
+    const other_id: usize = 4;
+    const t0: i64 = 1_000;
+
+    // First failure for a segment logs at once (its stamp starts at 0).
+    try testing.expect(s.drawFailLogDue(broken_id, t0));
+    // A permanent failure repeats every frame: the next frame inside the
+    // interval is suppressed -- the bounded rate the acceptance names.
+    try testing.expect(!s.drawFailLogDue(broken_id, t0 + 500));
+    try testing.expect(!s.drawFailLogDue(broken_id, t0 + state.draw_fail_log_interval_ms - 1));
+    // Once the interval elapses, the line is admitted again.
+    try testing.expect(s.drawFailLogDue(broken_id, t0 + state.draw_fail_log_interval_ms));
+
+    // Slots are independent: another segment's failure is unaffected.
+    try testing.expect(s.drawFailLogDue(other_id, t0 + 500));
+    try testing.expect(!s.drawFailLogDue(other_id, t0 + 600));
+
+    // The null-id path (no resolvable segment) has its own shared slot.
+    try testing.expect(s.drawFailLogDue(null, t0));
+    try testing.expect(!s.drawFailLogDue(null, t0 + 500));
+    try testing.expect(s.drawFailLogDue(null, t0 + state.draw_fail_log_interval_ms));
+}
+
+test "P2-63 layout generation stamps scopes and bounds; a stale stamp is detectable" {
+    var fx = try Fixture.setup();
+    defer fx.teardown();
+    const s = fx.s;
+
+    // A first full layout: solveRowPlan bumped the generation, and the paint
+    // recorded every scope/bound stamped with it.
+    renderFull(fx);
+    try testing.expect(s.layout_gen > 0);
+
+    // The clock's self-ticker scope carries the current generation.
+    const clock_id = segmod.segId("clock").?;
+    var clock_idx: usize = undefined;
+    var found = false;
+    for (segmod.self_ticking_ids, 0..) |cid, i| {
+        if (cid == clock_id) {
+            clock_idx = i;
+            found = true;
+        }
+    }
+    try testing.expect(found);
+    try testing.expect(s.clock.segs[clock_idx].valid);
+    try testing.expectEqual(s.layout_gen, s.clock.segs[clock_idx].gen);
+
+    // A clickable segment's recorded bound carries it too.
+    const title_id = state.title_id.?;
+    try testing.expectEqual(s.layout_gen, render.recordedBound(s, title_id).?.gen);
+
+    // A second layout bumps the generation and re-stamps from scratch.
+    const prev = s.layout_gen;
+    renderFull(fx);
+    try testing.expect(s.layout_gen > prev);
+    try testing.expectEqual(s.layout_gen, s.clock.segs[clock_idx].gen);
+    try testing.expectEqual(s.layout_gen, render.recordedBound(s, title_id).?.gen);
+
+    // Deliberately stale scope: bump the generation WITHOUT a re-record --
+    // the shape a "re-laid out but forgot to re-record" logic bug leaves.
+    // The stamps no longer match, which is exactly the condition the Debug
+    // asserts in drawClockOnly / redrawSegmentScoped trip on.
+    s.layout_gen +%= 1;
+    try testing.expect(s.clock.segs[clock_idx].gen != s.layout_gen);
+    try testing.expect(render.recordedBound(s, title_id).?.gen != s.layout_gen);
+}
+
 test "handleButtonPress dispatches left/right presses to the segment's onClick" {
     var fx = try Fixture.setup();
     defer fx.teardown();
