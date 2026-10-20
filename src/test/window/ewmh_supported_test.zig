@@ -34,6 +34,9 @@ const handled = [_]struct { name: []const u8, where: []const u8 }{
     .{ .name = "_NET_CLOSE_WINDOW", .where = "client_events.zig -> window.closeViaProtocol (icccm.zig)" },
     .{ .name = "_NET_CURRENT_DESKTOP", .where = "client_events.zig -> switchWorkspace hook" },
     .{ .name = "_NET_WM_DESKTOP", .where = "client_events.zig -> moveToWorkspace hook" },
+    .{ .name = "_NET_ACTIVE_WINDOW", .where = "client_events.zig -> focus.grabFocus(.user_command) + focus.zig advertise" },
+    .{ .name = "_NET_WM_WINDOW_TYPE_DOCK", .where = "protocol/struts.zig isDock -> admission float + strut publish" },
+    .{ .name = "_NET_WM_STRUT_PARTIAL", .where = "protocol/struts.zig -> usable_area dock claims" },
 };
 
 /// Hints hana does NOT implement. Advertising any of these would be a lie;
@@ -45,19 +48,18 @@ const unhandled = [_][]const u8{
     "_NET_WM_STATE_STICKY",
     "_NET_WM_STATE_HIDDEN",
     "_NET_WM_STATE_DEMANDS_ATTENTION",
-    // Client-message request answered only with a warning-and-ignore
-    // (_NET_CLOSE_WINDOW/_NET_CURRENT_DESKTOP/_NET_WM_DESKTOP used to sit
-    // here too; they are implemented now and advertised above).
-    "_NET_ACTIVE_WINDOW",
-    // Action/type/strut hints: declared on the bar's own window as a client,
-    // never read for managed windows.
+    // Action hints: declared on the bar's own window as a client; managed
+    // windows never get the property. (_NET_CLOSE_WINDOW/_NET_CURRENT_DESKTOP/
+    // _NET_WM_DESKTOP/_NET_ACTIVE_WINDOW/_NET_WM_WINDOW_TYPE_DOCK/
+    // _NET_WM_STRUT_PARTIAL used to sit here too; they are implemented now
+    // and advertised above.)
     "_NET_WM_ALLOWED_ACTIONS",
     "_NET_WM_ACTION_CLOSE",
     "_NET_WM_ACTION_ABOVE",
     "_NET_WM_ACTION_STICK",
+    // The generic type atom: only the DOCK member is acted on (and is
+    // advertised as its own atom); the rest of the type vocabulary is not.
     "_NET_WM_WINDOW_TYPE",
-    "_NET_WM_WINDOW_TYPE_DOCK",
-    "_NET_WM_STRUT_PARTIAL",
     // Enumeration hana does not maintain.
     "_NET_CLIENT_LIST",
     "_NET_CLIENT_LIST_STACKING",

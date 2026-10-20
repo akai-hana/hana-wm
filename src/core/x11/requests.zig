@@ -180,6 +180,9 @@ pub const supported_atoms = [_][]const u8{
     "_NET_CLOSE_WINDOW",
     "_NET_CURRENT_DESKTOP",
     "_NET_WM_DESKTOP",
+    "_NET_ACTIVE_WINDOW",
+    "_NET_WM_WINDOW_TYPE_DOCK",
+    "_NET_WM_STRUT_PARTIAL",
 };
 
 // Both lists must stay in sync at compile time: a misspelt/advertised atom
@@ -225,15 +228,15 @@ comptime {
 ///   is us-as-client, unrelated to this claim.
 /// - `_NET_WM_ALLOWED_ACTIONS` is never written on managed windows; the
 ///   per-window property and its `_NET_WM_ACTION_*` atoms stay unadvertised.
-/// - `_NET_WM_WINDOW_TYPE`/`_NET_WM_WINDOW_TYPE_DOCK`/`_NET_WM_STRUT_PARTIAL`
-///   are never READ for managed windows (the bar manages its own space; its
-///   strut is published for external compositors, not for us to parse).
+/// - The GENERIC `_NET_WM_WINDOW_TYPE` hint (and every member other than
+///   DOCK) is read only for the DOCK member's float+strut handling (F-80);
+///   the atom itself and the unacted-on members stay unadvertised.
 /// - `_NET_CLIENT_LIST`/`_NET_CLIENT_LIST_STACKING` are not maintained;
 ///   pagers cannot enumerate clients.
 /// - `_NET_WM_STATE_HIDDEN`/`_NET_WM_STATE_DEMANDS_ATTENTION` are neither
 ///   advertised nor answered; minimize is internal-only (no state property).
-/// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry must use
-///   `_NET_STRUT_PARTIAL` feedback instead.
+/// - `_NET_WORKAREA` is absent; clients wanting dock-safe geometry declare
+///   `_NET_WM_STRUT_PARTIAL` instead (honored: protocol/struts.zig).
 /// Claim SubstructureRedirectMask on the root window, which is what makes this
 /// process the window manager. The X server rejects the claim if another WM
 /// already holds it, so a failure here is the "another WM is running" case --

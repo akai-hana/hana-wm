@@ -439,6 +439,11 @@ fn unmanageWindow(win: u32) void {
     // store is queried through the registry below.
     focus.evict(win);
 
+    // F-80: drop the dock strut claim with the window. Unmanage's own
+    // re-tile (retileWithFallback) recomputes placement against the released
+    // edge, so no reconcile is needed from here.
+    _ = struts.release(win);
+
     // Evict child-cache entries pointing at this toplevel, so a new window
     // reusing the same XID can't be mis-identified as its child on the next
     // hover.
@@ -553,13 +558,17 @@ const prop_dirty_hints: u3 = 2;
 const prop_dirty_strut: u3 = 4;
 var prop_dirty: idmap.IdMap(u3, idmap.max_window_cache) = .{};
 
-/// Batch-end flush: one title refresh + one size-hints refresh per window
-/// marked during the batch, then the set is cleared. A window unmapped or
-/// destroyed mid-batch (no longer managed at flush time) is dropped without
-/// a round trip -- the unmap path already cleared its title cache entry.
+/// Batch-end flush: one title refresh + one size-hints refresh + one dock
+/// strut re-read per window marked during the batch, then the set is
+/// cleared. A window unmapped or destroyed mid-batch (no longer managed at
+/// flush time) is dropped without a round trip -- the unmap path already
+/// cleared its title cache entry. Strut changes that moved the ledger
+/// coalesce into ONE reconcile after the loop (several docks rewriting in
+/// the same batch need one re-tile, not one each).
 pub fn flushPropertyRefresh() void {
     if (prop_dirty.count() == 0) return;
     const conn = core.getState().conn;
+    var struts_changed = false;
     var it = prop_dirty.iterator();
     while (it.next()) |item| {
         const win = item.key;
@@ -569,10 +578,14 @@ pub fn flushPropertyRefresh() void {
             if (window_facts.refreshTitle(conn, win)) core.window.bump();
         }
         if (bits & prop_dirty_hints != 0) refreshSizeHints(win);
+        if (bits & prop_dirty_strut != 0) {
+            if (struts.refresh(conn, win)) struts_changed = true;
+        }
     }
     // Full clear after iteration (IdMap iteration is slot-walking; removing
     // mid-loop would tombstone slots it still walks).
     prop_dirty.clear();
+    if (struts_changed) pipeline.reconcileGrab(.{});
 }
 
 /// Test seam: how many windows the live dirty set covers (pre-flush).

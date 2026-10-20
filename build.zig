@@ -700,6 +700,7 @@ fn wireUnitTests(
         "pipeline_test",
         "visibility_test",
         "borders_test",
+        "struts_test",
     };
     {
         // The discovered *_test set; every test_gates row must appear in it.
@@ -746,7 +747,7 @@ fn wireUnitTests(
         // whether or not its gate is on) and modularity-safe (the matrix
         // deletes production paths, never src/test). Bumping it requires a
         // deliberate edit here.
-        const test_file_floor: usize = 79;
+        const test_file_floor: usize = 80;
         if (stems.items.len < test_file_floor) {
             std.debug.print(
                 "build: discovered {d} *_test.zig files, below the committed floor of {d}; restore the missing test file(s) or deliberately lower `test_file_floor` in build.zig (P1-27)\n",
