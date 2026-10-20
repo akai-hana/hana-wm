@@ -4,14 +4,26 @@
 //! surfaces that occupy screen space are accounted for." Any such surface (a
 //! bar, a dock, a future taskbar) contributes "the claim": an edge plus how
 //! many pixels it takes from that edge, released when it stops occupying
-//! space. One slot today (see `claim`); the ledger grows slots only when a
-//! second claimant exists. Core computes `workArea()` from the active claim
-//! and the physical screen dimensions.
+//! space. Core computes `workArea()` from the active claims and the physical
+//! screen dimensions.
+//!
+//! There are two claimant CLASSES, and they stay separate on purpose:
+//!
+//!   - The chrome surface (the bar) holds the single `claim` slot. It is
+//!     special: it registers its window at init (surface recognition,
+//!     stacking, click routing) and answers "a fullscreen window wants the
+//!     whole screen" by RELEASING its claim (see below).
+//!   - Foreign docks (EWMH `_NET_WM_STRUT_PARTIAL`, parsed by the window
+//!     layer's protocol/struts.zig) hold PER-WINDOW slots keyed by X id,
+//!     so a property change or an unmanage replaces/releases exactly its
+//!     own entry. D27's struts-only interim: one screen, the four edge
+//!     widths summed per edge; no per-monitor geometry here.
 //!
 //! Surfaces push claims and read nothing back beyond `workArea()`. They never
 //! hand core a final number; the subtraction math is core's, so the fact
 //! lives here, not in any particular surface. With no active claims, the
-//! usable area is the full screen (the natural state when the bar is absent).
+//! usable area is the full screen (the natural state when the bar is absent
+//! and no dock has claimed an edge).
 //!
 //! ## "Fullscreen means no work area" is NOT this module's rule
 //!
@@ -43,15 +55,29 @@ const Claim = struct {
     px: u16 = 0,
 };
 
-/// The one active claim, absent when nothing occupies screen space.
-///
-/// A single optional, not a table: today exactly one surface (the bar) claims
-/// screen space. A second claimant reintroduces slots AND per-claimant keying
-/// then -- `mappedSurfaceWindow` must key off its OWN claimant's claim, never
-/// "any claim", the day two coexist. `px == 0` is encoded as absence (null),
-/// not an inactive entry: every reader (insets, mapped-surface) skips both
-/// encodings identically.
+/// The chrome surface's (bar's) active claim, absent when the bar is not
+/// occupying screen space. This slot is the bar's ALONE: foreign docks live
+/// in the per-window table below and never write here, so `mappedSurfaceWindow`
+/// and the release-on-fullscreen protocol keep one story to tell.
 var claim: ?Claim = null;
+
+/// Per-window strut claims from foreign docks (EWMH `_NET_WM_STRUT_PARTIAL`).
+/// Keyed by the dock's X id so a property change or unmanage replaces or
+/// releases exactly its own entry; fixed capacity, allocation-free, like the
+/// rest of the layer's tables. A desktop with more simultaneous external
+/// docks than this is pathological; the overflow window keeps its geometry
+/// but contributes no claim (honest degradation, not a crash or a wrap).
+const max_dock_claims = 8;
+
+pub const DockClaim = struct {
+    win: core.WindowId = 0,
+    left: u16 = 0,
+    right: u16 = 0,
+    top: u16 = 0,
+    bottom: u16 = 0,
+};
+
+var dock_claims: [max_dock_claims]?DockClaim = .{null} ** max_dock_claims;
 
 /// The X window id of the chrome surface (the bar), registered by that
 /// surface at init/deinit. Lets core recognize "this window is chrome" (to
@@ -84,11 +110,8 @@ pub fn isSurfaceWindow(win: core.WindowId) bool {
 /// The chrome surface's window id when IT currently occupies screen space;
 /// null otherwise. Used for raise-above stacking.
 ///
-/// "The claimant holds the claim" == "the surface window is claimed" only
-/// while there is ONE slot: the optional IS the bar's claim today. The day a
-/// second slot exists, key this off that surface's OWN claim, never "any
-/// claim is active" -- a dock alone claiming screen space must not make the
-/// caller stack-raise a bar that is not on screen.
+/// Keyed off the BAR's own claim slot, never off "any claim is active": a
+/// dock's per-window claim does not make a hidden bar occupy screen space.
 pub fn mappedSurfaceWindow() ?core.WindowId {
     if (claim == null) return null;
     return surface_win;
@@ -107,12 +130,72 @@ pub fn releaseClaim() void {
     claim = null;
 }
 
-/// Pixels the active claim takes from `edge`; zero when nothing claims it.
-/// Pure over the one slot, so the arithmetic the usable-area depends on is
-/// testable without an X connection.
+/// Sets (or re-sets) `win`'s dock strut claim. An all-zero insets set RELEASES
+/// the entry (an EWMH client zeroing its strut stops occupying the edge); the
+/// caller triggers any reconcile new geometry requires. Returns true when the
+/// stored claim actually changed, so a property-notify refresh that re-reads
+/// the same values does not force a re-tile.
+pub fn setDockClaim(
+    win: core.WindowId,
+    left: u16,
+    right: u16,
+    top: u16,
+    bottom: u16,
+) bool {
+    if (left == 0 and right == 0 and top == 0 and bottom == 0) return releaseDockClaim(win);
+    for (&dock_claims) |*slot| {
+        if (slot.*) |*c| {
+            if (c.win != win) continue;
+            const changed = c.left != left or c.right != right or c.top != top or c.bottom != bottom;
+            c.* = .{ .win = win, .left = left, .right = right, .top = top, .bottom = bottom };
+            return changed;
+        }
+    }
+    for (&dock_claims) |*slot| {
+        if (slot.* == null) {
+            slot.* = .{ .win = win, .left = left, .right = right, .top = top, .bottom = bottom };
+            return true;
+        }
+    }
+    // Table full: the window contributes no claim (documented on max_dock_claims).
+    return false;
+}
+
+/// Drops `win`'s dock claim (unmanage / strut withdrawn). True when a claim
+/// was actually released.
+pub fn releaseDockClaim(win: core.WindowId) bool {
+    for (&dock_claims) |*slot| {
+        if (slot.*) |c| if (c.win == win) {
+            slot.* = null;
+            return true;
+        };
+    }
+    return false;
+}
+
+/// `win`'s current dock claim, if any. Pure read, for tests and diagnostics.
+pub fn dockClaimOf(win: core.WindowId) ?DockClaim {
+    for (dock_claims) |slot| {
+        if (slot) |c| if (c.win == win) return c;
+    }
+    return null;
+}
+
+/// Pixels the active claims take from `edge`: the bar's slot plus every
+/// foreign dock's, summed. Pure over the ledger, so the arithmetic the
+/// usable-area depends on is testable without an X connection.
 fn inset(edge: Edge) u32 {
-    if (claim) |c| if (c.edge == edge) return c.px;
-    return 0;
+    var total: u32 = 0;
+    if (claim) |c| if (c.edge == edge) total += c.px;
+    for (dock_claims) |slot| {
+        if (slot) |d| switch (edge) {
+            .top => total += d.top,
+            .bottom => total += d.bottom,
+            .left => total += d.left,
+            .right => total += d.right,
+        };
+    }
+    return total;
 }
 
 /// The usable-area arithmetic, with no global state and no X handle.
