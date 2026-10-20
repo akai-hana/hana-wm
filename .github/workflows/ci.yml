@@ -105,7 +105,7 @@ jobs:
 
       # xtest.sh starts an isolated Xvfb and sets HANA_REQUIRE_X=1 so every
       # display-gated test actually runs instead of self-skipping (a bare
-      # `zig build test` reports green with 49 tests silently skipped).
+      # `zig build test` reports green with 54 tests silently skipped).
       # Debug is several times cheaper than the ReleaseFast default
       # (resolveOptimize) and it also runs the std.debug.assert coverage
       # ReleaseFast compiles out.

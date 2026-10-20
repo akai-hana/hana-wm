@@ -88,3 +88,57 @@ test "releasing the claim restores the full screen" {
     }
     try testing.expectEqual(@as(u16, 1080), usable_area.workAreaFrom(1920, 1080).height);
 }
+
+test "a foreign dock claim insets its edge, keyed per window" {
+    // F-80: a dock's _NET_WM_STRUT_PARTIAL publishes into the same ledger
+    // arithmetic, so a peer's placement avoids it exactly like it avoids the
+    // bar. Keyed by window id: exactly the claimed edge moves.
+    try testing.expect(usable_area.setDockClaim(0x500001, 0, 0, 40, 0));
+    defer _ = usable_area.releaseDockClaim(0x500001);
+    const wa = usable_area.workAreaFrom(1920, 1080);
+    try testing.expectEqual(@as(i16, 40), wa.y);
+    try testing.expectEqual(@as(u16, 1920), wa.width);
+    try testing.expectEqual(@as(u16, 1040), wa.height);
+
+    const c = usable_area.dockClaimOf(0x500001).?;
+    try testing.expectEqual(@as(u16, 40), c.top);
+}
+
+test "bar and dock claims on the same edge sum" {
+    // Two claimants, one edge: a 30px bar plus a 40px dock must inset 70,
+    // not max() them, not replace the first with the second. This is the case
+    // that would break the day two slots existed -- now they do.
+    usable_area.setClaim(.top, 30);
+    defer usable_area.releaseClaim();
+    defer _ = usable_area.releaseDockClaim(0x500002);
+    try testing.expect(usable_area.setDockClaim(0x500002, 0, 0, 40, 0));
+    try testing.expectEqual(@as(i16, 70), usable_area.workAreaFrom(1920, 1080).y);
+    // Releasing the dock leaves the bar's claim standing.
+    try testing.expect(usable_area.releaseDockClaim(0x500002));
+    try testing.expectEqual(@as(i16, 30), usable_area.workAreaFrom(1920, 1080).y);
+}
+
+test "dock claims on different edges inset independently" {
+    defer _ = usable_area.releaseDockClaim(0x500003);
+    defer _ = usable_area.releaseDockClaim(0x500004);
+    try testing.expect(usable_area.setDockClaim(0x500003, 100, 0, 0, 0));
+    try testing.expect(usable_area.setDockClaim(0x500004, 0, 0, 40, 0));
+    const wa = usable_area.workAreaFrom(1920, 1080);
+    try testing.expectEqual(@as(i16, 100), wa.x);
+    try testing.expectEqual(@as(i16, 40), wa.y);
+    try testing.expectEqual(@as(u16, 1820), wa.width);
+    try testing.expectEqual(@as(u16, 1040), wa.height);
+}
+
+test "dock claim writes report change: republish same is no-op, release idempotent" {
+    // The property-notify refresh re-reads a dock's strut on every rewrite;
+    // identical values must not claim a ledger change (no forced re-tile),
+    // and a vanished window's double-release must not lie about change.
+    defer _ = usable_area.releaseDockClaim(0x500005);
+    try testing.expect(usable_area.setDockClaim(0x500005, 0, 0, 24, 0));
+    try testing.expect(!usable_area.setDockClaim(0x500005, 0, 0, 24, 0));
+    try testing.expect(usable_area.setDockClaim(0x500005, 0, 0, 48, 0));
+    try testing.expect(usable_area.releaseDockClaim(0x500005));
+    try testing.expect(!usable_area.releaseDockClaim(0x500005));
+    try testing.expect(usable_area.dockClaimOf(0x500005) == null);
+}

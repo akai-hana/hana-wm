@@ -218,6 +218,17 @@ wire_allowed() {
         # last-reviewed: 2026-10-20
         src/test/core/pipeline_test.zig) ;;
 
+        # src/test/window/struts_test.zig is a TEST DOUBLE: it writes
+        # _NET_WM_WINDOW_TYPE / _NET_WM_STRUT_PARTIAL onto its synthetic
+        # windows and unmaps them so the admission, PropertyNotify, and
+        # unmanage strut lifecycle can be driven through the REAL handlers
+        # (handleMapRequest/handlePropertyNotify/handleUnmapNotify) and
+        # asserted against usable_area. Test setup is not WM wire traffic and
+        # never routes through sync. Same carve-out as fixture.zig /
+        # pipeline_test.zig.
+        # last-reviewed: 2026-10-20
+        src/test/window/struts_test.zig) ;;
+
         # Bare output-buffer flushes that match the widened symbol set but send
         # NO geometry/border/map mutation (flush pushes the shared connection
         # buffer after others' queued requests). events.zig is the core

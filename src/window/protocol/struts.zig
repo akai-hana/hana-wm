@@ -127,7 +127,8 @@ fn isDock(conn: core.Connection, cookie: ?xcb.xcb_get_property_cookie_t) ?bool {
     const dock_atom = atoms.getAtomOrZero("_NET_WM_WINDOW_TYPE_DOCK");
     if (dock_atom == 0) return false;
     const values = icccm.u32Values(reply);
-    const len: usize = @intCast(xcb.xcb_get_property_value_length(reply) / @sizeOf(u32));
+    // value_len counts format-sized units (sink's _NET_WM_STATE read does the same).
+    const len: usize = @intCast(reply.*.value_len);
     for (values[0..len]) |a| if (a == dock_atom) return true;
     return false;
 }
@@ -138,7 +139,8 @@ fn drainStrut(conn: core.Connection, cookie: ?xcb.xcb_get_property_cookie_t) ?In
     defer std.c.free(reply);
     if (reply.*.format != 32) return null;
     const values = icccm.u32Values(reply);
-    const len: usize = @intCast(xcb.xcb_get_property_value_length(reply) / @sizeOf(u32));
+    // value_len counts format-sized units (sink's _NET_WM_STATE read does the same).
+    const len: usize = @intCast(reply.*.value_len);
     return parsePartial(values[0..len]);
 }
 
