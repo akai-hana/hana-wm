@@ -40,36 +40,38 @@ const workspace_labels: [model.max_workspaces][]const u8 = blk: {
 /// honest answer is zero -- see naturalWidthHook.
 const fallback_width: u16 = 270;
 
-// Sized to workspace_labels, the largest label source. Every workspace index
-// is bounded by query.getWorkspaceCount() (<= max_workspaces), so no
-// fallback path exists.
-var label_widths: [workspace_labels.len]u16 = [_]u16{0} ** workspace_labels.len;
-var ws_width: u16 = 0;
-var cache_valid: bool = false;
-// The ws_current/ws_all_active the cache was built for: the selected tag is
-// measured bold (wider), so a stale-key cache centers the newly selected tag
-// against the non-selected width after every switch.
-var cache_ws_current: u8 = 0;
-var cache_ws_all_active: bool = false;
-
-// Config + height captured at the last draw, so the natural-width path can
-// recompute the cell width before a full ensureCache pass has run on the
-// current (config, height) pair.
-var last_config: bar_config.Config = undefined;
-var last_height: u16 = 0;
-var last_geom_valid: bool = false;
-// All-view (all_workspaces / Mod+5) collapse: while the flag is active every
-// workspace tag is replaced by ONE cell labeled "花", so the whole segment
-// narrows to a single tag. The cell is at least the standard tag width,
-// growing to fit the (wider) CJK glyph when necessary.
+/// Owner state for the tags segment (P2-58): the label/geometry caches plus
+/// the all-view collapse widths and the indicator position. Sized to
+/// workspace_labels, the largest label source. Every workspace index is bounded
+/// by query.getWorkspaceCount() (<= max_workspaces), so no fallback path
+/// exists. Config + height are captured at the last draw, so the natural-width
+/// path can recompute the cell width before a full ensureCache pass has run on
+/// the current (config, height) pair. The ws_current/ws_all_active pair is the
+/// key the cache was built for: the selected tag is measured bold (wider), so
+/// a stale-key cache centers the newly selected tag against the non-selected
+/// width after every switch. All-view (all_workspaces / Mod+5) collapse: while
+/// the flag is active every workspace tag is replaced by ONE cell labeled
+/// "花", so the whole segment narrows to a single tag. The cell is at least
+/// the standard tag width, growing to fit the (wider) CJK glyph when
+/// necessary. cached_ind_x_off / cached_ind_y are the horizontal/vertical
+/// position of the indicator glyph within a workspace cell -- constant for
+/// all cells, added to the cell's start_x at draw time.
 const all_view_label = "花";
-var all_view_label_width: u16 = 0;
-var all_view_cell_width: u16 = 0;
-// Cached horizontal offset of the indicator glyph within a workspace cell.
-// Added to the cell's start_x at draw time; constant for all cells.
-var cached_ind_x_off: u16 = 0;
-// Cached vertical top position of the indicator glyph; constant for all cells.
-var cached_ind_y: u16 = 0;
+const TagsState = struct {
+    label_widths: [workspace_labels.len]u16 = [_]u16{0} ** workspace_labels.len,
+    ws_width: u16 = 0,
+    cache_valid: bool = false,
+    cache_ws_current: u8 = 0,
+    cache_ws_all_active: bool = false,
+    last_config: bar_config.Config = undefined,
+    last_height: u16 = 0,
+    last_geom_valid: bool = false,
+    all_view_label_width: u16 = 0,
+    all_view_cell_width: u16 = 0,
+    cached_ind_x_off: u16 = 0,
+    cached_ind_y: u16 = 0,
+};
+var g: TagsState = .{};
 
 /// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
 inline fn getLabel(i: usize, config: bar_config.Config) []const u8 {
@@ -80,7 +82,7 @@ inline fn getLabel(i: usize, config: bar_config.Config) []const u8 {
 
 /// Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
 fn invalidate() void {
-    cache_valid = false;
+    g.cache_valid = false;
 }
 
 /// Rebuilds the label-width and geometry cache if stale.
@@ -91,33 +93,33 @@ fn ensureCache(
     ws_current: u8,
     ws_all_active: bool,
 ) void {
-    if (cache_valid and cache_ws_current == ws_current and cache_ws_all_active == ws_all_active) return;
-    const count = @min(query.getWorkspaceCount(), label_widths.len);
+    if (g.cache_valid and g.cache_ws_current == ws_current and g.cache_ws_all_active == ws_all_active) return;
+    const count = @min(query.getWorkspaceCount(), g.label_widths.len);
     // Measure each label with ITS per-state styling: the selected tag may
     // render bold (workspaces_selected), so its glyph is wider than its
     // neighbors.
-    for (label_widths[0..count], 0..) |*w, i| {
+    for (g.label_widths[0..count], 0..) |*w, i| {
         const is_current = ws_all_active or (i == ws_current);
         w.* = dc.measureTextWidthStyled(getLabel(i, config), config.workspaceIconProps(is_current));
     }
-    ws_width = config.scaledWorkspaceWidth(height);
+    g.ws_width = config.scaledWorkspaceWidth(height);
     // Measure the all-view collapse label with the SELECTED styling: the single
     // all-view cell renders as the current tag, and its CJK glyph is wider than
     // the default numeric tags.
-    all_view_label_width = dc.measureTextWidthStyled(all_view_label, config.workspaceIconProps(true));
-    all_view_cell_width = @max(ws_width, all_view_label_width);
-    cache_valid = true;
-    cache_ws_current = ws_current;
-    cache_ws_all_active = ws_all_active;
-    last_config = config;
-    last_height = height;
-    last_geom_valid = true;
+    g.all_view_label_width = dc.measureTextWidthStyled(all_view_label, config.workspaceIconProps(true));
+    g.all_view_cell_width = @max(g.ws_width, g.all_view_label_width);
+    g.cache_valid = true;
+    g.cache_ws_current = ws_current;
+    g.cache_ws_all_active = ws_all_active;
+    g.last_config = config;
+    g.last_height = height;
+    g.last_geom_valid = true;
 
     // All geometry inputs are constant between reloads, so the indicator
     // position holds until the next invalidate() + ensureCache() cycle.
     const ind_size = config.scaledIndicatorSize(height);
     const pos = indicatorPos(
-        ws_width,
+        g.ws_width,
         height,
         ind_size,
         ind_size,
@@ -125,8 +127,8 @@ fn ensureCache(
         config.indicator_padding,
     );
     // pos.x is already the intra-cell offset (computed without a cell_x base).
-    cached_ind_x_off = pos.x;
-    cached_ind_y = pos.y;
+    g.cached_ind_x_off = pos.x;
+    g.cached_ind_y = pos.y;
 }
 
 /// Computes the top-left pixel position of an indicator item within a workspace cell.
@@ -194,7 +196,7 @@ fn drawCell(
             config.indicator_unfocused orelse types.default_indicator_unfocused;
         const color = config.workspaceIndicatorColor(is_current);
         // Use the pre-cached intra-cell offset; avoids per-workspace float arithmetic.
-        try dc.drawTextSized(x + cached_ind_x_off, cached_ind_y, glyph, config.scaledIndicatorSize(height), color);
+        try dc.drawTextSized(x + g.cached_ind_x_off, g.cached_ind_y, glyph, config.scaledIndicatorSize(height), color);
     }
 }
 
@@ -230,19 +232,19 @@ fn drawFrame(
             config,
             height,
             x,
-            all_view_cell_width,
+            g.all_view_cell_width,
             all_view_label,
-            all_view_label_width,
+            g.all_view_label_width,
             anyWorkspaceHasWindows(ws_has_windows),
             true,
         );
-        x += all_view_cell_width;
+        x += g.all_view_cell_width;
         return contract.Painted.span(start_x, x);
     }
 
     for (ws_has_windows, 0..) |has_windows, i| {
-        try drawCell(dc, config, height, x, ws_width, getLabel(i, config), label_widths[i], has_windows, i == ws_current);
-        x += ws_width;
+        try drawCell(dc, config, height, x, g.ws_width, getLabel(i, config), g.label_widths[i], has_windows, i == ws_current);
+        x += g.ws_width;
     }
     return contract.Painted.span(start_x, x);
 }
@@ -270,8 +272,8 @@ fn draw(ctx: *segmod.DrawCtx, start_x: u16) !contract.Painted {
 /// the reservation and the click hit-test must agree on that 0, so they both
 /// ask here instead of restating the ladder.
 fn cellWidth() u16 {
-    if (ws_width > 0) return ws_width;
-    if (last_geom_valid) return last_config.scaledWorkspaceWidth(last_height);
+    if (g.ws_width > 0) return g.ws_width;
+    if (g.last_geom_valid) return g.last_config.scaledWorkspaceWidth(g.last_height);
     return 0;
 }
 
@@ -285,8 +287,8 @@ fn naturalWidthHook(f: *const contract.Frame, _: u16) u16 {
     if (f.workspace_count > 0) {
         // All-view collapses 8 tags -> 1: the row reservation narrows with it.
         if (f.is_all_view_active) {
-            if (all_view_cell_width > 0) return all_view_cell_width;
-            if (last_geom_valid) return @max(last_config.scaledWorkspaceWidth(last_height), all_view_label_width);
+            if (g.all_view_cell_width > 0) return g.all_view_cell_width;
+            if (g.last_geom_valid) return @max(g.last_config.scaledWorkspaceWidth(g.last_height), g.all_view_label_width);
             return fallback_width;
         }
         // Hot cache / last-config re-derivation (cellWidth); if nothing has

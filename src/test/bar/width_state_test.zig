@@ -107,3 +107,37 @@ test "the bar's post-draw step hands the width back and reports a paint" {
     try std.testing.expect(!segmod.finishDraw(&seg, P.nothing(100)));
     try std.testing.expectEqual(@as(?u16, 0), last_reported);
 }
+
+// P2-56: the bar contract names a typed, X-free `DrawEnv` (config, height,
+// allocator, width, name, frame) rather than leaving the whole per-frame
+// environment reachable only through the type-erased `*anyopaque` the bar
+// hands to `draw`. This is the headless proof: a `DrawEnv` is assembled and
+// read with NO X connection and NO drawing context, exactly the subset a
+// config-only tool or a headless test can consume. The X pieces (`dc`, `conn`)
+// stay out of it, opaque the way `KeyPressEvent` is opaque.
+test "DrawEnv carries the X-free frame environment" {
+    const alloc = std.testing.allocator;
+    var cfg: @import("bar_config").Config = .{};
+    const frame: contract.Frame = .{
+        .workspace_count = 3,
+        .current_workspace = 1,
+        .is_all_view_active = false,
+    };
+    const env: contract.DrawEnv = .{
+        .config = cfg,
+        .height = 24,
+        .allocator = alloc,
+        .width = 120,
+        .name = "cpu",
+        .frame = frame,
+    };
+    // Every X-free field round-trips; none of them needs a connection.
+    try std.testing.expectEqual(@as(u16, 24), env.height);
+    try std.testing.expectEqual(@as(u16, 120), env.width);
+    try std.testing.expectEqualStrings("cpu", env.name);
+    try std.testing.expectEqual(@as(u8, 1), env.frame.current_workspace);
+    try std.testing.expectEqual(@as(u32, 3), env.frame.workspace_count);
+    try std.testing.expect(env.allocator.ptr == alloc.ptr);
+    // The config is a real bar_config.Config by value, not an opaque handle.
+    _ = cfg.segmentProps("cpu");
+}

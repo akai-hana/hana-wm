@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const types = @import("types");
+const bar_config = @import("bar_config");
 const dispatch = @import("contract_dispatch");
 
 /// The bar-segment hook set. Every module under a bar-owner's `modules/`
@@ -69,6 +70,38 @@ pub const BarOverlay = struct {
 /// real type on their side. An opaque type has no fields, so a hook that
 /// wants them must cast, and that requirement lives with the casters.
 pub const KeyPressEvent = opaque {};
+
+/// The X-free, typed per-frame environment a segment's `draw` reads: the
+/// config, allocator, row height, reserved width, segment name, frame snapshot,
+/// and the minimized-state service. This is the subset of the bar's scratch
+/// that carries no X connection and no drawing context, so it can be named
+/// directly here (the contract stays X-free) instead of being reached only
+/// through the type-erased `*anyopaque` the bar hands to `draw`.
+///
+/// The `dc` and `conn` stay OUTSIDE this type, kept opaque at the top of the
+/// bar's per-frame scratch: a segment that draws still reaches them through the
+/// opaque pointer the bar builds, exactly as `KeyPressEvent` stays opaque. This
+/// type's job is to make the NON-X fields first-class so a headless consumer (a
+/// test, a config-only tool) can assemble the environment without an X server,
+/// and so the field list is documented in one X-free place.
+pub const DrawEnv = struct {
+    /// Bar config snapshot for the frame (theme, widths, cadences). Pure
+    /// config -- no X, no drawing context -- so it is safe to name here.
+    config: bar_config.Config,
+    /// Bar height in pixels (shared by every segment's draw).
+    height: u16,
+    /// Segment allocator (per-frame scratch, font probing, etc.).
+    allocator: std.mem.Allocator,
+    /// Reserved row width for the segment currently being drawn.
+    width: u16 = 0,
+    /// The configured name of the segment currently being drawn, e.g. "cpu" or
+    /// "volume". Set by the bar from the name it already had in hand, so a
+    /// module can resolve its OWN themed colors without a second argument.
+    /// Empty when a caller builds an env without drawing a specific segment.
+    name: []const u8 = "",
+    /// Frame snapshot (workspace counts / current workspace / all-view).
+    frame: Frame,
+};
 
 /// What a segment actually painted, returned rather than inferred.
 ///

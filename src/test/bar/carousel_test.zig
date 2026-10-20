@@ -17,6 +17,9 @@ const Scroll = @import("title").Scroll;
 
 const short_title = "Short";
 const long_title = "A window title long enough to overflow any reasonable bar slot";
+/// The default `carousel_gap_px` config value, passed explicitly to every
+/// `offsetFor` call so the cycle math matches the shipped configuration.
+const gap_px: u16 = 48;
 
 /// Offsets are fractional; compare with a small tolerance.
 fn expectOffset(expected: f32, actual: f32) !void {
@@ -30,7 +33,7 @@ fn reset() void {
 /// Convenience wrapper: enabled scroll of `text_w` in an `avail_w` slot.
 /// Returns the whole Scroll; `tickOff` unwraps it to the offset.
 fn tickScroll(win: u32, text_w: u16, avail_w: u16, speed: u16, now_ms: i64) Scroll {
-    return carousel.offsetFor(win, long_title, text_w, avail_w, true, speed, now_ms);
+    return carousel.offsetFor(win, long_title, text_w, avail_w, true, speed, gap_px, now_ms);
 }
 
 fn tick(win: u32, text_w: u16, avail_w: u16, speed: u16, now_ms: i64) f32 {
@@ -74,14 +77,14 @@ test "a slot that jitters by one pixel does not restart the marquee" {
 
 test "fitting title stays static and inactive" {
     reset();
-    const scroll = carousel.offsetFor(1, short_title, 40, 100, true, 30, 1000);
+    const scroll = carousel.offsetFor(1, short_title, 40, 100, true, 30, gap_px, 1000);
     try expectOffset(0, scroll.off);
     try testing.expect(!scroll.active);
 }
 
 test "disabled carousel never scrolls" {
     reset();
-    const scroll = carousel.offsetFor(1, long_title, 500, 100, false, 30, 1000);
+    const scroll = carousel.offsetFor(1, long_title, 500, 100, false, 30, gap_px, 1000);
     try expectOffset(0, scroll.off);
     try testing.expect(!scroll.active);
 }
@@ -126,10 +129,10 @@ test "focus change resets the scroll" {
 
 test "title content change resets the scroll" {
     reset();
-    _ = carousel.offsetFor(1, long_title, 500, 100, true, 30, 0);
-    _ = carousel.offsetFor(1, long_title, 500, 100, true, 30, 5_000);
+    _ = carousel.offsetFor(1, long_title, 500, 100, true, 30, gap_px, 0);
+    _ = carousel.offsetFor(1, long_title, 500, 100, true, 30, gap_px, 5_000);
     // Renamed title (same window): restart from the head.
-    try expectOffset(0, carousel.offsetFor(1, long_title ++ " (edited)", 500, 100, true, 30, 5_001).off);
+    try expectOffset(0, carousel.offsetFor(1, long_title ++ " (edited)", 500, 100, true, 30, gap_px, 5_001).off);
 }
 
 test "re-enabling after a fit title starts over" {
@@ -160,7 +163,7 @@ test "poll deadline paces to the monitor refresh rate" {
     // draw time, so a config reload that turns the carousel off stops the
     // wakeups on the next frame instead of needing a separate policy channel.
     reset();
-    _ = carousel.offsetFor(1, long_title, 500, 100, false, 30, 1000);
+    _ = carousel.offsetFor(1, long_title, 500, 100, false, 30, gap_px, 1000);
     try testing.expectEqual(@as(i32, -1), carousel.pollDeadlineMs(1000, 60));
 }
 
@@ -171,19 +174,19 @@ test "one call returns the offset, the cycle and the active bit together" {
     // renderer down its static-ellipsis path -- see "an overflowing cell is
     // active on its very first frame" for why that was a bug.
     // The cycle is still reported so the caller never has to re-derive it.
-    const first = carousel.offsetFor(1, long_title, 100, 50, true, 30, 1000);
+    const first = carousel.offsetFor(1, long_title, 100, 50, true, 30, gap_px, 1000);
     try testing.expect(first.active);
     try expectOffset(0, first.off);
     try expectOffset(148, first.cycle); // text_w + inter_title_gap_px
 
     // Second frame: live motion, and the same cycle -- the agreement between
     // offset and cycle is what the single-value return now guarantees.
-    const second = carousel.offsetFor(1, long_title, 100, 50, true, 30, 1000);
+    const second = carousel.offsetFor(1, long_title, 100, 50, true, 30, gap_px, 1000);
     try testing.expect(second.active);
     try expectOffset(first.cycle, second.cycle);
 
     // The offset is always inside the cycle it was returned with.
-    const third = carousel.offsetFor(1, long_title, 100, 50, true, 200, 9000);
+    const third = carousel.offsetFor(1, long_title, 100, 50, true, 200, gap_px, 9000);
     try testing.expect(third.off >= 0 and third.off < third.cycle);
 }
 
@@ -269,7 +272,7 @@ test "a zero-width title cannot divide the modulo" {
     // undefined rather than an error, and this asserts the guard rather than
     // the invariant it depends on.
     reset();
-    const s = carousel.offsetFor(1, "", 0, 0, true, 30, 1000);
+    const s = carousel.offsetFor(1, "", 0, 0, true, 30, gap_px, 1000);
     try expectOffset(0, s.off);
     try testing.expect(std.math.isFinite(s.cycle) or s.cycle == 0);
 }
@@ -288,11 +291,11 @@ test "an overflowing cell is active on its very first frame" {
     //
     // Same cell, second frame, and it must be a continuation rather than a
     // restart -- off must have advanced by one frame's worth of motion.
-    const first = carousel.offsetFor(7, long_title, 100, 50, true, 30, 1000);
+    const first = carousel.offsetFor(7, long_title, 100, 50, true, 30, gap_px, 1000);
     try testing.expect(first.active);
     try expectOffset(0, first.off);
 
-    const second = carousel.offsetFor(7, long_title, 100, 50, true, 30, 1100);
+    const second = carousel.offsetFor(7, long_title, 100, 50, true, 30, gap_px, 1100);
     try testing.expect(second.active);
     // 30 px/s over 100 ms.
     try expectOffset(3.0, second.off);
@@ -301,13 +304,13 @@ test "an overflowing cell is active on its very first frame" {
 test "a static cell reports inactive, and an overflow after it starts live" {
     reset();
     // Title fits (60 <= 80): no scroll, so the renderer draws it statically.
-    const fits = carousel.offsetFor(3, "short", 60, 80, true, 30, 1000);
+    const fits = carousel.offsetFor(3, "short", 60, 80, true, 30, gap_px, 1000);
     try testing.expect(!fits.active);
     try expectOffset(0, fits.off);
 
     // Now a long title on the same bar. It must be active on its FIRST frame:
     // this is exactly the static-workspace -> carousel-workspace switch.
-    const over = carousel.offsetFor(4, long_title, 100, 50, true, 30, 2000);
+    const over = carousel.offsetFor(4, long_title, 100, 50, true, 30, gap_px, 2000);
     try testing.expect(over.active);
     try expectOffset(0, over.off);
 }
@@ -318,7 +321,7 @@ test "disabled carousel stays inactive even when the text overflows" {
     // is on", so a disabled carousel must still report false and fall through
     // to the static ellipsis. This is the boundary the fix above must not
     // cross: active tracks whether THIS frame should scroll.
-    const disabled = carousel.offsetFor(5, long_title, 100, 50, false, 30, 1000);
+    const disabled = carousel.offsetFor(5, long_title, 100, 50, false, 30, gap_px, 1000);
     try testing.expect(!disabled.active);
     try expectOffset(0, disabled.off);
 

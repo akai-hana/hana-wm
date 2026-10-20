@@ -25,7 +25,12 @@ pub fn usedPct(total: u64, avail: u64) ?u8 {
     return @intCast(@min((used * 100) / total, 100));
 }
 
-var g_num: [16]u8 = undefined;
+/// Owner state (P2-58): the format scratch buffer `percentSample` writes
+/// into. Single main-thread instance; no loose module-level scalars.
+const RamState = struct {
+    num: [16]u8 = undefined,
+};
+var g: RamState = .{};
 
 /// Used memory %, or null when meminfo is unreadable or -- because the read is
 /// truncation-aware -- too large to trust whole: a meminfo past the buffer is
@@ -37,7 +42,7 @@ fn read() ?systatus.Sample {
     const total = parseRamField(r.bytes, "MemTotal:") orelse return null;
     const avail = parseRamField(r.bytes, "MemAvailable:") orelse return null;
     const pct = usedPct(total, avail) orelse return null;
-    return systatus.percentSample(&g_num, pct);
+    return systatus.percentSample(&g.num, pct);
 }
 
 /// This readout's binding to the systatus surface (`systatus.Sub`).

@@ -96,3 +96,15 @@ test "native_pulse.plausibleSinkName accepts real names and rejects garbage" {
     try std.testing.expect(!native_pulse.plausibleSinkName("\x01control"));
     try std.testing.expect(!native_pulse.plausibleSinkName("...dots"));
 }
+
+test "native_pulse.commitVerdict: timeout is optimistic, a completed wait defers to the daemon" {
+    // The P2-61/D21 rule: a timed-out commit wait reports success so the
+    // display updates now and the 5 s read reconciles -- a wedged daemon must
+    // not stall the event loop for the full deadline on every scroll tick.
+    try std.testing.expect(native_pulse.commitVerdict(false, false));
+    try std.testing.expect(native_pulse.commitVerdict(false, true));
+    // A wait that DID complete defers to the daemon's verdict: a rejection
+    // (done with found=false) must never read as applied.
+    try std.testing.expect(!native_pulse.commitVerdict(true, false));
+    try std.testing.expect(native_pulse.commitVerdict(true, true));
+}

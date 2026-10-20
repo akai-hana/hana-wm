@@ -47,7 +47,7 @@ pub const Scroller = struct {
     /// and the active bit. The three must agree with each other across the
     /// addon boundary, so they arrive together rather than as three separate
     /// scroller queries.
-    offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, now_ms: i64) Scroll,
+    offsetFor: *const fn (win: u32, title: []const u8, text_w: u16, avail_w: u16, enabled: bool, speed_px_s: u16, gap_px: u16, now_ms: i64) Scroll,
     pivot: *const fn () void,
     pollDeadlineMs: *const fn (now_ms: i64, hz: f64) i32,
 };
@@ -157,9 +157,10 @@ fn drawSingleWindow(
                 text_geom.avail_w,
                 false,
                 0,
+                ctx.config.carousel_gap_px,
                 core.monotonicMs(),
             );
-            scroll_active = false;
+            g.scroll_active = false;
         }
         if (snapshot.minimized_title.len > 0)
             drawFittedTitle(
@@ -218,11 +219,12 @@ fn drawFittedTitle(
                 sg.avail_w,
                 ctx.config.carousel_enabled and text_w > sg.avail_w,
                 ctx.config.carousel_speed_px_s,
+                ctx.config.carousel_gap_px,
                 now,
             );
             // The scroller's one call carries the active bit, so it is recorded here
             // for the one consumer that is not a draw (needsRepaintHook).
-            scroll_active = scroll.active;
+            g.scroll_active = scroll.active;
             if (scroll.active) {
                 // Anchor the scroll at the padded text start (same spot static
                 // mode uses), so enabling the carousel continues seamlessly
@@ -321,15 +323,25 @@ fn drawSegmentedTitles(
 
 // Segment hooks
 
-/// True while the last draw handed the slot to the prompt overlay. Latched
-/// here so the overlay close can be noticed: the scroller saw no frames for
+/// Owner state for the title segment (P2-58): two main-thread bits.
+/// `overlay_was_active` latches the last draw handing the slot to the prompt
+/// overlay so the overlay close can be noticed: the scroller saw no frames for
 /// the whole session (pollTimeoutMs contributed none), so resuming without a
 /// pivot would advance `last_frame_ms` across it and teleport the marquee.
-var overlay_was_active: bool = false;
+/// `scroll_active` is the last frame's scroll-active bit, recorded from the
+/// single scroller call: the value arrives together with the offset it
+/// describes, and the title remembers it for the one consumer that is not a
+/// draw (needsRepaintHook). Written by `drawFittedTitle`, the one place the
+/// scroller is called from either outcome.
+const TitleState = struct {
+    overlay_was_active: bool = false,
+    scroll_active: bool = false,
+};
+var g: TitleState = .{};
 
 fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
     if (overlay) |o| if (o.is_active()) {
-        overlay_was_active = true;
+        g.overlay_was_active = true;
         // The overlay returns advanced x, not a width report: it covers the
         // whole slot, so the span is the reserved width by construction. The
         // title declares no `onPainted` at all -- its reservation is
@@ -340,8 +352,8 @@ fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
     // Overlay just closed after at least one overlay frame: pivot the
     // scroller's elapsed-time base so motion continues from the last shown
     // offset instead of catching the whole session in one frame.
-    if (overlay_was_active) {
-        overlay_was_active = false;
+    if (g.overlay_was_active) {
+        g.overlay_was_active = false;
         pivot();
     }
     // Render the title slot at `x` (its reserved width is in `c.width`).
@@ -388,15 +400,8 @@ fn pollTimeoutMsHook() i32 {
 /// than forcing a whole-bar redraw.
 fn needsRepaintHook() bool {
     if (overlay) |o| if (o.is_active()) return o.needsRepaint();
-    return scroll_active;
+    return g.scroll_active;
 }
-
-/// The last frame's scroll-active bit, recorded from the single scroller call:
-/// the value arrives together with the offset it describes, and the title
-/// remembers it for the one consumer that is not a draw (needsRepaintHook).
-/// Written by `drawFittedTitle`, the one place the scroller is called from
-/// either outcome.
-var scroll_active: bool = false;
 
 /// This module's bar-segment contribution (registry binding).
 pub const module = segmod.module(

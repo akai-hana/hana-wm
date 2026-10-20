@@ -68,21 +68,25 @@ const server_default_sink_offsets = [_]usize{ 48, 40 };
 
 /// Opaque handles resolved at attach (worker + lib), needed by callbacks that
 /// run on the mainloop thread. Safe: set before any operation, never cleared.
-var g_mainloop: ?*anyopaque = null;
-var g_oplib: ?Lib = null;
-var g_ctx: ?*anyopaque = null;
-
-/// Results of the pending operation, produced by callbacks, consumed after
-/// `runOp` returns.
-var g_server = ServerInfoResult{};
-var g_sink = SinkInfoResult{};
-
-/// Per-op parameters (single-threaded, never overlapping).
-var g_op_index: u32 = PA_INVALID_INDEX;
-var g_op_mute: c_int = 0;
-var g_op_vol: [132]u8 = undefined;
-var g_op_name: [257]u8 = undefined;
-var g_op_name_len: usize = 0;
+///
+/// Owner state (P2-58): the attach handles, the pending operation's result
+/// slots, and the per-op parameters (single-threaded, never overlapping).
+/// Each op's userdata carries its generation so a callback arriving after its
+/// waiter timed out is dropped instead of writing into the next op's result.
+const PulseState = struct {
+    mainloop: ?*anyopaque = null,
+    oplib: ?Lib = null,
+    ctx: ?*anyopaque = null,
+    server: ServerInfoResult = .{},
+    sink: SinkInfoResult = .{},
+    op_index: u32 = PA_INVALID_INDEX,
+    op_mute: c_int = 0,
+    op_vol: [132]u8 = undefined,
+    op_name: [257]u8 = undefined,
+    op_name_len: usize = 0,
+    active_gen: usize = 0,
+};
+var g: PulseState = .{};
 
 const ServerInfoResult = struct {
     done: bool = false,
@@ -252,14 +256,35 @@ pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
     return true;
 }
 
+/// Bound on a COMMIT wait (D21): a commit is a single socket round-trip, so
+/// anything near this bound means the daemon is wedged, not slow. Blocking the
+/// event loop for the old 100 ms made a dead daemon cost the WM frame; at 50
+/// ms the wait is capped and a timeout degrades to the optimistic path (see
+/// `commitVerdict`) instead of stalling the bar.
+pub const commit_wait_ms: i64 = 50;
+
+/// The verdict of one commit wait: optimistic on timeout, the daemon's
+/// verdict when it answered.
+///
+/// A timed-out wait (`!done`) is treated as SUCCESS -- the display updates
+/// now and the 5 s read reconciles -- because the alternative (blocking the
+/// event loop for the full deadline on every scroll tick of a wedged daemon)
+/// is exactly the frame stall this bound exists to prevent. A wait that DID
+/// complete still defers to the daemon: `successCb` fires `done` with
+/// `found=false` when the daemon rejects the op, and a rejection must never
+/// read as applied.
+pub fn commitVerdict(done: bool, found: bool) bool {
+    return !done or found;
+}
+
 // Operation plumbing
 
-/// Generation of the newest op, bumped (under the mainloop lock) each time an
-/// op is issued or the backend is torn down. Carried into every callback as
-/// the userdata value, so a callback whose waiter already timed out -- and
-/// which may fire while a NEWER op owns the result globals -- identifies
-/// itself as stale and is dropped before it can write or signal.
-var g_active_gen: usize = 0;
+// Generation of the newest op (PulseState.active_gen) is bumped (under the
+// mainloop lock) each time an op is issued or the backend is torn down.
+// Carried into every callback as the userdata value, so a callback whose
+// waiter already timed out -- and which may fire while a NEWER op owns the
+// result fields -- identifies itself as stale and is dropped before it can
+// write or signal.
 
 fn genUserdata(gen: usize) ?*anyopaque {
     // +1 keeps a live gen distinct from a null userdata.
@@ -272,7 +297,7 @@ fn genIsCurrent(ud: ?*anyopaque) bool {
     // current rather than stale, because dropping the signal of a callback a
     // waiter IS parked on is the failure mode this gate exists to prevent.
     if (p == 0) return true;
-    return p - 1 == g_active_gen;
+    return p - 1 == g.active_gen;
 }
 
 /// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`
@@ -282,9 +307,9 @@ fn genIsCurrent(ud: ?*anyopaque) bool {
 /// guarantees one invocation per op; `sinkInfoCb` covers the `info == NULL`
 /// terminal forms).
 fn waitDone(done: *bool, timeout_ms: i64) bool {
-    const lib = g_oplib.?;
-    const m = g_mainloop.?;
-    const ctx = g_ctx.?;
+    const lib = g.oplib.?;
+    const m = g.mainloop.?;
+    const ctx = g.ctx.?;
     const deadline = core.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
@@ -302,11 +327,11 @@ const IssueFn = *const fn (*anyopaque) ?*anyopaque;
 /// Issues an async pa_* operation under the lock, then waits (bounded) for
 /// its callback to fire. Returns whether a callback delivered a result.
 fn runOp(issue: IssueFn, done: *bool, timeout_ms: i64) bool {
-    const lib = g_oplib.?;
-    const m = g_mainloop.?;
+    const lib = g.oplib.?;
+    const m = g.mainloop.?;
     lib.mainloop_lock(m);
-    g_active_gen += 1;
-    const op = issue(g_ctx.?);
+    g.active_gen += 1;
+    const op = issue(g.ctx.?);
     if (op == null) {
         // Op creation failed => libpulse registered no callback, so nothing
         // can signal; report failure without waiting out the deadline.
@@ -328,27 +353,27 @@ fn runOp(issue: IssueFn, done: *bool, timeout_ms: i64) bool {
 // generation current at issue time (stubs run synchronously under the lock
 // right after `runOp`'s bump).
 fn issueServerInfo(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_server_info(ctx, serverInfoCb, genUserdata(g_active_gen));
+    return g.oplib.?.get_server_info(ctx, serverInfoCb, genUserdata(g.active_gen));
 }
 fn issueSinkByName(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_sink_info_by_name(ctx, g_op_name[0..g_op_name_len :0], sinkInfoCb, genUserdata(g_active_gen));
+    return g.oplib.?.get_sink_info_by_name(ctx, g.op_name[0..g.op_name_len :0], sinkInfoCb, genUserdata(g.active_gen));
 }
 fn issueSinkByIndex(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_sink_info_by_index(ctx, g_op_index, sinkInfoCb, genUserdata(g_active_gen));
+    return g.oplib.?.get_sink_info_by_index(ctx, g.op_index, sinkInfoCb, genUserdata(g.active_gen));
 }
 fn issueSinkList(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.get_sink_info_list(ctx, sinkInfoCb, genUserdata(g_active_gen));
+    return g.oplib.?.get_sink_info_list(ctx, sinkInfoCb, genUserdata(g.active_gen));
 }
 fn issueSetVolume(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.set_sink_volume(ctx, g_op_index, @ptrCast(&g_op_vol), successCb, genUserdata(g_active_gen));
+    return g.oplib.?.set_sink_volume(ctx, g.op_index, @ptrCast(&g.op_vol), successCb, genUserdata(g.active_gen));
 }
 fn issueSetMute(ctx: *anyopaque) ?*anyopaque {
-    return g_oplib.?.set_sink_mute(ctx, g_op_index, g_op_mute, successCb, genUserdata(g_active_gen));
+    return g.oplib.?.set_sink_mute(ctx, g.op_index, g.op_mute, successCb, genUserdata(g.active_gen));
 }
 
 fn signalDone(done: *bool) void {
     done.* = true;
-    if (g_mainloop) |m| if (g_oplib) |lib| lib.mainloop_signal(m, 0);
+    if (g.mainloop) |m| if (g.oplib) |lib| lib.mainloop_signal(m, 0);
 }
 
 fn serverInfoCb(_: ?*anyopaque, info: ?*const anyopaque, userdata: ?*anyopaque) callconv(.c) void {
@@ -356,13 +381,13 @@ fn serverInfoCb(_: ?*anyopaque, info: ?*const anyopaque, userdata: ?*anyopaque) 
     if (info) |i| {
         const ptr = @as([*]const u8, @ptrCast(@constCast(i)));
         if (readDefaultSink(ptr[0..512])) |name| {
-            const n = @min(name.len, g_server.name.len);
-            @memcpy(g_server.name[0..n], name);
-            g_server.name_len = n;
-            g_server.found_name = true;
+            const n = @min(name.len, g.server.name.len);
+            @memcpy(g.server.name[0..n], name);
+            g.server.name_len = n;
+            g.server.found_name = true;
         }
     }
-    signalDone(&g_server.done);
+    signalDone(&g.server.done);
 }
 
 fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, userdata: ?*anyopaque) callconv(.c) void {
@@ -373,30 +398,30 @@ fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, userdata: ?*a
         // signaling would leave `waitDone` parked in `mainloop_wait` with no
         // wake to re-check its deadline -- i.e. a frozen WM. Signal on every
         // terminal form; `found` stays as whatever a prior entry set.
-        if (eol != 0) signalDone(&g_sink.done);
+        if (eol != 0) signalDone(&g.sink.done);
         return;
     }
     if (eol != 0) {
         // List exhaustion: no more entries; the first guarded entry (set
         // above on a non-eol call) is what `found` keeps.
-        signalDone(&g_sink.done);
+        signalDone(&g.sink.done);
         return;
     }
     const ptr = @as([*]const u8, @ptrCast(@constCast(info)));
     if (parseSinkInfo(ptr[0 .. sink_info_muted + 4])) |snap| {
-        if (!g_sink.found) {
+        if (!g.sink.found) {
             if (volumePct(ptr[sink_info_volume..][0..132], snap.channels)) |p| {
-                g_sink.index = snap.index;
-                g_sink.channels = snap.channels;
-                g_sink.muted = snap.muted;
-                g_sink.pct = p;
-                g_sink.found = true;
+                g.sink.index = snap.index;
+                g.sink.channels = snap.channels;
+                g.sink.muted = snap.muted;
+                g.sink.pct = p;
+                g.sink.found = true;
                 // by-name/by-index deliver exactly one entry then end without
                 // an eol callback, so nothing else would ever signal `done`:
                 // signaling here is what keeps the single-info queries from
                 // waiting out their full timeout. The list query ends the same
                 // way on its first usable entry instead of scanning on.
-                signalDone(&g_sink.done);
+                signalDone(&g.sink.done);
             }
         }
     }
@@ -404,8 +429,8 @@ fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, userdata: ?*a
 
 fn successCb(_: ?*anyopaque, success: c_int, userdata: ?*anyopaque) callconv(.c) void {
     if (!genIsCurrent(userdata)) return;
-    g_sink.found = success != 0;
-    signalDone(&g_sink.done);
+    g.sink.found = success != 0;
+    signalDone(&g.sink.done);
 }
 
 // Attach
@@ -453,9 +478,9 @@ fn lookupKnown(lib: *std.DynLib, comptime ftype: type, name: [:0]const u8) ?ftyp
 
 /// Waits for the context to reach READY (bounded), with the lock held.
 fn waitReady(timeout_ms: i64) bool {
-    const lib = g_oplib.?;
-    const m = g_mainloop.?;
-    const ctx = g_ctx.?;
+    const lib = g.oplib.?;
+    const m = g.mainloop.?;
+    const ctx = g.ctx.?;
     const deadline = core.realtimeMs() + timeout_ms;
     lib.mainloop_lock(m);
     defer lib.mainloop_unlock(m);
@@ -484,13 +509,13 @@ fn abortAttach(lib: Lib, m: ?*anyopaque, ctx: ?*anyopaque, started: bool) ?Backe
     if (started) lib.mainloop_stop(m.?);
     if (ctx) |ctxp| lib.context_free(ctxp);
     if (m) |mm| lib.mainloop_free(mm);
-    g_oplib = null;
-    g_mainloop = null;
-    g_ctx = null;
+    g.oplib = null;
+    g.mainloop = null;
+    g.ctx = null;
     // Invalidate any straggler callback of the dead backend: its generation
     // can no longer match, so it can neither write results nor signal a
     // future waiter.
-    g_active_gen += 1;
+    g.active_gen += 1;
     var handle = lib._lib;
     handle.close();
     return null;
@@ -521,10 +546,10 @@ pub fn attach() ?Backend {
         return null;
     };
 
-    g_oplib = lib;
-    g_mainloop = m;
-    g_ctx = ctx;
-    g_active_gen += 1;
+    g.oplib = lib;
+    g.mainloop = m;
+    g.ctx = ctx;
+    g.active_gen += 1;
 
     lib.mainloop_lock(m);
     const rc = lib.context_connect(ctx, null, 0, null);
@@ -538,25 +563,25 @@ pub fn attach() ?Backend {
     var index: u32 = PA_INVALID_INDEX;
     var channels: u8 = 0;
     {
-        g_server = .{};
-        if (runOp(issueServerInfo, &g_server.done, 1500) and g_server.found_name) {
-            const name = g_server.name[0..g_server.name_len];
-            g_op_name_len = @min(name.len, g_op_name.len - 1);
-            @memcpy(g_op_name[0..g_op_name_len], name);
-            g_op_name[g_op_name_len] = 0;
+        g.server = .{};
+        if (runOp(issueServerInfo, &g.server.done, 1500) and g.server.found_name) {
+            const name = g.server.name[0..g.server.name_len];
+            g.op_name_len = @min(name.len, g.op_name.len - 1);
+            @memcpy(g.op_name[0..g.op_name_len], name);
+            g.op_name[g.op_name_len] = 0;
 
-            g_sink = .{};
-            if (runOp(issueSinkByName, &g_sink.done, 1500) and g_sink.found) {
-                index = g_sink.index;
-                channels = g_sink.channels;
+            g.sink = .{};
+            if (runOp(issueSinkByName, &g.sink.done, 1500) and g.sink.found) {
+                index = g.sink.index;
+                channels = g.sink.channels;
             }
         }
         if (index == PA_INVALID_INDEX) {
-            g_sink = .{};
-            _ = runOp(issueSinkList, &g_sink.done, 1500);
-            if (g_sink.found) {
-                index = g_sink.index;
-                channels = g_sink.channels;
+            g.sink = .{};
+            _ = runOp(issueSinkList, &g.sink.done, 1500);
+            if (g.sink.found) {
+                index = g.sink.index;
+                channels = g.sink.channels;
             }
         }
         if (index == PA_INVALID_INDEX) return abortAttach(lib, m, ctx, true);
@@ -568,7 +593,7 @@ pub fn attach() ?Backend {
         .ctx = ctx,
         .index = index,
         .channels = channels,
-        .muted = g_sink.muted,
+        .muted = g.sink.muted,
     };
 }
 
@@ -582,47 +607,58 @@ pub const Backend = struct {
     muted: bool,
 
     /// Detaches the backend: stop the worker, disconnect, free everything,
-    /// clear the module globals. The single-backend module's globals ARE the
-    /// handles this `Backend` was built from, so the caller must drop its own
-    /// copy immediately after -- the `lib` function pointers inside it are
-    /// dead once the dlopen handle closes.
+    /// clear the owner state (`PulseState`). Deinit ordering contract
+    /// (P2-58): the single-backend module's `PulseState` fields ARE the
+    /// handles this `Backend` was built from, so the caller (the volume
+    /// segment) must drop its own copy of the `Backend` immediately after
+    /// this call returns -- the `lib` function pointers inside it are dead
+    /// once the dlopen handle closes. Concretely: (1) stop+disconnect the
+    /// mainloop under the lock, (2) free the context, (3) free the mainloop,
+    /// (4) close the DynLib (which invalidates every `Fn*` pointer), (5)
+    /// null the `PulseState` handles so a late probe re-attaches from
+    /// scratch. Nothing may call into `lib` after step (4).
     pub fn deinit(_: *Backend) void {
-        _ = abortAttach(g_oplib.?, g_mainloop, g_ctx, true);
+        _ = abortAttach(g.oplib.?, g.mainloop, g.ctx, true);
     }
 
-    /// In-process volume commit: one native-protocol round trip.
+    /// In-process volume commit: one native-protocol round trip, bounded by
+    /// `commit_wait_ms`. A timeout is optimistic success (D21): the display
+    /// updates now and the 5 s read reconciles, rather than stalling the
+    /// event loop for a wedged daemon.
     pub fn setVolumePct(self: *const Backend, pct: u8) bool {
-        if (!buildCvolume(pct, self.channels, &g_op_vol)) return false;
-        g_op_index = self.index;
-        g_sink = .{};
-        _ = runOp(issueSetVolume, &g_sink.done, 100);
-        // Return `found` (the daemon's verdict), not just `done`: successCb
-        // fires done with found=false when the daemon rejects the op, so
-        // `done` alone would report a rejected commit as applied.
-        return g_sink.done and g_sink.found;
+        if (!buildCvolume(pct, self.channels, &g.op_vol)) return false;
+        g.op_index = self.index;
+        g.sink = .{};
+        const done = runOp(issueSetVolume, &g.sink.done, commit_wait_ms);
+        // `commitVerdict`: timeout => optimistic; completed => the daemon's
+        // verdict (`found`), since successCb fires done with found=false when
+        // the daemon rejects the op.
+        return commitVerdict(done, g.sink.found);
     }
 
     /// In-process mute commit: one native-protocol round trip, the
     /// toggleMute path's native counterpart (the subprocess rungs
     /// `toggle` blindly; the native protocol takes an absolute state,
-    /// so the segment passes the inverted observed state).
+    /// so the segment passes the inverted observed state). Bounded by
+    /// `commit_wait_ms` with the same optimistic-on-timeout rule (D21) as
+    /// `setVolumePct`.
     pub fn setMuted(self: *const Backend, muted: bool) bool {
-        g_op_index = self.index;
-        g_op_mute = @intFromBool(muted);
-        g_sink = .{};
-        _ = runOp(issueSetMute, &g_sink.done, 100);
-        // Return the daemon's verdict (`found`), not just completion: a
-        // rejected op fires done with found=false and must report failure.
-        return g_sink.done and g_sink.found;
+        g.op_index = self.index;
+        g.op_mute = @intFromBool(muted);
+        g.sink = .{};
+        const done = runOp(issueSetMute, &g.sink.done, commit_wait_ms);
+        // `commitVerdict`: timeout => optimistic; completed => the daemon's
+        // verdict (`found`), so a rejected op still reports failure.
+        return commitVerdict(done, g.sink.found);
     }
 
     /// Reads back the live sink state natively (volume + mute).
     pub fn readSink(self: *Backend) ?struct { pct: u8, muted: bool } {
-        g_op_index = self.index;
-        g_sink = .{};
-        _ = runOp(issueSinkByIndex, &g_sink.done, 300);
-        if (!g_sink.found) return null;
-        self.muted = g_sink.muted;
-        return .{ .pct = g_sink.pct, .muted = g_sink.muted };
+        g.op_index = self.index;
+        g.sink = .{};
+        _ = runOp(issueSinkByIndex, &g.sink.done, 300);
+        if (!g.sink.found) return null;
+        self.muted = g.sink.muted;
+        return .{ .pct = g.sink.pct, .muted = g.sink.muted };
     }
 };
