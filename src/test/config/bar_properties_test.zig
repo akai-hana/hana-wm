@@ -134,3 +134,50 @@ test "palette references resolve after collectPalette" {
     try testing.expectEqual(@as(usize, 1), cfg.segment_fg.count());
     try testing.expectEqual(@as(u32, 0xAA0000), cfg.segment_fg.get("cpu").?);
 }
+
+test "P2-64: size=N pins a segment's absolute text size" {
+    // Style-only single token: props with a size, and no color entry at all
+    // (the same early return a bare `underline` takes).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var cfg: bar_config.Config = .{};
+    defer cfg.deinit(testing.allocator);
+    try load(arena.allocator(), &cfg,
+        \\[bar]
+        \\
+        \\[bar.properties]
+        \\clock = size=14
+    );
+    try testing.expectEqual(bar_config.SegmentProps{ .size = 14 }, cfg.segment_props.get("clock").?);
+    try testing.expectEqual(@as(usize, 0), cfg.segment_fg.count());
+
+    // Composite form: color, flag and size land together.
+    var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena2.deinit();
+    var cfg2: bar_config.Config = .{};
+    defer cfg2.deinit(testing.allocator);
+    try load(arena2.allocator(), &cfg2,
+        \\[bar]
+        \\
+        \\[bar.properties]
+        \\cpu = #ff0000 bold size=12
+    );
+    try testing.expectEqual(@as(usize, 1), cfg2.segment_fg.count());
+    try testing.expectEqual(@as(u32, 0xff0000), cfg2.segmentFg("cpu"));
+    try testing.expectEqual(bar_config.SegmentProps{ .bold = true, .size = 12 }, cfg2.segment_props.get("cpu").?);
+
+    // Out of range (or non-integer) sizes are not recognized tokens: no
+    // props entry, exactly as an unknown style flag.
+    var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena3.deinit();
+    var cfg3: bar_config.Config = .{};
+    defer cfg3.deinit(testing.allocator);
+    try load(arena3.allocator(), &cfg3,
+        \\[bar]
+        \\
+        \\[bar.properties]
+        \\ram = size=0
+    );
+    try testing.expectEqual(bar_config.SegmentProps{}, cfg3.segment_props.get("ram") orelse bar_config.SegmentProps{});
+    try testing.expectEqual(@as(usize, 0), cfg3.segment_props.count());
+}

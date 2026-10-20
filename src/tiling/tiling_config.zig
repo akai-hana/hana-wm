@@ -152,8 +152,13 @@ pub const knobs = [_]knob.Knob{
     // lone [tiling] with no functional key.
     knob.knob(&.{knob.place(types.section_tiling, "gap_width")}, "gap_width", .{ .scalable = 0.0 }),
     knob.knob(&.{knob.place(types.section_tiling, "border_width")}, "border_width", .{ .scalable = 0.0 }),
-    knob.knob(&.{knob.place(types.section_tiling, "border_focused")}, "border_focused", .color),
-    knob.knob(&.{knob.place(types.section_tiling, "border_unfocused")}, "border_unfocused", .color),
+    // The two color knobs are read ONLY by the optional borders module
+    // (modules/borders.zig: resolveBorderColorWith/colorOf); when that
+    // module is deleted the settings are legitimately unread, so they carry
+    // the ownership declaration (P2-47). border_width stays core-owned:
+    // core.borderWidth() and the reconcile geometry read it regardless.
+    knob.readerOf(&.{knob.place(types.section_tiling, "border_focused")}, "border_focused", .color, "borders"),
+    knob.readerOf(&.{knob.place(types.section_tiling, "border_unfocused")}, "border_unfocused", .color, "borders"),
 
     // Master-stack trio: the dedicated section's shorter spellings win;
     // flat [tiling] keeps the flat spellings.
@@ -163,8 +168,18 @@ pub const knobs = [_]knob.Knob{
     masterStack("width", "master_width", .scalable_free),
 };
 
+/// Module-owned knob readers (see `knob.readerOf` / `Knob.reader`): the
+/// two border color knobs are read only by the optional borders module
+/// (modules/borders.zig), so the build's knob-reader scan excuses them on
+/// a tree that module has been deleted from (P2-47).
+pub const knob_reader_modules = [_][2][]const u8{
+    .{ "border_focused", "borders" },
+    .{ "border_unfocused", "borders" },
+};
+
 comptime {
     knob.validateTable(Config, &knobs, &.{});
+    knob.validateOwnership(&knobs, &knob_reader_modules, "tiling");
 }
 
 /// The section names the tiling subsystem owns (D13/P2-50): the composed

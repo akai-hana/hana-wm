@@ -397,20 +397,24 @@ fn getInRange(
     comptime min: ?T,
     comptime max: ?T,
 ) T {
-    const val = switch (T) {
-        u8, u16 => blk: {
-            const i = section.getAsOrWarn(i64, key) orelse return default;
-            // A negative int would trap on the @intCast below; warn-and-default
-            // it here so the out-of-range contract holds for negatives too.
-            if (i < 0) return reject(i64, key, i, "below minimum", 0, default);
-            // Guard the type's own range before the cast: an int larger than T
-            // can hold would trap on @intCast even when no explicit max is set.
-            if (i > std.math.maxInt(T))
-                return reject(i64, key, i, "above maximum", std.math.maxInt(T), default);
-            break :blk @as(T, @intCast(i));
-        },
-        else => @compileError("Unsupported type"),
-    };
+    comptime {
+        switch (@typeInfo(T)) {
+            .int => |i| if (i.bits > 64) @compileError(
+                "int knob wider than 64 bits: " ++ @typeName(T),
+            ),
+            else => @compileError("Unsupported type: " ++ @typeName(T)),
+        }
+    }
+    const i = section.getAsOrWarn(i64, key) orelse return default;
+    // The type's own span, in the read type, checked BEFORE the cast so no
+    // @intCast trap is reachable for any bounded int: minInt fits i64 for
+    // every int (unsigned minInt is 0), maxInt is clamped because u64's does
+    // not. Only then do the knob's explicit min/max apply.
+    const lo: i64 = std.math.minInt(T);
+    const hi: i64 = @min(std.math.maxInt(T), std.math.maxInt(i64));
+    if (i < lo) return reject(i64, key, i, "below minimum", lo, default);
+    if (i > hi) return reject(i64, key, i, "above maximum", hi, default);
+    const val: T = @intCast(i);
     if (comptime min) |m| if (val < m) return reject(T, key, val, "below minimum", m, default);
     if (comptime max) |m| if (val > m) return reject(T, key, val, "above maximum", m, default);
     return val;

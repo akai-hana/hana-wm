@@ -720,6 +720,18 @@ test "checkConfig reports the lint warns (mis-cased section, inert family)" {
     try testing.expect(bar_inert.contains("inert"));
     config.deinitGoodSource(alloc);
 
+    // And the same for [bar.layout.*] without [bar]: parseBar returns before
+    // it ever reads the columns, so a layout customized into silence needs
+    // the same report its two siblings get.
+    try box.write("hana/config.toml", "[bar.layout.left]\nsegments = [\"clock\"]\n");
+    var lay_inert: diagnostics.Diagnostics = .{ .allocator = alloc };
+    defer lay_inert.deinit();
+    try config.checkConfig(alloc, &lay_inert);
+    try testing.expect(lay_inert.count() > 0);
+    try testing.expect(lay_inert.contains("[bar.layout.*]"));
+    try testing.expect(lay_inert.contains("inert"));
+    config.deinitGoodSource(alloc);
+
     // The rule-table families (D13 extension, P2-50): [rules.*] without
     // [rules], and [workspace.rules.*] without [workspace.rules], warn the
     // same way the tiling family does.
