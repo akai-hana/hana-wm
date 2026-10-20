@@ -3,10 +3,21 @@
 //! including work-area snapping, size-hint constraints (PMin/PMax envelope
 //! plus PAspect ratio-accurate resize, Shift to break the band), and paced
 //! geometry commits (resize capped to the client repaint budget; moves at
-//! display rate). Tiled windows detach to floating
-//! on first motion. Also updates floating rects on the model and honors
+//! display rate). Tiled windows: a CENTER press still detaches to floating
+//! on first motion, but an EDGE/CORNER press under the master layout
+//! adjusts the adjacent split in place and stays tiled (D26 -- grabEdge /
+//! planTiledSplit classify the press; the split rides the keybind actions'
+//! ledger-diffed retile). Also updates floating rects on the model and honors
 //! configure requests for floating windows, exposing operations via the
 //! floating window module contract.
+//!
+//! Feature-choice note (D26, "no float module" builds): this whole file --
+//! drag engine, detach, and split path alike -- lives in the OPTIONAL
+//! floating module. Deleting it drops DragHooks to the contract's no-op
+//! default, so Super+drag simply does nothing rather than half-detaching a
+//! tiled window; there is no separate no-float branch to maintain, and the
+//! split gesture goes with it because the classifier that owns the press
+//! (classifyMousePress -> startDrag) is itself a floating-module hook.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -29,14 +40,155 @@ const reconcile_tails = @import("reconcile_tails");
 const model = @import("model");
 const scaling = @import("scaling");
 const reconcile = @import("reconcile");
+const contract = @import("tiling_contract");
 
-const DragMode = enum { move, resize };
+const DragMode = enum { move, resize, tiled_split };
 
 /// Corner closest to the cursor at drag-start; the opposite corner is the
 /// anchor that stays fixed during the resize. Crossing the anchor on an axis
 /// wraps the resize to grow the opposite way instead of collapsing. `pub`
 /// alongside DragState as the vocabulary of the pure test seams.
 pub const ResizeCorner = enum { top_left, top_right, bottom_left, bottom_right };
+
+/// Which window edge a drag-start grab sits on (D26). `pub` as the vocabulary
+/// of the pure grab-classification and split-planning test seams.
+pub const GrabEdge = enum { left, right, top, bottom };
+
+/// The split knob an edge-drag adjusts (D26): the master/stack boundary is
+/// `primary_width`, an interior stack divider is `secondary_balance`.
+pub const SplitKnob = enum { primary, balance };
+
+/// Plan for one tiled edge-drag, resolved once at drag start. The snapshot
+/// value plus the pixel->ratio denominators let every motion commit apply
+/// (start + mapped-delta) - current, which self-corrects at the knob's
+/// clamp instead of drifting when a target lands outside the bounds.
+pub const TiledSplit = struct {
+    knob: SplitKnob = .primary,
+    /// dx->primary sign: -1 when the master sits on the right (dragging the
+    /// boundary right then narrows the master, matching its geometry).
+    sign: f32 = 1,
+    /// The knob's value when the drag started.
+    start: f32 = 0,
+    /// Pixel->ratio denominators, resolved from the work area at drag start.
+    wa_w: f32 = 1,
+    wa_h: f32 = 1,
+};
+
+/// Pixel band around a tiled window's edge where a grab classifies as an
+/// edge (split) grab rather than a center (float) grab. Small enough that a
+/// center drag to move a window keeps working; wide enough to catch the
+/// seam: adjacent panes sit one half-gap + border apart, and each pane's own
+/// edge lies within this band of the physical divider.
+const edge_band: i32 = 8;
+
+/// Nearest window edge within `edge_band` of (x, y), or null for a center
+/// grab (the D26 "center -> existing float-detach" arm). A corner grab
+/// resolves to its nearest edge; ties go to the vertical pair first (the
+/// master/stack boundary is THE gesture, so its edge must win a corner tie).
+/// Pure: the whole classification rule is testable headlessly.
+pub fn grabEdge(x: i16, y: i16, rect: model.Rect) ?GrabEdge {
+    const px: i32 = x;
+    const py: i32 = y;
+    const x0: i32 = rect.x;
+    const y0: i32 = rect.y;
+    const x1: i32 = rect.x + @as(i32, rect.width);
+    const y1: i32 = rect.y + @as(i32, rect.height);
+    var best_dist: i32 = edge_band + 1;
+    var best: ?GrabEdge = null;
+    // @abs is unsigned in 0.16 (its result is the unsigned counterpart), so
+    // cast back; both endpoints are screen coordinates, so the signed
+    // distance cannot overflow i32.
+    const cand = [_]struct { GrabEdge, i32 }{
+        .{ .left, @intCast(@abs(px - x0)) },
+        .{ .right, @intCast(@abs(px - x1)) },
+        .{ .top, @intCast(@abs(py - y0)) },
+        .{ .bottom, @intCast(@abs(py - y1)) },
+    };
+    for (cand) |c| {
+        if (c[1] <= edge_band and c[1] < best_dist) {
+            best_dist = c[1];
+            best = c[0];
+        }
+    }
+    return best;
+}
+
+/// Resolves an edge grab into the split a tiled edge-drag adjusts, or null
+/// when the grab has no split behind it (D26's routing rules; null falls
+/// back to the existing center/float-detach behavior):
+///
+///   - left/right edge -> `primary_width`: the vertical boundary (or an
+///     outer vertical edge, where D26 routes it to master width anyway) is
+///     the horizontal knob, signed by master side.
+///   - top/bottom edge, window in the STACK, interior divider -> `balance`.
+///     The workarea-outer test doubles as the partner test: an edge pinned
+///     to the workarea border has no divider beside it, and a lone stack
+///     window's edges are all outer, so balance only ever moves a real
+///     divider. (The knob boosts the first/last stack slots, so an interior
+///     middle divider maps in the same direction, approximately.)
+///   - top/bottom edge of a MASTER-column window (row dividers) -> null:
+///     no knob backs them (D26 scopes balance to the stack).
+///
+/// `layout` is the caller-resolved registry module (`contract.moduleOf`);
+/// anything but master maps to null (no primary/balance behind it, so the
+/// drag detaches to float as before). The primary_count slot test is the
+/// obvious index rule; the engine's row-fit cap can make the effective
+/// master column shorter on small workareas, and this approximation only
+/// misroutes that rare geometry to a knob with no visible effect, never to
+/// wrong layout behavior.
+pub fn planTiledSplit(
+    m: *const model.Model,
+    win: model.WindowId,
+    edge: GrabEdge,
+    rect: model.Rect,
+    wa: model.Rect,
+    primary_on_right: bool,
+    layout: ?*const contract.Layout,
+) ?TiledSplit {
+    const lm = layout orelse return null;
+    if (!std.mem.eql(u8, lm.name, "master")) return null;
+    const ws = &m.ws[m.current.index];
+    const p = ws.params;
+    const base: TiledSplit = .{
+        .sign = if (primary_on_right) -1 else 1,
+        .start = 0,
+        .wa_w = @floatFromInt(wa.width),
+        .wa_h = @floatFromInt(wa.height),
+    };
+    switch (edge) {
+        .left, .right => {
+            var s = base;
+            s.knob = .primary;
+            s.start = p.primary_width;
+            return s;
+        },
+        .top, .bottom => {
+            const idx = ws.tiled_order.indexOfScalar(win) orelse return null;
+            if (idx < p.primary_count) return null; // master rows: no knob
+            const outer = if (edge == .top)
+                rect.y <= wa.y
+            else
+                @as(i32, rect.y) + @as(i32, rect.height) >= wa.y + @as(i32, wa.height);
+            if (outer) return null;
+            var s = base;
+            s.knob = .balance;
+            s.start = p.secondary_balance;
+            return s;
+        },
+    }
+}
+
+/// The pixel->ratio delta mapping: total displacement since drag start, in
+/// knob units. Vertical edges map dx to the primary-width ratio (signed by
+/// master side); interior stack dividers map dy to the balance ratio (a
+/// downward drag grows the upper side, matching balance's top-slot boost).
+/// Pure; the commit applies `start + mapped` against the LIVE knob value.
+pub fn mappedSplitDelta(split: TiledSplit, dx: i32, dy: i32) f32 {
+    return switch (split.knob) {
+        .primary => split.sign * (@as(f32, @floatFromInt(dx)) / split.wa_w),
+        .balance => @as(f32, @floatFromInt(dy)) / split.wa_h,
+    };
+}
 
 /// Work-area edges struct. `pub` alongside DragState/HintLimits as the
 /// vocabulary of the pure `computeResizeRect` test seam.
@@ -49,6 +201,9 @@ pub const DragState = struct {
     active: bool = false,
     window: core.WindowId = 0,
     mode: DragMode = .move,
+    /// Plan resolved at drag start when mode == .tiled_split; the defaults
+    /// sit inert in move/resize drags (same shape as resize_corner).
+    split: TiledSplit = .{},
     resize_corner: ResizeCorner = .bottom_right,
     start_x: i16 = 0,
     start_y: i16 = 0,
@@ -204,6 +359,27 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     else
         nearestResizeCorner(x, y, cur);
 
+    // D26: classify the grab. An edge/corner press on a TILED window under
+    // the MASTER layout adjusts the adjacent split in place (the window
+    // stays tiled); a CENTER press -- or any edge with no split behind it --
+    // keeps today's float-detach for every button. Button 1 vs 3 keeps its
+    // usual meaning on the float path (move vs corner resize) and does not
+    // gate the split path: position is the classifier, the classic
+    // drag-the-border model.
+    const split_plan: ?TiledSplit = if (query.isTiledMode(win)) blk: {
+        const m = pipeline.state();
+        const edge = grabEdge(x, y, cur) orelse break :blk null;
+        break :blk planTiledSplit(
+            m,
+            win,
+            edge,
+            cur,
+            usable_area.workArea(core.getState().screen),
+            primaryOnRight(),
+            contract.moduleOf(m.ws[m.current.index].params.kind),
+        );
+    } else null;
+
     // Snap distance and work area are resolved here so updateDrag's per-event
     // path only does arithmetic. They are constant for the duration of a drag.
     const snap_px = snapDistance();
@@ -211,7 +387,13 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         .drag = .{
             .active = true,
             .window = win,
-            .mode = if (button == 1) .move else .resize,
+            .mode = if (split_plan != null)
+                .tiled_split
+            else if (button == 1)
+                .move
+            else
+                .resize,
+            .split = split_plan orelse .{},
             .resize_corner = resize_corner,
             .start_x = x,
             .start_y = y,
@@ -227,8 +409,9 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
         },
         // A base-tiled window detaches to floating on first motion (see
         // updateDrag); move also skips snap on that first event so the
-        // window doesn't appear frozen at a tiled edge.
-        .pending_float = query.isTiledMode(win),
+        // window doesn't appear frozen at a tiled edge. The split path
+        // never detaches -- that is the whole D26 distinction.
+        .pending_float = split_plan == null and query.isTiledMode(win),
     };
     focus.grabFocus(win, .user_command);
     // Raise the dragged window immediately outside any server grab (grabFocus
@@ -236,14 +419,29 @@ pub fn startDrag(win: u32, button: u8, x: i16, y: i16) void {
     // sanctioned stack primitive + flush so wire stays in sync. Drag ticks
     // keep going flushless via the local dragRect's targeted reconcile
     // (1 configure, no grab).
-    const s = pipeline.syncSink();
-    s.stackOnly(win, .above);
-    // Record the raise at the top of the float raise order. A press on a
-    // still-tiled window is fine: the order's replay filters by anchor, so
-    // the slot stays inert until the detach, which then inherits the top
-    // position the drag deserves.
-    reconcile.floatRaise(win);
-    s.flush();
+    //
+    // Skipped on the split path: tiling owns stacking (the same rule the
+    // focus etiquette's `raise and !isTiledMode` encodes), and the window
+    // never leaves its tiled frame.
+    if (split_plan == null) {
+        const s = pipeline.syncSink();
+        s.stackOnly(win, .above);
+        // Record the raise at the top of the float raise order. A press on a
+        // still-tiled window is fine: the order's replay filters by anchor, so
+        // the slot stays inert until the detach, which then inherits the top
+        // position the drag deserves.
+        reconcile.floatRaise(win);
+        s.flush();
+    }
+}
+
+/// Master side from config, mirrored from pipeline.tilingEnv's comptime gate
+/// (absent-tiling builds have no tiling config field; they also never reach
+/// a split plan -- the layout registry is empty -- so the default here is
+/// only a compile-time shape).
+inline fn primaryOnRight() bool {
+    if (comptime !build_options.has_tiling) return false;
+    return core.getState().config.tiling.master_side == .right;
 }
 
 fn computeMoveRect(
@@ -432,6 +630,56 @@ fn dragRect(win: core.WindowId, r: model.Rect) void {
 /// Applies pointer motion to the active drag. No-op if no drag is active.
 /// `break_aspect` (Shift held at the motion event) frees the resize from the
 /// window's PAspect band for this tick; it is ignored for move drags.
+/// Commit period for a drag rate, capped at 1000Hz. Shared by the rect
+/// throttle (below) and the split throttle so the two paths cannot drift
+/// apart on the cap.
+fn commitPeriodNs(rate: f64) u64 {
+    const min_period_ns: u64 = 1_000_000_000 / 1000;
+    if (rate <= 0.0) return min_period_ns;
+    const p = @as(f64, 1_000_000_000.0) / rate;
+    return @max(@as(u64, @intFromFloat(@ceil(p))), min_period_ns);
+}
+
+/// One throttled commit of a tiled edge-drag (D26): map the total pixel
+/// displacement to knob units, then apply the gap between the DESIRED value
+/// (drag-start snapshot + mapped delta) and the LIVE model value. Re-reading
+/// the live value every commit is what makes the knob's internal clamp
+/// (min/max master width, balance swing) self-correcting: once a bound
+/// catches the target, further dragging accumulates in `desired` and the
+/// first motion back resumes exactly where the pointer is, with no drift.
+///
+/// Throttled to the resize budget: each commit retiles both adjacent panes,
+/// whose clients repaint on every geometry we send them -- same concern,
+/// same cap, per-mode rate chosen here (the rect switch never sees this
+/// mode, see the early return in updateDrag).
+///
+/// Delta mapping and the per-commit reconcile both ride the existing
+/// keybind actions (`adjust*` are exactly what mod+j / mod+shift+j do), so
+/// the ledger-diffed retile path is the proven one and no new wire entry
+/// exists. A no-tiling build never plans a split (empty layout registry ->
+/// planTiledSplit null), so this fn is unreachable there by construction.
+fn commitTiledSplit(drag: *DragState, dx: i32, dy: i32) void {
+    const s = drag.split;
+    const rate: f64 = @min(hz.detectedHz(), max_resize_commit_hz);
+    const now = core.monotonicNs();
+    if (now - drag.last_commit_ns < commitPeriodNs(rate)) return;
+    drag.last_commit_ns = now;
+
+    const m = pipeline.state();
+    const p = m.ws[m.current.index].params;
+    const desired = s.start + mappedSplitDelta(s, dx, dy);
+    const live: f32 = switch (s.knob) {
+        .primary => p.primary_width,
+        .balance => p.secondary_balance,
+    };
+    const delta = desired - live;
+    if (delta == 0) return;
+    switch (s.knob) {
+        .primary => window.adjustPrimaryWidthAction(delta),
+        .balance => window.adjustSecondaryBalance(delta),
+    }
+}
+
 pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
     if (!g_state.drag.active) return;
     const drag = &g_state.drag;
@@ -455,11 +703,20 @@ pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
     // the delta is computed in the wider type.
     const dx: i32 = @as(i32, x) - @as(i32, drag.start_x);
     const dy: i32 = @as(i32, y) - @as(i32, drag.start_y);
+
+    // D26: the split path never touches the rect machinery -- it retiles the
+    // layout from the model instead of configuring a floating frame.
+    if (drag.mode == .tiled_split) {
+        commitTiledSplit(drag, dx, dy);
+        return;
+    }
+
     const wa = drag.workarea;
 
     const rect = switch (drag.mode) {
         .move => computeMoveRect(drag.*, dx, dy, wa, was_pending_float),
         .resize => computeResizeRect(drag.*, dx, dy, wa, sizeHintLimits(drag.window), break_aspect),
+        .tiled_split => unreachable, // returned above
     };
     drag.pending_rect = rect;
 
@@ -472,13 +729,10 @@ pub fn updateDrag(x: i16, y: i16, break_aspect: bool) void {
     const rate: f64 = switch (drag.mode) {
         .move => hz.detectedHz(),
         .resize => @min(hz.detectedHz(), max_resize_commit_hz),
+        .tiled_split => unreachable, // returned above
     };
     const now = core.monotonicNs();
-    const min_period_ns: u64 = 1_000_000_000 / 1000; // cap at 1000Hz max commit rate
-    const period_ns: u64 = if (rate <= 0.0) min_period_ns else blk: {
-        const p = @as(f64, 1_000_000_000.0) / rate;
-        break :blk @max(@as(u64, @intFromFloat(@ceil(p))), min_period_ns);
-    };
+    const period_ns: u64 = commitPeriodNs(rate);
     if (now - drag.last_commit_ns >= period_ns) {
         if (drag.pending_rect) |r| {
             // Drop same-size commits (sub-pixel jiggle): a re-send of the
