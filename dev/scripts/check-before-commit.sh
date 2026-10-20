@@ -54,6 +54,11 @@ fi
 echo "[check-before-commit] fmt check..."
 "${fmt_cmd[@]}"
 
+# Docs: every path-like token in the living docs still exists (P2-77; also a
+# CI step). Sub-second, pure python3, so it never routes through the throttle.
+echo "[check-before-commit] doc path tokens..."
+dev/scripts/check-doc-paths.sh
+
 echo "[check-before-commit] zig build check (type-check + plugin-template + layers)..."
 "${zb[@]}" check -Doptimize=Debug
 

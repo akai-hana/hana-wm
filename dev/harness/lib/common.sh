@@ -87,6 +87,85 @@ settle() {
 	sleep "$(awk "BEGIN{print ${1:-$HW_SETTLE_MS}/1000}")"
 }
 
+# D22/P2-75: condition polling with deadlines, replacing fixed sleeps.
+# Every helper polls up to ${2:-5} seconds and fails loudly with the
+# OBSERVED state against what was expected -- a hang and a silent early
+# pass both lose the diagnosis.
+
+# Wait until hana's EWMH _NET_ACTIVE_WINDOW names the expected client
+# (or `null` when nothing should be focused). Polls X truth via xprop, so
+# no key press is needed: it keeps working while the WM is between grabs
+# (re-exec, reload) and never perturbs the _dump_seq sequence the
+# focused_assert helpers wait on.
+wait_focused() {
+	_want="$1"; _deadline=$(( $(date +%s) + ${2:-5} ))
+	if [ "$_want" = "null" ]; then
+		_exp="0x0"
+	else
+		_id=$(client_id "$_want")
+		[ -n "$_id" ] || { echo "FAIL wait_focused: no window '$_want'" >&2; return 1; }
+		_exp=$(printf '0x%x' "$_id")
+	fi
+	while :; do
+		_obs=$(DISPLAY="$HW_DISPLAY" xprop -root _NET_ACTIVE_WINDOW 2>/dev/null \
+			| sed -n 's/.*# \(0x[0-9a-fA-F]*\).*/\1/p')
+		[ -n "$_obs" ] || _obs=0x0
+		[ "$_obs" = "$_exp" ] && return 0
+		[ "$(date +%s)" -ge "$_deadline" ] && {
+			echo "FAIL wait_focused: observed focus '$_obs', expected '$_exp' ($_want) after ${2:-5}s" >&2
+			return 1
+		}
+		sleep 0.1
+	done
+}
+
+# Wait until the LAST state dump reports exactly `_want` total windows.
+# Each poll sends super+q and waits for a NEW dump, so the reading is
+# post-key: during a re-exec's grab-less window the keys are dropped and
+# the loop simply retries until the successor answers again. Uses its own
+# sequence variable (`_w_seq`) and never touches `_dump_seq`.
+wait_windows() {
+	_want="$1"; _deadline=$(( $(date +%s) + ${2:-5} )); _w_obs="<no dump>"
+	while :; do
+		_w_seq=$(grep -c 'STATE DUMP' "$HW_LOG" 2>/dev/null) || _w_seq=0
+		key super+q
+		_w_inner=$(( $(date +%s) + 2 ))
+		while :; do
+			_w_n=$(grep -c 'STATE DUMP' "$HW_LOG" 2>/dev/null) || _w_n=0
+			[ "$_w_n" -gt "$_w_seq" ] && break
+			[ "$(date +%s)" -ge "$_w_inner" ] && break
+			sleep 0.1
+		done
+		if [ "$_w_n" -gt "$_w_seq" ]; then
+			# Re-read after the seq bump; a partially written dump parses
+			# as empty and is retried on the next poll.
+			_w_obs=$(grep 'Total windows:' "$HW_LOG" 2>/dev/null | tail -1 | awk '{print $NF}')
+			[ "$_w_obs" = "$_want" ] && return 0
+		fi
+		[ "$(date +%s)" -ge "$_deadline" ] && {
+			echo "FAIL wait_windows: observed total '${_w_obs:-<no dump>}', expected '$_want' after ${2:-5}s" >&2
+			return 1
+		}
+		sleep 0.1
+	done
+}
+
+# Wait until no window named `_name` exists at all (mapped or parked):
+# xdotool search without --onlyvisible, same population wait_named_any
+# counts, so a hide/park that ends in deletion or a plain close both land.
+wait_gone() {
+	_name="$1"; _deadline=$(( $(date +%s) + ${2:-5} ))
+	while :; do
+		_c=$(DISPLAY="$HW_DISPLAY" xdotool search --name "^$_name\$" 2>/dev/null | wc -l)
+		[ "$_c" -eq 0 ] && return 0
+		[ "$(date +%s)" -ge "$_deadline" ] && {
+			echo "FAIL wait_gone: '$_name' still present ($_c matching) after ${2:-5}s" >&2
+			return 1
+		}
+		sleep 0.1
+	done
+}
+
 # Trigger hana's dump_state action; output lands in $HW_LOG. Records the
 # pre-key STATE DUMP count in _dump_seq so focused_mid/focused_final can
 # wait for THIS dump to land (a "log is quiet" heuristic races: the

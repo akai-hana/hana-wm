@@ -18,7 +18,11 @@ state_dump             # baseline dump_state identity/geometry
 pid_before="$HANA_PID"
 
 key super+shift+r      # reload_hana: unconditional in-place re-exec
-settle 1500            # save + exec + grab reclaim + restore boot settle
+wait_windows 3 || return 1   # save + exec + grab reclaim + restore boot:
+                             # the successor's own dump reporting all 3
+                             # windows is the completion condition (replaces
+                             # a fixed 1.5 s sleep; keys dropped while the
+                             # grab is down are retried by the poll)
 
 # The re-exec is an execv IN PLACE: same pid, same log file.
 kill -0 "$HANA_PID" 2>/dev/null || {
@@ -49,7 +53,7 @@ check_borders 4 A B    # C now lives on ws2 (fullscreen-adjacent slate); A,B til
 
 # A second re-exec must keep working (idempotence of the hand-off).
 key super+shift+r
-settle 1000
+wait_windows 3 || return 1   # same completion condition (was a 1 s sleep)
 kill -0 "$HANA_PID" 2>/dev/null || {
 	echo "FAIL: hana died across the second re-exec" >&2
 	return 1
