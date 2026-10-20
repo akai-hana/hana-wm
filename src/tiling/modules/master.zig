@@ -1,6 +1,7 @@
 //! Master-stack tiling layout.
 //! Master + stack panes, spilling overflow into a column-major grid.
 
+const std = @import("std");
 const model = @import("model");
 const tiling = @import("tiling");
 
@@ -335,6 +336,11 @@ fn tileStackExtra(
         for (windows) |win| tiling.emitHidden(ctx.out, win);
         return;
     }
+    // row_fit invariant: with row_avail >= max_fit each row's integer share
+    // of row_avail is >= 1 (consecutive cumulative-division floors differ by
+    // at least one), so the emission below can never hand the server a
+    // zero-height row. Debug-only: no release cost.
+    std.debug.assert(row_avail >= max_fit);
 
     const min_col_w: u16 = ctx.min_dim +| model.doubledBorder(ctx.m);
 
@@ -393,6 +399,12 @@ fn tileStackExtra(
 /// the call sites on purpose: they differ in the min_dim-floor corner, and
 /// merging them is not behavior-preserving.
 inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
+    // Every caller parks degenerate geometry instead of emitting it (a zero
+    // height share, a column at/below its doubled border, a pane at/below its
+    // seam margin), so a zero here is a caller bug. The sink would reject the
+    // configure (width/height 0 is a BadValue), but a Debug assert names the
+    // layout path instead of the server error. Debug-only: no release cost.
+    std.debug.assert(w >= 1 and h >= 1);
     // px is relative to the workarea's left edge (master_x/stack_origin both
     // start at 0 within screen_w): offset it by the workarea origin (waX) so
     // it lands on a side-claimed workarea, not the screen's left edge.

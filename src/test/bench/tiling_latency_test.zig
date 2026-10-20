@@ -148,6 +148,74 @@ test "tiling: reconcile cost with windows spread across 10 workspaces" {
     }
 }
 
+// P2-69: the resize_parked phase (Opts.resize_parked -- the bar-visibility
+// toggle's opt-in) re-runs the layout COMPUTE for every other workspace's
+// parked windows, O(workspaces) on top of the normal reconcile; its wire
+// delta dedups to zero in steady state (pinned by reconcile_test). This case
+// prices the extra compute: the same 10-workspace spread model, one steady
+// reconcile with the flag off vs on, and re-pins the dedup so a regression
+// that re-sends parked geometry every toggle fails the smoke, not just the
+// bench numbers.
+test "tiling: reconcile cost with resize_parked across 10 workspaces" {
+    inline for (.{ 10, 30, 50 }) |total| {
+        const per_ws = total / 10 + 1;
+        var m = makeModel();
+        var id: WindowId = 1;
+        for (0..10) |ws| {
+            for (0..per_ws) |_| {
+                _ = try window_state_ops.register(&m, id, model.WSId.fromIndex(ws));
+                id += 1;
+            }
+        }
+        focus.setFocus(&m, 1);
+
+        reconcile.init();
+        defer reconcile.init();
+
+        // Show every window once so its ledger holds a real visible rect --
+        // the dedup arms only then (a never-shown window resends its size on
+        // every toggle BY DESIGN; reconcile_test pins that trade). The bench
+        // then prices the steady-state toggle a long-running WM actually
+        // pays: pure extra compute, zero extra wire.
+        var show = CountingSink{};
+        var show_ctx = makeCtx(show.sink(), colorOfFocused, helpers.std_wa);
+        for (1..10) |ws| {
+            m.current = model.WSId.fromIndex(ws);
+            reconcile.run(&m, &show_ctx, .{});
+        }
+        m.current = model.WSId.fromIndex(0);
+        reconcile.run(&m, &show_ctx, .{}); // settle: re-show ws0 after the walk
+
+        // helpers.benchReconcile pins Opts to .{}; the flagged loop needs its
+        // own timing (same warm-then-loop shape).
+        const iterations: usize = if (bench) 2_000 else 1;
+
+        var off = CountingSink{};
+        var off_ctx = makeCtx(off.sink(), colorOfFocused, helpers.std_wa);
+        const t_off = nowNs();
+        for (0..iterations) |_| reconcile.run(&m, &off_ctx, .{});
+        const off_ns: f64 = @as(f64, @floatFromInt(nowNs() - t_off)) / @as(f64, @floatFromInt(iterations));
+
+        var on = CountingSink{};
+        var on_ctx = makeCtx(on.sink(), colorOfFocused, helpers.std_wa);
+        const t_on = nowNs();
+        for (0..iterations) |_| reconcile.run(&m, &on_ctx, .{ .resize_parked = true });
+        const on_ns: f64 = @as(f64, @floatFromInt(nowNs() - t_on)) / @as(f64, @floatFromInt(iterations));
+
+        // Steady-state wire is zero with the flag on: the recompute finds the
+        // parked windows already at their targets and the ledger elides. A
+        // regression to per-toggle re-sends fails here.
+        try std.testing.expectEqual(@as(usize, 0), on.total);
+        try std.testing.expectEqual(@as(usize, 0), off.total);
+
+        if (bench)
+            helpers.benchLog(
+                "[tiling] total={d} (10ws, {d}/ws): steady reconcile={d:.1} ns/pass, +resize_parked={d:.1} ns/pass (+{d:.1}%)\n",
+                .{ total, per_ws, off_ns, on_ns, 100.0 * (on_ns - off_ns) / off_ns },
+            );
+    }
+}
+
 // Decompose a retile into: (a) layout compute over visible windows,
 // (b) the full reconcile walk over ALL windows.
 test "tiling: decompose layout.compute vs full reconcile walk" {

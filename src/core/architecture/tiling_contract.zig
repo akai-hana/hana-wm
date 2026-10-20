@@ -28,8 +28,15 @@ const bounded = @import("bounded");
 ///
 /// This is the file's ONE edge into a generated implementation module, and it
 /// is deliberate -- see `activeLayoutKind` for why.
-pub const tiling_mods =
-    if (build_options.has_tiling_registry) @import("tiling_modules").modules else &[_]Layout{};
+///
+/// Typed as a SLICE (not inferred): the empty-registry branch is a
+/// `*const [0]Layout`, and the `&tiling_mods` call sites would then pass a
+/// `*const *const [0]Layout` that no longer coerces to `[]const Layout`
+/// (caught by the modularity matrix's tiling-deletion scenarios). A slice
+/// type makes both branches coerce uniformly and the call sites pass the
+/// value without `&`.
+pub const tiling_mods: []const Layout =
+    if (build_options.has_tiling_registry) &@import("tiling_modules").modules else &.{};
 
 /// The neutral layout: registry index 0, the fallback for an unresolvable
 /// config layout name and for a restored `kind` that no longer resolves.
@@ -41,15 +48,25 @@ pub const tiling_mods =
 /// "falls back to layout 0" stays visible at the call site.
 pub const default_kind: u8 = 0;
 
-/// Bounds-checked registry lookup for `kind` (the single owner of the
-/// `kind >= tiling_mods.len` guard). Returns the registry entry, or null when
-/// kind is out of range (including the absent-tiling empty registry). Every
-/// consumer that wants a layout module BY INDEX dispatches through this:
-/// moduleName/variantCount/compute, the pre-reconcile duty, viewport and
-/// fifo metadata, and the handoff restore fallback.
+/// Bounds-checked registry lookup for `kind`. Takes the registry AS A
+/// PARAMETER (`mods`), matching `providerOf`'s registry-parameter shape, so a
+/// test can inject a fake layout set and the production call sites pass the
+/// one true `tiling_mods` via the thin `moduleOf` wrapper below. Returns the
+/// registry entry, or null when kind is out of range (including the
+/// absent-tiling empty registry). Every consumer that wants a layout module
+/// BY INDEX dispatches through this: moduleName/variantCount/compute, the
+/// pre-reconcile duty, viewport and fifo metadata, and the handoff restore
+/// fallback.
+pub fn moduleOfRegistry(mods: []const Layout, kind: u8) ?*const Layout {
+    if (kind >= mods.len) return null;
+    return &mods[kind];
+}
+
+/// Production wrapper: `moduleOf(kind)` is `moduleOfRegistry(tiling_mods, kind)`.
+/// Kept so the many production call sites don't each name the registry; tests
+/// that want a fake registry call `moduleOfRegistry` directly.
 pub fn moduleOf(kind: u8) ?*const Layout {
-    if (kind >= tiling_mods.len) return null;
-    return &tiling_mods[kind];
+    return moduleOfRegistry(tiling_mods, kind);
 }
 
 /// The active tiling layout registry index, when the model-derived `kind` is
@@ -102,9 +119,25 @@ pub fn activeLayoutMeta(
     comptime pick: fn (Layout) ?[]const u8,
     fallback: []const u8,
 ) []const u8 {
-    if (tiling_mods.len == 0) return fallback;
-    const resolved = activeLayoutKind(kind, tiling_enabled) orelse return fallback;
-    return pick(tiling_mods[resolved]) orelse fallback;
+    return activeLayoutMetaFrom(tiling_mods, kind, tiling_enabled, pick, fallback);
+}
+
+/// Registry-parameter form of `activeLayoutMeta`: same gates and lookup, but
+/// over an injected `mods` slice instead of the `tiling_mods` singleton. The
+/// production wrapper above passes the singleton; a test can pass a fake
+/// layout set to exercise the pick/fallback logic without the build-generated
+/// registry.
+pub fn activeLayoutMetaFrom(
+    mods: []const Layout,
+    kind: u8,
+    tiling_enabled: bool,
+    comptime pick: fn (Layout) ?[]const u8,
+    fallback: []const u8,
+) []const u8 {
+    if (mods.len == 0) return fallback;
+    if (!tiling_enabled) return fallback;
+    const resolved = moduleOfRegistry(mods, kind) orelse return fallback;
+    return pick(resolved.*) orelse fallback;
 }
 
 /// The tiling-layout hook set. Every module under the tiling owner's `modules/`
