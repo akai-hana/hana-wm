@@ -18,7 +18,6 @@
 
 bar             bar composition/draw root; reached via the bar module registry tests and e2e S25 pixel goldens
 bindings        bar render column bindings; needs the cairo surface, covered by e2e bar pixels
-border_sweeps   border X-sync sweeps; X-wire, reached via borders/sync tests through seams and e2e
 client_events   ConfigureRequest/ClientMessage/Crossing handlers; X-event paths covered by e2e S11/S18/S24
 completion      prompt completion; needs the chrome overlay fixture (e2e bar scenarios)
 contract_dispatch  comptime providerOf/callAll over module contracts; exercised via the registries (tiling sweep, window/bar modules)

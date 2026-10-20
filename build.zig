@@ -73,6 +73,13 @@ fn resolveOptimize(b: *std.Build) std.builtin.OptimizeMode {
 }
 
 pub fn build(b: *std.Build) !void {
+    // P2-71: configure-time source memo starts fresh (no state leaks across
+    // build() invocations) and the wall clock the modules step reports starts
+    // now, so its figure covers the WHOLE configure (the modules step is
+    // registered at the end, after every scan has run).
+    SourceScanner.reset();
+    const configure_t0 = SourceScanner.nowMs();
+
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .native } });
     const optimize = resolveOptimize(b);
 
@@ -138,22 +145,6 @@ pub fn build(b: *std.Build) !void {
     // Restrict the run to one *_test stem. Applied in wireUnitTests, where a
     // name matching nothing is a hard error rather than a silent empty run.
     const test_filter = b.option([]const u8, "test-filter", "Run only this *_test file (e.g. model_test)");
-
-    // `zig build modules`: the discovered stem table, answerable without
-    // reading discovery code. The walk already ran, so the output is baked
-    // into a printf command at configure time — no custom step machinery.
-    {
-        var keys: std.ArrayList([]const u8) = .empty;
-        defer keys.deinit(b.allocator);
-        var mit = discovery.modules.keyIterator();
-        while (mit.next()) |k| try keys.append(b.allocator, k.*);
-        std.mem.sort([]const u8, keys.items, {}, lessStrings);
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(b.allocator);
-        for (keys.items) |k| try buf.print(b.allocator, "{s}\n", .{k});
-        const modules_step = b.step("modules", "Print the discovered module stem table (sorted)");
-        modules_step.dependOn(&b.addSystemCommand(&.{ "printf", "%s", buf.items }).step);
-    }
 
     // `zig build modularity-manifest`: the TSV scenario table
     // check-modularity.sh drives Tier 3/4 (and the all-removed) from, printed
@@ -245,6 +236,31 @@ pub fn build(b: *std.Build) !void {
     buildExeAndRunStep(b, root_mod);
     wireBenchStep(b, bench_enabled, unit_test_step);
     try wireCheckSteps(b, root_mod, &discovery, features, shared_ctx, has_usr, target, optimize);
+
+    // `zig build modules`: the discovered stem table, answerable without
+    // reading discovery code. The walk already ran, so the output is baked
+    // into a printf command at configure time — no custom step machinery.
+    // Registered at the END of build() (P2-71) so the configure-stats header
+    // carries the FINAL source-read count and the full configure wall clock:
+    // every scan (walk classification, import edges, sub-registry specs, test
+    // gates, knob fragments) has run by now, and the memoized SourceScanner
+    // reports one read per unique path instead of one per consumer.
+    {
+        var keys: std.ArrayList([]const u8) = .empty;
+        defer keys.deinit(b.allocator);
+        var mit = discovery.modules.keyIterator();
+        while (mit.next()) |k| try keys.append(b.allocator, k.*);
+        std.mem.sort([]const u8, keys.items, {}, lessStrings);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(b.allocator);
+        try buf.print(b.allocator, "# configure: {d} source reads (memoized: one per unique file), {d} ms\n", .{
+            SourceScanner.reads,
+            SourceScanner.nowMs() - configure_t0,
+        });
+        for (keys.items) |k| try buf.print(b.allocator, "{s}\n", .{k});
+        const modules_step = b.step("modules", "Print the discovered module stem table (sorted)");
+        modules_step.dependOn(&b.addSystemCommand(&.{ "printf", "%s", buf.items }).step);
+    }
 }
 
 /// Tiling-layout files the modularity matrix may delete individually: every
@@ -351,6 +367,7 @@ const FeatureSet = struct {
     has_minimize: bool,
     has_fullscreen: bool,
     has_workspaces: bool,
+    has_borders: bool,
     has_bar: bool,
     has_vim: bool,
     has_seg_clock: bool,
@@ -366,13 +383,14 @@ const FeatureSet = struct {
     /// Feature name -> is-it-built bool, for `readTestGate`. A gate a test
     /// declares in its own source resolves through this; naming a feature
     /// that does not exist is a hard error in the reader, not a silent skip.
-    fn featureFlags(self: FeatureSet) [16]FeatureFlag {
+    fn featureFlags(self: FeatureSet) [17]FeatureFlag {
         return [_]FeatureFlag{
             .{ .name = "tiling", .on = self.has_tiling },
             .{ .name = "floating", .on = self.has_floating },
             .{ .name = "minimize", .on = self.has_minimize },
             .{ .name = "fullscreen", .on = self.has_fullscreen },
             .{ .name = "workspaces", .on = self.has_workspaces },
+            .{ .name = "borders", .on = self.has_borders },
             .{ .name = "bar", .on = self.has_bar },
             .{ .name = "vim", .on = self.has_vim },
             .{ .name = "seg_clock", .on = self.has_seg_clock },
@@ -437,6 +455,13 @@ fn probeFeatures(discovery: *const Module.DiscoveryContext, build_opts: *std.Bui
     const has_workspaces = discovery.modules.contains("workspaces");
     build_opts.addOption(bool, "has_workspaces", has_workspaces);
 
+    // The borders module (border policy: color/width sweeps + reconcile
+    // color hook). NOT published as a build option: nothing outside the
+    // test gate table and the modularity matrix needs to ask; the window
+    // layer reaches it only through the `borders` contract family, whose
+    // hooks are simply unbound when the module is absent.
+    const has_borders = discovery.modules.contains("borders");
+
     // The bar exists only if all four internals are discovered; missing any
     // one forfeits the whole bar.
     const has_drawing = discovery.modules.contains("drawing");
@@ -477,6 +502,7 @@ fn probeFeatures(discovery: *const Module.DiscoveryContext, build_opts: *std.Bui
         .has_minimize = has_minimize,
         .has_fullscreen = has_fullscreen,
         .has_workspaces = has_workspaces,
+        .has_borders = has_borders,
         .has_bar = has_bar,
         .has_vim = has_vim,
         .has_seg_clock = has_seg_clock,
@@ -671,7 +697,6 @@ fn wireUnitTests(
     const test_gates = [_][]const u8{
         "actions_test",
         "ewmh_test",
-        "focus_test",
         "pipeline_test",
         "visibility_test",
         "borders_test",
@@ -712,6 +737,24 @@ fn wireUnitTests(
         }
         std.mem.sort([]const u8, stems.items, {}, lessStrings);
 
+        // Test-count floor (P1-27, re-landed): a test file that silently
+        // vanishes (rename without the tree noticing, an over-broad delete)
+        // would otherwise just make the suite smaller and greener. Every
+        // `zig build` command constructs this graph, so the guard fires for
+        // every command including CI's check/test/build steps. The floor is
+        // feature-gate-safe (a `// build-gate:` file stays discovered
+        // whether or not its gate is on) and modularity-safe (the matrix
+        // deletes production paths, never src/test). Bumping it requires a
+        // deliberate edit here.
+        const test_file_floor: usize = 79;
+        if (stems.items.len < test_file_floor) {
+            std.debug.print(
+                "build: discovered {d} *_test.zig files, below the committed floor of {d}; restore the missing test file(s) or deliberately lower `test_file_floor` in build.zig (P1-27)\n",
+                .{ stems.items.len, test_file_floor },
+            );
+            return error.TestFileFloor;
+        }
+
         var filter_matched = false;
         for (stems.items) |stem| {
             const entry = discovery.modules.getPtr(stem).?;
@@ -725,6 +768,28 @@ fn wireUnitTests(
             const rel = discovery.source_paths.get(stem) orelse
                 return error.NoTestSourcePath;
             const gate = try readTestGate(b, rel, &feature_flags);
+            // Bidirectional X-gate derivation (P1-29, re-landed): the table
+            // above and the file's own harness vocabulary must agree, for
+            // EVERY discovered test file with the feature gate ON or OFF --
+            // a gated-off file cannot hide a missing or a stale row. Both
+            // directions fail at configure time, which every `zig build`
+            // command (CI included) constructs, so the table cannot drift
+            // silently again.
+            const uses_x = try testUsesXHarness(b, rel);
+            if (uses_x and !x_gated) {
+                std.debug.print(
+                    "build: {s} uses the X test harness (`setUp(` / `@import(\"fixture\")`) but has no test_gates row; add the row so its run serializes on the shared $DISPLAY (P1-29)\n",
+                    .{rel},
+                );
+                return error.UnrowedXHarnessTest;
+            }
+            if (!uses_x and x_gated) {
+                std.debug.print(
+                    "build: test_gates row '{s}' ({s}) does not use the X test harness; remove the row (P1-29)\n",
+                    .{ stem, rel },
+                );
+                return error.StaleTestGateRow;
+            }
             if (!gate.on) continue;
             // -Dtest-filter=<stem> restricts the run to one file while
             // developing. filter_matched makes an unmatched name a loud error
@@ -841,6 +906,29 @@ fn wireCheckSteps(
         .{ .path = "contrib/plugin-template/config-fragment.zig", .import = "config_fragment", .decl = "binding", .present = true },
     };
     const plugin_template_check = try buildPluginTemplateCheck(b, &discovery.modules, shared_ctx, has_usr, target, optimize, &plugin_template_specs);
+
+    // `zig build hook-index` (P2-57): print the hook-index table (contract,
+    // hook name, single/multi/data cardinality, dispatch site) from the REAL
+    // contract types — a compiled step, not a textual scan, so the table
+    // cannot drift from the partition lists the generated registries enforce.
+    // Sibling of `zig build modules` (which prints the stem table); the plan
+    // deliberately keeps both as their own steps rather than merging output.
+    {
+        const hook_mod = b.createModule(.{
+            .root_source_file = b.path("dev/build-support/hook_index.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        finalizeModuleLinked(hook_mod, optimize, has_usr);
+        injectShared(hook_mod, shared_ctx);
+        var it = discovery.modules.iterator();
+        while (it.next()) |entry| hook_mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
+        const hook_exe = b.addExecutable(.{ .name = "hook-index", .root_module = hook_mod });
+        const hook_run = b.addRunArtifact(hook_exe);
+        const hook_step = b.step("hook-index", "Print the contract hook-index table (name -> single/multi/data -> dispatch site)");
+        hook_step.dependOn(&hook_run.step);
+    }
+
     // `zig build check` type-checks the exe AND runs the layer guards
     // (check-layers.sh): the pure layers stay xcb-free and wire-mutating
     // requests stay behind the reconcile boundary.
@@ -1885,24 +1973,58 @@ const SourceScanner = struct {
     b: *std.Build,
     src: []const u8,
 
+    /// Monotonic milliseconds for the configure-stats header (P2-71). Zig
+    /// 0.16's std.time has no wall-clock reads left, and build() is
+    /// Linux-only anyway, so this goes straight to the kernel like the
+    /// runtime's core.monotonicMs does (same fallback-free best effort: a
+    /// failed clock read yields 0 and only skews the printed figure).
+    fn nowMs() i64 {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s +
+            @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+    }
+
+    /// P2-71: ONE read per path for the whole configure. The walk's
+    /// classification, the import-edge wiring, the sub-registry scan, the
+    /// knob-fragment reader, and the test-gate reader all route through
+    /// `open`, which serves every consumer the same arena-backed slice and
+    /// counts the real reads; each consumer parses it itself (parsing is
+    /// cheap, the I/O is what this dedupes). Reset at the top of `build()`.
+    var memo: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var reads: usize = 0;
+
+    fn reset() void {
+        memo = .empty;
+        reads = 0;
+    }
+
     /// Bounded read: the scanned decls (a `pub const module` shape, a binding
     /// marker, a build-gate line, an @import literal) all live in the first
     /// few hundred bytes of a file, and a build script is not a place to
     /// allocate an unbounded read for.
     fn open(b: *std.Build, rel_path: []const u8) !SourceScanner {
-        return .{
-            .b = b,
-            .src = try b.build_root.handle.readFileAlloc(
-                b.graph.io,
-                rel_path,
-                b.allocator,
-                .limited(Module.max_scan_source_bytes),
-            ),
-        };
+        if (memo.get(rel_path)) |src| return .{ .b = b, .src = src };
+        const src = try b.build_root.handle.readFileAlloc(
+            b.graph.io,
+            rel_path,
+            b.allocator,
+            .limited(Module.max_scan_source_bytes),
+        );
+        // Key is duped: callers pass stack-buffer slices (the walk's
+        // path_buf), which the memo outlives. The arena already owns the
+        // value; nothing is ever torn down (same lifetime contract as
+        // DiscoveryContext's maps).
+        try memo.put(b.allocator, try b.allocator.dupe(u8, rel_path), src);
+        reads += 1;
+        return .{ .b = b, .src = src };
     }
 
     fn close(self: SourceScanner) void {
-        self.b.allocator.free(self.src);
+        // The source is memoized and arena-backed (see `open`): shared with
+        // every other consumer for the whole configure, and the build arena's
+        // lifetime already covers the build. Nothing to free.
+        _ = self;
     }
 
     /// Line iterator over the scanned source: splits on newlines
@@ -2677,6 +2799,23 @@ const TestGate = struct {
 /// does, so FORGETTING a marker becomes a compile error naming the missing
 /// import, not a silently skipped test. An unknown feature NAME is fatal, so a
 /// typo cannot read as "no gate at all".
+/// Line-scan for X-harness vocabulary in a test file: `setUp(` or
+/// `@import("fixture")`. Vocabulary scan, not call analysis, by design (a
+/// commented mention counts: a false alarm costs one deliberate table edit,
+/// while a false negative would silently desync the DISPLAY-serialization
+/// table this feeds). Consumed by the bidirectional `test_gates` check in
+/// `wireUnitTests` (P1-29).
+fn testUsesXHarness(b: *std.Build, path: []const u8) !bool {
+    var scan = try SourceScanner.open(b, path);
+    defer scan.close();
+    var lines = scan.lines();
+    while (lines.next()) |t| {
+        if (std.mem.indexOf(u8, t, "setUp(") != null) return true;
+        if (std.mem.indexOf(u8, t, "@import(\"fixture\")") != null) return true;
+    }
+    return false;
+}
+
 fn readTestGate(b: *std.Build, path: []const u8, flags: []const FeatureFlag) !TestGate {
     var scan = try SourceScanner.open(b, path);
     defer scan.close();

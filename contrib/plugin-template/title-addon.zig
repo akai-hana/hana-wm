@@ -51,6 +51,7 @@ fn offsetFor(
     avail_w: u16,
     enabled: bool,
     speed_px_s: u16,
+    gap_px: u16,
     now_ms: i64,
 ) title.Scroll {
     // TODO: your scroll math. The resting answer (a title that
@@ -62,6 +63,7 @@ fn offsetFor(
     _ = avail_w;
     _ = enabled;
     _ = speed_px_s;
+    _ = gap_px;
     _ = now_ms;
     return .{ .off = 0, .cycle = 0, .active = false };
 }
