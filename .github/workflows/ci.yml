@@ -86,6 +86,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxcb-xkb-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-cursor-dev libxkbcommon-dev libxkbcommon-x11-dev libcairo2-dev libpango1.0-dev libxrandr-dev
 
+      # Living docs must not rot: every path-like token in README/AGENTS/
+      # config README still exists (P2-77). Pure python3 scan, no zig — runs
+      # before the fmt gate so a docs-only PR still gets checked (the `test`
+      # job ignores the paths-filter `code` output on purpose).
+      - name: Doc path guard
+        run: ./dev/scripts/check-doc-paths.sh
+
       - name: zig fmt --check
         run: zig fmt --check src
 
@@ -98,7 +105,7 @@ jobs:
 
       # xtest.sh starts an isolated Xvfb and sets HANA_REQUIRE_X=1 so every
       # display-gated test actually runs instead of self-skipping (a bare
-      # `zig build test` reports green with 48 tests silently skipped).
+      # `zig build test` reports green with 49 tests silently skipped).
       # Debug is several times cheaper than the ReleaseFast default
       # (resolveOptimize) and it also runs the std.debug.assert coverage
       # ReleaseFast compiles out.

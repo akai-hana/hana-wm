@@ -175,6 +175,18 @@ Segment behavior knobs:
 - `clock_format` (strftime), `run_prompt`, `carousel_enabled`,
   `carousel_speed_px_s`, `indicator_*` and the appearance/color knobs
   (usually themed).
+- `carousel_gap_px` — pixels of blank space between repeats of a scrolling
+  title. Default: `48`.
+- `systatus_interval_ms` — how often the systatus readouts (`batt`, `cpu`,
+  `ram`) poll their source while present. Default: `2000`; a readout that
+  goes absent still backs off to its own slower re-probe. Minimum `250`.
+- `volume_read_interval_ms` — how often the volume control polls the sink
+  (this is also the cadence that corrects an optimistic drag commit if the
+  daemon disagreed with it). Default: `5000`. Minimum `250`.
+- `max_batched_redraws` — an internal safety cap: how many redraw passes one
+  batch of events may run while modules settle their layouts. Raising it
+  lets unusually deep layout cascades finish inside one batch; lowering it
+  to `1` trades that for earlier batching. Default: `4` (range `1`–`64`).
 - Selected workspace tag: `selected_fg` colors the current tag's **icon text**
   and `selected_indicator_color` colors its **indicator glyph** independently
   (unset follows `indicator_color`, then the tag's text color). The selected
@@ -190,7 +202,10 @@ item (`cpu = primary_color`) sets the text color and trailing
 `underline`/`bold`/`italic` flags set its style, e.g.
 `volume = #ff0000 underline bold` or a style-only `clock = underline`.
 A bare flag means `true`; `name=bool` and `name=0|1` spellings work too.
-A `<segment>_value` key is color-only and separately colors its numeric
+A `size=N` token pins the segment's text to an absolute pixel size (1–255),
+overriding the configured font size for that segment alone, e.g.
+`cpu = #ff0000 size=14`. A `<segment>_value` key is color-only and separately
+colors its numeric
 readout (the `42%` in `CPU 42%`), falling back to the segment text color when
 absent.
 
