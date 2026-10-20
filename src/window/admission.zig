@@ -5,7 +5,7 @@
 //! rules map (one map, rebuilt from `config.workspaces.rules` at
 //! init and on every reload), the spawn
 //! queue (pending (workspace, pid) assignments consumed at the next
-//! MapRequest), the five-cookie admission pipeline (fire every
+//! MapRequest), the batched admission pipeline (fire every
 //! property query up-front so the X server processes them in
 //! parallel, drain the replies sequentially), the admission decision,
 //! and the registration helper both admission paths run through.
@@ -33,7 +33,7 @@ const log = std.log.scoped(.admission);
 const query = @import("query");
 const icccm = @import("icccm");
 const reply_mod = @import("reply");
-const title_cache = @import("title_cache");
+const window_facts = @import("window_facts");
 const atoms = @import("atoms");
 const contract = @import("tiling_contract");
 const focus = @import("focus");
@@ -46,6 +46,7 @@ const session = @import("session");
 const pipeline = @import("pipeline");
 const reconcile = @import("reconcile");
 const usable_area_mod = @import("usable_area");
+const struts = @import("struts");
 const window_mods = @import("window_modules").modules;
 const registry = @import("registry");
 
@@ -328,7 +329,7 @@ pub fn registerSpawn(workspace: core.WorkspaceId, pid: u32) void {
     };
 }
 
-/// The five property-query cookies fired for an admitted window. All are
+/// The property-query cookies fired for an admitted window. All are
 /// fired up-front (before any reply is drained) so the X server processes
 /// them in parallel; the callers differ only in how they drain the two
 /// workspace-resolution cookies (rules/spawn resolution vs. discard).
@@ -342,7 +343,12 @@ pub const AdmissionCookies = struct {
     /// the server processes it in parallel; drained by drainAdmissionCookies
     /// into the AdmissionDrain's transient_for.
     transient_cookie: xcb.xcb_get_property_cookie_t,
-    title_cookies: title_cache.TitleCookies,
+    title_cookies: window_facts.TitleCookies,
+    /// EWMH window-type list + strut (F-80: foreign-dock edge claims). Fired
+    /// with the batch; drained by drainAdmissionCookies into the drain's
+    /// (is_dock, strut) facts, published to usable_area by the CALLER before
+    /// the admitting reconcile.
+    strut_cookies: struts.Cookies,
 };
 
 /// Fires all property-query cookies for an admitted window (WM_CLASS,
@@ -386,7 +392,8 @@ pub fn fireAdmissionCookies(conn: core.Connection, win: u32) AdmissionCookies {
         .protocols_cookie = protocols_cookie,
         .hints_cookie = hints_cookie,
         .transient_cookie = transient_cookie,
-        .title_cookies = title_cache.fireTitleCookies(conn, win),
+        .title_cookies = window_facts.fireTitleCookies(conn, win),
+        .strut_cookies = struts.fireCookies(conn, win),
     };
 }
 
@@ -402,13 +409,19 @@ pub fn claimManagedEventMask(conn: core.Connection, win: u32) void {
 }
 
 /// Everything drainAdmissionCookies extracts from a fired cookie batch: the
-/// parsed size hints and the ICCCM transient parent (dialog placement).
+/// parsed size hints, the ICCCM transient parent (dialog placement), and the
+/// EWMH dock facts (strut insets for usable_area, plus the DOCK type bit that
+/// floats the window at admission).
 pub const AdmissionDrain = struct {
     size_hints: ?model_mod.SizeHints,
     /// WM_TRANSIENT_FOR's parent window id, or null for a non-transient
     /// window. The id is unvalidated here; admitWindow resolves it against
     /// the model (preferred) or the X server (unmanaged parent).
     transient_for: ?u32,
+    /// True when the window declares `_NET_WM_WINDOW_TYPE_DOCK`.
+    is_dock: bool = false,
+    /// The dock's `_NET_WM_STRUT_PARTIAL` insets, when dock-typed and valid.
+    strut: ?struts.Insets = null,
 };
 
 /// Drains the three unconditionally-fired admission cookies plus the
@@ -426,10 +439,13 @@ pub fn drainAdmissionCookies(conn: core.Connection, win: u32, cookies: Admission
     }
     const size_hints = window.parseSizeHints(cookies.normal_hints_cookie);
     icccm.populateFocusCacheFromCookies(conn, win, cookies.protocols_cookie, cookies.hints_cookie);
-    title_cache.collectTitleCookies(conn, win, cookies.title_cookies);
+    window_facts.collectTitleCookies(conn, win, cookies.title_cookies);
+    const dock = struts.drain(conn, cookies.strut_cookies);
     return .{
         .size_hints = size_hints,
         .transient_for = drainTransientFor(conn, cookies.transient_cookie),
+        .is_dock = dock.is_dock,
+        .strut = dock.strut,
     };
 }
 
@@ -452,7 +468,8 @@ fn drainTransientFor(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_
 pub fn discardAdmissionCookies(conn: core.Connection, cookies: AdmissionCookies) void {
     icccm.discardProtocolCookie(conn, cookies.c_wm_class);
     icccm.discardProtocolCookie(conn, cookies.c_net_wm_pid);
-    title_cache.discardTitleCookies(conn, cookies.title_cookies);
+    window_facts.discardTitleCookies(conn, cookies.title_cookies);
+    struts.discard(conn, cookies.strut_cookies);
     inline for (.{
         cookies.normal_hints_cookie,
         cookies.protocols_cookie,
@@ -530,7 +547,7 @@ pub fn mapRequest(
         // Evict, or a refused window's XID lingers in the cache forever: XIDs
         // are recycled, so the next client to be handed this id would inherit
         // a stale title/child entry and read the wrong window.
-        title_cache.removeWindow(win);
+        window_facts.removeWindow(win);
         return;
     };
     // Install the admission drain's WM_NORMAL_HINTS on the fresh entry (no
@@ -903,8 +920,10 @@ fn adoptRootWindows() !usize {
         // from accumulating unconsumed results. A persisted restore record
         // wins over the float rule too (it carries the window's exact
         // pre-restart anchor); record-less windows still honor a class float
-        // rule, matching the MapRequest admission policy.
-        const float = if (entry.record == null) resolveClassFloat(entry.cookies.c_wm_class) else false;
+        // rule AND the dock bit (F-80: a DOCK-typed window floats at its own
+        // geometry, never a tiled slot), matching the MapRequest admission
+        // policy.
+        //
         // resolveClassFloat already consumed the WM_CLASS reply, so draining it
         // again (drainAdmissionCookies with all=true) would double-dispose
         // the same XCB reply (a freed sequence wedged at the 16-bit wrap, plus
@@ -915,6 +934,12 @@ fn adoptRootWindows() !usize {
         var drain_cookies = entry.cookies;
         if (entry.record == null) drain_cookies.c_wm_class = null;
         const drain = drainAdmissionCookies(conn, win, drain_cookies, true);
+        const float = if (entry.record == null) resolveClassFloat(entry.cookies.c_wm_class) or drain.is_dock else false;
+
+        // F-80: publish the dock's strut claim BEFORE the end-of-adoption
+        // reconcile (adoptSession's single reconcile) so an adopted dock's
+        // shrink lands with the session's first placement.
+        if (drain.is_dock) _ = struts.publish(win, drain.strut);
 
         // Register on the restored-or-current workspace. on_current=false so
         // mapRequest does NOT reconcile per-window (the caller owns

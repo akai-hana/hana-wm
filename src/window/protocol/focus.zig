@@ -30,6 +30,7 @@ const model_mod = @import("model");
 const types = @import("types");
 const idmap = @import("idmap");
 const registry = @import("registry");
+const focus_select = @import("focus_select");
 
 const atoms = @import("atoms");
 const requests = @import("requests");
@@ -1020,158 +1021,33 @@ pub fn cycleFocus(dir: types.Dir, duty: *const fn () void) void {
     grabFocusWithDuty(target, .user_command, duty);
 }
 
-/// Resolve the visible window a focus-cycle step would land on, or null when
-/// the step is a no-op (no visible windows, or the only visible window is
-/// already focused). Pure read: no focus change, no grab -- the reason
-/// `cycleFocus` exists is to stop the caller from having to pair this with a
-/// commit itself. The Mod+k/Mod+j input path folds the target's viewport snap
-/// into the SAME grab as the focus transition (one grab+reconcile instead of
-/// focus-then-snap).
+/// Thin bind over `focus_select.cycleTarget`: supplies the live model and
+/// current focus so the read stays a pure selection step. The pure form
+/// (`focus_select.cycleTarget(m, focused, dir)`) is what tests exercise
+/// without a live pipeline; this wrapper exists so the input path can resolve
+/// a cycle step from real state without threading state through by hand.
 pub fn cycleTarget(dir: types.Dir) ?u32 {
-    const forward = dir == .forward;
-    // Caller-owned scratch, like every other snapshot buffer in this layer
-    // (query.zig): the ordering itself comes from collectCyclePool (below),
-    // which anchors the cycle on the workspace's tiled_order -- so Mod+j/k
-    // follows the arrangement and a move/swap reorders the cycle with it.
-    var buf: [model_mod.store_capacity]u32 = undefined;
-    const m = pipeline.state();
-    const len = collectCyclePool(m, m.current, &buf);
-    if (len == 0) return null;
-    const wins = buf[0..len];
-    // Single visible window: the only sensible cycle step is to focus it
-    // when it isn't focused already; the modulo wrap below would otherwise
-    // spin a redundant grabFocus against the same id.
-    if (len == 1) {
-        const only = wins[0];
-        return if (getFocused() == only) null else only;
-    }
-    // When the focused window isn't in the visible list, wrap so the very next
-    // step lands on wins[0] (forward) or wins[len-1] (backward).
-    const sentinel: usize = if (forward) len - 1 else 0;
-    const idx = if (getFocused()) |w|
-        std.mem.indexOfScalar(u32, wins, w) orelse sentinel
-    else
-        sentinel;
-    return wins[model_mod.wrapIndex(idx, if (forward) 1 else -1, len)];
+    return focus_select.cycleTarget(pipeline.state(), getFocused(), dir);
 }
 
 // Section: model focus operations (the focus protocol owns focus state
-// transitions on the model).
+// transitions on the model). The selection logic itself lives pure in
+// `window/state/focus_select.zig`; these are re-exports so the protocol
+// surface and its callers keep one spelling for the writers.
 
 /// Writes `win` as the model's focused window and moves it to the front of
 /// the focus MRU. Unknown windows are ignored.
-pub fn setFocus(m: *model_mod.Model, win: model_mod.WindowId) void {
-    if (!m.store.has(win)) return;
-    m.focused = win;
-    const list = &m.ws[m.current.index].focus_mru;
-    // Re-focusing an already-tracked window moves it to the front WITHOUT
-    // spending an eviction, so the newest `mru_capacity` DISTINCT windows are
-    // the ones retained. Then front-insert, evicting the oldest (tail) at
-    // capacity -- one call, so the order (evict, then insert) cannot be
-    // transposed at the call site.
-    const already = list.removeValue(win);
-    if (!already) _ = list.pushFrontEvictingTail(win) else _ = list.insert(0, win);
-}
+pub const setFocus = focus_select.setFocus;
 
 /// Model-side focus drop (minimize/close with no eligible successor).
-pub fn clearFocus(m: *model_mod.Model) void {
-    m.focused = null;
-}
+pub const clearFocus = focus_select.clearFocus;
 
-/// The ONE focused/unfocused border-pixel pick, sitting with focus because
-/// the focus state is what the pick reads: a second copy of the same ternary
-/// in the window layer could drift from the core pipeline's copy and nothing
-/// would notice.
-///
-/// `m` supplies the focus source so the caller cannot pass an answer that
-/// differs from the pipeline's own `m.focused`.
-pub inline fn focusedBorderColor(m: *const model_mod.Model, win: model_mod.WindowId, focused_px: u32, unfocused_px: u32) u32 {
-    return if (m.focused == win) focused_px else unfocused_px;
-}
+/// The ONE focused/unfocused border-pixel pick (see focus_select).
+pub const focusedBorderColor = focus_select.focusedBorderColor;
 
-/// Whether `cand` is eligible as a focus-fallback candidate on `ws`: not the
-/// `excluded` window, and visible there (parked entries fail visibleOn). The
-/// tier-specific extra criteria (tiled membership, base mode) stay at each
-/// tier's call site.
-fn qualifies(m: *const model_mod.Model, cand: model_mod.WindowId, ws: model_mod.WSId, excluded: ?model_mod.WindowId) bool {
-    if (cand == excluded) return false;
-    return model_mod.visibleOn(m, cand, ws);
-}
+/// Minimize-fallback target policy (see focus_select).
+pub const fallbackFocusCandidate = focus_select.fallbackFocusCandidate;
 
-/// Minimize-fallback target policy. Tier order on workspace `ws`: focus MRU
-/// (newest first), reversed tiled_order, then any visible floating-base
-/// window not in tiled_order. First `visibleOn(ws)` candidate wins; null when
-/// nothing qualifies. `excluded` is a candidate the caller already rejected
-/// (e.g. a no_input window that can never hold X focus) — it is skipped
-/// across all tiers so the caller can re-scan for the next focusable window.
-pub fn fallbackFocusCandidate(m: *const model_mod.Model, ws: model_mod.WSId, excluded: ?model_mod.WindowId) ?model_mod.WindowId {
-    // 1. focus MRU, newest first (mru[0] is the MOST RECENT focus, so
-    //    minimizing the focused window falls back to the previously focused
-    //    one). visibleOn rejects parked entries, including the just-parked
-    //    window itself.
-    const mru = &m.ws[ws.index].focus_mru;
-    for (mru.constSlice()) |cand| {
-        if (qualifies(m, cand, ws, excluded)) return cand;
-    }
-    // 2. reversed tiled_order.
-    var j = m.ws[ws.index].tiled_order.len;
-    while (j > 0) {
-        j -= 1;
-        const cand = m.ws[ws.index].tiled_order.items[j];
-        if (qualifies(m, cand, ws, excluded)) return cand;
-    }
-    // 3. any floating window on the workspace (base geometry, not in
-    //    tiled_order). A covering window owns the screen, so it is not a
-    //    fallback target.
-    //    Linear membership check per floating entry against tiled_order;
-    //    adequate for <50 windows.
-    var it = m.store.iterator();
-    while (it.next()) |row| {
-        if (row.val.anchor != .floating or row.val.presence == .covering) continue;
-        if (row.key == excluded or !model_mod.visibleEntry(m, row.val, ws)) continue;
-        if (m.ws[ws.index].tiled_order.indexOfScalar(row.key) == null) return row.key;
-    }
-    return null;
-}
-
-/// The visible windows of `ws` in ON-SCREEN order, for focus cycling: writes
-/// them into `buf` and returns the count (0 when `buf` is empty). Ordered by
-/// layout, not by window id, because the cycle must follow the arrangement:
-/// `ws`'s tiled_order first (the same slice the layout engine tiles, so master
-/// slots lead and the stack follows), then the visible windows with no tiled
-/// slot here -- floating ones and multi-tagged windows homed on another
-/// workspace -- in store order. A covering occupant collapses the pool to
-/// that one window. `seen` is per-call stack scratch marking the store slots
-/// already admitted, so the two passes can't double-admit a window.
-pub fn collectCyclePool(m: *const model_mod.Model, ws: model_mod.WSId, buf: []model_mod.WindowId) usize {
-    if (model_mod.coveringOccupantOnWs(m, ws)) |occ| {
-        if (buf.len == 0) return 0;
-        buf[0] = occ;
-        return 1;
-    }
-    var seen: [model_mod.store_capacity]bool = [_]bool{false} ** model_mod.store_capacity;
-    var n: usize = 0;
-    // Pass 1: the shown workspace's tiled order == screen order. indexOf
-    // locates the store row, at() reads it -- one search per window, matching
-    // the reconciler's order build.
-    for (m.ws[ws.index].tiled_order.constSlice()) |w| {
-        if (n == buf.len) break;
-        const slot = m.store.indexOf(w) orelse continue;
-        const e = m.store.at(slot).val;
-        if (!model_mod.visibleEntry(m, e, ws)) continue;
-        seen[slot] = true;
-        buf[n] = w;
-        n += 1;
-    }
-    // Pass 2: the untiled tail, after the tiled run. Store order, so floating
-    // windows keep a stable order among themselves.
-    for (0..m.store.count()) |slot| {
-        if (n == buf.len) break;
-        if (seen[slot]) continue;
-        const row = m.store.at(slot);
-        if (!model_mod.visibleEntry(m, row.val, ws)) continue;
-        buf[n] = row.key;
-        n += 1;
-    }
-    return n;
-}
+/// The visible windows of `ws` in ON-SCREEN order, for focus cycling (see
+/// focus_select).
+pub const collectCyclePool = focus_select.collectCyclePool;

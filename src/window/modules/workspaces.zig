@@ -73,10 +73,9 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
 /// `releaseCovering` only goes one way, so the wrong-direction mistake is
 /// unrepresentable.
 fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
-    const occupant = if (covering.providerOf(.visibleCoveringOnWs)) |wm|
-        wm.covering.visibleCoveringOnWs.?(m, dest)
-    else
-        null;
+    // Screen-owner question: the AND rule, straight from the model (P2-51
+    // consolidated the old contract hook into model.coveringOccupantOn).
+    const occupant = model.coveringOccupantOn(m, dest, .anchored_and_visible);
     if (occupant != null and occupant != win) {
         if (covering.providerOf(.releaseCovering)) |wm| {
             wm.covering.releaseCovering.?(m, win);
@@ -342,9 +341,10 @@ pub fn switchWorkspace(ws_idx: u8) void {
     // from the fact, so spuriously bumping it on every switch would churn a
     // bar-redraw for workspaces with no fullscreen window (the claim for the
     // new workspace was already applied by updateBarVisibilityForWorkspace
-    // above). OR scan (not the module AND hook): any covering entry, anchored
-    // or merely visible on the current workspace, owns the screen here.
-    if (model.coveringOccupantOnWs(m, m.current) != null) core.fullscreen.bump();
+    // above). OR rule (not the AND screen-owner rule): any covering entry,
+    // anchored or merely visible on the current workspace, owns the screen
+    // here.
+    if (model.coveringOccupantOn(m, m.current, .anchored_or_visible) != null) core.fullscreen.bump();
 
     const t1: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 

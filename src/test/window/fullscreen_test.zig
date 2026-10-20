@@ -163,7 +163,7 @@ test "fullscreenWsOf keeps the workspace while minimized-from-fullscreen" {
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 30));
     try testing.expect(m.store.get(30).?.presence == .parked);
     try testing.expect(!model.visibleOn(&m, 30, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 }
 
 // FSQ: model fullscreen semantics: mode ignores visibility, on-workspace checks the
@@ -176,13 +176,13 @@ test "FSQ: model fullscreen queries (mode / on-workspace / visible occupant)" {
     try testing.expect(!model.isCoveringOn(&m, 50, WSId.fromIndex(0)));
     try testing.expect(!model.isCovering(&m, unknown_win)); // unknown id
     try testing.expect(!model.isCoveringOn(&m, unknown_win, WSId.fromIndex(0))); // unknown id
-    try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 
     _ = fullscreen.toggleFullscreen(&m, 50); // record targets current workspace (0)
     try testing.expect(model.isCovering(&m, 50));
     try testing.expect(model.isCoveringOn(&m, 50, WSId.fromIndex(0)));
     try testing.expect(!model.isCoveringOn(&m, 50, WSId.fromIndex(1))); // other-workspace record
-    try testing.expectEqual(@as(?WindowId, 50), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 50), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 
     // A record for a workspace the window isn't tagged to is NOT an occupant:
     // occupancy requires visibility (sync parks such strays).
@@ -191,7 +191,7 @@ test "FSQ: model fullscreen queries (mode / on-workspace / visible occupant)" {
     try testing.expect(model.isCovering(&m, 51));
     try testing.expect(model.isCoveringOn(&m, 51, WSId.fromIndex(0)));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 51));
-    try testing.expectEqual(@as(?WindowId, 50), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 50), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 
     // Minimize-from-fullscreen: MODE retained, but parked => not an occupant.
     try minimize.minimize(&m, 50);
@@ -199,7 +199,7 @@ test "FSQ: model fullscreen queries (mode / on-workspace / visible occupant)" {
     try testing.expect(model.isCoveringOn(&m, 50, WSId.fromIndex(0)));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 50));
     try testing.expect(!model.visibleOn(&m, 50, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 }
 
 // The occupant scan claims the covering winner per workspace and excludes parked
@@ -212,18 +212,18 @@ test "occupant scan winner resolution and parked-ghost exclusion" {
 
     regCur(&m, 60);
     regCur(&m, 61);
-    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
     _ = fullscreen.toggleFullscreen(&m, 60); // covering on workspace 0
-    try testing.expectEqual(@as(?model.WindowId, 60), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, 60), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
     _ = fullscreen.toggleFullscreen(&m, 61); // switch: 61 releases 60's claim
-    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(1)));
+    try testing.expectEqual(@as(?model.WindowId, 61), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
+    try testing.expectEqual(@as(?model.WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(1), .anchored_and_visible));
     // Parked ghost: the covering intent survives but never claims the screen.
     try minimize.minimize(&m, 61);
-    try testing.expectEqual(@as(?model.WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), model.coveringWsOf(&m, 61).?);
     minimize.restore(&m, 61);
-    try testing.expectEqual(@as(?model.WindowId, 61), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?model.WindowId, 61), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 }
 
 // toggleFullscreen drives the model's covering_ws core intent in lockstep
@@ -235,31 +235,31 @@ test "toggleFullscreen writes covering_ws core intent" {
 
     // Before entering fullscreen the core intent is absent.
     try testing.expectEqual(@as(?WSId, null), m.store.get(90).?.covering_ws);
-    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
 
     _ = fullscreen.toggleFullscreen(&m, 90); // on workspace 0
     var e = m.store.get(90).?;
     try testing.expect(e.presence == .covering);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), e.covering_ws);
-    try testing.expectEqual(@as(?WindowId, 90), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 90), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
 
     // Exit clears the core intent.
     _ = fullscreen.toggleFullscreen(&m, 90);
     e = m.store.get(90).?;
     try testing.expect(e.presence == .present);
     try testing.expectEqual(@as(?WSId, null), e.covering_ws);
-    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
 }
 
 // The module occupant hook delegates to the model scan and agrees with it on
 // the parked-ghost exclusion.
-test "coveringOccupantOnWs excludes parked ghosts" {
+test "coveringOccupantOn excludes parked ghosts" {
     var m = makeModel();
 
     regCur(&m, 91);
     _ = fullscreen.toggleFullscreen(&m, 91);
-    try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, 91), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
+    try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 
     // Minimize-from-fullscreen: covering_ws is KEPT (ghost) but presence is
     // parked, so neither the module hook nor the model helper reports an
@@ -267,16 +267,16 @@ test "coveringOccupantOnWs excludes parked ghosts" {
     try minimize.minimize(&m, 91);
     try testing.expect(m.store.get(91).?.presence == .parked);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(0)), m.store.get(91).?.covering_ws);
-    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, null), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 
     // Restore re-surfaces the window: it re-enters covering (the model's
     // covering intent is the single authority for re-claiming the screen).
     minimize.restore(&m, 91);
     try testing.expect(m.store.get(91).?.presence == .covering);
     try testing.expect(model.isCovering(&m, 91));
-    try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
-    try testing.expectEqual(@as(?WindowId, 91), fullscreen.visibleCoveringOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
+    try testing.expectEqual(@as(?WindowId, 91), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_and_visible));
 }
 
 // A move/tag retarget (workspaces path) keeps the model's covering_ws in
@@ -294,8 +294,8 @@ test "move/tag retarget tracks covering_ws to the new workspace" {
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), m.store.get(93).?.covering_ws);
     try testing.expectEqual(@as(?WSId, WSId.fromIndex(2)), model.coveringWsOf(&m, 93));
     try testing.expect(m.store.get(93).?.presence == .covering);
-    try testing.expectEqual(@as(?WindowId, 93), model.coveringOccupantOnWs(&m, WSId.fromIndex(2)));
-    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOnWs(&m, WSId.fromIndex(0)));
+    try testing.expectEqual(@as(?WindowId, 93), model.coveringOccupantOn(&m, WSId.fromIndex(2), .anchored_or_visible));
+    try testing.expectEqual(@as(?WindowId, null), model.coveringOccupantOn(&m, WSId.fromIndex(0), .anchored_or_visible));
 }
 
 test "Deferred bar pending is per-window, not a single slot" {

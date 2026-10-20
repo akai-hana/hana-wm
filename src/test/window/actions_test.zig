@@ -27,7 +27,7 @@ const floating = @import("floating");
 const tiling = @import("tiling");
 const fixture = @import("fixture");
 const reconcile = @import("reconcile");
-const title_cache = @import("title_cache");
+const window_facts = @import("window_facts");
 const events = @import("events");
 const registry = @import("registry");
 const atoms = @import("atoms");
@@ -620,12 +620,12 @@ test "actions: title PropertyNotify storms coalesce into one batch refresh" {
     // Marked, not fetched: one dirty window, cache still at the admission
     // default (no title was ever fetched for this window).
     try std.testing.expectEqual(@as(usize, 1), window.pendingPropertyRefreshCount());
-    try std.testing.expectEqualStrings("", title_cache.peekTitle(win));
+    try std.testing.expectEqualStrings("", window_facts.peekTitle(win));
 
     // Batch end: one refresh per dirty window, converging on "three".
     window.flushPropertyRefresh();
     try std.testing.expectEqual(@as(usize, 0), window.pendingPropertyRefreshCount());
-    try std.testing.expectEqualStrings("three", title_cache.peekTitle(win));
+    try std.testing.expectEqualStrings("three", window_facts.peekTitle(win));
 }
 
 /// Writes an 8-bit string property on `win` the way a client sets a title.
@@ -681,9 +681,9 @@ test "actions: an over-long title is cached truncated instead of dropped" {
     setTitleProperty(fx, win, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING, &long);
     refreshTitleOverWire(fx, win);
 
-    const got = title_cache.peekTitle(win);
-    try std.testing.expectEqual(@as(usize, title_cache.max_title_len), got.len);
-    try std.testing.expectEqualStrings(long[0..title_cache.max_title_len], got);
+    const got = window_facts.peekTitle(win);
+    try std.testing.expectEqual(@as(usize, window_facts.max_title_len), got.len);
+    try std.testing.expectEqualStrings(long[0..window_facts.max_title_len], got);
 }
 
 // The byte cap can land inside a multi-byte UTF-8 character (the arrow's lead
@@ -710,7 +710,7 @@ test "actions: a title cut mid-character caches the last whole character" {
     setTitleProperty(fx, win, net_wm_name, utf8_string, &long);
     refreshTitleOverWire(fx, win);
 
-    const got = title_cache.peekTitle(win);
+    const got = window_facts.peekTitle(win);
     try std.testing.expectEqual(@as(usize, 255), got.len);
     try std.testing.expectEqualStrings(long[0..255], got);
     try std.testing.expect(std.unicode.utf8ValidateSlice(got));

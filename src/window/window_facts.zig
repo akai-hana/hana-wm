@@ -3,7 +3,7 @@
 //! of truth. Title reads use cache-only peeks (no X11 on the draw path), with
 //! pipelined batch admission (_NET_WM_NAME preferred over WM_NAME) and a
 //! single-window refresh on rename. Geometry remains in the model/sync ledger.
-//! The title cache is the single source of truth for window titles: admission
+//! The window-facts cache is the single source of truth for window titles: admission
 //! fires _NET_WM_NAME + WM_NAME as part of the pipelined admission cookie
 //! batch and caches the winner per window id; a title PropertyNotify
 //! re-fetches that one window. The bar reads via peekTitle() -- a cache hit,
@@ -88,7 +88,7 @@ pub fn removeWindow(window_id: u32) void {
     _ = cache.remove(window_id);
 }
 
-// Window-title cache
+// Window-facts cache (title + border + geometry facts per window id)
 
 const property_no_delete = icccm.property_no_delete;
 
@@ -111,7 +111,7 @@ fn ensureAtoms() void {
     // failure there aborts init. Latching that null before success would
     // permanently disable _NET_WM_NAME for the whole session, so only a
     // full answer latches and the null is retried next time (P1-37;
-    // title_cache_test's primed-then-cleared latch tests).
+    // window_facts_test's primed-then-cleared latch tests).
     const name = atoms.getAtomCached("_NET_WM_NAME") orelse return;
     const utf = atoms.getAtomCached("UTF8_STRING") orelse return;
     net_wm_name = name;
@@ -134,7 +134,7 @@ fn resetAtoms() void {
 /// latched. The production callers (`fireTitleCookies`/`pickTitle`) only
 /// reach `ensureAtoms` through a live connection, so the latch rule above
 /// (a null answer must NOT latch) is otherwise unobservable headless.
-/// `title_cache_test` drives this with `atoms.swapAtomCacheForTest`.
+/// `window_facts_test` drives this with `atoms.swapAtomCacheForTest`.
 pub fn resolveTitleAtomsForTest() struct { resolved: bool, net_wm_name: ?u32, utf8_string: ?u32 } {
     ensureAtoms();
     return .{
@@ -252,7 +252,7 @@ fn takePropertyReply(
 /// Caches `title` for `win` by copying it into the entry's inline buffer
 /// (POD storage, no heap, no free). Public because it is the cache's write
 /// side (the pipelined admission path reaches it through
-/// `collectTitleCookies`), which the headless `title_cache_test` exercises for
+/// `collectTitleCookies`), which the headless `window_facts_test` exercises for
 /// the overwrite/cap lifecycle.
 ///
 /// THE AT-CAPACITY POLICY, in one place: a full store drops a NEW

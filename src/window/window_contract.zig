@@ -62,19 +62,14 @@ pub const HideHooks = struct {
 /// hooks: a hook behind the registry returns null when no covering module
 /// is bound — meaning "is this window covering" would answer FALSE in such
 /// a build while the model held the intent. `model.coveringWsOf` /
-/// `model.isCovering` / `model.isCoveringOn` cannot be unbound.
+/// `model.isCovering` / `model.isCoveringOn` cannot be unbound, and neither
+/// can the occupant questions: both rules live in `model.coveringOccupantOn`
+/// (P2-51 consolidated the old OR scan and this family's former
+/// `visibleCoveringOnWs` AND hook into it).
 pub const CoveringHooks = struct {
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
     toggleCovering: ?*const fn (*model.Model, model.WindowId) bool = null,
-    /// The STRICT covering occupant on `ws`: covering AND anchored AND visible
-    /// (an AND of all three, where the model's `coveringOccupantOnWs` is an
-    /// anchor-or-visible OR). Both exist and both are used: the model scan
-    /// answers "who owns the screen", the strict one answers "which covering
-    /// window is actually usable here". Named apart from the model scan:
-    /// sharing its name would let the two different semantics read as
-    /// interchangeable. At most one module binds this.
-    visibleCoveringOnWs: ?*const fn (*const model.Model, model.WSId) ?model.WindowId = null,
     /// One-way covering release: clear `win`'s covering intent and presence.
     /// Unlike `toggleCovering` this never ENTERS covering mode, so a peer that
     /// means "demote" cannot turn into "promote".
@@ -171,6 +166,24 @@ pub const CommandHooks = struct {
     toggleFloatingWindow: ?*const fn (model.WindowId) void = null,
 };
 
+/// Border policy (the optional `borders` module): the color decision used
+/// by the reconcile delta plus the three per-batch sweeps. Deleting the
+/// module leaves windows at the configured width with a constant 0
+/// (uncolored) pixel — see the module's own doc for the full deletion
+/// semantics. All four hooks are single-binder.
+pub const BordersHooks = struct {
+    /// The reconcile delta's border-color pick for one window; resolved
+    /// against MODEL focus. Constant 0 when the module is absent.
+    colorOf: ?*const fn (model.WindowId, *const model.Model) u32 = null,
+    /// Recolor every window on the current workspace (ledger-deduped).
+    updateWorkspaceBorders: ?*const fn () void = null,
+    /// Recolor the current workspace's floating windows only (tiled
+    /// windows are handled by the tile configure path).
+    updateFloatingWindowBorders: ?*const fn () void = null,
+    /// Full sweep after a config reload (width + color).
+    reloadBorders: ?*const fn () void = null,
+};
+
 /// The (family field name, family struct) pairs, the one place the family
 /// composition is listed. `hookFamily` and `hookBinds` key off it, so a new
 /// family is one entry here plus its field on `WindowModule`.
@@ -181,6 +194,7 @@ const families = .{
     .{ "floating", FloatingHooks },
     .{ "drag", DragHooks },
     .{ "command", CommandHooks },
+    .{ "borders", BordersHooks },
 };
 
 /// The window sub-system hook set: flat lifecycle/persistence/protocol
@@ -244,6 +258,7 @@ pub const WindowModule = struct {
     floating: FloatingHooks = .{},
     drag: DragHooks = .{},
     command: CommandHooks = .{},
+    borders: BordersHooks = .{},
 
     /// The hooks whose contract is "at most one module binds this": dispatch is
     /// first-match (`providerOf`/`callHook`, invoked by the owner's family
@@ -283,7 +298,7 @@ pub const WindowModule = struct {
     };
 
     /// `WindowModule` top-level fields that are NOT directly-dispatched
-    /// hooks: the `name` data field plus the six family containers (each
+    /// hooks: the `name` data field plus the seven family containers (each
     /// dispatches THROUGH its own namespace, so no top-level hook lists name
     /// them). The partition invariant below has to account for them: the
     /// honest form is "every top-level field is classified, as multi-
@@ -291,7 +306,7 @@ pub const WindowModule = struct {
     /// to get here, so adding one without a decision is still a compile error.
     pub const non_hook_fields = [_][]const u8{
         "name",     "hide", "covering", "workspaces",
-        "floating", "drag", "command",
+        "floating", "drag", "command",  "borders",
     };
 
     /// The family (by `families` index) that owns the flat hook `hook`,
@@ -330,7 +345,7 @@ pub const WindowModule = struct {
 
 comptime {
     @setEvalBranchQuota(20_000);
-    // 47 top-level fields: 1 data + 10 multi + 6 family containers; the 36
+    // 18 top-level fields: 1 data + 10 multi + 7 family containers; the 40
     // single-binder hooks live INSIDE the families. The lists are not
     // documentation dressed as code -- build.zig's generated registry
     // consumes `single_binder_hooks` (via `hookBinds`) to reject a second

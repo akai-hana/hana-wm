@@ -10,8 +10,9 @@
 //!   2. CLIENT_MESSAGE — EWMH messages: fullscreen requests from
 //!      applications (the pager / native-fullscreen side of the fullscreen
 //!      protocol; the model transition itself is modules/fullscreen.zig) and
-//!      the pager's close/switch-desktop/move-desktop messages
-//!      (_NET_CLOSE_WINDOW → shared ICCCM closeViaProtocol,
+//!      the pager's activation/close/switch-desktop/move-desktop messages
+//!      (_NET_ACTIVE_WINDOW → focus.grabFocus with the visibility guards,
+//!      _NET_CLOSE_WINDOW → shared ICCCM closeViaProtocol,
 //!      _NET_CURRENT_DESKTOP → switchWorkspace hook, _NET_WM_DESKTOP →
 //!      moveToWorkspace hook; advertised in requests.supported_atoms).
 //!      Owns the warn-once latches: a looping pager would otherwise flood
@@ -240,6 +241,11 @@ const State = struct {
     // Reset together via reset() so an init() re-arms every diagnostic.
     warned_unmanaged_fs_request: bool = false,
     warned_active_ignore: bool = false,
+    // Activation's second diagnostic: the target is managed but unreachable
+    // (another workspace, or hidden/minimized) -- distinct from the spoof
+    // guard above so a looping pager that activates a hidden window still
+    // explains itself once the unmanaged latch has already fired.
+    warned_active_unreachable: bool = false,
     warned_unmanaged_state: bool = false,
 };
 
@@ -296,13 +302,49 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
         return;
     }
 
+    // _NET_ACTIVE_WINDOW: pager/taskbar activation. Focus and raise the
+    // target through the SAME two-phase prepare/apply path every other focus
+    // change takes (`focus.grabFocus` with `.user_command`, whose etiquette
+    // raises). data32[0] is the source indication (0 unknown / 1 application
+    // / 2 pager) and data32[1] a timestamp; hana has no focus-stealing
+    // prevention, so all sources are honored alike -- the guards below bound
+    // what any message can do.
     const net_active = atoms.getAtomOrZero("_NET_ACTIVE_WINDOW");
     if (net_active != 0 and event.type == net_active) {
-        warnOnce(
-            &state.warned_active_ignore,
-            "Ignoring _NET_ACTIVE_WINDOW request for 0x{x}: EWMH activation is not implemented",
-            .{event.window},
-        );
+        const win = event.window;
+        // The window field is content of a spoofable message: activation is
+        // honored for managed windows only, the same bound as
+        // _NET_CLOSE_WINDOW.
+        if (!query.isValidManagedWindow(win)) {
+            warnOnce(
+                &state.warned_active_ignore,
+                "Ignoring _NET_ACTIVE_WINDOW for unmanaged window 0x{x}",
+                .{win},
+            );
+            return;
+        }
+        // Reachability bound, mirroring hover's guards (focus.maybeFocusWindow):
+        // model focus must never land on a window the user cannot see. A
+        // window on another workspace (or hidden/minimized) is dropped, not
+        // switched-to -- a spoofable message must not yank the user's
+        // workspace view, and focusing a parked window would strand focus
+        // off-screen where neither borders nor the bar can reach it.
+        const m = pipeline.state();
+        if ((!query.isOnCurrentWorkspace(win) and !m.all_view_active) or
+            registry.hide.callHookBool(.isWindowHidden, .{ m, win }))
+        {
+            warnOnce(
+                &state.warned_active_unreachable,
+                "Ignoring _NET_ACTIVE_WINDOW for unreachable window 0x{x} (other workspace or hidden)",
+                .{win},
+            );
+            return;
+        }
+        // The existing focus prepare/apply path: prepareFocus resolves the
+        // input model, and its `.no_input` union limb refuses BEFORE the
+        // model write, so an activated no_input window never takes model
+        // focus (grabFocus then commits nothing -- no focus, no raise).
+        focus.grabFocus(win, .user_command);
         return;
     }
 
