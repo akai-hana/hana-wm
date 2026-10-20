@@ -7,6 +7,11 @@
 //! state), self-skipping when no X display is reachable. The X-issuing half
 //! (`applyWith/applyWidth`, the sent ledger) requires a live connection and is
 //! covered by the integration layer instead.
+//
+// build-gate: borders
+// (@imports the borders module; without it this test is not wired, so a
+// tree that deleted modules/borders.zig still compiles its test suite.
+// The X-gating is a separate layer (test_gates, HANA_REQUIRE_X).)
 
 const std = @import("std");
 const testing = std.testing;
