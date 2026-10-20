@@ -569,13 +569,18 @@ run_scenarios() {
         "src/window/modules/workspaces_config.zig"
 
     run_scenario \
+        "borders (behavior module)" \
+        "src/window/modules/borders.zig"
+
+    run_scenario \
         "all behaviors" \
         "src/window/modules/floating.zig" \
         "src/window/modules/floating_config.zig" \
         "src/window/modules/fullscreen.zig" \
         "src/window/modules/minimize.zig" \
         "src/window/modules/workspaces.zig" \
-        "src/window/modules/workspaces_config.zig"
+        "src/window/modules/workspaces_config.zig" \
+        "src/window/modules/borders.zig"
 
     # Tier 3: Individual tiling layouts. Derived from the same discovery walk
     # build.zig runs, so a new layout file adds a scenario on its own.

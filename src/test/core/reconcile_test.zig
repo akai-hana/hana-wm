@@ -498,25 +498,35 @@ test "park: offscreen-X constant, ONE merged request per parked window per pass"
 // wire concern — visibility (park), borders (pixel / width), geometry — and
 // these tests pin the sequence each concern emits in isolation.
 
-test "concern/visibility: parked-drift re-parks instead of taking the fast-path elision" {
+test "concern/visibility: parked-drift repair re-parks with ONE park, no map" {
     var fx: Fixture = undefined;
     fx.init();
     defer fx.deinit();
 
-    try window_state_ops.register(&fx.m, 911, model.WSId.fromIndex(0));
-    try window_state_ops.register(&fx.m, 912, model.WSId.fromIndex(1));
+    helpers.regCur(&fx.m, 911);
+    helpers.regCur(&fx.m, 912);
     focus.setFocus(&fx.m, 911);
-    fx.reconcile(.{}); // baseline: 911 placed, 912 parked (map+park first sight)
+    fx.reconcile(.{}); // baseline: both shown, both have has_rect
 
-    // Steady state: 912 is parked and clean, so the off-workspace fast path
-    // elides it entirely.
+    // 912 minimizes: 911 grows to the full master cell (moved => winner
+    // ABOVE) and 912 emits ONE park (has_rect survives the park —
+    // SentEntry doc).
+    try minimize.minimize(&fx.m, 912);
+    fx.rec.clear();
+    fx.reconcile(.{});
+    try fx.rec.expectLen(2);
+    try fx.rec.expectGeomRect(0, 911, golden.single, .above);
+    try fx.rec.expectPark(1, 912);
+
+    // Steady state: parked and clean, so the off-workspace fast path elides.
     fx.rec.clear();
     fx.reconcile(.{});
     try fx.rec.expectLen(0);
 
     // The client moved its parked window behind our back: markParkedDirty
-    // arms the repair, and the next reconcile must re-send the park (no map:
-    // it already has a sent rect, so has_rect is true).
+    // arms the repair. Next reconcile must re-send the park — ONE op, no
+    // map (has_rect survived, so the window is already viewable) and no
+    // pixel/bw (they survived too).
     recon.markParkedDirty(912);
     fx.rec.clear();
     fx.reconcile(.{});
@@ -534,10 +544,24 @@ test "concern/borders: a border-width-only change sends one bw configure, no rai
     fx.init();
     defer fx.deinit();
 
+    // FLOATING window: its anchor rect is layout-independent, so widening
+    // the border changes bw WITHOUT moving the window (a tiled window would
+    // also re-inset its cell — the merged geom+bw shape, already pinned by
+    // the spawn test).
     helpers.regCur(&fx.m, 921);
     focus.setFocus(&fx.m, 921);
+    model.detachTiledToFloating(&fx.m, fx.m.store.getPtr(921).?, 921, golden.single);
     fx.reconcile(.{});
-    try fx.rec.expectLen(3); // map, pixel, geom+bw (cfg_bw)
+    // map, pixel, geom+bw — plus the float re-assert's stack replay (a
+    // floating window's first send arms it: it must come back above the
+    // tiled layer, and the replay re-raises even the winner it just sent).
+    try fx.rec.expectLen(4);
+    try fx.rec.expectMap(0, 921);
+    try fx.rec.expectPixel(1, 921, focused_pixel);
+    try fx.rec.expectGeomBw(2, 921, golden.single, cfg_bw, .above);
+    try testing.expect(fx.rec.ops.items[3] == .stack);
+    try testing.expectEqual(@as(model.WindowId, 921), fx.rec.ops.items[3].stack.win);
+    try testing.expectEqual(sink.Stack.above, fx.rec.ops.items[3].stack.s);
 
     // Config reload widens the border: geometry is unchanged, so the merged
     // configure carries ONLY the new bw (need_geom false, no stack: a

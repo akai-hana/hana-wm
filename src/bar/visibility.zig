@@ -26,7 +26,7 @@ const model = @import("model");
 /// a model that is not the one its caller is about to act on.
 pub fn barForcedHiddenByFullscreen(m: *const model.Model, ws: u8) bool {
     return if (build_options.has_fullscreen)
-        model.coveringOccupantOnWs(m, model.WSId.fromIndex(ws)) != null
+        model.coveringOccupantOn(m, model.WSId.fromIndex(ws), .anchored_or_visible) != null
     else
         false;
 }

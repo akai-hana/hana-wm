@@ -137,31 +137,17 @@ fn Family(comptime family_field: []const u8, comptime F: type) type {
     };
 }
 
-/// The six single-binder families, one namespace each (see the family
-/// structs in window_contract). A call site names its family first
-/// (`command.callHook(.switchWorkspace, ...)`) and the hook second, both
-/// enum-checked.
+/// The seven single-binder families, one namespace each (see the family
+/// structs in `window_contract.zig`). A family is one field on the contract
+/// and one namespace here; dispatch is first-match, so each family hook is
+/// bound by at most one module (asserted at comptime).
 pub const hide = Family("hide", contract.HideHooks);
 pub const covering = Family("covering", contract.CoveringHooks);
 pub const workspaces = Family("workspaces", contract.WorkspacesHooks);
 pub const floating = Family("floating", contract.FloatingHooks);
 pub const drag = Family("drag", contract.DragHooks);
 pub const command = Family("command", contract.CommandHooks);
-
-/// Convenience over the covering family's `providerOf`: the current
-/// workspace's covering occupant via the module AND hook (anchored AND
-/// visible), null without a fullscreen module. Contrast the model's OR scan
-/// `model.coveringOccupantOnWs`.
-///
-/// Here rather than in each consumer because two owner modules ask the same
-/// question and neither may name the other: `fullscreen` owns the covering
-/// record, `minimize` must know whether parking freed the screen.
-pub fn currentCoveringOccupant(m: *const model.Model) ?model.WindowId {
-    return if (covering.providerOf(.visibleCoveringOnWs)) |prov|
-        prov.covering.visibleCoveringOnWs.?(m, m.current)
-    else
-        null;
-}
+pub const borders = Family("borders", contract.BordersHooks);
 
 /// Convenience over the hide family's `callHookBool`: is this window parked
 /// anywhere in the model? Asked by the restore path and by the tag-change

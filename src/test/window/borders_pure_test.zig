@@ -2,6 +2,10 @@
 //! borderless rule and the focused/unfocused pixel pick. The X-touching
 //! send/apply half stays in the X-gated borders_test; these functions take
 //! their state as parameters so they run without a server.
+//
+// build-gate: borders
+// (@imports the borders module; without it this test is not wired, so a
+// tree that deleted modules/borders.zig still compiles.)
 
 const std = @import("std");
 const model = @import("model");

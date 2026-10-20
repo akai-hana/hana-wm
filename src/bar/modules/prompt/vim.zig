@@ -33,11 +33,17 @@ const Prefix = struct {
     arg: Arg = .none,
 };
 
-var prefix = Prefix{};
-var last_find_kind: u8 = 0;
-var last_find_ch: u8 = 0;
-var yank_buf: []u8 = &.{};
-var yank_len: usize = 0;
+/// Owner state for the vim engine (P2-58): the pending command prefix, the
+/// last f/t find (for `;` / `,` repeat), and the yank register. Single
+/// main-thread instance; no loose module-level scalars.
+const VimState = struct {
+    prefix: Prefix = .{},
+    last_find_kind: u8 = 0,
+    last_find_ch: u8 = 0,
+    yank_buf: []u8 = &.{},
+    yank_len: usize = 0,
+};
+var g: VimState = .{};
 
 const MotionResult = struct {
     pos: usize,
@@ -46,7 +52,7 @@ const MotionResult = struct {
 };
 
 fn resetPrefix() void {
-    prefix = .{};
+    g.prefix = .{};
 }
 
 pub fn onDeactivate(vs: *EditorState) void {
@@ -86,13 +92,13 @@ pub fn handleInsert(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
 /// (dd/cc/yy): applies it to the whole line.
 fn handleOperatorArm(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
     const op: u8 = @truncate(sym);
-    if (prefix.op == 0) {
-        prefix.op = op;
-        prefix.op_count = prefix.count;
-        prefix.count = 0;
+    if (g.prefix.op == 0) {
+        g.prefix.op = op;
+        g.prefix.op_count = g.prefix.count;
+        g.prefix.count = 0;
         return .none;
     }
-    if (prefix.op == op) {
+    if (g.prefix.op == op) {
         applyOperator(vs, op, .{ .pos = vs.len, .range_start_override = 0 });
     }
     resetPrefix();
@@ -102,7 +108,7 @@ fn handleOperatorArm(vs: *EditorState, sym: xcb.xcb_keysym_t) Action {
 fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
     switch (sym) {
         xk_escape => {
-            const act: Action = if (prefix.op == 0 and prefix.count == 0) .deactivate else .none;
+            const act: Action = if (g.prefix.op == 0 and g.prefix.count == 0) .deactivate else .none;
             resetPrefix();
             return act;
         },
@@ -114,7 +120,7 @@ fn execNormalKey(vs: *EditorState, sym: xcb.xcb_keysym_t, cnt: u32) Action {
 
         'x', 'X', 'D', 'C', 's' => execDirectSym(vs, @truncate(sym), cnt),
 
-        'p', 'P' => if (yank_len > 0) for (0..cnt) |_| {
+        'p', 'P' => if (g.yank_len > 0) for (0..cnt) |_| {
             if (sym == 'p' or sym == 'P') paste(vs, sym == 'p');
         },
 
@@ -161,18 +167,18 @@ inline fn clampCursorForMode(vs: *EditorState) void {
 }
 
 fn tryAccumulateDigit(sym: xcb.xcb_keysym_t) bool {
-    const digit = if (sym >= '1' and sym <= '9') @as(u32, @truncate(sym - '0')) else if (sym == '0' and prefix.count > 0) 0 else return false;
-    prefix.count = @min(prefix.count *% 10 +% digit, 1_000_000);
+    const digit = if (sym >= '1' and sym <= '9') @as(u32, @truncate(sym - '0')) else if (sym == '0' and g.prefix.count > 0) 0 else return false;
+    g.prefix.count = @min(g.prefix.count *% 10 +% digit, 1_000_000);
     return true;
 }
 
 fn tryArmFindPrefix(sym: xcb.xcb_keysym_t) bool {
     if (sym == 'g') {
-        prefix.arg = .g_prefix;
+        g.prefix.arg = .g_prefix;
         return true;
     }
     if (sym == 'f' or sym == 'F' or sym == 't' or sym == 'T') {
-        prefix.arg = .{ .find_char = @truncate(sym) };
+        g.prefix.arg = .{ .find_char = @truncate(sym) };
         return true;
     }
     return false;
@@ -195,14 +201,14 @@ const MotionKeyResult = struct {
 };
 
 inline fn commitMotion(mr: MotionResult) MotionKeyResult {
-    const op = prefix.op;
+    const op = g.prefix.op;
     resetPrefix();
     return .{ .mr = mr, .op = op };
 }
 
 fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
-    if (prefix.arg == .find_char) return resolvePendingFindChar(vs, sym);
-    if (prefix.arg == .g_prefix) return resolvePendingGPrefix(vs, sym);
+    if (g.prefix.arg == .find_char) return resolvePendingFindChar(vs, sym);
+    if (g.prefix.arg == .g_prefix) return resolvePendingGPrefix(vs, sym);
 
     if (tryAccumulateDigit(sym)) return .{};
 
@@ -210,9 +216,9 @@ fn resolveMotionKey(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyResult {
 
     // ;/, repeat last find.
     if (sym == ';' or sym == ',') {
-        if (last_find_kind != 0) {
-            const kind = if (sym == ',') reverseFindKind(last_find_kind) else last_find_kind;
-            return commitMotion(motionFind(vs, kind, last_find_ch, cnt));
+        if (g.last_find_kind != 0) {
+            const kind = if (sym == ',') reverseFindKind(g.last_find_kind) else g.last_find_kind;
+            return commitMotion(motionFind(vs, kind, g.last_find_ch, cnt));
         }
         resetPrefix();
         return .{};
@@ -233,9 +239,9 @@ fn resolvePendingFindChar(vs: *EditorState, sym: xcb.xcb_keysym_t) ?MotionKeyRes
         return .{};
     }
     const ch: u8 = @truncate(sym);
-    const kind = prefix.arg.find_char;
-    last_find_kind = kind;
-    last_find_ch = ch;
+    const kind = g.prefix.arg.find_char;
+    g.last_find_kind = kind;
+    g.last_find_ch = ch;
     const mr = motionFind(vs, kind, ch, effectiveCount());
     return commitMotion(mr);
 }
@@ -270,8 +276,8 @@ fn setCursor(vs: *EditorState, mr: MotionResult) void {
 fn yankRange(vs: *EditorState, from: usize, to: usize) void {
     if (from >= to or to > vs.len) return;
     const n = to - from;
-    @memcpy(yank_buf[0..n], vs.buf[from..to]);
-    yank_len = n;
+    @memcpy(g.yank_buf[0..n], vs.buf[from..to]);
+    g.yank_len = n;
 }
 
 fn deleteAndYank(vs: *EditorState, from: usize, to: usize) void {
@@ -289,9 +295,9 @@ fn clearAndYankAll(vs: *EditorState) void {
 /// in whether the cursor advances first. At end-of-buffer there is no "after"
 /// position, so `p` leaves the cursor where it is and the two coincide.
 fn paste(vs: *EditorState, after: bool) void {
-    if (yank_len == 0) return;
+    if (g.yank_len == 0) return;
     if (after and vs.cursor < vs.len) vs.cursor += 1;
-    prompt.insertSlice(vs, yank_buf[0..yank_len]);
+    prompt.insertSlice(vs, g.yank_buf[0..g.yank_len]);
 }
 
 inline fn toggleCaseChar(ch: u8) u8 {
@@ -350,8 +356,8 @@ fn execDirectSym(vs: *EditorState, sym: u8, cnt: u32) void {
 /// 1e6); consumers clamp against buffer bounds anyway, so saturate instead of
 /// overflowing.
 fn effectiveCount() u32 {
-    const p = prefix.count;
-    const o = prefix.op_count;
+    const p = g.prefix.count;
+    const o = g.prefix.op_count;
     return (if (p == 0) 1 else p) *| (if (o == 0) 1 else o);
 }
 
@@ -451,13 +457,13 @@ fn modeLabel(m: Mode) []const u8 {
 }
 
 pub fn init(allocator: std.mem.Allocator, max_input: usize) !void {
-    yank_buf = try allocator.alloc(u8, max_input);
+    g.yank_buf = try allocator.alloc(u8, max_input);
 }
 
 pub fn deinit(allocator: std.mem.Allocator) void {
-    if (yank_buf.len > 0) {
-        allocator.free(yank_buf);
-        yank_buf = &.{};
+    if (g.yank_buf.len > 0) {
+        allocator.free(g.yank_buf);
+        g.yank_buf = &.{};
     }
 }
 

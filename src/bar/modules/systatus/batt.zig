@@ -21,7 +21,12 @@ pub fn parseCapacity(contents: []const u8) ?u8 {
     return v;
 }
 
-var g_num: [16]u8 = undefined;
+/// Owner state (P2-58): the format scratch buffer `percentSample` writes
+/// into. Single main-thread instance; no loose module-level scalars.
+const BattState = struct {
+    num: [16]u8 = undefined,
+};
+var g: BattState = .{};
 
 /// Charge % of the first present battery under /sys/class/power_supply.
 fn read() ?systatus.Sample {
@@ -33,7 +38,7 @@ fn read() ?systatus.Sample {
         if (r.truncated) continue;
         // An unreadable/invalid slot is not fatal: try the next battery, and
         // only report absence once every probed slot has come up empty.
-        if (parseCapacity(r.bytes)) |v| return systatus.percentSample(&g_num, v);
+        if (parseCapacity(r.bytes)) |v| return systatus.percentSample(&g.num, v);
     }
     return null;
 }

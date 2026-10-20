@@ -22,6 +22,11 @@
 //!   reach the shared ICCCM close path, the switchWorkspace hook, and the
 //!   moveToWorkspace hook respectively, with their guards: no close of an
 //!   unmanaged window, no workspace index hana doesn't have.
+//!   `_NET_ACTIVE_WINDOW` activation (taskbar/pager clicks) must focus the
+//!   target through the normal focus prepare/apply path and advertise it on
+//!   the root, with its guards: no activation of an unmanaged (spoofed)
+//!   window, none of an unreachable (other workspace / hidden) one, and
+//!   never model focus for a no_input window.
 //!   The `_NET_SUPPORTED` root property must round-trip the advertised list
 //!   exactly (the behavioural audit of that list is the display-free
 //!   ewmh_supported_test).
@@ -32,6 +37,7 @@ const model = @import("model");
 const pipeline = @import("pipeline");
 const window = @import("window");
 const atoms = @import("atoms");
+const focus = @import("focus");
 const requests = @import("requests");
 const fixture = @import("fixture");
 const xcb = core.xcb;
@@ -72,7 +78,7 @@ fn wmStateRequest(win: u32, action: u32) xcb.xcb_client_message_event_t {
 }
 
 fn covering(m: *const model.Model) ?u32 {
-    return model.coveringOccupantOnWs(m, m.current);
+    return model.coveringOccupantOn(m, m.current, .anchored_or_visible);
 }
 
 fn admit(win: u32) void {
@@ -226,7 +232,7 @@ test "EWMH: a non-32-format ClientMessage is ignored" {
     try std.testing.expect(covering(m) == null);
 }
 
-test "EWMH: _NET_ACTIVE_WINDOW is reported as unimplemented, not acted on" {
+test "EWMH: _NET_ACTIVE_WINDOW activation focuses the target" {
     var fx = try fixture.setUp("ewmh_test");
     defer fx.deinit();
     const m = pipeline.state();
@@ -236,7 +242,9 @@ test "EWMH: _NET_ACTIVE_WINDOW is reported as unimplemented, not acted on" {
     admit(w1);
     admit(w2);
     fx.flush();
-    const focused_before = m.focused;
+    // Spawn focus: the newest admitted window owns focus, so activating w1
+    // below is a real move, not a no-op that would pass vacuously.
+    try std.testing.expectEqual(@as(?u32, w2), m.focused);
 
     var ev: xcb.xcb_client_message_event_t = std.mem.zeroes(xcb.xcb_client_message_event_t);
     ev.format = 32;
@@ -247,9 +255,74 @@ test "EWMH: _NET_ACTIVE_WINDOW is reported as unimplemented, not acted on" {
     window.handleClientMessage(&ev);
     fx.flush();
 
-    // Unimplemented activation must not move focus as a side effect.
-    try std.testing.expectEqual(focused_before, m.focused);
-    try std.testing.expect(covering(m) == null);
+    // Activation goes through focus.grabFocus(.user_command): model focus
+    // moves and the root advertisement follows (advertiseActiveWindow).
+    try std.testing.expectEqual(@as(?u32, w1), m.focused);
+    try std.testing.expectEqual(@as(?u32, w1), fx.rootActiveWindow());
+}
+
+test "EWMH: activating a no_input window never takes model focus" {
+    // The .no_input union limb refuses BEFORE the model write: an activated
+    // no_input window gets no focus, no raise, and no advertisement -- even
+    // though it is managed and on the current workspace.
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const w1 = fx.createWindow();
+    const w2 = fx.createWindow();
+    admit(w1);
+    admit(w2);
+    fx.flush();
+    try std.testing.expectEqual(@as(?u32, w2), m.focused);
+
+    // ICCCM no_input: input hint present, input=false. Mirrored onto the
+    // real WM_HINTS so the window's ICCCM state agrees, and seeded into the
+    // focus cache directly -- the resolve path is cache-first with a
+    // provisional fallback, not a live query, so the cache is what the
+    // handler will actually see.
+    fx.setNoInput(w1);
+    focus.put(w1, .{ .accepts_input = false, .wm_delete = false, .take_focus = false });
+
+    var ev: xcb.xcb_client_message_event_t = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    ev.format = 32;
+    ev.window = w1;
+    ev.response_type = xcb.XCB_CLIENT_MESSAGE;
+    ev.type = atoms.getAtomOrZero("_NET_ACTIVE_WINDOW");
+    ev.data.data32[0] = 2; // source: pager
+    window.handleClientMessage(&ev);
+    fx.flush();
+
+    try std.testing.expectEqual(@as(?u32, w2), m.focused);
+    try std.testing.expectEqual(@as(?u32, w2), fx.rootActiveWindow());
+}
+
+test "EWMH: _NET_ACTIVE_WINDOW for an unmanaged window is dropped" {
+    // event.window is content of a spoofable message: activation must not
+    // move focus onto a window hana does not manage.
+    var fx = try fixture.setUp("ewmh_test");
+    defer fx.deinit();
+    const m = pipeline.state();
+
+    const w1 = fx.createWindow();
+    admit(w1);
+    fx.flush();
+    try std.testing.expectEqual(@as(?u32, w1), m.focused);
+
+    const ghost = fx.createWindow(); // created, never admitted
+    fx.flush();
+
+    var ev: xcb.xcb_client_message_event_t = std.mem.zeroes(xcb.xcb_client_message_event_t);
+    ev.format = 32;
+    ev.window = ghost;
+    ev.response_type = xcb.XCB_CLIENT_MESSAGE;
+    ev.type = atoms.getAtomOrZero("_NET_ACTIVE_WINDOW");
+    ev.data.data32[0] = 2; // source: pager
+    window.handleClientMessage(&ev);
+    fx.flush();
+
+    try std.testing.expectEqual(@as(?u32, w1), m.focused);
+    try std.testing.expectEqual(@as(?u32, w1), fx.rootActiveWindow());
 }
 
 test "EWMH: an unknown action code on a fullscreen REQUEST is dropped" {

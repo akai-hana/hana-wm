@@ -150,12 +150,12 @@ pub fn toggleFullscreen(m: *model.Model, win: model.WindowId) bool {
         return true;
     }
     // Covering SWITCH: a resident occupant of this workspace yields first
-    // (sync's store-order scan, model.coveringOccupantOnWs). The release
+    // (the model's store-order scan, model.coveringOccupantOn). The release
     // is gated on the entrant being able to claim this workspace (present and
     // visible here): a stray intent elsewhere never displaces the owner.
     const entrant_claims_ws = e.presence != .parked and model.visibleOn(m, win, m.current);
     if (entrant_claims_ws) {
-        if (model.coveringOccupantOnWs(m, m.current)) |occupant| {
+        if (model.coveringOccupantOn(m, m.current, .anchored_or_visible)) |occupant| {
             if (occupant != win) releaseCovering(m, occupant);
         }
     }
@@ -186,28 +186,6 @@ pub fn releaseCovering(m: *model.Model, win: model.WindowId) void {
     // stays `.parked` with only its intent released.
     e.presence = if (e.presence == .parked) .parked else .present;
     e.covering_ws = null; // release the core covering intent
-}
-
-/// The first window holding a covering capture of `ws`: presence must be
-/// covering (not parked), the capture must anchor to `ws`, and the window must
-/// be visible on `ws` (a stray intent whose base is tagged elsewhere never
-/// counts as an occupant — sync parks such strays instead of letting them
-/// claim the slot). Pure store-order AND scan over the model: the entry IS the
-/// record, so there is no separate registry to scan. At most one visible
-/// occupant per workspace is guaranteed by sync (others parked).
-/// Contrast `model.coveringOccupantOnWs` (OR: anchor-or-visibility union).
-/// Routed through contract.visibleCoveringOnWs for the workspaces move/tag path.
-pub fn visibleCoveringOnWs(m: *const model.Model, ws: model.WSId) ?model.WindowId {
-    var it = m.store.iterator();
-    while (it.next()) |row| {
-        const e = row.val;
-        if (e.presence != .covering) continue;
-        const cws = e.covering_ws orelse continue;
-        if (!cws.eql(ws)) continue;
-        if (!model.visibleOn(m, row.key, ws)) continue;
-        return row.key;
-    }
-    return null;
 }
 
 /// Hook for the workspaces module's move/tag slice: retargets `win`'s
@@ -393,7 +371,7 @@ pub fn fullscreenSetWindow(win: model.WindowId, want: ?bool) void {
     // Classify BEFORE toggling so bar deferrals keep the occupant
     // scan in one place; both the classification and prev_fs_win need
     // the same result, saving one full store scan.
-    const prev_fs_win = registry.currentCoveringOccupant(m);
+    const prev_fs_win = model.coveringOccupantOn(m, m.current, .anchored_and_visible);
     const is_fs = model.isCoveringOn(m, win, m.current);
     // An explicit request that matches the current state is a no-op, not a
     // toggle: without this guard a redundant `_NET_WM_FULLSCREEN_REQUEST`
@@ -519,7 +497,6 @@ pub const module: @import("window_contract").WindowModule = .{
     .resolvePendingBarNow = resolvePendingBarNow,
     .covering = .{
         .toggleCovering = toggleFullscreen,
-        .visibleCoveringOnWs = visibleCoveringOnWs,
         .releaseCovering = releaseCovering,
         .moveCoveringTo = moveFullscreenTo,
     },

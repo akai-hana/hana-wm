@@ -470,8 +470,13 @@ fn scratchCoversOrder(v: *const View, scratch: *const List) bool {
 
 /// Re-emit `scratch` into `out` in `v.order` position.
 ///
-/// Fast path: the layout already emitted in order (five of the six do), so
-/// this is one comparison pass plus a copy and no searching. Otherwise each
+/// Fast path: the layout already emitted in order (all six registry layouts
+/// do on their normal path -- monocle's top-first emission, the historical
+/// exception named below, now iterates `v.order` too; the one out-of-order
+/// shape still possible is the shared overflow fan-out in emitOverflowShare,
+/// which emits its top window first and reaches here only when that window
+/// is already the head), so this is one comparison pass plus a copy and no
+/// searching. Otherwise each
 /// order position takes the placement whose window it names, and `taken` keeps
 /// a duplicate from satisfying two positions -- without it, a layout that
 /// emitted window 5 twice and dropped window 4 would silently hand window 5's

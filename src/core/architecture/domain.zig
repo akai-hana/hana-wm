@@ -3,8 +3,9 @@
 //! enums, constants, pure helpers, and the generic sorted-key Store re-export.
 //! The runtime state that HOLDS this vocabulary (Entry, WsState, Model) and
 //! every state operation live beside it in `core/model.zig` — this file is
-//! PRIVATE to that facade: only `model` imports it, so nothing else can
-//! reach past the facade.
+//! PRIVATE to that facade, with one sanctioned carve-out: the config→model
+//! seeding root (`config/model_config.zig`) stamps config into the model and
+//! imports this vocabulary directly. Nothing else reaches past the facade.
 //!
 //! Geometry lives here rather than in a `geom` module because it is not a
 //! utility: `Rect`/`Margins` are value objects the state holds (`BaseMode.
@@ -105,7 +106,9 @@ pub const max_workspaces: usize = 64;
 /// Maximum tiled windows on a single workspace (per-workspace tiled_order
 /// capacity, applied per workspace). Buffers sized from this are indexed by
 /// usize/u16, so raising it only costs memory; keep it a compile-time bound
-/// so stack buffers stay stack buffers.
+/// so stack buffers stay stack buffers. P2-72: `View.hintsFor`
+/// (tiling_contract) is an O(n) scan over exactly this bound -- if it ever
+/// grows past ~64, swap hintsFor to an index-aligned lookup FIRST.
 pub const max_tiled_windows: usize = 64;
 
 /// Lower bound on the primary-column width ratio. Config validation and the
@@ -381,6 +384,9 @@ pub const Store = bounded.Store;
 /// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated);
 /// 16 keeps the per-workspace focus MRU small. Per-workspace tiled membership
 /// is bounds from the compile-time caps above. Transitions never allocate (defined capacities).
+/// P2-72: the layout interchange's hintsFor scan (tiling_contract) is O(n) in
+/// the per-ws order bound (max_tiled_windows), not this store cap; if either
+/// ever grows past ~64/128, swap hintsFor to an index-aligned lookup FIRST.
 pub const store_capacity = 128;
 
 /// Primary-column capacity: a sane handful of slots, capped at a quarter of

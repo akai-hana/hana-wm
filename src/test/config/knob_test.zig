@@ -511,6 +511,10 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     var cfg = try loadToml(testing.allocator, "revert",
         \\[bar]
         \\carousel_speed_px_s = 0
+        \\carousel_gap_px = 5000
+        \\systatus_interval_ms = 100
+        \\volume_read_interval_ms = 100
+        \\max_batched_redraws = 0
         \\font_size = -10%
         \\
         \\[tiling]
@@ -528,6 +532,10 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     );
     defer cfg.deinit(testing.allocator);
     try testing.expectEqual(@as(u16, 125), cfg.bar.carousel_speed_px_s);
+    try testing.expectEqual(@as(u16, 48), cfg.bar.carousel_gap_px);
+    try testing.expectEqual(@as(i64, 2000), cfg.bar.systatus_interval_ms);
+    try testing.expectEqual(@as(i64, 5000), cfg.bar.volume_read_interval_ms);
+    try testing.expectEqual(@as(u8, 4), cfg.bar.max_batched_redraws);
     try testing.expectEqual(types.ScalableValue.percentage(10.0), cfg.bar.font_size);
     try testing.expectEqual(types.ScalableValue.absolute(10.0), cfg.tiling.gap_width);
     try testing.expectEqual(types.ScalableValue.absolute(8.0), cfg.floating.snap_distance);
@@ -535,6 +543,33 @@ test "warn-and-revert: out-of-range scalars revert to defaults" {
     // An absurd dpi warns back to null, i.e. to detection, rather than
     // scaling the whole UI by a number nobody meant.
     try testing.expectEqual(@as(?f32, null), cfg.core.dpi);
+}
+
+test "P2-64: bar cadence, batch-cap and title-gap knobs read" {
+    var cfg = try loadToml(testing.allocator, "bar-cadences",
+        \\[bar]
+        \\systatus_interval_ms = 5000
+        \\volume_read_interval_ms = 300
+        \\max_batched_redraws = 8
+        \\carousel_gap_px = 16
+        \\
+    );
+    defer cfg.deinit(testing.allocator);
+    try testing.expectEqual(@as(i64, 5000), cfg.bar.systatus_interval_ms);
+    try testing.expectEqual(@as(i64, 300), cfg.bar.volume_read_interval_ms);
+    try testing.expectEqual(@as(u8, 8), cfg.bar.max_batched_redraws);
+    try testing.expectEqual(@as(u16, 16), cfg.bar.carousel_gap_px);
+
+    // Absent keys keep the shipped defaults (the values the old hard-coded
+    // cadences had): one parse proves both directions.
+    var base = try loadToml(testing.allocator, "bar-cadences-default",
+        \\[bar]
+    );
+    defer base.deinit(testing.allocator);
+    try testing.expectEqual(@as(i64, 2000), base.bar.systatus_interval_ms);
+    try testing.expectEqual(@as(i64, 5000), base.bar.volume_read_interval_ms);
+    try testing.expectEqual(@as(u8, 4), base.bar.max_batched_redraws);
+    try testing.expectEqual(@as(u16, 48), base.bar.carousel_gap_px);
 }
 
 test "bar.position is case-insensitive; unknown spellings keep .top" {
@@ -982,4 +1017,37 @@ test "composed knob schema: the --dump-config-schema inventory is complete and v
     try testing.expectEqualStrings("scalable", master_width.object.get("type").?.string);
     try testing.expectEqualStrings("", master_width.object.get("range").?.string);
     try testing.expectEqualStrings("50%", master_width.object.get("default").?.string);
+}
+
+test "P2-66: an i32 range knob compiles, reads, and reverts out of range" {
+    const parser = @import("parser");
+    const Mini = struct { latency_ms: i32 = -7 };
+    const table = [_]knob.Knob{
+        knob.knob(&.{knob.place(types.section_bar, "latency_ms")}, "latency_ms", .{ .int = .{ .T = i32, .min = -1000, .max = 1000 } }),
+    };
+    knob.validateTable(Mini, &table, &.{});
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // The widened Kind.int path: any bounded int reads through the same
+    // generic guards u8/u16 always had.
+    var pos_doc = try parser.parse(arena.allocator(), "[bar]\nlatency_ms = 42\n", "<i32-knob>");
+    var pos_cfg: Mini = .{};
+    try knob.applyAll(Mini, &pos_doc, testing.allocator, &pos_cfg, &table);
+    try testing.expectEqual(@as(i32, 42), pos_cfg.latency_ms);
+
+    // Signed values land; the negative side of the span is not a "below
+    // minimum" unless the knob's own min says so.
+    var neg_doc = try parser.parse(arena.allocator(), "[bar]\nlatency_ms = -500\n", "<i32-knob-neg>");
+    var neg_cfg: Mini = .{};
+    try knob.applyAll(Mini, &neg_doc, testing.allocator, &neg_cfg, &table);
+    try testing.expectEqual(@as(i32, -500), neg_cfg.latency_ms);
+
+    // Explicitly out of range: warn-and-revert to the default, same
+    // contract every int knob has.
+    var oor_doc = try parser.parse(arena.allocator(), "[bar]\nlatency_ms = 5000\n", "<i32-knob-oor>");
+    var oor_cfg: Mini = .{};
+    try knob.applyAll(Mini, &oor_doc, testing.allocator, &oor_cfg, &table);
+    try testing.expectEqual(@as(i32, -7), oor_cfg.latency_ms);
 }
