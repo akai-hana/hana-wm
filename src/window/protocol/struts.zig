@@ -37,14 +37,6 @@ pub const Insets = struct {
     right: u16 = 0,
     top: u16 = 0,
     bottom: u16 = 0,
-
-    pub fn eql(a: Insets, b: Insets) bool {
-        return a.left == b.left and a.right == b.right and a.top == b.top and a.bottom == b.bottom;
-    }
-
-    pub fn isZero(a: Insets) bool {
-        return a.left == 0 and a.right == 0 and a.top == 0 and a.bottom == 0;
-    }
 };
 
 /// Pure parse of a `_NET_WM_STRUT_PARTIAL` payload: 12 CARDINALs, indices
@@ -146,16 +138,12 @@ fn drainStrut(conn: core.Connection, cookie: ?xcb.xcb_get_property_cookie_t) ?In
 
 /// Publishes `insets` as `win`'s dock claim (null or all-zero RELEASES).
 /// Returns true when the ledger changed, so the caller can trigger a re-tile
-/// only when geometry actually needs to move.
+/// only when geometry actually needs to move. The change detection is
+/// owned entirely by `usable_area.setDockClaim` — one spelling, no
+/// pre-compare here.
 pub fn publish(win: core.WindowId, insets: ?Insets) bool {
-    const new = insets orelse Insets{};
-    const old: Insets = if (usable_area.dockClaimOf(win)) |c|
-        .{ .left = c.left, .right = c.right, .top = c.top, .bottom = c.bottom }
-    else
-        .{};
-    if (new.eql(old)) return false;
-    _ = usable_area.setDockClaim(win, new.left, new.right, new.top, new.bottom);
-    return true;
+    const n = insets orelse Insets{};
+    return usable_area.setDockClaim(win, n.left, n.right, n.top, n.bottom);
 }
 
 /// Releases `win`'s claim (unmanage). True when a claim existed; the caller

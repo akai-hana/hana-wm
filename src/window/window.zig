@@ -497,13 +497,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // owner of title freshness; the bar does no title property fetching.
     const net_wm_name = atoms.getAtomOrZero("_NET_WM_NAME");
     if (event.atom == xcb.XCB_ATOM_WM_NAME or (net_wm_name != 0 and event.atom == net_wm_name)) {
-        if (prop_dirty.getPtr(event.window)) |bits| {
-            bits.* |= prop_dirty_title;
-        } else if (!prop_dirty.put(event.window, prop_dirty_title)) {
-            // Set full (pathological): fall back to the immediate refresh so
-            // the title still converges.
-            if (window_facts.refreshTitle(conn, event.window)) core.window.bump();
-        }
+        markPropertyDirty(event.window, prop_dirty_title, refreshTitleNow);
         return;
     }
 
@@ -512,11 +506,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     // update hints after map time (e.g. terminal emulators adjusting their
     // increment grid when the font changes).
     if (event.atom == xcb.XCB_ATOM_WM_NORMAL_HINTS) {
-        if (prop_dirty.getPtr(event.window)) |bits| {
-            bits.* |= prop_dirty_hints;
-        } else if (!prop_dirty.put(event.window, prop_dirty_hints)) {
-            refreshSizeHints(event.window);
-        }
+        markPropertyDirty(event.window, prop_dirty_hints, refreshSizeHints);
         return;
     }
 
@@ -535,12 +525,7 @@ pub fn handlePropertyNotify(event: *const xcb.xcb_property_notify_event_t) void 
     if ((strut_atom != 0 and event.atom == strut_atom) or
         (wtype_atom != 0 and event.atom == wtype_atom))
     {
-        if (prop_dirty.getPtr(event.window)) |bits| {
-            bits.* |= prop_dirty_strut;
-        } else if (!prop_dirty.put(event.window, prop_dirty_strut)) {
-            // Set full (pathological): refresh immediately, like the title path.
-            if (struts.refresh(conn, event.window)) pipeline.reconcileGrab(.{});
-        }
+        markPropertyDirty(event.window, prop_dirty_strut, refreshStrutsNow);
     }
 }
 
@@ -557,6 +542,26 @@ const prop_dirty_title: u3 = 1;
 const prop_dirty_hints: u3 = 2;
 const prop_dirty_strut: u3 = 4;
 var prop_dirty: idmap.IdMap(u3, idmap.max_window_cache) = .{};
+
+/// Marks `win` for the coalesced batch refresh; when the set is FULL, runs
+/// `refresh` immediately so correctness never depends on capacity. The ONE
+/// spelling of the mark/fallback dance (title, hints, and strut all route
+/// through here).
+fn markPropertyDirty(win: u32, bit: u3, comptime refresh: fn (u32) void) void {
+    if (prop_dirty.getPtr(win)) |bits| {
+        bits.* |= bit;
+    } else if (!prop_dirty.put(win, bit)) {
+        refresh(win);
+    }
+}
+
+fn refreshTitleNow(win: u32) void {
+    if (window_facts.refreshTitle(core.getState().conn, win)) core.window.bump();
+}
+
+fn refreshStrutsNow(win: u32) void {
+    if (struts.refresh(core.getState().conn, win)) pipeline.reconcileGrab(.{});
+}
 
 /// Batch-end flush: one title refresh + one size-hints refresh + one dock
 /// strut re-read per window marked during the batch, then the set is
