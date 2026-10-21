@@ -1,33 +1,18 @@
 //! Shared bar vocabulary for the segment modules.
 //!
-//! This is NOT a bar segment module: it holds the shared vocabulary every
-//! segment module (and bar.zig) imports -- `Frame` (live workspace visitability;
-//! an alias for bar_contract.zig's Frame, so the `naturalWidth` hook
-//! can type its frame parameter), `DrawCtx` (the per-frame scratch bar builds
-//! for each segment's draw), the shared title constants, and the prompt
-//! service-handle struct. The title render/snapshot TYPES live with the title
-//! module in `modules/title/vocab.zig`.
+//! NOT a bar segment module: it holds the shared vocabulary every segment
+//! module (and bar.zig) imports (`Frame`, `DrawCtx`, title constants, the
+//! prompt service handles) plus the bar's feature-probe surface (registry
+//! helpers `segId`, `isRole`, `roleIndexOf`, `hasRegisteredSegments`, and
+//! the role id-sets such as `self_ticking_ids`), so the bar and its modules
+//! locate each other by NAME without importing each other directly. It also
+//! holds the segment-binding builder: the width-state cache, the comptime
+//! `module` builder, and the pure `finishDraw`/`drawAndStore` helpers.
 //!
-//! It is also the bar's feature-probe surface: the registry-resolved
-//! capability helpers (`segId`, `isRole`, `roleIndexOf`,
-//! `hasRegisteredSegments`, and the role id-sets such as `self_ticking_ids`)
-//! computed against the generated `bar_modules` array, so the bar and its
-//! modules locate each other by NAME without importing each other directly.
-//!
-//! Segments are discovered under the bar's `modules/` directory and register
-//! into the build-generated `bar_modules.modules` array; the bar orchestrator
-//! iterates that array with uniform loops. This file sits beside them (not
-//! inside the scanned dir) so it is never itself registered.
-//!
-//! Rendering uses per-segment dirty tracking: only dirty segments are
-//! repainted on each frame, and the dirty set is registry-sized.
-//!
-//! It ALSO holds the segment-binding builder: the width-state cache, the
-//! comptime `module` builder every registered segment constructs its
-//! `contract.Segment` through (the ONE binding style), and the pure
-//! `finishDraw`/`drawAndStore` helpers. The two halves are separated by a
-//! banner below; the vocabulary half stays first because the builder types
-//! its hooks against it.
+//! Segments are discovered under the bar's `modules/` directory and
+//! register into the build-generated `bar_modules.modules` array. This file
+//! sits beside them (not inside the scanned dir) so it is never itself
+//! registered.
 
 const std = @import("std");
 const core = @import("core");
@@ -44,30 +29,24 @@ const model = @import("model");
 /// init. Passed once so segments never import the bar orchestrator;
 /// one-way bar -> segment only.
 pub const BarHandlers = struct {
-    /// Force the bar visible + top-of-stack while the prompt is active.
     presentForPrompt: *const fn () void,
-    /// Return the bar to whatever pre-prompt state it was actually in.
     dismissAfterPrompt: *const fn () void,
-    /// True when `win` is the bar window.
     isBarWindow: *const fn (u32) bool,
 };
 
 /// The bar's per-frame workspace facts, collected fresh by bar.zig every
-/// draw -- the only segment-visible slice of WM state (besides what a segment
-/// reads directly from core). The DEFINITION lives in
-/// bar_contract.zig so the `naturalWidth` hook can type its first
-/// parameter as a real `*const Frame`; this alias keeps `segmod.Frame` as the
-/// name every reader already uses.
+/// draw -- the only segment-visible slice of WM state. The DEFINITION
+/// lives in bar_contract.zig so the `naturalWidth` hook can type its first
+/// parameter as a real `*const Frame`; this alias keeps `segmod.Frame` as
+/// the name every reader already uses.
 pub const Frame = contract.Frame;
 
 /// Minimized-state service the title addon exposes to the bar through the
-/// shared DrawCtx. The title segment owns all minimized-window
-/// knowledge (gated on `build_options.has_minimize`); the bar invokes these
-/// hooks through the registry-dispatched DrawCtx so bar.zig never names a
-/// window addon. `m` is the live model passed as `*const anyopaque`
-/// (type-free contract); the title segment casts back.
+/// shared DrawCtx. The title segment owns all minimized-window knowledge;
+/// the bar invokes these hooks through the registry-dispatched DrawCtx so
+/// bar.zig never names a window addon. `m` is the live model passed as
+/// `*const anyopaque` (type-free contract); the title segment casts back.
 pub const MinimizedApi = struct {
-    /// Synthesize the full minimized-window set into `set` (bar's title shot).
     collect: ?*const fn (
         m: *const anyopaque,
         set: *std.AutoHashMapUnmanaged(u32, void),
@@ -82,14 +61,12 @@ pub inline fn castDraw(ctx: *anyopaque) *DrawCtx {
     return @ptrCast(@alignCast(ctx));
 }
 
-/// Per-frame scratch shared by every segment's `draw(ctx, x)` call. Built once
-/// per frame by the bar; `width` is the segment's reserved row width, set by
-/// the bar immediately before invoking each segment's draw hook (needed by the
-/// title renderer to return its advanced x and by nothing else). The X-free
-/// frame environment (config/height/allocator/width/name/frame) is also
-/// exposed as a typed `contract.DrawEnv` via `drawEnv()`, so a headless
-/// consumer can read it without the X pieces (`dc`, `conn`), which stay opaque
-/// here exactly as `KeyPressEvent` is opaque in the contract.
+/// Per-frame scratch shared by every segment's `draw(ctx, x)` call. Built
+/// once per frame by the bar. The X-free frame environment
+/// (config/height/allocator/width/name/frame) is exposed as a typed
+/// `contract.DrawEnv` via `drawEnv()`, so a headless consumer can read it
+/// without the X pieces (`dc`, `conn`), which stay opaque here exactly as
+/// `KeyPressEvent` is opaque in the contract.
 pub const DrawCtx = struct {
     dc: *drawing.DrawContext,
     config: bar_config.Config,
@@ -100,16 +77,16 @@ pub const DrawCtx = struct {
     /// Reserved row width for the segment currently being drawn.
     width: u16 = 0,
 
-    /// The configured name of the segment currently being drawn, e.g. "cpu" or
-    /// "volume". Set by bar.drawSegment from the name it already had in hand,
-    /// so a module can resolve its OWN themed colors without a second argument
-    /// threaded through the registry draw hook (which is shared by every
-    /// segment). Empty when a caller builds a DrawCtx without drawing a
+    /// The configured name of the segment currently being drawn, e.g. "cpu"
+    /// or "volume". Set by bar.drawSegment from the name it already had in
+    /// hand, so a module can resolve its OWN themed colors without a second
+    /// argument. Empty when a caller builds a DrawCtx without drawing a
     /// specific segment.
     name: []const u8 = "",
 
     /// Title addon's minimized-state service (registered each draw). The
-    /// bar caches it into State so it can invoke the synthesis on every scan.
+    /// bar caches it into State so it can invoke the synthesis on every
+    /// scan.
     minimized_api: MinimizedApi = .{},
 
     frame: Frame,
@@ -122,9 +99,7 @@ pub const DrawCtx = struct {
     minimized_set: *const std.AutoHashMapUnmanaged(u32, void) = &.{},
 
     /// The X-free frame environment, typed in the contract. Projects the
-    /// non-X fields above; `dc`/`conn` (X) and the title slots are excluded,
-    /// so a headless reader can assemble and consume just this. This is the
-    /// typed `DrawEnv` the bar contract names.
+    /// non-X fields; `dc`/`conn` (X) and the title slots are excluded.
     pub fn drawEnv(self: *const DrawCtx) contract.DrawEnv {
         return .{
             .config = self.config,
@@ -136,8 +111,8 @@ pub const DrawCtx = struct {
         };
     }
 
-    /// The title renderer's stable per-frame context (dc/config/height/
-    /// start_x/width/conn). The start_x/width are the segment's on-screen box.
+    /// The title renderer's stable per-frame context. start_x/width are the
+    /// segment's on-screen box.
     pub fn titleRenderContext(self: *const DrawCtx, start_x: u16, width: u16) vocab.TitleRenderContext {
         return .{
             .dc = self.dc,
@@ -148,7 +123,8 @@ pub const DrawCtx = struct {
         };
     }
 
-    /// The title renderer's per-frame snapshot, built from the bar-filled slots.
+    /// The title renderer's per-frame snapshot, built from the bar-filled
+    /// slots.
     pub fn titleSnapshot(self: *const DrawCtx) vocab.TitleSnapshot {
         return .{
             .focused_window = self.focused_window,
@@ -160,14 +136,11 @@ pub const DrawCtx = struct {
     }
 };
 
-// Title render/snapshot machinery, held here so the bar can reach it without
-// naming the title segment.
-
 /// Minimum reserved row width for the title segment.
 pub const title_min_width: u16 = 100;
 
-/// Maximum number of windows rendered in split-view; the single bar-wide cap
-/// (whole batch, per-window scratch, and title gather all bound to it).
+/// Maximum number of windows rendered in split-view; the single bar-wide
+/// cap (whole batch, per-window scratch, and title gather all bound to it).
 pub const max_visible_windows = model.max_tiled_windows;
 
 /// Off-screen sentinel: sorts last in position, drawing is skipped.
@@ -191,8 +164,8 @@ pub fn hasSource(sources: contract.DirtySources, source: DirtySourcesSource) boo
     };
 }
 
-/// Resolves a configured segment name to its registry index, or null when no
-/// module with that name is compiled in (segment removed or unknown).
+/// Resolves a configured segment name to its registry index, or null when
+/// no module with that name is compiled in.
 fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
     for (modules, 0..) |m, i| {
         if (std.mem.eql(u8, m.name, name)) return i;
@@ -204,36 +177,33 @@ fn idByName(modules: []const contract.Segment, name: []const u8) ?usize {
 /// here once so the registry-index helpers below serve every consumer.
 const bar_mods = @import("bar_modules").modules;
 
-/// Registry index for `name` in the bar's own registry, or null
-/// when absent (also when the registry is empty: `bar_mods` is
-/// then a zero-length array and idByName finds nothing).
+/// Registry index for `name`, or null when absent (also when the registry
+/// is empty).
 pub inline fn segId(name: []const u8) ?usize {
     return idByName(&bar_mods, name);
 }
 
-/// True in builds with at least one registered bar segment, false
-/// in segment-less builds. Guards every registry index: indexing
-/// a zero-length array is a compile error even under a runtime
-/// guard, so the empty build drops the whole body before it is
-/// analyzed.
+/// True in builds with at least one registered bar segment, false in
+/// segment-less builds. Guards every registry index: indexing a zero-length
+/// array is a compile error even under a runtime guard, so the empty build
+/// drops the whole body before it is analyzed.
 pub inline fn hasRegisteredSegments() bool {
     return comptime bar_mods.len != 0;
 }
 
-/// Resolves the registry index of every module whose capability field `name`
-/// is set, in registry order. Used by the bar as its ROLE SET: capabilities
-/// with multiple binders (self_ticking, center_slot) fan out / split evenly
-/// over the whole set rather than first-match wins.
+/// Resolves the registry index of every module whose capability field
+/// `name` is set, in registry order. The bar's ROLE SET: capabilities with
+/// multiple binders (self_ticking, center_slot) fan out over the whole set
+/// rather than first-match wins.
 ///
-/// `name` is a FIELD, not a string: it is typed `std.meta.FieldEnum(Segment)`
-/// so a renamed or removed capability is a compile error at every call site.
-/// A string form would let a typo silently resolve the empty set, which is
-/// the same shape as "this role has no binders" -- the failure mode that
-/// reads as a working bar with one segment missing.
+/// `name` is a FIELD, not a string: typed `std.meta.FieldEnum(Segment)`, so
+/// a renamed or removed capability is a compile error at every call site. A
+/// string form would let a typo silently resolve the empty set -- the same
+/// shape as "this role has no binders", the failure mode that reads as a
+/// working bar with one segment missing.
 ///
-/// Comptime-friendly: when `modules` is comptime-known (a generated registry)
-/// the returned slice is a comptime value, so empty-set guards
-/// (`.len == 0`) dead-code-eliminate.
+/// Comptime-friendly: when `modules` is comptime-known the returned slice
+/// is a comptime value, so empty-set guards dead-code-eliminate.
 pub fn findAllByCapability(
     modules: []const contract.Segment,
     comptime name: std.meta.FieldEnum(contract.Segment),
@@ -250,15 +220,13 @@ pub fn findAllByCapability(
 /// Registry capability sets (comptime, from the generated registry): the
 /// center-slot segments that share the center-row budget, and the
 /// self-ticking segments whose merged display width IS that budget's clock
-/// reservation. The single home of the sets.
+/// reservation.
 pub const center_slot_ids: []const usize = findAllByCapability(&bar_mods, .center_slot);
 pub const self_ticking_ids: []const usize = findAllByCapability(&bar_mods, .self_ticking);
 
-/// Index of the registry id `id` within the role set `comptime ids` (the
-/// self-ticking and center-slot capability sets today), or null when it is
-/// not a member. Name-free: membership is by declared capability, and the set
-/// is resolved from the generated registry. A name that does not resolve
-/// (null) is a member of nothing.
+/// Index of the registry id `id` within the role set `comptime ids`, or
+/// null when it is not a member. Membership is by declared capability, not
+/// name; a null id is a member of nothing.
 pub fn roleIndexOf(id: ?usize, comptime ids: []const usize) ?usize {
     const i = id orelse return null;
     inline for (ids, 0..) |rid, j| {
@@ -273,11 +241,10 @@ pub fn isRole(id: ?usize, comptime ids: []const usize) bool {
 }
 
 /// A segment's natural (reserved) width via its uniform naturalWidth hook,
-/// or 0 for an unknown/removed segment name (null id, or an empty registry).
-/// `clock_width` is the merged clock width the hook receives as its fallback
-/// reservation; the hook takes a real `*const contract.Frame`
-/// (`segmod.Frame` is an alias for exactly that), so the frame passes
-/// through with no cast.
+/// or 0 for an unknown/removed segment name. `clock_width` is the merged
+/// clock width the hook receives as its fallback reservation; the hook
+/// takes a real `*const contract.Frame`, so the frame passes through with
+/// no cast.
 pub fn naturalWidthOf(id: ?usize, frame: *const Frame, clock_width: u16) u16 {
     if (comptime !hasRegisteredSegments()) return 0;
     const i = id orelse return 0;
@@ -292,9 +259,7 @@ pub inline fn all() []const contract.Segment {
 }
 
 /// Registry entry at a resolved `id`. Callers reach this only after a
-/// registry capability/role lookup matched a name; a match is impossible
-/// when the registry is empty (guarded like every other index: a zero-length
-/// array is a comptime error to index even under a runtime check).
+/// registry capability/role lookup matched a name.
 pub inline fn segmentAt(id: usize) *const contract.Segment {
     if (comptime !hasRegisteredSegments()) unreachable;
     return &bar_mods[id];
@@ -313,14 +278,12 @@ pub fn anyBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment), args: an
     return false;
 }
 
-/// Consume-all fold over an explicit probe list: every probe is called, each
-/// one that answers true has consumed its own request by returning it, and
-/// the result is whether ANY fired. The opposite drain policy of
+/// Consume-all fold over an explicit probe list: every probe is called,
+/// each one that answers true has consumed its own request by returning
+/// it, and the result is whether ANY fired. The opposite drain policy of
 /// `anyBoolHook`'s short circuit on purpose: short-circuiting here would
 /// consume the first pending request and strand every later one until the
-/// next fold, turning a five-module first-paint settle into five rounds --
-/// which is what pushed a real boot past `max_batched_redraws` and left the
-/// last module's frame waiting on an unrelated timer tick.
+/// next fold, turning a five-module first-paint settle into five rounds.
 pub fn foldProbes(probes: []const ?*const fn () bool) bool {
     var any = false;
     for (probes) |p| {
@@ -333,22 +296,22 @@ pub fn foldProbes(probes: []const ?*const fn () bool) bool {
     return any;
 }
 
-/// The registry fold: `foldProbes` over every segment's no-arg bool `hook`,
-/// in registry order. Takes no args -- unlike `anyBoolHook`, whose callers
-/// pass per-event payloads -- because the fold family only answers "is there
-/// pending work", never "did this event match".
+/// The registry fold: `foldProbes` over every segment's no-arg bool
+/// `hook`, in registry order. Takes no args -- unlike `anyBoolHook` --
+/// because the fold family only answers "is there pending work", never
+/// "did this event match".
 pub fn foldBoolHook(comptime hook: std.meta.FieldEnum(contract.Segment)) bool {
     var probes: [bar_mods.len]?*const fn () bool = undefined;
     for (bar_mods, 0..) |seg, i| probes[i] = @field(seg, @tagName(hook));
     return foldProbes(&probes);
 }
 
-/// Segment-binding builder: width-state cache, the comptime `module` builder
-/// (the ONE binding style), finishDraw/drawAndStore. Per-module width cache:
-/// the ACTUAL drawn width from the last render, read by the default
-/// naturalWidth for the row reservation (0 until the first draw), invalidated
-/// on config reload. The comptime `tag` must differ per module so each call
-/// site gets its own instantiation (and thus its own state).
+/// Segment-binding builder: width-state cache, the comptime `module`
+/// builder, finishDraw/drawAndStore. Per-module width cache: the ACTUAL
+/// drawn width from the last render, read by the default naturalWidth for
+/// the row reservation (0 until the first draw), invalidated on config
+/// reload. The comptime `tag` must differ per module so each call site gets
+/// its own instantiation (and thus its own state).
 pub fn widthState(comptime tag: []const u8) type {
     return struct {
         var cached: u16 = 0;
@@ -371,22 +334,19 @@ pub fn widthState(comptime tag: []const u8) type {
         pub fn naturalWidth(_: *const contract.Frame, _: u16) u16 {
             return cached;
         }
-        /// The width to reserve: the measured one, or `probe` until there IS
-        /// a measurement.
+        /// The width to reserve: the measured one, or `probe` until there
+        /// IS a measurement.
         ///
-        /// `cached == 0` means "never painted", not "zero pixels wide" -- a
-        /// segment that has not drawn yet has no measured width, and reserving
-        /// 0 for it collapses the row on the very first layout pass. One
-        /// definition, used by every consumer, is what keeps the hit-test, the
-        /// drag range and the reservation agreeing from frame one: a module
-        /// with a private zero-check can let the click hit-test reject presses
-        /// while its own `slot_w` is 0, while the drag denominator and the row
-        /// reservation fall back to DIFFERENT values in the same frame.
+        /// `cached == 0` means "never painted", not "zero pixels wide" --
+        /// reserving 0 for an unpainted segment collapses the row on the
+        /// very first layout pass. One definition, used by every consumer,
+        /// keeps the hit-test, the drag range and the reservation agreeing
+        /// from frame one.
         pub fn resolved(probe: u16) u16 {
             return if (cached != 0) cached else probe;
         }
-        /// The raw last-painted width, 0 when never painted. For callers that
-        /// genuinely need to distinguish the two (not the reservation).
+        /// The raw last-painted width, 0 when never painted. For callers
+        /// that genuinely need to distinguish the two (not the reservation).
         pub fn measured() u16 {
             return cached;
         }
@@ -397,32 +357,30 @@ pub fn widthState(comptime tag: []const u8) type {
 /// painted width back to the segment that owns the measurement, and say
 /// whether the row advances by the paint or by the reservation.
 ///
-/// It lives here, not inline in the bar's draw loop, because the loop needs a
-/// live `DrawContext` and an X connection: as a function over a `Segment` and
-/// a `Painted`, both halves are reachable from a unit test. A segment that
-/// forgets its own width, or a row that advances on a draw that painted
-/// nothing, are both silent in production and obvious here.
+/// Lives here, not inline in the bar's draw loop, so both halves are
+/// reachable from a unit test (the loop needs a live DrawContext and an X
+/// connection).
 ///
-/// Returns true when the segment painted something. A zero width is a valid
-/// successful outcome (an absent readout) and, like a caught draw error, still
-/// leaves the caller to consume the full reserved width.
+/// Returns true when the segment painted something. A zero width is a
+/// valid successful outcome (an absent readout) and, like a caught draw
+/// error, still leaves the caller to consume the full reserved width.
 pub fn finishDraw(seg: *const contract.Segment, painted: contract.Painted) bool {
     if (seg.onPainted) |sink| sink(painted.width);
     return painted.width != 0;
 }
 
 /// Draws one padded segment for `name` and reports what it painted (the
-/// shared draw body of the icon-ish modules that are exactly "padded segment
-/// plus a measured width").
+/// shared draw body of the icon-ish modules that are exactly "padded
+/// segment plus a measured width").
 ///
-/// Empty `text` draws nothing and reports a 0-width reservation instead, so
-/// segments that may have nothing to show (variants without an indicator) keep
-/// the row layout honest without a per-module guard.
+/// Empty `text` draws nothing and reports a 0-width reservation instead,
+/// so segments that may have nothing to show keep the row layout honest
+/// without a per-module guard.
 ///
-/// It does NOT record the width: the bar feeds the painted width back through
-/// the segment's `onPainted` hook, so "the reservation must follow the
-/// painted content" is one rule in one place rather than an obligation every
-/// drawing helper has to remember.
+/// It does NOT record the width: the bar feeds the painted width back
+/// through the segment's `onPainted` hook, so "the reservation must follow
+/// the painted content" is one rule in one place rather than an obligation
+/// every drawing helper has to remember.
 pub fn drawAndStore(
     comptime name: []const u8,
     dc: *drawing.DrawContext,
@@ -435,46 +393,46 @@ pub fn drawAndStore(
     if (text.len != 0) {
         end_x = try drawing.drawPaddedSegment(dc, config, height, start_x, name, text, null, config.segmentProps(name));
     }
-    // Empty text lands on `span` with end_x == start_x, i.e. Painted.nothing:
-    // a SUCCESSFUL zero-width draw, not a failure.
+    // Empty text lands on `span` with end_x == start_x, i.e.
+    // Painted.nothing: a SUCCESSFUL zero-width draw, not a failure.
     return contract.Painted.span(start_x, end_x);
 }
 
 const NaturalWidth = *const fn (*const contract.Frame, u16) u16;
 const OnClick = *const fn (*const contract.ClickCtx) bool;
 
-/// How one slot's WIDTH behaves over its lifetime -- the shapes a bar segment
-/// can actually have, named by the SlotMode enum below.
+/// How one slot's WIDTH behaves over its lifetime -- the shapes a bar
+/// segment can actually have, named by the SlotMode enum below.
 const SlotMode = enum {
-    /// Measured width reported to the width state, and a width change raises a
-    /// re-layout request. For a segment that can change shape DURING a frame:
-    /// variants collapses to zero width on a layout transition and must re-lay
-    /// the row in the SAME batch, before the end-of-batch flush, or the gap it
-    /// left never closes.
+    /// Measured width reported to the width state, and a width change
+    /// raises a re-layout request. For a segment that can change shape
+    /// DURING a frame: variants collapses to zero width on a layout
+    /// transition and must re-lay the row in the SAME batch, before the
+    /// end-of-batch flush, or the gap it left never closes.
     measured_relayout,
-    /// Measured width reported to the width state, but no re-layout request.
-    /// Right for a segment whose width only changes on a config reload: the
-    /// bar re-lays out for that anyway, so a request would be a duplicate.
+    /// Measured width reported to the width state, but no re-layout
+    /// request. Right for a segment whose width only changes on a config
+    /// reload: the bar re-lays out for that anyway, so a request would be
+    /// a duplicate.
     measured_no_relayout,
     /// The module measures its OWN width, on its own cadence, and wants
     /// neither a report nor a request. The clock: its reservation is a
-    /// deliberate per-mode text measurement, refreshed when the mode changes,
-    /// not the width that happened to paint -- and a painted-width report
-    /// would be measuring the wrong thing.
+    /// deliberate per-mode text measurement, refreshed when the mode
+    /// changes, not the width that happened to paint -- and a painted-width
+    /// report would be measuring the wrong thing.
     self_measured,
     /// No width participation at all: no reservation probe unless one is
-    /// supplied explicitly, no paint report, no redraw request. The prompt's
-    /// shape -- an overlay-first segment whose row draw exists but whose
-    /// width the bar never measures or derives.
+    /// supplied explicitly, no paint report, no redraw request. The
+    /// prompt's shape -- an overlay-first segment whose row draw exists but
+    /// whose width the bar never measures or derives.
     unmeasured,
 };
 
 /// Optional bindings for the segment: one field per contract.Segment hook a
-/// module can set. Unset fields keep the contract defaults (the builder only
-/// ever fills them in).
+/// module can set. Unset fields keep the contract defaults (the builder
+/// only ever fills them in).
 const Opts = struct {
-    /// How this slot's width behaves; see SlotMode. Defaults to the safest
-    /// measured shape.
+    /// How this slot's width behaves; see SlotMode.
     mode: SlotMode = .measured_no_relayout,
     self_ticking: bool = false,
     center_slot: bool = false,
@@ -489,16 +447,15 @@ const Opts = struct {
     onPollWakeup: ?*const fn () void = null,
     secondsElapsed: ?*const fn ([]const u8) bool = null,
     onBarShown: ?*const fn () void = null,
-    /// Cleared via the uniform invalidate hook on bar (re)creation. Segments
-    /// without a real invalidate (layout/variants) keep their last measured
-    /// width as the row reservation: zeroing it would make the first measure
-    /// after a reload reserve a 0-width slot and push downstream segments out
-    /// of place for a frame.
+    /// Cleared via the uniform invalidate hook on bar (re)creation.
+    /// Segments without a real invalidate (layout/variants) keep their last
+    /// measured width as the row reservation: zeroing it would make the
+    /// first measure after a reload reserve a 0-width slot and push
+    /// downstream segments out of place for a frame.
     invalidate: ?*const fn () void = null,
-    /// Clears per-module caches on config reload (font/padding may change).
     invalidateReloadCaches: ?*const fn () void = null,
-    /// Raw redraw-request walker; wins over the mode-derived one (the prompt
-    /// folds its own pending requests).
+    /// Raw redraw-request walker; wins over the mode-derived one (the
+    /// prompt folds its own pending requests).
     consumeRedrawRequest: ?*const fn () bool = null,
     handleKeypress: ?*const fn (*const contract.KeyPressEvent, ?*const types.Action) bool = null,
     measureString: ?*const fn () []const u8 = null,
@@ -539,11 +496,11 @@ fn clickHook(comptime action: anytype) OnClick {
     }.f;
 }
 
-/// The default naturalWidth for a module that binds a measureString: reserve
-/// the bar's clock budget (the `clock_width` argument, the merged self-ticker
-/// measurement) itself, rather than a cached drawn width. This is the clock's
-/// reservation path -- its width store lives in State.Clock.width, re-derived
-/// by the bar, so the hook only forwards.
+/// The default naturalWidth for a module that binds a measureString:
+/// reserve the bar's clock budget (the `clock_width` argument, the merged
+/// self-ticker measurement) itself, rather than a cached drawn width. This
+/// is the clock's reservation path -- its width store lives in
+/// State.Clock.width, re-derived by the bar, so the hook only forwards.
 fn passthroughWidth(_: *const contract.Frame, clock_width: u16) u16 {
     return clock_width;
 }
@@ -583,8 +540,8 @@ pub fn module(
         .handleKeypress = opts.handleKeypress,
         .measureString = opts.measureString,
         .naturalWidth = switch (opts.mode) {
-            // Out of the width economy: the reservation probe stays whatever
-            // was supplied explicitly (normally nothing).
+            // Out of the width economy: the reservation probe stays
+            // whatever was supplied explicitly (normally nothing).
             .unmeasured => opts.natural_width,
             else => opts.natural_width orelse (if (opts.measureString != null) passthroughWidth else W.naturalWidth),
         },

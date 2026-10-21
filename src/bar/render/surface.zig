@@ -1,16 +1,13 @@
 //! Off-screen X drawable and the XCB/cairo machinery that writes to it:
 //! the pixmap + cairo surface a frame draws into, visual/depth resolution,
 //! and the fill/blit primitives with their paint-order rule (XCB fills land
-//! under cairo glyphs of the same frame).
-//!
-//! `DrawContext` in `drawing.zig` composes this with the font book from
-//! `fonts.zig`.
+//! under cairo glyphs of the same frame). `DrawContext` in `drawing.zig`
+//! composes this with the font book from `fonts.zig`.
 
 const std = @import("std");
 const core = @import("core");
 const bindings = @import("bindings");
 
-/// First visual on `screen` matching `depth`, or null.
 fn firstVisualOfDepth(screen: core.Screen, depth: u8) ?*core.xcb.xcb_visualtype_t {
     var di = core.xcb.xcb_screen_allowed_depths_iterator(screen);
     while (di.rem > 0) : (core.xcb.xcb_depth_next(&di)) {
@@ -27,9 +24,6 @@ pub fn findVisualByDepth(screen: core.Screen, depth: u8) u32 {
     return vt.visual_id;
 }
 
-/// Owns the off-screen X drawable and the XCB/cairo machinery that writes to
-/// it. The display resources and the font resources have independent owners;
-/// `DrawContext` is the facade that composes them.
 pub const Surface = struct {
     conn: core.Connection,
     /// The real X window, only used as the copy destination in `blit`.
@@ -48,7 +42,8 @@ pub const Surface = struct {
     /// Pre-computed alpha byte for XCB pixel packing.
     alpha_u8: u8 = 0xFF,
     last_color: ?u32 = null,
-    /// Cached GC foreground: skips xcb_change_gc when the packed pixel is unchanged.
+    /// Cached GC foreground: skips xcb_change_gc when unchanged (the common
+    /// case for adjacent same-background segments).
     last_gc_color: ?u32 = null,
     /// True once this frame has issued its first XCB fill.
     xcb_filled_this_frame: bool = false,
@@ -85,9 +80,9 @@ pub const Surface = struct {
         const ctx = bindings.cairo_create(cairo_surface) orelse return error.CairoCreateFailed;
         errdefer bindings.cairo_destroy(ctx);
 
-        // Fire both GC-create requests before blocking on either reply so both
-        // land in the same TCP segment. The errdefers free both on any failure
-        // after they exist; deinit owns them once init returns.
+        // Fire both GC-create requests before blocking on either reply so
+        // both land in the same TCP segment. The errdefers free both on any
+        // failure after they exist; deinit owns them once init returns.
         const gc = core.xcb.xcb_generate_id(conn);
         errdefer _ = core.xcb.xcb_free_gc(conn, gc);
         const copy_gc = core.xcb.xcb_generate_id(conn);
@@ -125,16 +120,17 @@ pub const Surface = struct {
         if (self.gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.gc);
         if (self.copy_gc != 0) _ = core.xcb.xcb_free_gc(self.conn, self.copy_gc);
         bindings.cairo_destroy(self.ctx);
-        // Destroy surface before pixmap: Cairo holds a reference to the pixmap.
+        // Destroy surface before pixmap: Cairo holds a reference to the
+        // pixmap.
         bindings.cairo_surface_destroy(self.cairo_surface);
         if (self.pixmap != 0) _ = core.xcb.xcb_free_pixmap(self.conn, self.pixmap);
     }
 
     /// Image-backed surface with the XCB half inert: no pixmap, no GCs, so
-    /// every wire path in this struct short-circuits on its zero handle
-    /// (`fillRect` falls back to cairo, `blitImpl` returns after the flush).
-    /// The test-only constructor for a headless DrawContext -- same cairo
-    /// surface type the font probe already measures against, no display.
+    /// every wire path short-circuits on its zero handle (`fillRect` falls
+    /// back to cairo, `blitImpl` returns after the flush). The test-only
+    /// constructor for a headless DrawContext -- same cairo surface type the
+    /// font probe measures against, no display.
     pub fn initImage(width: u16, height: u16) !Surface {
         const cairo_surface = bindings.cairo_image_surface_create(
             .ARGB32,
@@ -165,31 +161,26 @@ pub const Surface = struct {
         self.last_color = color;
     }
 
-    /// Uses XCB rather than Cairo to write straight-alpha pixels (picom expects
-    /// straight-alpha; Cairo's XRender backend writes premultiplied).
-    /// `last_gc_color` skips xcb_change_gc when the color is unchanged, which is
-    /// the common case for adjacent same-background segments.
+    /// Uses XCB rather than Cairo to write straight-alpha pixels (picom
+    /// expects straight-alpha; Cairo's XRender backend writes premultiplied).
     ///
-    /// ## Paint-order rule: XCB fills are ordered BEFORE every cairo
-    /// glyph of the frame
+    /// ## Paint-order rule: XCB fills are ordered BEFORE every cairo glyph
+    /// of the frame
     ///
-    /// `cairo_surface` is an xcb surface backed by `pixmap` -- the very pixmap
-    /// this writes -- so the two paths meet in one place but do not arrive there
-    /// together. Glyphs go through cairo and are buffered until something
-    /// flushes them; this method's `xcb_poly_fill_rectangle` is put on the wire
-    /// immediately. The frame's blit flushes cairo at the end, so the order the
-    /// server sees is: every fill of the frame, then every glyph of the frame --
-    /// regardless of the order the modules called them in. That is what makes
-    /// `fillRect` usable as a BACKGROUND: the segment fills first and the label
-    /// lands on top of it.
+    /// `cairo_surface` is an xcb surface backed by `pixmap`. Glyphs go
+    /// through cairo and are buffered until the frame's blit flushes them;
+    /// `xcb_poly_fill_rectangle` goes on the wire immediately, so the server
+    /// sees: every fill of the frame, then every glyph of the frame,
+    /// regardless of the order modules called them in. That is what makes
+    /// `fillRect` usable as a BACKGROUND: the segment fills first and the
+    /// label lands on top of it.
     ///
     /// The rule is enforced at the top: the first XCB write of a frame
-    /// quiesces cairo first, so no cairo operation can be left pending across
-    /// the boundary where the two orderings diverge.
-    pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {
-        // Image surface (no pixmap): the same pixels via cairo, so a headless
-        // frame still paints a background. The wire-only state below is skipped
-        // entirely -- there is no GC to arm and no ordering to enforce.
+    /// quiesces cairo first, so no cairo operation can be left pending
+    /// across the boundary where the two orderings diverge.
+    pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {        // Image surface (no pixmap): the same pixels via cairo, so a
+        // headless frame still paints a background. The wire-only state
+        // below is skipped entirely -- no GC to arm, no ordering to enforce.
         if (self.pixmap == 0) {
             self.setColor(color);
             bindings.cairo_rectangle(
@@ -229,10 +220,10 @@ pub const Surface = struct {
         _ = core.xcb.xcb_poly_fill_rectangle(self.conn, self.pixmap, self.gc, 1, &rect);
     }
 
-    /// Shared blit body: bindings.cairo_surface_flush + xcb_copy_area of [x, x+w),
-    /// plus an immediate xcb_flush only for `blitRegion`. `queueBlit` must NOT
-    /// flush here: it is safe inside xcb_grab_server precisely because the copy
-    /// is sent with the caller's batch end.
+    /// Shared blit body: bindings.cairo_surface_flush + xcb_copy_area of
+    /// [x, x+w), plus an immediate xcb_flush only for `blitRegion`.
+    /// `queueBlit` must NOT flush here: it is safe inside xcb_grab_server
+    /// precisely because the copy is sent with the caller's batch end.
     pub inline fn blitImpl(self: *Surface, x: u16, w: u16, comptime flush: bool) void {
         // The frame's glyphs go on the wire here, which is what puts them after
         // this frame's fills. Re-arms the one-shot quiesce for the next
@@ -269,8 +260,9 @@ inline fn createXcbPixmap(conn: core.Connection, depth: u8, drawable: u32, w: u1
     return pixmap;
 }
 
-/// Returns the visual matching `visual_id` across all screens, or falls back
-/// to a visual matching `depth` on `screen`. Errors if no visuals exist.
+/// Returns the visual matching `visual_id` across all screens, or falls
+/// back to a visual matching `depth` on `screen`. Errors if no visuals
+/// exist.
 fn resolveVisualType(
     conn: core.Connection,
     screen: core.Screen,
@@ -278,7 +270,6 @@ fn resolveVisualType(
     depth: u8,
 ) !*core.xcb.xcb_visualtype_t {
     if (visual_id) |vid| {
-        // Scan all screens/depths for the requested visual_id.
         var si = core.xcb.xcb_setup_roots_iterator(core.xcb.xcb_get_setup(conn));
         while (si.rem > 0) : (core.xcb.xcb_screen_next(&si)) {
             var di = core.xcb.xcb_screen_allowed_depths_iterator(si.data);
@@ -289,7 +280,7 @@ fn resolveVisualType(
             }
         }
     }
-    // Fallback: return a visual matching the PIXMAP depth to avoid BadMatch
-    // when the surface pairs visual+drawable at different depths.
+    // Fallback: a visual matching the PIXMAP depth to avoid BadMatch when
+    // the surface pairs visual+drawable at different depths.
     return firstVisualOfDepth(screen, depth) orelse error.NoVisuals;
 }
