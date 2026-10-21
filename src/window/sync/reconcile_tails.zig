@@ -6,10 +6,8 @@
 //! because each is one MODEL transition plus one RECONCILE entry: the pure
 //! tiling layer may not import `pipeline`/`core` (build.zig's
 //! `assertPureLayerImports`), so a transition that reaches a server grab
-//! cannot sit under it. The tiling ENGINE is still reached the same way —
-//! through the build-generated `tiling_seam`, never by naming
-//! `src/tiling/` — so a tree without the tiling subsystem keeps compiling
-//! behind the `has_tiling` gates that already guard every one of these.
+//! cannot sit under it. The tiling ENGINE is still reached through the
+//! build-generated `tiling_seam`, never by naming `src/tiling/`.
 
 const std = @import("std");
 const core = @import("core");
@@ -21,21 +19,21 @@ const build_options = @import("build_options");
 const contract = @import("tiling_contract");
 const usable_area = @import("usable_area");
 // Layout-name resolution for the state dump and the layout cycle, via the
-// build-generated seam. The seam's top level also carries the has_tiling-gated
-// op stubs (reorderTiled/stepTiled/...) so these transitions need no
-// per-call guard of their own.
+// build-generated seam. The seam also carries the has_tiling-gated op stubs
+// (reorderTiled/stepTiled/...), so these transitions need no per-call guard.
 const tiling_seam = @import("tiling_seam");
 const tiling = tiling_seam.tiling;
 
 /// The four reconcile shapes a tiling action can ask for, as ONE axis.
 ///
 /// A four-bool bag (`restack` / `full_redraw` / `with_focus` /
-/// `bump_fullscreen`) resolved by a three-way if-chain would let a caller name
-/// a combination that means nothing -- `with_focus` with no focus transition to
-/// apply, or `restack` silently ignored on the plain path -- and would make the
-/// dispatch unreadable without re-deriving the truth table. All four reachable
-/// combinations are enumerated here instead, so the compiler rejects the
-/// impossible ones and a reader sees the dispatch without reading the chain.
+/// `bump_fullscreen`) resolved by a three-way if-chain would let a caller
+/// name a combination that means nothing — `with_focus` with no focus
+/// transition, or `restack` silently ignored on the plain path — and would
+/// make the dispatch unreadable without re-deriving the truth table. All
+/// four reachable combinations are enumerated here instead, so the compiler
+/// rejects the impossible ones and a reader sees the dispatch without
+/// reading the chain.
 pub const RetileMode = enum {
     /// reconcileGrab: no focus, no restack.
     plain,
@@ -59,20 +57,17 @@ pub const RetileOpts = struct {
 ///
 /// Each mode names which facts IT bumps. The plain and restack modes
 /// deliberately do NOT bump the window fact here: both reconcile through
-/// `pipeline.reconcileGrab`, which owns that bump, so the actions
-/// that route through them get the invariant without having to remember
-/// it, and this one cannot double-bump on the way there. The focus variants
-/// reconcile through `pipeline.reconcileGrabFocus`, which does not bump, so
-/// those still bump the window fact here. That is the whole asymmetry, and
-/// it is the one line of the function that looks surprising on purpose.
+/// `pipeline.reconcileGrab`, which owns that bump, so the actions routing
+/// through them get the invariant without having to remember it, and this
+/// one cannot double-bump on the way there. The focus variants reconcile
+/// through `pipeline.reconcileGrabFocus`, which does not bump, so those
+/// still bump the window fact here. That is the whole asymmetry, and it is
+/// the one line of the function that looks surprising on purpose.
 ///
 /// A fact bump is a counter increment with no X traffic, so doing it before
 /// the reconcile is wire-identical to doing it after; actions with a pinned
 /// side-effect ORDER keep their own tails instead of routing through here.
 pub fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
-    // `full_redraw` selects WHICH geometry fact to bump; without it only the
-    // focus modes still bump the window fact themselves (their reconcile
-    // entry does not), and plain/restack leave it entirely to reconcileGrab.
     if (opts.full_redraw) core.layout.bump() else if (opts.mode == .focus or opts.mode == .focus_restack) core.window.bump();
     if (opts.bump_fullscreen) core.fullscreen.bump();
 
@@ -80,26 +75,24 @@ pub fn retile(opts: RetileOpts, ft: ?focus.FocusTransition) void {
         .plain => pipeline.reconcileGrab(.{}),
         .restack => pipeline.reconcileGrab(.{ .force_restack = true }),
         // Focus lands before geometry (focus-before). A null transition for a
-        // focus mode is treated as the no-op transition instead of a panic, so
-        // a caller that forgets the FocusTransition degrades to a plain
-        // focus-mode retile rather than a crash.
+        // focus mode degrades to the no-op transition instead of a panic, so
+        // a caller that forgets the FocusTransition gets a plain focus-mode
+        // retile rather than a crash.
         .focus => pipeline.reconcileGrabFocus(.{}, ft orelse .none, .before, null),
         .focus_restack => pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft orelse .none, .before, null),
     }
 }
 
 /// Shared hide/close withdraw tail: when the withdrawn window was the
-/// current workspace's covering occupant, bump the core fact so the bar (a
-/// consumer) re-derives its screen claim before the reconcile reads the work
-/// area; then hand focus to the fallback winner (or clear) and reconcile
-/// focus + geometry under one grab.
+/// current workspace's covering occupant, bump the core fact so the bar
+/// re-derives its screen claim before the reconcile reads the work area;
+/// then hand focus to the fallback winner (or clear) and reconcile focus +
+/// geometry under one grab.
 pub fn retileWithFallback(m: *model_mod.Model, fs_current: bool, was_focused: bool) void {
     const ft: focus.FocusTransition = if (was_focused) focus.focusFallback(m, .tiling_operation) else .none;
     retile(.{ .mode = .focus_restack, .bump_fullscreen = fs_current }, ft);
 }
 
-/// Layout-parameter transitions: one model transition + one reconcile entry,
-/// over the active workspace's `LayoutParams`.
 /// Secondary-column balance swing cap for grow_stack adjustments (see
 /// StackBoost.fromBalance).
 const max_primary_swing: f32 = 6.0;
@@ -112,8 +105,6 @@ pub fn cycleLayoutKind(dir: i32) void {
 
 /// Step the active layout within the config layout-name list (config order
 /// is the cycle order), wrapping around while resetting the variant index.
-/// Defaults/overrides always come from config names, so the active kind is
-/// always resolvable.
 fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     if (!build_options.has_tiling) return;
     const cfg = &core.getState().config.tiling;
@@ -121,9 +112,9 @@ fn cycleActiveLayout(m: *model_mod.Model, dir: i32) void {
     const next_kind = tiling.cycleKind(p.kind, dir, cfg.layouts.items);
     p.kind = next_kind;
     p.variant_idx = 0;
-    // global_layout (P1-15): the flag is a real behavior, not just a parsed
-    // knob — when set, the cycled kind propagates to every workspace so a
-    // layout change is machine-wide. Mirrors the config-reload stamping
+    // global_layout: the flag is a real behavior, not just a parsed knob —
+    // when set, the cycled kind propagates to every workspace so a layout
+    // change is machine-wide. Mirrors the config-reload stamping
     // (model_config.applyConfigReload) but touches only `kind`/`variant_idx`,
     // leaving per-workspace master counts and viewport state alone. The
     // active workspace is stamped above; this loop covers the rest.
@@ -167,7 +158,7 @@ pub fn adjustSecondaryBalance(delta: f32) void {
 }
 
 /// swap_master: exchanges the focused window's tiled slot with the previously
-/// focused window's (focus MRU), not the list head -- a slot in the middle of
+/// focused window's (focus MRU), not the list head — a slot in the middle of
 /// a 3+ window workspace still swaps the pair the user expects. focus_swap
 /// variant moves focus to the previously focused window BEFORE the reconcile
 /// so the swapped-in window is focused on the first reconcile.
@@ -212,7 +203,7 @@ const viewport_inactive: ViewportContext =
 
 /// Viewport context for the active layout, resolved through the layout
 /// metadata: a layout "has a viewport" iff it registers the slotWidth/
-/// maxOffset hooks. Returns inactive for layouts without a viewport or an
+/// maxOffset hooks. Inactive for layouts without a viewport or an
 /// out-of-range kind.
 fn viewportContext(m: *const model_mod.Model) ViewportContext {
     if (!build_options.has_tiling) return viewport_inactive;
@@ -248,12 +239,12 @@ pub fn viewportStep(dir: i32) void {
 }
 
 /// Focus-change viewport snap: shift the viewport minimally so the focused
-/// window's slot is fully on-usable area. Pure model/param mutation (no grab, no
-/// reconcile). When the focused window is already fully on-screen (the common
-/// case during focus cycling) nothing changes. The focus-cycle path runs this
-/// as a duty INSIDE the focus transition's grab, so a Mod+k/Mod+j that scrolls
-/// the viewport still lands focus + geometry in one grab+reconcile rather than
-/// two.
+/// window's slot is fully on-usable area. Pure model/param mutation (no
+/// grab, no reconcile); when the focused window is already fully on-screen
+/// (the common case during focus cycling) nothing changes. The focus-cycle
+/// path runs this as a duty INSIDE the focus transition's grab, so a
+/// Mod+k/Mod+j that scrolls the viewport still lands focus + geometry in
+/// one grab+reconcile rather than two.
 fn snapViewportParamsToFocused() void {
     const vp = activeViewport() orelse return;
     const m = vp.m;
@@ -296,9 +287,9 @@ fn activeViewport() ?struct {
     sc: ViewportContext,
 } {
     if (!build_options.has_tiling) return null;
-    // No `has_bar` gate: the viewport clamps to `usable_area.workArea`,
-    // which is the full screen without a bar, so a scroll layout works
-    // headless too -- the clamp target is bar-independent.
+    // No `has_bar` gate: the viewport clamps to `usable_area.workArea`, which
+    // is the full screen without a bar, so a scroll layout works headless
+    // too — the clamp target is bar-independent.
     const m = pipeline.mut();
     const p = &m.ws[m.current.index].params;
     const sc = viewportContext(m);

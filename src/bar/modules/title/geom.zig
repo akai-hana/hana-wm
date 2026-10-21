@@ -38,20 +38,10 @@ const WindowInfo = struct {
     minimized: bool,
 };
 
-/// Sort order for the split-view segment layout:
-///
-///   1. Non-minimized windows first (minimized shown last/rightmost, matching
-///      their visual demotion in tiling).
-///   2. On-screen before off-screen.  Negative-x windows (monocle background)
-///      are off-screen; demoting them stops artificial coordinates overriding
-///      real spatial ordering.
-///   3. Left-to-right by x, then top-to-bottom by y, keeps each window's
-///      segment stable across focus changes.
-///   4. Tie-break by window ID for deterministic ordering.
-///
-/// Focus is intentionally NOT a sort key: using it as a tie-break would
-/// reorder segments when two windows share coordinates, making the bar jump
-/// on focus changes. The focused window is highlighted via accent colour.
+/// Sort order for the split-view: non-minimized first, on-screen (x>=0)
+/// before off-screen, then LTR-by-x then TTB-by-y, tie-break by window ID.
+/// Focus is NOT a sort key: a focus tie-break would reorder shared-coordinate
+/// segments and make the bar jump; the focused window is accent-coloured.
 fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     if (a.minimized != b.minimized) return !a.minimized;
     if ((a.x < 0) != (b.x < 0)) return a.x >= 0;
@@ -60,19 +50,12 @@ fn compareWindows(_: void, a: WindowInfo, b: WindowInfo) bool {
     return a.window < b.window;
 }
 
-/// Caller-frame scratch for the gather phase, shared verbatim by hitTest and
-/// the title module's draw. The gather is the method rather than a private fn
-/// beside it: it had exactly one caller, and forwarding three arguments just to
-/// reach its own field was a second name for a single step.
+/// Caller-frame scratch for the gather phase, shared by hitTest and draw.
 pub const GatherScratch = struct {
     window_infos: [max_visible_windows]WindowInfo = undefined,
 
-    /// Builds the sorted WindowInfo list for the split view from the
-    /// snapshot's per-window entries (id + title + geom). The bar already
-    /// resolved both per window id from in-process caches (WM title cache +
-    /// sync truth-rect), so nothing here touches the wire and no positional
-    /// batch exists to scramble. Windows with an unknown geometry are dropped,
-    /// not padded.
+    /// Builds the sorted WindowInfo list from the snapshot's per-window
+    /// entries. Nothing here touches the wire; unknown geometries are dropped.
     pub fn gather(
         self: *GatherScratch,
         snapshot: TitleSnapshot,

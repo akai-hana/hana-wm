@@ -1,17 +1,13 @@
-//! Border policy for tiled and floating windows — an OPTIONAL window module
-//! (P2-47; moved from `protocol/borders.zig` + `sync/border_sweeps.zig`).
-//! Resolves border visibility, color, and width (hiding borders for covering/
+//! Border policy for tiled and floating windows — an OPTIONAL window module.
+//! Resolves border visibility/color/width (hiding borders for covering
 //! fullscreen windows and windows behind covering occupants), applies them
-//! with ledger-backed deduplication to avoid redundant XCB configure requests,
-//! and owns the per-batch sweeps that recolor live windows.
+//! with ledger-backed dedup, and owns the per-batch recolor sweeps.
 //!
-//! DELETION SEMANTICS (the modularity matrix deletes this file): the registry
-//! shortens, every dispatch through the `borders` family no-ops, and
-//! `window.borderColorOf` falls back to a constant 0 — windows keep the
-//! CONFIGURED width (`ctx.env.margins.border` / `core.borderWidth()`, which
-//! stays a core config knob: geometry and layout insets are coupled to it)
-//! with an uncolored (black) pixel. No other file names this module; core
-//! reaches it only through the `window` facade / the contract family.
+//! DELETION SEMANTICS: the registry shortens, `borders` dispatches no-op, and
+//! `window.borderColorOf` falls back to constant 0 — windows keep the
+//! CONFIGURED width (`core.borderWidth()`, a core config knob: geometry and
+//! layout insets are coupled to it) with an uncolored pixel. Core reaches
+//! this module only through the `window` facade / contract family.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -24,13 +20,11 @@ const requests = @import("requests");
 const reconcile = @import("reconcile");
 const query = @import("query");
 
-/// Pure covering-occupant borderless rule: true when `win` must render
-/// borderless because a covering (fullscreen) occupant holds the workspace it
-/// actually lives on. `current` is the current workspace for the
+/// True when `win` must render borderless because a covering (fullscreen)
+/// occupant holds the workspace it actually lives on. `current` is the
 /// unresolvable-workspace fallback; `has_fullscreen` (comptime) gates the
 /// covering-mode reads for fullscreen-absent builds; `occupants` is the
-/// precomputed per-workspace table (see `model.coveringOccupants` — the
-/// batch form of `model.coveringOccupantOn(..., .anchored_or_visible)`).
+/// precomputed per-workspace table (`model.coveringOccupants`).
 pub fn isBehindCoveringWindowWith(
     m: *const model.Model,
     win: u32,
@@ -46,10 +40,9 @@ pub fn isBehindCoveringWindowWith(
 }
 
 /// The border-color decision for `win`: 0 for screen-covering windows,
-/// focused or unfocused color otherwise, resolved against a PRECOMPUTED
-/// occupant table (see `model.coveringOccupants` — every caller sweeps
-/// windows, so the table is built once per sweep, never per window).
-/// The SWEEPS' color decision; the reconcile delta uses `colorOf` below.
+/// focused or unfocused color otherwise, against a PRECOMPUTED occupant
+/// table (built once per sweep, never per window). The SWEEPS' decision;
+/// the reconcile delta uses `colorOf` below.
 pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 {
     if (comptime !build_options.has_tiling) return 0; // borderless: no tiled chrome
     // Covering windows render borderless via the bw=0/pixel=0 policy in
@@ -57,26 +50,22 @@ pub fn resolveBorderColorWith(win: u32, occupants: []const ?model.WindowId) u32 
     const m = pipeline.state();
     if (model.isCovering(m, win)) return 0;
     const cfg = &core.getState().config.tiling;
-    // A window that shares a workspace with a covering (fullscreen) occupant
-    // is hidden behind it, so it must render borderless too -- otherwise the
-    // barless fullscreen view leaks colored edges. This resolves the member's
-    // real workspace from its covering state or (re)place home; a stray or
-    // unfindable window falls back to whether the CURRENT workspace has a
-    // covering occupant.
+    // A window sharing a workspace with a covering occupant is hidden behind
+    // it, so it must render borderless too -- otherwise the barless
+    // fullscreen view leaks colored edges. Stray/unfindable windows fall back
+    // to whether the CURRENT workspace has a covering occupant.
     if (isBehindCoveringWindowWith(m, win, m.current, build_options.has_fullscreen, occupants)) return 0;
     // The model is the focus source, so this cannot drift from the
     // pipeline's own pick.
     return focus.focusedBorderColor(m, win, cfg.border_focused, cfg.border_unfocused);
 }
 
-/// The reconcile delta's border-color pick (the `colorOf` contract hook;
-/// formerly `pipeline.colorOf`). Deliberately WITHOUT the covering checks
-/// `resolveBorderColorWith` carries: the reconciler zeroes bw/pixel for the
-/// covering winner and for parked windows itself (computeDesire's policy),
-/// so those windows never send this value as a colored border. Fullscreen
-/// windows get bw=0/pixel=0 through that branch policy instead. Reads MODEL
-/// focus; focus.zig mirrors every transition into m.focused, so this is the
-/// same single source of truth.
+/// The reconcile delta's border-color pick (the `colorOf` contract hook).
+/// Deliberately WITHOUT the covering checks `resolveBorderColorWith`
+/// carries: the reconciler zeroes bw/pixel for the covering winner and for
+/// parked windows itself (computeDesire's policy), so those never send this
+/// value as a colored border. Reads MODEL focus; focus.zig mirrors every
+/// transition into m.focused.
 fn colorOf(win: model.WindowId, m: *const model.Model) u32 {
     if (comptime !build_options.has_tiling) return 0;
     const cfg = &core.getState().config.tiling;
@@ -84,8 +73,8 @@ fn colorOf(win: model.WindowId, m: *const model.Model) u32 {
 }
 
 /// Applies the configured border width to `win`, skipping the configure when
-/// the sync ledger shows that exact width is already the last one sent.
-/// (The ledger is the sole "last border width sent" owner.)
+/// the sync ledger shows that width was already sent (the ledger is the sole
+/// owner of "last border width sent").
 fn applyWidth(conn: core.Connection, win: u32) void {
     const w = core.borderWidth();
     if (w == 0) return;
@@ -97,17 +86,14 @@ fn applyWidth(conn: core.Connection, win: u32) void {
     if (build_options.has_tiling) reconcile.markSentBorderWidth(win, w);
 }
 
-/// Applies border width + color to `win` against a PRECOMPUTED occupant table,
-/// for callers sweeping many windows (the reload sweep): resolving the color
-/// per window would rebuild the table each time, making the sweep
-/// O(windows * store). One build (model.coveringOccupants) + applyWidth +
-/// resolveBorderColorWith keeps it at O(store) total.
+/// Applies border width + color against a PRECOMPUTED occupant table for
+/// sweep callers: resolving color per window would rebuild the table each
+/// time (O(windows * store)); one build + apply keeps the sweep O(store).
 ///
-/// The color dedup lives in the SENT LEDGER, beside the width record and
-/// the reconcile's own `need_pixel` check, so the sweep and the reconcile derive
-/// "has this pixel already gone out" from one record. Deriving it from the
-/// window_facts entry instead would let a pixel sent by the reconcile go
-/// unrecorded for the sweep (and vice versa).
+/// The color dedup lives in the SENT LEDGER beside the width record, so
+/// sweep and reconcile share one "has this pixel gone out" record — deriving
+/// it from window_facts would let a reconcile-sent pixel go unrecorded for
+/// the sweep (and vice versa).
 fn applyWith(conn: core.Connection, win: u32, occupants: []const ?model.WindowId) void {
     applyWidth(conn, win);
     const c = resolveBorderColorWith(win, occupants);
@@ -119,49 +105,38 @@ inline fn tilingActive() bool {
 }
 
 /// Fill `buf` with the per-workspace covering-occupant table in ONE store
-/// pass. Every per-window color decision asks "does this window's workspace
-/// have a covering occupant"; asking per window made the sweep O(N^2) in
-/// store scans, so both sweep variants (and reloadBorders) build it once
-/// up-front.
+/// pass. Asking the covering question per window made sweeps O(N^2) in store
+/// scans, so every sweep variant (and reloadBorders) builds it up-front.
 fn occupantsInto(buf: *[model.max_workspaces]?model.WindowId) void {
     buf.* = @splat(null);
     model.coveringOccupants(pipeline.state(), buf);
 }
 
-/// Refresh border colors for all windows on the current workspace. Shared
-/// iteration loop for workspace border sweeps:
-///
-/// - `skip_tiled` true (updateFloatingWindowBorders): skip tiled windows,
-///   `configureWithHints` already updated their borders via get_border_color;
-///   when tiling is absent or disabled it falls back to a full sweep because
-///   there are no tiled windows to skip.
-/// - `skip_tiled` false (updateWorkspaceBorders): dedup via the sent ledger
-///   (markSentBorderPixelIfChanged), so the steady-state focused-window
-///   sweep generates zero XCB traffic.
+/// Refresh border colors for windows on the current workspace; shared loop
+/// for both sweep variants. `skip_tiled` true (updateFloatingWindowBorders)
+/// skips tiled windows (configureWithHints already updated theirs; falls
+/// back to a full sweep when tiling is absent). `skip_tiled` false
+/// (updateWorkspaceBorders) relies on ledger dedup so the steady-state sweep
+/// generates zero XCB traffic.
 fn sweepWorkspaceBorders(comptime skip_tiled: bool) void {
     const cur = query.getCurrentWorkspace() orelse return;
     const cur_ws = model.WSId.fromIndex(cur);
     var occupants: [model.max_workspaces]?model.WindowId = undefined;
     occupantsInto(&occupants);
-    // Caller-owned scratch (the diag.zig pattern): the store walk fills a
-    // plain buffer instead of module-level State, so the sweep carries no
-    // cross-call state to reset.
+    // Caller-owned scratch: a plain buffer instead of module-level State, so
+    // the sweep carries no cross-call state to reset.
     var snapshot: [model.store_capacity]query.Entry = undefined;
     for (query.allWindowsInto(&snapshot)) |entry| {
         const win = entry.win;
         if (!model.maskedOn(entry.mask, cur_ws)) continue;
-        // Parked (offscreen/minimized) windows are invisible; recoloring
-        // them is pointless XCB traffic and can race the park position. The
-        // unpark reconcile re-establishes their border color.
+        // Parked windows are invisible; recoloring them is pointless XCB
+        // traffic and can race the park position (the unpark reconcile
+        // re-establishes their color).
         if (entry.presence == .parked) continue;
         if (comptime skip_tiled) {
             if (build_options.has_tiling and tilingActive() and query.isTiledMode(win)) continue;
         }
         const color = resolveBorderColorWith(win, &occupants);
-        // Same ledger dedup in both sweep variants: a window whose color is
-        // unchanged (per the ledger's record) skips the XCB call outright.
-        // One record has to answer this for both the sweep and the
-        // reconcile -- see applyWith.
         if (reconcile.markSentBorderPixelIfChanged(win, color))
             requests.setBorderPixel(core.getState().conn, win, color);
     }
@@ -175,7 +150,6 @@ fn updateFloatingWindowBorders() void {
     sweepWorkspaceBorders(true);
 }
 
-/// Called on config reload.
 fn reloadBorders() void {
     var occupants: [model.max_workspaces]?model.WindowId = undefined;
     occupantsInto(&occupants);
@@ -185,8 +159,8 @@ fn reloadBorders() void {
     }
 }
 
-/// This module's window sub-system contribution: the border-color decision
-/// plus the three per-batch sweeps. No lifecycle hooks (no module state).
+/// This module's window contribution: the border-color decision plus the
+/// three per-batch sweeps. No lifecycle hooks (no module state).
 pub const module: @import("window_contract").WindowModule = .{
     .name = "borders",
     .borders = .{

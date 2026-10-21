@@ -33,11 +33,10 @@ fn resolveAutoTerminal(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Every action key, as one hand-maintained table: the `Action` union's
-/// void tag names are usable verbatim (auto-derived below), and these
-/// entries add the aliases / payload-carrying spellings. Adding an Action
-/// union member requires only the union edit for its tag name; forgetting an
-/// intended alias fails the parser's unknown-action typo detection instead
-/// of silently unparsable.
+/// void tag names are usable verbatim (auto-derived below); these entries add
+/// the aliases / payload-carrying spellings. Adding a union member needs only
+/// the union edit for its tag name; forgetting an intended alias fails the
+/// parser's unknown-action typo detection.
 const action_entries = [_]struct { key: []const u8, action: types.Action }{
     // Void-variant aliases (legacy spellings of the auto-derived void tags).
     .{ .key = "close", .action = .{ .close_window = {} } },

@@ -1,15 +1,7 @@
-//! Config file discovery: the ceiling-bounded read/merge machinery
-//! (per-file read with growth, parse, arena merge, `include` joining
-//! one level deep), the config-dir walk, and the user-config search
-//! order. Everything here answers "which files make up this load, and
-//! what did they merge into" -- turning paths into an arena-backed
-//! TOML document; the orchestrator (config.zig) turns that document
-//! into a Config.
-//!
-//! A config directory contributes exactly ONE file (`entry_file`) plus that
-//! file's `include`s; its other top-level `.toml` files are reported as inert
-//! rather than merged, so a file dropped into the directory can never change
-//! the config behind the user's back.
+//! Config file discovery: ceiling-bounded read/merge (`include` joining one
+//! level deep), the config-dir walk, and the user-config search order.
+//! A config dir contributes exactly ONE file (`entry_file`) plus its
+//! `include`s; other top-level `.toml` files are inert, never merged.
 
 const std = @import("std");
 const log = std.log.scoped(.discover);
@@ -18,26 +10,17 @@ const composed = @import("composed");
 
 pub const max_file_bytes = 1024 * 1024;
 
-/// Ceilings for ONE config load. `max_file_bytes` bounds a single file, which
-/// on its own leaves the load itself unbounded: a config dir holding thousands
-/// of small files, or an `include` list naming the same file a few thousand
-/// times, all stay under the per-file cap and still cost thousands of reads,
-/// parses and arena merges before boot finishes. These two bound the load as a
-/// whole.
-///
-/// Exceeding either fails the load (`TooManyConfigFiles` / `TooManyConfigBytes`)
-/// rather than warning and skipping: silently dropping config files yields a
-/// config that is subtly NOT the user's, which is the failure mode this module
-/// spends the most comments defending against. Both bounds sit far above any
-/// real config (the reference set is 6 files, ~30KB).
+/// Ceilings for ONE config load. `max_file_bytes` bounds a single file; these
+/// two bound the load as a whole (thousands of small files / include names all
+/// stay under the per-file cap). Exceeding either FAILS the load rather than
+/// warning and skipping: silently dropping config files yields a config that
+/// is subtly NOT the user's. Both bounds sit far above any real config.
 pub const max_config_files = 128;
 const max_total_config_bytes = 8 * 1024 * 1024;
 
 /// The files one load consumed, in merge order, plus their running byte total.
-/// The list is what the re-exec snapshot freezes; the total is the half of the
-/// load ceiling that a file COUNT cannot express. Both counters move in one
-/// place (`mergeAndRecord`), the single choke point every read passes through, so
-/// a new file-reading path cannot forget to check them.
+/// Both counters move in one place (`mergeAndRecord`), the choke point every
+/// read passes through, so a new file-reading path cannot forget to check them.
 pub const ReadSet = struct {
     paths: std.ArrayList([]const u8) = .empty,
     bytes: usize = 0,
@@ -50,7 +33,6 @@ const read_growth_initial_bytes = 64 * 1024;
 /// Reads `path`, returning `error.FileTooLarge` when it exceeds
 /// `max_file_bytes`. The returned slice may alias a larger allocation (loading
 /// is arena-backed, so all ownership is released together by the arena reset).
-/// Growth-path rationale sits inline below.
 pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const io = std.Options.debug_io;
     const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
@@ -60,7 +42,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     defer file.close(io);
     // A successful stat reporting size 0 is as untrustworthy as a failed one:
     // procfs/sysfs/pipes report 0 while carrying content, so they take the
-    // same read-with-growth path (pinned by config_test).
+    // same read-with-growth path.
     const stat: ?std.Io.File.Stat = file.stat(io) catch null;
     const known_size: usize = if (stat) |st| size: {
         if (st.size > max_file_bytes) return error.FileTooLarge;
@@ -70,8 +52,7 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
     const initial: usize = if (known_size > 0) known_size else read_growth_initial_bytes;
     // Single ownership throughout: the armed errdefer frees the whole buffer
-    // exactly once on every error path, and the success path hands ownership
-    // (possibly after a shrinking realloc) to the caller.
+    // exactly once on every error path.
     var buf = try allocator.alloc(u8, initial);
     errdefer allocator.free(buf);
     var total: usize = 0;
@@ -86,22 +67,20 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     }
     if (total > max_file_bytes) return error.FileTooLarge;
     if (total == buf.len) return buf;
-    // Hand the caller an owned buffer of the exact size (the growth buffer was
-    // oversized); shrinking via realloc transfers ownership instead of leaking
-    // a subslice the caller would double-free.
+    // Hand the caller an owned buffer of the exact size; shrinking via realloc
+    // transfers ownership instead of leaking a subslice the caller would
+    // double-free.
     return allocator.realloc(buf, total);
 }
 
 /// Reads and parses the .toml at `path`, returning null for an empty file.
-/// Read/parse errors propagate to the caller, who decides how to handle them.
 /// `allocator` must be arena-backed: the file buffer and the parsed Document
 /// alias it, released together by the caller's load-scoped arena reset.
 pub fn parseTomlFile(allocator: std.mem.Allocator, path: []const u8) !?ParsedToml {
     const raw = try readFileAlloc(allocator, path);
     if (raw.len == 0) return null;
-    // `raw.len`, not a stat: it is the count of bytes actually READ, so the load
-    // ceiling cannot be evaded by a file whose stat lies (the growth path
-    // already covers a stat that reports 0 or fails outright).
+    // `raw.len`, not a stat: the count of bytes actually READ, so the load
+    // ceiling cannot be evaded by a file whose stat lies.
     return .{ .doc = try parser.parse(allocator, raw, path), .bytes = raw.len };
 }
 
@@ -111,10 +90,7 @@ pub const ParsedToml = struct { doc: parser.Document, bytes: usize };
 /// warn-and-skip wrapper around parseTomlFile, the "never crash on bad
 /// config" path `include` resolution takes. An entry file or a single-file
 /// location deliberately does NOT: there a read failure must propagate raw
-/// (see config.parseFileDoc). On read or parse failure, marks the destination
-/// merged document's `had_errors` so the caller can propagate
-/// error.ConfigParseFailed. An empty file returns null without setting
-/// `had_errors`.
+/// (see config.parseFileDoc). Failure marks the destination `had_errors`.
 fn tryParseTomlFile(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -130,10 +106,9 @@ fn tryParseTomlFile(
 }
 
 /// The ReadSet choke point: byte ceiling, tally, merge into `dst`, log and
-/// path record. Every contributing file -- single file and directory entry
-/// (config.parseFileDoc), include -- passes through here, so both counters
-/// move in one place. A file that fails before reaching this returns without
-/// being recorded, so `read` holds exactly the files that contributed.
+/// path record. Every contributing file passes through here. A file that
+/// fails before reaching this is not recorded, so `read` holds exactly the
+/// files that contributed.
 pub fn mergeAndRecord(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -156,8 +131,7 @@ pub fn mergeAndRecord(
 
 /// Read-merge-log path `include` resolution takes: refuse an over-limit tree
 /// BEFORE the read it was about to do, then read (skipping a broken file with
-/// `had_errors` set) and hand the bookkeeping to mergeAndRecord. Returns null
-/// for an empty or skipped file.
+/// `had_errors` set) and hand bookkeeping to mergeAndRecord.
 fn parseAndMerge(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -181,8 +155,7 @@ fn parseAndMerge(
 /// Merges files listed in `include = [...]` from `src_doc` into `dst`;
 /// `dir_path` is the base for relative paths. Includes resolve one level deep
 /// only: an included file's own `include` is skipped, keeping the graph
-/// cycle-free by construction (no cycle-detection machinery) at the cost of
-/// no chained includes. `allocator` is the load's arena allocator.
+/// cycle-free by construction (no cycle-detection machinery).
 pub fn mergeIncludes(
     allocator: std.mem.Allocator,
     dst: *parser.Document,
@@ -191,11 +164,10 @@ pub fn mergeIncludes(
     dir_path: []const u8,
 ) !void {
     // Each included file is merged into `dst` while we walk `src_doc`'s
-    // `include` list. The arena never moves an existing allocation, so the
-    // `includes` slice below stays valid while the loop merges into it.
-    //
-    // The `include` key is copied into `dst` by mergeDocumentsInto, so mark it
-    // consumed there as well: otherwise warnUnconsumed would flag it as a typo.
+    // `include` list; the arena never moves an existing allocation, so the
+    // `includes` slice stays valid. The `include` key is copied into `dst` by
+    // mergeDocumentsInto, so mark it consumed there too (warnUnconsumed
+    // would otherwise flag it as a typo).
     dst.root.markConsumed("include");
     const inc_val = src_doc.root.get("include") orelse return;
     const includes = inc_val.asArray() orelse return;
@@ -219,12 +191,9 @@ fn sliceLessThan(_: void, a: []u8, b: []u8) bool {
 
 /// Collects the `*.toml` files directly inside `dir_path` (alphabetical
 /// order; subdirectories only via explicit `include`), excluding the
-/// embedded `fallback.toml`. The caller owns the returned list and its
-/// strings.
-///
-/// This does NOT decide what loads -- that is `entry_file` plus its
-/// `include`s -- it is the inventory the two reports below are written
-/// against: the per-file inert warning and the entryless-directory warning.
+/// embedded `fallback.toml`. The caller owns the returned list and strings.
+/// Does NOT decide what loads -- that is `entry_file` plus its `include`s --
+/// it is the inventory the two reports below are written against.
 fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std.ArrayList([]u8) {
     var names: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -256,22 +225,17 @@ fn discoverDirNames(allocator: std.mem.Allocator, dir_path: []const u8) !std.Arr
 }
 
 /// The one file a config directory auto-loads, relative to the directory
-/// root. Everything else in there is inert until this file names it in
-/// `include` -- one choke point decides what a dropped-in file can
-/// contribute. Also the name the single-file search locations resolve
-/// (`searchPaths`), so "the entry file" is spelled once for both branches.
+/// root. Everything else is inert until this file names it in `include`.
+/// Also the name the single-file search locations resolve, so "the entry
+/// file" is spelled once for both branches.
 pub const entry_file = "config.toml";
 
 /// Reports every top-level `*.toml` in `dir_path` the load did NOT consume.
-/// A config dir merges exactly `entry_file` and that file's `include`s, so a
-/// dropped-in file is inert until an `include` names it -- and an inert file
-/// the user meant to be live is the silent-drop failure this module's
+/// A dropped-in file is inert until an `include` names it -- and an inert
+/// file the user meant to be live is the silent-drop failure this module's
 /// ceilings exist to prevent. Membership is checked against `read` (what was
-/// actually read) rather than against the include list, so a named-but-broken
-/// file is reported here too, beside its own parse warning. Intended for the
-/// load's arena allocator, where the walk's allocations cost nothing to
-/// release; `dir_path` is expected to exist (the entry file was just read
-/// from it), and a directory that does not is `discoverDirNames`' report.
+/// actually read), so a named-but-broken file is reported beside its own
+/// parse warning. Intended for the load's arena allocator.
 pub fn warnInertSiblings(allocator: std.mem.Allocator, dir_path: []const u8, read: *const ReadSet) void {
     var names = discoverDirNames(allocator, dir_path) catch return;
     defer {
@@ -295,11 +259,10 @@ pub fn warnInertSiblings(allocator: std.mem.Allocator, dir_path: []const u8, rea
 }
 
 /// Reports a config dir that holds `.toml` files but no `entry_file`: the
-/// search skips such a directory (it is not a config source) and moves on to
-/// the next location, and skipping it SILENTLY would boot whatever config
-/// answers next with nothing on stderr to explain the tree on disk. No report
-/// when there is nothing to skip -- an absent or empty directory is the
-/// ordinary "no config here" the search is built to walk past.
+/// search skips such a directory, and skipping it SILENTLY would boot
+/// whatever config answers next with nothing on stderr to explain the tree on
+/// disk. No report when there is nothing to skip -- an absent or empty
+/// directory is the ordinary "no config here" the search walks past.
 pub fn warnEntrylessDir(allocator: std.mem.Allocator, dir_path: []const u8) void {
     var names = discoverDirNames(allocator, dir_path) catch return;
     defer {
@@ -310,30 +273,25 @@ pub fn warnEntrylessDir(allocator: std.mem.Allocator, dir_path: []const u8) void
 }
 
 /// Errors that mean "nothing to load HERE", so the search moves on without a
-/// warning. One list for the search, shared by the dir loop and the file loop
-/// so they cannot drift apart, and a typo'd entry is a warning that never
-/// fires.
+/// warning. One list shared by the dir and file loops so they cannot drift.
 /// (NotDir is inert for a single-file path, which is why one set fits both.)
 ///
 /// The pinned-snapshot branch in `loadConfigDefault` keeps its own switch on
 /// purpose: there a parse failure is ALSO non-fatal -- a broken snapshot must
-/// not swap the embedded fallback over an otherwise-fine user config -- which
-/// is the opposite of the search, where a parse failure must reach the caller.
+/// not swap the embedded fallback over an otherwise-fine user config --
+/// opposite of the search, where a parse failure must reach the caller.
 const silent_missing = [_]anyerror{ error.FileNotFound, error.NotDir };
 
 /// Load failures that mean "this config cannot be used", as opposed to "there
-/// is nothing here". All of them are handled identically at both ends: `load`
-/// (boot) falls back to the embedded config, and the reload path lets them
-/// propagate so the live config is kept. The set is named so the search's
-/// hard-fail list and boot's fallback list cannot drift apart -- they are the
-/// same policy, spelled twice, and the ceilings joined both.
+/// is nothing here". Handled identically at both ends: `load` (boot) falls
+/// back to the embedded config; the reload path lets them propagate so the
+/// live config is kept. Named so the search's hard-fail list and boot's
+/// fallback list cannot drift apart -- same policy, spelled twice.
 fn isFatalLoadError(err: anyerror) bool {
     return switch (err) {
         // InvalidConfig is part of the list: a fragment's validate fails
         // inside composed.parse, so an out-of-range value must propagate
-        // out of the search exactly like a TOML parse failure (boot falls
-        // back; reload keeps live) rather than warn-and-skip to the next
-        // search path.
+        // exactly like a TOML parse failure rather than warn-and-skip.
         error.ConfigParseFailed, error.TooManyConfigFiles, error.TooManyConfigBytes, error.InvalidConfig => true,
         else => false,
     };
@@ -346,11 +304,10 @@ pub fn tryLoadOrWarn(
     comptime err_msg: []const u8,
 ) !?composed.Config {
     return loader(allocator, path) catch |err| {
-        // A parse error must reach the caller. On reload it makes the
-        // swap fail so the live config is kept (see reload.handleConfigReload);
-        // at boot `load` catches it and falls back to the embedded config.
-        // Swallowing it here would silently install the fallback over a
-        // user's typo'd config.
+        // A parse error must reach the caller: on reload it makes the swap
+        // fail so the live config is kept; at boot `load` falls back to the
+        // embedded config. Swallowing it here would silently install the
+        // fallback over a user's typo'd config.
         if (isFatalLoadError(err)) return err;
         for (silent_missing[0..]) |e| if (err == e) return null;
         log.warn(err_msg, .{ path, err });
@@ -360,9 +317,9 @@ pub fn tryLoadOrWarn(
 
 /// The directory and single-file locations searched for a user config, in
 /// priority order. Single source of truth shared by the loader
-/// (loadConfigDefault) so the search order cannot drift; loadConfigDefault also
-/// reports which source supplied the config, so the reload path needs no
-/// separate existence probe.
+/// (loadConfigDefault) so the search order cannot drift; loadConfigDefault
+/// also reports which source supplied the config, so the reload path needs
+/// no separate existence probe.
 pub const SearchPaths = struct {
     xdg_dir: []u8,
     local_dir: []u8,
@@ -377,15 +334,13 @@ pub const SearchPaths = struct {
     }
 };
 
-/// The shape every search location's loader has: both the dir loader and the
-/// single-file loader take exactly (allocator, path).
+/// The shape every search location's loader has: both the dir and
+/// single-file loaders take exactly (allocator, path).
 pub const LoadFn = *const fn (std.mem.Allocator, []const u8) anyerror!composed.Config;
 
-/// The user-config search order, declared ONCE. Adding a location (a second
-/// per-user dir, a system-wide `/etc/hana`) is a new enum tag plus one line in
-/// `loadConfigDefault`'s switch; the priority order, the loader, the
-/// "nothing here" error set and the warn wording are all decided by the tag
-/// rather than by the order the loops happen to be written in.
+/// The user-config search order, declared ONCE. Adding a location is a new
+/// enum tag plus one line in `loadConfigDefault`'s switch; the priority order,
+/// loader, "nothing here" error set and warn wording all follow the tag.
 pub const search_order = [_]SearchLoc{
     .xdg_dir,
     .local_dir,
@@ -397,7 +352,7 @@ pub const SearchLoc = enum { xdg_dir, local_dir, xdg_file, local_file };
 
 /// One resolved search location: where to look, how to read it, and whether
 /// the source is a directory (which the re-exec snapshot records). Built per
-/// tag inside `loadConfigDefault`; the failure wording comes from the tag too.
+/// tag inside `loadConfigDefault`.
 pub const SearchAttempt = struct {
     path: []const u8,
     load: LoadFn,
@@ -407,19 +362,16 @@ pub const SearchAttempt = struct {
 /// XDG config-home resolution, the one place that policy lives.
 ///
 /// `$XDG_CONFIG_HOME` wins when set AND non-empty; otherwise `$HOME/.config`.
-/// An EMPTY value counts as unset, per the XDG spec and for a concrete reason:
-/// joining `""` with the app name yields a RELATIVE path, so `XDG_CONFIG_HOME=""`
-/// would silently redirect the config search to the current working directory
-/// -- a config that boots differently depending on where hana was started.
-///
-/// Writes into `buf` and returns the slice; `buf` is caller-owned.
-/// discover's searchPaths is the only caller.
+/// An EMPTY value counts as unset, per the XDG spec and for a concrete
+/// reason: joining `""` with the app name yields a RELATIVE path, so
+/// `XDG_CONFIG_HOME=""` would silently redirect the search to the cwd -- a
+/// config that boots differently depending on where hana was started.
 pub fn configHome(buf: []u8, xdg: ?[]const u8, home: []const u8) ![]const u8 {
     if (xdg) |x| {
         if (x.len != 0) return std.fmt.bufPrint(buf, "{s}", .{x}) catch error.NameTooLong;
     }
-    // The caller passes "/" for an unset HOME (so the result stays absolute),
-    // and a bare "{s}/.config" would then be "//.config" -- harmless, but it
+    // The caller passes "/" for an unset HOME (so the result stays absolute);
+    // a bare "{s}/.config" would then be "//.config" -- harmless, but it
     // leaks into every warning and path comparison that mentions the config
     // home. Join semantics, not string concatenation.
     if (home.len != 0 and home[home.len - 1] == '/')
@@ -430,8 +382,8 @@ pub fn configHome(buf: []u8, xdg: ?[]const u8, home: []const u8) ![]const u8 {
 pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     // An unset or empty HOME taken as "/" with no word to the user would
     // silently become `/.config/hana` and then `./config/` -- a WM that came
-    // up with a different config than every other launch, with nothing on
-    // stderr to say so. Name the substitution instead.
+    // up with a different config than every other launch. Name the
+    // substitution instead.
     const home: []const u8 = if (std.c.getenv("HOME")) |h| blk: {
         const s = std.mem.span(h);
         break :blk if (s.len == 0) "/" else s;
@@ -447,10 +399,10 @@ pub fn searchPaths(allocator: std.mem.Allocator) !SearchPaths {
     } else null;
     var ch_buf: [std.fs.max_path_bytes]u8 = undefined;
     const config_home = try configHome(&ch_buf, xdg_config_home, home);
-    // Joined through a stack buffer and duped once: `fs.path.join` allocates its
-    // result in the arena, and this is an intermediate (the owned copy below is
-    // what SearchPaths returns), so an arena-allocated join would be freed only
-    // by the arena reset -- a leak the load-scoped-arena tests correctly catch.
+    // Joined through a stack buffer and duped once: `fs.path.join` allocates
+    // its result in the arena, and this is an intermediate (the owned copy
+    // below is what SearchPaths returns) -- an arena-allocated join would be
+    // freed only by the arena reset, a leak the load-scoped-arena tests catch.
     var xdg_buf: [std.fs.max_path_bytes]u8 = undefined;
     const xdg_dir = try allocator.dupe(u8, try std.fmt.bufPrint(&xdg_buf, "{s}/hana", .{config_home}));
     errdefer allocator.free(xdg_dir);

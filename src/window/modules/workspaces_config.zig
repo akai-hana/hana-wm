@@ -1,9 +1,8 @@
 //! The workspaces config fragment: `Config` (the [workspaces] subtree), its
 //! knob table, and the workspace-rules parsers (the `[workspace.rules]` /
 //! `[rules]` families the knob engine does not cover). Deleting this file
-//! (with the rest of the optional workspaces module) removes the `workspaces`
-//! field, every [workspaces] knob, and the rule parsers from the build with
-//! no trace elsewhere.
+//! (with the rest of the optional workspaces module) removes the
+//! `workspaces` field, every [workspaces] knob, and the rule parsers.
 //!
 //! `types.Rule` stays in the shared vocab: the always-compiled admission
 //! layer's signatures take `[]const types.Rule` even when this fragment is
@@ -41,12 +40,11 @@ comptime {
     knob.validateTable(Config, &knobs, &.{});
 }
 
-/// The section names the workspaces subsystem owns (D13/P2-50): the
-/// composed facade unions every fragment's list into the mis-case lint's
-/// inventory. `[bar.modules.workspaces]` is consumed by this fragment's
-/// count knob but lives in the bar's section namespace, so bar_config
-/// lists it (a name appears in exactly one fragment -- the comptime
-/// pairwise-distinct check pins that).
+/// The section names the workspaces subsystem owns: the composed facade
+/// unions every fragment's list into the mis-case lint's inventory.
+/// `[bar.modules.workspaces]` is consumed by this fragment's count knob but
+/// lives in the bar's section namespace, so bar_config lists it (a name
+/// appears in exactly one fragment).
 pub const sections = &[_][]const u8{
     types.section_workspaces,
     types.section_workspace_rules,
@@ -60,26 +58,25 @@ pub const section_prefixes = &[_][]const u8{
     types.section_prefix_rules,
 };
 
-/// Inert families (D13/P2-50): the numbered rule tables are read only when
-/// their parent section is present; a present family with the parent
-/// missing leaves those rules inert, which the load warns about.
+/// Inert families: the numbered rule tables are read only when their parent
+/// section is present; a present family with the parent missing leaves those
+/// rules inert, which the load warns about.
 pub const inert_families = &[_]types.InertFamily{
     .{ .parent = types.section_rules, .child_prefix = types.section_prefix_rules },
     .{ .parent = types.section_workspace_rules, .child_prefix = types.section_prefix_workspace_rules },
 };
 
 /// Both rule-table sections accumulate duplicate declarations by design
-/// (one key per rule; repeated names read as arrays), so scalar reads of
-/// an accumulated rule take the last declaration without a "later wins"
-/// warn.
+/// (one key per rule; repeated names read as arrays), so scalar reads of an
+/// accumulated rule take the last declaration without a "later wins" warn.
 pub const accumulate_exempt = &[_]types.SectionKey{
     .{ .section = types.section_workspace_rules },
     .{ .section = types.section_rules },
 };
 
 /// The section HEADS whose presence in the embedded fallback TOML is gated
-/// on this fragment's owner module (P2-50): `workspace` heads the
-/// `[workspace.rules*]` family, `rules` the numbered tables.
+/// on this fragment's owner module: `workspace` heads the `[workspace.rules*]`
+/// family, `rules` the numbered tables.
 pub const fallback_sections = &[_][]const u8{ "workspaces", "workspace", "rules" };
 
 /// The fragment parse entry: apply the scalar knobs, then parse the
@@ -94,11 +91,11 @@ pub fn parse(allocator: std.mem.Allocator, doc: *parser.Document) !Config {
 }
 
 /// No domain invariants beyond the count knob's bounds; present so the
-/// generated composed facade can call `validate` uniformly on every fragment.
+/// composed facade can call `validate` uniformly on every fragment.
 pub fn validate(_: *const Config) !void {}
 
 /// Validates a 1-based workspace number, warn-and-skip when outside the
-/// 1..`max` window (workspace count / model.max_workspaces ceiling).
+/// 1..`max` window.
 fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
     if (!types.workspaceInRange(ws_1based, max)) {
         log.warn(
@@ -112,8 +109,8 @@ fn checkWorkspaceBound(ws_1based: usize, context: []const u8, max: usize) bool {
 
 /// Appends one class rule. A workspace rule binds `class_name` to the
 /// 1-based workspace `ws_1based`; a null `ws_1based` makes it a "float" class
-/// rule instead (windows are admitted floating on the current workspace, with
-/// `workspace` left 0, unused).
+/// rule instead (windows are admitted floating on the current workspace,
+/// with `workspace` left 0, unused).
 fn addRule(
     allocator: std.mem.Allocator,
     cfg: *Config,
@@ -129,13 +126,12 @@ fn addRule(
 
 /// The `[workspace.rules]` and `[rules]` families: class-name-to-workspace
 /// bindings in both directions, plus the numbered `[workspace.rules.<n>]` /
-/// `[rules.<n>]` sub-sections. Gated on the parent section existing, exactly
-/// as the scalar knobs are, and every owned class name is duped off the
-/// parsed document so it outlives the load-scoped arena.
+/// `[rules.<n>]` sub-sections. Gated on the parent section existing, and
+/// every owned class name is duped off the parsed document so it outlives
+/// the load-scoped arena.
 pub fn parseRules(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *Config) !void {
     // [workspace.rules]: key is either a class name (value = a workspace
-    // number) or a workspace number (value = class array). Both directions
-    // call addRule.
+    // number) or a workspace number (value = class array).
     if (doc.getSection(types.section_workspace_rules)) |s| try parseWorkspaceRuleSection(allocator, cfg, s);
     // [rules]: simple class -> workspace mapping (key = class, value = a
     // workspace number).
@@ -149,8 +145,8 @@ pub fn parseRules(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *Con
 }
 
 /// Processes numbered rule sub-sections (e.g. [workspace.rules.1], [rules.3]).
-/// Each section's keys are class names; the section name suffix is the workspace
-/// number. Shared by both "workspace.rules.*" and "rules.*" prefixes.
+/// Each section's keys are class names; the name suffix is the workspace
+/// number. Shared by both rule-table prefixes.
 fn parseNumberedRuleSections(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
@@ -172,9 +168,9 @@ fn parseNumberedRuleSections(
     }
 }
 
-/// Parses `value` as a workspace int or the "float" marker and, if valid, adds
-/// a rule mapping `class_name` accordingly. Shared by the class-keyed
-/// direction of [workspace.rules] and by [rules], which are always class-keyed.
+/// Parses `value` as a workspace int or the "float" marker and, if valid,
+/// adds a rule mapping `class_name` accordingly. Shared by the class-keyed
+/// direction of [workspace.rules] and by [rules].
 fn tryAddClassRule(allocator: std.mem.Allocator, cfg: *Config, class_name: []const u8, value: parser.Value) !void {
     if (value.asScalar([]const u8)) |s| {
         if (std.mem.eql(u8, s, "float")) {
@@ -203,9 +199,9 @@ fn countLeadingDigits(s: []const u8) usize {
 }
 
 /// Handle the [workspace.rules] section where the key may be a class name
-/// (integer value -> workspace) or a workspace number (array value -> classes).
-/// Distinguish by the LEADING NUMERIC RUN, not by an all-key parseInt: a
-/// numeric-prefixed class like "12x" is parsed as a probability-1 class rule
+/// (integer value -> workspace) or a workspace number (array value ->
+/// classes). Distinguish by the LEADING NUMERIC RUN, not by an all-key
+/// parseInt: a numeric-prefixed class like "12x" is parsed as a class rule
 /// (warned), never silently coerced by a catch; only all-digit keys are
 /// workspace numbers.
 fn parseWorkspaceRuleSection(

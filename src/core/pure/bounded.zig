@@ -45,8 +45,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         }
 
         /// A plain (non-capturing) `item.field_name == key` predicate for
-        /// `indexOf`/`removeWhere`. Shared by the two id-keyed methods below
-        /// instead of restating the match struct.
+        /// `indexOf`/`removeWhere`, shared by the two id-keyed methods.
         fn fieldEq(comptime field_name: std.meta.FieldEnum(T)) type {
             return struct {
                 fn match(key: u32, item: T) bool {
@@ -76,8 +75,7 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
         }
 
         /// Appends `item` if there's room. Returns false and leaves the
-        /// collection untouched if full; callers decide whether a full
-        /// collection is worth a warning or a silent fallback.
+        /// collection untouched if full.
         pub fn append(self: *Self, item: T) bool {
             if (self.len >= capacity) {
                 // Unconditional (not `runtime_safety`-gated): a dropped
@@ -113,12 +111,8 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 
         /// Inserts `item` at the FRONT, first evicting the tail (oldest) entry
         /// if the list is at `capacity`. This is the "newest N" pattern (an MRU
-        /// list), and it is a container operation rather than a caller's
-        /// three-line dance: the hand-rolled `if (len == cap) evict_tail` then
-        /// `insert(0, item)` invites getting the order wrong (inserting first
-        /// silently drops a NEWER entry).
-        ///
-        /// Returns false only if `capacity` is 0, which no real caller sets.
+        /// list): a hand-rolled `if (len == cap) evict_tail` then
+        /// `insert(0, item)` invites getting the order wrong.
         pub fn pushFrontEvictingTail(self: *Self, item: T) bool {
             if (capacity == 0) return false;
             if (self.len == capacity) self.orderedRemove(self.len - 1);
@@ -146,10 +140,9 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
             return self.removeWhere(id, fieldEq(field_name).match);
         }
 
-        /// Removes the first item equal to `scalar` (order-preserving).
-        /// First-class scalar removal: the find-then-remove pair is the shape
-        /// half the tree wants, so give it one name instead of every caller
-        /// spelling it out. Returns whether anything was removed.
+        /// Removes the first item equal to `scalar` (order-preserving), i.e.
+        /// the find-then-remove pair in one name. Returns whether anything was
+        /// removed.
         pub fn removeValue(self: *Self, v: T) bool {
             const i = self.indexOfScalar(v) orelse return false;
             self.orderedRemove(i);
@@ -179,17 +172,15 @@ pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
 }
 
 /// Bounded, allocation-free key-value collection with sorted-key binary
-/// search. Parameterised by key type, value type, and a hard capacity
-/// ceiling (stack-allocated arrays). Keys stay sorted at all times: get /
-/// getPtr / has use O(log n) binary search; put and remove shift arrays to
-/// keep sorted order. Single-threaded like BoundedList (event-loop thread).
-/// Capacity is absolute: put returns error.CapacityFull once full, no
-/// eviction.
+/// search. Parameterised by key type, value type, and a hard capacity ceiling
+/// (stack-allocated arrays). Keys stay sorted: get / getPtr / has use O(log n)
+/// binary search; put and remove shift arrays to keep order. Single-threaded
+/// like BoundedList (event-loop thread). Capacity is absolute: put returns
+/// error.CapacityFull once full, no eviction.
 ///
 /// The backing arrays are contiguous, so a *V from getPtr/put stays valid as
-/// long as its key's slot does not move; slots move only on remove(k), a
-/// wholesale reload, or inserting a NEW key before k (updating an existing
-/// key rewrites in place).
+/// long as its key's slot does not move; slots move only on remove(k) or
+/// inserting a NEW key before k.
 pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
@@ -266,8 +257,8 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
 
         /// Sorted-key row iterator: yields every stored (key, value) in order,
         /// so scans never hand-roll the `0..count()`/`, at(k)` bounds dance.
-        /// The row pointer is valid until the store mutates (see the pointer
-        /// contract on getPtr). Early-exit mid-iteration is safe.
+        /// Row pointer valid until the store mutates (see getPtr). Early-exit
+        /// mid-iteration is safe.
         pub const Iterator = struct {
             store: *const Self,
             pos: usize = 0,
@@ -282,11 +273,9 @@ pub fn Store(comptime K: type, comptime V: type, comptime capacity: usize) type 
             return .{ .store = self };
         }
 
-        /// Indexed accessor: `seq` beyond count() clamps to the
-        /// last stored row (real check, not a debug-only assert), so an
-        /// off-by-one index can't OOB the backing arrays in ReleaseFast.
-        /// Empty map → row 0 of the fixed-capacity storage (always
-        /// addressable, capacity >= 1).
+        /// Indexed accessor: `seq` beyond count() clamps to the last stored
+        /// row (real check, not a debug-only assert), so an off-by-one index
+        /// can't OOB the backing arrays in ReleaseFast. Empty map → row 0.
         pub fn at(self: *const Self, seq: usize) Item {
             // An empty map has no row to return: a clamp would hand back
             // whatever sits in the fixed-capacity storage. Every caller already

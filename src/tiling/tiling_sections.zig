@@ -1,10 +1,9 @@
 //! Tiling's non-scalar config structures: the layouts array (cycle order +
-//! per-workspace overrides), per-layout variant preferences, and master-
-//! stack counts -- the tables the knob engine (tiling_config.knobs via
-//! knob.applyAll) does not cover. Called from tiling_config.parse; every
-//! parser here is gated on its parent section existing, exactly as the
-//! scalar knobs are, and every owned string it stores is duped off the
-//! parsed document so it outlives the load-scoped arena.
+//! per-workspace overrides), per-layout variant preferences, and master-stack counts
+//! -- the tables the knob engine (tiling_config.knobs via knob.applyAll) does not
+//! cover. Called from tiling_config.parse; every parser is gated on its parent section
+//! existing, and every owned string is duped off the parsed document so it outlives
+//! the load-scoped arena.
 
 const std = @import("std");
 const log = std.log.scoped(.tiling_sections);
@@ -14,10 +13,9 @@ const types = @import("types");
 const tiling_config = @import("tiling_config");
 const layout_names = @import("layout_names");
 
-/// Parses a 1-based workspace number from a bare token, warning with `fmt` on
-/// a malformed token or a value outside 1..255 / `max` (the callers embed the
-/// section name in `fmt`, so no separate context is needed), and returns null
-/// to skip it.
+/// Parses a 1-based workspace number from a bare token, warning with `fmt` on a
+/// malformed token or a value outside 1..255 / `max` (callers embed the section name in
+/// `fmt`), and returns null to skip it.
 fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: anytype) ?usize {
     const ws_1based = std.fmt.parseInt(usize, tok, 10) catch {
         log.warn(fmt, args);
@@ -30,8 +28,8 @@ fn tryParseWsToken(tok: []const u8, max: usize, comptime fmt: []const u8, args: 
     return ws_1based;
 }
 
-/// Appends one layout name (duped) to the tiling layout cycle -- the seed
-/// both the default config and the single-layout parse path use.
+/// Appends one layout name (duped) to the tiling layout cycle -- the seed both the
+/// default config and the single-layout parse path use.
 pub fn seedDefaultLayout(allocator: std.mem.Allocator, cfg: *tiling_config.Config, name: []const u8) !void {
     try cfg.layouts.append(allocator, try allocator.dupe(u8, name));
 }
@@ -39,11 +37,10 @@ pub fn seedDefaultLayout(allocator: std.mem.Allocator, cfg: *tiling_config.Confi
 /// Upper bound for per-workspace master counts in `[tiling.layouts.master-stack.counts]`.
 const max_master_count: u8 = 10;
 
-/// Tiling's NON-scalar structures: the layouts array (cycle order +
-/// per-workspace overrides), per-layout variant preferences, and
-/// master-stack counts. Every tiling SCALAR ([tiling] flags, aesthetics,
-/// master trio) is driven by schema.applyAll; all of it stays gated on the
-/// [tiling] section existing.
+/// Tiling's NON-scalar structures: the layouts array (cycle order + per-workspace
+/// overrides), per-layout variant preferences, and master-stack counts. Every tiling
+/// SCALAR is driven by schema.applyAll; all of it stays gated on the [tiling] section
+/// existing.
 pub fn parseTilingStructures(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
@@ -60,18 +57,16 @@ pub fn parseTilingStructures(
     try parseTilingLayoutSubtables(allocator, doc, cfg);
 }
 
-/// The flat `[tiling] master_variant/monocle_variant/grid_variant` keys
-/// map onto their canonical layout names.
+/// Flat `[tiling] *_variant` keys mapped onto their canonical layout names.
 const flat_variant_keys = [_]struct { key: []const u8, canon: []const u8 }{
     .{ .key = "master_variant", .canon = types.canon_master_layout },
     .{ .key = "monocle_variant", .canon = "monocle" },
     .{ .key = "grid_variant", .canon = "grid" },
 };
 
-/// Stores `value` into tiling.variants under canonical key `canon`, duping
-/// both so the map owns its storage independent of the parsed document (which
-/// is freed after buildConfigFromDoc). Last override wins: any prior value
-/// for the same key is freed first.
+/// Stores `value` into tiling.variants under canonical key `canon`, duping both so
+/// the map owns its storage independent of the parsed document (freed after
+/// buildConfigFromDoc). Last override wins: any prior value is freed first.
 fn setTilingVariant(
     allocator: std.mem.Allocator,
     cfg: *tiling_config.Config,
@@ -90,12 +85,12 @@ fn setTilingVariant(
 
 /// The `[tiling.layouts.*]` sub-table family, scanned once: a bare
 /// `[tiling.layouts.<name>]` table carries a per-layout `variants` string; a
-/// `[tiling.layouts.<name>.counts]` one carries per-workspace master-count
-/// overrides (workspace_number (1-based) = count; only meaningful with
-/// global_layout = false, and only the master family can carry counts). Keys
-/// canonicalize so master alias spellings resolve the same table; the flat
-/// `[tiling] *_variant` keys feed the map too, and no validity check happens
-/// on variant strings (layout modules own their meaning at seed time).
+/// `[tiling.layouts.<name>.counts]` one carries per-workspace master-count overrides
+/// (workspace_number (1-based) = count; only meaningful with global_layout = false,
+/// and only the master family can carry counts). Keys canonicalize so master alias
+/// spellings resolve the same table; the flat `[tiling] *_variant` keys feed the map
+/// too, and no validity check happens on variant strings (layout modules own their
+/// meaning at seed time).
 fn parseTilingLayoutSubtables(
     allocator: std.mem.Allocator,
     doc: *parser.Document,
@@ -110,9 +105,9 @@ fn parseTilingLayoutSubtables(
     while (iter.next()) |entry| {
         const sec_name = entry.key_ptr.*;
         if (!std.mem.startsWith(u8, sec_name, prefix)) continue;
-        // Only direct "<prefix><name>[.counts]" tables qualify (no deeper
-        // nesting); the counts table is master-family only, and its keys are
-        // 1-based workspace numbers -> in-[0,max_master_count] master counts.
+        // Only direct "<prefix><name>[.counts]" tables qualify (no deeper nesting); the
+        // counts table is master-family only, and its keys are 1-based workspace
+        // numbers -> [0,max_master_count] master counts.
         const tail = sec_name[prefix.len..];
         if (std.mem.endsWith(u8, tail, suffix)) {
             const seg = tail[0 .. tail.len - suffix.len];
@@ -137,8 +132,8 @@ fn parseTilingLayoutSubtables(
                 }
             }
         } else if (std.mem.indexOfScalar(u8, tail, '.') == null) {
-            // Direct "<prefix><name>" keys canonicalize so master alias
-            // spellings resolve the same variant entry.
+            // Direct "<prefix><name>" keys canonicalize so master alias spellings
+            // resolve the same variant entry.
             if (entry.value_ptr.getAs([]const u8, "variants")) |v|
                 try setTilingVariant(allocator, cfg, layout_names.canonicalLayoutName(tail), v);
         }
@@ -158,10 +153,10 @@ fn isWorkspaceList(s: []const u8) bool {
     return has_digit;
 }
 
-/// Parses a comma-separated workspace list string (e.g. "1,3,5") and appends
-/// one WorkspaceLayoutOverride per valid workspace to `overrides`. Each
-/// override owns a heap-dupe of the (possibly null) variant value-string, so
-/// it outlives the parsed document.
+/// Parses a comma-separated workspace list string (e.g. "1,3,5") and appends one
+/// WorkspaceLayoutOverride per valid workspace to `overrides`. Each override owns a
+/// heap-dupe of the (possibly null) variant value-string, so it outlives the parsed
+/// document.
 fn parseWorkspaceListInto(
     allocator: std.mem.Allocator,
     ws_str: []const u8,
@@ -179,30 +174,28 @@ fn parseWorkspaceListInto(
     }
 }
 
-/// Hard ceiling on the number of distinct layouts the cycle ring can hold.
-/// The canonical value lives in the model (it bounds the u8 registry `kind`
-/// index and WorkspaceLayoutOverride.layout_idx alike); the @intCast below
-/// relies on it so a 256th entry can't trap in ReleaseFast. Names past the
-/// cap warn-and-skip.
+/// Hard ceiling on the number of distinct layouts the cycle ring can hold. The
+/// canonical value lives in the model (it bounds the u8 registry `kind` index and
+/// WorkspaceLayoutOverride.layout_idx alike); the @intCast below relies on it so a
+/// 256th entry can't trap in ReleaseFast. Names past the cap warn-and-skip.
 const max_layouts = model.max_layouts;
 
-/// Parses the `layouts` TOML array. A layout name (any string; registry
-/// resolution happens at seed time) starts a new group; the optional next
-/// element is a variants word or a workspace list ("1,3,5"); a third may
-/// follow as a workspace list when the second was a variants. Plain
-/// single-name format ("master-stack") is fully backward-compatible. Names
-/// are stored lowercased, canonicalized (master aliases fold onto "master"),
-/// and de-duplicated case-insensitively ON THE CANONICAL form — comparing the
-/// raw spelling would let "master" and "master-stack" both land in the ring
-/// as two "master" rows; an overlong name is skipped with a warning
-/// (resolution, not spelling, is authoritative).
-/// The optional trailing group after an appended layout name: a workspace
-/// list and/or a variants word, consumed in either order. A variants word
-/// is stored into `cfg.variants` under the canonical layout name and
-/// also, when a workspace list follows, feeds the per-workspace overrides.
-/// `i` advanced past every consumed token; null when the trailing token is
-/// another layout name or nothing (a malformed variants word also yields
-/// null, leaving the word for the caller's warn-and-skip).
+/// Parses the `layouts` TOML array. A layout name (any string; registry resolution
+/// happens at seed time) starts a new group; the optional next element is a variants
+/// word or a workspace list ("1,3,5"); a third may follow as a workspace list when the
+/// second was a variants. Plain single-name format is fully backward-compatible. Names
+/// are stored lowercased, canonicalized (master aliases fold onto "master"), and
+/// de-duplicated case-insensitively ON THE CANONICAL form — comparing the raw spelling
+/// would let "master" and "master-stack" both land in the ring as two "master" rows;
+/// an overlong name is skipped with a warning (resolution, not spelling, is
+/// authoritative).
+///
+/// The optional trailing group after an appended layout name: a workspace list and/or
+/// a variants word, consumed in either order. A variants word is stored into
+/// `cfg.variants` under the canonical layout name and, when a workspace list follows,
+/// also feeds the per-workspace overrides. `i` advances past every consumed token; null
+/// when the trailing token is another layout name or nothing (a malformed variants word
+/// also yields null, leaving the word for the caller's warn-and-skip).
 fn parseLayoutTrailing(
     allocator: std.mem.Allocator,
     cfg: *tiling_config.Config,
@@ -217,9 +210,9 @@ fn parseLayoutTrailing(
         return .{ .variants = null, .ws_list = peek };
     }
     if (layout_names.isLayoutName(peek)) return null;
-    // A variants word: stored canonical (aliases fold onto their registry
-    // module) under the already-lowered layout name. Anything else leaves the
-    // word for the caller's warn-and-skip.
+    // A variants word: stored canonical (aliases fold onto their registry module) under
+    // the already-lowered layout name. Anything else leaves the word for the caller's
+    // warn-and-skip.
     try setTilingVariant(allocator, cfg, layout_names.canonicalLayoutName(name_lower), peek);
     i.* += 1;
     if (i.* + 1 < arr.len) {
@@ -249,10 +242,9 @@ fn parseLayoutsArray(
             log.warn("layouts array: layout name '{s}' at index {} is longer than the {d}-byte limit, skipping", .{ raw_name, i, layout_names.max_layout_name });
             continue;
         };
-        // Canonicalize BEFORE the dedup check: the stored entries are
-        // canonical, so comparing the raw spelling would let an alias pair
-        // ("master" + "master-stack") past the check and land two "master"
-        // rows in the cycle ring.
+        // Canonicalize BEFORE the dedup check: stored entries are canonical, so comparing
+        // the raw spelling would let an alias pair ("master" + "master-stack") past and
+        // land two "master" rows in the cycle ring.
         const name_canon = layout_names.canonicalLayoutName(name_lower);
         const is_dup = for (cfg.layouts.items) |existing| {
             if (std.mem.eql(u8, existing, name_canon)) break true;
@@ -261,11 +253,11 @@ fn parseLayoutsArray(
             log.warn("layouts array: duplicate layout '{s}' at index {}, skipping", .{ name_canon, i });
             continue;
         }
-        // Stored canonical so every downstream resolution -- the global
-        // default, per-workspace overrides, and the cycle ring -- sees the
-        // registry's canonical spelling. The cycle ring is capped at
-        // max_layouts (the overrides index into it via a u8), checked BEFORE
-        // the cast so an overlong config can't trap in ReleaseFast.
+        // Stored canonical so every downstream resolution -- the global default,
+        // per-workspace overrides, and the cycle ring -- sees the registry's canonical
+        // spelling. The cycle ring is capped at max_layouts (the overrides index into
+        // it via a u8), checked BEFORE the cast so an overlong config can't trap in
+        // ReleaseFast.
         if (cfg.layouts.items.len >= max_layouts) {
             log.warn("layouts array: maximum of {d} unique layouts reached, skipping '{s}'", .{ max_layouts, raw_name });
             continue;

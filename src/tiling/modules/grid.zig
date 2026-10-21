@@ -4,17 +4,15 @@
 const tiling = @import("tiling");
 const model = @import("model");
 
-/// The ONE variant table for this layout.
 const variants = [_]tiling.Variant{
     .{ .name = "rigid", .indicator = "[#]" },
     .{ .name = "relaxed", .indicator = "[~]" },
 };
 
-/// Ordinal of the "relaxed" variant, read from the table above.
 const variant_relaxed: u8 = tiling.variantIndex(&variants, "relaxed");
 
 /// Even share of `total` across `count` cells, with a full `gap` between every
-/// pair plus one at each outer edge. The cell math behind grid's rigid and
+/// pair plus one at each outer edge -- the cell math behind grid's rigid and
 /// widened-last-row shapes.
 inline fn paneCell(total: u16, count: u16, gap: u16) u16 {
     return (total -| (count + 1) *| gap) / count;
@@ -28,7 +26,6 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const m = ctx.m;
     const grid = calcGridShape(n);
-    // Both sides of each window's border, used to shrink usable cell dimensions.
     const bm = model.doubledBorder(m);
 
     const screen_w = tiling.waWidth(v.workarea);
@@ -36,9 +33,9 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const cell_w = paneCell(screen_w, grid.cols, m.gap);
     const cell_h = paneCell(screen_h, grid.rows, m.gap);
-    // A cell that cannot host a border-inset window (the panes saturate to
-    // zero when the workarea is smaller than the seams need, or sit under the
-    // border) would have shrinkCapped's >=1 floor flare the window out of its
+    // A cell that cannot host a border-inset window (panes saturate to zero
+    // when the workarea is smaller than the seams need, or sit under the
+    // border) would let shrinkCapped's >=1 floor flare the window out of its
     // own cell and, on a degenerate workarea, off the screen: park everything.
     if (!tiling.insetFits(cell_w, cell_h, bm)) {
         for (v.order) |win| tiling.emitHidden(out, win);
@@ -76,8 +73,8 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     }
 }
 
-/// Column/row counts of the smallest square grid holding `n` windows; uses
-/// a 3-column, 1-row layout for `n == 3`. Integer ceiling-sqrt loop.
+/// Column/row counts of the smallest square grid holding `n` windows; `n == 3`
+/// deliberately uses 3 columns and 1 row. Integer ceiling-sqrt loop.
 inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     if (n == 3) return .{ .cols = 3, .rows = 1 };
     var cols: u16 = 1;
@@ -85,5 +82,4 @@ inline fn calcGridShape(n: usize) struct { cols: u16, rows: u16 } {
     return .{ .cols = cols, .rows = @intCast((n + cols - 1) / cols) };
 }
 
-/// This layout's registry contribution: metadata plus the dispatch hook.
 pub const module = tiling.layoutModule("grid", "[+]", compute, &variants, .{});

@@ -7,14 +7,13 @@ const masks = @import("masks");
 const log = std.log.scoped(.trace);
 
 /// Arming state: null = not yet resolved from the environment. Resolving it
-/// lazily keeps getenv off the hot path for the common (disabled) case while
-/// still costing a single null check per call.
+/// lazily keeps getenv off the hot path for the common (disabled) case.
 var watch: ?[]const u32 = null;
 var armed: bool = false;
 
-/// Reads `HANA_XTRACE` once. `*` arms every window (recorded as an empty
-/// watch list, which `watches` reports as always-true); a comma-separated list
-/// of decimal or 0x-prefixed ids arms exactly those.
+/// Reads `HANA_XTRACE` once. `*` arms every window (recorded as an empty watch
+/// list, which `watches` reports as always-true); a comma-separated list of
+/// decimal or 0x-prefixed ids arms exactly those.
 fn resolve() void {
     if (armed) return;
     armed = true;
@@ -32,27 +31,26 @@ fn resolve() void {
         if (t.len == 0) continue;
         const v = std.fmt.parseInt(u32, t, 0) catch continue;
         ids.append(gpa, v) catch |err| {
-            // A partial ids list is still a hand-owned slab: free it and bail
-            // with a visible failure, leaving watch null so the disabled gate
-            // keeps holding (armed was set up top).
+            // A partial ids list is still a hand-owned slab: free it and bail,
+            // leaving watch null so the disabled gate keeps holding.
             ids.deinit(gpa);
             log.warn("[xtrace] HANA_XTRACE OOM ({}) -- tracing disabled", .{err});
             return;
         };
     }
     if (ids.items.len == 0) {
-        // A non-empty value that parsed no ids (garbage, stray commas) is
-        // NOT "trace everything": an empty watch read as always-true, waking
-        // the tracer on every event. Treat it as a disabled, reported misconfig.
+        // A non-empty value that parsed no ids is NOT "trace everything": an
+        // empty watch read as always-true would wake the tracer on every event.
+        // Treat it as a disabled, reported misconfig.
         log.warn("[xtrace] HANA_XTRACE={s} contains no valid window ids; tracing disabled", .{raw});
         ids.deinit(gpa);
         return;
     }
     watch = ids.toOwnedSlice(gpa) catch |err| {
         // toOwnedSlice failure leaves the ids buffer hand-owned; free it,
-        // report, and stay disabled. Note: this must NOT return &[_]u32{} --
-        // that would alias the "trace everything" sentinel and turn a config
-        // error into an ear on every event.
+        // report, stay disabled. This must NOT return &[_]u32{} -- that would
+        // alias the "trace everything" sentinel and turn a config error into
+        // an ear on every event.
         ids.deinit(gpa);
         log.warn("[xtrace] HANA_XTRACE OOM ({}) -- tracing disabled", .{err});
         return;
@@ -62,8 +60,7 @@ fn resolve() void {
 const gpa = std.heap.c_allocator;
 
 /// True when tracing is armed at all. The hot-path guard: call sites check
-/// this before touching anything else, so the disabled cost is one compare
-/// against a bool that never changes after the first traced event.
+/// this before touching anything else, so the disabled cost is one compare.
 pub fn enabled() bool {
     if (watch == null) resolve();
     return watch != null;
@@ -78,12 +75,11 @@ pub fn watches(win: u32) bool {
     return false;
 }
 
-/// The X11 event name for a response type byte, so the log is readable
-/// without keeping an xev session open alongside.
-/// Event name for the raw type byte. Bit 7 (XCB's SendEvent flag) is stripped
-/// first: an EWMH _NET_WM_STATE request arrives as 33 | 0x80, and naming the
-/// raw byte printed "Other" for every one of them, which is why a trace aimed
-/// at browser fullscreen requests appeared to see no ClientMessage at all.
+/// Event name for the raw response type byte, so the log is readable without
+/// keeping an xev session open. Bit 7 (XCB's SendEvent flag) is stripped first:
+/// an EWMH _NET_WM_STATE request arrives as 33 | 0x80, and naming the raw byte
+/// printed "Other" for every one of them -- a trace aimed at browser fullscreen
+/// requests appeared to see no ClientMessage at all.
 fn name(t: u8) []const u8 {
     return switch (masks.coreEventType(t)) {
         2 => "KeyPress",
@@ -123,16 +119,15 @@ fn name(t: u8) []const u8 {
     };
 }
 
-/// Logs one inbound event for `win`. The caller has already decided the
-/// event belongs to a watched window, so this does no filtering itself.
+/// Logs one inbound event for `win`. The caller has already decided the event
+/// belongs to a watched window, so this does no filtering itself.
 pub fn inbound(t: u8, win: u32) void {
     log.info("[xtrace] {s} win=0x{x}", .{ name(t), win });
 }
 
 /// Logs a request hana is about to send. `what` names the operation and `arg`
-/// carries whatever the caller already has formatted (a rect, a stack mode, an
-/// empty string). Recorded BEFORE the request so the log order matches the
-/// order the server sees, not the order the socket flushes.
+/// carries whatever the caller already has formatted. Recorded BEFORE the
+/// request so the log order matches the order the server sees.
 pub fn outbound(win: u32, what: []const u8, arg: []const u8) void {
     log.info("[xtrace] -> {s} win=0x{x} {s}", .{ what, win, arg });
 }

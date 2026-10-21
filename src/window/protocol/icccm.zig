@@ -1,18 +1,18 @@
 //! ICCCM focus protocol support (WM_HINTS and WM_PROTOCOLS): the X11
 //! queries, the admission-cookie drain that seeds the focus-property cache,
-//! and the WM_DELETE_WINDOW verdict path. The per-window verdict cache
-//! itself, the four ICCCM 4.1.7 focus-delivery modes, WM_TAKE_FOCUS
-//! dispatch, and the PropertyNotify half-refresh live in focus.zig (the
-//! cache's owner); this module fills the cache through focus.put. Also
-//! shares firePropQuery/u32Values for its admission and size-hints paths.
+//! and the WM_DELETE_WINDOW verdict path. The per-window verdict cache, the
+//! four ICCCM 4.1.7 focus-delivery modes, WM_TAKE_FOCUS dispatch, and the
+//! PropertyNotify half-refresh live in focus.zig (the cache's owner); this
+//! module fills the cache through focus.put. Also shares
+//! firePropQuery/u32Values for its admission and size-hints paths.
 
 const std = @import("std");
 
 const core = @import("core");
 const xcb = core.xcb;
 const log = std.log.scoped(.icccm);
-/// Maximum number of 32-bit words to request when fetching an XCB window property.
-/// 256 words = 1 KiB, sufficient for all fixed-size properties the WM reads.
+/// Maximum 32-bit words to request when fetching a window property (256 =
+/// 1 KiB, sufficient for all fixed-size properties the WM reads).
 pub const property_max_length: u32 = 256;
 /// Value for the `delete` argument to xcb_get_property that leaves the property intact.
 pub const property_no_delete: u8 = 0;
@@ -25,21 +25,19 @@ const wm_hints_flags_field: usize = 0;
 const wm_hints_input_field: usize = 1;
 pub const wm_hints_long_length: u32 = 9; // flags + 8 fields
 
-/// Shared admission drain: the MapRequest and boot-adoption routes fire their
-/// admission cookies up-front and land here (via admission.drainAdmissionCookies)
-/// to consume the focus-relevant pair. The WM_PROTOCOLS reply is drained
-/// through the same protocolPropsFromReply path as the live query, so the
-/// pipelined verdict is byte-identical; both halves are cached (mask-first map
-/// ordering makes take_focus staleness impossible, see the section comment
-/// above focus.put).
+/// Shared admission drain: the MapRequest and boot-adoption routes fire
+/// their admission cookies up-front and land here (via
+/// admission.drainAdmissionCookies) to consume the focus-relevant pair. The
+/// WM_PROTOCOLS reply is drained through the same protocolPropsFromReply
+/// path as the live query, so the pipelined verdict is byte-identical; both
+/// halves are cached.
 pub fn populateFocusCacheFromCookies(
     conn: core.Connection,
     win: u32,
     protocols_cookie: xcb.xcb_get_property_cookie_t,
     hints_cookie: xcb.xcb_get_property_cookie_t,
 ) void {
-    // Scan WM_PROTOCOLS once for both protocols atoms (no second round-trip);
-    // wm_delete and take_focus both get cached below.
+    // Scan WM_PROTOCOLS once for both atoms (no second round-trip).
     const protocols_result = drainWMProtocolsReply(conn, protocols_cookie);
 
     focus.put(win, .{
@@ -63,11 +61,10 @@ pub fn firePropQuery(conn: core.Connection, win: u32, prop: u32, comptime prop_t
     );
 }
 
-/// Fires (but does not drain) a WM_PROTOCOLS query for `win`, so a caller can
-/// pipeline it with other round trips and consume the reply later via
-/// queryWMProtocolsProps. Returns null when the WM_PROTOCOLS atom is not yet
+/// Fires (but does not drain) a WM_PROTOCOLS query for `win`, so a caller
+/// can pipeline it with other round trips and drain later via
+/// queryWMProtocolsProps. Null when the WM_PROTOCOLS atom is not yet
 /// interned (the caller then falls back to the live query path).
-/// Fire-and-forget; the caller owns the cookie.
 pub fn fireWMProtocolsQuery(
     conn: core.Connection,
     win: u32,
@@ -76,8 +73,8 @@ pub fn fireWMProtocolsQuery(
     return firePropQuery(conn, win, protocols_atom, xcb.XCB_ATOM_ATOM, property_max_length);
 }
 
-/// Drains the WM_HINTS cookie and returns the ICCCM input flag. Returns true
-/// when absent, when the flag is unset, or when the field is explicitly True,
+/// Drains the WM_HINTS cookie and returns the ICCCM input flag. True when
+/// absent, when the flag is unset, or when the field is explicitly True,
 /// matching ICCCM 4.1.2.4 defaults.
 fn extractWMHintsInput(
     conn: core.Connection,
@@ -93,8 +90,8 @@ fn extractWMHintsInput(
     return hints[wm_hints_input_field] != 0;
 }
 
-/// Returns cached props if available, otherwise queries, caches the result,
-/// and returns it. Blocking only on a miss; used by the non-hot ICCCM paths
+/// Returns cached props if available, otherwise queries, caches, and
+/// returns. Blocking only on a miss; used by the non-hot ICCCM paths
 /// (supportsWMDeleteCached / window close) that genuinely need the verdict.
 fn getOrQueryCachedProps(conn: core.Connection, win: u32) focus.CachedProps {
     if (focus.peek(win)) |p| return p;
@@ -108,8 +105,8 @@ fn getOrQueryCachedProps(conn: core.Connection, win: u32) focus.CachedProps {
     return result;
 }
 
-/// Resolves the input model from the focus-property cache, live-queried only
-/// on a genuine miss (rare: the cache is seeded at map time).
+/// Cached WM_DELETE_WINDOW verdict, live-queried only on a genuine miss
+/// (rare: the cache is seeded at map time).
 pub fn supportsWMDeleteCached(conn: core.Connection, win: u32) bool {
     return getOrQueryCachedProps(conn, win).wm_delete;
 }
@@ -171,21 +168,18 @@ pub fn queryWMProtocolsProps(conn: core.Connection, win: u32) WMProtocolsProps {
 }
 
 /// Drains a WM_PROTOCOLS reply (the cookie fired by queryWMProtocolsProps
-/// above, or the admission-path cookie) into take_focus/wm_delete. Sharing
-/// one drain keeps the pipelined verdict byte-identical to the live one; the
-/// caller fired the query BEFORE the pointer round trip so its reply is
-/// typically already buffered by the time this is reached. A failed atom
-/// resolution (cache not ready) returns early with empty props, so the reply
-/// still drains cleanly.
+/// or the admission path) into take_focus/wm_delete. Sharing one drain keeps
+/// the pipelined verdict byte-identical to the live one; a failed atom
+/// resolution returns early with empty props so the reply still drains
+/// cleanly.
 fn drainWMProtocolsReply(conn: core.Connection, cookie: xcb.xcb_get_property_cookie_t) WMProtocolsProps {
     const reply = xcb.xcb_get_property_reply(conn, cookie, null) orelse return .{};
     defer std.c.free(reply);
     // WM_DELETE_WINDOW resolves independently of the focus-atom cache, so a
     // client that advertises it still gets wm_delete detection during the
-    // narrow startup window where focusAtoms() (and its take_focus atom) are
-    // not yet available. take_focus atom 0 can never match a real client
-    // atom, keeping the miss path's take_focus verdict as correct as the
-    // old early-return-empty.
+    // narrow startup window where take_focus is not yet available. take_focus
+    // atom 0 can never match a real client atom, so the miss path stays
+    // correct.
     const wm_delete = atoms.getAtomOrZero("WM_DELETE_WINDOW");
     const at = focusAtomsOrNil() orelse
         return protocolPropsFromReply(reply, 0, wm_delete);
@@ -200,9 +194,9 @@ fn focusAtomsOrNil() ?struct { take_focus: u32 } {
     return .{ .take_focus = take_focus };
 }
 
-/// Discards a pre-fired WM_PROTOCOLS cookie without draining it. Used when a
-/// pipelined cookie was fired for a candidate window that the caller ultimately
-/// does not target, so it never leaks a pending reply on the stream.
+/// Discards a pre-fired WM_PROTOCOLS cookie without draining it, so a
+/// candidate the caller ultimately rejects never leaks a pending reply on
+/// the stream.
 pub fn discardProtocolCookie(conn: core.Connection, opt: anytype) void {
     if (opt) |ck| xcb.xcb_discard_reply(conn, ck.sequence);
 }

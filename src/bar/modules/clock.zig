@@ -1,17 +1,13 @@
-//! Clock bar segment.
-//!
-//! Renders wall-clock time and schedules its own repaints: the event loop
-//! asks bar.pollTimeoutMs() for the nearest timer deadline (this segment
-//! contributes the ms-to-next-boundary value) and wakes exactly at
-//! whole-second boundaries; `bar.updateClock` then redraws this segment when
-//! its on-screen content has gone stale (second rolled over, a config reload
-//! changed the format, or the display mode changed). The three display modes
-//! -- date-time (default, configured format), time-only, date-only -- cycle
-//! by clicking the segment: left-click advances, right-click reverses. A cycle
-//! also moves the reserved slot width, so the bar re-lays the row for the new
-//! mode rather than ticking in place (see bar.updateClock).
-//! Single-threaded by construction -- all state lives on the main thread, so
-//! there are no locks, flags, or drain races.
+//! Clock bar segment. Renders wall-clock time and schedules its own
+//! repaints: the event loop asks bar.pollTimeoutMs() for the nearest timer
+//! deadline (this segment contributes the ms-to-next-boundary value) and
+//! wakes exactly at whole-second boundaries; `bar.updateClock` then redraws
+//! when content has gone stale. The three display modes -- date-time
+//! (default, configured format), time-only, date-only -- cycle by clicking
+//! the segment: left-click advances, right-click reverses. A cycle also
+//! moves the reserved slot width, so the bar re-lays the row (see
+//! bar.updateClock). Single-threaded by construction -- all state lives on
+//! the main thread, so there are no locks, flags, or drain races.
 
 const std = @import("std");
 const types = @import("types");
@@ -25,7 +21,6 @@ const c = @cImport(@cInclude("time.h"));
 
 const ns_per_s = std.time.ns_per_s;
 
-/// Measurement string used to pre-compute the clock segment width.
 const clock_measure_string: []const u8 = "0000-00-00 00:00:00";
 
 /// Width probes for the narrower display modes, so the segment reserves the
@@ -33,10 +28,9 @@ const clock_measure_string: []const u8 = "0000-00-00 00:00:00";
 const time_measure_string: []const u8 = "00:00:00";
 const date_measure_string: []const u8 = "0000-00-00";
 
-/// The mode-specific width probe: the string whose measured width the segment
-/// reserves for that view. Stable within a mode, so per-second text drift never
-/// re-lays the row; only a mode cycle (or a fresh bar) re-measures it. Pure,
-/// so tests can pin each mode's probe.
+/// The mode-specific width probe: the string whose measured width the
+/// segment reserves for that view. Stable within a mode, so per-second text
+/// drift never re-lays the row. Pure, so tests can pin each mode's probe.
 pub fn measureStringFor(m: DisplayMode) []const u8 {
     return switch (m) {
         .date_time => clock_measure_string,
@@ -45,34 +39,31 @@ pub fn measureStringFor(m: DisplayMode) []const u8 {
     };
 }
 
-/// The clock's reserved-width probe: the string the bar measures at
-/// layout width. At most one module provides a `measureString` hook.
+/// The clock's reserved-width probe: the string the bar measures at layout
+/// width. At most one module provides a `measureString` hook.
 fn measureString() []const u8 {
     return measureStringFor(g.mode);
 }
 
-/// Display modes cycled by clicking the segment. date_time is the default and
-/// renders the configured `clock_format`; time and date render built-in
-/// strftime formats on their own.
+/// Display modes cycled by clicking the segment. date_time is the default
+/// and renders the configured `clock_format`; time and date render
+/// built-in strftime formats on their own.
 pub const DisplayMode = enum(u2) { date_time, time, date };
 
-/// strftime formats for the time-only and date-only modes.
 const time_format: []const u8 = "%H:%M:%S";
 const date_format: []const u8 = "%Y-%m-%d";
 
 /// The format-byte clip shared by the render record's store and compare.
 pub const fmt_limit: usize = 128;
 
-/// Owner state: the live display mode plus the on-screen render record
-/// (the epoch second last rendered, the mode rendered under, and an OWNED
-/// copy of the effective format -- a fixed buffer, never a slice into config
-/// memory; see recordRendered). Single main-thread instance (P2-58); no
-/// loose module-level scalars. Comparing the second catches the passage of
-/// time; the format's BYTES catch config reloads; the mode catches
-/// display-mode cycles whose effective format happens to be byte-identical
-/// (date_time configured as the built-in time format), where the bytes alone
-/// would read "unchanged" even though the mode's width probe -- the
-/// reservation -- moved.
+/// Owner state: the live display mode plus the on-screen render record (the
+/// epoch second last rendered, the mode rendered under, and an OWNED copy
+/// of the effective format -- a fixed buffer, never a slice into config
+/// memory). Single main-thread instance (P2-58). Comparing the second
+/// catches the passage of time; the format's BYTES catch config reloads;
+/// the mode catches display-mode cycles whose effective format happens to
+/// be byte-identical, where the bytes alone would read "unchanged" even
+/// though the mode's width probe moved.
 const ClockState = struct {
     mode: DisplayMode = .date_time,
     rendered_sec: i64 = -1,
@@ -89,8 +80,7 @@ pub inline fn displayMode() DisplayMode {
 }
 
 /// The format `m` maps `base` (the configured format) to: the config format
-/// unchanged in date_time mode, a fixed built-in otherwise. Pure, so tests can
-/// pin each mode's format.
+/// unchanged in date_time mode, a fixed built-in otherwise. Pure.
 pub fn effectiveFormatFor(base: []const u8, m: DisplayMode) []const u8 {
     return switch (m) {
         .date_time => base,
@@ -99,9 +89,8 @@ pub fn effectiveFormatFor(base: []const u8, m: DisplayMode) []const u8 {
     };
 }
 
-/// The next mode after `m` when cycling in direction `forward` (left-click =
-/// +1, right-click = -1), wrapping through the three states and back. Pure, so
-/// tests can pin the wrap directions.
+/// The next mode after `m` when cycling in direction `forward` (left-click
+/// = +1, right-click = -1), wrapping through the three states. Pure.
 pub fn cycledMode(m: DisplayMode, forward: bool) DisplayMode {
     return switch (m) {
         .date_time => if (forward) .time else .date,
@@ -110,25 +99,15 @@ pub fn cycledMode(m: DisplayMode, forward: bool) DisplayMode {
     };
 }
 
-/// The record's clip: the store and the compare both truncate `fmt` here, so
-/// they always see the same byte span. formatTime's own stack copy (fmt_z) is
-/// this same length, so every format that CAN render compares exactly; one
-/// that cannot (>= fmt_limit, rejected by formatTime) compares on its clip --
-/// it paints nothing either way, and the record stays stable instead of
-/// re-reading as changed forever (which would retry the doomed render every
-/// event batch rather than once per second).
+/// Store and compare both truncate `fmt` here so they see the same bytes;
+/// an unrenderable format compares on its clip and stays stable.
 fn clip(fmt: []const u8) []const u8 {
     return fmt[0..@min(fmt.len, fmt_limit)];
 }
 
-/// The staleness predicate, pure so a test can drive it without a live wall
-/// clock. Keyed on the format's BYTES, not on its pointer: a reload frees the
-/// old config arena, so a re-parse can land a different format at a recycled
-/// address, and a pointer compare would call that "unchanged" (or, worse,
-/// "changed" for a format that did not move). The mode compare is what drives
-/// the post-cycle width re-derivation (bar.updateClock): a cycle between two
-/// modes whose effective bytes are identical still moves the width probe, so
-/// it must read stale.
+/// Pure staleness predicate. Keyed on the format's BYTES not its pointer:
+/// a reload frees the old config arena, so a recycled address would read
+/// "unchanged". The mode compare drives post-cycle width re-derivation.
 pub fn stalenessFor(
     sec: i64,
     rendered_sec_val: i64,
@@ -146,24 +125,18 @@ pub fn stalenessFor(
 
 /// True when the segment on screen no longer matches (sec, mode, fmt).
 /// Callers pass the base configured format so reloads invalidate without a
-/// separate flag; the segment folds its own display-mode format in on top of
-/// it (the effective format) and compares the mode itself, so a mode cycle
-/// invalidates whether or not the two modes' formats agree byte-for-byte.
-/// Drawing clears staleness as a side effect of rendering; a failed draw
-/// leaves it stale so the next boundary retries.
+/// separate flag; the segment folds its own display-mode format in on top
+/// of it and compares the mode itself. Drawing clears staleness as a side
+/// effect; a failed draw leaves it stale so the next boundary retries.
 fn secondElapsed(base_fmt: []const u8) bool {
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(base_fmt, g.mode);
     return stalenessFor(sec, g.rendered_sec, g.mode, g.rendered_mode, fmt, g.rendered_fmt_buf[0..g.rendered_fmt_len]);
 }
 
-/// Records (sec, mode, format) as the on-screen state, copying the format
-/// into this module's buffer. The copy is a correctness fix, not an
-/// optimization: a config reload frees the old config, and a slice left
-/// pointing at the old `clock_format` would compare against freed memory on
-/// the next same-second staleness check. Called BEFORE the fallible
-/// formatTime (the storm guard documented there), so a render failure still
-/// records the attempt.
+/// Records (sec, mode, format) as on-screen state, copying the format so a
+/// reload cannot leave a slice into freed memory. Called BEFORE the
+/// fallible formatTime so a render failure still records the attempt.
 fn recordRendered(sec: i64, m: DisplayMode, fmt: []const u8) void {
     g.rendered_sec = sec;
     g.rendered_mode = m;
@@ -172,42 +145,34 @@ fn recordRendered(sec: i64, m: DisplayMode, fmt: []const u8) void {
     @memcpy(g.rendered_fmt_buf[0..src.len], src);
 }
 
-/// Deadline arithmetic, factored out pure so tests can drive the clock.
-/// ms from `now_ms` to the next whole-second wall-clock boundary: always in
-/// [1, 1000]. poll()'s timeout is only a lower bound (POSIX), so the wake
-/// lands at or after the boundary -- no grace padding is needed because
-/// nothing must drain a producer's output before rendering; the render
-/// itself happens lazily in draw().
+/// ms from `now_ms` to the next whole-second boundary: always in [1, 1000].
+/// poll()'s timeout is only a lower bound (POSIX); render is lazy in draw().
 pub fn deadlineFromMs(now_ms: i64) i32 {
     return @intCast(1000 - @mod(now_ms, 1000));
 }
 
-/// ms until the next whole-second boundary, contributed via bar.pollTimeoutMs().
+/// ms until the next whole-second boundary, via bar.pollTimeoutMs().
 fn tickDeadlineMs() i32 {
     return deadlineFromMs(core.realtimeMs());
 }
 
 // Drawing
 
-/// Draws the current time at `start_x`, formatting lazily: the strftime run
-/// happens at most once per wall-second (or after a format change), right
-/// here on the main thread. Covers the reserved slot with the active mode's
-/// own probe so a region-scoped repaint (mode cycle) leaves no stale pixels
-/// from the previous wider view.
+/// Draws the current time at `start_x`, formatting at most once per
+/// wall-second. Covers the reserved slot with the mode's own probe so a
+/// region-scoped repaint leaves no stale pixels.
 fn draw(dc: *drawing.DrawContext, config: bar_config.Config, height: u16, start_x: u16) !contract.Painted {
     var buf: [64]u8 = undefined;
     const sec = currentEpochSeconds();
     const fmt = effectiveFormatFor(drawing.clockFormat(config), g.mode);
-    // Record the attempt BEFORE rendering. A persistent render failure (e.g.
-    // fonts unavailable) must degrade to one retry per boundary -- the
-    // second-boundary cadence -- never to a per-event-batch retry storm, and
-    // only an assignment placed ahead of the fallible call can promise that.
-    // A genuine transient miss simply shows the previous second for up to one
-    // extra second, exactly as the cadence design intends.
+    // Record the attempt BEFORE rendering. A persistent render failure
+    // (e.g. fonts unavailable) must degrade to one retry per boundary --
+    // the second-boundary cadence -- never to a per-event-batch retry
+    // storm, and only an assignment ahead of the fallible call can
+    // promise that.
     recordRendered(sec, g.mode, fmt);
-    // Propagation is fine: the record above is already written, so a failure
-    // still leaves the next retry one boundary away rather than one event
-    // batch away.
+    // Propagation is fine: the record above is already written, so a
+    // failure still leaves the next retry one boundary away.
     const str = try formatTime(&buf, sec, fmt);
     return contract.Painted.span(start_x, try drawing.drawPaddedSegment(
         dc,
@@ -225,10 +190,9 @@ fn currentEpochSeconds() i64 {
     return @intCast(core.realtimeNs() / ns_per_s);
 }
 
-/// Formats `sec` (seconds since the Unix epoch) into `buf` using `fmt` as a
-/// strftime(3) format string. Uses localtime_r for the local timezone, falling
-/// back to gmtime_r when timezone data is unavailable. Both are POSIX-guaranteed
-/// reentrant.
+/// Formats `sec` into `buf` using `fmt` as a strftime(3) format string.
+/// Uses localtime_r for the local timezone, falling back to gmtime_r when
+/// timezone data is unavailable. Both are POSIX-guaranteed reentrant.
 fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
     var raw_sec: c.time_t = @intCast(sec);
     var tm_buf: c.struct_tm = undefined;
@@ -246,27 +210,26 @@ fn formatTime(buf: []u8, sec: i64, fmt: []const u8) ![]const u8 {
     return buf[0..n];
 }
 
-/// Cycles the clock's display mode: left-click advances date-time -> time ->
-/// date -> date-time, right-click cycles the opposite way. The repaint rides
-/// the existing staleness path: the mode change makes the next secondElapsed
-/// report stale (the record's mode no longer matches), so the bar's
-/// end-of-batch updateClock runs this same batch. That path re-derives the
-/// clock budget and re-lays the row for the new mode's slot width (a narrower
-/// mode's text cannot be blitted into the outgoing mode's wider reservation),
-/// which is why this hook neither redraws nor measures anything itself.
+/// Cycles the clock's display mode: left-click advances date-time -> time
+/// -> date -> date-time, right-click the opposite. The repaint rides the
+/// existing staleness path: the mode change makes the next secondElapsed
+/// report stale, so the bar's end-of-batch updateClock runs this same
+/// batch. That path re-derives the clock budget and re-lays the row for
+/// the new mode's slot width (a narrower mode's text cannot be blitted
+/// into the outgoing mode's wider reservation), which is why this hook
+/// neither redraws nor measures anything itself.
 fn onClickHook(ctx: *const contract.ClickCtx) bool {
     g.mode = cycledMode(g.mode, ctx.is_left);
     return true;
 }
 
-/// This module's bar-segment contribution (registry binding). Reserved width
-/// is the bar's merged clock budget (State.Clock.width), passed in as the
-/// `naturalWidth` argument and returned unmodified -- the builder's
-/// measure-string passthrough. There is deliberately no clock-local width
-/// store: the budget is re-derived at State.init, on the mode-aware staleness
-/// path (bar.updateClock -> adoptFreshClockWidth), and within one second of
-/// any config change on a surviving bar (the ordinary tick), always from the
-/// same live probe the draw measures.
+/// This module's bar-segment contribution (registry binding). Reserved
+/// width is the bar's merged clock budget (State.Clock.width), passed in
+/// as the `naturalWidth` argument and returned unmodified. There is
+/// deliberately no clock-local width store: the budget is re-derived at
+/// State.init, on the mode-aware staleness path (bar.updateClock), and
+/// within one second of any config change on a surviving bar, always from
+/// the same live probe the draw measures.
 pub const module = segmod.module(
     "clock",
     draw,
@@ -277,8 +240,8 @@ pub const module = segmod.module(
         .pollTimeoutMs = tickDeadlineMs,
         .secondsElapsed = secondElapsed,
         .measureString = measureString,
-        // The clock's reserved width is measured per mode, not observed from
-        // what painted -- see SlotMode.self_measured.
+        // Reserved width is measured per mode, not observed from what
+        // painted -- see SlotMode.self_measured.
         .mode = .self_measured,
     },
 );

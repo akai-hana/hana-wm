@@ -4,11 +4,10 @@
 
 const std = @import("std");
 
-/// Upper bound on live cache entries (focus-property cache in focus.zig and
-/// the border/hints/title cache in window_facts.zig). Backing tables are fixed,
-/// allocation-free, and O(1) at the cap; windows beyond the ceiling still
-/// work, they just fall through to the live X11 path. Lives here because both
-/// caches are `IdMap` instantiations -- the generic owns its capacity.
+/// Upper bound on live cache entries (focus-property cache in focus.zig,
+/// border/hints/title cache in window_facts.zig). Beyond the ceiling windows
+/// still work, they fall through to the live X11 path. Lives here because both
+/// caches are `IdMap` instantiations.
 pub const max_window_cache: usize = 512;
 
 pub fn IdMap(comptime V: type, comptime capacity: usize) type {
@@ -59,10 +58,9 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
             return self.vals[i];
         }
 
-        /// Pointer form of `get`: a pointer to `id`'s stored value, or null
-        /// when absent. Writers update the entry in place through it and
-        /// readers borrow slices out of it (the title-cache contract), so a
-        /// lookup never copies the value out.
+        /// Pointer form of `get`: a pointer to `id`'s stored value, or null.
+        /// Writers update in place through it and readers borrow slices out of
+        /// it (the title-cache contract), so a lookup never copies the value.
         pub fn getPtr(self: *Self, id: u32) ?*V {
             const i = self.find(id) orelse return null;
             return &self.vals[i];
@@ -74,15 +72,13 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
         }
 
         /// Inserts or overwrites. Returns false (table untouched) when
-        /// `capacity` live entries are already held; callers fall back to the
-        /// live path.
+        /// `capacity` live entries are already held.
         pub fn put(self: *Self, id: u32, value: V) bool {
             if (self.find(id)) |i| {
                 self.vals[i] = value;
                 return true;
             }
-            // No empty slot left because tombstones consumed it: reclaim them
-            // before deciding the table is full.
+            // No empty slot left because tombstones consumed it: reclaim first.
             if (self.len + self.tombstones == slots) self.rehash();
             if (self.len == capacity) return false;
 
@@ -98,18 +94,16 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
                     self.vals[slot] = value;
                     self.len += 1;
                     // The insert may have consumed the last empty slot while a
-                    // tombstone survived: then every slot is live-or-tomb and
-                    // the next find/put spins forever. Rehash to drop the
-                    // tombstones and guarantee an empty slot remains.
+                    // tombstone survived: then every slot is live-or-tomb and the
+                    // next find/put spins forever. Rehash to drop tombstones.
                     if (self.len + self.tombstones == slots) self.rehash();
                     return true;
                 }
                 if (k == tomb and first_tomb == null) first_tomb = i;
                 i = (i + 1) & slot_mask;
             }
-            // Defensive: the always-one-empty-slot invariant (restored by the
-            // pre-insert rehash and the post-insert rehash above) guarantees
-            // the probe hits an open slot, so this is unreachable in a kept-
+            // Defensive: the always-one-empty-slot invariant guarantees the
+            // probe hits an open slot, so this is unreachable in a kept-
             // invariant table. Report full rather than spin.
             return false;
         }
@@ -139,7 +133,7 @@ pub fn IdMap(comptime V: type, comptime capacity: usize) type {
         /// each entry at a Fibonacci-hashed slot with linear probing, so live
         /// entries are scattered and a dense prefix scan would return whatever
         /// unoccupied slots it hit (reading the `empty` sentinel as a live key
-        /// of 0) and then stop at `len`.
+        /// of 0).
         pub const Iterator = struct {
             map: *const Self,
             pos: usize = 0,

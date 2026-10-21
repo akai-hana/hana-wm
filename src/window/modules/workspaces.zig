@@ -1,20 +1,16 @@
 //! Workspace state transitions over the window model: tag membership, moves,
-//! pin and all-view toggles. Pure model edits, no state of its own -- a
-//! window's membership IS its tag mask plus its workspace's `tiled_order`,
-//! so a move is one mask write plus two list edits. The only cross-module
-//! rule is covering intent: a move or a removed tag retargets a covering
-//! window to the new workspace, or drops it to de-fullscreen when that
-//! destination already has an owner (dispatched through the registry, so
-//! `fullscreen` is never named here). Workspace count and per-workspace
-//! config overrides are owned elsewhere (query latches the count;
-//! config/model_config.zig seeds the params).
+//! pin and all-view toggles. A window's membership IS its tag mask plus its
+//! workspace's `tiled_order`, so a move is one mask write plus two list
+//! edits. The only cross-module rule is covering intent: a move or a removed
+//! tag retargets a covering window to the new workspace, or drops it to
+//! de-fullscreen when that destination already has an owner (dispatched
+//! through the registry, so `fullscreen` is never named here).
 //!
 //! The module also owns the WORKSPACE COMMANDS (switch, move, tag, pin,
-//! all-view): each is one model transition plus one reconcile entry, and
-//! each binds a hook on `module` so the core reaches it through the
-//! registry instead of importing this file by name. Deleting this file
-//! drops the commands along with the state. That is why this file may
-//! import `pipeline`/`focus`/`core` (the "pure model edits" claim above
+//! all-view): each is one model transition plus one reconcile entry, bound
+//! as a `module` hook so the core reaches it through the registry. Deleting
+//! this file drops the commands along with the state — which is why this
+//! file may import `pipeline`/`focus`/`core` (the "pure model edits" claim
 //! covers the model transitions, not the commands layered on them).
 
 const std = @import("std");
@@ -61,20 +57,17 @@ pub fn moveWindowToWs(m: *model.Model, win: model.WindowId, ws: model.WSId) void
     }
 }
 
-/// Move `win`'s covering intent to `dest`, or drop it when a resident occupant
-/// there swallows the transfer.
+/// Move `win`'s covering intent to `dest`, or drop it when a resident
+/// occupant there swallows the transfer.
 ///
-/// The demote direction is EXPLICIT. `toggleCovering` is a two-edged verb
-/// whose correctness depends entirely on a guard the caller has already
-/// proved -- `win` really is covering. If that proof were ever lost (a
-/// reordered check, a new caller, a provider that reports covering
-/// differently) a "demote" silently becomes a fullscreen ENTRY, and the
-/// failure is a window jumping to screen-covering, not a no-op.
-/// `releaseCovering` only goes one way, so the wrong-direction mistake is
-/// unrepresentable.
+/// The demote direction is EXPLICIT: `toggleCovering` is a two-edged verb
+/// whose correctness depends on a guard the caller has already proved — that
+/// `win` really is covering. If that proof were ever lost, a "demote"
+/// silently becomes a fullscreen ENTRY, and the failure is a window jumping
+/// to screen-covering, not a no-op. `releaseCovering` only goes one way, so
+/// the wrong-direction mistake is unrepresentable.
 fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WSId) void {
-    // Screen-owner question: the AND rule, straight from the model (P2-51
-    // consolidated the old contract hook into model.coveringOccupantOn).
+    // Screen-owner question: the AND rule, straight from the model.
     const occupant = model.coveringOccupantOn(m, dest, .anchored_and_visible);
     if (occupant != null and occupant != win) {
         if (covering.providerOf(.releaseCovering)) |wm| {
@@ -94,16 +87,16 @@ fn retargetOrDropFullscreen(m: *model.Model, win: model.WindowId, dest: model.WS
 fn transferFullscreenOnMove(m: *model.Model, win: model.WindowId, ws: model.WSId) void {
     // Model query, not a peer-module dispatch: a dispatch returns null when
     // no covering module is bound, which would answer "is this window
-    // covering" false in such a build -- while the model still holds the
-    // intent, and session.zig restores it across a session restart.
+    // covering" false while the model still holds the intent (and session
+    // restore persists it).
     const fws = model.coveringWsOf(m, win) orelse return;
     if (fws.eql(ws)) return;
     retargetOrDropFullscreen(m, win, ws);
 }
 
 /// Remove tag `ws`; the last remaining tag is protected (returns false).
-/// Fullscreen on the removed workspace transfers to the lowest remaining bit,
-/// or drops into de-fullscreen when that destination is occupied.
+/// Fullscreen on the removed workspace transfers to the lowest remaining
+/// bit, or drops into de-fullscreen when that destination is occupied.
 pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     const e = m.store.getPtr(win) orelse return false;
     if (@popCount(e.mask) <= 1) return false;
@@ -118,8 +111,8 @@ pub fn tagRemove(m: *model.Model, win: model.WindowId, ws: model.WSId) bool {
     // longer be placed on its old home workspace, so its tiled_order entry
     // and home cache have to move to a surviving tag (or the seat drops and
     // reconcile parks the unplaced window). Leaving it would inflate the old
-    // list's len and feed capacity refusals while the window itself never
-    // returns to a layout.
+    // list's len and feed capacity refusals while the window never returns
+    // to a layout.
     if (e.home_ws) |hw| {
         if (hw.eql(ws)) {
             model.removeValue(&m.ws[hw.index].tiled_order, win);
@@ -152,11 +145,9 @@ pub fn allViewToggle(m: *model.Model) bool {
     return m.all_view_active;
 }
 
-/// Workspace commands: one model transition + one reconcile entry each, living
-/// beside the state they write. The core reaches them through the
-/// `switchWorkspace`/`moveToWorkspace`/`toggleTag`/`pinWindow`/`allWorkspaces`
-/// hooks on `module`, so a tree without this file compiles with no binder
-/// rather than a dangling import.
+/// Workspace commands: one model transition + one reconcile entry each,
+/// living beside the state they write. The core reaches them through the
+/// `module` hooks, so a tree without this file compiles with no binder.
 /// Shared change guard for the tag/pin commands: the window must be present
 /// in the model and not hidden.
 fn canTagChange(m: *const model.Model, win: model.WindowId) bool {
@@ -189,23 +180,22 @@ pub fn moveToWorkspace(win: model.WindowId, ws_idx: u8) void {
         // workspace's covering occupancy: bump the core fact; bar reacts.
         if (was_fs_current) core.fullscreen.bump();
     } else if (!was_fs_current and model.isCoveringOn(m, win, m.current)) {
-        // A covering window moved ONTO the current workspace: current gained
-        // a screen-claiming occupant, so bump the core fullscreen fact and
-        // re-apply the bar's visibility for the new occupant. Without this, a
-        // tag-move of a fullscreen window onto the active workspace leaves the
-        // bar mapped over the new cover (switchWorkspace handles arrival on a
-        // switch; this move path must handle it too).
+        // A covering window moved ONTO the current workspace: it gained a
+        // screen-claiming occupant, so bump the fullscreen fact and re-apply
+        // the bar's visibility (switchWorkspace handles arrival on a switch;
+        // this move path must handle it too). Without this the bar stays
+        // mapped over the new cover.
         surfaces.updateBarVisibilityForWorkspace(ws_idx);
         core.fullscreen.bump();
     }
     reconcile_tails.retile(.{ .mode = .focus }, ft);
 }
 
-/// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag gesture);
-/// removing the CURRENT tag evicts the window and re-focuses.
+/// toggle_tag (Mod+Alt+N). Focus is left unchanged on add (multi-tag
+/// gesture); removing the CURRENT tag evicts the window and re-focuses.
 pub fn toggleTag(win: model.WindowId, ws_idx: u8, protect_current: bool) void {
-    // Guard on the two hooks this command actually dispatches: with neither
-    // bound there is nothing to toggle (and no reconcile to trigger).
+    // Guard on the two hooks this command dispatches: with neither bound
+    // there is nothing to toggle (and no reconcile to trigger).
     const add_prov = wsf.providerOf(.addToWs);
     const rem_prov = wsf.providerOf(.removeFromWs);
     if (add_prov == null and rem_prov == null) {
@@ -256,8 +246,8 @@ pub fn pinWindow(win: model.WindowId) void {
     reconcile_tails.retile(.{}, null);
 }
 
-/// all_workspaces (Mod+5): flag flip; the reconciler maps foreign windows on
-/// enter and parks them again on exit through the ordinary diff.
+/// all_workspaces (Mod+5): flag flip; the reconciler maps foreign windows
+/// on enter and parks them again on exit through the ordinary diff.
 pub fn allWorkspaces() void {
     const wm = wsf.providerOf(.toggleAllView) orelse {
         log.warn("all_workspaces: no toggleAllView provider bound", .{});
@@ -272,28 +262,16 @@ pub fn allWorkspaces() void {
     reconcile_tails.retile(.{ .mode = .focus_restack }, ft);
 }
 
-// workspace switch
-
-/// Workspace switch. One model transition + one reconcile; the LastSent
-/// diff parks leavers once and maps+places arrivers (see reconcile_test's
-/// switch scenario).
-///
-/// Kept protocol-side: pointer-hover query and focus suppression reset.
-/// model.current is the single store; query's getCurrentWorkspace is a
-/// read-through facade over it.
-///
-/// Geometry-before-focus: the reconcile maps the arriving window before
-/// applyPendingFocus targets it — the arriving window may have been spawned
-/// off-current and never mapped, so an earlier focus-before-reconcile
-/// ordering produced a BadMatch that left X focus on the old workspace's
-/// window.
+/// Workspace switch: one model transition + one reconcile; the LastSent diff
+/// parks leavers once and maps+places arrivers. Kept protocol-side for the
+/// pointer-hover query and focus suppression reset; `model.current` is the
+/// single store (query's getCurrentWorkspace is a read-through facade).
 pub fn switchWorkspace(ws_idx: u8) void {
     const m = pipeline.mut();
     if (!core.isValidWorkspaceIndex(ws_idx)) return;
-    // No-op only when the view is already exactly this workspace (no all-view
-    // to exit). In all-view the current index may already equal the target:
-    // hitting the tag must still exit the all-view flag, returning the view to
-    // that one workspace.
+    // No-op only when the view is already exactly this workspace (no
+    // all-view to exit). In all-view the current index may already equal the
+    // target: hitting the tag must still exit the all-view flag.
     if (m.current.index == ws_idx and !m.all_view_active) return;
 
     const t0: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
@@ -301,84 +279,66 @@ pub fn switchWorkspace(ws_idx: u8) void {
     // Suppression reset, then the switch transition.
     focus.setSuppressReason(.none);
 
-    // All-view exit is a flag flip (emerges from visibility); temp-window
-    // masks do not exist in the model.
+    // All-view exit is a flag flip (emerges from visibility).
     m.all_view_active = false;
 
-    // model.current is the ONLY store for the current workspace; the other
-    // layers read through it. The layout params are per-workspace too, so the
-    // outgoing workspace's kind/variant are captured HERE, before the flip --
-    // they are what the layout and variants segments were last drawn from.
+    // model.current is the ONLY store for the current workspace; the layout
+    // params are per-workspace too, so the outgoing kind/variant are
+    // captured HERE, before the flip.
     const leaving_kind = m.ws[m.current.index].params.kind;
     const leaving_variant = m.ws[m.current.index].params.variant_idx;
     m.current = model.WSId.fromIndex(ws_idx);
 
-    // Bump the window fact: the workspace indicator always changes on switch.
-    // prepareClearFocus returns .none when last_applied is null (empty-to-empty
-    // switch), so the focus fact alone can't guarantee a redraw; bumping the
-    // window fact here makes the bar redraw at end-of-batch.
+    // Bump the window fact: the workspace indicator always changes on
+    // switch. prepareClearFocus returns .none for an empty-to-empty switch,
+    // so the focus fact alone can't guarantee a redraw.
     core.window.bump();
-    // The window fact repaints only the frame-declaring segments (title, tags):
-    // the layout/variants indicators render the ACTIVE workspace's per-workspace
-    // kind/variant, which that fact does not carry -- without this they stayed
-    // stale on a switch until an unrelated segment's redraw request happened to
-    // repaint the row. The layout fact is the revision that means "the kind or
-    // variants changed" (a full redraw, the same tail cycle_layout/cycle_variants
-    // take), so bump it ONLY when the switch actually changed what they render:
-    // an identical switch must not churn a redraw, a differing one must not wait.
+    // The window fact repaints only the frame-declaring segments (title,
+    // tags): the layout/variants indicators render the ACTIVE workspace's
+    // kind/variant, which that fact does not carry. The layout fact means
+    // "the kind or variants changed"; bump it ONLY when the switch changed
+    // what they render (an identical switch must not churn a redraw).
     const entering = m.ws[ws_idx].params;
     if (leaving_kind != entering.kind or leaving_variant != entering.variant_idx)
         core.layout.bump();
-    // Bar visibility follows the NEW workspace's fullscreen occupant. Apply it
-    // NOW (X-free, no reconcile) so the FIRST reconcile below already reads the
-    // correct screen claim / workarea for this workspace. Otherwise the bar's
-    // deferred visibility update would require a SECOND reconcile on this
-    // workspace, retiling Discord's geometry twice and causing a flicker.
-    // No `has_bar` guard: the hook is a no-op with no surface module.
+    // Bar visibility follows the NEW workspace's fullscreen occupant. Apply
+    // it NOW (X-free, no reconcile) so the first reconcile already reads the
+    // correct screen claim / workarea — otherwise a deferred update would
+    // need a SECOND reconcile, retiling geometry twice and flickering. No
+    // `has_bar` guard: the hook is a no-op with no surface module.
     surfaces.updateBarVisibilityForWorkspace(ws_idx);
-    // Bump the core fullscreen fact only when the target workspace actually
-    // carries a covering occupant: the bar's reactive path derives its claim
-    // from the fact, so spuriously bumping it on every switch would churn a
-    // bar-redraw for workspaces with no fullscreen window (the claim for the
-    // new workspace was already applied by updateBarVisibilityForWorkspace
-    // above). OR rule (not the AND screen-owner rule): any covering entry,
-    // anchored or merely visible on the current workspace, owns the screen
-    // here.
+    // Bump the core fullscreen fact only when the target workspace carries
+    // a covering occupant: spuriously bumping on every switch churns a bar
+    // redraw (the claim was already applied above). OR rule (not the AND
+    // screen-owner rule): any covering entry, anchored or merely visible on
+    // the current workspace, owns the screen here.
     if (model.coveringOccupantOn(m, m.current, .anchored_or_visible) != null) core.fullscreen.bump();
 
     const t1: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
-    // The server grab (pipeline's grabScoped token, not a local bracket) wraps
-    // pure fire-and-forget XCB (focus transition + reconcile), so no blocking
-    // wait ever freezes input while the grab is held. All decision work —
-    // focus-candidate selection and the FocusTransition prep — runs here,
-    // model-local or cache-backed,
-    // BEFORE grabServer so a fast-following keypress is never starved by this
-    // switch.
+    // The server grab wraps pure fire-and-forget XCB, so no blocking wait
+    // can freeze input while it is held. All decision work (focus-candidate
+    // selection, FocusTransition prep) runs BEFORE grabServer so a
+    // fast-following keypress is never starved.
 
     // Keyboard-triggered switch focuses the model's tiered fallback
     // (newest-first MRU, then reversed tiled_order, then floating) — NO
-    // pointer query. Querying what's under the cursor costs a synchronous
-    // round trip that stalls the single-threaded event loop; a fast-following
-    // keypress (Super+2 immediately after Super+1) waits behind that stall,
-    // which is exactly the "quick workspace switches sometimes don't register"
-    // symptom. A keyboard switch has no pointer gesture to honor, so focus is
-    // decided purely from the model with zero X round trips.
+    // pointer query: a synchronous round trip stalls the single-threaded
+    // event loop, and a fast-following keypress waits behind that stall
+    // ("quick workspace switches sometimes don't register"). A keyboard
+    // switch has no pointer gesture to honor, so focus is decided purely
+    // from the model.
     const ft: focus.FocusTransition = focus.focusFallback(m, .workspace_switch);
 
     const t2: u64 = if (build_options.profile_key) core.monotonicNs() else 0;
 
-    // Reconcile + focus under one server grab, atomically, via the pipeline's
-    // grab path (grabCtx/reconcile/applyPendingFocus/ungrabAndFlush
-    // consolidated). Only fire-and-forget XCB runs inside the grab, so it is
-    // held for microseconds—no blocking wait can freeze a next keypress.
-    //
-    // Geometry-before-focus (FocusOrder.after): the arriving window may have
-    // been spawned off-current and never mapped (the spawn path registers but
-    // defers the map to the first reconcile).  Firing xcb_set_input_focus on
-    // an unmapped window is a BadMatch that leaves X focus on the old
-    // workspace's window.  The .after order maps the arriving window before
-    // applyPendingFocus targets it, in the same flush.
+    // Reconcile + focus under one server grab. Geometry-before-focus
+    // (FocusOrder.after): the arriving window may have been spawned
+    // off-current and never mapped (the spawn path registers but defers the
+    // map to the first reconcile). Firing xcb_set_input_focus on an unmapped
+    // window is a BadMatch that leaves X focus on the old workspace's
+    // window; `.after` maps the arriving window before applyPendingFocus
+    // targets it, in the same flush.
     pipeline.reconcileGrabFocus(.{ .force_restack = true }, ft, .after, null);
 
     if (build_options.profile_key) {
@@ -393,9 +353,9 @@ pub fn switchWorkspace(ws_idx: u8) void {
     }
 }
 
-/// This module's window sub-system contribution: pure model transitions;
-/// lifecycle is handled by the query facade's init (count latch) and
-/// model state lives in the model.
+/// This module's window contribution: pure model transitions + the workspace
+/// commands; lifecycle is the query facade's init and model state lives in
+/// the model.
 pub const module: @import("window_contract").WindowModule = .{
     .name = "workspaces",
     .workspaces = .{

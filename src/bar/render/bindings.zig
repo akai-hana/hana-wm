@@ -1,11 +1,8 @@
-//! Cairo/Pango/GLib C bindings for bar rendering.
-//!
-//! Leaf bindings file, on the `core/x11/xcb.zig` precedent: the
-//! raw `extern` declarations live apart from the drawing logic so
-//! `drawing.zig` is a layer of logic over them, not a file whose
-//! first fifth is a C-header translation. Nothing outside the bar
-//! drawing layer names these bindings; `drawing.zig`, `fonts.zig` and `surface.zig`
-//! are their consumers and qualify every use through this module.
+//! Cairo/Pango/GLib C bindings for bar rendering. Leaf bindings file, on
+//! the `core/x11/xcb.zig` precedent: raw `extern` declarations live apart
+//! from the drawing logic so `drawing.zig` is a layer of logic over them.
+//! Nothing outside the bar drawing layer names these bindings;
+//! `drawing.zig`, `fonts.zig` and `surface.zig` are the consumers.
 
 const core = @import("core");
 const xcb = core.xcb;
@@ -16,8 +13,6 @@ const xcb_visualtype_t = xcb.xcb_visualtype_t;
 
 // Declared as `pub extern fn` because library headers may not be present
 // in all build environments.
-
-// Cairo
 
 pub const cairo_surface_t = opaque {};
 pub const cairo_t = opaque {};
@@ -59,20 +54,16 @@ pub extern fn cairo_rectangle(cr: *cairo_t, x: f64, y: f64, width: f64, height: 
 pub extern fn cairo_fill(cr: *cairo_t) void;
 pub extern fn cairo_clip(cr: *cairo_t) void;
 
-// Pango
-
 pub const PangoLayout = opaque {};
 pub const PangoContext = opaque {};
 pub const PangoFontDescription = opaque {};
 pub const PangoFontMetrics = opaque {};
 pub const PangoAttrList = opaque {};
-// PangoAttribute was opaque, which was fine while every attribute was
-// created by Pango and only ever inserted whole. A foreground attribute over a
-// SUB-RANGE needs its start_index/end_index set by us, so the leading fields
-// (the type/kop and the two range fields) are now declared. Pango's own header
-// is the authority for this layout: PangoAttributeType type; PangoAttributeFlags
-// flags; guint32 start_index; guint32 end_index; -- and a color attribute's
-// payload is a 4-byte PangoColor we set through the constructor, never by hand.
+// The leading fields (type/flags + the two range indices) are declared
+// because a foreground attribute over a SUB-RANGE needs start/end set by
+// us; Pango's own header is the authority for this layout. A color
+// attribute's payload is a PangoColor set through the constructor, never
+// by hand.
 pub const PangoAttribute = extern struct {
     /// PangoAttributeType; only used for debugging/logging, never compared.
     attribute_type: c_int = 0,
@@ -108,10 +99,9 @@ pub extern fn pango_layout_set_font_description(
     desc: ?*PangoFontDescription,
 ) void;
 pub extern fn pango_layout_get_context(layout: *PangoLayout) *PangoContext;
-/// Creates a fresh layout sharing `ctx`. This is what lets a text run
-/// own its own layout without building a cairo surface and context per run.
+/// Creates a fresh layout sharing `ctx`, letting a text run own its own
+/// layout without a cairo surface+context per run.
 pub extern fn pango_layout_new(ctx: *PangoContext) ?*PangoLayout;
-/// Pass null for either dimension if not needed.
 pub extern fn pango_layout_get_pixel_size(
     layout: *PangoLayout,
     width: ?*c_int,
@@ -127,14 +117,13 @@ pub extern fn pango_font_description_copy(desc: *PangoFontDescription) ?*PangoFo
 pub extern fn pango_font_description_free(desc: *PangoFontDescription) void;
 pub extern fn pango_font_description_set_absolute_size(desc: *PangoFontDescription, size: f64) void;
 
-/// Returns Pango units. Pass null for either rect if not needed.
+/// Returns Pango units.
 pub extern fn pango_layout_get_extents(
     layout: *PangoLayout,
     ink_rect: ?*PangoRectangle,
     logical_rect: ?*PangoRectangle,
 ) void;
 
-/// Pass null for `language` to use the default language.
 pub extern fn pango_context_get_metrics(
     context: *PangoContext,
     desc: ?*PangoFontDescription,
@@ -178,20 +167,18 @@ pub extern fn pango_attr_weight_new(weight: pango_weight_t) ?*PangoAttribute;
 pub extern fn pango_attr_style_new(style: pango_style_t) ?*PangoAttribute;
 
 /// An attribute list owns its attributes; every attribute `insert`-ed must
-/// NOT be freed by the caller.
-/// Creates a foreground-colour attribute.
-/// Takes r/g/b in 0..65535 (Pango's scale) rather than hana's 0xRRGGBB.
+/// NOT be freed by the caller. Creates a foreground-colour attribute. Takes
+/// r/g/b in 0..65535 (Pango's scale), not hana's 0xRRGGBB.
 pub extern fn pango_attr_foreground_new(red: u16, green: u16, blue: u16) ?*PangoAttribute;
 pub extern fn pango_attr_list_new() ?*PangoAttrList;
 pub extern fn pango_attr_list_insert(list: *PangoAttrList, attr: *PangoAttribute) void;
 pub extern fn pango_attr_list_unref(list: *PangoAttrList) void;
 pub extern fn pango_layout_set_attributes(layout: *PangoLayout, attrs: ?*PangoAttrList) void;
 
-/// The Pango layout does NOT take ownership of the list; the list must stay
-/// alive while set, and be unref'd afterwards. A `TextRun` owns both
-/// the list and the layout it is attached to and unrefs them together in
-/// `deinit`, so that lifetime is structural rather than a pairing callers have
-/// to remember.
+/// The Pango layout does NOT take ownership of the list; the list must
+/// stay alive while set and be unref'd afterwards. A `TextRun` owns both
+/// the list and the layout and unrefs them together in `deinit`, making
+/// that lifetime structural rather than a pairing callers must remember.
 
 // GLib / GObject
 

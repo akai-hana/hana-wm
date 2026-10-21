@@ -10,57 +10,45 @@ const log = std.log.scoped(.session);
 const model = @import("model");
 const snapshot = @import("snapshot");
 /// Layout registry (build-generated); the active layout is a `u8` index into
-/// it (see model.LayoutParams.kind). Empty when the tiling subsystem is
-/// absent. Gated on has_tiling so tree variants without tiling compile (the
-/// scenario matrix removes the tiling subsystem entirely).
+/// it. Empty when the tiling subsystem is absent; has_tiling-gated so tree
+/// variants without tiling compile.
 const tiling_mods = @import("tiling_contract").tiling_mods;
 const contract = @import("tiling_contract");
 /// Shared config-layout-name resolver (registry index or neutral default);
 /// see pipeline.defaultIndexForLayoutName.
 const pipeline_mod = @import("pipeline");
-// Per-feature serialization hooks via the build-generated `window_modules`
-// registry (a tree without a feature has no serializeWindow provider).
+// Per-feature serialization hooks via the build-generated `window_modules` registry.
 const window_mods = @import("window_modules").modules;
 
 const MAX_WS = model.max_workspaces;
 
-/// Wire-format revision of the restore file. Failed or older revisions are
-/// rejected in loadToGlobal rather than migrated. Bumped whenever the durable
-/// record shape changes; v5 adds the per-blob header, so only v5+ restore
-/// files are accepted. The header's own format is versioned SEPARATELY
-/// (`ext_format_version`), because changing it does not change the durable
-/// record shape: a v5 file stamped with a v1 (ordinal) blob header is still a
-/// v5 file and is still read.
+/// Wire-format revision of the restore file; failed or older revisions are
+/// rejected in loadToGlobal, never migrated. Bumped when the durable record
+/// shape changes. The per-blob header is versioned SEPARATELY
+/// (`ext_format_version`): changing the header does not change the record
+/// shape, so a v5 file with a v1 ordinal blob header is still a v5 file.
 const handoff_version: u32 = 5;
 
-/// The per-window feature blob header format. Every blob this module stores is
-/// wrapped as `[ext_format_version][name length][claiming module name][payload]`
-/// -- the name is the module's stable `contract.WindowModule.name`, not its
-/// position in the build-generated `window_modules` registry. Adoption
-/// (admission.applyRestoredRecord) fast-paths on the name and falls back to the
-/// magic-byte scan when the name no longer resolves (module removed or
-/// renamed) — the
-/// self-identifying format tags each module embeds in its payload keep the
-/// fallback unambiguous.
+/// The per-window feature blob header format: every blob is wrapped as
+/// `[ext_format_version][name length][claiming module name][payload]` -- the
+/// module's stable `contract.WindowModule.name`, not its registry position.
+/// Adoption fast-paths on the name and falls back to the magic-byte scan when
+/// it no longer resolves (module removed/renamed); the self-identifying tags
+/// in each payload keep that fallback unambiguous.
 pub const ext_format_version: u8 = 2;
 
-/// Header byte length for a name-stamped blob: version + name length + the
-/// name itself. The name is variable-length, so this is a function of the
-/// module name rather than a constant. Shared by the writer (save path) and
-/// `decodeExt`.
+/// Header byte length for a name-stamped blob (version + name length + name);
+/// variable-length, so a function of the module name. Shared by save and decodeExt.
 fn extHeaderLen(name_len: usize) usize {
     return 2 + name_len;
 }
 
 /// One blob's decoded header: the payload to hand a module, plus WHICH module
-/// the header claims, if any.
-///
-/// `decodeExt` below is the ONLY place the on-disk header format is
-/// interpreted, so a format change is a change there rather than at every
-/// reader.
+/// the header claims. `decodeExt` is the ONLY place the on-disk header format
+/// is interpreted, so format changes happen there alone.
 const ExtHeader = struct {
-    /// Bytes after the header. Equals `blob` verbatim when the header is not
-    /// recognized, so the payload is always usable.
+    /// Bytes after the header; equals `blob` verbatim when unrecognized, so
+    /// the payload is always usable.
     payload: []const u8,
     /// Module name from a name-stamped header, or null.
     claimed_name: ?[]const u8,
@@ -68,13 +56,10 @@ const ExtHeader = struct {
     legacy_ordinal: ?usize,
 };
 
-/// Decodes a stored ext blob's header.
-///
-/// `blob` is the raw stored bytes: one length check and one version switch,
-/// so all three header facts come from a single parse and cannot disagree
-/// with each other the way independent re-derivations can. A foreign or
-/// truncated header yields `payload = blob` -- passed through WHOLE, exactly
-/// as an unstamped blob was.
+/// Decodes a stored ext blob's header. One length check and one version
+/// switch, so all three header facts come from a single parse and cannot
+/// disagree. A foreign or truncated header yields `payload = blob` -- passed
+/// through whole, exactly as an unstamped blob was.
 pub fn decodeExt(blob: []const u8) ExtHeader {
     const miss = ExtHeader{ .payload = blob, .claimed_name = null, .legacy_ordinal = null };
     if (blob.len < 2) return miss;
@@ -84,9 +69,8 @@ pub fn decodeExt(blob: []const u8) ExtHeader {
             if (blob.len < len) return miss;
             return .{ .payload = blob[len..], .claimed_name = blob[2..len], .legacy_ordinal = null };
         },
-        // Legacy ordinal header: [version=1][ordinal]. Still read, so a
-        // session saved by the previous format is adopted rather than
-        // silently dropped.
+        // Legacy ordinal header [version=1][ordinal]: still read so parked
+        // windows in a v5 session file are adopted, not silently dropped.
         ext_format_version_ordinal => return .{ .payload = blob[2..], .claimed_name = null, .legacy_ordinal = blob[1] },
         else => return miss,
     }
@@ -95,24 +79,21 @@ pub fn decodeExt(blob: []const u8) ExtHeader {
 /// Longest module name a blob header can carry in its one length byte.
 const max_stamped_name_len: usize = 255;
 
-/// The pre-name blob format: `[version=1][registry ordinal]`. Still READ (see
-/// `decodeExt`) so a v5 session file keeps its parked windows, never written.
+/// The pre-name blob format: `[version=1][registry ordinal]`. Still read
+/// (see decodeExt), never written.
 pub const ext_format_version_ordinal: u8 = 1;
 
-/// Cap on the restore file's size. The file is a bounded JSON dump of the
-/// model (bounded stores/workspaces), so a file beyond this is junk (or a
-/// corrupt/hostile write), not a legitimately huge session.
+/// Cap on the restore file's size. The model is bounded, so a file beyond
+/// this is junk (or a corrupt/hostile write), not a huge session.
 const max_restore_bytes = 1 << 20;
 
 /// Per-window record: identity + anchor, matched by XID during adoption.
-/// `presence` restores visibility semantics across the re-exec (parked /
-/// covering windows are re-hidden by the adopting module via their `ext`
-/// blob); `ext` is the opaque feature-owned serialized blob (null when no
-/// feature claimed it). `covering_ws` is the model's core covering intent,
-/// persisted directly on the record (independent of module blobs) so a
-/// window minimized-from-fullscreen — whose fullscreen blob is deliberately
-/// absent (parked ⇒ minimize owns the slot) — still restores its covering
-/// identity across the re-exec without needing any optional subsystem.
+/// `presence` restores visibility (parked/covering windows re-hide via their
+/// module's `ext` blob); `ext` is the opaque feature-owned blob. `covering_ws`
+/// is the model's core covering intent, persisted on the record independent
+/// of module blobs so a minimized-from-fullscreen window (whose fullscreen
+/// blob is deliberately absent) restores its covering identity without any
+/// optional subsystem.
 pub const WindowRecord = struct {
     win: u32,
     mask: model.Mask,
@@ -139,9 +120,9 @@ const StateFile = struct {
     windows: []const WindowRecord,
 };
 
-/// Parsed restore file, if loadToGlobal succeeded. Module-owned: its arena
-/// holds every slice the records reference; freed and replaced by the next
-/// loadToGlobal call. Single-threaded (event-loop thread), like the model.
+/// Parsed restore file, if loadToGlobal succeeded. Its arena holds every
+/// slice the records reference; freed and replaced by the next loadToGlobal.
+/// Single-threaded (event-loop thread), like the model.
 var loaded_parsed: ?std.json.Parsed(StateFile) = null;
 
 /// Default restore path; the shared XDG-/tmp-uid policy lives in
@@ -150,14 +131,11 @@ pub fn defaultStatePath(alloc: std.mem.Allocator) ![]u8 {
     return snapshot.runtimeFile(alloc, "hana-restore", ".json");
 }
 
-/// Cold-boot housekeeping for the file this module owns. Adoption is gated on
+/// Cold-boot housekeeping for this module's file. Adoption is gated on
 /// `restart.restore_env` (set only by `execNext`, only alongside a file it
-/// just wrote), so when that gate is absent a restore file at the default path
-/// is a leftover of a session that crashed before its graceful-exit delete.
-/// Whether its XIDs still name the same windows is unknowable here (the X
-/// server may have restarted since and recycled them), so no boot ever adopts
-/// it -- discard rather than let a dead session's record linger (and report
-/// the leftover exactly once, rather than on every subsequent boot).
+/// just wrote), so without that gate a restore file is a crash leftover.
+/// Whether its XIDs still name the same windows is unknowable (the X server
+/// may have recycled them), so no boot ever adopts it -- discard, once.
 pub fn discardOrphan(alloc: std.mem.Allocator) void {
     const path = defaultStatePath(alloc) catch |err| {
         log.warn("handoff: no restore path ({s}); skipping orphan cleanup", .{@errorName(err)});
@@ -165,8 +143,6 @@ pub fn discardOrphan(alloc: std.mem.Allocator) void {
     };
     defer alloc.free(path);
     std.Io.Dir.deleteFileAbsolute(std.Options.debug_io, path) catch |err| switch (err) {
-        // The normal cold-boot outcome: this session never re-exec'd, so
-        // there is no record to discard and nothing to report.
         error.FileNotFound => return,
         else => {
             log.warn("handoff: could not remove leftover restore file ({s}): {s}", .{ path, @errorName(err) });
@@ -176,9 +152,8 @@ pub fn discardOrphan(alloc: std.mem.Allocator) void {
     log.info("handoff: discarded restore file left by a session that did not exit cleanly ({s})", .{path});
 }
 
-/// One save session's flat records. The owner allocations (dup'ed membership
-/// lists and feature blobs) live here so a single deinit releases everything
-/// on success and on partial-built error paths alike.
+/// One save session's flat records; owner allocations (dup'ed lists, blobs)
+/// live here so one deinit covers success and partial-built error paths.
 const Snapshot = struct {
     allocator: std.mem.Allocator,
     windows: []WindowRecord,
@@ -214,40 +189,33 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
     };
     errdefer snap.deinit();
 
-    // The WindowRecord shape matches the model's Entry fields that survive a
-    // re-exec (mask + mode); size_hints and home_ws are rebuilt/derived by
-    // registration and transitions.
+    // WindowRecord carries only the Entry fields that survive a re-exec
+    // (mask + mode); size_hints and home_ws are rebuilt by registration.
     var widx: usize = 0;
     var it = m.store.iterator();
     while (it.next()) |item| : (widx += 1) {
-        // Opaque feature blob: ask each module in registry order whether it
-        // owns this window; the first module that returns bytes claims it, and
-        // the blob is stamped with the module's stable name so adoption can
-        // fast-path on it (a deleted or renamed module still falls back to the
-        // magic-byte scan). The model is handed across
-        // the hook AS-IS (a `*const` handle -- serialization never mutates, and
-        // the contract type is const so this save path can't even @constCast:
-        // writing through it is a compile error).
+        // Opaque feature blob: first module (registry order) returning bytes
+        // claims the window; the blob is stamped with its stable name so
+        // adoption can fast-path (deleted/renamed modules fall back to the
+        // magic-byte scan). The model crosses the hook AS-IS: a `*const`
+        // handle, and the contract type is const so writing is a compile error.
         var blob: ?[]const u8 = null;
         for (window_mods, 0..) |mod, idx| {
             if (mod.serializeWindow) |f| {
                 if (f(m, item.key, allocator)) |body| {
-                    // own_body tracks whether the arms of this scope are still
-                    // responsible for freeing `body`. The over-long-name branch
-                    // transfers that ownership into `blob` (the snapshot owns
-                    // it from there); the normal branch copies body into
-                    // `wrapped` and so still frees it on scope exit. Without
-                    // the transfer flag, the over-long branch's deferred free
-                    // fired on break and left snap.windows[].ext dangling.
+                    // own_body tracks who frees `body`: the over-long-name
+                    // branch transfers ownership into `blob`; the normal branch
+                    // copies into `wrapped` and still frees on scope exit.
+                    // Without the flag the over-long branch's deferred free
+                    // fired on break, leaving snap.windows[].ext dangling.
                     var own_body = true;
                     defer if (own_body) allocator.free(body);
                     const mod_name = mod.name;
                     if (mod_name.len == 0) {
-                        // Cannot happen: the generated window registry rejects
-                        // a serializing module with an empty name at compile
-                        // time. Reported rather than asserted because a blob
-                        // stamped with nothing degrades to the magic-byte scan
-                        // and is still correct -- just slower.
+                        // Cannot happen (the generated registry rejects an
+                        // empty name at compile time); reported rather than
+                        // asserted because an unstamped blob still degrades
+                        // correctly to the magic-byte scan -- just slower.
                         log.warn(
                             "handoff: module #{} serializes windows but has no " ++
                                 "name; stamping an unnamed header (adoption will " ++
@@ -299,9 +267,9 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
         };
         snap.ws_filled = i + 1;
     }
-    // The loader reads the whole fixed-size workspace array, so a snapshot that
-    // stopped early would be read back as a truncated session. The loop above
-    // can only fail, never break early, so a short fill is a bug -- say so.
+    // The loader reads the whole fixed-size workspace array, so a short fill
+    // would be read back as a truncated session; the loop can only fail, so a
+    // short fill is a bug -- say so.
     std.debug.assert(snap.ws_filled == MAX_WS);
     return snap;
 }
@@ -311,17 +279,15 @@ fn saveSnapshot(allocator: std.mem.Allocator, m: *const model.Model) !Snapshot {
 /// loader tolerates a missing file but warns on a corrupt one).
 fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
     const io = std.Options.debug_io;
-    // Pid-qualified: two hana instances restoring the same session would
-    // otherwise race on one temp path, and the loser's unlink could delete
-    // the winner's in-flight file.
+    // Pid-qualified: two instances racing one temp path could have the
+    // loser's unlink delete the winner's in-flight file.
     const tmp = try std.fmt.allocPrint(allocator, "{s}.{d}.tmp", .{ path, std.os.linux.getpid() });
     defer allocator.free(tmp);
-    // Exclusive, no-follow create: a pre-existing symlink or hardlink at the
-    // temp path would otherwise be followed and redirect the write to an
-    // attacker-chosen file. O_EXCL makes the open fail with PathAlreadyExists
-    // if anything (symlink, hardlink, or regular file) already occupies the
-    // name, so we never write through a planted entry. A stale temp left by a
-    // crashed run is the one legitimate occupant; remove it and retry once.
+    // Exclusive, no-follow create: a planted symlink/hardlink at the temp
+    // path would otherwise redirect the write to an attacker-chosen file.
+    // O_EXCL fails with PathAlreadyExists if anything occupies the name; a
+    // stale temp from a crashed run is the one legitimate occupant -- remove
+    // it and retry once.
     const file = blk: {
         const attempt = createExclusive(io, tmp) catch |err| switch (err) {
             error.PathAlreadyExists => {
@@ -334,15 +300,13 @@ fn atomicWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8
     };
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
-    // Flush BEFORE the rename. Rename is atomic with respect to the NAME, not
-    // the DATA: without the sync, a crash right after the rename can leave the
-    // new name pointing at blocks that never reached disk, so the boot-time
-    // loader can read a truncated file -- the exact outcome the temp-file dance
-    // above exists to prevent. Skipping this only "worked" because the page
-    // cache usually survives; that is not a durability property.
+    // Flush BEFORE the rename. Rename is atomic w.r.t. the NAME, not the
+    // DATA: without the sync, a crash right after rename can leave the new
+    // name pointing at blocks never on disk -- the truncated-file outcome the
+    // temp-file dance exists to prevent. The page cache usually surviving is
+    // not a durability property.
     try file.sync(io);
-    // POSIX rename replaces the name while the fd stays open; the defer's
-    // close lands after the rename moved the temp into place.
+    // POSIX rename replaces the name while the fd stays open; the defer's close lands after.
     try std.Io.Dir.renameAbsolute(tmp, path, io);
 }
 
@@ -356,12 +320,10 @@ fn createExclusive(io: std.Io, path: []const u8) !std.Io.File {
 pub fn save(allocator: std.mem.Allocator, m: *const model.Model, path: []const u8) !void {
     var snap = try saveSnapshot(allocator, m);
     defer snap.deinit();
-    // Model-level scalars read live from `m`; the durable records come from
-    // the snapshot. The two shapes stay two types on purpose (the judgment
-    // behind this split): `Snapshot` OWNS the duped records + blobs
-    // (allocator, partial-fill deinit), `StateFile` is the pure wire value --
-    // merging them would hang an Allocator off the JSON type or hand the
-    // parsed value an ownership-ful deinit that would free arena memory.
+    // Model-level scalars read live from `m`; durable records come from the
+    // snapshot. Two shapes on purpose: `Snapshot` OWNS duped records + blobs
+    // (partial-fill deinit), `StateFile` is the pure wire value -- merging
+    // them would hang an Allocator off the JSON type or free arena memory.
     const state = StateFile{
         .version = handoff_version,
         .current = @intCast(m.current.index),
@@ -420,10 +382,9 @@ pub fn loaded() ?*const StateFile {
 }
 
 /// The degraded-restore fallback layout kind: the active config's default
-/// layout name (canonical at parse time, re-canonicalized here for defense),
-/// resolved against the registry by name, else index 0 -- the same neutral
-/// last resort as contract.default_kind. Runs only on the removed-layout path
-/// (applyModelLevel) where core is already initialized and config is live.
+/// layout name, re-canonicalized for defense, resolved against the registry
+/// by name, else index 0 (contract.default_kind's neutral last resort). Runs
+/// only on the removed-layout path in applyModelLevel.
 fn resumableDefaultKind() u8 {
     if (comptime !build_options.has_tiling) return contract.default_kind;
     const layout_name = core.getState().config.tiling.defaultLayout();
@@ -441,22 +402,19 @@ fn restoreMembers(list: anytype, src: []const u32, m: *const model.Model, cap: u
     }
 }
 
-/// Restores model-level fields into the model: current/focused/all_view,
-/// per-workspace params, tiled_order and focus_mru (pruned to windows that
-/// are actually registered (closed or never adopted ones are dropped).
-/// Call AFTER the adoption phase registered the surviving windows.
-///
-/// No feature counters live in this phase: extensions own all of their
-/// state (minimize maintains its sequence internally), so this phase only
-/// re-lists tiled membership and copies scalars.
+/// Restores model-level fields: current/focused/all_view, per-workspace
+/// params, tiled_order and focus_mru (pruned to registered windows). Call
+/// AFTER the adoption phase registered the surviving windows. No feature
+/// counters live here -- extensions own their state (minimize keeps its
+/// sequence internally); this phase only re-lists membership and scalars.
 pub fn applyModelLevel(m: *model.Model) void {
     const f = loaded() orelse return;
 
     // Restore the model-authoritative covering intent (presence + covering_ws)
     // from the window records. Fullscreen needs no module blob (its state IS
-    // the model intent), so this phase is the fullscreen restore path. A
-    // `.parked` record that still carries covering_ws (minimized-from-fullscreen)
-    // keeps presence intact while restoring the capture target.
+    // the model intent), so this phase is the fullscreen restore path; a
+    // `.parked` record still carrying covering_ws keeps presence intact while
+    // restoring its capture target.
     for (f.windows) |r| {
         if (r.covering_ws == null and r.presence != .covering) continue;
         const e = m.store.getPtr(r.win) orelse continue;
@@ -474,15 +432,10 @@ pub fn applyModelLevel(m: *model.Model) void {
         const r = &f.workspaces[i];
         s.params = r.params;
         // Registry-driven layout kind: a persisted index that no longer
-        // resolves (a layout module was removed between runs) falls back to the
-        // config default kind (index 0 as the neutral last resort) instead of
-        // leaving an unresolvable dispatch id. Loud, so the degradation is never
-        // silent.
-        // variant_idx is validated here for the same reason `kind` is: it is
-        // persisted as a bare ordinal, so a variant that no longer exists
-        // (a module trimmed its variant list between runs) would otherwise
-        // index past the end of the module's own table. Clamp to the reported
-        // count and say so, rather than reading out of bounds.
+        // resolves (module removed between runs) falls back to the config
+        // default kind, loudly. variant_idx is validated for the same reason:
+        // a bare ordinal whose variant list shrank would otherwise index past
+        // the module's own table -- clamp to the reported count and say so.
         const restored = @import("tiling_contract").moduleOf(s.params.kind);
         if (restored) |l| {
             const vc = l.variant_count;
@@ -509,14 +462,12 @@ pub fn applyModelLevel(m: *model.Model) void {
         restoreMembers(&s.focus_mru, r.mru, m, model.mru_capacity);
     }
 
-    // Membership repair: the adoption phase registered every surviving window
-    // as a base-tiled member of its home workspace (which also appended it to
-    // tiled_order), but the loop above clears and rebuilds tiled_order from a
-    // file that may not record everything (a record-less first restore, or a
-    // window whose tiled slot was dropped before the file was written. Without
-    // a tiled slot the window has no placement and the reconcile parks it
-    // offscreen indefinitely. Re-append any base-tiled member that the file
-    // did not list (in store order, appended to the list tail).
+    // Membership repair: the loop above rebuilds tiled_order from a file that
+    // may not record every window (a record-less first restore, or a slot
+    // dropped before the file was written). Without a tiled slot a window has
+    // no placement and the reconcile parks it offscreen indefinitely, so
+    // re-append any base-tiled member the file did not list (store order,
+    // list tail).
     var it = m.store.iterator();
     while (it.next()) |row| {
         const e = row.val;

@@ -1,10 +1,9 @@
-//! The prompt's overlay renderer: the scroll-aware text
-//! spans, the mode pill, the block/blink carets, and the
-//! layout cache that keeps a caret-blink frame allocation-
-//! and measurement-free. All measurement caches live in this
-//! module's global; the editor state (buffer, cursor, mode)
-//! and the ghost suffix are passed in by the package core,
-//! which owns activation and key routing.
+//! The prompt's overlay renderer: the scroll-aware text spans, the mode pill,
+//! the block/blink carets, and the layout cache that keeps a caret-blink frame
+//! allocation- and measurement-free. All measurement caches live in this
+//! module's global; the editor state (buffer, cursor, mode) and the ghost
+//! suffix are passed in by the package core, which owns activation and key
+//! routing.
 
 const types = @import("types");
 const bar_config = @import("bar_config");
@@ -15,8 +14,6 @@ const completion = @import("completion");
 // Minimum pixel width of the block cursor; ensures it is visible even on
 // the narrowest glyphs (e.g. '.', '!').
 const min_cursor_px: u16 = 8;
-// Number of editing modes (derived from the editor's Mode enum at
-// comptime).
 const num_modes = @typeInfo(editor.Mode).@"enum".fields.len;
 
 const cursor_width: u16 = 1;
@@ -32,7 +29,7 @@ const RenderState = struct {
 
     is_blink_visible: bool = true,
 
-    // Caret geometry cached after the first insert-mode draw.  Font metrics
+    // Caret geometry cached after the first insert-mode draw. Font metrics
     // and bar height are constant between reloads, so these never need clearing.
     cached_caret_top: ?u16 = null,
     cached_caret_h: ?u16 = null,
@@ -45,10 +42,10 @@ const RenderState = struct {
     blink_repaint: bool = false,
 
     // Layout cache: pixel width of the pre-caret text, the block-caret width,
-    // and the scroll offset keeping the caret visible.  Recomputed in
+    // and the scroll offset keeping the caret visible. Recomputed in
     // `drawActive` only when `layout_dirty` is set (keypress, activate,
-    // or bar-height change): the caret-blink redraws an identical
-    // frame each blink, so ticks reuse these instead of ~20 Pango shape passes.
+    // or bar-height change): the caret-blink redraws an identical frame each
+    // blink, so ticks reuse these instead of ~20 Pango shape passes.
     cached_pre_w: u16 = 0,
     cached_caret_w: u16 = 0,
     cached_scroll_x: u16 = 0,
@@ -60,9 +57,7 @@ var g: RenderState = .{};
 
 /// Invalidates every cache derived from config/font metrics or bar height.
 /// Called from bar.applyReload: these module globals are built against the
-/// OLD config's fonts and bar height, and a reload can change both. Without
-/// this the prompt renders with stale widths/geometry until its next full
-/// cycle.
+/// OLD config's fonts and bar height, and a reload can change both.
 pub fn invalidateReloadCaches() void {
     g.cached_prompt_w = null;
     g.cached_mode_w = .{null} ** num_modes;
@@ -78,9 +73,7 @@ pub fn overlayNeedsRepaint() bool {
 }
 
 /// Toggle cursor blink visibility and flag the scoped repaint. Called by
-/// the package core's blink tick, which owns the active/insert-mode guard
-/// (a non-blinking prompt must not toggle invisible state or queue
-/// repaints off the clock's cadence).
+/// the package core's blink tick, which owns the active/insert-mode guard.
 pub fn blinkTick() void {
     g.is_blink_visible = !g.is_blink_visible;
     g.blink_repaint = true;
@@ -94,9 +87,6 @@ pub fn clearBlinkRepaint() void {
     g.blink_repaint = false;
 }
 
-/// Flag the layout cache stale: the next draw recomputes caret widths
-/// and the scroll offset. Called by the package core on keypress and
-/// activation (buffer/cursor/mode changed).
 pub fn markLayoutDirty() void {
     g.layout_dirty = true;
 }
@@ -172,7 +162,7 @@ inline fn drawScrollSpan(
     const draw_x: u16 = @intCast(origin);
     const available: u16 = @intCast(se - origin);
 
-    // Clip the visible suffix to the available width on the right.  When no
+    // Clip the visible suffix to the available width on the right. When no
     // left clip occurred and the full text fits, `w` (already measured) skips
     // the binary-search pass entirely.
     const suffix = text[start..];
@@ -231,7 +221,7 @@ inline fn drawBlockCursor(
 }
 
 /// Lazily cache the caret geometry: font metrics and bar height are constant
-/// between reloads, so this runs at most once.  Hoisted before the pill and
+/// between reloads, so this runs at most once. Hoisted before the pill and
 /// mode branches so the lazy-init runs exactly once regardless of which
 /// branch executes first.
 fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
@@ -255,7 +245,7 @@ fn promptWidth(dc: *drawing.DrawContext, prompt: []const u8) u16 {
 }
 
 /// Recompute the cached caret widths and scroll offset, but only when
-/// `layout_dirty` or a bar-height change demands it.  The caret-blink redraws
+/// `layout_dirty` or a bar-height change demands it. The caret-blink redraws
 /// an identical frame every blink, so blink ticks reuse these instead of ~20
 /// Pango shape passes per tick; the cache needs invalidating only when
 /// buffer, cursor, mode, or height changes.
@@ -423,7 +413,7 @@ fn drawNormalMode(
 /// Render the active input UI.
 ///
 /// Layout: [ pad | scrollable: PROMPT | pre | CURSOR/SELECTION | post |
-/// MODE_LABEL | pad ].  The mode label is pinned right (never scrolls); the
+/// MODE_LABEL | pad ]. The mode label is pinned right (never scrolls); the
 /// scrollable region keeps the cursor in view.
 pub fn drawActive(
     dc: *drawing.DrawContext,
@@ -451,7 +441,7 @@ pub fn drawActive(
 
     ensureCaretGeom(dc, height);
 
-    // Mode widget, pinned right; does not scroll.  Its left edge bounds the
+    // Mode widget, pinned right; does not scroll. Its left edge bounds the
     // scrollable text region.
     const scroll_end_x = drawPill(dc, height, baseline, text_left_x, text_end_x, vim_state, accent) orelse
         return end_x;

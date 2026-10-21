@@ -93,43 +93,35 @@ pub fn pctFromRaw(comptime T: type, raw: T, min: T, max: T) u8 {
 //     Membership in `subs` -- and therefore a bar segment named after the
 //     control -- comes from FILE PRESENCE plus self-declared role, so adding
 //     a control is drop a file; deleting one is delete the file.
-//
-// To add a control: drop `foo.zig` here exporting `pub const sub: Sub`.
 
 pub const Sub = struct {
     /// Config identity ("volume", "brightness", ...): the name its bar
     /// segment is selected by in `[bar.layout.*]`.
     name: []const u8,
-    /// Per-control poll cadence.
     read_interval_ms: i64 = 5000,
     /// Runtime override of the poll cadence: a control whose cadence is a
     /// bar-config knob (volume's `volume_read_interval_ms`) supplies a hook
-    /// reading the live config; a null hook keeps the static field.
+    /// reading the live config; null keeps the static field.
     read_interval_ms_of: ?*const fn () i64 = null,
-    /// The control's 0-100 level, or null while it has no answer (the control
-    /// then renders nothing: zero-width slot, unclickable). Null HOOK = always
-    /// present.
-    ///
-    /// The absence is in the type, so it cannot disagree with the value: a
-    /// module that latches a level and forgets its presence flag cannot report
-    /// a level nobody has or hide a level everybody can see.
+    /// The control's 0-100 level, or null while it has no answer (renders
+    /// nothing: zero-width slot, unclickable). Null HOOK = always present.
+    /// Absence is in the type, so a module cannot latch a level and forget
+    /// its presence flag.
     level: ?*const fn () ?u8 = null,
     /// True while the backend can write; while false interactions no-op but
     /// the level still displays.
     writable: *const fn () bool,
-    /// Refresh the control's live state (attach/probe cached inside); returns
-    /// true when the displayed state changed this call.
+    /// Refresh the control's live state; returns true when the displayed
+    /// state changed this call.
     read: *const fn () bool,
     /// Writes `pct`, or advances only the display -- see `Write`.
     write: *const fn (Write, u8) void,
-    /// The latency class of one commit on this control, as a named value (see
-    /// `CommitCost`). `immediate` commits are cheap in-process writes and are
-    /// never coalesced; `rate_limited` ones pass through the throttle window.
+    /// Latency class of one commit (see `CommitCost`). `immediate` commits
+    /// are cheap in-process writes and never coalesced; `rate_limited` ones
+    /// pass through the throttle window.
     commit_cost: *const fn () CommitCost,
-    /// This control's own spawn-commit window in ms, or null to share the core
-    /// default (`throttle_ms`). Per-control so a control whose subprocess is
-    /// cheap enough to afford a tighter sweep can say so as data instead of
-    /// living with the shared window. Ignored for `immediate` commits.
+    /// This control's own spawn-commit window in ms, or null to share the
+    /// core default (`throttle_ms`). Ignored for `immediate` commits.
     commit_window_ms: ?i16 = null,
     /// Renders the idle label into `buf` (control-scoped scratch) from the
     /// control's own state and config, plus the label's numeric region;
@@ -155,11 +147,9 @@ pub const Binding = Sub;
 pub const pctFromSlot = level.pctFromSlot;
 
 // Declared by the interaction shell and re-exported here: `Write` and
-// `CommitCost` are contract-visible vocabulary (`Sub.write`,
-// `Sub.commit_cost`), and `Throttle` is what the controls' commit tests
-// drive directly -- the shell OWNS them because it is the machinery that
-// switches on them, and the core NAMES them so one package answers
-// `slider.Write` for every caller (controls, tests, the plugin template).
+// `CommitCost` are contract-visible vocabulary, and `Throttle` is what the
+// controls' commit tests drive directly. The shell OWNS them; the core
+// NAMES them so one package answers `slider.Write` for every caller.
 pub const Write = shell.Write;
 pub const CommitCost = shell.CommitCost;
 pub const Throttle = shell.Throttle;

@@ -4,7 +4,6 @@
 //! dirIterator, exeInDir): one probe order for finding an executable, shared
 //! by this module's terminal detection and the prompt's command completion,
 //! so the two cannot drift.
-
 const std = @import("std");
 const log = std.log.scoped(.fallback);
 const fallback_toml = @import("fallback_toml");

@@ -1,10 +1,7 @@
 //! Pango font book: the layout/description/metrics lifecycle for one draw
 //! target (`FontBook`), the one-shot text run, the metric probe, the
-//! sized-font list, and the Xft->Pango name conversion.
-//!
-//! Font state has one owner (`FontBook`, composed into `DrawContext` in
-//! `drawing.zig` beside the surface from `surface.zig`), so the font
-//! lifecycle can change without touching the painters.
+//! sized-font list, and the Xft->Pango name conversion. Font state has one
+//! owner here so the lifecycle can change without touching the painters.
 
 const std = @import("std");
 const log = std.log.scoped(.fonts);
@@ -12,43 +9,38 @@ const types = @import("types");
 const bar_config = @import("bar_config");
 const bindings = @import("bindings");
 
-/// Default point size for scaled metrics; also the size embedded in the
-/// fallback font description below, so the last-resort font and the metric
-/// probe always agree. It lives HERE so this file needs no metrics import:
-/// metrics.zig's live probe adapters import this file, and the shared number
-/// must not force a fonts<->metrics cycle.
+/// Default point size for scaled metrics; also the size in the fallback
+/// font description, so the last-resort font and the metric probe always
+/// agree. Lives HERE so this file needs no metrics import (metrics.zig's
+/// probe adapters import this file; the shared number must not force a
+/// fonts<->metrics cycle).
 pub const default_scaled_font_size: u16 = 10;
 
-/// Fallback Pango font description used when no configured font loads:
-/// monospace at the default `default_scaled_font_size` point size.
+/// Fallback Pango description when no configured font loads: monospace at
+/// `default_scaled_font_size`.
 pub const default_fallback_font: [:0]const u8 =
     std.fmt.comptimePrint("monospace:size={d}", .{default_scaled_font_size});
 
-/// Pango font string used when no fonts are configured or a named font fails
-/// to load; family/size come from the consts above.
 const fallbackFont = default_fallback_font;
 
-/// One piece of text together with the exact Pango state it will be measured
-/// and painted with: its own layout, its own attribute list, and its own font
+/// One piece of text together with the exact Pango state it will be
+/// measured and painted with: its own layout, attribute list, and font
 /// description.
 ///
-/// The point is that the state is not shared. A measure is a SIDE EFFECT -- it
-/// sets the layout's text -- so on one shared layout, measuring a string and
-/// then painting something else paints the measurement unless the text is
-/// reset; and style attributes attached for one draw and not detached change
-/// every LATER draw in the frame. A run's layout is private, so measuring it
-/// cannot disturb a draw, and its attributes die with it rather than needing
-/// a restore.
+/// The point is that the state is NOT shared. A measure is a SIDE EFFECT --
+/// it sets the layout's text -- so on one shared layout, measuring a string
+/// and then painting something else paints the measurement unless the text
+/// is reset; style attributes attached for one draw and not detached change
+/// every LATER draw. A run's layout is private, so measuring cannot disturb
+/// a draw, and its attributes die with it.
 ///
-/// The draw helpers are infallible: a run that could not be built degrades to
-/// an empty run that measures zero and paints nothing, which is what a
-/// zero-length text draw would do anyway.
+/// Draw helpers are infallible: a failed run degrades to an empty run that
+/// measures 0 and paints nothing.
 pub const TextRun = struct {
     /// Null exactly when the run could not be built; every method tolerates it.
     layout: ?*bindings.PangoLayout = null,
-    /// The attribute list built for this run, owned by the run.
     attrs: ?*bindings.PangoAttrList = null,
-    /// Size-suffixed description this run uses, borrowed from the FontBook.
+    /// Size-suffixed description, borrowed from the FontBook.
     sized_font: ?*bindings.PangoFontDescription = null,
 
     /// Width in pixels of the run's text, 0 for an empty run.
@@ -72,19 +64,16 @@ pub const TextRun = struct {
 
 /// Bound on the text-width cache: a full cache is cleared wholesale rather
 /// than evicted entry-by-entry. A measure is cheap to recompute, the strings
-/// are per-config and few (static labels, prompt prefixes), and the
-/// pathological many-distinct-strings caller merely misses after a clear.
+/// are per-config and few, and a many-distinct-strings caller merely misses.
 const measure_cache_max: u32 = 512;
 
-/// `sized_px` sentinel for "no size override" (both measure entry points are
-/// unsized today; the key carries the dimension so a sized measure can join
-/// without colliding with an unsized one).
+/// `sized_px` sentinel for "no size override" (the key carries the dimension
+/// so a sized measure can join without colliding with an unsized one).
 const no_sized_px: u16 = std.math.maxInt(u16);
 
-/// Cache key: measured text content plus the style bits and size that derived
-/// its width. Content-keyed, never pointer-keyed (a font swap rebuilds every
-/// description, so pointer identity would alias stale widths -- see the
-/// `FontBook` doc).
+/// Cache key: measured text content plus the style bits and size that
+/// derived its width. Content-keyed, never pointer-keyed (a font swap
+/// rebuilds every description, so pointer identity would alias stale widths).
 const MeasureKey = struct {
     /// Borrowed on lookup, owned by the map on insert (`MeasureEntry`).
     text: []const u8,
@@ -92,8 +81,7 @@ const MeasureKey = struct {
     sized_px: u16,
 };
 
-/// Map payload: the width plus the owned text backing `MeasureKey.text`, so
-/// invalidate/deinit need no inference about which slices to free.
+/// Map payload: the width plus the owned text backing `MeasureKey.text`.
 const MeasureEntry = struct {
     owned_text: []const u8,
     width: u16,
@@ -115,9 +103,8 @@ const MeasureContext = struct {
 
 const MeasureCache = std.HashMapUnmanaged(MeasureKey, MeasureEntry, MeasureContext, 80);
 
-/// Packs a segment's style flags into the cache key: underline | bold<<1 |
-/// italic<<2. Two props that share bits measure to the same width, so the
-/// bits (not the struct) are the identity that matters here.
+/// Packs style flags into the cache key: underline | bold<<1 | italic<<2.
+/// Two props that share bits measure to the same width.
 fn propsBits(props: bar_config.SegmentProps) u8 {
     return @as(u8, @intFromBool(props.underline)) |
         (@as(u8, @intFromBool(props.bold)) << 1) |
@@ -125,18 +112,14 @@ fn propsBits(props: bar_config.SegmentProps) u8 {
 }
 
 /// Owns all Pango font state for one draw target: the layout, the resolved
-/// base font description, its cached metrics, and the size-suffixed description
-/// the indicator-glyph path needs.
+/// base font description, its cached metrics, and the size-suffixed
+/// description the indicator-glyph path needs.
 ///
-/// The font lifecycle has one owner here. `loadFont` is the only thing that
-/// swaps the base description, so it invalidates the sized copy directly and
-/// the sized cache key is just `sized_px` -- no pointer comparison against the
-/// base.
-///
-/// The same rule governs the text-width cache below: a measure is keyed by the
-/// TEXT CONTENT plus style bits and size, never by a layout or description
-/// pointer, and a font swap (`loadFont`) drops every cached width, because the
-/// widths were derived from the previous description.
+/// One owner. `loadFont` is the only thing that swaps the base description,
+/// so it invalidates the sized copy directly and the sized cache key is just
+/// `sized_px` -- no pointer comparison against the base. The same rule
+/// governs the text-width cache: keyed by TEXT CONTENT + style bits + size,
+/// never by a layout/description pointer; a font swap drops every width.
 pub const FontBook = struct {
     allocator: std.mem.Allocator,
     pango_layout: *bindings.PangoLayout,
@@ -145,18 +128,14 @@ pub const FontBook = struct {
     cached_metrics: ?struct { i16, i16 } = null,
     /// Bounded (text, style bits, size) -> pixel width map. Replaces a
     /// per-call Pango layout alloc for the common case of measuring the same
-    /// label repeatedly (static segments, prompt prefixes). Bounded at
-    /// `measure_cache_max` entries; a full cache is cleared wholesale rather
-    /// than evicted LRU -- a measure is cheap to recompute, and the one
-    /// many-distinct-strings caller (the prompt prefix search) merely misses.
+    /// label repeatedly. A full cache is cleared wholesale, not LRU: a
+    /// measure is cheap to recompute.
     measure_cache: MeasureCache = .empty,
-    /// Uncached (real Pango) measures since construction; a test-visible
-    /// counter so the "static label measures once per config" invariant has
-    /// something to assert against. (Struct fields have no `pub` in Zig: the
-    /// type is reachable, so the field is readable wherever it is.)
+    /// Uncached (real Pango) measures since construction; the observable
+    /// a "static label measures once per config" test asserts against.
     measure_misses: u32 = 0,
-    /// Size-suffixed copy of `current_font_desc` for `drawTextSized`, rebuilt
-    /// only when `sized_px` differs. Never outlives a base-description swap.
+    /// Size-suffixed copy of `current_font_desc`, rebuilt only when
+    /// `sized_px` differs. Never outlives a base-description swap.
     sized_desc: ?*bindings.PangoFontDescription = null,
     sized_px: u16 = 0,
     /// The description the layout currently has set, so a sized draw can skip
@@ -188,9 +167,8 @@ pub const FontBook = struct {
             log.warn("Failed to load font '{s}', using default", .{font_name});
             desc = bindings.pango_font_description_from_string(fallbackFont);
         }
-        // Install the new description only after it exists, so a failed
-        // conversion cannot leave `current_font_desc` dangling. Free the old
-        // one after the new one is in hand.
+        // Install the new description only after it exists so a failed
+        // conversion cannot leave `current_font_desc` dangling.
         if (self.current_font_desc) |old| bindings.pango_font_description_free(old);
         self.current_font_desc = desc;
         bindings.pango_layout_set_font_description(self.pango_layout, self.current_font_desc);
@@ -200,9 +178,9 @@ pub const FontBook = struct {
         self.invalidateSized();
     }
 
-    /// Drops the size-suffixed copy after a base-description swap. The layout
-    /// may still reference the freed sized description, so re-seat it on the
-    /// base; the next sized draw sets its own before painting.
+    /// Drops the size-suffixed copy after a base-description swap. The
+    /// layout may still reference the freed sized description, so re-seat
+    /// it on the base; the next sized draw sets its own before painting.
     fn invalidateSized(self: *FontBook) void {
         if (self.sized_desc) |d| bindings.pango_font_description_free(d);
         self.sized_desc = null;
@@ -213,13 +191,13 @@ pub const FontBook = struct {
         }
     }
 
-    /// The base description scaled to `size_px`, cached by size alone. The only
-    /// failure is having no base description to copy.
+    /// The base description scaled to `size_px`, cached by size alone. The
+    /// only failure is having no base description to copy.
     fn sizedDesc(self: *FontBook, size_px: u16) !*bindings.PangoFontDescription {
         const desc = self.current_font_desc orelse return error.NoFont;
         if (self.sized_desc == null or self.sized_px != size_px) {
-            // Copy FIRST, then free the old descriptor: freeing before the copy
-            // leaves a dangling `sized_desc` if the copy fails.
+            // Copy FIRST, then free the old: freeing before the copy leaves
+            // a dangling `sized_desc` if the copy fails.
             const temp = bindings.pango_font_description_copy(desc) orelse
                 return error.PangoDescCopyFailed;
             if (self.sized_desc) |old| bindings.pango_font_description_free(old);
@@ -246,26 +224,22 @@ pub const FontBook = struct {
         return .{ ascent, descent };
     }
 
-    /// Measures `text` with no style, through the bounded width cache. A pure
-    /// read of the font state: a hit returns the stored width, a miss builds a
-    /// throwaway run (discarded immediately) and stores what it measured.
+    /// Measures `text` with no style, through the bounded width cache. A
+    /// hit returns the stored width; a miss builds a throwaway run and stores.
     pub fn measureTextWidth(self: *FontBook, text: []const u8) u16 {
         return self.measureCached(text, .{}, null);
     }
 
-    /// Measures `text` with `props` styling applied, through the same cache as
-    /// `measureTextWidth`. Styled and unstyled measures of one string are
-    /// distinct keys (style bits are part of the key), and a sized measure is
-    /// distinct from an unsized one (`sized_px` is part of the key too), so a
-    /// width can never be served from an entry that measured something else.
+    /// Measures `text` with `props` styling through the same cache. Styled
+    /// and unstyled measures of one string are distinct keys (style bits +
+    /// sized_px are part of the key), so a width can never be served from an
+    /// entry that measured something else.
     pub fn measureTextWidthStyled(self: *FontBook, text: []const u8, props: bar_config.SegmentProps) u16 {
         return self.measureCached(text, props, props.size);
     }
 
     /// Cache lookup by content; on a miss, measure in a throwaway run and
-    /// store the result. `measure_misses` counts the real Pango measures (the
-    /// misses), which is the observable a "measures once per config" test
-    /// asserts against.
+    /// store. `measure_misses` counts the real Pango measures.
     fn measureCached(self: *FontBook, text: []const u8, props: bar_config.SegmentProps, sized_px: ?u16) u16 {
         const key = MeasureKey{ .text = text, .props = propsBits(props), .sized_px = sized_px orelse no_sized_px };
         if (self.measure_cache.get(key)) |entry| return entry.width;
@@ -279,9 +253,8 @@ pub const FontBook = struct {
 
     /// Inserts an owned copy of `key`'s text plus the measured width. An
     /// allocation failure (or a full cache) just leaves the entry unstored:
-    /// the width is still returned to this caller, and the next measure of the
-    /// same string misses again and retries -- a cache that cannot grow must
-    /// never fail a measure.
+    /// the width is still returned and the next measure misses and retries --
+    /// a cache that cannot grow must never fail a measure.
     fn storeMeasure(self: *FontBook, key: MeasureKey, width: u16) void {
         if (self.measure_cache.count() >= measure_cache_max) self.clearMeasureCache();
         const owned = self.allocator.dupe(u8, key.text) catch return;
@@ -291,8 +264,8 @@ pub const FontBook = struct {
         };
     }
 
-    /// Frees every owned key text and empties the map, retaining capacity for
-    /// reuse. Called on the one thing that invalidates every width: a
+    /// Frees every owned key text and empties the map, retaining capacity.
+    /// Called on the one thing that invalidates every width: a
     /// base-description swap (`loadFont`), plus `deinit`.
     fn clearMeasureCache(self: *FontBook) void {
         var it = self.measure_cache.valueIterator();
@@ -301,8 +274,7 @@ pub const FontBook = struct {
     }
 
     /// Builds a run for `text` under `props` (and `sized_px` when non-null),
-    /// with its own layout. Never returns an error: a failed run is an empty
-    /// run, which measures 0 and paints nothing.
+    /// with its own layout. Never errors: a failed run is empty.
     pub fn beginRun(
         self: *FontBook,
         text: []const u8,
@@ -312,9 +284,8 @@ pub const FontBook = struct {
         const l = bindings.pango_layout_new(bindings.pango_layout_get_context(self.pango_layout)) orelse
             return .{};
         var run = TextRun{ .layout = l };
-        // Sized runs need a base description to copy. Unsized runs fall back to
-        // Pango's default when none is loaded, which is what a shared layout
-        // with no font set would have used.
+        // Sized runs need a base description to copy. Unsized runs fall back
+        // to Pango's default when none is loaded.
         if (sized_px) |px| {
             const sized = self.sizedDesc(px) catch {
                 run.deinit();
@@ -331,10 +302,9 @@ pub const FontBook = struct {
         return run;
     }
 
-    /// Builds a book around a fresh Pango layout on `ctx`. This is the
-    /// ONLY place a layout is created: the live context and the probe both go
-    /// through it, so a change to layout setup cannot reach one path and miss
-    /// the other.
+    /// Builds a book around a fresh Pango layout on `ctx`. The ONLY place
+    /// a layout is created: the live context and the probe both go through
+    /// it, so a change to layout setup cannot reach one path and miss the other.
     pub fn initBook(allocator: std.mem.Allocator, ctx: *bindings.cairo_t, dpi: f32) !FontBook {
         return .{
             .allocator = allocator,
@@ -343,9 +313,7 @@ pub const FontBook = struct {
     }
 
     /// Loads `font_names` into a throwaway detached book and returns its
-    /// metrics. This is the single layout-bootstrap path: the probe and
-    /// the live context share this construction instead of each building a
-    /// surface/context/layout of its own.
+    /// metrics. Single layout-bootstrap path shared by the probe and live context.
     pub fn probe(
         allocator: std.mem.Allocator,
         dpi: f32,
@@ -377,10 +345,8 @@ inline fn pxToPango(px: u16) f64 {
     return @as(f64, @floatFromInt(px)) * bindings.pango_scale;
 }
 
-/// Builds a one-shot attribute list encoding the non-default flags of `props`
-/// (underline, bold, italic), or null when no flags are set. The caller owns
-/// the returned list and must unref it (bindings.pango_attr_list_unref) once detached
-/// from the layout.
+/// Builds a one-shot attribute list encoding the non-default flags of
+/// `props`, or null when no flags are set. Caller owns the returned list.
 fn buildStyleAttrs(props: bar_config.SegmentProps) ?*bindings.PangoAttrList {
     if (props.isDefault()) return null;
     const list = bindings.pango_attr_list_new() orelse return null;
@@ -425,20 +391,15 @@ pub fn probeFontMetrics(
     return FontBook.probe(allocator, dpi, font_names);
 }
 
-/// Owned, size-suffixed copies of the configured font list.
-///
-/// This is a VALUE that owns what it built: every entry is an owned copy, so
-/// deinit has nothing to infer. Ownership is never read back from the live
-/// config -- inferring it from POINTER IDENTITY against live config is wrong
-/// whenever a config swap between build and free (a reload mid-frame is
-/// exactly that) hands out a borrowed entry to free or an owned one to leak.
-/// The extra copies cost one small allocation per font on a path that runs
-/// once per DrawContext creation, which is not a hot path.
-///
-/// `fonts` is the configured font family list, and `font_size` is the point
-/// size to build at; both are REQUIRED rather than optional. A caller
+/// Owned, size-suffixed copies of the configured font list. A VALUE that
+/// owns what it built: every entry is an owned copy, so deinit has nothing
+/// to infer. Ownership is never read back from the live config -- inferring
+/// it from POINTER IDENTITY against live config is wrong whenever a config
+/// swap between build and free (a reload mid-frame) hands out a borrowed
+/// entry to free or an owned one to leak. Runs once per DrawContext
+/// creation, not a hot path. `fonts` and `font_size` are REQUIRED: a caller
 /// measuring a trial size passes the trial; a caller drawing the bar passes
-/// the bar's resolved `Metrics` and the live config's font list.
+/// the resolved metrics and the live config's font list.
 pub const SizedFontList = struct {
     allocator: std.mem.Allocator,
     items: [][]const u8,
@@ -448,8 +409,7 @@ pub const SizedFontList = struct {
         errdefer allocator.free(items);
         for (fonts, items) |f, *out| {
             // Even at font_size 0 this COPIES rather than borrowing: every
-            // entry must be owned for deinit to need no inference, and the
-            // string is handed straight to Pango which copies it again anyway.
+            // entry must be owned for deinit to need no inference.
             out.* = if (font_size > 0)
                 try std.fmt.allocPrint(allocator, "{s}:size={}", .{ f, font_size })
             else
@@ -472,9 +432,9 @@ fn createPangoLayout(ctx: *bindings.cairo_t, dpi: f32) !*bindings.PangoLayout {
 }
 
 /// Converts Xft `"FontName:size=N:weight=bold"` (or a comma-joined fallback
-/// chain of those) to Pango `"FontName,OtherFont Bold N"` format. Comma-joined
-/// families are kept as a Pango family list so multi-font configs get real
-/// per-glyph fallback rather than first-family-only.
+/// chain) to Pango `"FontName,OtherFont Bold N"`. Comma-joined families are
+/// kept as a Pango family list so multi-font configs get real per-glyph
+/// fallback rather than first-family-only.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![:0]const u8 {
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null and
         std.mem.indexOfScalar(u8, xft_name, ',') == null)
@@ -490,9 +450,8 @@ fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![:0]cons
     var fonts = std.mem.splitScalar(u8, xft_name, ',');
     var first_family = true;
     while (fonts.next()) |font| {
-        // Bound each family to its own Xft spec (`Family:size=..:weight=..`).
-        // The font description is family-first, so emit families up front and
-        // let the option tokens below trail the whole list.
+        // Bound each family to its own Xft spec. The description is
+        // family-first, so emit families up front and let option tokens trail.
         if (!first_family) try result.append(allocator, ',');
         first_family = false;
 

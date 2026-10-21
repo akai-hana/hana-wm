@@ -1,23 +1,19 @@
-//! Systatus readout segments.
-//! Every readout sub in this directory is promoted to its OWN bar segment
-//! ("cpu", "ram", "batt", ...) via `segmentFor(i)`, so each readout is
-//! selected, ordered, and spaced independently in `[bar.layout.*]` -- there
-//! is no aggregate "systatus" belt any more. Readouts refresh on a 2 s poll.
-//! All reads are plain file reads on the main thread -- no subprocesses, no
-//! allocation -- so the cadence is effectively free.
+//! Systatus readout segments. Every readout sub is promoted to its OWN bar
+//! segment ("cpu", "ram", "batt", ...) via `segmentFor(i)`, so each is
+//! selected, ordered, and spaced independently in `[bar.layout.*]`. Readouts
+//! refresh on a 2 s poll. All reads are plain file reads on the main thread
+//! -- no subprocesses, no allocation -- so the cadence is effectively free.
 //!
 //! The readout modules keep binding `pub const sub: Sub`; this closed core
-//! owns only the machinery every readout shares: arm-on-first-draw, the poll
+//! owns the machinery every readout shares: arm-on-first-draw, the poll
 //! deadline, dirty redraw requests, and the "<label> <pct>%" render.
 //!
-//! This per-segment lifecycle (arm once, poll a deadline, mark dirty on
-//! change, track painted width) is a structural twin of slider.zig's. The
-//! two are deliberately NOT merged into a shared "polled-segment" scaffold:
-//! a readout is read-only on one fixed cadence, while a slider adds drag /
-//! scroll interaction, a commit throttle, per-control cadences, and a click
-//! bound -- so the extracted core would be a parameterised contract surface
-//! (refresh + draw + cadence hooks) around a thin body. The shared 10-line
-//! shape is kept explicit in each file instead; see slider.zig.
+//! This per-segment lifecycle is a structural twin of slider.zig's. The two
+//! are deliberately NOT merged: a readout is read-only on one fixed cadence,
+//! while a slider adds drag/scroll, a commit throttle, per-control cadences
+//! and a click bound -- so the extracted core would be a parameterised
+//! contract surface around a thin body. The shared shape is kept explicit in
+//! each file instead; see slider.zig.
 
 const std = @import("std");
 const drawing = @import("drawing");
@@ -26,21 +22,18 @@ const contract = @import("bar_contract");
 
 const core = @import("core");
 
-/// Present-readout poll cadence, from the bar config knob (default 2000 ms).
-/// Absent readouts back off to `absent_reprobe_ms` regardless.
 fn readIntervalMs() i64 {
     return core.getState().config.bar.systatus_interval_ms;
 }
 
 /// Length of the per-segment rendered-text buffers: room for "<label> <pct>%"
-/// (worst-case label plus a 3-digit readout). Larger than any rendered slot.
+/// (worst-case label plus a 3-digit readout).
 const render_buf_len: usize = 128;
 
-// The systatus surface is a closed-core / open-module system: the CLOSED CORE
-// is this file (`Sub` + the per-segment poll/render machinery); the OPEN
-// MODULES are the sibling `.zig` files, each binding `pub const sub: Sub`, and
-// membership in `subs` -- and therefore a bar segment named after it -- comes
-// from FILE PRESENCE alone.
+// Closed-core / open-module: the CLOSED CORE is this file (`Sub` + the
+// per-segment poll/render machinery); the OPEN MODULES are the sibling `.zig`
+// files, each binding `pub const sub: Sub`, and membership in `subs` -- and
+// therefore a bar segment named after it -- comes from FILE PRESENCE alone.
 //
 // To add a readout: drop `foo.zig` beside this file exporting
 // `pub const sub: Sub`. Every file here besides systatus.zig must export it.
@@ -49,7 +42,7 @@ pub const Sub = struct {
     /// Config identity ("ram", "cpu", ...): the name its bar segment is
     /// selected by in `[bar.layout.*]`.
     name: []const u8,
-    /// Label prefix rendered before the value ("RAM", "CPU", ...).
+    /// Label prefix rendered before the value.
     label: []const u8,
     /// Current readout, or null when unreadable / not present this tick (the
     /// segment then renders nothing, zero width).
@@ -58,45 +51,36 @@ pub const Sub = struct {
 
 /// The registry-facing spelling of this contract: build.zig types the
 /// generated `systatus_subs` array through it, so the generated module
-/// never names the concrete struct (`Sub`) or a sibling's import alias.
+/// never names the concrete struct or a sibling's import alias.
 pub const Binding = Sub;
 
-/// One reading from a readout, carrying its DISPLAY text: the module owns its
-/// own presentation (a temperature, a byte count, "up", a percentage), and the
-/// core just paints two spans.
-///
-/// `text` is borrowed from storage the module owns (typically a module-level
-/// buffer); the core COPIES it into the render buffer, so it need not outlive
-/// the call.
+/// One reading from a readout, carrying its DISPLAY text: the module owns
+/// its own presentation; the core just paints two spans. `text` is borrowed
+/// from storage the module owns; the core COPIES it into the render buffer.
 pub const Sample = struct {
-    /// Display form of the value, e.g. "42%". Rendered in the segment's
-    /// value colour.
+    /// Display form, e.g. "42%". Rendered in the segment's value colour.
     text: []const u8,
 };
 
-/// Builds a percentage `Sample` into `buf`, the common case. Kept so the
-/// existing percentage readouts do not each hand-roll the same format.
+/// Builds a percentage `Sample` into `buf`, the common case.
 pub fn percentSample(buf: []u8, value: u8) Sample {
     return .{ .text = std.fmt.bufPrint(buf, "{d}%", .{value}) catch "?" };
 }
 
-/// The readout registry, generated from file presence (build.zig). Each
-/// entry becomes one standalone bar segment named `sub.name`.
+/// The readout registry, generated from file presence (build.zig).
 pub const subs = @import("systatus_subs").subs;
 
 /// One file read, with truncation reported rather than hidden.
 const FileRead = struct {
     bytes: []const u8,
-    /// True when the read filled `buf` completely, so the tail was dropped and
-    /// the contents cannot be trusted whole. Reporting it keeps a
-    /// /proc/meminfo larger than the buffer distinguishable from a meminfo
-    /// with no MemAvailable: a truncated file must read as an I/O problem, not
-    /// as "no RAM".
+    /// True when the read filled `buf` completely so the tail was dropped.
+    /// Keeps a /proc/meminfo larger than the buffer distinguishable from a
+    /// meminfo with no MemAvailable: truncation is an I/O problem, not "no RAM".
     truncated: bool,
 };
 
-/// Opens `path` and reads its contents into `buf`, reporting whether the
-/// buffer was filled (see `FileRead.truncated`). Null when absent/unreadable.
+/// Opens `path` and reads into `buf`, reporting whether the buffer was
+/// filled. Null when absent/unreadable.
 pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
     const io = std.Options.debug_io;
     var f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
@@ -106,37 +90,30 @@ pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
 }
 
 /// Consecutive failed reads tolerated before a readout collapses. One
-/// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must not
-/// blank the segment: collapsing the row on a single failure causes a visible
-/// blink plus a spurious re-lay on every hiccup. After this many consecutive
-/// misses the readout is treated as genuinely gone (battery removed, file
-/// deleted) and the slot collapses for real.
+/// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must
+/// not blank the segment: collapsing on a single failure causes a visible
+/// blink plus a spurious re-lay on every hiccup. After this many, the
+/// readout is treated as genuinely gone and the slot collapses for real.
 const miss_tolerance: u8 = 3;
 
-/// How long a readout that has collapsed as ABSENT goes unprobed before it is
-/// given one more chance. Without this, a desktop with no battery pays eight
-/// futile /sys/class/power_supply opens every 2 s forever; with a plain
-/// one-way latch it would never notice a battery being hot-swapped in. The
-/// slow re-probe is the cost of not being wrong in either direction: the
-/// absent readout is silent (no slot reserved) but not abandoned.
+/// How long a collapsed-ABSENT readout goes unprobed before one more chance.
+/// Without this, a desktop with no battery pays eight futile opens every
+/// 2 s forever; with a one-way latch it would never notice a hot-swapped
+/// battery. The absent readout is silent (no slot) but not abandoned.
 const absent_reprobe_ms: i64 = 30_000;
 
 /// One readout's mutable state, indexed by registry position (segment i ==
-/// subs[i]). One struct says which fields belong to the same readout, and
-/// `&g_readouts[idx]` hands the whole lifecycle to a helper at once.
+/// subs[i]). `&g_readouts[idx]` hands the whole lifecycle to a helper.
 const Readout = struct {
-    /// Set by the first draw (when the bar actually renders the segment), so
-    /// an unconfigured readout never wakes the loop.
+    /// Set by the first draw so an unconfigured readout never wakes the loop.
     armed: bool = false,
     /// Consecutive failed reads; reset on every successful read. Drives the
     /// sticky last-good window (see `miss_tolerance`).
     misses: u8 = 0,
-    /// True once `misses` exhausted its tolerance and the readout collapsed:
-    /// its segment reserves nothing, and its poll slows to
-    /// `absent_reprobe_ms` instead of hammering an answer that is not coming.
-    /// Cleared by the first success.
+    /// True once `misses` exhausted its tolerance: the segment reserves
+    /// nothing and its poll slows to `absent_reprobe_ms`. Cleared by the
+    /// first success.
     absent: bool = false,
-    /// A text-change redraw is owed (see `consumeRedrawRequestFor`).
     pending_redraw: bool = false,
     next_read_ms: i64 = 0,
     /// The last rendered text ("<label> <value>"), owned here so the sticky
@@ -145,8 +122,7 @@ const Readout = struct {
     len: usize = 0,
     /// Byte range of the numeric readout ("42%") inside `last`; `value_len ==
     /// 0` when there is no value this tick. The number is painted with the
-    /// segment's `_value` color while the label keeps its own (see
-    /// drawing.drawPaddedSegmentValue).
+    /// segment's `_value` color while the label keeps its own.
     value_start: usize = 0,
     value_len: usize = 0,
 };

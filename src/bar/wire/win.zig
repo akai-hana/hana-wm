@@ -1,14 +1,9 @@
-//! Bar self-window lifecycle.
-//!
-//! Owns the bar's X11 window as a CLIENT: creation, dock/EWMH properties,
-//! atom resolution, visual/colormap selection, and the draw-context wiring.
-//! This is protocol-side traffic that answers the COMPOSITOR/EWMH contract
-//! (dock strut, window type, state hints), not layout policy: hence it
-//! lives outside sync, same rationale as the rest of bar's allowlisted
-//! self-window traffic in dev/scripts/check-layers.sh.
-//!
-//! Atom storage is owned on this module (resolved once in initAtoms), not by
-//! the bar orchestrator.
+//! Bar self-window lifecycle: creation, dock/EWMH properties, atom
+//! resolution, visual/colormap selection, draw-context wiring. Protocol-side
+//! traffic answering the COMPOSITOR/EWMH contract (dock strut, window type,
+//! state hints), not layout policy — hence outside sync, under the
+//! check-layers.sh Rule-1 allowlist. Atoms are owned on this module
+//! (resolved once in initAtoms), not by the bar orchestrator.
 
 const core = @import("core");
 const types = @import("types");
@@ -19,7 +14,6 @@ const drawing = @import("drawing");
 const surface = @import("surface");
 
 const atom = @import("atoms");
-/// All atoms needed to declare the bar window as a dock to the compositor.
 const BarAtoms = struct {
     strut_partial: xcb.xcb_atom_t = 0,
     window_type: xcb.xcb_atom_t = 0,
@@ -33,7 +27,6 @@ const BarAtoms = struct {
     action_stick: xcb.xcb_atom_t = 0,
 };
 
-/// Module-level atom storage. Resolved once in initAtoms().
 var atoms: BarAtoms = .{};
 
 pub fn initAtoms() void {
@@ -55,12 +48,11 @@ pub fn initAtoms() void {
 
 /// The bar window's top-edge y for a given position, size and screen height.
 ///
-/// Takes all three as values instead of reading `core.getState()`. The
-/// screen height is a u16 and the height a u16, so reading the wrong one
-/// compiles; and this ran during bar creation, where the answer decides where
-/// the bar lands -- a wrong reference is a bar on the wrong edge, or past the
-/// bottom of the screen, with no error to point at it. As a pure function of
-/// its arguments it is checkable without a display.
+/// Takes all three as values instead of reading `core.getState()`: the
+/// screen height and height are both u16, so reading the wrong one compiles,
+/// and a wrong reference means a bar on the wrong edge (or past the screen
+/// bottom) with no error to point at it. Pure in its arguments, so
+/// checkable without a display.
 pub fn calcBarYPos(position: bar_config.BarScreenPosition, screen_height_px: u16, height: u16) i16 {
     return if (position == .bottom)
         @intCast(@as(i32, screen_height_px) - height)
@@ -70,7 +62,6 @@ pub fn calcBarYPos(position: bar_config.BarScreenPosition, screen_height_px: u16
 
 pub const BarWindowSetup = struct { win_id: u32, visual_id: u32, has_argb: bool, colormap: u32 };
 
-/// Set an EWMH atom property on the bar window.
 fn setAtomProperty(
     conn: core.Connection,
     win_id: u32,
@@ -114,8 +105,7 @@ pub fn setWindowProperties(win_id: u32, height: u16) void {
     }
 }
 
-/// Frees the bar's colormap (identity on the non-transparent 0 case). Shared
-/// by the window teardown and the bar orchestrator's WindowCtx teardown.
+/// Frees the bar's colormap (identity on the non-transparent 0 case).
 fn freeColormap(conn: core.Connection, colormap: u32) void {
     if (colormap != 0) _ = xcb.xcb_free_colormap(conn, colormap);
 }
@@ -126,10 +116,9 @@ pub fn destroyBarWindow(conn: core.Connection, win_id: u32, colormap: u32) void 
 }
 
 /// Creates the bar window. `want_transparency` is passed in rather than read
-/// from the live config so the window's visual, depth and colormap are
-/// all decided by the one value the caller was given, instead of the window
-/// re-deriving "is this bar opaque?" from config state the caller may already
-/// be about to replace.
+/// from the live config so the window's visual, depth and colormap are all
+/// decided by the one value the caller was given, instead of re-deriving
+/// "is this bar opaque?" from config the caller may be about to replace.
 pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWindowSetup {
     const cs = core.getState();
     const visual_id = if (want_transparency)
@@ -179,9 +168,6 @@ pub fn createBarWindow(height: u16, y_pos: i16, want_transparency: bool) BarWind
     };
 }
 
-/// `font_size` is the bar's resolved point size, passed in rather than read
-/// from bar state: the draw context is built from values the caller already
-/// resolved, so it does not have to be re-derived here.
 pub fn createDrawContext(setup: BarWindowSetup, height: u16, font_size: u16) !*drawing.DrawContext {
     const cs = core.getState();
     const dc = try drawing.DrawContext.initWithVisual(

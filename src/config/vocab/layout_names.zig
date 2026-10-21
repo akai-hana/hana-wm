@@ -4,19 +4,16 @@
 //! which is exact-on-canonical) needs no alias handling of its own. The
 //! known-spelling set lives here too, as the one grammar both config and the
 //! tiling tests can see: the two sides cannot import each other (config is
-//! below tiling), so neither can check the registry agreement alone, and a
-//! drift between them would be silent.
+//! below tiling), so neither can check the registry agreement alone.
 
 const std = @import("std");
 const types = @import("types");
 
 /// Canonicalizes the layout-name aliases accepted from config: "master-stack"
 /// and "master_stack" (any case) fold onto the registry module's canonical
-/// name "master". Every config-sourced layout name passes through here so
-/// downstream resolution (engine.layoutByName,
-/// which is exact-on-canonical) needs no alias handling. Returns `name`
-/// unchanged otherwise; never allocates, and the returned slice aliases the
-/// input whenever it is not the canonical literal.
+/// name "master". Returns `name` unchanged otherwise; never allocates, and
+/// the returned slice aliases the input whenever it is not the canonical
+/// literal.
 pub fn canonicalLayoutName(name: []const u8) []const u8 {
     if (std.ascii.eqlIgnoreCase(name, "master-stack") or
         std.ascii.eqlIgnoreCase(name, "master_stack"))
@@ -31,10 +28,9 @@ pub fn canonicalLayoutName(name: []const u8) []const u8 {
 /// `tiling_modules` registry indices at seed time (engine.layoutByName), and
 /// unknown names pass through so third-party addon layouts keep working.
 /// Public so the tiling test can assert this list and the layout registry
-/// agree in BOTH directions -- the two sides cannot import each other (config
-/// is below tiling), so neither can check itself, and a drift between them is
-/// silent: a name here that the registry dropped is skipped at parse, a layout
-/// in the registry missing here is unselectable.
+/// agree in BOTH directions -- the two sides cannot import each other, so
+/// neither can check itself: a name here that the registry dropped is
+/// skipped at parse, a layout in the registry missing here is unselectable.
 pub const layout_name_grammar = std.StaticStringMap(void).initComptime(.{
     .{ "master", {} },  .{ "master-stack", {} }, .{ "master_stack", {} },
     .{ "monocle", {} }, .{ "grid", {} },         .{ "fibonacci", {} },
@@ -56,8 +52,7 @@ pub fn normalizeLayoutName(buf: *[max_layout_name]u8, name: []const u8) ?[]const
 }
 
 /// Whether `name` is one of the known layout-name spellings (grammar test).
-/// Public for the same reason as `layout_name_grammar`: the tiling test uses
-/// this to check the registry can be spelled, without config importing tiling.
+/// Public for the same reason as `layout_name_grammar`.
 pub fn isLayoutName(name: []const u8) bool {
     var buf: [max_layout_name]u8 = undefined;
     const lowered = normalizeLayoutName(&buf, name) orelse return false;

@@ -1,12 +1,11 @@
-//! The tiling config fragment: `Config` (the [tiling] subtree), its knob
-//! table, and the parse/validate entry points the generated `composed`
-//! dispatcher calls. Deleting this file (with the rest of src/tiling/)
-//! removes the `tiling` field, every [tiling] knob, and all tiling config
-//! vocabulary from the build with no trace elsewhere.
+//! The tiling config fragment: `Config` (the [tiling] subtree), its knob table,
+//! and the parse/validate entry points the generated `composed` dispatcher calls.
+//! Deleting this file (with the rest of src/tiling/) removes the `tiling` field,
+//! every [tiling] knob, and all tiling config vocabulary from the build.
 //!
-//! The non-scalar structures (layouts array, per-layout variants, master-
-//! stack counts) are parsed by the sibling `tiling_sections` module; the
-//! scalar knobs below are applied by the generic engine in `knob`.
+//! The non-scalar structures (layouts array, per-layout variants, master-stack
+//! counts) are parsed by the sibling `tiling_sections` module; the scalar knobs
+//! below are applied by the generic engine in `knob`.
 
 const std = @import("std");
 const model = @import("model");
@@ -30,8 +29,8 @@ pub const MasterSide = enum {
     });
 };
 
-/// Per-workspace startup layout assignment, overriding the global default.
-/// variant is null -> use the per-layout map default ([tiling].variants).
+/// Per-workspace startup layout assignment, overriding the global default. variant
+/// is null -> use the per-layout map default ([tiling].variants).
 pub const WorkspaceLayoutOverride = struct {
     workspace_idx: model.WorkspaceId,
     layout_idx: u8, // index into Config.layouts
@@ -53,35 +52,32 @@ pub const Config = struct {
     border_width: types.ScalableValue = types.ScalableValue.absolute(2.0),
     border_focused: types.Color = types.default_focused_border,
     border_unfocused: types.Color = types.default_unfocused_border,
-    /// Smallest on-screen width/height a tiled window (and floating drag
-    /// resize) is allowed to reach, in pixels.
+    /// Smallest on-screen width/height a tiled window (and floating drag resize) is
+    /// allowed to reach, in pixels.
     min_window_dim: u16 = types.default_min_window_dim,
 
-    // Per-layout variant preferences: window placement policy expressed as
-    // value-strings in this canonical layout-name -> VALUE-STRING map (no
-    // closed per-layout variant enums; each module interprets its strings via
-    // its `variant_parse` hook). Both the key and the value-string are
-    // heap-duped at parse time (setTilingVariant) so they outlive the parsed
-    // document; deinit frees every key and value via freeStringMap.
+    // Per-layout variant preferences: placement policy as value-strings in a
+    // canonical layout-name -> VALUE-STRING map (no closed per-layout enums; each
+    // module interprets its strings via `variant_parse`). Both key and value are
+    // heap-duped at parse so they outlive the document; deinit frees them.
     variants: std.StringHashMapUnmanaged([]const u8) = .empty,
 
     /// Per-workspace layout assignments parsed from the layouts array.
     workspace_layout_overrides: std.ArrayList(WorkspaceLayoutOverride) = .empty,
 
-    /// Per-workspace master count overrides parsed from [tiling.layouts.master-stack.counts].
-    /// Only applied when global_layout = false.
+    /// Per-workspace master count overrides parsed from
+    /// [tiling.layouts.master-stack.counts]. Only applied when global_layout = false.
     workspace_master_count_overrides: std.ArrayList(WorkspaceMasterCountOverride) = .empty,
 
-    /// When true, layout changes apply globally across all workspaces instead
-    /// of per workspace.
+    /// When true, layout changes apply globally across all workspaces instead of per
+    /// workspace.
     global_layout: bool = false,
 
     /// Resolves the per-workspace master-count overrides into a fixed-size,
     /// workspace-indexed lookup with last-wins semantics (a duplicate entry
-    /// for one workspace overrides its predecessor). `null` at an index means
-    /// no override for that workspace (use the global default). Consumed by
-    /// the core seed path (seed.seedParamsFromConfig), so the last-wins
-    /// rule lives in one place.
+    /// overrides its predecessor). `null` means no override (use the global default).
+    /// Consumed by seed.seedParamsFromConfig, so the last-wins rule lives in one
+    /// place.
     pub fn masterCountLookup(self: *const Config) [model.max_workspaces]?u8 {
         var lookup: [model.max_workspaces]?u8 = .{null} ** model.max_workspaces;
         for (self.workspace_master_count_overrides.items) |o| {
@@ -99,11 +95,10 @@ pub const Config = struct {
     }
 
     /// Resolves the per-workspace layout overrides into a fixed-size,
-    /// workspace-indexed lookup of override indices with last-wins semantics
-    /// (a duplicate entry for one workspace overrides its predecessor).
-    /// `null` at an index means no override for that workspace. Consumed by
-    /// the core seed path (seed.seedParamsFromConfig), so the last-wins
-    /// rule lives in one place.
+    /// workspace-indexed lookup of override indices with last-wins semantics (a
+    /// duplicate entry overrides its predecessor). `null` means no override.
+    /// Consumed by seed.seedParamsFromConfig, so the last-wins rule lives in one
+    /// place.
     pub fn workspaceLayoutLookup(self: *const Config) [model.max_workspaces]?usize {
         var lookup: [model.max_workspaces]?usize = .{null} ** model.max_workspaces;
         for (self.workspace_layout_overrides.items, 0..) |o, oi| {
@@ -125,9 +120,9 @@ pub const Config = struct {
     }
 };
 
-/// Master-stack trio: dedicated-section short spelling wins over the flat
-/// [tiling] spelling (section presence, not key presence, picks the
-/// spelling). Targets are relative to THIS Config.
+/// Master-stack trio: dedicated-section short spelling wins over the flat [tiling]
+/// spelling (section presence, not key presence, picks the spelling). Targets are
+/// relative to THIS Config.
 fn masterStack(dedicated_key: []const u8, flat_key: []const u8, kind: knob.Kind) knob.Knob {
     return .{
         .places = &.{ knob.place(types.section_tiling_layouts_master_stack, dedicated_key), knob.place(types.section_tiling, flat_key) },
@@ -137,41 +132,37 @@ fn masterStack(dedicated_key: []const u8, flat_key: []const u8, kind: knob.Kind)
     };
 }
 
-/// Every tiling scalar knob, exactly once. ORDER MATTERS only for `needs`
-/// (none today), which `validateTable` enforces.
+/// Every tiling scalar knob, exactly once. ORDER MATTERS only for `needs` (none today),
+/// which `validateTable` enforces.
 pub const knobs = [_]knob.Knob{
-    // [tiling]: functional knobs gated on the section itself -- a lone
-    // [tiling] carrying only the aesthetics quartet (a theme file's shape)
-    // never fed these knobs. (The aesthetics quartet below is UNGATED: it's
-    // visual, so themes may ship it without any functional key.)
+    // [tiling]: functional knobs gated on the section itself -- a lone [tiling]
+    // carrying only the aesthetics quartet (a theme file's shape) never fed these
+    // knobs. (The quartet below is UNGATED: it's visual.)
     knob.knobGated(&.{knob.place(types.section_tiling, "global_layout")}, "global_layout", .b, types.section_tiling),
     knob.knobGated(&.{knob.place(types.section_tiling, "min_window_dim")}, "min_window_dim", .{ .int = .{ .T = u16, .min = 1 } }, types.section_tiling),
 
-    // Aesthetics quartet: flat [tiling] spellings. UNGATED --
-    // it's visual, so a theme file may ship only these in a
-    // lone [tiling] with no functional key.
+    // Aesthetics quartet: flat [tiling] spellings. UNGATED -- it's visual, so a
+    // theme file may ship only these in a lone [tiling] with no functional key.
     knob.knob(&.{knob.place(types.section_tiling, "gap_width")}, "gap_width", .{ .scalable = 0.0 }),
     knob.knob(&.{knob.place(types.section_tiling, "border_width")}, "border_width", .{ .scalable = 0.0 }),
-    // The two color knobs are read ONLY by the optional borders module
-    // (modules/borders.zig: resolveBorderColorWith/colorOf); when that
-    // module is deleted the settings are legitimately unread, so they carry
-    // the ownership declaration (P2-47). border_width stays core-owned:
-    // core.borderWidth() and the reconcile geometry read it regardless.
+    // The two color knobs are read ONLY by the optional borders module; when that
+    // module is deleted the settings are legitimately unread, so they carry the
+    // ownership declaration (P2-47). border_width stays core-owned: core.borderWidth()
+    // and the reconcile geometry read it regardless.
     knob.readerOf(&.{knob.place(types.section_tiling, "border_focused")}, "border_focused", .color, "borders"),
     knob.readerOf(&.{knob.place(types.section_tiling, "border_unfocused")}, "border_unfocused", .color, "borders"),
 
-    // Master-stack trio: the dedicated section's shorter spellings win;
-    // flat [tiling] keeps the flat spellings.
+    // Master-stack trio: the dedicated section's shorter spellings win; flat
+    // [tiling] keeps the flat spellings.
     masterStack("count", "master_count", .{ .int = .{ .T = u8, .min = 1 } }),
     masterStack("side", "master_side", .{ .enum_read = .{ .T = MasterSide, .ci = true } }),
     // No local bound: validate() owns master_width's ratio/negative policy.
     masterStack("width", "master_width", .scalable_free),
 };
 
-/// Module-owned knob readers (see `knob.readerOf` / `Knob.reader`): the
-/// two border color knobs are read only by the optional borders module
-/// (modules/borders.zig), so the build's knob-reader scan excuses them on
-/// a tree that module has been deleted from (P2-47).
+/// Module-owned knob readers (see `knob.readerOf` / `Knob.reader`): the two border
+/// color knobs are read only by the optional borders module, so the build's
+/// knob-reader scan excuses them on a tree that module has been deleted from (P2-47).
 pub const knob_reader_modules = [_][2][]const u8{
     .{ "border_focused", "borders" },
     .{ "border_unfocused", "borders" },
@@ -182,10 +173,9 @@ comptime {
     knob.validateOwnership(&knobs, &knob_reader_modules, "tiling");
 }
 
-/// The section names the tiling subsystem owns (D13/P2-50): the composed
-/// facade unions every fragment's list into the mis-case lint's inventory.
-/// The two master-stack spellings (hyphen and underscore) are the shipped
-/// dedicated tables; other layout names arrive through the
+/// The section names the tiling subsystem owns (D13/P2-50): the composed facade unions
+/// every fragment's list into the mis-case lint's inventory. The two master-stack
+/// spellings are the shipped dedicated tables; other layout names arrive through the
 /// `section_prefixes` family below, not as exact entries.
 pub const sections = &[_][]const u8{
     types.section_tiling,
@@ -193,34 +183,33 @@ pub const sections = &[_][]const u8{
     types.section_prefix_tiling_layouts ++ "master_stack",
 };
 
-/// Mis-case family: `[tiling.layouts.*]` is an open set (any registry
-/// layout name), so a case-variant of the family gets the family warn
-/// rather than needing exact entries.
+/// Mis-case family: `[tiling.layouts.*]` is an open set (any registry layout name), so
+/// a case-variant of the family gets the family warn rather than needing exact entries.
 pub const section_prefixes = &[_][]const u8{types.section_prefix_tiling_layouts};
 
-/// Inert family (D13/P2-50): `[tiling.*]` sub-tables are read only when
-/// bare `[tiling]` is present; a present family with the parent missing
-/// leaves those knobs inert, which the load warns about.
+/// Inert family (D13/P2-50): `[tiling.*]` sub-tables are read only when bare
+/// `[tiling]` is present; a present family with the parent missing leaves those knobs
+/// inert, which the load warns about.
 pub const inert_families = &[_]types.InertFamily{.{
     .parent = types.section_tiling,
     .child_prefix = types.section_prefix_tiling,
 }};
 
-/// `[tiling] layouts` accumulates the layout-name list by design (same
-/// list-reading policy the layout cycle has always had); a scalar read of
-/// it takes the last declaration without a "later wins" warn.
+/// `[tiling] layouts` accumulates the layout-name list by design (same list-reading
+/// policy the layout cycle has always had); a scalar read takes the last declaration
+/// without a "later wins" warn.
 pub const accumulate_exempt = &[_]types.SectionKey{.{
     .section = types.section_tiling,
     .key = "layouts",
 }};
 
-/// The section HEADS whose presence in the embedded fallback TOML is gated
-/// on this fragment's owner module (P2-50).
+/// The section HEADS whose presence in the embedded fallback TOML is gated on this
+/// fragment's owner module (P2-50).
 pub const fallback_sections = &[_][]const u8{"tiling"};
 
-/// The fragment parse entry: self-seed the owned defaults (so an empty
-/// document still yields a usable single-layout cycle), apply the scalar
-/// knobs, then parse the non-scalar structures.
+/// The fragment parse entry: self-seed the owned defaults (so an empty document still
+/// yields a usable single-layout cycle), apply the scalar knobs, then parse the
+/// non-scalar structures.
 pub fn parse(allocator: std.mem.Allocator, doc: *parser.Document) !Config {
     var cfg: Config = .{};
     errdefer cfg.deinit(allocator);
@@ -230,10 +219,10 @@ pub fn parse(allocator: std.mem.Allocator, doc: *parser.Document) !Config {
     return cfg;
 }
 
-/// Range checks the knob engine does not own: master_width's ratio band
-/// (percentages validate as a [min_master_width, max_master_width] ratio;
-/// pixels only as >= 0, since the screen width for a ratio isn't available
-/// here and the runtime clamps). Called by composed.parse.
+/// Range checks the knob engine does not own: master_width's ratio band (percentages
+/// validate as a [min_master_width, max_master_width] ratio; pixels only as >= 0,
+/// since the screen width for a ratio isn't available here and the runtime clamps).
+/// Called by composed.parse.
 pub fn validate(cfg: *const Config) !void {
     const mw = cfg.master_width;
     if (mw.is_percentage) {

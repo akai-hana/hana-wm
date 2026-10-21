@@ -1,10 +1,8 @@
 //! Bar's non-scalar config structures: fonts, indicator glyph mirroring,
-//! workspace icons, and the bar layout columns -- the tables the knob engine
-//! (bar_config.knobs via knob.applyAll) does not cover. Called from
-//! bar_config.parse; every parser here is gated on its parent section
-//! existing, exactly as the scalar knobs are, and every owned string it
-//! stores is duped off the parsed document so it outlives the load-scoped
-//! arena.
+//! workspace icons, and the bar layout columns (the tables knob.applyAll
+//! does not cover). Called from bar_config.parse; every parser is gated on
+//! its parent section, and owned strings are duped so they outlive the
+//! load-scoped arena.
 
 const std = @import("std");
 const log = std.log.scoped(.bar_sections);
@@ -16,9 +14,8 @@ const types = @import("types");
 const bar_config = @import("bar_config");
 const segmod = @import("segment");
 
-/// One row of the bar-anchor table driving both the default bar layout
-/// (initDefaultBarLayout) and the per-anchor `[bar.layout.<name>]` sections
-/// (parseBarLayout), so the anchor set can never drift.
+/// One row of the bar-anchor table driving both the default layout and the
+/// per-anchor `[bar.layout.<name>]` sections, so the anchor set can't drift.
 const BarAnchorInfo = struct {
     name: []const u8,
     position: bar_config.BarSegmentAnchor,
@@ -39,18 +36,15 @@ pub fn initDefaultBarLayout(allocator: std.mem.Allocator, cfg: *bar_config.Confi
     }
 }
 
-/// `appendDupedStrings`'s comptime `warn` argument meanings: the bar segment
-/// list warns on a stray non-string entry (a typo should be called out), the
-/// fonts list silently ignores it.
+/// `appendDupedStrings`'s comptime `warn` argument: segment list warns on a
+/// stray non-string entry (a typo should be called out); fonts list doesn't.
 const warn_bad_segment_entries = true;
 const ignore_bad_font_entries = false;
 
-/// Dupe-appends every string element of `items` into `dst`, optionally also
-/// formatting integer elements as decimal strings (`ints_as_numbers`, the
+/// Dupe-appends every string element of `items` into `dst`, optionally
+/// formatting integers as decimal strings (`ints_as_numbers`, the
 /// workspace-icons form). Non-string entries are skipped; with `warn` set
-/// they also surface a warning (the bar segment list, where a typo should be
-/// called out, vs. the fonts list, where a stray non-string is simply
-/// ignored).
+/// they also surface a warning.
 fn appendDupedStrings(
     comptime warn: bool,
     comptime ints_as_numbers: bool,
@@ -76,11 +70,8 @@ fn appendDupedStrings(
         log.warn("Non-string entry in bar segment list, skipping", .{});
 }
 
-/// Bar's NON-scalar structures: fonts, indicator glyph mirroring, workspace
-/// icons, and the bar columns. Every bar SCALAR (flags, scalables, height,
-/// colors incl. the [bar.properties] fallback chains, strings, enums, ratios)
-/// is driven by knob.applyAll; like parseBar always did, everything here
-/// stays gated on the [bar] section existing.
+/// Every bar SCALAR is driven by knob.applyAll; everything here stays
+/// gated on the [bar] section existing.
 pub fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar_config.Config) !void {
     const section = doc.getSection(types.section_bar) orelse return;
     if (section.getAsOrWarn([]const parser.Value, "fonts")) |arr| {
@@ -88,8 +79,9 @@ pub fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar_c
         try appendDupedStrings(ignore_bad_font_entries, false, allocator, arr, &cfg.fonts);
         log.info("Loaded {} fonts for bar", .{cfg.fonts.items.len});
     }
-    // indicator_focused/unfocused: if only one is set, the other mirrors it.
-    // A pair interaction, so it stays bespoke rather than joining the table.
+    // If only one of indicator_focused/unfocused is set, the other mirrors
+    // it: a pair interaction, so it stays bespoke rather than joining the
+    // knob table.
     const raw_focused = section.getAs([]const u8, "indicator_focused");
     const raw_unfocused = section.getAs([]const u8, "indicator_unfocused");
     const focused_val = raw_focused orelse raw_unfocused;
@@ -100,11 +92,10 @@ pub fn parseBar(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar_c
     try parseBarLayout(allocator, doc, cfg);
 }
 
-/// The workspace-count source for icon padding: `[bar.modules.workspaces]
-/// count` first-present, else `[workspaces] count`, else the default 9. Read
-/// straight off the DOCUMENT (never off the workspaces fragment's Config)
-/// so the bar fragment has no cross-fragment dependency on the optional
-/// workspaces module (the count knob itself belongs to workspaces_config).
+/// Workspace-count source for icon padding: `[bar.modules.workspaces]
+/// count`, else `[workspaces] count`, else default. Read straight off the
+/// DOCUMENT so the bar fragment has no cross-fragment dependency on the
+/// optional workspaces module.
 fn workspaceCountFromDoc(doc: *parser.Document) u8 {
     inline for (.{ types.section_bar_modules_workspaces, types.section_workspaces }) |sec_name| {
         if (doc.getSection(sec_name)) |sec| {
@@ -123,8 +114,7 @@ pub fn padWorkspaceIcons(allocator: std.mem.Allocator, doc: *parser.Document, cf
     }
 }
 
-/// Formats integer `n` as decimal and dupes it to a string, the "int ->
-/// string icon" step shared by parseWorkspaceIcons and padWorkspaceIcons.
+/// Formats integer `n` as decimal and dupes it to a string.
 fn dupeNum(allocator: std.mem.Allocator, n: anytype) ![]u8 {
     return std.fmt.allocPrint(allocator, "{}", .{n});
 }
@@ -174,10 +164,9 @@ fn parseBarLayout(allocator: std.mem.Allocator, doc: *parser.Document, cfg: *bar
 }
 
 /// Source attribution for the first `segments` declaration in `section`,
-/// the P1-43 entry fields applied the way document.zig's private fileLabel
-/// does ("" from an entry built without one labels as "<input>"). Only
-/// called on a section whose `segments` key has just been read, so the
-/// entry always exists; the fallback is defensive.
+/// labeled the way document.zig's private fileLabel does ("" labels as
+/// "<input>"). Only called on a section whose `segments` was just read, so
+/// the entry always exists; the fallback is defensive.
 fn segmentsSource(section: *parser.Section) struct { file: []const u8, line: usize } {
     for (section.entries.items) |e| {
         if (std.mem.eql(u8, e.key, "segments"))
@@ -187,20 +176,13 @@ fn segmentsSource(section: *parser.Section) struct { file: []const u8, line: usi
 }
 
 /// Load-time rejection of an unknown segment name in a `[bar.layout.<anchor>]`
-/// column (P1-46). Every layout consumer skips an unresolvable name
-/// (`segmod.segId(name) orelse continue`), so a typo'd name used to load
-/// clean and simply render nothing; the fail bar now rejects the config with
-/// the file:line of the `segments` declaration instead. The registry is
-/// comptime, so this knows at load time, not just at render.
-///
-/// Both guards are comptime so a tree without the bar's segment dispatch
-/// (`has_bar` off — `segment.zig` itself is gone) or one with no registered
+/// column. Consumers skip unresolvable names, so a typo would render nothing
+/// unless rejected here with the file:line of the `segments` declaration.
+/// The registry is comptime, so this knows at load time. Both guards are
+/// comptime so a tree without segment dispatch or with no registered
 /// segments (the "all segments removed" modularity scenario, whose fallback
 /// layout lists names that no longer exist) compiles the check away rather
-/// than failing to boot on names it could never resolve.
-///
-/// Every unknown name in the list is reported before returning, so one load
-/// tells the user about all of them, not just the first.
+/// than failing to boot. Every unknown name is reported before returning.
 fn rejectUnknownSegments(
     section: *parser.Section,
     anchor: []const u8,
@@ -212,14 +194,12 @@ fn rejectUnknownSegments(
     // The build's OWN embedded fallback never rejects: loadFor falls back to
     // exactly this source, so a tree that deleted one of its layout segments
     // would take the floor down with the user config it just rejected (boot
-    // would die instead of degrading). The full-tree contract that the
-    // shipped layout names all resolve stays pinned by the tests that load
-    // the same bytes under a file label (fallback_test, the knob_test
-    // fallback pipeline test) -- only the boot-floor path skips.
+    // would die instead of degrading). The shipped-layout-names-all-resolve
+    // contract stays pinned by the tests that load the same bytes under a
+    // file label; only the boot-floor path skips.
     if (std.mem.eql(u8, src.file, types.embedded_fallback_label)) return;
     var bad = false;
     for (seg_arr) |v| {
-        // Non-strings are appendDupedStrings' warn-and-skip, unchanged.
         const name = v.asScalar([]const u8) orelse continue;
         if (segmod.segId(name) != null) continue;
         log.err(
@@ -231,14 +211,12 @@ fn rejectUnknownSegments(
     if (bad) return error.InvalidConfig;
 }
 
-/// Rejects a segment listed more than once across the whole configured
-/// layout. A second instance is dropped with a warning: it would paint twice
-/// but live in the FIRST-match click-bound table (the later instance's hit
-/// test resolves to the earlier slot) and a self-ticking duplicate would
-/// region-repaint only its last-recorded slot, leaving the other stale.
-/// Warn-and-skip is deliberately softer than the sibling check above: a
-/// duplicate is a rendering nuisance, an unknown NAME renders nothing at
-/// all (rejectUnknownSegments, which fails the load instead).
+/// Rejects a segment listed more than once across the configured layout: a
+/// second instance would paint twice but live in the FIRST-match
+/// click-bound table, and a self-ticking duplicate would region-repaint only
+/// its last-recorded slot, leaving the other stale. Warn-and-skip (softer
+/// than rejectUnknownSegments): a duplicate is a rendering nuisance; an
+/// unknown NAME renders nothing at all.
 fn rejectDuplicateSegments(allocator: std.mem.Allocator, cfg: *bar_config.Config) void {
     for (cfg.layout.items, 0..) |*lay, ri| {
         var keep: usize = 0;

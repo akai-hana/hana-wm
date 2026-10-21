@@ -6,7 +6,6 @@ const tiling = @import("tiling");
 const shrinkCapped = tiling.shrinkCapped;
 const Region = tiling.Region;
 
-// Clockwise spiral direction for the next window split.
 const SpiralDirection = enum(u2) {
     right, // Split vertically: window on left, remainder on right.
     down, // Split horizontally: window on top, remainder below.
@@ -35,26 +34,22 @@ const SpiralDirection = enum(u2) {
     }
 };
 
-/// Compute Fibonacci spiral layout. Outer gap stripped first; each split
-/// halves the remaining dimension with one gap at the seam. Drawn by pointer;
-/// helpers take the pointer to avoid copies in the recursion.
+/// Compute Fibonacci spiral layout. Outer gap stripped first; each split halves
+/// the remaining dimension with one gap at the seam. Helpers take a pointer to
+/// avoid copies in the recursion.
 fn compute(v: *const tiling.View, out: *tiling.List) void {
-    // LayoutCtx.init copies v.env.margins and v.env.min_dim precisely so
-    // modules read them from ctx rather than re-deriving from v.env, which is
-    // how the same fact ends up with two homes.
     const ctx = tiling.LayoutCtx.init(v, out);
     const m = ctx.m;
-    // NOTE: the overflow gate deliberately stays geometry-only (what the
-    // strip can carry). The min_dim requirement is handled AT EMISSION by
-    // capping w/h to the strip's content area, so raising this gate to include
-    // min_dim is redundant with the emission cap and only moves the overflow
-    // threshold -- a stricter gate trips overflow earlier and changes layout
-    // batching. The `gap + 2` floor is the positivity requirement of the split
-    // itself: bisectRegion's first half is (dim - gap) / 2, which is 0 when
-    // dim <= gap + 1, and a zero-width strip would emit through shrinkCapped's
-    // >= 1 floor while the remainder stays put -- stacking every later window
-    // on the same cell. totalInset dominates for any border >= 1; the floor
-    // only bites the borderless zero/one-gap configs.
+    // The overflow gate deliberately stays GEOMETRY-ONLY (what the strip can
+    // carry): min_dim is handled at EMISSION by capping w/h to the strip's
+    // content area, so folding it into the gate would be redundant and would
+    // only move the overflow threshold, changing layout batching. The
+    // `gap + 2` floor is the split's own positivity requirement: bisectRegion's
+    // first half is (dim - gap) / 2, which is 0 when dim <= gap + 1, and a
+    // zero-width strip would emit through shrinkCapped's >=1 floor while the
+    // remainder stays put, stacking later windows on the same cell.
+    // totalInset dominates for any border >= 1; the floor only bites
+    // borderless zero/one-gap configs.
     const min_region = @max(tiling.totalInset(m.gap, m), m.gap + 2);
 
     const outer = tiling.outerArea(v.workarea, m.gap);
@@ -65,11 +60,9 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     for (windows, 0..) |win, i| {
         const last = i == windows.len - 1;
         // Too small for another split: the seam would leave no room for a
-        // border either side. Gate is geometry-only (gap+borders), unlike
-        // leaf.zig's 2*min_dim+gap floor for a flat two-child pane.
+        // border either side. Geometry-only (gap+borders), unlike leaf.zig's
+        // 2*min_dim+gap floor for a flat two-child pane.
         if (last or cur.w < min_region or cur.h < min_region) {
-            // focusedElse falls back to the current split-remainder head
-            // (win == windows[i..][0]).
             tiling.emitOverflowShare(ctx, windows[i..], cur);
             return;
         }
@@ -104,8 +97,6 @@ inline fn splitAndAdvance(
     const w = shrinkCapped(strip_w, border2);
     const h = shrinkCapped(strip_h, border2);
     tiling.emitRect(ctx.v, ctx.out, win, cur.x + off_x, cur.y + off_y, w, h);
-    // Advance the remainder origin along the split axis (forward only), then
-    // shrink the remainder along that axis by the taken strip.
     if (split_x) {
         if (forward) cur.x += @intCast(win_dim + gap);
         cur.w = cur.w -| (win_dim + gap);
@@ -115,5 +106,4 @@ inline fn splitAndAdvance(
     }
 }
 
-/// This layout's registry contribution: metadata plus the dispatch hook.
 pub const module = tiling.layoutModule("fibonacci", "[@]", compute, &.{}, .{});

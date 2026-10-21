@@ -1,15 +1,12 @@
-//! Input-layer protocol vocabulary: modifier masks, event masks, mouse button
-//! codes, and the binding-mask helpers. A member of the pure shelf (listed in
-//! build.zig's pureLayerAllows), so config/ may import it; it lives beside its
-//! main consumers in src/core/input/. The protocol constants are spelled as
-//! their X protocol values rather than `@import("xcb")` names so it stays
-//! xcb-free by construction; src/test/core/masks_test.zig pins every
-//! literal against the XCB names, so a divergence fails there instead of
-//! silently changing grab/input behavior.
+//! Input-layer protocol vocabulary: modifier masks, event masks, mouse button codes,
+//! and the binding-mask helpers. A member of the pure shelf (build.zig's
+//! pureLayerAllows), so config/ may import it; it lives beside its consumers in
+//! src/core/input/. Constants are spelled as their X protocol values rather than
+//! `@import("xcb")` names, keeping the file xcb-free; masks_test.zig pins every
+//! literal against the XCB names so a divergence fails there.
 
-// Modifier masks (X protocol: Shift=1<<0, Lock=1<<1, Control=1<<2,
-// Mod1..Mod5=1<<3..1<<7; Mod2 carries NumLock, Mod3 ScrollLock, Mod4 Super).
-// u16 as required by the XCB API's modifier fields.
+// Modifier masks (X protocol: Shift=1<<0, Lock=1<<1, Control=1<<2, Mod1..Mod5=1<<3..1<<7).
+// u16 as the XCB API's modifier fields require.
 pub const mod_shift: u16 = 1 << 0;
 pub const mod_capslock: u16 = 1 << 1;
 pub const mod_control: u16 = 1 << 2;
@@ -25,28 +22,23 @@ pub const mouse_button_right: u8 = 3;
 pub const mouse_button_scroll_up: u8 = 4;
 pub const mouse_button_scroll_down: u8 = 5;
 
-// Modifier keysym band. X11 reserves XK_Shift_L..XK_Hyper_R (0xFFE1..0xFFEE)
-// for modifier keys; the check widens that band by one key on each side (none
-// of which are valid editing/navigation keys) so bare modifier presses can be
-// dropped without logging noise. Shared by core/input/keys.zig and the prompt.
+// Modifier keysym band. X11 reserves XK_Shift_L..XK_Hyper_R (0xFFE1..0xFFEE) for
+// modifier keys; the check widens it by one key on each side (neither a valid
+// editing/navigation key) so bare modifier presses drop without log noise. Shared by
+// core/input/keys.zig and the prompt.
 pub const modifier_keysym_lo: u32 = 0xFFE0;
 pub const modifier_keysym_hi: u32 = 0xFFEF;
 
-/// True when `keysym` falls in the modifier keysym band (see above). A bare
-/// modifier press can never match a binding; callers use this to stay silent
-/// instead of logging keystroke noise.
+/// True when `keysym` is in the modifier band (see above): a bare modifier press can
+/// never match a binding, so callers stay silent rather than log keystroke noise.
 pub inline fn isModifierKeysym(keysym: u32) bool {
     return keysym >= modifier_keysym_lo and keysym <= modifier_keysym_hi;
 }
 
-/// Lock key combinations grabbed alongside every keybinding so binds work
-/// regardless of NumLock / CapsLock / ScrollLock state. All 2^3 subsets of
-/// the three lock modifiers in the historical grab order (size 0, the three
-/// singles, the three pairs, the triple). Consumers only iterate it / use `.len`.
-/// Every lock-modifier bit in one mask: the OR of `lock_modifiers` below.
-/// A binding compares equal regardless of lock-key state, so a rule about what
-/// a bind can match has to treat these bits as absent (core/input/keybinds.zig's
-/// `undeliverableMouseBindReason` is the consumer).
+/// Lock key combinations grabbed alongside every keybinding so binds work regardless
+/// of NumLock / CapsLock / ScrollLock state: all 2^3 subsets of the three lock
+/// modifiers, in the historical grab order (size 0, singles, pairs, triple).
+/// Consumers only iterate it / use `.len`.
 pub const lock_bits: u16 = mod_capslock | mod_numlock | mod_scrolllock;
 
 pub const lock_modifiers: [8]u16 = .{
@@ -60,52 +52,32 @@ pub const lock_modifiers: [8]u16 = .{
     mod_capslock | mod_numlock | mod_scrolllock,
 };
 
-// Event masks
-/// Strips the XCB synthetic-event bit (bit 7) from a raw event `response_type`
-/// to recover the core event code. Core event codes are 0..0x7F; the top bit
-/// marks events delivered via SendEvent. Core events keep their low-7 bits
-/// under a SendEvent, so masking recovers the true code. Callers fold through
-/// `coreEventType` below rather than spelling the mask themselves.
+/// Strips the XCB synthetic-event bit (bit 7) from a raw event `response_type` to
+/// recover the core event code: core codes are 0..0x7F and the top bit marks a
+/// SendEvent delivery, which preserves the low 7 bits. Callers fold through
+/// `coreEventType` rather than spelling the mask.
 pub const core_event_code_mask: u8 = 0x7f;
 
 /// THE one spelling of "strip the SendEvent bit": dispatch routing, window
-/// extraction, trace event naming and the prompt's key filter all fold a raw
-/// `response_type` through here, so the rule exists exactly once (P2-67).
+/// extraction, trace naming and the prompt's key filter all fold through here.
 pub inline fn coreEventType(response_type: u8) u8 {
     return response_type & core_event_code_mask;
 }
 
 pub const EventMasks = struct {
     // DWM verbatim (setup() in dwm.c): SubstructureRedirect|Notify, ButtonPress,
-    // PointerMotion, Enter/LeaveWindow, StructureNotify, PropertyChange.
-    //
-    // Three deliberate deviations, all because this WM differs from DWM:
+    // PointerMotion, Enter/LeaveWindow, StructureNotify, PropertyChange -- except for
+    // these deliberate deviations, all because this WM differs:
     //  - KEY_PRESS: our keybind grabs land on root via xcb_grab_key.
-    //  - POINTER_MOTION (raw): the server reports every pointer move; raw
-    //    volume is bounded by motion coalescing in events.handleXcbEvents,
-    //    which collapses runs to the last event per poll wakeup (rather than
-    //    a POINTER_MOTION_HINT + per-tick QueryPointer re-arm).
-    //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer +
-    //    XMaskEvent loop, so root never needs it. Ours are async; the
-    //    Super+Button grab from grabs.grabMouseButtons stays engaged for the
-    //    whole gesture (AsyncPointer; see keepDragGrab in mouse.zig), so this
-    //    bit is what lets the release reach mouse.handleButtonRelease and clear
-    //    drag.active. Without it, drag.active sticks true and handleEnterNotify
-    //    drops every hover-focus EnterNotify until the WM restarts.
-    //  - KEY_RELEASE: the release half of every binding press. Key RELEASE
-    //    also covers a passive grab's repeated presses re-firing: with
-    //    detectable auto-repeat held binding keys re-fire their action on
-    //    every repeat (a passive grab reports the release to the grab window,
-    //    but the root mask, not the grab, decides which events the WM actually
-    //    receives; without the release bit, the detectable-auto-repeat
-    //    press/release stream in core/input/mouse.zig would still work for presses but
-    //    releases would be lost).
-    // X protocol EventMask bits: KeyPress=1<<0, KeyRelease=1<<1,
-    // ButtonPress=1<<2, ButtonRelease=1<<3, EnterWindow=1<<4,
-    // LeaveWindow=1<<5, PointerMotion=1<<6, KeymapState=1<<14,
-    // Exposure=1<<15, VisibilityChange=1<<16, StructureNotify=1<<17,
-    // ResizeRedirect=1<<18, SubstructureNotify=1<<19,
-    // SubstructureRedirect=1<<20, FocusChange=1<<21, PropertyChange=1<<22.
+    //  - POINTER_MOTION (raw): volume bounded by motion coalescing in
+    //    events.handleXcbEvents (collapses a run to its last event per poll wakeup).
+    //  - BUTTON_RELEASE: DWM's drags run their own blocking XGrabPointer loop so root
+    //    never needs it; ours are async, with the Super+Button grab engaged for the
+    //    whole gesture. Without this bit drag.active sticks true and hover-focus drops
+    //    every EnterNotify until the WM restarts.
+    //  - KEY_RELEASE: the release half of every binding press, and the way a passive
+    //    grab's held key keeps re-firing under detectable auto-repeat (the root mask,
+    //    not the grab, decides what the WM receives).
     pub const root_window: u32 = 1 << 20 | // SubstructureRedirect
         1 << 19 | // SubstructureNotify
         1 << 0 | // KeyPress
@@ -120,12 +92,9 @@ pub const EventMasks = struct {
 
     // DWM verbatim (manage() in dwm.c): EnterWindow|FocusChange|PropertyChange|
     // StructureNotify via XSelectInput; buttons via XGrabButton (grabbuttons).
-    //
-    // Deliberately NO BUTTON_PRESS: DWM does not subscribe managed windows to
-    // it either; unfocused-window buttons arrive via grabbuttons' grabs and
-    // focused-window buttons via the focus-specific grabs. Adding it here would
-    // deliver button events through both mechanisms, duplicating events and
-    // interfering with SYNC-mode grab sequencing.
+    // Deliberately NO BUTTON_PRESS: unfocused-window buttons arrive via grabbuttons'
+    // grabs and focused ones via the focus-specific grabs. Adding it here would
+    // duplicate them and interfere with SYNC-mode grab sequencing.
     pub const managed_window: u32 = 1 << 4 | // EnterWindow (DWM: EnterWindowMask)
         1 << 21 | // FocusChange (DWM: FocusChangeMask)
         1 << 22 | // PropertyChange (DWM: PropertyChangeMask)
@@ -134,13 +103,12 @@ pub const EventMasks = struct {
 
 /// The four modifiers a binding can be expressed in, as a 4-bit value.
 ///
-/// A raw `u16` carries lock bits (NumLock, CapsLock, ScrollLock) and pointer
-/// button bits that can never match a configured mask. That made an un-normalized
-/// value a SILENT failure rather than a mistake: the binding simply never fires,
-/// with no compiler hint and nothing in the log to point at. At four bits wide
-/// the type cannot represent those bits, so the mistake becomes a compile error
-/// at the call site, which is the only place it can be diagnosed, since the
-/// symptom is "my binding is dead" weeks later.
+/// A raw `u16` carries lock bits (NumLock, CapsLock, ScrollLock) and pointer button
+/// bits that can never match a configured mask, which made an un-normalized value a
+/// SILENT failure: the binding simply never fires, with no compiler hint. At four bits
+/// the type cannot represent those bits, so the mistake becomes a compile error at the
+/// call site -- the only place it can be diagnosed, since the symptom is "my binding
+/// is dead" weeks later.
 pub const BindingMods = packed struct(u4) {
     shift: bool = false,
     control: bool = false,
@@ -153,11 +121,9 @@ pub const BindingMods = packed struct(u4) {
     }
 };
 
-/// Strips lock-key and pointer-button bits from a raw event modifier state,
-/// leaving only the modifier bits the WM uses for keybind matching.
-///
-/// A mask operation, so it lives with the masks it filters: the input layer
-/// is the only caller.
+/// Strips lock-key and pointer-button bits from a raw event modifier state, leaving
+/// only the bits the WM uses for keybind matching. A mask operation, so it lives with
+/// the masks it filters; the input layer is the only caller.
 pub inline fn normalizeModifiers(state: u16) BindingMods {
     return .{
         .shift = state & mod_shift != 0,
@@ -167,9 +133,9 @@ pub inline fn normalizeModifiers(state: u16) BindingMods {
     };
 }
 
-/// Widens back to a `u16` mask, for the paths that compare against a config's
-/// stored masks (mouse binds) or print one. The reverse of `normalizeModifiers`
-/// and lossy in the same way: any bit outside the four is not representable.
+/// Widens back to a `u16` mask for paths comparing against a config's stored masks
+/// (mouse binds) or printing one. The reverse of `normalizeModifiers` and lossy in
+/// the same way: bits outside the four are not representable.
 pub inline fn toMask(m: BindingMods) u16 {
     var mask: u16 = 0;
     if (m.shift) mask |= mod_shift;

@@ -6,9 +6,8 @@ const tiling = @import("tiling");
 const Region = tiling.Region;
 
 /// Compute BSP layout: recursive bisection of the longer axis 50/50 with one
-/// gap at each seam; border subtracted at leaf nodes only. Requires the
-/// engine contract's non-empty `v.order` (recursion halves never produce an
-/// empty sub-slice for n >= 2).
+/// gap at each seam; border subtracted at leaf nodes only. Recursion halves
+/// never produce an empty sub-slice for n >= 2.
 fn compute(v: *const tiling.View, out: *tiling.List) void {
     const ctx = tiling.LayoutCtx.init(v, out);
 
@@ -28,10 +27,10 @@ fn tileRegion(
     const n = windows.len;
 
     // Splitting a gap-less pane yields overlapping children that the parent
-    // then re-splits forever: an Env with min_dim==0 and gap==0 passed the
-    // min-dim gate and never terminated (zero-Env default was a live hazard).
-    // A region that cannot host any placement parks every window -- returning
-    // silently would emit fewer placements than v.order has windows.
+    // re-splits forever: an Env with min_dim==0 and gap==0 passes the min-dim
+    // gate and never terminates. A region that cannot host any placement parks
+    // every window -- returning silently would emit fewer placements than
+    // v.order has windows.
     const border2: u16 = model.doubledBorder(ctx.m);
     if (!tiling.insetFits(r.w, r.h, border2)) {
         for (windows) |w| tiling.emitHidden(ctx.out, w);
@@ -39,7 +38,6 @@ fn tileRegion(
     }
 
     if (n == 1) {
-        // All leaf placements are visible; hints applied by tiling.emitView.
         tiling.emitView(ctx.v, ctx.out, windows[0], tiling.insetRect(r.x, r.y, r.w, r.h, border2, ctx.min_dim));
         return;
     }
@@ -51,16 +49,13 @@ fn tileRegion(
     const dim: u32 = if (horizontal) r.w else r.h;
     // The pane cannot hold two min-dim children plus the seam gap: splitting
     // both sides to min_dim would push the second past the parent's far edge,
-    // so leaf overflows instead. Gate is a min_dim floor, unlike fibonacci's
-    // gap+border spiral gate. Hand the whole region to the focused window and
-    // park the rest, the same overflow-share shape fibonacci uses.
-    // The split's own positivity floor (`gap + 2`, so bisectRegion's first
-    // half is >= 1; a zero first half would emit through shrinkCapped's >= 1
-    // floor while the second half keeps the whole pane, stacking siblings).
-    // max_dim-floor and positivity: the larger bound wins; for any min_dim >=
-    // 1 the floor already dominates, so batching is unchanged.
+    // so leaf overflows instead. The gate is a min_dim floor, unlike
+    // fibonacci's gap+border spiral gate; `gap + 2` is the split's own
+    // positivity floor (bisectRegion's first half must be >= 1, else it emits
+    // through shrinkCapped's >=1 floor while the second half keeps the whole
+    // pane, stacking siblings). The larger of the two bounds wins -- for any
+    // min_dim >= 1 the floor already dominates.
     if (dim < @max(@as(u32, ctx.min_dim) * 2 +| @as(u32, gap), @as(u32, gap) + 2)) {
-        // focusedElse falls back to the list head (first window).
         tiling.emitOverflowShare(ctx, windows, r);
         return;
     }
@@ -80,5 +75,4 @@ fn tileRegion(
     tileRegion(ctx, windows[n_left..], second);
 }
 
-/// This layout's registry contribution: metadata plus the dispatch hook.
 pub const module = tiling.layoutModule("leaf", "BSP", compute, &.{}, .{});

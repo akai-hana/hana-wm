@@ -66,7 +66,7 @@ pub fn workspaceInRange(ws_1based: usize, max: usize) bool {
 /// case-typo sweep that keys on these) updates one place. A fragment
 /// references the names it owns from here (a local const is what a fork or
 /// plugin fragment may use instead -- the section lists are per-fragment
-/// exports, D13); the mis-case lint's inventory is the union of the PRESENT
+/// exports); the mis-case lint's inventory is the union of the PRESENT
 /// fragments' exports, so in a tree that deleted a module its sections drop
 /// out of the mis-case table and fall back to the unconsumed-key warns.
 pub const section_tiling = "tiling";
@@ -123,7 +123,6 @@ pub const InertFamily = struct {
 /// would take the floor down in a build that deleted one of its segments)
 /// while tests that load the same bytes under a file label keep it pinned.
 pub const embedded_fallback_label = "<embedded fallback>";
-
 /// Document-global color-palette variable names declared once and referenced
 /// by any color knob (the color_from chains and the parser's collectPalette).
 pub const palette_primary_color = "primary_color";
@@ -244,8 +243,8 @@ pub const CoreConfig = struct {
     /// guess, and a HiDPI panel whose physical size the compositor has not
     /// told X about yields a DPI that is simply wrong. Both produce a bar
     /// whose text is the wrong size, with nothing in the config to correct it
-    /// by. The value is validated for reasonableness on load, exactly like a
-    /// detected one, so a typo cannot buy a font the size of a billboard.
+    /// by. Validated for reasonableness on load, exactly like a detected one,
+    /// so a typo cannot buy a font the size of a billboard.
     dpi: ?f32 = null,
 
     /// Allow held keybindings to re-fire at the X auto-repeat rate
@@ -279,14 +278,12 @@ pub const Rule = struct {
 
 /// Default colors (kept as shared literals: they seed fragment field
 /// initializers and read-time fallbacks without coupling the fragments to
-/// each other).
-/// Default color scheme for the focused/unfocused tiling borders.
+/// each other). Default color scheme for the focused/unfocused tiling borders.
 pub const default_focused_border: u32 = 0x5294E2;
 pub const default_unfocused_border: u32 = 0x383C4A;
 
 /// Default accent color; declared once so every referencing field has a single source of truth.
 pub const default_accent: u32 = 0x61AFEF;
-
 /// Default bar background/foreground scheme. Kept in one place so the bar's
 /// color defaults read as a palette rather than scattered hex literals.
 pub const default_bar_bg: u32 = 0x222222;

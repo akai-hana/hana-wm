@@ -3,17 +3,15 @@
 //! named reads (covering occupant, parked predicate) that wrap one-line
 //! provider lookups every consumer would otherwise restate.
 //!
-//! BINDING-LAYER SURFACE: the five dispatch wrappers below
-//! (providerOf/callHook/callHookBool/dispatchAll/dispatchFirstTrue) are thin
-//! on purpose. Collapsing them would spread providerOf + @call pairs across
-//! every dispatch call site, and folding them back into contract would
-//! re-create comptime-generic helpers that the two-primitive dispatch family
-//! deliberately does not carry. They stay five: do not collapse further.
+//! The five dispatch wrappers are thin ON PURPOSE: collapsing them would
+//! spread providerOf + @call pairs across every dispatch call site, and
+//! folding them back into contract would re-create comptime-generic helpers
+//! the two-primitive dispatch family deliberately does not carry. They stay
+//! five; do not collapse further.
 //!
-//! Within `src/window/**` callers import `registry` directly (one hop to the
-//! definition); outside the layer `window.zig` re-exports them so
-//! `window.*` stays the stable external facade events.zig, bar/state.zig,
-//! input and the tests import.
+//! Within `src/window/**` callers import `registry` directly; outside the
+//! layer `window.zig` re-exports them so `window.*` stays the stable facade
+//! that events.zig, bar/state.zig, input and the tests import.
 
 const std = @import("std");
 
@@ -22,21 +20,20 @@ const dispatch = @import("contract_dispatch");
 const model = @import("model");
 const window_mods = @import("window_modules").modules;
 
-/// Registry lookup for the hook `field` (see `dispatch.providerOf`), null when
-/// no module binds it; shared by the whole window layer.
-/// Thin typed forward onto the single canonical `contract` dispatch family
-/// (two primitives: providerOf + callAll).
+/// Registry lookup for the hook `field` (see `dispatch.providerOf`), null
+/// when no module binds it. Thin typed forward onto the canonical `contract`
+/// dispatch family.
 pub fn providerOf(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
 ) ?*const contract.WindowModule {
     return dispatch.providerOf(contract.WindowModule, window_mods[0..], field);
 }
 
-/// First-match dispatch: invokes the first module that binds `field`, nothing
-/// when none does (the "adopt by name" path for single-binder hooks, see
-/// `single_binder_hooks`). providerOf + invoke stated here -- the shape had
-/// this one consumer, so it lives at the binding layer rather than as a
-/// comptime-generic helper in contract).
+/// First-match dispatch: invokes the first module that binds `field`,
+/// nothing when none does (the "adopt by name" path for single-binder hooks,
+/// see `single_binder_hooks`). providerOf + invoke stated here — this shape
+/// had one consumer, so it lives at the binding layer rather than as a
+/// comptime-generic helper in contract.
 pub fn callHook(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
@@ -57,14 +54,12 @@ pub fn callHookBool(
 /// Fan-out FIRE COUNT for the `onWindowGone` lifecycle audit: every hook
 /// binding that name is idempotent (find-then-clear), so MODULE STATE cannot
 /// distinguish one fire from two — only a count can pin "a managed destroy
-/// fires the hook exactly once" (P1-19's X-gated test, which is what makes
-/// P1-40's removal of the events.zig pre-fire checkable: a re-added second
-/// fire site regresses this counter even though every hook stays happy). The
-/// count lives at the dispatch PRIMITIVE so it sees every path — the
-/// `window.*` facade re-export, in-layer direct `registry.dispatchAll`
-/// calls, and module-to-module re-dispatch — however the next call site is
-/// written. Increment is comptime-gated on this one field (every other hook
-/// pays nothing), and no production code reads the counter (test seam).
+/// fires the hook exactly once", and it catches a re-added second fire site
+/// even though every hook stays happy. The count lives at the dispatch
+/// PRIMITIVE so it sees every path — the `window.*` facade re-export,
+/// in-layer direct `registry.dispatchAll` calls, and module-to-module
+/// re-dispatch. Increment is comptime-gated on this one field (every other
+/// hook pays nothing); no production code reads it (test seam).
 pub var onWindowGone_fires: usize = 0;
 
 /// Runs a hook on EVERY module that binds it, not just the first (callHook
@@ -78,10 +73,9 @@ pub fn dispatchAll(
 }
 
 /// Like dispatchAll but returns true at the first provider whose hook does;
-/// false when no provider binds the hook or none returns true. The any-true
-/// scan is stated here (one consumer per owner layer -- see the dispatch-
-/// primitives note in contract_dispatch.zig); the fallible fan-out variant was inlined
-/// at its single lifecycle-init call site.
+/// false when none binds it or none returns true. Stated here (one consumer
+/// per owner layer — see the dispatch-primitives note in
+/// contract_dispatch.zig).
 pub fn dispatchFirstTrue(
     comptime field: std.meta.FieldEnum(contract.WindowModule),
     args: anytype,
@@ -92,14 +86,12 @@ pub fn dispatchFirstTrue(
     return false;
 }
 
-/// Per-family dispatch (D12/P2-54): the same five shapes as the top-level
-/// wrappers above, scoped to one `WindowModule` family struct
+/// Per-family dispatch: the same five shapes as the top-level wrappers,
+/// scoped to one `WindowModule` family struct
 /// (`registry.hide.callHook(.hideWindow, ...)`). `get` projects the family
 /// out of an element; `providerOf` returns the WHOLE element (pointer into
 /// the static registry, same lifetime contract as the top-level lookup), so
-/// a caller can still read other fields off it. Stated once per contract
-/// here rather than as a comptime-generic primitive in contract_dispatch:
-/// the window layer is its only consumer.
+/// a caller can still read other fields off it.
 fn Family(comptime family_field: []const u8, comptime F: type) type {
     return struct {
         const Self = @This();
@@ -138,9 +130,8 @@ fn Family(comptime family_field: []const u8, comptime F: type) type {
 }
 
 /// The seven single-binder families, one namespace each (see the family
-/// structs in `window_contract.zig`). A family is one field on the contract
-/// and one namespace here; dispatch is first-match, so each family hook is
-/// bound by at most one module (asserted at comptime).
+/// structs in `window_contract.zig`). Dispatch is first-match, so each
+/// family hook is bound by at most one module (asserted at comptime).
 pub const hide = Family("hide", contract.HideHooks);
 pub const covering = Family("covering", contract.CoveringHooks);
 pub const workspaces = Family("workspaces", contract.WorkspacesHooks);

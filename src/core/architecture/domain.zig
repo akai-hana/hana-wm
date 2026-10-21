@@ -1,75 +1,46 @@
-//! Pure vocabulary (no I/O): identifier types, value objects the window state
-//! holds, mask/tag vocabulary, layout-parameter records, feature-vocabulary
-//! enums, constants, pure helpers, and the generic sorted-key Store re-export.
-//! The runtime state that HOLDS this vocabulary (Entry, WsState, Model) and
-//! every state operation live beside it in `core/model.zig` — this file is
-//! PRIVATE to that facade, with one sanctioned carve-out: the config→model
-//! seeding root (`config/model_config.zig`) stamps config into the model and
-//! imports this vocabulary directly. Nothing else reaches past the facade.
-//!
-//! Geometry lives here rather than in a `geom` module because it is not a
-//! utility: `Rect`/`Margins` are value objects the state holds (`BaseMode.
-//! floating`, `Placement`), and the two coordinate helpers exist only to serve
-//! them -- `satI16` clamps into `Rect`'s own i16 range, `toXcbCoord` adapts a
-//! `Rect` field to the wire. `satI16` is also used by the pure `tiling/` layer,
-//! which is why these cannot live on the x11 side. The one adapter that IS
-//! genuinely xcb-typed, `rectFromXcb`, stays in `x11/requests.zig`.
-//!
-//! Layer rule: pure core (no X11, no feature imports). The only imports are
-//! `std` and other xcb-free vocabulary, so this file cannot reach the
-//! connection in `core.zig` -- that is what keeps the pure side a DAG root.
-//! Single-threaded.
+//! Pure vocabulary (no I/O): identifier types, state-held value objects, mask/tag and
+//! layout-parameter records, feature enums, constants, helpers, and the generic Store
+//! re-export. PRIVATE to the `core/model.zig` facade; the only sanctioned import past it
+//! is the config→model seed. Geometry lives here because `Rect`/`Margins` are state-held
+//! value objects and `satI16` also serves the pure `tiling/` layer. Layer rule: only
+//! `std` and xcb-free vocabulary may be imported. Single-threaded.
 const std = @import("std");
 
 const bounded = @import("bounded");
 
-/// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId`
-/// and `model.WindowId` are aliases of this single definition, so window ids
-/// cross the core/state boundary without conversion.
+/// Canonical window identifier type (xcb_window_t / uint32_t). `core.WindowId` and
+/// `model.WindowId` alias it, so ids cross the core/state boundary without
+/// conversion.
 pub const WindowId = u32;
 
-/// Canonical workspace identifier type.
-///
-/// `core.WorkspaceId` and `model.WSId` are both names for this single
-/// struct, so workspace ids cross the core/state boundary without conversion.
-/// The type keeps a `.index` member so state code can keep using `ws` values
-/// directly as array indices; integer-typed boundaries (wire formats,
-/// counters) convert with `fromIndex` / `.index`.
-/// `fromIndex` accepts any integer (internal checked `@intCast` to u8), so
-/// callers don't scatter `@intCast` wrappers; the u8 field type still keeps
-/// indices distinct from unrelated u8 values (counts, layout indices, etc.).
-/// Range is a SEPARATE question from representation: `fromIndex` is lenient
-/// (config/recovery paths), `fromIndexChecked` asserts (internal paths), and
-/// `isValid` is the single definition every fixed-size consumer asks.
-/// Lives here (the pure vocabulary root) because every layer -- config,
-/// tiling, the hub, the window modules -- needs it; it imports nothing but
-/// std and the shared bounded shelf.
+/// Canonical workspace identifier; `core.WorkspaceId` and `model.WSId` are both names for
+/// this struct, so ids cross the core/state boundary without conversion. `.index` keeps
+/// `ws` values usable directly as array indices. Range is a SEPARATE question from
+/// representation: `fromIndex` is lenient (config/recovery), `fromIndexChecked` asserts
+/// (internal), `isValid` is the question every fixed-size consumer asks.
 pub const WorkspaceId = struct {
     index: u8,
 
-    /// Lenient constructor: accepts any integer, narrowing to u8. This is the
-    /// entry point the parser and restore paths use, and it deliberately does
-    /// NOT range-check -- an out-of-range value from a user config is
-    /// recoverable there (the caller clamps or skips with a warning), and a
-    /// panic would turn a typo in a config file into a failed startup. Use
-    /// `fromIndexChecked` where the value is internal and must be valid.
+    /// Lenient constructor (the parser/restore entry point): narrows to u8 and deliberately
+    /// does NOT range-check -- an out-of-range config value is recoverable there (the
+    /// caller clamps or warns) while a panic would turn a config typo into a failed
+    /// startup. Use `fromIndexChecked` for internal values that must be valid.
     pub fn fromIndex(i: anytype) WorkspaceId {
         return .{ .index = @intCast(i) };
     }
 
-    /// Constructive constructor: asserts the index is a real workspace. Every
-    /// INTERNAL site (state, mask, action dispatch) uses this, so a 65th
-    /// workspace is a debug failure at the boundary that created it rather
-    /// than a silent wrong-mask or an out-of-bounds array read further on.
+    /// Constructive constructor: asserts a real workspace, so an internal 65th
+    /// workspace fails at the boundary that created it rather than as a silent
+    /// wrong-mask or out-of-bounds read further on.
     pub fn fromIndexChecked(i: anytype) WorkspaceId {
         const ws: WorkspaceId = .{ .index = @intCast(i) };
         std.debug.assert(isValidWorkspaceIndex(ws.index));
         return ws;
     }
 
-    /// True when this id names a workspace the model can hold. A value past
-    /// the ceiling can still exist (the lenient `fromIndex` admits it), so
-    /// every consumer that indexes a fixed-size array must ask.
+    /// True when this id names a workspace the model can hold. Past-ceiling values can
+    /// still exist (lenient `fromIndex` admits them), so every fixed-size-array consumer
+    /// must ask.
     pub fn isValid(self: WorkspaceId) bool {
         return isValidWorkspaceIndex(self.index);
     }
@@ -79,50 +50,37 @@ pub const WorkspaceId = struct {
     }
 };
 
-/// State-layer alias of the canonical WorkspaceId. Within the state, `ws`
-/// values are read as array indices via `.index`.
+/// State-layer alias of the canonical WorkspaceId.
 pub const WSId = WorkspaceId;
 
-/// The ONE validity notion for a workspace index. Everything that has
-/// to decide "is this index in range" -- the mask shift, the state's fixed-size
-/// `ws` array, the config lookup tables -- asks here, so a raise of
-/// `max_workspaces` cannot leave one of them answering a different question.
+/// The ONE validity notion for a workspace index: the mask shift, the state's
+/// fixed-size `ws` array and the config lookup tables all ask here, so a raise of
+/// `max_workspaces` cannot leave one answering a different question.
 pub fn isValidWorkspaceIndex(i: anytype) bool {
     return @as(usize, @intCast(i)) < max_workspaces;
 }
 
-/// Hard ceiling on the number of workspaces the WM can meaningfully support.
-///
-/// Not an arbitrary round number: tiling.zig's geometry-validity cache packs
-/// one bit per workspace into a u64 (`workspace_geom_valid_bits`), and
-/// workspaces.zig's per-workspace layout/master-count override tables are
-/// fixed-size arrays sized to match. Raising this requires widening those
-/// first; it is not just a config-side number. config.zig validates parsed
-/// workspace numbers against it at parse time so oversized configs warn
-/// immediately instead of silently no-oping once workspaces.init() builds its
-/// lookup tables.
+/// Hard ceiling on workspaces the WM can meaningfully support -- not an arbitrary round
+/// number: tiling.zig packs one bit per workspace into a u64 (`workspace_geom_valid_bits`)
+/// and workspaces.zig's override tables are fixed-size arrays sized to match, so those
+/// widen first. config.zig validates parsed workspace numbers against it.
 pub const max_workspaces: usize = 64;
 
-/// Maximum tiled windows on a single workspace (per-workspace tiled_order
-/// capacity, applied per workspace). Buffers sized from this are indexed by
-/// usize/u16, so raising it only costs memory; keep it a compile-time bound
-/// so stack buffers stay stack buffers. P2-72: `View.hintsFor`
-/// (tiling_contract) is an O(n) scan over exactly this bound -- if it ever
-/// grows past ~64, swap hintsFor to an index-aligned lookup FIRST.
+/// Maximum tiled windows per workspace (tiled_order capacity). Buffers sized from this
+/// are usize/u16-indexed, so raising it only costs memory. `View.hintsFor` is an O(n)
+/// scan over exactly this bound -- past ~64, swap it for an index-aligned lookup FIRST.
 pub const max_tiled_windows: usize = 64;
 
-/// Lower bound on the primary-column width ratio. Config validation and the
-/// runtime primary-width adjustment both clamp here.
+/// Lower bound on the primary-column width ratio; config validation and the
+/// runtime adjustment both clamp here.
 pub const min_master_width: f32 = 0.05;
 
-/// Primary-column width is capped at 95% so the secondary column always keeps
-/// some screen. Single-sourced: config validation, the runtime pixel->ratio
-/// conversion, and the primary-width adjustment action all clamp to this same
-/// bound.
+/// Primary-column width caps at 95% so the secondary column always keeps some screen.
+/// Single-sourced: config validation, the runtime pixel->ratio conversion and the
+/// primary-width adjustment all clamp here.
 pub const max_master_width: f32 = 0.95;
 
-/// Position and dimensions of a managed window, relative to the root window
-/// (the total display area).
+/// Position and dimensions of a managed window, relative to the root window.
 pub const Rect = struct {
     x: i16,
     y: i16,
@@ -135,28 +93,19 @@ pub const Rect = struct {
             self.height == other.height and self.border_width == other.border_width;
     }
 
-    /// Geometry only, ignoring `border_width`.
-    ///
-    /// `eql` and `eqlGeom` exist because a `Rect` carries BOTH geometry and a
-    /// border width, but the two are sent by different requests and tracked by
-    /// different sent-state (a geometry configure vs the ledger's `bw` field).
-    /// Comparing a whole `Rect` to decide "did the geometry move" therefore
-    /// reads a field the comparison does not own, so a border-width-only
-    /// change reads as a move and buys a spurious configure plus raise. Use
-    /// `eql` only when the border width is part of the comparison.
+    /// Geometry only, ignoring `border_width`. The two comparators exist because geometry
+    /// and border width ride different requests and sent-state, so comparing a whole `Rect`
+    /// to decide "did the geometry move" makes a border-only change buy a spurious
+    /// configure plus raise. Use `eql` for the full comparison.
     pub inline fn eqlGeom(self: Rect, other: Rect) bool {
         return self.x == other.x and self.y == other.y and self.width == other.width and
             self.height == other.height;
     }
 };
 
-/// Width/height without a position: the resize-while-parked request shape.
-///
-/// A parked window must be resized OFFSCREEN so its client re-renders before
-/// a workspace switch shows it (the bar-toggle pre-resize), which means a
-/// configure carrying WIDTH|HEIGHT and NOT X/Y — moving it back on screen
-/// would overlay the live workspace. `sink.Configure.size` is the wire shape;
-/// this is its vocabulary, kept beside Rect as the other geometry type.
+/// Width/height without a position: the resize-while-parked request shape. A parked window
+/// must be resized OFFSCREEN so its client re-renders before a workspace switch shows it,
+/// i.e. WIDTH|HEIGHT without X/Y. `sink.Configure.size` is the wire shape.
 pub const Dims = struct {
     width: u16,
     height: u16,
@@ -168,23 +117,21 @@ pub const Margins = struct {
     border: u16 = 0,
 };
 
-/// Twice the border width (left+right / top+bottom inset).
+/// Twice the border width (the left+right / top+bottom inset).
 pub inline fn doubledBorder(m: Margins) u16 {
     return 2 *| m.border;
 }
 
-/// Saturating i16 coordinate clamp: narrows an i32 coordinate into the i16
-/// `Rect` range, clamping instead of wrapping so a single pathological value
-/// can't cross the whole screen in ReleaseFast.
+/// Saturating i16 coordinate clamp: narrows an i32 into the i16 `Rect` range, clamping
+/// instead of wrapping so one pathological value can't cross the whole screen in
+/// ReleaseFast.
 pub inline fn satI16(v: i32) i16 {
     return @intCast(std.math.clamp(v, std.math.minInt(i16), std.math.maxInt(i16)));
 }
 
-/// Centers a `w`x`h` box over `parent`, clamped inside `bounds` (the work
-/// area): the dialog-over-parent placement ICCCM's WM_TRANSIENT_FOR asks
-/// for. The clamp wins when centering would hang the box off an edge; a box
-/// larger than `bounds` pins to the bounds origin rather than producing an
-/// inverted clamp range.
+/// Centers a `w`x`h` box over `parent`, clamped inside `bounds` (the work area): the
+/// dialog-over-parent placement ICCCM's WM_TRANSIENT_FOR asks for. The clamp wins over
+/// centering; a box larger than `bounds` pins to the bounds origin.
 pub fn centerRectIn(parent: Rect, w: u16, h: u16, bounds: Rect) Rect {
     const bx: i32 = bounds.x;
     const by: i32 = bounds.y;
@@ -203,10 +150,9 @@ pub inline fn toXcbCoord(v: i16) u32 {
     return @bitCast(@as(i32, v));
 }
 
-/// Modulo-wraps `idx` by signed `dir` into [0, n); 0 for an empty range.
-/// The one modulo-wrap in the tree, powering the round-robin focus and
-/// layout-direction cycles, so those callers name the operation instead of
-/// reaching into a shared grab bag for it.
+/// Modulo-wraps `idx` by signed `dir` into [0, n); 0 for an empty range. The one
+/// modulo-wrap in the tree (round-robin focus and layout cycles), so those callers name
+/// it rather than reaching into a grab bag.
 pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
     if (n == 0) return 0;
     return @intCast(@mod(@as(i64, @intCast(idx)) + dir, @as(i64, @intCast(n))));
@@ -214,13 +160,10 @@ pub inline fn wrapIndex(idx: usize, dir: i32, n: usize) usize {
 
 pub const Mask = u64;
 
-/// Mask bit for workspace `ws`.
-///
-/// Two preconditions, both tied to `max_workspaces` rather than
-/// restating its number: the index must name a real workspace, and it must
-/// fit the u64 mask. A shift by >= bitSizeOf would silently produce a wrong
-/// mask in safe modes, so raising max_workspaces past 64 is a loud build
-/// failure rather than a corrupt membership mask.
+/// Mask bit for workspace `ws`. Two preconditions, both tied to `max_workspaces` rather
+/// than restating its number: the index must name a real workspace and must fit the u64
+/// mask. A shift by >= bitSizeOf would silently yield a wrong mask, so raising
+/// max_workspaces past 64 is a loud build failure instead of a corrupt membership mask.
 pub inline fn bit(ws: WSId) Mask {
     std.debug.assert(ws.isValid());
     std.debug.assert(ws.index < @bitSizeOf(Mask));
@@ -234,29 +177,24 @@ pub inline fn maskedOn(mask: Mask, ws: WSId) bool {
 
 pub const ALL_MASK: Mask = ~@as(Mask, 0);
 
-/// Single canonical size-hints record AND the only store: admission threads
-/// the parsed WM_NORMAL_HINTS to mapRequest as a parameter (there is no
-/// staging copy anywhere). Do NOT import layouts from here (layer rule).
+/// Single canonical size-hints record AND the only store: admission threads the parsed
+/// WM_NORMAL_HINTS to mapRequest as a parameter (no staging copy anywhere). Do NOT
+/// import layouts from here (layer rule).
 pub const SizeHints = struct {
-    /// PMinSize / PBaseSize floor. Policy: TILING deliberately does not
-    /// ENFORCE declared minimums -- the layout engine owns tiled dimensions,
-    /// and honouring them would pin the rect and block mod_h/mod_l resizing
-    /// (`tiling.applyHints` is the tiled-side delegate). It does participate
-    /// as the ICCCM increment-snap fallback base when PBaseSize is absent
-    /// (see `base_width`); that anchors the snap, it does not floor the
-    /// result. Only the floating drag-resize path honours this as a
-    /// user-facing floor.
+    /// PMinSize / PBaseSize floor. TILING deliberately does not ENFORCE declared minimums
+    /// -- the layout engine owns tiled dimensions; honouring them would pin the rect and
+    /// block mod_h/mod_l resizing (`tiling.applyHints` is the tiled-side delegate). It only
+    /// serves as the ICCCM increment-snap fallback base when PBaseSize is absent. Only the
+    /// floating drag-resize honours it as a user-facing floor.
     min_width: u16 = 0,
     min_height: u16 = 0,
     max_width: u16 = 0, // PMaxSize limit
     max_height: u16 = 0,
     inc_width: u16 = 0, // PResizeInc: w = base_width + N * inc_width
     inc_height: u16 = 0,
-    /// PBaseSize: the snap origin for PResizeInc (ICCCM 4.1.2.3 sizes are
-    /// base + N*inc). 0 when undeclared, in which case the increment snap
-    /// falls back to `min_width` (the standard's own fallback). NOT a floor:
-    /// tiling stays shrink-only around it, so a slot smaller than the base
-    /// passes through instead of being pinned up to it.
+    /// PBaseSize: snap origin for PResizeInc (ICCCM sizes are base + N*inc); 0 when
+    /// undeclared, so the snap falls back to `min_width` (the standard's own fallback).
+    /// NOT a floor: tiling stays shrink-only.
     base_width: u16 = 0,
     base_height: u16 = 0,
     min_aspect: f32 = 0.0, // PAspect (dwm convention)
@@ -271,24 +209,14 @@ pub const SizeHints = struct {
             self.min_aspect == 0.0 and self.max_aspect == 0.0;
     }
 
-    /// Shrink-only PAspect fit: reduces whichever dimension of `w` x `h` is
-    /// excess so the result lands inside the declared aspect band (cross-
-    /// multiplied, as in the tiling clamp this was extracted from: `w/h` must
-    /// satisfy `1/min_aspect <= w/h <= max_aspect`). Never grows, never
-    /// violates the bound on either axis; an already in-band size passes
-    /// through unchanged.
+    /// Shrink-only PAspect fit: reduces whichever dimension of `w` x `h` is excess so the
+    /// result lands inside the declared aspect band, cross-multiplied
+    /// (`1/min_aspect <= w/h <= max_aspect`). Never grows; in-band sizes pass through.
     ///
-    /// BOTH OR NEITHER: the two bounds are the two halves of ONE rule, and a
-    /// lone bound is a DIFFERENT constraint, not a weaker one (a max bound
-    /// alone clamps the offending DIMENSION, so a 400x50 window under
-    /// `max_aspect = 4` gets NARROWER instead of taller -- the client is told
-    /// to resize its content rather than given its declared shape). A record
-    /// with only one bound set therefore returns the size unchanged.
-    ///
-    /// Callers clamp the raw size into the PMin/PMax envelope first; the
-    /// ratio then wins over a declared minimum on the derived axis (letterbox
-    /// freedom is the point of the constraint). A dimension that rounds out
-    /// entirely is floored to 1 when its input was positive.
+    /// BOTH OR NEITHER: the two bounds are the halves of ONE rule -- a max bound alone
+    /// clamps the offending DIMENSION, so a 400x50 window under `max_aspect = 4` gets
+    /// NARROWER instead of taller. One bound alone returns the size unchanged. Callers
+    /// clamp into the PMin/PMax envelope first. A dimension rounding out floors to 1.
     pub fn aspectFit(self: SizeHints, w: u16, h: u16) struct { width: u16, height: u16 } {
         if (self.min_aspect <= 0.0 or self.max_aspect <= 0.0)
             return .{ .width = w, .height = h };
@@ -296,9 +224,9 @@ pub const SizeHints = struct {
         const fh: f32 = @floatFromInt(h);
         var out_w = w;
         var out_h = h;
-        // Cross-multiplied to avoid a per-resize FP division pair. Clamp the
-        // product into the u16 range before narrowing so a huge declared ratio
-        // caps instead of trapping in ReleaseFast.
+        // Cross-multiplied to avoid a per-resize FP division pair. Clamp the product into
+        // the u16 range before narrowing so a huge declared ratio caps instead of
+        // trapping in ReleaseFast.
         if (fw > fh * self.max_aspect) {
             out_w = @min(roundAspectDim(fh * self.max_aspect), w);
         } else if (fh > fw * self.min_aspect) {
@@ -311,26 +239,22 @@ pub const SizeHints = struct {
 };
 
 /// Round a non-negative aspect product to the nearest integer, saturating at
-/// the u16 wire limit (the shared shape with the tiling clamp this serves).
+/// the u16 wire limit.
 inline fn roundAspectDim(product: f32) u16 {
     if (!(product > 0.0)) return 0; // zero or NaN (defensive; ratios are > 0)
     const clamped = std.math.clamp(@round(product), 0.0, @as(f32, std.math.maxInt(u16)));
     return @intFromFloat(clamped);
 }
 
-/// Hard ceiling on the number of distinct layouts the cycle ring can hold.
-/// The canonical value lives here because it bounds the u8 `kind` registry
-/// index (LayoutParams.kind) and the u8 `layout_idx` in workspace layout
-/// overrides alike; config side imports it and enforces the cap at parse time
-/// (a 256th entry would trap on the config-side `@intCast` in ReleaseFast,
-/// so names past the cap warn-and-skip).
+/// Hard ceiling on distinct layouts in the cycle ring. Lives here because it bounds BOTH
+/// the u8 `kind` registry index and the u8 `layout_idx` workspace override; config
+/// enforces the cap at parse time (a 256th entry would trap the config-side `@intCast`).
 pub const max_layouts = 256;
 
 pub const LayoutParams = struct {
-    /// Index into the build-generated `tiling_modules` registry (dispatch
-    /// order == deterministic scan order). Resolved from config at seed time;
-    /// out-of-range values are disambiguated by the registry layer (default
-    /// layout fallback). The model stays registry-free: it is a bare index here.
+    /// Index into the build-generated `tiling_modules` registry (dispatch order ==
+    /// deterministic scan order), resolved from config at seed time; the registry layer
+    /// disambiguates out-of-range values. The model stays registry-free.
     kind: u8 = 0,
     variant_idx: u8 = 0,
     primary_width: f32 = 0.5,
@@ -343,29 +267,27 @@ pub const LayoutParams = struct {
 };
 
 pub const BaseMode = union(enum) {
-    /// Home workspace membership is DERIVED (exactly one `ws`.tiled_order list
-    /// holds a tiled window; findHome). Visibility on other tagged workspaces
-    /// is a sync-time mask filter (engine stays mask-agnostic).
+    /// Home workspace membership is DERIVED (exactly one `ws`.tiled_order list holds a
+    /// tiled window; findHome). Visibility on other tagged workspaces is a sync-time mask
+    /// filter (engine stays mask-agnostic).
     tiled,
     floating: Rect,
 };
 
-/// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden
-/// by an extension), `covering` (owns the screen on a workspace). Enumerates
-/// PATTERNS, not features; a parked/covering window keeps its `anchor`/`mask`.
+/// Open visibility pattern: `present` (visible/layoutable), `parked` (hidden by an
+/// extension), `covering` (owns the screen on a workspace). Enumerates PATTERNS, not
+/// features; parked/covering windows keep their `anchor`/`mask`.
 pub const Presence = enum { present, parked, covering };
 
-// Shared vocabulary types.
-// Pure vocabulary consumed by both the wire-side feature plugins and wire
-// callers; they live in core so nothing needs to import a feature file just
-// to reference them.
+// Shared vocabulary types: consumed by wire-side feature plugins and wire
+// callers alike, so they live in core and neither imports a feature file.
 
-/// Restore-order target selection over minimized windows on a workspace:
-/// `.fifo` = oldest minimize seq, `.lifo` = newest.
+/// Restore-order over minimized windows: `.fifo` = oldest minimize seq,
+/// `.lifo` = newest.
 pub const RestoreOrder = enum { lifo, fifo };
 
 /// Optional increment of a floating window's geometry honored on
-/// configure-request; unset fields leave the current value unchanged.
+/// configure-request; null fields leave the current value unchanged.
 pub const ConfigureReq = struct {
     x: ?i16 = null,
     y: ?i16 = null,
@@ -378,30 +300,24 @@ pub const ConfigureReq = struct {
 pub const HonorDecision = enum { geometry_applied, border_only, ignored };
 
 /// Bounded sorted-key collection re-exported from the pure shelf; the model's
-/// window store and the reconcile ledger share it without either naming core.
+/// window store and the reconcile ledger share it without naming `core`/wire.
 pub const Store = bounded.Store;
 
-/// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated);
-/// 16 keeps the per-workspace focus MRU small. Per-workspace tiled membership
-/// is bounds from the compile-time caps above. Transitions never allocate (defined capacities).
-/// P2-72: the layout interchange's hintsFor scan (tiling_contract) is O(n) in
-/// the per-ws order bound (max_tiled_windows), not this store cap; if either
-/// ever grows past ~64/128, swap hintsFor to an index-aligned lookup FIRST.
+/// Store and MRU capacities: 128 bounds the sorted-key store (stack-allocated), 16 keeps
+/// the per-workspace focus MRU small; defined capacities mean state transitions never
+/// allocate. tiling_contract's hintsFor scan is O(n) in max_tiled_windows, not this
+/// store cap.
 pub const store_capacity = 128;
 
-/// Primary-column capacity: a sane handful of slots, capped at a quarter of
-/// the managed-window ceiling so one workspace can't statically claim the
-/// store. The config grammar lets master_count rise to its u8 ceiling (and
-/// admits a 0 count for a workspace override), so the config-driven stamps go
-/// through `capPrimaryCount`.
+/// Primary-column capacity: capped at a quarter of the managed-window ceiling so one
+/// workspace can't statically claim the store. Config lets master_count reach its u8
+/// ceiling, so config-driven stamps go through `capPrimaryCount`.
 pub const max_primary_count = store_capacity / 4;
 
-/// Clamps a configured primary count into [1, max_primary_count] — the model's
-/// primary-count invariant, and the one clamp the config-driven seed stamps
-/// call. The interactive increment (`adjustPrimaryCount`) clamps the same
-/// bounds inline rather than here: its delta arithmetic runs in i32 so a
-/// decrement below 1 cannot wrap a u8, and narrowing to u8 first would be the
-/// overflow it is avoiding.
+/// Clamps a configured primary count into [1, max_primary_count] -- the model's
+/// primary-count invariant, and the one clamp config-driven seed stamps call. The
+/// interactive `adjustPrimaryCount` clamps the same bounds inline instead: its delta runs
+/// in i32 so a decrement below 1 cannot wrap a u8.
 pub fn capPrimaryCount(count: u8) u8 {
     return std.math.clamp(count, 1, @as(u8, @intCast(max_primary_count)));
 }
@@ -409,7 +325,7 @@ pub const mru_capacity = 16;
 pub const max_tiled_per_ws = max_tiled_windows;
 
 /// Index (workspace id) of the lowest set bit in `m`, or null for the zero
-/// mask (`@ctz(0)` = 64, out of the u64 bit range — see `bit`).
+/// mask (`@ctz(0)` = 64, out of u64 range -- see `bit`).
 pub fn lowestBit(m: Mask) ?WSId {
     if (m == 0) return null;
     return WSId.fromIndex(@ctz(m));

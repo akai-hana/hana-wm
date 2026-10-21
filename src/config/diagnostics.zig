@@ -7,10 +7,9 @@
 //! when it is above zero, which is what makes config validation usable in CI.
 //!
 //! Installed through the module-level `diagnostics` pointer, never passed
-//! down the call chain: the odd-dozen warn sites in the config loader are
-//! exactly the ones this exists to cover, and threading a bag through each of
-//! them is the maintenance burden that made the idea unattractive. When it is
-//! null -- the normal case -- `capture` is a no-op.
+//! down the call chain: threading a bag through each of the odd-dozen warn
+//! sites is the maintenance burden that made the idea unattractive. When it
+//! is null -- the normal case -- `capture` is a no-op.
 
 const std = @import("std");
 
@@ -59,11 +58,10 @@ pub const Diagnostics = struct {
     /// The "[module] message" line the stderr path would have written,
     /// clipped to `buf` when it does not fit. `bufPrint` REFUSES to truncate
     /// (error.NoSpaceLeft), so the overflow case is clipped by hand and
-    /// reported via `truncated` instead of erroring: one over-long
-    /// diagnostic must not abort the check that is printing it, and the
-    /// exact flag beats the `len == buf.len` heuristic (false positive on a
-    /// perfectly-fitting line, false negative if a clip ever reserved marker
-    /// room).
+    /// reported via `truncated`: one over-long diagnostic must not abort the
+    /// check that is printing it, and the exact flag beats the
+    /// `len == buf.len` heuristic (false positive on a perfectly-fitting
+    /// line, false negative if a clip ever reserved marker room).
     pub fn line(d: Diagnostic, buf: []u8) Line {
         if (std.fmt.bufPrint(buf, "[{s}] {s}", .{ d.module, d.message })) |text| {
             return .{ .text = text, .truncated = false };
@@ -99,8 +97,8 @@ pub fn capture(
     args: anytype,
 ) void {
     const c = diagnostics orelse return;
-    // Only the failure levels are collected: `info`/`debug` are progress
-    // chatter, and a check that failed on them could never pass.
+    // Only the failure levels are collected: a check that failed on
+    // `info`/`debug` progress chatter could never pass.
     if (level != .warn and level != .err) return;
     const message = std.fmt.allocPrint(c.allocator, format, args) catch {
         c.items.append(c.allocator, .{

@@ -5,19 +5,15 @@
 //! (`collectPalette`).
 //!
 //! The value-level color grammar, extracted from parser.zig: it is a
-//! self-contained sub-language. The TOKEN-level
-//! spellings stay in parser -- `parseColor` (a hex string to a
-//! u32) and the weight markers (`parseWeightPrefix`/`isWeightToken`/
-//! `weightFromToken`/`splitWeightPrefix`), which the bare-token
-//! interpreter classifies with. This file sits in `parse/` between
-//! parser and schema: it reads parser's `Value` and token grammar, and
-//! schema (and bar_properties, now beside it in `parse/`) read this
-//! file's decoders. The dependency is one-directional -- parser never
-//! imports color -- so it cannot cycle; bar_properties takes the knob
-//! table as a parameter, so schema<->bar_properties stays loop-free
-//! too. With color and bar_properties both living in `parse/`, the
-//! config layer's cross-directory edge is gone outright: `parse/`
-//! imports nothing from `sections/` or `vocab/`.
+//! self-contained sub-language. The TOKEN-level spellings stay in parser --
+//! `parseColor` (a hex string to a u32) and the weight markers
+//! (`parseWeightPrefix`/`isWeightToken`/`weightFromToken`/`splitWeightPrefix`),
+//! which the bare-token interpreter classifies with. This file sits in
+//! `parse/` between parser and schema: it reads parser's `Value` and token
+//! grammar, and schema (and bar_properties, beside it in `parse/`) read this
+//! file's decoders. The dependency is one-directional -- parser never imports
+//! color -- so it cannot cycle; bar_properties takes the knob table as a
+//! parameter, so schema<->bar_properties stays loop-free too.
 
 const std = @import("std");
 const log = std.log.scoped(.color);
@@ -38,10 +34,10 @@ pub fn colorFromValue(val: Value) ?u32 {
         // Bare all-digit color spellings are HEX: 6 digits = #RRGGBB. Any
         // other bare integral value in a color context is INVALID (no silent
         // decimal coerce); spell a value-color via 0xRRGGBB instead. An
-        // 8-digit spelling is deliberately rejected, matching parser.parseColor
-        // (which caps at 24 bits): parsing it raw returned 0xRRGGBBAA, whose
-        // alpha byte sits in the low byte and red shifted into the top byte --
-        // i.e. an invalid packed Color flowing into XCB pixel fields.
+        // 8-digit spelling is rejected, matching parser.parseColor's 24-bit
+        // cap: parsing it raw returned 0xRRGGBBAA, whose alpha byte sits in
+        // the low byte and red shifted into the top byte -- an invalid packed
+        // Color flowing into XCB pixel fields.
         var buf: [20]u8 = undefined;
         const digits = std.fmt.bufPrint(&buf, "{d}", .{@as(u64, @intCast(i))}) catch return null;
         if (digits.len == 6) return std.fmt.parseInt(u32, digits, 16) catch null;
@@ -275,7 +271,6 @@ pub fn resolveColorExpr(val: Value, palette: *const std.StringHashMap(u32)) ?u32
 /// resolveColorExpr (bare lists and spaced spellings mix); an accumulated
 /// `.array` (duplicate declarations) is NOT a mix -- it falls through to the
 /// last-declaration scalar so "later declaration wins" like every other knob.
-/// Used by collectPalette's fixpoint.
 fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
     if (colorFromValue(val)) |c| return c;
     if (val == .array) {
@@ -292,8 +287,8 @@ fn resolvePaletteDecl(val: Value, palette: *const std.StringHashMap(u32)) ?u32 {
 
 /// Scans every section (and the root) for palette-variable declarations,
 /// resolving each to its color value and storing the last declaration into
-/// `doc.palette` ("later declaration wins" like every other knob). The initial scan
-/// resolves literal declarations; a bounded fixpoint then resolves aliases
+/// `doc.palette` ("later declaration wins" like every other knob). The initial
+/// scan resolves literal declarations; a bounded fixpoint then resolves aliases
 /// and `+` mixes that reference other palette variables, so
 /// `primary_color = secondary_color + text_color` works. Also marks the keys
 /// consumed so they never appear as unrecognized. A variable left unresolved
@@ -360,8 +355,8 @@ pub fn collectPalette(doc: *parser.Document) void {
 
 /// True when `val` looks like a color-mix attempt that FAILED the bounds
 /// check (a `+` in some element, or a weight marker anywhere): the
-/// last-scalar fallback must not swallow it (descending to its
-/// final operand silently resolves the bad mix instead of reverting).
+/// last-scalar fallback must not swallow it (descending to its final operand
+/// silently resolves the bad mix instead of reverting).
 fn isMixAttempt(val: parser.Value) bool {
     if (val != .array) return false;
     for (val.asArray().?) |item| {
@@ -377,8 +372,8 @@ fn isMixAttempt(val: parser.Value) bool {
 /// `0xRRGGBB`, an integer, a full-name reference to a collected palette
 /// variable (e.g. `border_focused = primary_color`), or a `+` color-mix
 /// expression of any of those (e.g. `primary_color + (weight:75%)
-/// secondary_color`). The value-decoding forms share colorFromValue
-/// (the single decoder); this layer adds the palette-reference lookup and the
+/// secondary_color`). The value-decoding forms share colorFromValue (the
+/// single decoder); this layer adds the palette-reference lookup and the
 /// warn-and-default policy on top.
 pub fn getColorFromValue(
     key: []const u8,

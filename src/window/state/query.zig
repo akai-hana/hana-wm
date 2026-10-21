@@ -4,14 +4,13 @@
 //! registry for callers that sweep it.
 //!
 //! This file holds NO state and NO lifecycle: the workspace count is derived
-//! from the live config on read, and the focus-MRU clear belongs to the model
-//! owner (pipeline.clearFocusMru, invoked by the window layer's reset
-//! discipline). Every model mutation belongs to its transition owner
-//! (window/focus); all model reads go through core.isModelReady()
-//! (the one spelling), so boot order never touches an undefined instance.
-//! It exists as a LIGHT read surface: core/loop, core/process, input and bar
-//! readers must not import window.zig (drags focus/admission) or
-//! pipeline's reconcile chain for a predicate.
+//! from the live config on read, and the focus-MRU clear belongs to the
+//! model owner (pipeline.clearFocusMru). Every model mutation belongs to its
+//! transition owner; all model reads go through core.isModelReady() (the one
+//! spelling), so boot order never touches an undefined instance. It exists
+//! as a LIGHT read surface: core/loop, core/process, input and bar readers
+//! must not import window.zig (drags focus/admission) or pipeline's
+//! reconcile chain for a predicate.
 
 const std = @import("std");
 
@@ -32,44 +31,39 @@ pub const Entry = struct {
     presence: model_mod.Presence = .present,
 };
 
-// Registry queries (facade)
-
-/// The double-manage guard, in one place. A window can send multiple MapRequest
-/// events (e.g. an unmap+remap race while the first is still processing);
-/// without this check the model registration and property queries would fire
-/// twice. Every admission path asks THIS, never a raw store lookup, so the
-/// guard cannot drift out of parity between the direct and drain paths.
+/// The double-manage guard, in one place. A window can send multiple
+/// MapRequest events (e.g. an unmap+remap race while the first is still
+/// processing); without this check the model registration and property
+/// queries would fire twice. Every admission path asks THIS, never a raw
+/// store lookup, so the guard cannot drift between the direct and drain
+/// paths.
 pub fn isManaged(win: u32) bool {
     const mm = m() orelse return false;
     return mm.store.has(win);
 }
 
-/// True for the null window, the root, or one of this layer's own X surfaces
-/// (bar/output -- usable_area.isSurfaceWindow); never a valid focus or
-/// manage target. The complement of isValidManagedWindow below.
+/// True for the null window, the root, or one of this layer's own X
+/// surfaces (bar/output -- usable_area.isSurfaceWindow); never a valid
+/// focus or manage target. The complement of isValidManagedWindow below.
 pub inline fn isInvalidWindow(win: u32) bool {
     return win == 0 or win == core.getState().root or usable_area.isSurfaceWindow(win);
 }
 
 /// True when `win` is a real manage target we are tracking. The single
-/// predicate for "is this window ours" (events.zig, reconcile paths);
-/// window.zig re-exports this so `window.*` stays the stable facade for
-/// callers outside the layer.
+/// predicate for "is this window ours"; window.zig re-exports this so
+/// `window.*` stays the stable facade for callers outside the layer.
 pub inline fn isValidManagedWindow(win: u32) bool {
     return !isInvalidWindow(win) and isManaged(win);
 }
 
-/// NOTE: rebuild-per-call is correct for correctness; a dirty flag
-/// would need mutation hooks to track when the model store changes.
-///
 /// Read-only SNAPSHOT of the model registry into the CALLER's buffer,
 /// returning the filled prefix. Do not retain across mutations.
+/// Rebuild-per-call is correct; a dirty flag would need mutation hooks.
 ///
-/// The buffer is caller-owned on purpose: each caller passes its own State-
-/// local array, so the aliasing is not expressible. Silently returning a
-/// SHORT snapshot would read like "those are all the windows", which is the
-/// bug this whole function is shaped to avoid, so an undersized buffer is an
-/// assert rather than a clamp.
+/// The buffer is caller-owned on purpose: each caller passes its own
+/// State-local array, so the aliasing is not expressible. Silently
+/// returning a SHORT snapshot would read like "those are all the windows",
+/// so an undersized buffer is an assert rather than a clamp.
 pub fn allWindowsInto(buf: []Entry) []const Entry {
     const mm = m() orelse return &.{};
     const n = mm.store.count();
@@ -83,12 +77,12 @@ pub fn allWindowsInto(buf: []Entry) []const Entry {
 }
 
 // Lifecycle / workspace count: derived on read from the live config (no
-// latch, no re-latch on reload — see getWorkspaceCount).
+// latch; see getWorkspaceCount).
 
 /// Read-through facade over `model.current`, the single source of truth:
-/// every write path (workspaces.switchWorkspace) mutates the model directly, so a
-/// read-only query needs no separate storage. Null before pipeline.init
-/// (callers default to workspace 0).
+/// every write path mutates the model directly, so a read-only query needs
+/// no separate storage. Null before pipeline.init (callers default to
+/// workspace 0).
 pub inline fn getCurrentWorkspace() ?u8 {
     // core.isModelReady() and nothing else: the model-live question has one
     // spelling, and the place that owns it documents why the gate exists.
@@ -96,14 +90,13 @@ pub inline fn getCurrentWorkspace() ?u8 {
     return pipeline.state().current.index;
 }
 
-/// The workspace count from the live config, derived on read: collapses to a
-/// single implicit workspace when the workspaces feature is not compiled in
-/// (a tree without `src/window/modules/workspaces.zig` has no binder, so a
-/// multi-count would be phantom). The u64 workspace bitmask caps the count;
-/// clamp (never crash) so a corrupt config count can't overflow the mask in
-/// ReleaseFast. Callers before core.init (headless test harnesses) get the
-/// default of 1. A hot reload that edits `[workspaces] count` is picked up by
-/// the next read — no latch to re-arm.
+/// The workspace count from the live config, derived on read: collapses to
+/// a single implicit workspace when the workspaces feature is not compiled
+/// in (a tree without `src/window/modules/workspaces.zig` has no binder, so
+/// a multi-count would be phantom). The u64 workspace bitmask caps the
+/// count; clamp (never crash) so a corrupt config can't overflow the mask
+/// in ReleaseFast. Callers before core.init get the default of 1. A hot
+/// reload that edits `[workspaces] count` is picked up by the next read.
 pub inline fn getWorkspaceCount() usize {
     if (comptime !build_options.has_workspaces) return 1;
     if (!core.isReady()) return 1;
@@ -111,8 +104,8 @@ pub inline fn getWorkspaceCount() usize {
 }
 
 /// True while the all_workspaces (Mod+5) all-view flag is active: every
-/// workspace's windows are shown at once, and the bar collapses the tags into
-/// a single cell. Reads the model, the single source of truth.
+/// workspace's windows are shown at once, and the bar collapses the tags
+/// into a single cell. Reads the model, the single source of truth.
 pub inline fn isAllViewActive() bool {
     const mm = m() orelse return false;
     return mm.all_view_active;

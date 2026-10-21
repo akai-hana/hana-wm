@@ -9,10 +9,8 @@
 //! between the two files runs one way (types -> action) and never forms a
 //! cycle. `needsTilingFocusScaffold` is a generic function and cannot be
 //! const-aliased, so its two consumers (`input/dispatch`, the input tests)
-//! import this module directly.
-//!
-//! Its own stem (`action`, consumed by input) is why this union is not just
-//! a section of types.zig.
+//! import this module directly. Its own stem (`action`) is why this union is
+//! not just a section of types.zig.
 
 const std = @import("std");
 const model = @import("model");
@@ -51,9 +49,9 @@ pub const Action = union(enum) {
     move_to_workspace: u8,
     toggle_tag: u8,
     /// Ordered list of actions executed left-to-right (owned slice).
-    /// A `+`-linked group in a config list becomes a `.parallel` step (see
-    /// below); the enclosing `.sequence` runs steps in order, so a mixed list
-    /// like `[a, b + c, d]` is a, then b+c, then d.
+    /// A `+`-linked group in a config list becomes a `.parallel` step; the
+    /// enclosing `.sequence` runs steps in order, so `[a, b + c, d]` is a,
+    /// then b+c, then d.
     sequence: []Action,
     /// One batch of sub-actions launched together: every member is dispatched
     /// before the enclosing sequence proceeds to its next step, and no member
@@ -101,19 +99,16 @@ pub const Action = union(enum) {
 /// Actions that need the tiling-op focus scaffold: transient focus noise
 /// suppressed, then a settle grab, wrapped around the mutation.
 ///
-/// This is a property OF THE ACTION, so it is declared here beside the union
-/// rather than left implicit in whichever switch arm happens to call the
-/// helper. The failure mode that motivated it: the graft lived at three
-/// dispatch arms, so a new mutating tag was scaffolded or not by which arm
-/// somebody wrote, and the answer was invisible at the type. The `switch` below
-/// has no `else` on purpose -- adding a variant is a compile error naming
-/// this decision, not a silent default.
+/// A property OF THE ACTION, declared beside the union: the graft once lived
+/// at three dispatch arms, so a new mutating tag was scaffolded or not by
+/// which arm somebody wrote. The `switch` below has no `else` on purpose --
+/// adding a variant is a compile error naming this decision.
 ///
-/// Why only these three, when `set_master_width`, `swap_master`,
-/// `move_window_*` and `scroll_view` also mutate the layout: those reconcile
+/// Only these three because `set_master_width`, `swap_master`,
+/// `move_window_*` and `scroll_view` also mutate the layout but reconcile
 /// inside the command itself (`window.adjustPrimaryWidthAction` and friends
-/// each end in `pipeline.reconcileGrab`) and never move focus, so there is no
-/// transient focus event to suppress and no settle grab owed. The three
+/// each end in `pipeline.reconcileGrab`) and never move focus, so there is
+/// no transient focus event to suppress and no settle grab owed. The three
 /// grafted tags DO move focus as a side effect -- toggling float and cycling
 /// layout/variants re-derive the focused window -- so they take one grab for
 /// the whole operation instead of paying focus-then-reconcile's two.

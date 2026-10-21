@@ -1,11 +1,9 @@
-//! The last-good config source and the re-exec snapshot. On every
-//! successful load/reload the winning user config source is frozen
-//! into a snapshot dir, and a re-exec (`reload_hana`) boots from that
-//! snapshot via `HANA_CONFIG_DIR`. A re-exec therefore swaps ONLY the
-//! binary; config file edits land exclusively through `reload_config`.
-//! Because the snapshot is refreshed only on *successful* loads, it is
-//! the last-known-good config: a mid-edit (or outright broken) config
-//! tree at re-exec time cannot take the successor down with it.
+//! The last-good config source and the re-exec snapshot. On every successful
+//! load/reload the winning user config source is frozen into a snapshot dir,
+//! and a re-exec (`reload_hana`) boots from that snapshot via
+//! `HANA_CONFIG_DIR` -- so a re-exec swaps ONLY the binary; config edits land
+//! exclusively through `reload_config`. Refreshed only on *successful* loads:
+//! a mid-edit config tree at re-exec time cannot take the successor down.
 
 const std = @import("std");
 const log = std.log.scoped(.snapshot);
@@ -13,11 +11,9 @@ const log = std.log.scoped(.snapshot);
 /// Runtime-dir file path, the ONE policy for per-session state files:
 /// `$XDG_RUNTIME_DIR/{base}{ext}` when set (already per-user, so no uid
 /// suffix), else `/tmp/{base}-{uid}{ext}` so co-located users stay apart.
-/// The uid suffix in the fallback is load-bearing. Callers own the returned
-/// slice. Deliberately NOT used by native_pulse's socket probe: PulseAudio's
-/// `/run/user/{uid}` fallback is a different convention, not this policy.
-/// Consumers: this module's snapshot dir and process/session's restore file;
-/// this module owns the policy as one of them.
+/// The uid suffix in the fallback is load-bearing. Deliberately NOT used by
+/// native_pulse's socket probe: PulseAudio's `/run/user/{uid}` fallback is a
+/// different convention, not this policy. Callers own the returned slice.
 pub fn runtimeFile(alloc: std.mem.Allocator, base: []const u8, ext: []const u8) ![]u8 {
     if (std.c.getenv("XDG_RUNTIME_DIR")) |dir|
         return std.fmt.allocPrint(alloc, "{s}/{s}{s}", .{ std.mem.span(dir), base, ext });
@@ -28,11 +24,9 @@ pub fn runtimeFile(alloc: std.mem.Allocator, base: []const u8, ext: []const u8) 
 /// restore file and the prompt's history file both call this out explicitly
 /// so the magic literal isn't re-spelled at each call site.
 pub const restricted_file_mode: u32 = 0o600;
-
-/// Where a default-config load came from. Reported by loadConfigDefault so the
-/// reload path can distinguish "loaded the user config" from "fell back to the
-/// embedded fallback" without re-probing the filesystem (they resolve to
-/// the same Config value otherwise).
+/// Where a default-config load came from. Reported by loadConfigDefault so
+/// the reload path can distinguish "loaded the user config" from "fell back
+/// to the embedded fallback" without re-probing the filesystem.
 pub const DefaultSource = enum {
     /// One of the user locations at priority (1)-(4) supplied the config.
     user,
@@ -42,23 +36,18 @@ pub const DefaultSource = enum {
 };
 
 /// The winning user config source of a load: its location plus the files it
-/// read, recorded at the end of a winning load so the snapshot can freeze
-/// exactly what the successor should boot from.
+/// read, recorded so the snapshot can freeze what the successor boots from.
 const GoodSource = struct {
     /// Heap-allocated copy of the winning search location (a dir or a file).
     path: []u8,
     is_dir: bool,
     /// The config files the winning load actually read, in merge order, each
     /// owned by the same allocator as `path`. The snapshot copies exactly
-    /// these rather than the whole tree: the config dir is a user-owned
-    /// location that also holds plenty hana never reads (a vendored
-    /// `.opencode` tree, a `node_modules`, VCS metadata), and freezing all of
-    /// it turned a three-file config into a thousands-of-files tmpfs copy on
-    /// every boot. Each entry carries its own size/mtime stamp (null when the
-    /// snapshot is not known to mirror the source): the stamp rides beside
-    /// the path it describes, so there is no second slice to keep
-    /// index-for-index in step and no ownership transfer across a no-op
-    /// reload.
+    /// these rather than the whole tree: a user config dir also holds plenty
+    /// hana never reads, and freezing all of it turned a three-file config
+    /// into a thousands-of-files tmpfs copy on every boot. Each entry carries
+    /// its own size/mtime stamp (null when the snapshot is not known to
+    /// mirror the source): the stamp rides beside the path it describes.
     files: []SourceFile,
 };
 
@@ -66,8 +55,7 @@ const GoodSource = struct {
 /// captured at the last successful refresh, or null when the snapshot is not
 /// known to mirror the source. An unchanged reload compares these and writes
 /// nothing at all. Stamps are set together -- a fresh record starts null and
-/// `refreshSnapshot` stamps every entry after a successful freeze -- so the
-/// per-entry optional never carries a partial state in practice.
+/// `refreshSnapshot` stamps every entry after a successful freeze.
 const SourceFile = struct {
     path: []u8,
     stamp: ?FileStamp = null,
@@ -80,11 +68,8 @@ const FileStamp = struct { size: u64, mtime: i96 };
 /// paired with the arena that owns their bytes. Module-level because the set
 /// must outlive the load-scoped parse arena (it is consumed at snapshot time,
 /// after the load has returned), and because discarding it wholesale is then
-/// one arena reset instead of per-path free bookkeeping. `publishReadFiles`
-/// installs a FRESH pair per load and frees the previous one, so a set is
-/// never released by a different load's allocator and the two halves can
-/// never move out of step. Read (never owned) by `rememberGoodSource` at the end
-/// of a winning load.
+/// one arena reset. `publishReadFiles` installs a FRESH pair per load and frees
+/// the previous one. Read (never owned) by `rememberGoodSource`.
 var read_files: ?struct {
     arena: std.heap.ArenaAllocator,
     paths: []const []const u8,
@@ -107,9 +92,8 @@ pub fn publishReadFiles(items: []const []const u8) !void {
 }
 
 /// Dupe `items` into a freshly allocated `SourceFile` list owned by
-/// `allocator`; released with `freeSourceFiles`. An empty input yields a
-/// zero-length slice, which `freeSourceFiles` releases as a no-op. Stamps
-/// start null: a fresh record is not known to mirror any prior snapshot.
+/// `allocator`; released with `freeSourceFiles`. Stamps start null: a fresh
+/// record is not known to mirror any prior snapshot.
 fn dupeSourceFiles(allocator: std.mem.Allocator, items: []const []const u8) ![]SourceFile {
     const out = try allocator.alloc(SourceFile, items.len);
     errdefer allocator.free(out);
@@ -131,8 +115,7 @@ fn freeSourceFiles(allocator: std.mem.Allocator, files: []SourceFile) void {
 
 /// The most recently loaded-and-validated user config location. Mutated by
 /// every successful load/reload; read by refreshSnapshot at re-exec time.
-/// Allocated with the caller's (c_allocator) arena semantics, process-lifetime
-/// after the winning load holds it.
+/// Process-lifetime after the winning load holds it.
 var last_good_source: ?GoodSource = null;
 
 /// True when two resolved file lists name the same files in the same order.
@@ -154,11 +137,10 @@ pub fn rememberGoodSource(allocator: std.mem.Allocator, path: []const u8, is_dir
     };
     if (last_good_source) |g| {
         // Carry the stamps over when this load resolved the very same source
-        // to the very same files. That is what lets a no-op reload take the
+        // to the very same files -- what lets a no-op reload take the
         // "nothing changed" fast path instead of re-freezing the snapshot on
         // every SIGHUP. The stamps live ON each new entry, so carrying them
-        // is a per-entry copy against an identical list -- index-for-index
-        // correct by construction, with no second slice to own.
+        // is a per-entry copy against an identical list.
         const same = g.is_dir == is_dir and std.mem.eql(u8, g.path, path) and sameSourceList(g.files, files);
         if (same) {
             for (files, g.files) |*nf, of| nf.stamp = of.stamp;
@@ -236,8 +218,7 @@ fn relativeTo(allocator: std.mem.Allocator, root: []const u8, path: []const u8) 
 /// are untouched since the last successful refresh -- the no-op-reload fast
 /// path, so a reload that changes nothing does no writes at all. Contents are
 /// compared as an exact set (not just presence), so a source that was RENAMED
-/// cannot leave its old name behind in the snapshot for the successor to load
-/// as a config file the user deleted.
+/// cannot leave its old name behind in the snapshot.
 fn snapshotCurrent(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -276,13 +257,11 @@ fn snapshotCurrent(
 
 /// Freezes the last-good config's resolved file set into the snapshot dir, so
 /// a re-exec boots an identical config without re-reading the live config tree.
-/// Only the files the load actually consumed are copied (see `GoodSource.files`
-/// for why the whole tree is not), and the new snapshot is assembled beside the
-/// old one and swapped in, so a copy that fails part-way leaves the previous
-/// snapshot intact. Best-effort: a failed refresh keeps the previous snapshot,
-/// still self-consistent -- and every failure path says so with `log.err`, so
-/// an unwritable runtime dir (or any other cause) is visible instead of a
-/// silently stale hand-off.
+/// Only the files the load actually consumed are copied (see `GoodSource.files`).
+/// Assembled beside the old one and swapped in, so a copy that fails part-way
+/// leaves the previous snapshot intact. Best-effort: a failed refresh keeps the
+/// previous snapshot -- every failure path says so with `log.err`, so an
+/// unwritable runtime dir is visible instead of a silently stale hand-off.
 pub fn refreshSnapshot(allocator: std.mem.Allocator) void {
     const g = last_good_source orelse return;
     const io = std.Options.debug_io;

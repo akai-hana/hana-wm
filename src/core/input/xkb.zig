@@ -1,11 +1,8 @@
-//! XKB keyboard state: the live keycode->keysym table, its construction from
-//! the server's keymap, and the one-shot XKB extension negotiation that
-//! makes the table possible.
-//!
-//! This is the lowest layer of src/core/input: it depends on nothing else in
-//! the directory (only `keymap`, the connection-free table vocabulary), so
-//! everything above it (keybinds, keys, dispatch) can read the live
-//! keyboard without any of them reaching back.
+//! XKB keyboard state: the live keycode->keysym table, its construction from the
+//! server's keymap, and the one-shot XKB extension negotiation that makes it
+//! possible. The lowest layer of src/core/input -- it depends on nothing else in the
+//! directory (only `keymap`, the connection-free table vocabulary), so everything
+//! above (keybinds, keys, dispatch) can read the live keyboard without reaching back.
 const std = @import("std");
 
 const core = @import("core");
@@ -18,11 +15,10 @@ const xkb = keymap.xkb;
 
 const xkb_context = keymap.xkb_context;
 
-/// Module-owned XKB state
 var xkb_state: ?XkbState = null;
 
-/// Initialises the XKB context, keymap, and key state
-/// from the server's current keyboard configuration.
+/// Initialises the XKB context, keymap, and key state from the server's current
+/// keyboard configuration.
 pub fn initXkb(conn: core.Connection) !void {
     xkb_state = try XkbState.init(conn);
 }
@@ -33,49 +29,40 @@ pub fn deinitXkb() void {
     xkb_state = null;
 }
 
-/// Returns a read-only view of the module-owned XkbState, or null only at boot
-/// before initXkb has run and at shutdown after deinitXkb (there is no reload
-/// window; see the reload path in config/reload.zig). The pointer is invalidated by
-/// deinitXkb and must not be cached across it.
+/// Read-only view of the module-owned XkbState; null only at boot before initXkb and
+/// at shutdown after deinitXkb (no reload window). Invalidated by deinitXkb -- never
+/// cache it across that.
 ///
-/// Const, deliberately. Zig has no private fields, so a struct's fields are
-/// reachable by anyone holding a pointer to it, which makes the live
-/// keycode->keysym table and the reverse index a mutation surface: any module
-/// could overwrite a key's keysym or truncate the index, and the dispatch path
-/// would read the damage with no way to tell it from a real mapping. Handing
-/// out `*const` closes every field but one: `rebuild`, which this module calls
-/// below and which rebuilds both tables as a unit.
+/// Const, deliberately: Zig has no private fields, so anyone holding a pointer could
+/// overwrite a key's keysym or truncate the reverse index, and dispatch would read the
+/// damage as a real mapping. Handing out `*const` closes every field but `rebuild`,
+/// which this module alone calls and which replaces both tables as a unit.
 pub fn getXkbState() ?*const XkbState {
     return if (xkb_state) |*s| s else null;
 }
 
 /// The one mutable handle on the XKB state, kept inside this module: the
-/// mapping-change path needs to replace the tables, and nothing else does.
+/// mapping-change path must replace the tables and nothing else does.
 fn getXkbStateMut() ?*XkbState {
     return if (xkb_state) |*s| s else null;
 }
 
-/// Rebuilds the keycode->keysym table after the server changes the keyboard
-/// mapping (setxkbmap/xmodmap). `keyboard` is the event's `request` field
-/// narrowed to MappingKeyboard; false for the modifier-map and pointer
-/// mapping events that arrive through the same type, which are ignored.
-/// Keybind resolution is keysym-indexed, so rebuilding the flat keycode->keysym
-/// table keeps existing bindings working under the new layout.
+/// Rebuilds the keycode->keysym table after the server changes the keyboard mapping
+/// (setxkbmap/xmodmap). `keyboard` is the event's `request` field narrowed to
+/// MappingKeyboard, so the modifier-map and pointer remaps sharing that type are
+/// ignored. Keybind resolution is keysym-indexed, so the rebuild keeps existing
+/// bindings working under the new layout.
 ///
-/// Returns true when the table was actually rebuilt, i.e. when the keycodes
-/// may have moved under the caller and everything derived from them (the key
-/// grabs, the compiled bind list) is now stale. Returns false for the
-/// modifier-map and pointer-button remaps that arrive through the same
-/// event: those are common (`xmodmap` touches both), and rebuilding for them
-/// throws away working state and makes the user pay a full ungrab/regrab storm
-/// over a change that cannot have affected any binding. The modifier map is
-/// not part of the keycode->keysym table, and button remapping is the
-/// client's own business.
+/// True only when the table actually rebuilt (keycodes may have moved under the
+/// caller). False for the common modifier-map/pointer-button remaps: rebuilding would
+/// impose a full ungrab/regrab storm over a change that cannot affect a binding -- the
+/// modifier map is not part of this table, and button remapping is the client's own
+/// business.
 ///
-/// This is deliberately the XKB HALF only. Re-resolving the compiled binds
-/// from the new table belongs to `keybinds.handleMappingNotify`, which calls
-/// This; making the composite live here would put a keybinds -> xkb ->
-/// keybinds import cycle back into a directory laid out to stay acyclic.
+/// Deliberately the XKB HALF only: re-resolving compiled binds belongs to
+/// `keybinds.handleMappingNotify`, which calls this. A composite here would put a
+/// keybinds -> xkb -> keybinds import cycle back into a directory laid out to stay
+/// acyclic.
 pub fn rebuildKeymap(keyboard: bool) bool {
     if (!keyboard) return false;
     const state = getXkbStateMut() orelse return false;
@@ -83,32 +70,28 @@ pub fn rebuildKeymap(keyboard: bool) bool {
     return true;
 }
 
-/// XKB state, retry ladder, and detectable auto-repeat
-/// The XKB setup requests are sent once after setup; these retries cover the
-/// surrounding early-startup negotiation (xkb_x11_setup_xkb_extension,
-/// get_core_keyboard_device_id, keymap creation), while the X server is still
-/// being established.
+/// Retry ladder for the early-startup negotiation around XKB setup
+/// (xkb_x11_setup_xkb_extension, get_core_keyboard_device_id, keymap creation) while
+/// the X server is still being established. The setup requests themselves are sent
+/// once.
 const max_xkb_retries: u8 = 3;
 
-/// Delay between those retries. Short enough to be imperceptible, long enough
-/// to avoid busy-spinning while XKB initialises (~1 polling cycle at 50 Hz).
+/// Delay between retries: short enough to be imperceptible, long enough to avoid
+/// busy-spinning while XKB initialises (~1 polling cycle at 50 Hz).
 const xkb_retry_delay_ms: u64 = 20;
 
-/// Detectable auto-repeat: the server emits a held key's repeat as KeyPress
-/// events WITHOUT the deactivating KeyRelease X11's default autorepeat elides
-/// between them. Without it a held binding key flaps between do/undo of a
-/// toggle action every repeat. Set via XkbPerClientFlags (minor opcode 21):
-/// there is no XkbSetDetectableAutoRepeat request, and hand-marshalling minor
-/// opcode 34 would silently never enable the feature (that opcode does not
-/// exist).
+/// Detectable auto-repeat: the server emits a held key's repeat as KeyPress events
+/// WITHOUT the deactivating KeyRelease X11's default autorepeat elides between them.
+/// Without it a held binding key flaps between do/undo of a toggle action every
+/// repeat. Set via XkbPerClientFlags (minor opcode 21) -- there is no
+/// XkbSetDetectableAutoRepeat request, and hand-marshalling minor opcode 34 would
+/// silently never enable the feature.
 const xkb_detectable_auto_repeat_mask: u32 = 1; // XkbPCF_DetectableAutoRepeatMask
 
-/// Enables detectable auto-repeat on the XKB core device. Must be called after
-/// the XKB extension is negotiated (xkb_x11_setup_xkb_extension) and the
-/// extension opcode is discoverable via xcb_get_extension_data. Best-effort: a
-/// failure to look up the opcode or to send the request is logged and ignored;
-/// the WM still functions, it just reverts to the flappy autorepeat behaviour
-/// this is meant to eliminate.
+/// Enables detectable auto-repeat on the XKB core device. Must be called after the
+/// extension is negotiated and its opcode discoverable via xcb_get_extension_data.
+/// Best-effort: failures are logged and ignored -- the WM still works, it just reverts
+/// to the flappy autorepeat this eliminates.
 fn enableDetectableAutoRepeat(conn: core.Connection) void {
     const c = core.xcb;
 
@@ -147,23 +130,19 @@ fn enableDetectableAutoRepeat(conn: core.Connection) void {
 
 pub const XkbState = struct {
     context: *xkb_context,
-    /// Flat keycode->keysym table for the standard X11 range (indices 0..255).
-    /// Populated at init time; entries outside 8..255 hold XKB_KEY_NoSymbol.
-    /// No allocator needed; 256 x 4 bytes = 1 KiB, lives inside XkbState.
+    /// Flat keycode->keysym table for the standard X11 range (0..255); entries outside
+    /// 8..255 hold XKB_KEY_NoSymbol. No allocator needed -- 256 x 4 bytes lives inside
+    /// XkbState.
     keysym_by_keycode: [keymap.x11_max_keycode]u32,
-    /// Reverse index over the same table, sorted by keysym. Held as one value
-    /// (not a bare array plus a separate count) so the pair can never be
-    /// updated apart; `len` is how many entries are live, and the rest of
-    /// the array is uninitialized.
+    /// Reverse index over the same table, sorted by keysym. One value rather than a
+    /// bare array plus a count so the pair can never be updated apart; `len` is the
+    /// live count, the rest is uninitialized.
     reverse: keymap.ReverseIndex,
 
-    /// Initialises an XKB context and builds the keysym table from the live
-    /// X connection. Retries up to max_xkb_retries times to handle early-startup
-    /// races.
-    ///
-    /// No xkb_state/keymap handles are retained: dispatch resolves from the
-    /// flat table by design, so (CapsLock at startup aside) lock state cannot
-    /// pin shifted symbols.
+    /// Initialises an XKB context and builds the keysym table from the live X
+    /// connection, retrying up to max_xkb_retries times against early-startup races.
+    /// No xkb_state/keymap handles are retained: dispatch resolves from the flat table
+    /// by design, so (CapsLock at startup aside) lock state cannot pin shifted symbols.
     pub fn init(xcb_conn: core.Connection) !XkbState {
         const ctx = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
             return error.XkbContextFailed;
@@ -171,9 +150,8 @@ pub const XkbState = struct {
 
         try retrySetup(xcb_conn);
 
-        // Enable detectable auto-repeat after the XKB extension is negotiated.
-        // See the note on `xkb_detectable_auto_repeat_mask` above for why this
-        // is required for correct held-key repeat handling.
+        // After the extension is negotiated; see `xkb_detectable_auto_repeat_mask` for
+        // why correct held-key repeat handling requires this.
         enableDetectableAutoRepeat(xcb_conn);
 
         const device_id = try retryDeviceId(xcb_conn);
@@ -193,29 +171,24 @@ pub const XkbState = struct {
     }
 
     /// Rebuilds the keycode->keysym table after a server-side mapping change
-    /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY); dispatch resolves keysyms
-    /// from it, so it must track the new mapping or bindings silently stop
-    /// matching. On failure the old mapping is kept. Caller must be on the
-    /// main thread; it runs inside the event loop and makes exactly one
-    /// keymap attempt: the opposite of `init`'s retry ladder. The server has
-    /// just told us the keyboard changed, so the new keymap is already there
-    /// and retries would only add `retryDelay` sleeps in front of every other
-    /// event the batch carried, on a path an `xmodmap` can trigger at any
-    /// time. A failure here is a logged one-line miss on a table that is
-    /// still serving the previous mapping.
+    /// (setxkbmap/xmodmap -> XCB_MAPPING_NOTIFY). Dispatch resolves keysyms from it, so
+    /// it must track the new mapping or bindings silently stop matching; on failure the
+    /// old mapping is kept. Caller must be on the main thread. Exactly ONE keymap
+    /// attempt, the opposite of `init`'s retry ladder: the server just told us the
+    /// keyboard changed, so the new keymap is already there and retries would only
+    /// sleep `retryDelay` in front of every other event the batch carried.
     pub fn rebuild(self: *XkbState, xcb_conn: core.Connection) void {
         const device_id = xkb.xkb_x11_get_core_keyboard_device_id(@ptrCast(xcb_conn));
         if (device_id == -1) {
-            // The core keyboard can be absent (a headless or purely virtual
-            // X server). Returning silently here would make a missing device
-            // indistinguishable from a device that simply had nothing to
-            // rebuild, which is exactly the kind of failure that reads as
-            // "my keybinds stopped working after xmodmap".
+            // The core keyboard can be absent (headless/virtual X server). Returning
+            // silently would make that indistinguishable from a device with nothing to
+            // rebuild -- the failure that reads as "my keybinds stopped working after
+            // xmodmap".
             log.warn("XKB: no core keyboard device id; keymap not rebuilt after mapping change", .{});
             return;
         }
-        // Table swapped only after the new keymap built successfully, so a
-        // failed rebuild leaves dispatch fully functional on the old mapping.
+        // Swap only after the new keymap built: a failed rebuild leaves dispatch fully
+        // functional on the old mapping.
         const table = keymapOnce(keymapOnceArgs{ .ctx = self.context, .conn = xcb_conn, .device_id = device_id }) orelse {
             log.warn("XKB: keymap rebuild failed after mapping change; keeping old mapping", .{});
             return;
@@ -225,28 +198,25 @@ pub const XkbState = struct {
         self.reverse = built;
     }
 
-    /// Returns the level-0 keysym for `keycode`, unaffected by lock modifiers
-    /// (NumLock, CapsLock, ScrollLock). The flat table is indexed by raw keycode.
+    /// Level-0 keysym for `keycode`, unaffected by lock modifiers (NumLock, CapsLock,
+    /// ScrollLock); the flat table indexes by raw keycode.
     pub inline fn keycodeToKeysym(self: *const XkbState, keycode: u8) u32 {
         return self.keysym_by_keycode[keycode];
     }
 
-    /// Reverse-look up a keysym to its keycode: bisects the reverse index
-    /// built over the flat table. Serves config parsing AND the live grab
-    /// path (resolveKeycodes), not config alone.
-    ///
-    /// The table holds level-0 symbols, so a Shift-only keysym (e.g. `@`) can
-    /// resolve to null; callers should warn, since such a binding cannot be
-    /// grabbed. Returns only the first keycode when several map to the keysym.
+    /// Reverse-lookup a keysym to its keycode via the reverse index. Serves config
+    /// parsing AND the live grab path (resolveKeycodes). The table holds level-0
+    /// symbols, so a Shift-only keysym (e.g. `@`) can resolve to null -- callers should
+    /// warn, since such a binding cannot be grabbed. Returns only the first keycode
+    /// when several map to it.
     pub inline fn keysymToKeycode(self: *const XkbState, keysym: u32) ?u8 {
         return self.reverse.find(keysym);
     }
 };
 
-/// Sleeps between retry attempts (skipped on the final one). Uses nanosleep
-/// directly; std.time.sleep is absent in this Zig build. Resumes on EINTR
-/// (the WM's SIGCHLD handler can interrupt the sleep) so a signal doesn't
-/// shorten the delay.
+/// Sleeps between retry attempts (skipped on the final one). Uses nanosleep directly
+/// (std.time.sleep is absent in this Zig build) and resumes on EINTR (the WM's SIGCHLD
+/// handler can interrupt it) so a signal can't shorten it.
 fn retryDelay(attempt: u8) void {
     if (attempt >= max_xkb_retries - 1) return;
     const ns = xkb_retry_delay_ms * std.time.ns_per_ms;
@@ -263,9 +233,9 @@ fn retryDelay(attempt: u8) void {
 }
 
 /// Shared early-startup retry skeleton behind the three XKB probes: runs
-/// `attempt(args)` up to max_xkb_retries times with `retryDelay` between
-/// tries, accepting the first non-null result and falling back to `failure`
-/// when every try fails. Each probe reports its own "not ready yet" as null.
+/// `attempt(args)` up to max_xkb_retries times with `retryDelay` between, accepting
+/// the first non-null result and falling back to `failure` when every try fails. Each
+/// probe reports "not ready yet" as null.
 fn withRetries(
     comptime T: type,
     args: anytype,
@@ -293,8 +263,8 @@ fn setupOnce(conn: core.Connection) ?void {
     return if (ok == 0) null else {};
 }
 
-/// Retries xkb_x11_setup_xkb_extension up to max_xkb_retries times; the
-/// extension may not be ready immediately at WM startup.
+/// Retries xkb_x11_setup_xkb_extension; the extension may not be ready immediately at
+/// WM startup.
 fn retrySetup(xcb_conn: core.Connection) !void {
     _ = try withRetries(void, xcb_conn, setupOnce, error.XkbSetupFailed);
 }
@@ -304,9 +274,8 @@ fn deviceOnce(conn: core.Connection) ?i32 {
     return if (device_id == -1) null else device_id;
 }
 
-/// Retries xkb_x11_get_core_keyboard_device_id up to max_xkb_retries times;
-/// the core keyboard device may not be enumerable yet in the same
-/// early-startup window retrySetup guards against.
+/// Retries xkb_x11_get_core_keyboard_device_id; the core keyboard device may not be
+/// enumerable yet in the same early-startup window retrySetup guards.
 fn retryDeviceId(xcb_conn: core.Connection) !i32 {
     return withRetries(i32, xcb_conn, deviceOnce, error.XkbNoKeyboard);
 }
@@ -330,8 +299,8 @@ fn keymapOnce(args: keymapOnceArgs) ?[keymap.x11_max_keycode]u32 {
     return if (built.healthy) built.table else null;
 }
 
-/// Retries keymap creation up to max_xkb_retries times, accepting only a
-/// sufficiently populated keymap to guard against early-startup races.
+/// Retries keymap creation, accepting only a sufficiently populated keymap to guard
+/// against early-startup races.
 fn retryKeymap(ctx: *xkb_context, conn: core.Connection, device_id: i32) ![keymap.x11_max_keycode]u32 {
     return withRetries(
         [keymap.x11_max_keycode]u32,
