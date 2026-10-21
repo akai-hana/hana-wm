@@ -1,10 +1,9 @@
-//! The prompt's completion provider: the sorted `$PATH`
-//! executable table, the ghost-completion suffix, and the
-//! run-history ring (newest first, persisted append-only under
-//! `$HOME`). State lives in this module's global so no allocation
-//! or partial-OOM bookkeeping exists; the package core
-//! (`prompt.zig`) owns activation and key routing and reaches the
-//! tables through the accessors below.
+//! The prompt's completion provider: the sorted `$PATH` executable table,
+//! the ghost-completion suffix, and the run-history ring (newest first,
+//! persisted append-only under `$HOME`). State lives in this module's global
+//! so no allocation or partial-OOM bookkeeping exists; the package core
+//! (`prompt.zig`) owns activation and key routing and reaches the tables
+//! through the accessors below.
 
 const std = @import("std");
 
@@ -85,7 +84,7 @@ pub fn isHistLoaded() bool {
 }
 
 /// Scan every directory in $PATH and collect executable names into the static
-/// completion table.  Called once on first activation.
+/// completion table. Called once on first activation.
 pub fn loadCompletions() void {
     g.comp_count = 0;
     // Mark attempted up front: a missing $PATH or an empty result must not
@@ -127,7 +126,7 @@ pub fn loadCompletions() void {
 }
 
 /// True when `name` under `dir_path` is executable, so it can be offered as a
-/// command completion.  Filters empty/oversized/dot-prefixed names and probes
+/// command completion. Filters empty/oversized/dot-prefixed names and probes
 /// the executable bit on the joined path.
 fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
     if (name.len == 0 or name.len > max_completion_len) return false;
@@ -137,7 +136,7 @@ fn isRunnableFile(dir_path: []const u8, name: []const u8) bool {
     return fallback.exeInDir(&full_path_buf, dir_path, name);
 }
 
-/// Stores `name` into the next completion slot.  Returns true when the table is
+/// Stores `name` into the next completion slot. Returns true when the table is
 /// full and the $PATH scan should stop.
 fn offerCompletion(name: []const u8) bool {
     const slot = &g.comp_names[g.comp_count];

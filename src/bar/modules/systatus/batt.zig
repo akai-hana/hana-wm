@@ -1,15 +1,13 @@
-//! Systatus battery readout.
-//! Reports the charge % of the first /sys/class/power_supply/BAT* found.
-//! `read` returns null while no battery reports a capacity, so a selected
-//! `batt` segment renders nothing on a battery-less machine rather than a
-//! stale value (its slot collapses to zero width).
+//! Systatus battery readout: charge % of the first
+//! /sys/class/power_supply/BAT* found. Null while no battery reports a
+//! capacity, so the slot collapses to zero width rather than showing stale.
 
 const std = @import("std");
 const systatus = @import("systatus");
 
-/// Number of `BAT*` slots probed under `/sys/class/power_supply`
-/// (`BAT0`..`BAT{battery_probe_slots - 1}`): laptops with many slots are
-/// exotic, but the probe is a handful of no-op stat/opens either way.
+/// Number of `BAT*` slots probed (`BAT0`..`BAT{battery_probe_slots - 1}`):
+/// exotic machines have many slots, but the probe is a handful of no-op
+/// stat/opens either way.
 const battery_probe_slots: usize = 8;
 
 /// Parses a sysfs `capacity` file into a charge percent, rejecting anything
@@ -21,14 +19,14 @@ pub fn parseCapacity(contents: []const u8) ?u8 {
     return v;
 }
 
-/// Owner state (P2-58): the format scratch buffer `percentSample` writes
-/// into. Single main-thread instance; no loose module-level scalars.
+/// Owner state: the format scratch buffer `percentSample` writes into. No
+/// loose module-level scalars.
 const BattState = struct {
     num: [16]u8 = undefined,
 };
 var g: BattState = .{};
 
-/// Charge % of the first present battery under /sys/class/power_supply.
+/// Charge % of the first present battery.
 fn read() ?systatus.Sample {
     for (0..battery_probe_slots) |i| {
         var path_buf: [64]u8 = undefined;
@@ -37,13 +35,12 @@ fn read() ?systatus.Sample {
         const r = systatus.readFileChecked(path, &cb) orelse continue;
         if (r.truncated) continue;
         // An unreadable/invalid slot is not fatal: try the next battery, and
-        // only report absence once every probed slot has come up empty.
+        // report absence only once every probed slot has come up empty.
         if (parseCapacity(r.bytes)) |v| return systatus.percentSample(&g.num, v);
     }
     return null;
 }
 
-/// This readout's binding to the systatus surface (`systatus.Sub`).
 pub const sub: systatus.Sub = .{
     .name = "batt",
     .label = "BAT",

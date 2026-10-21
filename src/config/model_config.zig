@@ -2,11 +2,11 @@
 //! live config at boot and on reload. Owns the name/variant resolution
 //! (layout registry ids, per-layout `variant_parse`), the primary-count
 //! clamp, and the two-arg `applyConfigReload` stamping loop (config owns
-//! seeding). The
-//! reload reconcile is `pipeline.reconcileGrab`. Callers: `main` (boot, before
-//! the first reconcile) and `config/reload` (post-swap re-seed via
-//! `reloadAndReconcile`). The window-layer command half — layout cycling,
-//! variant stepping, primary/swap — lives in `window/sync/reconcile_tails.zig`.
+//! seeding). The reload reconcile is `pipeline.reconcileGrab`. Callers:
+//! `main` (boot, before the first reconcile) and `config/reload` (post-swap
+//! re-seed via `reloadAndReconcile`). The window-layer command half — layout
+//! cycling, variant stepping, primary/swap — lives in
+//! `window/sync/reconcile_tails.zig`.
 
 const std = @import("std");
 const core = @import("core");

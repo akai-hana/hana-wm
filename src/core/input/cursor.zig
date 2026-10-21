@@ -1,11 +1,9 @@
-//! Root-window cursor theming and the startup mouse-bind reachability report.
-//! One startup call that touches the X connection and the screen and nothing
-//! else, plus the pure config-vs-grab analysis `setup` fires right after it.
-//!
-//! Wire traffic: `xcb_change_window_attributes` on the root to apply the
-//! theme. Root DECORATION, taken once at startup before the event loop;
-//! not a per-window mutation, which is why this file carries its own
-//! allowlist entry in check-layers.sh.
+//! Root-window cursor theming plus the startup mouse-bind reachability report.
+//! Wire traffic: `xcb_change_window_attributes` on the root -- a root
+//! DECORATION taken once at startup before the event loop, not a per-window
+//! mutation, which is why this file carries its own allowlist entry in
+//! check-layers.sh. The report is pure config-vs-grab analysis that `setup`
+//! fires right after the theme is applied.
 const std = @import("std");
 
 const core = @import("core");
@@ -13,10 +11,8 @@ const xcb = core.xcb;
 const log = std.log.scoped(.cursor);
 const mouse = @import("mouse");
 
-/// Root-window cursor theming via libxcb-cursor: one startup call that
-/// touches the X connection and the screen and nothing else. The
-/// declarations are hand-written because `xcb_cursor_load_cursor` is a
-/// static inline function in the C header, which cImport cannot bind.
+/// libxcb-cursor declarations, hand-written because `xcb_cursor_load_cursor` is
+/// a static inline function in the C header, which cImport cannot bind.
 const Context = opaque {};
 
 extern fn xcb_cursor_context_new(
@@ -27,8 +23,8 @@ extern fn xcb_cursor_context_new(
 extern fn xcb_cursor_load_cursor(ctx: *Context, name: [*:0]const u8) u32;
 extern fn xcb_cursor_context_free(ctx: ?*Context) void;
 
-/// Applies the user's cursor theme to the root window. Falls back silently
-/// if xcb-cursor is unavailable or the cursor cannot be loaded.
+/// Applies the user's cursor theme to the root window; falls back silently if
+/// xcb-cursor is unavailable or the cursor cannot be loaded.
 fn setupRoot(conn: core.Connection, screen: core.Screen) void {
     var cursor_ctx: ?*Context = null;
     if (xcb_cursor_context_new(conn, screen, &cursor_ctx) < 0) return;
@@ -53,13 +49,10 @@ fn setupRoot(conn: core.Connection, screen: core.Screen) void {
     _ = xcb.xcb_free_cursor(conn, cursor);
 }
 
-// Grab setup
-
-/// Applies the user's cursor theme and reports mouse binds that can never
-/// fire. The root mouse grab itself is installed by the caller (main.zig
-/// calls `keybinds.grabMouseButtons` next). The report is pure analysis of the
-/// config against `keybinds.mouse_grab_buttons`, so it needs no grab to exist
-/// yet.
+/// Applies the user's cursor theme and reports mouse binds that can never fire.
+/// The root mouse grab itself is installed by the caller (main.zig calls
+/// `keybinds.grabMouseButtons` next); the report is pure analysis of the config
+/// against `keybinds.mouse_grab_buttons`, so it needs no grab to exist yet.
 pub fn setup(conn: core.Connection, screen: core.Screen) void {
     setupRoot(conn, screen);
     mouse.reportUndeliverableMouseBinds();

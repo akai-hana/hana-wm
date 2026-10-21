@@ -1,18 +1,16 @@
 //! Rolling latency profiler: accumulates `ns` samples up to a window size,
-//! then logs a summary. Shared shape across the key-dispatch and retile
-//! paths (src/core/input/keys.zig, src/core/loop/pipeline.zig). Compiles out
-//! entirely when `enabled` is false (callers still reference `.enabled`).
+//! then logs a summary. Shared shape across the key-dispatch and retile paths
+//! (src/core/input/keys.zig, src/core/loop/pipeline.zig). Compiles out entirely
+//! when `enabled` is false (callers still reference `.enabled`).
 //!
-//! Detached from diagnostics capture: this is an optional instrumentation
-//! helper that reports through a caller-supplied log function (usually a
-//! `std.log.scoped(...).info`), not part of the warn/err capture bag.
+//! Detached from diagnostics capture: optional instrumentation reporting
+//! through a caller-supplied log function, not part of the warn/err bag.
 
 const std = @import("std");
 
 /// Rolling windowed latency profiler: accumulates `ns` samples up to
-/// `window_size`, then logs a summary via `logFn(fmt, .{ count, avg_ns,
-/// min_ns, max_ns })`. Compiles out entirely when `enabled_flag` is false
-/// (callers still reference `.enabled`).
+/// `window_size`, then logs a summary via `logFn`. Compiles out entirely when
+/// `enabled_flag` is false (callers still reference `.enabled`).
 pub fn WindowedProfiler(
     comptime enabled_flag: bool,
     comptime fmt: []const u8,

@@ -1,23 +1,18 @@
 //! X atom interning: the name -> atom-id table every property request reads.
-//!
-//! Interning is a round trip
-//! with the server's atom table, not wire I/O, and it is a distinct concern
-//! from the request shims that consume the ids.
+//! Interning is a round trip with the server's atom table, not wire I/O, and
+//! it is a distinct concern from the request shims that consume the ids.
 
 const std = @import("std");
 
 // Imported from the leaf xcb hub (pure @cImport) rather than from `core`, so
-// this layer stays a DAG root: `core` re-exports these decls upward, and
-// reaching back into it here would close the loop.
+// this layer stays a DAG root: `core` re-exports these decls upward.
 const xcb = @import("xcb");
 const Connection = xcb.Connection;
 
-// Atom cache
-//
-// Field names match X11 atom strings exactly, so getAtomCached resolves
-// them with a single @field call: no switch, no enum, no second place to
-// add entries when a new atom is needed. Public so `requests.zig` can prove
-// at comptime that its advertised EWMH set is a subset of these fields.
+// Atom cache: field names match X11 atom strings exactly, so getAtomCached
+// resolves them with a single @field call -- no switch, no enum, no second
+// place to add entries. Public so `requests.zig` can prove at comptime that its
+// advertised EWMH set is a subset of these fields.
 pub const AtomCache = struct {
     WM_PROTOCOLS: u32,
     WM_DELETE_WINDOW: u32,
@@ -28,8 +23,8 @@ pub const AtomCache = struct {
     // Root window EWMH-conformance atoms, see requests.advertiseEwmhSupport.
     _NET_SUPPORTED: u32,
     _NET_SUPPORTING_WM_CHECK: u32,
-    // Bar window property atoms, batched here so setWindowProperties pays
-    // zero X round-trips instead of 10 serial ones.
+    // Bar window property atoms, batched so setWindowProperties pays zero X
+    // round-trips instead of serial ones.
     _NET_WM_STRUT_PARTIAL: u32,
     _NET_WM_WINDOW_TYPE: u32,
     _NET_WM_WINDOW_TYPE_DOCK: u32,
@@ -49,9 +44,8 @@ pub const AtomCache = struct {
     _NET_ACTIVE_WINDOW: u32,
     // Pager/taskbar messages handled in client_events.handleClientMessage:
     // _NET_CLOSE_WINDOW is the close BUTTON (ICCCM deletion request),
-    // _NET_CURRENT_DESKTOP switches workspace, _NET_WM_DESKTOP moves a
-    // managed window. All three are advertised in requests.supported_atoms,
-    // which comptime-requires the AtomCache field.
+    // _NET_CURRENT_DESKTOP switches workspace, _NET_WM_DESKTOP moves a managed
+    // window. All three are advertised in requests.supported_atoms.
     _NET_CLOSE_WINDOW: u32,
     _NET_CURRENT_DESKTOP: u32,
     _NET_WM_DESKTOP: u32,
@@ -62,8 +56,8 @@ pub const AtomCache = struct {
 var atom_cache: ?AtomCache = null;
 
 /// Interns all atoms in a single round-trip batch. Atom names come from
-/// `AtomCache`'s field names at comptime, so adding a field is the only
-/// change required, no parallel array, no index-order mismatch risk.
+/// `AtomCache`'s field names at comptime, so adding a field is the only change
+/// required -- no parallel array, no index-order mismatch risk.
 pub fn initAtomCache(conn: Connection) !void {
     const fields = std.meta.fields(AtomCache);
     var cookies: [fields.len]xcb.xcb.xcb_intern_atom_cookie_t = undefined;
@@ -92,18 +86,16 @@ pub inline fn getAtomCached(comptime name: []const u8) ?u32 {
 }
 
 /// Like getAtomCached but returns 0 (the X11 "no atom" sentinel) instead of
-/// null when the cache isn't ready. Callers guard `if (atom != 0)` before
-/// issuing an X request.
+/// null when the cache isn't ready. Callers guard `if (atom != 0)`.
 pub inline fn getAtomOrZero(comptime name: []const u8) u32 {
     return getAtomCached(name) orelse 0;
 }
 
-/// Test seam (P1-37): install a replacement atom cache and hand back the
-/// one it displaced, so a test can drive the primed-then-cleared sequences
-/// that pin consumers' latch rules (`window_facts_test`) without a connection
-/// and still restore whatever real cache a previous test in the same
-/// process had set up. Production only ever writes `atom_cache` in
-/// `initAtomCache`.
+/// Test seam: install a replacement atom cache and hand back the one it
+/// displaced, so a test can drive the primed-then-cleared sequences that pin
+/// consumers' latch rules (`window_facts_test`) without a connection and still
+/// restore whatever real cache a previous test set up. Production only ever
+/// writes `atom_cache` in `initAtomCache`.
 pub fn swapAtomCacheForTest(cache: ?AtomCache) ?AtomCache {
     const prev = atom_cache;
     atom_cache = cache;

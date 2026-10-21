@@ -40,22 +40,16 @@ const workspace_labels: [model.max_workspaces][]const u8 = blk: {
 /// honest answer is zero -- see naturalWidthHook.
 const fallback_width: u16 = 270;
 
-/// Owner state for the tags segment (P2-58): the label/geometry caches plus
-/// the all-view collapse widths and the indicator position. Sized to
-/// workspace_labels, the largest label source. Every workspace index is bounded
-/// by query.getWorkspaceCount() (<= max_workspaces), so no fallback path
-/// exists. Config + height are captured at the last draw, so the natural-width
-/// path can recompute the cell width before a full ensureCache pass has run on
-/// the current (config, height) pair. The ws_current/ws_all_active pair is the
-/// key the cache was built for: the selected tag is measured bold (wider), so
-/// a stale-key cache centers the newly selected tag against the non-selected
-/// width after every switch. All-view (all_workspaces / Mod+5) collapse: while
-/// the flag is active every workspace tag is replaced by ONE cell labeled
-/// "花", so the whole segment narrows to a single tag. The cell is at least
-/// the standard tag width, growing to fit the (wider) CJK glyph when
-/// necessary. cached_ind_x_off / cached_ind_y are the horizontal/vertical
-/// position of the indicator glyph within a workspace cell -- constant for
-/// all cells, added to the cell's start_x at draw time.
+/// Owner state for the tags segment (P2-58): label/geometry caches plus
+/// the all-view collapse widths and indicator position. Config + height are
+/// captured at the last draw so the natural-width path can recompute cell
+/// width before a full ensureCache. The ws_current/ws_all_active pair is the
+/// cache key: the selected tag is measured bold (wider), so a stale-key
+/// cache would center the newly selected tag against the wrong width.
+/// All-view (all_workspaces / Mod+5) collapse: every workspace tag is
+/// replaced by ONE "花" cell, at least the standard tag width, growing for
+/// the CJK glyph. cached_ind_x_off / cached_ind_y: indicator glyph position
+/// within a cell, constant across cells.
 const all_view_label = "花";
 const TagsState = struct {
     label_widths: [workspace_labels.len]u16 = [_]u16{0} ** workspace_labels.len,
@@ -73,14 +67,14 @@ const TagsState = struct {
 };
 var g: TagsState = .{};
 
-/// Returns the display label for workspace `i`, falling back through icons, labels, and "?".
+/// Display label for workspace `i`, falling back through icons, labels, "?".
 inline fn getLabel(i: usize, config: bar_config.Config) []const u8 {
     if (i < config.workspace_icons.items.len) return config.workspace_icons.items[i];
     if (i < workspace_labels.len) return workspace_labels[i];
     return "?";
 }
 
-/// Invalidates the segment cache; next draw() call will remeasure labels and cell widths.
+/// Invalidates the segment cache; next draw remeasures labels and cell widths.
 fn invalidate() void {
     g.cache_valid = false;
 }

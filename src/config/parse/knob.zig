@@ -1,17 +1,13 @@
 //! Knob vocabulary + the generic reflection engine + the comptime coverage
-//! helper. Every scalar config knob is declared exactly once, as data, in the
-//! fragment table that owns its field (`tiling_config.knobs`, `bar_config.knobs`,
-//! ...); this module owns the shared vocab (`Placement`/`Kind`/`Knob` and the
-//! table-literal builders) and the engine that applies any such table onto
-//! its fragment root. Targets are always relative to the fragment root the
-//! table is applied to -- the fragment root IS the subsystem config struct,
-//! so a bar knob reads `target = "bg"`, not `"bar.bg"`.
+//! helper. Every scalar config knob is declared once, as data, in the fragment
+//! table that owns its field; this module owns the shared vocab and the engine
+//! that applies any table onto its fragment root (targets relative to that
+//! root: a bar knob reads `target = "bg"`, not `"bar.bg"`).
 //!
-//! The comptime contract each fragment runs on its own table (`validateTable`)
-//! turns three schema-wide requirements into per-fragment checks: every target
-//! names a real field, every scalar leaf is either a knob target or listed
-//! bespoke, and every `needs` dependency is supplied by an earlier knob in the
-//! same table.
+//! `validateTable` turns three schema-wide requirements into per-fragment
+//! comptime checks: every target names a real field, every scalar leaf is
+//! either a knob target or listed bespoke, and every `needs` dependency is
+//! supplied by an earlier knob in the same table.
 
 const std = @import("std");
 const log = std.log.scoped(.knob);
@@ -20,7 +16,6 @@ const types = @import("types");
 const scaling = @import("scaling");
 const color = @import("color");
 
-/// The knob table vocabulary: Placement, the table-literal builders, Kind, Knob.
 /// One accepted location for a knob: a section name and the key spelling
 /// used inside it.
 pub const Placement = struct {
@@ -43,9 +38,8 @@ pub fn knobGated(places: []const Placement, target: []const u8, kind: Kind, requ
     return .{ .places = places, .target = target, .kind = kind, .requires = requires };
 }
 
-/// Knob whose only reader is the optional module `reader` (see Knob.reader).
-/// This is how a module-owned setting declares itself: the build may delete
-/// the module, and the knob goes with it rather than looking dead.
+/// Knob whose only reader is the optional module `reader`: the build may
+/// delete the module, and the knob goes with it rather than looking dead.
 pub fn readerOf(places: []const Placement, target: []const u8, kind: Kind, reader: []const u8) Knob {
     return .{ .places = places, .target = target, .kind = kind, .reader = reader };
 }
@@ -59,12 +53,10 @@ pub fn readerOfGated(places: []const Placement, target: []const u8, kind: Kind, 
 pub const EnumRead = struct {
     T: type,
     /// true = case-insensitive lookup through types.enumFromString (the alias
-    /// map, e.g. MasterSide's "l"/"left"/"r"/"right"); false = exact-case
-    /// std.meta.stringToEnum.
+    /// map, e.g. MasterSide's "l"/"left"); false = exact-case stringToEnum.
     ci: bool = false,
     /// Warn (mentioning `default_label`) when the value doesn't parse;
-    /// otherwise fall back silently. Either way the field keeps its
-    /// current (= default) value.
+    /// otherwise fall back silently. Either way the field keeps its default.
     warn: bool = false,
     default_label: []const u8 = "",
 };
@@ -72,43 +64,37 @@ pub const EnumRead = struct {
 /// What kind of value a knob accepts, and which reader enforces it.
 ///
 /// Flat on purpose: each variant is ONE read-and-warn policy, dispatched in
-/// one arm of applyAll's switch. Folding the near-neighbours together (the
-/// three color variants, `ratio`/`ratio_strict`, `scalable`/`scalable_free`)
-/// would trade those arms for a flag apiece and push the branching back
-/// inside them -- more to read at the call site, not less.
+/// one arm of applyAll's switch. Folding the near-neighbours together would
+/// trade those arms for a flag apiece and push the branching back inside
+/// them -- more to read at the call site, not less.
 pub const Kind = union(enum) {
-    /// Plain boolean flag.
     b,
     /// Integer with optional inclusive bounds (warn-and-revert outside).
     int: struct { T: type, min: ?comptime_int = null, max: ?comptime_int = null },
     /// ScalableValue (px or %) rejecting negative raw .value with a warning.
     scalable: f32,
-    /// ScalableValue assigned whenever present, with NO local bound
-    /// (master_width: validate() owns the ratio/negative policy).
+    /// Assigned whenever present, NO local bound (master_width: validate()
+    /// owns the ratio/negative policy).
     scalable_free,
-    /// Optional ScalableValue; absent means "auto" (null), a negative
-    /// warns back to auto.
+    /// Optional ScalableValue; absent means "auto", a negative warns back to auto.
     auto_scalable,
     /// Color accepting #RRGGBB / 0xRRGGBB / integer.
     color,
     /// Color defaulting to the CURRENT value of a named sibling field of the
-    /// SAME fragment root (e.g. run_bg->bg, title->primary_color);
-    /// `copy_when_absent` also assigns it when the knob's section is absent.
+    /// SAME fragment root (e.g. run_bg->bg); `copy_when_absent` also assigns
+    /// it when the knob's section is absent.
     color_from: []const u8,
     /// Like color_from, but assigned only when the KEY itself exists.
     color_opt: []const u8,
-    /// [0,1] ratio: bare integers are percentages, `1` resolves to 1% with
-    /// a warning.
+    /// [0,1] ratio: bare integers are percentages, `1` resolves to 1% with a warning.
     ratio,
-    /// [0,1] ratio that rejects bare integers: only a decimal (0.0-1.0)
-    /// or a `%`-suffixed value parses; a bare integer warns and reverts
-    /// to the default. `transparency` uses this so `= 1` can never be
-    /// misread as 1% while `= 1.0` means 100%.
+    /// [0,1] ratio that rejects bare integers (only a decimal or `%` parses);
+    /// `transparency` uses this so `= 1` can never be misread as 1%.
     ratio_strict,
     /// Optional heap-dup'd string; absent leaves the field untouched.
     str,
-    /// Optional float; absent leaves the field at null (meaning "auto").
-    /// Out-of-range values warn and revert to absent, matching `int`.
+    /// Optional float; absent = null ("auto"). Out-of-range warns and reverts
+    /// to absent, matching `int`.
     opt_float: struct { min: f32, max: f32 },
     /// Enum parsed per EnumRead.
     enum_read: EnumRead,
@@ -120,37 +106,26 @@ pub const Knob = struct {
     /// Dotted path from the fragment root to the field this knob feeds.
     target: []const u8,
     kind: Kind,
-    /// When non-empty the whole knob is skipped unless this section exists
-    /// (the gates mirror the parsers' own missing-section returns).
+    /// When non-empty the whole knob is skipped unless this section exists.
     requires: []const u8 = "",
     /// Assign the fallback default even when no placement matched.
     copy_when_absent: bool = false,
-    /// Module stem whose source reads this target (e.g. "tags", "master").
-    /// Non-empty means the knob's only reader lives in that OPTIONAL module:
-    /// when the tree has no such module the knob is legitimately unwritten
-    /// (the modularity matrix deletes a module and its consumers together),
-    /// so the build's knob-reader scan excuses an absent module instead of
-    /// failing. The stem is pinned to the fragment's `knob_reader_modules`
-    /// entry by `validateOwnership`, so a typo in either table is a build
-    /// error rather than a silent re-owning of the knob. Empty means "a
-    /// reader must exist in the tree", the behaviour every core-owned knob
-    /// relies on. `readerOf` (or a helper's `reader` argument) sets it.
+    /// Module stem whose source reads this target (e.g. "tags"). Non-empty
+    /// means the knob's only reader lives in that OPTIONAL module: the build
+    /// excuses it when the tree lacks the module. Pinned to the fragment's
+    /// `knob_reader_modules` entry by `validateOwnership`, so a typo in
+    /// either table is a build error. Empty means "a reader must exist".
     reader: []const u8 = "",
     /// Targets this knob READS to resolve its value (the sibling a
-    /// `color_from`/`color_opt` kind falls back to), by dotted path relative
-    /// to the fragment root. This is the ORDERING constraint stated as data:
-    /// without it, a knob moved up or a sibling renamed would silently read
-    /// the DEFAULT value instead of the configured one -- the knob still
-    /// parsed, the color was just wrong, and only a visual diff of the bar
-    /// would show it. `validateTable` turns the ordering into a build
+    /// `color_from` falls back to), by dotted path. The ORDERING constraint
+    /// as data: without it a knob moved up would silently read the DEFAULT
+    /// instead of the configured sibling. `validateTable` makes it a build
     /// failure.
     needs: []const []const u8 = &.{},
 };
 
-/// Type/value walks into a fragment root by dotted path.
 /// Resolves a dotted path from `root` to the FIELD TYPE it names, or null
-/// when any step is missing. Comptime only -- the path is always a comptime
-/// string built by the knob builders, never a runtime value.
+/// when any step is missing. Comptime only.
 fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
     comptime {
         var cur = root;
@@ -165,12 +140,10 @@ fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
                 }
             }
             const t = next orelse return null;
-            // The last segment is the answer, even when its type is a struct:
-            // ScalableValue IS a struct, and treating it as a waypoint would
-            // make every size/percentage knob look like a dangling path.
+            // Last segment is the answer even when its type is a struct
+            // (ScalableValue IS one); treating it as a waypoint would make
+            // every size knob look like a dangling path.
             if (it.peek() == null) return t;
-            // Otherwise a struct continues the walk and anything else means
-            // the path went deeper than the type allows.
             if (@typeInfo(t) == .@"struct" and t != f64) {
                 cur = t;
             } else return null;
@@ -180,14 +153,10 @@ fn fieldTypeAt(comptime root: type, comptime path: []const u8) ?type {
 }
 
 /// The field type at the dotted `path`, or a build failure when it names
-/// nothing: the declaration-time validity of a target is established by
-/// `validateTable`; this is the same walk for a path whose validity the
-/// table already established.
+/// nothing: declaration-time validity is established by `validateTable`.
 pub fn FieldType(comptime T: type, comptime path: []const u8) type {
     comptime {
-        // One instantiation per distinct knob target, each walking the struct
-        // fields per segment: the shared comptime budget has to cover them
-        // all, so this is a ceiling on work, not on depth.
+        // Ceiling on comptime work, not depth: one instantiation per target.
         @setEvalBranchQuota(50_000);
         return fieldTypeAt(T, path) orelse @compileError(
             "knob: '" ++ path ++ "' does not name a field of " ++ @typeName(T),
@@ -217,26 +186,20 @@ inline fn walkVal(comptime T: type, base: *const T, comptime path: []const u8) F
     return @field(base, path);
 }
 
-/// Read-only view of a fragment's target field (a read-only test seam for
-/// the per-fragment tables, the mirror of applyAll's assignment).
+/// Read-only view of a fragment's target field (a read-only test seam, the
+/// mirror of applyAll's assignment).
 pub fn value(comptime CfgT: type, cfg: *const CfgT, comptime path: []const u8) FieldType(CfgT, path) {
     return walkVal(CfgT, cfg, path);
 }
 
-/// Comptime table contract.
-/// True when `t` names a field whose value is a plain scalar the knob tables
-/// are expected to own: bool, int, float, or one of the config value types.
-/// Containers (ArrayList, maps) and nested structs are excluded -- they are
-/// the bespoke cases, declared per fragment.
+/// True when `t` names a field a knob table may own: bool, int, float, a
+/// config value type, a string slice, or an enum. Containers and nested
+/// structs are excluded -- they are the bespoke cases, declared per fragment.
 fn isScalarLeaf(comptime t: type) bool {
     if (t == types.ScalableValue or t == types.Color) return true;
     return switch (@typeInfo(t)) {
-        // Owned string leaves: `[]const u8` slices (and their optionals)
-        // count as scalars a knob may own.
         .optional => |o| o.child == []const u8,
         .pointer => |p| p.size == .slice and p.child == u8,
-        // Enums are config-visible leaves too: a layout/gap enum nobody
-        // parses is dead in exactly the same way an int nobody parses is.
         .@"enum", .bool, .int, .float, .comptime_int, .comptime_float => true,
         else => false,
     };
@@ -244,17 +207,14 @@ fn isScalarLeaf(comptime t: type) bool {
 
 /// The comptime contract every fragment runs on its OWN table, with its OWN
 /// Config as the root:
-///   1. every knob target names a real field (otherwise a typo in a builder's
-///      target string produces a knob that parses, validates and assigns into
-///      nothing at all -- the config key works, the value goes nowhere, and
-///      no build fails);
+///   1. every knob target names a real field (a typo otherwise parses and
+///      assigns into nothing -- no build fails);
 ///   2. every scalar leaf is either a knob target or listed `bespoke`
-///      (otherwise it compiles, it parses, and it is always at its
-///      initializer -- a DEAD field);
-///   3. every bespoke entry names a real field (a stale exemption would
-///      quietly let a future rename escape check 2);
+///      (otherwise it stays at its initializer forever -- a DEAD field);
+///   3. every bespoke entry names a real field (a stale exemption would let
+///      a future rename escape check 2);
 ///   4. every `needs` dependency is supplied by an EARLIER knob in the same
-///      table (the base-colors-before-the-color_from-chain rule, checked).
+///      table (the base-colors-before-the-color_from-chain rule).
 pub fn validateTable(
     comptime CfgT: type,
     comptime knobs: []const Knob,
@@ -267,11 +227,9 @@ pub fn validateTable(
                 "knob table: target '" ++ k.target ++ "' does not name a field of " ++ @typeName(CfgT),
             );
         }
-        // Plain comptime string accumulation, not an ArrayList: this runs in
-        // a container-scope `comptime` block where a method call on a local
-        // list resolves to the UNBOUND `append(list, item)` and reports a
-        // bogus arity error only once a dead field actually makes the line
-        // reachable.
+        // Plain comptime string accumulation, not an ArrayList: a method call
+        // on a local list resolves to the UNBOUND `append` in a
+        // container-scope comptime block and reports a bogus arity error.
         var unclaimed: []const u8 = "";
         var unclaimed_n: usize = 0;
         for (std.meta.fields(CfgT)) |f| {
@@ -319,15 +277,11 @@ pub fn validateTable(
 /// The comptime contract between a fragment's knob table and its
 /// `knob_reader_modules` ownership pairs (the build's text scan reads the
 /// pairs to excuse a module-owned knob when the tree lacks the module):
-///   1. every pair names a target of the same fragment's knob table (a
-///      stale entry would excuse a knob that no longer exists);
-///   2. the pair's stem equals the `reader` the knob entry itself declares,
-///      so a typo in EITHER table fails the build instead of silently
-///      re-owning the knob;
-///   3. every knob entry with a non-empty `reader` has a pair, so the
-///      excusal table can never lag the knob table.
-/// Aliases share a target, so every entry for a target is checked in both
-/// directions.
+///   1. every pair names a target of the same fragment's knob table;
+///   2. the pair's stem equals the `reader` the knob entry declares, so a
+///      typo in EITHER table fails the build;
+///   3. every knob with a non-empty `reader` has a pair, so the excusal
+///      table can never lag the knob table.
 pub fn validateOwnership(
     comptime knobs: []const Knob,
     comptime pairs: []const [2][]const u8,
@@ -369,7 +323,6 @@ pub fn validateOwnership(
     }
 }
 
-/// Generic readers.
 /// Warn-and-return-default for an out-of-range value, shared by getInRange's
 /// integer path so the warning wording lives once.
 fn reject(
@@ -406,10 +359,9 @@ fn getInRange(
         }
     }
     const i = section.getAsOrWarn(i64, key) orelse return default;
-    // The type's own span, in the read type, checked BEFORE the cast so no
-    // @intCast trap is reachable for any bounded int: minInt fits i64 for
-    // every int (unsigned minInt is 0), maxInt is clamped because u64's does
-    // not. Only then do the knob's explicit min/max apply.
+    // The type's own span, checked BEFORE the cast so no @intCast trap is
+    // reachable: minInt fits i64 for every int (unsigned minInt is 0);
+    // maxInt is clamped because u64's does not. Then the knob's min/max.
     const lo: i64 = std.math.minInt(T);
     const hi: i64 = @min(std.math.maxInt(T), std.math.maxInt(i64));
     if (i < lo) return reject(i64, key, i, "below minimum", lo, default);
@@ -421,11 +373,9 @@ fn getInRange(
 }
 
 /// Reads `section.key` as a ScalableValue, warn-and-return-`default` below
-/// `min`. `fallback_label` names the fallback in the warning ("default" for
-/// ordinary scalables, "auto" for bar.height); callers remap null to their
-/// own default. Only enforces a lower bound on the raw `.value` (percentages
-/// and absolute pixels share no meaningful ceiling): enough to reject a
-/// negative like `gap_width = -50`, matching getInRange.
+/// `min`. `fallback_label` names the fallback in the warning ("default" or
+/// "auto"). Only a lower bound on the raw `.value` is enforced (no meaningful
+/// ceiling), enough to reject a negative like `gap_width = -50`.
 fn getScalableInRange(
     section: *parser.Section,
     key: []const u8,
@@ -445,14 +395,13 @@ fn getScalableInRange(
 }
 
 /// Reads `section.key` into a [0.0, 1.0] ratio, falling back to `default`
-/// when the key is absent or out of range. Decimals and `%`-suffixed
-/// values are ratios directly; quoted values fall to the default, warned.
+/// when the key is absent or out of range.
 ///
-/// `ints_are_percent` selects the bare-integer policy. The legacy one
-/// (`.ratio`) reads a bare integer as a percentage 0-100 (`= 1`
-/// resolving to 1% with a warning). The strict one (`.ratio_strict`)
-/// rejects bare integers outright, so `transparency = 1` reverts to the
-/// default instead of being misread as 1% while `= 1.0` means 100%.
+/// `ints_are_percent` selects the bare-integer policy: the legacy one
+/// (`.ratio`) reads a bare integer as a percentage 0-100 (`= 1` resolving to
+/// 1% with a warning); the strict one (`.ratio_strict`) rejects bare integers
+/// outright, so `transparency = 1` reverts to the default instead of being
+/// misread as 1% while `= 1.0` means 100%.
 fn getRatio(comptime ints_are_percent: bool, section: *parser.Section, key: []const u8, default: f32) f32 {
     const val = section.get(key) orelse return default;
     if (val.asScalar(i64)) |i| {
@@ -462,9 +411,8 @@ fn getRatio(comptime ints_are_percent: bool, section: *parser.Section, key: []co
                 return default;
             }
             if (i == 1) {
-                // `= 1` is ambiguous (1% or 1.0); per the "bare integers are
-                // percentages" rule it resolves to 1%, but we warn so a user who
-                // meant the full value writes `1.0` or `100%`.
+                // Ambiguous (1% or 1.0); resolves to 1% per the percentages
+                // rule, but warn so a user who meant 1.0 writes `1.0`/`100%`.
                 log.warn("{s} value 1 is ambiguous (1% or 1.0 ratio?); " ++
                     "treating as 1%. Use '1.0' or '100%' for 100%.", .{key});
                 return 0.01;
@@ -503,22 +451,19 @@ fn getRatio(comptime ints_are_percent: bool, section: *parser.Section, key: []co
 
 /// Dupes `val` into `*view`, freeing the previous value first. `*view` must
 /// already hold a heap allocation (or null), so Config.deinit frees every
-/// owned string unconditionally. The dupe comes BEFORE the free because the
-/// key-absent fallback passes `view.*` as `val`.
+/// owned string unconditionally. Dupe BEFORE free: the key-absent fallback
+/// passes `view.*` as `val`.
 pub fn assignStr(allocator: std.mem.Allocator, view: *?[]const u8, val: []const u8) !void {
     const copy = try allocator.dupe(u8, val);
     if (view.*) |old| allocator.free(old);
     view.* = copy;
 }
 
-/// The engine: applies one fragment's knob table onto its root.
 /// Applies every knob of `knobs` from a parsed Document onto `cfg` (a
-/// fragment root). The single table-driven scalar pass; OOM from string
-/// dupes propagates; everything else warns-and-reverts in place. The
-/// document-global palette must already be collected (`color.collectPalette`)
-/// before color knobs read. This does NOT lint the document and does NOT run
-/// any bespoke tail -- those belong to the caller (composed.parse lints;
-/// each fragment appends its own tables).
+/// fragment root). The single table-driven scalar pass; OOM from string dupes
+/// propagates; everything else warns-and-reverts in place. The
+/// document-global palette must already be collected before color knobs read.
+/// Does NOT lint the document or run any bespoke tail -- the caller's job.
 pub fn applyAll(
     comptime CfgT: type,
     doc: *parser.Document,
@@ -533,10 +478,9 @@ pub fn applyAll(
         }
         var hit: ?struct { sec: *parser.Section, key: []const u8 } = null;
         for (k.places) |pl| {
-            // Places probe in order; the FIRST section present in the document
-            // wins and only its paired key spelling is read. Presence of
-            // `[tiling.layouts.master-stack]` therefore makes flat `[tiling]`
-            // master_count unrecognized.
+            // First section present wins; only its paired key spelling is read
+            // (presence of `[tiling.layouts.master-stack]` makes flat
+            // `[tiling]` master_count unrecognized).
             if (doc.getSection(pl.section)) |sec| {
                 hit = .{ .sec = sec, .key = pl.key };
                 break;
@@ -589,8 +533,7 @@ pub fn applyAll(
             },
             .opt_float => |spec| if (hit) |h| {
                 if (h.sec.getAsOrWarn(f32, h.key)) |v| {
-                    // Out of range warns and leaves the field null, i.e. the
-                    // user gets detection rather than a silent absurd value.
+                    // Out of range warns and leaves the field null (auto).
                     if (v < spec.min or v > spec.max) {
                         log.warn(
                             "{s}.{s} = {d} is outside {d}..{d}; ignoring and detecting instead",
@@ -620,7 +563,7 @@ pub fn applyAll(
 }
 
 // ---------------------------------------------------------------------------
-// P1-44: the knob schema dump backing `hana --dump-config-schema`.
+// The knob schema dump backing `hana --dump-config-schema`.
 //
 // The tables are comptime data with a validated contract; this renders them
 // -- plus each field's default, which lives in the fragment root's field
@@ -654,7 +597,7 @@ pub const SchemaTable = struct {
 /// Collects every table's entries in declaration order -- core first, then
 /// the discovered fragments in owner order; the generated composed module
 /// passes exactly that list. A fragment without a `knobs` decl contributes
-/// none, so an optional subsystem's deletion shortens the inventory with the
+/// none, so deleting an optional subsystem shortens the inventory with the
 /// rest of its config trace.
 pub fn collectSchema(comptime tables: []const SchemaTable) []const SchemaEntry {
     comptime {

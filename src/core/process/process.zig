@@ -1,10 +1,7 @@
-//! Process lifecycle: flags and fd plumbing (xcb-free, module-level atomics
-//! shared between signal handlers, actions, and the event loop), the
-//! in-place exec coordinator (binary reload via event-loop flag, also
-//! xcb-free and model-free), and the signal self-pipe/dispatch: POSIX
-//! signals routed through a self-pipe so the event loop can dispatch them
-//! without signal-handler reentrancy. Config reloads (SIGHUP/reload_config)
-//! are separate from re-exec.
+//! Process lifecycle: module-level atomics, the in-place exec coordinator, and
+//! the signal self-pipe (POSIX signals routed through a self-pipe so the event
+//! loop dispatches without handler reentrancy). Config reloads (SIGHUP) are
+//! separate from re-exec.
 
 const std = @import("std");
 
@@ -17,31 +14,24 @@ const spawn = @import("spawn");
 /// Set to false by SIGTERM/SIGINT to break the main event loop.
 pub var running = std.atomic.Value(bool).init(true);
 
-/// Set to true by SIGHUP or the `reload_config` keybinding.
-/// Consumed by `consumeReload` in the main event loop.
+/// Set by SIGHUP or the `reload_config` keybinding; consumed by `consumeReload`.
 var should_reload = std.atomic.Value(bool).init(false);
 
-/// Write end of the signal self-pipe (owned by `setup` below), registered via
-/// `setSignalWriteFd`. The `reload_config` keybinding has no signal byte, so
-/// `reload()` writes a wake byte here to poke the event loop out of poll
-/// immediately instead of waiting for an unrelated signal.
+/// Write end of the signal self-pipe (owned by `setup`), registered via
+/// `setSignalWriteFd` so `reload()` can wake the event loop out of poll.
 var signal_write_fd: std.posix.fd_t = -1;
 
-/// Byte `reload()` writes to the signal pipe to wake the event loop out of
-/// poll. A pure wake token: the drain discards it and dispatches from the
-/// real-signal bitmap, so no byte value collides with a signal.
+/// Byte `reload()`/`wake()` write to poke the event loop; pure wake token, the
+/// drain dispatches from the real-signal bitmap so no value collides.
 const wake_byte: u8 = 0xff;
 
-/// Registers the write end of the signal self-pipe so `reload()` can wake the
-/// event loop. Pass -1 to unregister (teardown).
+/// Registers the signal-pipe write end; pass -1 to unregister (teardown).
 pub fn setSignalWriteFd(fd: std.posix.fd_t) void {
     signal_write_fd = fd;
 }
 
-/// Wakes the event loop out of poll by writing the wake byte, if the signal
-/// pipe is registered. Lossy: a full (or unregistered) pipe drops the byte;
-/// the event loop polls its flags every iteration, so a lost byte only delays
-/// the action by one poll timeout at worst.
+/// Writes the wake byte if the pipe is registered. Lossy by design: the event
+/// loop polls its flags every iteration, so a lost byte costs one poll timeout.
 fn writeWakeByte() void {
     if (signal_write_fd >= 0)
         _ = std.os.linux.write(signal_write_fd, &[_]u8{wake_byte}, 1);
@@ -52,47 +42,33 @@ pub fn quit() void {
     running.store(false, .release);
 }
 
-/// Signals the main event loop to reload the user config.
-///
-/// Safe from any thread: the wake byte is a plain write, not a signal. If the
-/// pipe is full (or not yet registered) the write is dropped; the event loop
-/// also polls the flag itself every iteration, so a lost byte only delays the
-/// reload by one poll timeout at worst.
+/// Signals the event loop to reload the user config. Safe from any thread: the
+/// wake byte is a plain write, not a signal (lossy write: see `writeWakeByte`).
 pub fn reload() void {
     if (!should_reload.swap(true, .acq_rel)) writeWakeByte();
 }
 
-/// Wakes the event loop out of poll by writing the wake byte, without
-/// touching any flag. The narrow version of `reload()`: `requestReexec` uses it so
-/// its re-exec request (a separate flag, consumed by `consumeReexec`) is
-/// noticed immediately instead of waiting for an unrelated signal. Same
-/// lossy-write tolerance as `reload()`: the event loop polls its flags every
-/// iteration, so a dropped byte only delays the action by one poll timeout.
+/// Writes the wake byte without touching any flag: `requestReexec`'s separate
+/// flag is noticed immediately instead of waiting for an unrelated signal.
 pub fn wake() void {
     writeWakeByte();
 }
 
-/// Atomically consumes the reload flag.
-/// Returns true exactly once per request, whichever call path checks first wins.
+/// Atomically consumes the reload flag; true exactly once per request.
 pub fn consumeReload() bool {
     return should_reload.swap(false, .acq_rel);
 }
 
-/// In-place exec coordinator.
-
-// libc bindings for execv/setenv (no Zig stdlib wrappers exist for them, and
-// the executable links libc, so mirroring spawn.zig's pattern is the honest
-// route). execv (not execvp) is deliberate: we hand it the absolute self
-// path, so there is no PATH lookup; and as the variadic execv it inherits
-// the process environ, which carries DISPLAY and HANA_RESTORE forward.
+// libc bindings for execv/setenv (no stdlib wrappers exist). execv (not
+// execvp) is deliberate: we hand it the absolute self path (no PATH lookup),
+// and the variadic form inherits the environ carrying DISPLAY and HANA_RESTORE.
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
 });
 
-/// c_allocator-owned, NUL-terminated copy of `src`, or die: the re-exec
-/// cannot proceed without the path, the X connection is already closed, and
-/// there is nothing left to do but end the session.
+/// c_allocator-owned, NUL-terminated copy of `src`, or die: the X connection
+/// is already closed, so ending the session is all that is left.
 fn mustDupeZ(src: []const u8, what: []const u8) [:0]const u8 {
     return std.heap.c_allocator.dupeZ(u8, src) catch {
         log.err("restart: out of memory copying {s}", .{what});
@@ -100,22 +76,21 @@ fn mustDupeZ(src: []const u8, what: []const u8) [:0]const u8 {
     };
 }
 
-/// Null-terminated absolute path to exec on re-exec (readLink of
-/// `/proc/self/exe`). c_allocator-owned, process-lifetime: never freed.
+/// Null-terminated `/proc/self/exe` path for re-exec; c_allocator-owned,
+/// process-lifetime: never freed.
 var exec_path_z: ?[:0]const u8 = null;
 
-/// Re-exec request flag. Set by `requestReexec` (the `reload_hana` action and
-/// SIGUSR1), consumed by `consumeReexec` in the main event loop.
+/// Re-exec request flag; set by `requestReexec`, consumed by `consumeReexec`.
 var should_reexec = std.atomic.Value(bool).init(false);
 
-/// Resolves the binary to exec on re-exec: the readLink of `/proc/self/exe`.
-/// One-shot at startup, before any reload/reexec request can arrive.
+/// Resolves the binary to exec on re-exec (readLink of `/proc/self/exe`),
+/// one-shot at startup before any request can arrive.
 pub fn init() void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.os.linux.readlinkat(std.os.linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len);
-    // readlinkat returns exactly `buf.len` (errno still SUCCESS) when the
-    // path fills the buffer -- truncated, no NUL. Treat a full buffer as
-    // unresolvable so a re-exec can never hand execv a cut-off path.
+    // readlinkat returns exactly `buf.len` (errno SUCCESS) when truncated --
+    // no NUL -- so a full buffer must count as unresolvable: execv must never
+    // receive a cut-off path.
     if (std.posix.errno(n) != .SUCCESS or n == buf.len) {
         log.warn(
             "restart: readlink /proc/self/exe failed or truncated; in-place re-exec disabled",
@@ -127,67 +102,52 @@ pub fn init() void {
     }
 }
 
-/// Unconditional re-exec (`reload_hana` action / SIGUSR1): re-exec the
-/// current in-place binary, skipping any change check.
+/// Unconditional re-exec (`reload_hana` / SIGUSR1): re-exec the current
+/// binary, skipping any change check.
 pub fn requestReexec() void {
     should_reexec.store(true, .release);
     wake();
 }
 
-/// Atomic, mirrors consumeReload: true exactly once per request.
-/// Consumed by the event loop AFTER consumeReload (events.run checks reload
-/// first, re-exec second).
+/// Atomic, mirrors consumeReload: true exactly once per request. Consumed by
+/// the event loop AFTER consumeReload (events.run checks reload first).
 pub fn consumeReexec() bool {
     return should_reexec.swap(false, .acq_rel);
 }
 
-/// The resolved path of the running image, still sentinel-terminated, for
-/// callers that hand it to `execv`. Null when re-exec was never armed (init
-/// saw no /proc). `execNext` takes this form so the hand-off does not
-/// re-duplicate a string the process is already holding.
+/// The running image's sentinel-terminated path for `execv`. Null when
+/// re-exec was never armed. This form avoids re-duplicating a held string.
 fn selfPathZ() ?[:0]const u8 {
     return exec_path_z;
 }
 
-/// The environment variables that carry the re-exec hand-off. The WRITER
-/// (`execNext`) and the READER (boot, via `restorePathFromEnv`) have to agree
-/// on these names exactly. A typo on the reading side is the worst kind of bug
-/// here: the lookup simply returns null, so a re-exec'd instance boots as a
-/// COLD boot and silently adopts nothing, with no error anywhere.
+/// Env vars carrying the re-exec hand-off. Writer (`execNext`) and reader
+/// (boot, via `restorePathFromEnv`) must agree on these names exactly: a typo
+/// on the reading side silently boots the successor as a COLD boot that adopts
+/// nothing, with no error anywhere.
 pub const restore_env = "HANA_RESTORE";
 pub const config_dir_env = "HANA_CONFIG_DIR";
 
-/// The restore path a previous instance handed over, or null when this is a
-/// cold boot. Borrowed from the process environment -- do not free, and do not
-/// retain past the adoption.
+/// The restore path a previous instance handed over, or null on cold boot.
+/// Borrowed from the environ -- do not free or retain past adoption.
 pub fn restorePathFromEnv() ?[*:0]const u8 {
     return std.c.getenv(restore_env);
 }
 
-/// The complete re-exec hand-off, assembled once and owned by this module.
-///
-/// Three loose arguments for one transition would mean the sequence has to be
-/// re-derived at every call site, and nothing could assert the set is
-/// complete. Naming the record makes "what crosses the hand-off" a single
-/// declaration.
+/// The complete re-exec hand-off: naming the set makes "what crosses the
+/// transition" one declaration that call sites and tests cannot get wrong.
 pub const Handoff = struct {
     /// Sentinel-terminated (`selfPathZ()`); this process's own image.
     self_path: [:0]const u8,
-    /// The session state file. Not sentinel-terminated: the only copy is made
-    /// here, inside the call that needs it.
+    /// The session state file; the only copy is made inside the call needing it.
     restore_path: []const u8,
-    /// Frozen last-good config directory, or null when no user config was ever
-    /// loaded (a fallback-only session has nothing to pin).
+    /// Frozen last-good config dir, or null when no user config was ever loaded.
     config_snapshot: ?[:0]const u8 = null,
 };
 
-/// The hand-off for this process, or null when re-exec was never armed
-/// (`init` saw no `/proc`, so there is no exec path to hand over).
-///
-/// `config_snapshot` is passed in rather than resolved here: the snapshot
-/// lives in the config layer, and importing config from `core/process` to fetch
-/// one path would invert the dependency for no gain. The caller already has
-/// both values; this only fixes their order and names them.
+/// The hand-off for this process, or null when re-exec was never armed.
+/// `config_snapshot` is passed in rather than fetched here: importing config
+/// from `core/process` would invert the dependency for no gain.
 pub fn currentHandoff(restore_path: []const u8, config_snapshot: ?[:0]const u8) ?Handoff {
     const self_path = selfPathZ() orelse return null;
     return .{
@@ -198,24 +158,17 @@ pub fn currentHandoff(restore_path: []const u8, config_snapshot: ?[:0]const u8) 
 }
 
 /// Execs `self_path` IN PLACE, inheriting environ/DISPLAY. Never returns.
-/// MUST be called only after the X connection is closed (handleReexec does):
-/// a live inherited fd would keep the old client (and its root
-/// SubstructureRedirect grab) alive while the fresh connection tries to
-/// claim the same grab, and the server would reject the newcomer with
-/// BadAccess.
+/// MUST run only after the X connection is closed: a live inherited fd would
+/// keep the old client's root SubstructureRedirect grab alive, and the server
+/// would reject the fresh connection with BadAccess.
 ///
-/// Deliberately NO fork: the process identity (pid and parent) survives
-/// the hand-off. Under startx the display lives exactly as long as the
-/// session client (xinit -> Xsession -> .xinitrc -> this process); replacing
-/// the image in place keeps that chain unbroken, so the successor boots into
-/// a live server and the session only ends when the new WM actually exits.
-/// (A fork-then-exit design would kill every supervised re-exec: the
-/// parent's exit makes the session script return and xinit tears down Xorg
-/// mid-hand-off.)
+/// Deliberately NO fork: the pid/parent identity must survive so the startx
+/// session chain (xinit -> ... -> this process) stays unbroken -- a
+/// fork-then-exit would make xinit tear down Xorg mid-hand-off.
 ///
-/// The restore path crosses the hand-off in `restore_env`: execv inherits
-/// environ, and Zig 0.16's classic `main() !void` cannot read argv, so the
-/// environment is the one channel a fresh boot can see.
+/// The restore path crosses via `restore_env`: execv inherits environ, and
+/// Zig 0.16's `main() !void` cannot read argv, so the environment is the one
+/// channel a fresh boot can see.
 pub fn execNext(handoff: Handoff) noreturn {
     const self_z = handoff.self_path;
     const restore_z = mustDupeZ(handoff.restore_path, "restore path");
@@ -227,89 +180,71 @@ pub fn execNext(handoff: Handoff) noreturn {
     if (handoff.config_snapshot) |snap_z|
         _ = c.setenv(config_dir_env, snap_z, 1);
     _ = c.execv(self_z, @ptrCast(&[_:null]?[*:0]const u8{ self_z, null }));
-    // Only reachable when exec failed; the X connection is already closed,
-    // so there is nothing left to do but end the session.
+    // Only reachable when exec failed; the X connection is already closed.
     log.err("restart: execv failed", .{});
     std.process.exit(1);
 }
 
-/// Signal self-pipe and dispatch:
-/// routes POSIX signals through a self-pipe so the event loop can dispatch
-/// them safely without signal-handler reentrancy.
 // End indices of the self-pipe: signal handlers write to pipe_write; the
 // event loop polls pipe_read.
 const pipe_read = 0;
 const pipe_write = 1;
 
-/// Bytes read per syscall from the self-pipe. The pipe holds only wake tokens
-/// (whose value is ignored), so this is just a read size: big enough that a
-/// coalesced burst is cleared in one call.
+/// Read size per syscall; the pipe holds only ignored wake tokens, so this
+/// just clears a coalesced burst in one call.
 const drain_buf_size: usize = 16;
 
 var signal_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 
-// Alternate-signal-stack backing store for the SIGUSR2 backtrace handler,
-// which runs with SA.ONSTACK. 64 KiB is ~8x SIGSTKSZ (8 KiB on x86_64) so the
-// handler never reaches the top of a tiny kernel-given area; static so no
-// allocator is touched in signal context. align(16) so the stack pointer the
-// kernel installs is ABI-aligned for a pushed frame.
+// Alternate-signal-stack backing for the SA.ONSTACK SIGUSR2 handler: 64 KiB
+// (~8x SIGSTKSZ) so it never tops out; static so no allocator runs in signal
+// context; align(16) for the ABI-aligned stack pointer the kernel installs.
 var alt_stack_mem: [64 * 1024]u8 align(16) = undefined;
 
-// Async-signal-safe pending-signal bitmap. The self-pipe byte is only a
-// WAKE TOKEN: a full pipe forces the handler to drain its backlog, so a byte
-// can be discarded, and signal STATE must not ride on the byte. Instead the
-// handler sets a bit here with a lock-free atomic OR, and the event loop
-// consumes the whole word. A TERM/INT/reload delivered during a pipe-full
-// burst therefore can never be lost.
+// Async-signal-safe pending-signal bitmap. The pipe byte is only a WAKE
+// TOKEN: signal STATE must not ride on it (a full pipe can discard a byte), so
+// the handler sets a bit and the event loop consumes the whole word -- a
+// TERM/INT/reload during a pipe-full burst can never be lost.
 var pending_signals: std.atomic.Value(u64) = .init(0);
 
 // Async-signal-safe handler: records the signal and wakes the loop.
 fn signalHandler(signo: std.posix.SIG) callconv(.c) void {
-    // The u64 bitmap only has 64 bits, so clamp rather than panic when the
-    // runtime hands us a signal number past 63: a panic inside an
-    // async-signal handler cannot unwind, it would abort the process. A
+    // Clamp past-63 signal numbers rather than panic: a panic in an
+    // async-signal handler cannot unwind and would abort the process; a
     // clamped signal still lands in the bitmap and still gets dispatched.
     const bit: u6 = @intCast(@min(@intFromEnum(signo), 63));
     _ = pending_signals.fetchOr(@as(u64, 1) << bit, .release);
     writeWakeToken();
 }
 
-/// The one byte written to the self-pipe. Its VALUE carries nothing: the
-/// reader (`drainAndDispatch`) drains whatever is there and then consumes the
-/// whole `pending_signals` bitmap, so the pipe is a wake token, not a queue.
+/// The self-pipe byte; its VALUE carries nothing -- the pipe is a wake token,
+/// not a queue (the reader consumes the whole `pending_signals` bitmap).
 const wake_token: u8 = 1;
 
-/// Async-signal-safe, non-blocking write of the single wake token.
-///
-/// EAGAIN needs no recovery: a full pipe means an UNCONSUMED token is already
-/// queued, which is precisely the state this write exists to create, and the
-/// reader's bitmap swap collects every signal that arrived in the meantime.
+/// Async-signal-safe, non-blocking write of the wake token. EAGAIN needs no
+/// recovery: a full pipe already holds an UNCONSUMED token, the very state
+/// this write exists to create; the bitmap swap collects signals in between.
 fn writeWakeToken() void {
     const wfd = signal_pipe[pipe_write];
     const rc: isize = @bitCast(std.os.linux.write(wfd, &[_]u8{wake_token}, 1));
     if (rc <= 0) return; // pipe full (already awake) or closed fd: lossy
 }
 
-// Re-entry guard for the SIGUSR2 backtrace dump: a second USR2 arriving
-// mid-dump must be dropped rather than re-enter the write path.
+// Re-entry guard: a second USR2 mid-dump must be dropped, not re-entered.
 var backtrace_in_progress: std.atomic.Value(bool) = .init(false);
 
-// SIGUSR2: live diagnostic. Dumps the stack of the INTERRUPTED main thread
-// (the exact spot hana is stuck in when it freezes) straight to stderr
-// (-> ~/hana-crash.log via .xinitrc). Trigger with: kill -USR2 <pid>
+// SIGUSR2: live diagnostic. Dumps the INTERRUPTED main thread's stack (the
+// hang site) straight to stderr (-> ~/hana-crash.log via .xinitrc); trigger
+// with `kill -USR2 <pid>`. Unlike SIGUSR1 no pipe byte is written: the point
+// is to work when the event loop itself is wedged. The kernel ucontext makes
+// the trace show the pre-signal frame, not this handler.
 //
-// Unlike SIGUSR1, no byte is written to the self-pipe: the point is to work
-// when the event loop itself is wedged and would never dispatch a pipe byte.
-// Using the kernel-provided ucontext makes the trace show the pre-signal
-// frame (the hang site), not this handler.
-//
-// ASYNC-SIGNAL-SAFETY: this handler runs in the signal context, so it only
-// performs raw write(2) on stack buffers and reads the interrupted thread's
-// own frame chain, bounded to its stack window. It must NOT use locks, the
-// allocator, or std.debug symbolization: those re-enter exclusive state the
-// interrupted main thread may hold (GPA lock, io lock), which would hang the
-// dump exactly when it is most needed. Frames print as raw return addresses;
-// resolve them offline with e.g. `addr2line -e hana -f -C`.
+// ASYNC-SIGNAL-SAFETY: only raw write(2) on stack buffers plus a bounded
+// walk of the interrupted thread's own frame chain. It must NOT use locks, the
+// allocator, or std.debug symbolization -- those re-enter exclusive state the
+// interrupted thread may hold (GPA lock, io lock) and would hang the dump
+// exactly when it is most needed. Frames print as raw addresses; resolve
+// offline with e.g. `addr2line -e hana -f -C`.
 fn handleBacktraceRequest(
     sig: std.posix.SIG,
     info: *const std.posix.siginfo_t,
@@ -328,19 +263,14 @@ fn handleBacktraceRequest(
     if (opt_ctx) |*ctx| {
         writePcLine(fd, 0, ctx.getPc());
         if (builtin.cpu.arch == .x86_64) {
-            // Frame-pointer walk over the interrupted thread's stack. Stacks
-            // grow down, so every frame pointer is >= the interrupted rsp and
-            // the chain strictly increases; bound reads to rsp..rsp+span (the
-            // main thread's default 8 MiB stack mapping) so a corrupted chain
-            // can never dereference unrelated memory. The span NAMES that
-            // platform default (Linux pthread main-stack 8 MiB); it is not a
-            // measured working set.
+            // Frame-pointer walk over the interrupted stack: chains grow
+            // strictly upward from rsp, so bounding reads to rsp..rsp+span
+            // (the 8 MiB Linux pthread main-stack default, not a measured
+            // working set) keeps a corrupted chain off unrelated memory.
             const span: usize = 8 << 20;
-            // Each saved frame straddles rbp and rbp+8 (saved rbp then return
-            // address); +16 bounds the chain strictly within the span.
+            // A saved frame straddles rbp..rbp+8 (saved rbp, return address).
             const frame_stride: usize = 16;
-            // A real frame pointer is 8-aligned; unaligned pointers are a
-            // corrupted chain.
+            // Real frame pointers are 8-aligned; unaligned = corrupted chain.
             const frame_alignment: usize = 8;
             const max_depth: usize = 96;
             const lo = ctx.gprs.get(.rsp);
@@ -374,8 +304,8 @@ fn writeLiteral(fd: std.posix.fd_t, s: []const u8) void {
     _ = std.os.linux.write(fd, s.ptr, s.len);
 }
 
-/// Async-signal-safe single-frame line: "  #<depth> 0x<16 hex>\n". Purely
-/// stack-local formatting plus one raw write(2); symbols are resolved offline.
+/// Async-signal-safe frame line: "  #<depth> 0x<16 hex>\n" via stack-local
+/// formatting plus one raw write(2); symbols resolve offline.
 fn writePcLine(fd: std.posix.fd_t, depth: usize, addr: usize) void {
     const hex = "0123456789abcdef";
     var buf: [8 + 16 + 1]u8 = undefined;
@@ -397,7 +327,6 @@ fn writePcLine(fd: std.posix.fd_t, depth: usize, addr: usize) void {
     _ = std.os.linux.write(fd, &buf, buf.len);
 }
 
-// Replaces the default SIGUSR2 disposition with the live backtrace dump.
 fn setupBacktraceHandler() void {
     const sa: std.posix.Sigaction = .{
         .handler = .{ .sigaction = handleBacktraceRequest },
@@ -417,26 +346,21 @@ const handled_signals = [_]std.posix.SIG{
     std.posix.SIG.USR1,
 };
 
-/// What `setup` installs, as DATA, with no side effects.
-///
-/// Naming the policy as a value separates the question from the effects:
-/// `plan` is pure and testable, `install` is the only thing that touches
-/// process state -- which is what lets a test assert the table directly,
-/// since installing the real dispositions from a test binary would clobber
-/// the runner's own SIGINT/SIGTERM handling.
+/// What `setup` installs, as DATA with no side effects. Naming the policy as
+/// a value keeps `plan` pure and testable -- a test can assert the table
+/// without installing real dispositions that would clobber the runner's own
+/// SIGINT/SIGTERM handling.
 pub const Plan = struct {
     /// Signals that get the self-pipe handler, in install order.
     handled: []const std.posix.SIG,
-    /// The one signal ignored outright. Kept out of `handled` because its
-    /// disposition is SIG_IGN, not a handler.
+    /// The one signal ignored outright (SIG_IGN, not a handler).
     ignored: std.posix.SIG,
-    // Order matters and is why this is not reordered: the alternate stack MUST
-    // be installed before any ONSTACK handler is armed, because the backtrace
-    // handler runs on it, and without one it would run on the (possibly
-    // corrupted) stack it exists to diagnose.
+    // Order is load-bearing: the alternate stack MUST be installed before any
+    // ONSTACK handler is armed -- the backtrace handler runs on it, and
+    // without one it would run on the (possibly corrupted) stack it exists
+    // to diagnose.
 };
 
-/// The disposition policy, as pure data. No signal is touched, no fd opened.
 pub fn plan() Plan {
     return .{
         .handled = &handled_signals,
@@ -474,10 +398,7 @@ fn install(p: Plan) !void {
         .flags = 0,
     }, null);
 
-    // The backtrace handler arms SA.ONSTACK, but no alternate stack was
-    // ever installed -- without one the handler would run on the (possibly
-    // corrupted) interrupted stack it exists to diagnose. Install it before
-    // arming any ONSTACK handler.
+    // Alternate stack before any ONSTACK handler (see the Plan field note).
     const ss: std.posix.stack_t = .{
         .sp = &alt_stack_mem,
         .flags = 0,
@@ -488,7 +409,6 @@ fn install(p: Plan) !void {
     setupBacktraceHandler();
 }
 
-// Closes both ends of the signal pipe.
 pub fn deinit() void {
     setSignalWriteFd(-1);
     for (&signal_pipe) |*fd| {
@@ -503,21 +423,17 @@ pub fn readFd() std.posix.fd_t {
     return signal_pipe[pipe_read];
 }
 
-// Dispatches one signal from the pending-signals bitmap. The self-pipe byte
-// is only a wake token; the signal number comes from the bitmap, not the
-// byte.
+// Dispatches one signal from the pending-signals bitmap (the pipe byte is
+// only a wake token; the number comes from the bitmap).
 fn dispatchSignal(pending_sig: u8) void {
     switch (@as(std.posix.SIG, @enumFromInt(pending_sig))) {
         .HUP => reload(),
-        // Unconditional in-place re-exec of the current binary (no change
-        // check). Dispatch runs on the event loop, NOT in the signal
-        // handler, so flag work is safe.
+        // Runs on the event loop, NOT in the signal handler, so flag work is safe.
         .USR1 => requestReexec(),
         .TERM, .INT => quit(),
-        // SIGCHLD: a spawned child has exited (or, now that hana is a
-        // subreaper, an orphaned grandchild of one has re-parented to us).
-        // Reap it with WNOHANG, then immediately drain the spawn pipes so
-        // registerSpawn fires without waiting for the next XCB event batch.
+        // SIGCHLD: a child exited (or a subreaper-orphaned grandchild
+        // re-parented to us). Reap WNOHANG, then drain the spawn pipes so
+        // registerSpawn fires without waiting for the next XCB batch.
         .CHLD => {
             spawn.reapPendingChildren();
             spawn.drainPendingSpawns();
@@ -527,15 +443,12 @@ fn dispatchSignal(pending_sig: u8) void {
 }
 
 /// Drains the non-blocking signal pipe and dispatches each pending signal.
-///
-/// The pipe is read purely as a wake token (see `wake_token`); signal state
-/// lives in `pending_signals`. Reading first, then consuming the bitmap, means a
-/// signal that arrives after the swap re-arms the pipe, so the next poll drains
-/// and consumes it.
+/// Read-then-swap ordering: a signal arriving after the bitmap swap re-arms
+/// the pipe, so the next poll drains and consumes it.
 ///
 /// std.os.linux.read returns usize; a kernel error wraps a negative value into
-/// a huge unsigned number an unsigned comparison would never catch. Bitcast to
-/// isize and stop on any non-positive result (error, EOF, or empty).
+/// a huge unsigned an unsigned comparison would never catch. Bitcast to isize
+/// and stop on any non-positive result (error, EOF, or empty).
 pub fn drainAndDispatch(fd: std.posix.fd_t) void {
     var buf: [drain_buf_size]u8 = undefined;
     while (true) {

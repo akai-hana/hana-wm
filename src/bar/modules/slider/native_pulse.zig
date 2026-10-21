@@ -1,39 +1,27 @@
-//! Native PulseAudio backend for the volume segment, via runtime `dlopen` of
-//! `libpulse.so.0` -- no headers, no link-time dependency, no subprocess.
+//! Native PulseAudio backend for the volume segment, via runtime `dlopen`
+//! of `libpulse.so.0` -- no headers, no link-time dependency, no subprocess.
 //!
-//! Every commit (`setVolumePct`, `setMuted`) and read (`readSink`, used on
-//! the 5 s read cadence) is an in-process call into a threaded mainloop that
-//! talks the native protocol straight to the PulseAudio/PipeWire daemon.
-//! Commits are single socket round-trips (tens of microseconds, no
-//! fork/exec/pipe), which is what makes per-event, un-throttled volume
-//! scrolls/drags possible on PipeWire/PulseAudio machines -- including ones
-//! where `pactl` is unavailable but `/run/user/$uid/pulse/native` is served
-//! by PipeWire.
+//! Every commit and read is an in-process call into a threaded mainloop
+//! that talks the native protocol straight to the PulseAudio/PipeWire
+//! daemon. Commits are single socket round-trips, which is what makes
+//! per-event, un-throttled volume scrolls/drags possible.
 //!
-//! The module links NOTHING at build time: symbols are resolved at runtime
-//! with `std.DynLib`. On a machine without `libpulse.so.0` the attach fails
-//! cleanly and the volume segment falls back to its `pactl`/`amixer`
-//! subprocess path, so this module compiles everywhere and is only exercised
-//! where the library exists.
+//! Links NOTHING at build time: symbols resolved at runtime with
+//! `std.DynLib`. Without `libpulse.so.0` the attach fails cleanly and the
+//! volume segment falls back to its `pactl`/`amixer` path.
 //!
 //! ABI discipline: instead of linking the pulse headers, the handful of
 //! structs we touch are read as raw bytes. Layouts are stable across the
-//! pulse 1.x-16.x era, but every field is guard-checked at runtime. If any
-//! guard fails the backend is abandoned and the spawn fallback is used.
-//! `pa_server_info` DOES have a version-dependent hole: `server_version2` was
-//! added in pulse 16.0, moving `default_sink_name` from offset 40 to 48; both
-//! are tried, selecting the first that looks like a sink name.
+//! pulse 1.x-16.x era, but every field is guard-checked at runtime; a failed
+//! guard abandons the backend. `pa_server_info` has a version-dependent
+//! hole: `server_version2` was added in pulse 16.0, moving
+//! `default_sink_name` from offset 40 to 48; both are tried.
 //!
 //! Lifecycle: attach is attempted once and cached by the volume segment; a
 //! failed attach tears every handle down so the next probe starts clean.
-//! All operations are issued under the mainloop lock with a wait bounded by
-//! the deadline AND the context state: the wait can only re-check those on a
-//! wake, so every callback contract branch (including the terminal
-//! `info == NULL` ones) must signal `done` -- see `sinkInfoCb`. One-shot ops
-//! never overlap (single-threaded event loop), so per-op state lives in
-//! module globals, and each op's userdata carries its generation so a callback
-//! arriving after its waiter timed out is dropped instead of writing into the
-//! next op's result.
+//! One-shot ops never overlap, so per-op state lives in module globals,
+//! and each op's userdata carries its generation so a late callback is
+//! dropped.
 
 const std = @import("std");
 const core = @import("core");
@@ -54,10 +42,9 @@ const PA_STATE_FAILED = 5;
 const PA_STATE_TERMINATED = 6;
 
 /// Offsets into `pa_sink_info` (stable across the supported era):
-///   name* @0, index u32 @8, description* @16, sample_spec @24 (u32+u32+u8 =
-///   9 bytes), channel_map @33 (u8 + u8[32] = 33 bytes), owner_module u32
-///   @68, volume pa_cvolume @72 { u8 channels; u32 values[32] } (132 bytes),
-///   muted int @140, and then the tail that later versions extend.
+/// name* @0, index u32 @8, description* @16, sample_spec @24, channel_map
+/// @33, owner_module u32 @68, volume pa_cvolume @72 { u8 channels;
+/// u32 values[32] } (132 bytes), muted int @140.
 pub const sink_info_index: usize = 8;
 const sink_info_volume: usize = 72;
 pub const sink_info_channel_bytes: usize = sink_info_volume;
@@ -66,13 +53,10 @@ pub const sink_info_muted: usize = 140;
 /// `default_sink_name` in `pa_server_info`: offset 40 pre-16.0, 48 in 16.0+.
 const server_default_sink_offsets = [_]usize{ 48, 40 };
 
-/// Opaque handles resolved at attach (worker + lib), needed by callbacks that
-/// run on the mainloop thread. Safe: set before any operation, never cleared.
-///
-/// Owner state (P2-58): the attach handles, the pending operation's result
-/// slots, and the per-op parameters (single-threaded, never overlapping).
-/// Each op's userdata carries its generation so a callback arriving after its
-/// waiter timed out is dropped instead of writing into the next op's result.
+/// Opaque handles resolved at attach; safe: set before any operation.
+/// Owner state (P2-58): attach handles, pending op result slots, and the
+/// per-op parameters (single-threaded, never overlapping). Each op's
+/// userdata carries its generation so a late callback is dropped.
 const PulseState = struct {
     mainloop: ?*anyopaque = null,
     oplib: ?Lib = null,
@@ -156,13 +140,11 @@ const Lib = struct {
 };
 
 /// True when a PulseAudio-style runtime is present (the native protocol
-/// socket under `$XDG_RUNTIME_DIR`/`/run/user/<uid>`), i.e. sound is served
-/// through PipeWire/PulseAudio rather than raw ALSA. The ALSA-control native
-/// backend is only valid (matches amixer's `Master`) on systems where this
-/// probe is false.
-/// NOTE: the `/run/user/{uid}` fallback here is PulseAudio's own convention,
-/// not the `/tmp/{name}-{uid}` state-file policy shared by config/persist
-/// snapshot.runtimeFile (snapshot + restore); the two deliberately differ.
+/// socket under `$XDG_RUNTIME_DIR`/`/run/user/<uid>`). The ALSA-control
+/// native backend is only valid on systems where this probe is false.
+/// NOTE: the `/run/user/{uid}` fallback is PulseAudio's own convention,
+/// not the `/tmp/{name}-{uid}` state-file policy shared by
+/// config/persist snapshot.runtimeFile; the two deliberately differ.
 pub fn pulseReachable() bool {
     var buf: [192]u8 = undefined;
     const base = if (c.getenv("XDG_RUNTIME_DIR")) |env|
@@ -263,28 +245,21 @@ pub fn buildCvolume(pct: u8, channels: u8, out: []u8) bool {
 /// `commitVerdict`) instead of stalling the bar.
 pub const commit_wait_ms: i64 = 50;
 
-/// The verdict of one commit wait: optimistic on timeout, the daemon's
-/// verdict when it answered.
-///
-/// A timed-out wait (`!done`) is treated as SUCCESS -- the display updates
-/// now and the 5 s read reconciles -- because the alternative (blocking the
-/// event loop for the full deadline on every scroll tick of a wedged daemon)
-/// is exactly the frame stall this bound exists to prevent. A wait that DID
-/// complete still defers to the daemon: `successCb` fires `done` with
-/// `found=false` when the daemon rejects the op, and a rejection must never
-/// read as applied.
+/// A timed-out wait is treated as SUCCESS -- the display updates now and the
+/// 5 s read reconciles -- because blocking the event loop on every scroll tick
+/// of a wedged daemon is exactly the frame stall this bound exists to
+/// prevent. A completed wait still defers to the daemon: a rejection must
+/// never read as applied.
 pub fn commitVerdict(done: bool, found: bool) bool {
     return !done or found;
 }
 
 // Operation plumbing
 
-// Generation of the newest op (PulseState.active_gen) is bumped (under the
-// mainloop lock) each time an op is issued or the backend is torn down.
-// Carried into every callback as the userdata value, so a callback whose
-// waiter already timed out -- and which may fire while a NEWER op owns the
-// result fields -- identifies itself as stale and is dropped before it can
-// write or signal.
+// Generation of the newest op is bumped (under the mainloop lock) each time
+// an op is issued or the backend is torn down. Carried into every callback as
+// the userdata value, so a stale callback identifies itself and is dropped
+// before it can write or signal.
 
 fn genUserdata(gen: usize) ?*anyopaque {
     // +1 keeps a live gen distinct from a null userdata.
@@ -293,19 +268,17 @@ fn genUserdata(gen: usize) ?*anyopaque {
 
 fn genIsCurrent(ud: ?*anyopaque) bool {
     const p = @intFromPtr(ud);
-    // A null userdata is not something this module ever issues; treat it as
-    // current rather than stale, because dropping the signal of a callback a
-    // waiter IS parked on is the failure mode this gate exists to prevent.
+    // Null userdata is never issued here; treat it as current, because
+    // dropping a signal a waiter IS parked on is the failure mode this gate
+    // exists to prevent.
     if (p == 0) return true;
     return p - 1 == g.active_gen;
 }
 
-/// Waits (with the mainloop lock held) for `done`, bounded by `timeout_ms`
-/// and by the context leaving a dead state. The deadline and the state are
-/// both only re-checked when the wait wakes, so correctness of the bound
-/// depends on every terminal callback path signaling `done` (libpulse
-/// guarantees one invocation per op; `sinkInfoCb` covers the `info == NULL`
-/// terminal forms).
+/// Waits (mainloop lock held) for `done`, bounded by `timeout_ms` and by the
+/// context leaving a dead state. Correctness depends on every terminal
+/// callback path signaling `done` (libpulse guarantees one invocation per
+/// op; `sinkInfoCb` covers the `info == NULL` forms).
 fn waitDone(done: *bool, timeout_ms: i64) bool {
     const lib = g.oplib.?;
     const m = g.mainloop.?;
@@ -325,7 +298,7 @@ fn waitDone(done: *bool, timeout_ms: i64) bool {
 const IssueFn = *const fn (*anyopaque) ?*anyopaque;
 
 /// Issues an async pa_* operation under the lock, then waits (bounded) for
-/// its callback to fire. Returns whether a callback delivered a result.
+/// its callback. Returns whether a callback delivered a result.
 fn runOp(issue: IssueFn, done: *bool, timeout_ms: i64) bool {
     const lib = g.oplib.?;
     const m = g.mainloop.?;
@@ -393,11 +366,11 @@ fn serverInfoCb(_: ?*anyopaque, info: ?*const anyopaque, userdata: ?*anyopaque) 
 fn sinkInfoCb(_: ?*anyopaque, info: ?*const anyopaque, eol: c_int, userdata: ?*anyopaque) callconv(.c) void {
     if (!genIsCurrent(userdata)) return;
     if (info == null) {
-        // The terminal callback arrives as `info == NULL, eol != 0` for BOTH
-        // an empty list and an operation error. Returning here without
-        // signaling would leave `waitDone` parked in `mainloop_wait` with no
-        // wake to re-check its deadline -- i.e. a frozen WM. Signal on every
-        // terminal form; `found` stays as whatever a prior entry set.
+        // The terminal callback is `info == NULL, eol != 0` for BOTH an empty
+        // list and an operation error. Returning without signaling would
+        // leave `waitDone` parked in `mainloop_wait` with no wake to re-check
+        // its deadline -- i.e. a frozen WM. Signal on every terminal form;
+        // `found` stays as whatever a prior entry set.
         if (eol != 0) signalDone(&g.sink.done);
         return;
     }

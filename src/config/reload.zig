@@ -1,16 +1,12 @@
-//! Config reload: load, validate, and atomically swap in a new
-//! config, then rebuild the subsystems that read it. Keybindings
-//! regrab only when the key PAIR layout changed; bar and tiling
-//! rebuild unconditionally (see config.detectChanges). A transition concern --
-//! driven by the reload flag the event loop consumes -- not
-//! per-event path work.
+//! Config reload: load, validate, and atomically swap in a new config, then
+//! rebuild the subsystems that read it. Keybindings regrab only when the key
+//! PAIR layout changed; bar and tiling rebuild unconditionally.
 //!
-//! Boundary: this file is config loading + subsystem
-//! rebuild ORCHESTRATION. After the pointer swap it hands param stamping to
-//! `seed.reloadAndReconcile()` (config/model_config.zig, pure config→model)
-//! and never models state itself. Session continuity across re-exec is a
-//! separate concern owned by process/session.zig (persist) + process/process.zig
-//! (re-exec coordination); neither reaches through here.
+//! Boundary: this file is config loading + subsystem rebuild ORCHESTRATION.
+//! After the pointer swap it hands param stamping to
+//! `seed.reloadAndReconcile()` (pure config→model) and never models state
+//! itself. Session continuity across re-exec is a separate concern owned by
+//! process/session.zig + process/process.zig; neither reaches through here.
 
 const std = @import("std");
 const core = @import("core");
@@ -24,23 +20,16 @@ const seed = @import("model_config");
 // when absent), so the `surfaces.onReload()` call below compiles away.
 const surfaces = @import("surfaces").Surfaces;
 
-/// The reload decision table, pure. Given how the load went, this is the
-/// whole accept/reject surface of `handleConfigReload`: extract the decision
-/// from the side-effecting orchestration so it is testable without
-/// `core.getState()` or an X connection (P1-25). `handleConfigReload` is the
-/// only caller and keeps every side effect (reporting, freeing, swapping,
-/// rebuilding) to itself.
+/// The reload decision table, pure. Extracts the decision from the
+/// side-effecting orchestration so it is testable without `core.getState()`
+/// or an X connection. `handleConfigReload` is the only caller and keeps
+/// every side effect (reporting, freeing, swapping, rebuilding) to itself.
 ///
-/// The detectChanges-timing half of the table is a property of `.apply_new`
-/// only: it runs PRE-swap (it reads both config boxes, and the swap below
-/// releases the old one), while every rebuild below the swap (buildKeybinds,
-/// grabKeybindings, reloadBorders, ...) runs POST-swap so it stamps the
-/// config_rev the swap just bumped (see the ordering doc on
-/// `handleConfigReload`).
+/// detectChanges runs PRE-swap (it reads both boxes); every rebuild below the
+/// swap runs POST-swap so it stamps the config_rev the swap just bumped.
 pub const Decision = enum {
-    /// Load failed (parse error, too many files, ...): the live config stays
-    /// put, nothing was allocated here, the keybind regrab is skipped, and
-    /// the caller reports the error once (the sole reload reporter).
+    /// Load failed: the live config stays put, the keybind regrab is skipped,
+    /// and the caller reports the error once (the sole reload reporter).
     fail_keep_old,
     /// Load succeeded but not from a user file (the embedded fallback, which
     /// is boot-only): soft-reject, keep the live config, and free the
@@ -83,10 +72,8 @@ pub fn handleConfigReload() !void {
     var source: config.DefaultSource = .fallback;
     // Load the LIVE config tree, never the re-exec snapshot restart.config_dir_env
     // points at: the pin stays set for the whole process lifetime after the
-    // first reload_hana, and honoring it here would re-read the frozen last-
-    // good snapshot instead of the user's freshly edited files, so bind/theme
-    // changes would never hot-reload. refreshSnapshot below then re-freezes
-    // the now-live config as the re-exec source.
+    // first reload_hana, and honoring it here would re-read the frozen
+    // last-good snapshot instead of the user's freshly edited files.
     const new_config = config.loadConfigDefault(cs.alloc, &source, false) catch |err| {
         // A TOML parse error already reported per-line warnings; treat it as
         // a hard failure and keep the live config rather than swapping in a
@@ -100,7 +87,6 @@ pub fn handleConfigReload() !void {
         return err;
     };
     // Heap-allocate so the swap is a pointer exchange, not a by-value copy.
-    // The defer below frees the allocation unless the swap commits.
     const new_ptr = try cs.alloc.create(@TypeOf(new_config));
     new_ptr.* = new_config;
     // The defer owns BOTH the Config internals and the box itself, so any
@@ -142,7 +128,7 @@ pub fn handleConfigReload() !void {
     // hand-off be a single core call instead of a pointer swap that leaves two
     // sites reasoning about who frees what. Only the regrab is skipped for an
     // unchanged pair layout; bar and tiling rebuild unconditionally so no
-    // borrowed state outlives the box the swap releases (see config.detectChanges).
+    // borrowed state outlives the box the swap releases.
     const changes = config.detectChanges(cs.config, new_ptr);
 
     // Ownership moves to the new box and the displaced one is released in the
@@ -156,18 +142,14 @@ pub fn handleConfigReload() !void {
     // for the whole process lifetime (init at boot, deinit only at shutdown),
     // so this reload never sees a null state.
     keybinds.buildKeybinds(new_ptr.core.keybindings.items);
-
     // Freeze the now-live config as the re-exec source: a later reload_hana
     // (binary-only reload) boots from this snapshot rather than from the
     // (possibly mid-edit or broken) config files.
     config.refreshSnapshot(cs.alloc);
 
     // The bar survives a reload that does not touch it: it reads the live
-    // config at draw time, so nothing has to be re-pointed and no copy can
-    // be left borrowing the config the caller is about to free.
-    //
-    // No `has_bar` guard: `surfaces.onReload` is the no-op hook when no
-    // surface module is compiled in, so the gate is already inside the type.
+    // config at draw time. No `has_bar` guard: `surfaces.onReload` is the
+    // no-op hook when no surface module is compiled in.
     surfaces.onReload();
     seed.reloadAndReconcile();
     // Borders sweep AFTER the seed+reconcile: its reconcile rebuilds geometry,

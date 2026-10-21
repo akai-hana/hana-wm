@@ -21,11 +21,11 @@ comptime {
     knob.validateTable(types.CoreConfig, &knobs, &.{});
 }
 
-/// The section names this always-present fragment owns (D13/P2-50): the
-/// composed facade unions every fragment's list into the mis-case lint's
-/// inventory, so a new section is added here, not in the core. `fullscreen`
-/// is reserved vocabulary with no consumer yet; it stays recognized so a
-/// case-variant header still gets the mis-case warn.
+/// The section names this always-present fragment owns: the composed facade
+/// unions every fragment's list into the mis-case lint's inventory, so a new
+/// section is added here, not in the core. `fullscreen` is reserved
+/// vocabulary with no consumer yet; it stays recognized so a case-variant
+/// header still gets the mis-case warn.
 pub const sections = &[_][]const u8{
     types.section_binds,      types.section_binds_alt,
     types.section_display,    types.section_core,

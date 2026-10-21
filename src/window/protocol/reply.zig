@@ -1,33 +1,28 @@
-//! Pure ICCCM property-reply parsing: the WM_CLASS split (identity) and
-//! the WM_NORMAL_HINTS / WM_SIZE_HINTS field walk (size hints). Both take
-//! the reply BYTES/fields and derive model values; no X round trips, no
-//! cache writes. The caller owns the wire read (icccm.firePropQuery +
-//! reply drain) and where the result lands -- the model entry, threaded
-//! as a parameter at admission time (see admission.mapRequest). Pure by
-//! construction, so both derivations are unit-testable without a
-//! connection (reply_test.zig). The X-wired query/refresh half stays in
-//! icccm.zig.
+//! Pure ICCCM property-reply parsing: the WM_CLASS split (identity) and the
+//! WM_NORMAL_HINTS field walk (size hints). Both take the reply BYTES and
+//! derive model values: no X round trips, no cache writes — unit-testable
+//! without a connection (reply_test.zig). The caller owns the wire read
+//! (icccm.firePropQuery + reply drain) and where the result lands (the model
+//! entry, threaded as a parameter at admission). The X-wired query/refresh
+//! half stays in icccm.zig.
 
 const std = @import("std");
 const model = @import("model");
 const scaling = @import("scaling");
 
-/// WM_CLASS split.
-/// The two WM_CLASS components: `instance` (the res_name,
-/// e.g. "alacritty") and `class` (the res_class, e.g.
-/// "Alacritty").
+/// The two WM_CLASS components: `instance` (the res_name, e.g. "alacritty")
+/// and `class` (the res_class, e.g. "Alacritty").
 pub const WmClass = struct {
     instance: []const u8,
     class: []const u8,
 };
 
-/// Splits a WM_CLASS property value: two consecutive
-/// null-terminated strings, "instance\x00class\x00". Trailing
-/// nulls are trimmed per component, not on the whole
-/// buffer: trimming the whole buffer first turns
-/// "instance\x00\x00" (empty class) into "instance" with no
-/// separator, silently skipping the instance lookup.
-/// Returns null when no separator is present at all.
+/// Splits a WM_CLASS property value: two consecutive null-terminated
+/// strings, "instance\x00class\x00". Trailing nulls are trimmed per
+/// component, not on the whole buffer: trimming the whole buffer first
+/// turns "instance\x00\x00" (empty class) into "instance" with no
+/// separator, silently skipping the instance lookup. Null when no
+/// separator is present at all.
 pub fn parseWmClass(data: []const u8) ?WmClass {
     const sep = std.mem.indexOfScalar(u8, data, 0) orelse return null;
     const instance = data[0..sep];
@@ -38,7 +33,6 @@ pub fn parseWmClass(data: []const u8) ?WmClass {
     return .{ .instance = instance, .class = class_raw[0..class_end] };
 }
 
-/// WM_NORMAL_HINTS field walk.
 /// ICCCM flag bits (the PMinSize/PMaxSize/... word of the reply).
 const p_min_size: u32 = 0x10;
 const p_max_size: u32 = 0x20;
@@ -50,9 +44,7 @@ const p_base_size: u32 = 0x100;
 /// base_size/win_gravity).
 pub const wm_normal_hints_long_length: u32 = 18;
 
-/// Extract a pair of consecutive u16 fields when the flag is set and enough
-/// fields are present. Shared by max_size and resize_inc extraction which
-/// share the same 2-field pattern.
+/// The shared 2-field pattern: max_size and resize_inc extraction use it.
 const SizePair = struct { width: u16, height: u16 };
 
 fn extractFieldPair(
@@ -70,23 +62,18 @@ fn extractFieldPair(
 
 const Aspect = struct { min: f32, max: f32 };
 
-/// Parses a WM_NORMAL_HINTS reply's u32 fields into the model's
-/// SizeHints, or null when no constraint flag is set.
+/// Parses a WM_NORMAL_HINTS reply's u32 fields into the model's SizeHints,
+/// or null when no constraint flag is set.
 ///
-/// PMinSize/PBaseSize feed the floating drag-resize floor: tiling
-/// does not ENFORCE declared minimums outright (policy on
-/// model.SizeHints), but when both are declared the effective floor
-/// is the larger, so a client can never be dragged smaller than
-/// either it or its base declares. PBaseSize is ALSO forwarded
-/// separately (`base_width`/`base_height`) so the tiling increment
-/// snap can anchor at the ICCCM grid origin even when a larger
-/// PMinSize wins the floor. The max/increment/aspect constraints are
-/// forwarded so hint-constrained windows behave correctly in both
-/// modes.
+/// PMinSize/PBaseSize feed the floating drag-resize floor: tiling does not
+/// ENFORCE declared minimums outright, but when both are declared the
+/// effective floor is the larger. PBaseSize is ALSO forwarded separately
+/// (`base_width`/`base_height`) so the tiling increment snap can anchor at
+/// the ICCCM grid origin even when a larger PMinSize wins the floor.
 ///
 /// PAspect: fields[11..14] = min_aspect.x/y, max_aspect.x/y. dwm
-/// convention: min_aspect = y/x (upper bound on h/w), max_aspect =
-/// x/y (upper bound on w/h).
+/// convention: min_aspect = y/x (upper bound on h/w), max_aspect = x/y
+/// (upper bound on w/h).
 pub fn parse(fields: [*]const u32, field_count: u32) ?model.SizeHints {
     const flags = fields[0];
 

@@ -16,8 +16,7 @@ const tiling = @import("tiling_seam").tiling;
 /// WM-wide state dump diagnostic: logs a live snapshot of model and subsystem
 /// state on demand (read-only); used by the dump-state command.
 pub fn dumpState() void {
-    // A stack array is the right owner here (no State to hang it off), and it
-    // keeps `query` free of module-level scratch.
+    // A stack array is the right owner here (no State to hang it off).
     var scratch: [model.store_capacity]query.Entry = undefined;
     const all = query.allWindowsInto(&scratch);
 

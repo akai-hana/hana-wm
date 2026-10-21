@@ -1,31 +1,27 @@
-//! Volume slider sub.
-//! Shows the default sink's level and mute state and controls it, bound to
-//! the slider core's `Sub` contract. This module owns the sink's TRUTH --
-//! backend attach/probe, reads, writes, and the display format -- while the
-//! slider core owns the shared render shell, interaction, poll, and commit
-//! clock.
+//! Volume slider sub: shows the default sink's level and mute state and
+//! controls it, bound to the slider core's `Sub` contract. This module owns
+//! the sink's TRUTH -- backend attach/probe, reads, writes, display format --
+//! while the slider core owns the shared render shell, interaction, poll,
+//! and commit clock.
 //!
-//! Backends, most-native first. The resolved backend is LATCHED: once a
-//! read has identified one, later reads go straight to it instead of re-walking
-//! the ladder, and a ladder that found nothing is negative-cached for a while
-//! so a dead daemon cannot cost a fresh pair of subprocesses on every press,
-//! right-click and 5 s poll. Both directions are undone by the same trigger --
-//! a daemon-reachability recheck, plus a slow deadline -- so a daemon that
-//! starts after we gave up on it is still picked up:
+//! Backends, most-native first. The resolved backend is LATCHED: once a read
+//! has identified one, later reads go straight to it; a ladder that found
+//! nothing is negative-cached so a dead daemon cannot cost a fresh pair of
+//! subprocesses on every press, right-click and 5 s poll. Both directions
+//! are undone by the same trigger -- a daemon-reachability recheck plus a
+//! slow deadline -- so a daemon that starts later is still picked up:
 //!   1. `libpulse` via dlopen (`native_pulse.zig`) -- PulseAudio AND every
 //!      real PipeWire desktop (`pipewire-pulse` ships the `libpulse.so.0`
 //!      ABI). In-process, one socket round trip per commit.
-//!   2. `pactl` subprocess -- the split-packaging case: the .so absent
-//!      but the CLI present.
+//!   2. `pactl` subprocess -- the split-packaging case: the .so absent but
+//!      the CLI present.
 //!   3. `amixer` subprocess -- ALSA, when alsa-utils is installed.
-//!   4. `/dev/snd/controlC*` ioctls (`native_alsa.zig`) -- the ALSA
-//!      floor: kernel ioctls, no userspace tool required at all.
+//!   4. `/dev/snd/controlC*` ioctls (`native_alsa.zig`) -- the ALSA floor.
 //!
-//! The two native rungs are why `commit_cost` is a per-sub query: they are
-//! single in-process round trips (`.immediate`), while the two subprocess
-//! rungs fork (`.rate_limited`), and the slider core throttles on the
-//! difference. The 0-100 % clamp in `commit` is the single guard for every
-//! caller's value.
+//! The two native rungs are why `commit_cost` is a per-sub query: single
+//! in-process round trips (`.immediate`) vs the two subprocess rungs that
+//! fork (`.rate_limited`), and the slider core throttles on the difference.
+//! The 0-100 % clamp in `commit` is the single guard for every caller.
 
 const std = @import("std");
 const log = std.log.scoped(.volume);
@@ -45,23 +41,14 @@ const Backend = enum { unknown, pulse, alsa };
 
 /// Owner state (P2-58): the latched backend, the display value, the ladder
 /// negative cache, the two in-process rung handles, and the optimistic-commit
-/// muted bits. Attached handles for the two in-process rungs: non-null means
-/// the rung won the ladder walk and is latched. Probed lazily; given up on
-/// when a read fails (the native pulse backend is torn down so the next walk
-/// attaches fresh), and `probeDue`'s reachability recheck is what allows a
-/// late-appearing daemon to be picked up. `ladder_failed_at_ms` is the
-/// negative cache for a ladder that found no working backend. Null until the
-/// first total failure. Without it every read against a dead daemon re-walks
-/// all four rungs -- up to three `popen`s, each blocking the WM loop -- and
-/// the poll, every press and every right-click pays it again.
-/// `pulse_recheck_at_ms` is when the daemon is next re-checked for having
-/// come back. Separate from the negative cache's deadline so the cheap
-/// reachability check can trigger a retry long before the cache expires.
-/// `pulse_reachable` is the last observed daemon reachability, so a CHANGE
-/// can be recognised. Null until first observed. `pulse_muted`/`alsa_muted`
-/// are the last muted bit reported by each native rung's ladder walk, used by
-/// the optimistic-commit path to echo the committed state before the next
-/// read lands.
+/// muted bits. Attached handles: non-null means the rung won the ladder walk
+/// and is latched. Probed lazily; given up on when a read fails. The
+/// negative cache stops every read against a dead daemon re-walking all four
+/// rungs (up to three `popen`s, each blocking the WM loop). The recheck
+/// window is separate from the cache deadline so a cheap reachability check
+/// can retry long before the cache expires. `pulse_muted`/`alsa_muted` are
+/// the last muted bits reported by each native rung, used by the
+/// optimistic-commit path to echo the committed state before the next read.
 const VolumeState = struct {
     backend: Backend = .unknown,
     pct: u8 = 0,
@@ -80,23 +67,18 @@ var g: VolumeState = .{};
 pub const reprobe_interval_ms: i64 = 15_000;
 
 /// What the negative cache says about one poll: whether the ladder may be
-/// walked. One bool, because there is now exactly one thing to forget: the
-/// latched backend. (A failed native read un-latches its attach directly --
-/// `readLatched`/`tryRungNativePulse` tear the backend down -- while a
-/// daemon-reachability CHANGE is what grants the walk that finds a daemon
+/// walked. One bool, because there is exactly one thing to forget: the
+/// latched backend. (A failed native read un-latches its attach directly;
+/// a daemon-reachability CHANGE is what grants the walk that finds a daemon
 /// started after this cache wrote the machine off. See `probeDue`.)
 pub const Probe = struct { walk: bool };
 
-/// The pure re-probe decision. All the timing policy, with no clock and
-/// no IO, so it is testable: whether a poll may walk the ladder again, and
-/// whether it must first re-ask whether a daemon is reachable.
-///
-///   - No recorded failure: the ladder has never run to completion, so it runs.
-///   - The slow deadline has passed: retry on the deadline alone.
-///   - The recheck window has arrived: ask again; a CHANGED answer is the
-///     trigger that finds a daemon started after we wrote it off, without
-///     paying for the ladder on every poll.
-///   - Otherwise: skip, which is the whole point of the negative cache.
+/// The pure re-probe decision: whether a poll may walk the ladder again, and
+/// whether it must first re-ask reachability. No clock, no IO -- testable.
+///   - No recorded failure: the ladder has never completed, so it runs.
+///   - Slow deadline passed: retry on the deadline alone.
+///   - Recheck window arrived: ask again; a CHANGED answer is the trigger.
+///   - Otherwise: skip -- the whole point of the negative cache.
 pub fn probeDecision(
     now: i64,
     failed_at_ms: ?i64,
@@ -104,15 +86,15 @@ pub fn probeDecision(
     last_reachable: ?bool,
     reachable: bool,
 ) Probe {
-    // No recorded failure: the ladder has never run to completion, so run it
-    // even if the daemon looks exactly as it did last time. "Unchanged" is
-    // only evidence once there is a previous observation to be unchanged from.
+    // No recorded failure: the ladder has never completed, so run it even
+    // if the daemon looks as it did last time.
     if (failed_at_ms == null) return .{ .walk = true };
     const failed_at = failed_at_ms.?;
     if (now -| failed_at >= reprobe_interval_ms) return .{ .walk = true };
     if (now >= recheck_at_ms) {
-        // The daemon was asked again. Only a CHANGED answer un-latches, which
-        // is what finds a daemon that started after we wrote it off.
+        // Only a CHANGED answer un-latches: the daemon that started after
+        // we wrote it off is found here, without paying for the ladder on
+        // every poll.
         return .{ .walk = last_reachable == null or last_reachable.? != reachable };
     }
     return .{ .walk = false };
@@ -135,16 +117,16 @@ fn probeDue() bool {
         g.pulse_recheck_at_ms = now + reprobe_interval_ms;
         g.pulse_reachable = reachable;
     }
-    // A daemon that appeared (or vanished) is worth a fresh native attach: the
-    // one-shot probed flag would otherwise write the machine off for the rest
-    // of the session. Only the reachability change grants this.
+    // A daemon that appeared (or vanished) is worth a fresh native attach:
+    // the one-shot probed flag would otherwise write the machine off for
+    // the rest of the session.
     return probe.walk;
 }
 
-/// The rung a latched backend is read through. Named, not inlined into
-/// `readLatched`, so the backend -> rung mapping is checkable without a
-/// daemon: the point of the latch is that this mapping is consulted directly
-/// and never re-derived by re-walking the ladder.
+/// The rung a latched backend is read through. Named so the backend ->
+/// rung mapping is checkable without a daemon: the point of the latch is
+/// that this mapping is consulted directly and never re-derived by
+/// re-walking the ladder.
 pub const Rung = enum { native_pulse, pactl, amixer, native_alsa, none };
 
 pub fn latchedRung(backend: Backend) Rung {
@@ -156,25 +138,22 @@ pub fn latchedRung(backend: Backend) Rung {
 }
 
 /// The level a press should show without re-reading. Null means "show
-/// nothing new": with no backend, `commitPct` wrote nothing, so echoing the
-/// value back would display a level the sink never accepted.
+/// nothing new": with no backend, `commitPct` wrote nothing, so echoing
+/// would display a level the sink never accepted.
 pub fn optimisticLevel(backend: Backend, v: u8) ?u8 {
     return if (backend == .unknown) null else slider.clampPct(v);
 }
 
 /// The display level after a press. Value in, value out, so the "with no
-/// backend the display does not move" half of the contract is checkable: with
-/// `unknown`, `commitPct` wrote nothing, and echoing the value back would show
-/// a level the sink never accepted.
+/// backend the display does not move" half is checkable.
 pub fn optimisticAfter(backend: Backend, v: u8, current: u8) u8 {
     return optimisticLevel(backend, v) orelse current;
 }
 
-/// The negative cache after one ladder run. A rung answered, so the cache is
+/// The negative cache after one ladder run. A rung answered so it is
 /// CLEARED -- an armed failure must never outlive the success that disproved
-/// it, or a recovered daemon would stay unwalked. Nothing answered, so it is
-/// armed at `now`, which is what stops the next poll, press and right-click
-/// from re-paying for up to three blocked subprocess spawns.
+/// it. Nothing answered so it is armed at `now`, which stops the next poll
+/// and right-click from re-paying for up to three blocked subprocess spawns.
 pub fn noteLadderResult(ok: bool, now: i64) ?i64 {
     return if (ok) null else now;
 }
@@ -197,12 +176,11 @@ pub fn parsePercent(out: []const u8) ?u8 {
 }
 
 /// The one-time diagnostic for a machine where every rung failed. Distinct
-/// from the MUTE display: MUTE is the steady state (the sink may genuinely be
-/// muted), this is the one line saying *why* there is no level to show.
-/// `reason_logged` (VolumeState) is armed once per process: the poll loop
-/// would otherwise repeat the same line every 5 s for the life of the
-/// session, and a bar that says the same thing every five seconds is how a
-/// real fault gets ignored.
+/// from the MUTE display: MUTE is the steady state (the sink may genuinely
+/// be muted); this is the one line saying *why* there is no level. Armed
+/// once per process: the poll loop would otherwise repeat it every 5 s, and
+/// a bar that says the same thing every five seconds is how a real fault
+/// gets ignored.
 fn logNoBackend() void {
     if (g.reason_logged) return;
     g.reason_logged = true;
@@ -214,38 +192,35 @@ fn logNoBackend() void {
 }
 
 /// Re-reads level + mute from the live backend, walking the ladder
-/// (libpulse -> pactl -> amixer -> native ALSA). Returns true when this read
+/// (libpulse -> pactl -> amixer -> native ALSA). True when this read
 /// changed the displayed state.
 fn readVolume() bool {
     // A LATCHED backend is read directly: the latch takes the ladder off the
-    // hot path, so a dead daemon does not spawn pactl/amixer on every poll,
-    // press and right-click.
+    // hot path so a dead daemon does not spawn subprocesses on every poll.
     if (g.backend != .unknown) {
         if (readLatched()) |changed| return changed;
         // The latched backend stopped answering (daemon restarted, card
-        // unplugged). Forget it and let the ladder decide again -- but the
-        // negative cache still applies, so this is not a free re-probe either.
+        // unplugged). Forget it; the negative cache still applies.
         g.backend = .unknown;
     }
     if (!probeDue()) return false;
     return runLadder();
 }
 
-/// Reads only the currently latched backend. Returns null when that backend
-/// does not answer, which tells `readVolume` to fall back to the ladder.
+/// Reads only the currently latched backend. Null when that backend does
+/// not answer, which tells `readVolume` to fall back to the ladder.
 fn readLatched() ?bool {
     const had_value = g.has_value;
     const old_pct = g.pct;
     const old_muted = g.muted;
-    // One read per rung. `pactl` needs two commands (level, then mute), so the
-    // two rungs share a shape but not a body.
+    // One read per rung. `pactl` needs two commands (level, then mute), so
+    // the two rungs share a shape but not a body.
     switch (latchedRung(g.backend)) {
         .native_pulse => {
             const sink = g.native_pulse.?.readSink() orelse {
-                // The native backend stopped answering (daemon died or
-                // restarted): tear it DOWN and forget it, so the next ladder
-                // walk attaches fresh instead of holding a dead context --
-                // and its worker thread -- for the rest of the session.
+                // The native backend stopped answering: tear it DOWN and
+                // forget it so the next ladder walk attaches fresh instead
+                // of holding a dead context (and its worker thread).
                 g.native_pulse.?.deinit();
                 g.native_pulse = null;
                 return null;
@@ -283,24 +258,13 @@ fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
 
 /// The four-rung ladder, reached only when nothing is latched (or the latch
 /// went stale). Order is by protocol family, not by speed:
-///
-///   1. libpulse via dlopen  -- PulseAudio AND every real PipeWire desktop,
-///      because `pipewire-pulse` ships a `libpulse.so.0` ABI. One rung, two
-///      systems, no fork.
-///   2. `pactl`              -- the same family again, for the split-packaging
-///      case where the .so is absent but the CLI is not.
-///   3. `amixer`             -- ALSA, when alsa-utils is installed.
-///   4. `/dev/snd/controlC*` -- the ALSA floor: kernel ioctls, no userspace
-///      tool required at all.
-///
-/// Deliberately NOT "most-native first". Native rung 1 beats `pactl` on latency,
-/// but rung 1 only exists on Pulse-family machines; putting it ahead of `amixer`
-/// would cost a failed dlopen on every pure-ALSA box. Ordering by family keeps
-/// each machine's first probe the one that can actually answer.
-///
-/// Rungs 1 and 4 are the coverage floor: a PulseAudio install without
-/// pulseaudio-utils, or a kernel ALSA box without alsa-utils, has no CLI at all
-/// and is reachable only through them.
+///   1. libpulse via dlopen -- PulseAudio AND every real PipeWire desktop.
+///   2. `pactl` -- same family, for the split-packaging case.
+///   3. `amixer` -- ALSA, when alsa-utils is installed.
+///   4. `/dev/snd/controlC*` -- the ALSA floor: kernel ioctls only.
+/// Deliberately NOT "most-native first": rung 1 only exists on Pulse-family
+/// machines; putting it ahead of `amixer` would cost a failed dlopen on every
+/// pure-ALSA box. Rungs 1 and 4 are the coverage floor for CLI-less installs.
 fn runLadder() bool {
     const had_value = g.has_value;
     const old_pct = g.pct;
@@ -335,12 +299,10 @@ fn runLadder() bool {
     return changedFrom(had_value, old_pct, old_muted);
 }
 
-/// Mute flag captured alongside the level by `tryRung`: the two subprocess
-/// rungs differ only in their mute token and command set. Stored in
+/// One subprocess rung: run `vol_cmd`, parse a percentage, then derive the
+/// mute state. `mute_cmd` empty means the mute answer is in the volume
+/// output (`amixer` reports both in one line). Mute flag stored in
 /// VolumeState.pulse_muted / alsa_muted.
-/// One subprocess rung: run `vol_cmd`, parse a percentage, then derive the mute
-/// state. `mute_cmd` empty means the mute answer is in the volume output
-/// (`amixer` reports both in one line).
 fn tryRung(backend: Backend, vol_cmd: []const u8, mute_cmd: []const u8, on_token: []const u8) ?u8 {
     var buf: [1024]u8 = undefined;
     const out = spawn_capture.runOut(vol_cmd, &buf);
@@ -391,12 +353,9 @@ fn tryRungNativeAlsa() bool {
 }
 
 /// The latency class of one commit on the live backend: the two native rungs
-/// are a single ioctl (or an in-process libpulse call) and report
-/// `.immediate`, while the two subprocess rungs fork and are
-/// `.rate_limited`. Kept as a per-sub query because the slider core throttles
-/// on it and brightness's sysfs path genuinely is immediate -- folding the
-/// answer to a constant here would push that distinction into every
-/// caller (and let the subprocess rungs commit on every scroll event).
+/// are a single ioctl/libpulse call (`.immediate`); the two subprocess rungs
+/// fork (`.rate_limited`). Per-sub query because the slider core throttles on
+/// it; folding to a constant would push the distinction into every caller.
 fn commitCost() slider.CommitCost {
     return switch (latchedRung(g.backend)) {
         .native_pulse, .native_alsa => .immediate,
@@ -427,19 +386,17 @@ fn commitPct(v: u8) void {
     }
 }
 
-/// The one write entry point; each mode names its difference, so the clamp
+/// The one write entry point; each mode names its difference so the clamp
 /// and the display update each live in one place (see brightness.zig).
 fn write(w: slider.Write, v: u8) void {
     switch (w) {
-        // Scroll/drag motion: the label follows immediately while the backend
-        // write is the core scheduler's business.
+        // Scroll/drag motion: the label follows immediately.
         .preview => g.pct = optimisticAfter(g.backend, v, g.pct),
         .commit => commitPct(v),
         // Press set / drag end. The value just committed IS the display
-        // value, so it is shown optimistically and the next poll confirms it
-        // against the real sink. With no backend the display does not move,
-        // because commitPct wrote nothing and echoing the value would show a
-        // level the sink never accepted.
+        // value, shown optimistically; the next poll confirms against the
+        // real sink. With no backend the display does not move, because
+        // commitPct wrote nothing.
         .apply => {
             commitPct(v);
             g.pct = optimisticAfter(g.backend, v, g.pct);
@@ -447,14 +404,11 @@ fn write(w: slider.Write, v: u8) void {
     }
 }
 
-/// Renders the display string into `buf`, substituting every `{pct}` and
-/// `{state}` placeholder, and returns the text (plus the numeric region); a
-/// truncated tail is still a complete, scan-safe string.
-/// With no backend at all, `muted` is forced true so the segment renders MUTE
-/// rather than `VOL 0%`. `VOL 0%` would be a lie -- it claims a level was read
-/// from a sink when no sink was ever reached -- and it is also the one string
-/// that reads as "muted" to a user while inviting a pointless volume-up scroll.
-/// MUTE is the honest terminal state and matches what the user asked for.
+/// Renders the display string into `buf`, substituting `{pct}` and `{state}`,
+/// returning the text (plus the numeric region). Truncated tail is still
+/// scan-safe. With no backend at all, `muted` is forced true so the segment
+/// renders MUTE rather than `VOL 0%`: `VOL 0%` would claim a level was read
+/// from a sink when no sink was ever reached.
 fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Label {
     const effective_mute = muted or !g.has_value;
     const fmt = if (effective_mute)
@@ -466,33 +420,31 @@ fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Labe
 }
 
 /// Idle label hook: the slider core renders this during the segment's draw.
-/// Test-only seam: the display state `label` reads (`g.pct`, `g.muted`) is
-/// module-private, and its tests live in `src/test/bar/volume_test.zig`,
-/// which needs this to set their state: this harness runs tests from the test
-/// ROOT, so an inline test in an imported module is never even ANALYZED. A
-/// plain `pub` on the globals would export mutable global state to
-/// every importer; this scopes the write to an obviously test-shaped name.
+/// Test-only seam: the display state `label` reads is module-private and its
+/// tests live in `src/test/bar/volume_test.zig` (which runs from the test
+/// ROOT, so an inline test in an imported module is never analyzed). A plain
+/// `pub` on the globals would export mutable global state; this scopes the
+/// write to an obviously test-shaped name.
 pub fn setDisplayForTest(pct: u8, muted: bool) void {
     g.pct = pct;
     g.muted = muted;
-    // A supplied pct is by definition a level some rung read, so the seam sets
-    // the has-value flag with it. Without this the forced-MUTE path in
-    // `renderDisplay` would swallow every level these tests are checking.
+    // A supplied pct is by definition a level some rung read, so the seam
+    // sets has-value with it. Without this the forced-MUTE path would
+    // swallow every level these tests are checking.
     g.has_value = true;
 }
 
 /// Paired with `setDisplayForTest` to reach the one state that seam cannot
 /// express: set, then cleared, is "a level is on screen but no rung ever read
-/// one", which is exactly the no-backend start-up condition the forced-MUTE
-/// path exists for.
+/// one" -- the no-backend start-up condition the forced-MUTE path exists for.
 pub fn clearValueForTest() void {
     g.has_value = false;
 }
 
-/// Test seam for the latch/rung mapping: the native backends are process
-/// globals latched once, and a test that never clears them lets one stale
-/// backend choice leak into the next test's assertion. Clearing here keeps each
-/// latchedRung decision pinned to this test's own state.
+/// Test seam for the latch/rung mapping: a test that never clears the
+/// native backends lets one stale backend choice leak into the next
+/// assertion. Clearing here keeps each latchedRung decision pinned to this
+/// test's own state.
 pub fn clearNativeBackendForTest() void {
     g.native_pulse = null;
     g.native_alsa = null;
@@ -502,13 +454,11 @@ pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
     return renderDisplay(config, g.muted, buf);
 }
 
-/// Right-click: flip the sink's mute state. Routed through the LATCHED
-/// rung like every other commit (`commitPct`), so the native backends --
-/// whose protocol takes an ABSOLUTE mute state, not a toggle -- set the
-/// inverted observed state directly instead of spawning a `pactl`/`amixer`
-/// that would talk to a different mixer than the latched backend reads.
-/// Returns through the same follow-up read, so the display reflects what
-/// the sink actually did.
+/// Right-click: flip the sink's mute state. Routed through the LATCHED rung
+/// like every other commit, so the native backends -- whose protocol takes
+/// an ABSOLUTE mute state, not a toggle -- set the inverted observed state
+/// directly instead of spawning a CLI that would talk to a different mixer.
+/// Returns through the same follow-up read.
 fn toggleMute() void {
     switch (latchedRung(g.backend)) {
         .native_pulse => {
@@ -524,8 +474,8 @@ fn toggleMute() void {
     _ = readVolume();
 }
 
-/// The displayed level, or null while the backend has never answered, which is
-/// what makes an audio-less machine reserve no slot and take no clicks.
+/// The displayed level, or null while the backend has never answered, which
+/// is what makes an audio-less machine reserve no slot and take no clicks.
 fn currentLevel() ?u8 {
     return if (g.has_value) g.pct else null;
 }
@@ -535,8 +485,8 @@ fn writable() bool {
 }
 
 /// The volume sub's live poll cadence from the bar config knob (default
-/// 5000 ms). Wired as `Sub.read_interval_ms_of` so the shell picks it up
-/// per wake; the static field below stays as the fallback default.
+/// 5000 ms). Wired as `Sub.read_interval_ms_of`; the static field stays as
+/// the fallback default.
 fn readIntervalMsFromConfig() i64 {
     return core.getState().config.bar.volume_read_interval_ms;
 }
