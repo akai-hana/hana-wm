@@ -1,15 +1,10 @@
-//! Keybind grammar: the `[binds]` parser (bind strings,
-//! `{...}` glob expansion, mouse bindings, the `Mod`/`kill`
-//! placeholders, `+`-linked parallel batches) and the
-//! orchestration that turns a parsed value into an Action.
-//! The action-name grammar itself (the comptime action map,
-//! workspace verbs, `auto_terminal`, exec-fallback typo
-//! warnings) lives in action_names.zig; the
-//! actionFromValue/resolveElement chain below is the one
-//! interleaving point between the two, so it stays here and
-//! calls actions.parseAction. Pure parsing -- the bindings
-//! land on the Config, and core/input/keybinds.zig turns them into
-//! keycodes at buildKeybinds time.
+//! Keybind grammar: the `[binds]` parser (bind strings, `{...}` glob
+//! expansion, mouse bindings, the `Mod`/`kill` placeholders, `+`-linked
+//! parallel batches) and the orchestration that turns a parsed value into an
+//! Action. The action-name grammar itself lives in action_names.zig; the
+//! actionFromValue/resolveElement chain below is the one interleaving point
+//! between the two. Pure parsing -- the bindings land on the Config, and
+//! core/input/keybinds.zig turns them into keycodes at buildKeybinds time.
 
 const std = @import("std");
 const keymap = @import("keymap");
@@ -25,7 +20,6 @@ const max_modifier_key_bytes = 16;
 /// Longest keysym name the bind parser will accept raw (at that length the
 /// name no longer fits a zero-terminated copy in the fixed buffer → error.KeyNameTooLong).
 const max_key_name_bytes = 64;
-
 const mod_map = std.StaticStringMap(u16).initComptime(.{
     .{ "super", masks.mod_super },
     .{ "mod4", masks.mod_super },
@@ -49,7 +43,6 @@ const GlobEntry = struct {
     ws_idx: u16, // 1-based position in the expanded list; 0 when there is no glob
     owned: bool, // true when key was heap-allocated and must be freed by the caller
 };
-
 /// Maximum number of keys a single `{...}` glob may expand to. Workspace
 /// indices only reach 256 (see tryParseWorkspace), and a larger glob could
 /// only ever produce unreachable exec fallbacks, so expansion stops there.
@@ -220,7 +213,6 @@ fn containsSyncExec(a: *const types.Action) bool {
     }
     return false;
 }
-
 /// A `+` is a parallel separator only when whitespace sits on at least one
 /// side, so literal plus signs in exec commands (`xdotool key ctrl+plus`)
 /// are never split.
@@ -317,12 +309,11 @@ pub fn parseKeybindings(allocator: std.mem.Allocator, doc: *parser.Document, cfg
                 action.deinit(allocator);
                 continue;
             };
-            // Config lint (P1-14): a `,`-sequence exec step runs through
+            // Config lint: a `,`-sequence exec step runs through
             // spawn.execSynchronous, which BLOCKS the WM event loop until the
-            // command exits (wall-clock capped at spawn.sync_exec_timeout_ms
-            // since P1-14, but a long step still freezes the WM for the cap).
-            // Warn at parse time so the cost is visible where the bind is
-            // written, not when it first fires.
+            // command exits (bounded by spawn.sync_exec_timeout_ms, but a long
+            // step still freezes the WM for the cap). Warn at parse time so the
+            // cost is visible where the bind is written.
             if (containsSyncExec(&action)) {
                 log.warn("Keybind '{s}': a `,`-sequence exec step blocks the WM until the command exits (bounded, but avoid long-running commands here)", .{keybind_str});
             }

@@ -6,8 +6,8 @@ const model = @import("model");
 const tiling = @import("tiling");
 
 const scaling = @import("scaling");
-/// Stack-column weight boosts derived from `secondary_balance`:
-/// positive boosts the top slot, negative boosts the bottom slot.
+/// Stack-column weight boosts derived from `secondary_balance`: positive boosts the top
+/// slot, negative the bottom.
 const StackBoost = struct {
     top: f32 = 0,
     bottom: f32 = 0,
@@ -21,10 +21,9 @@ const StackBoost = struct {
     }
 };
 
-/// Master-stack layout: master pane + stack pane, gaps at screen edges and
-/// half-gap between panes. Heights via cumulative integer division with
-/// max_height capping (water-filling). Requires the engine contract's
-/// non-empty `v.order`.
+/// Master-stack layout: master + stack panes, gaps at screen edges and a half-gap
+/// between panes. Heights via cumulative integer division with max_height capping
+/// (water-filling).
 fn compute(v: *const tiling.View, out: *tiling.List) void {
     const windows = v.order;
     const n = windows.len;
@@ -33,25 +32,22 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const screen_w = tiling.waWidth(v.workarea);
     const screen_h = tiling.waHeight(v.workarea);
-    // A workarea smaller than the edge-gap plus a border-inset pane on either
-    // axis (including the degenerate 0x0) cannot host a single placement:
-    // shrinkClamped's min_dim floor and the water-fill's height floor would
-    // flare windows off the workarea. Park everything.
+    // A workarea smaller than edge-gap plus a border-inset pane on either axis
+    // (including the degenerate 0x0) cannot host a single placement: shrinkClamped's
+    // min_dim floor and the water-fill's height floor would flare windows off the
+    // workarea. Park everything.
     if (!tiling.insetFits(screen_w, screen_h, tiling.totalInset(m.gap, m))) {
         for (windows) |win| tiling.emitHidden(ctx.out, win);
         return;
     }
-    // Row-fit count: how many windows fit in one column at min pane height.
-    // Fits per window = min pane dim plus row pitch (gap + doubled border).
-    // A zero min_dim+gap+border Env would make the denominator 0 and the
-    // division panic; floor it to 1 so the degenerate case can't (the fit
-    // count then becomes available/1 = huge, which the stack/clamp handle).
-    // The same row_fit caps the master COUNT below (floored at 1: a
-    // primary_count of 0 would size the master pane to zero width, leaving a
-    // dead strip instead of a full-width master), so surplus windows fall
-    // through to the stack path (tileStack), which carries its own
-    // overflow/park guard -- without the cap a master column overflows its
-    // rows below the workarea.
+    // Row-fit count: windows that fit in one column at min pane height, i.e. min pane
+    // dim plus row pitch (gap + doubled border) each. A zero min_dim+gap+border Env
+    // would make the denominator 0 and panic, so it floors to 1 (the fit count then
+    // goes huge, which the stack/clamp handle). The same row_fit caps the master COUNT
+    // below -- floored at 1, else a primary_count of 0 would size the master pane to
+    // zero width -- so surplus windows fall to tileStack, which has its own
+    // overflow/park guard; without the cap a master column overflows its rows off the
+    // workarea.
     const space_per_window: u16 = ctx.min_dim +| rowPitch(ctx.m);
     const available: u32 = @as(u32, screen_h) -| @as(u32, m.gap);
     const row_fit: u16 = @intCast(@max(1, available / @max(1, @as(u32, space_per_window))));
@@ -66,8 +62,8 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     else
         screen_w;
 
-    // Shrink the stack pane to the widest bounded slave's max_width
-    // (dialogs/small windows no longer leave a dead gap beside them).
+    // Shrink the stack pane to the widest bounded slave's max_width, so dialogs/small
+    // windows don't leave a dead gap beside them.
     const is_primary_on_right = ctx.v.env.primary_on_right;
     const stack_pane_w: u16 = screen_w -| master_w_frac;
     const natural_stack_w: u16 = minStackWidth(ctx, stack_windows);
@@ -79,12 +75,11 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const master_x: u16 = if (is_primary_on_right) screen_w -| master_w else 0;
 
-    // The master column gets a full gap on its screen edge and a half-gap
-    // toward the stack; with no stack both edges carry a full gap. Borders
-    // are then subtracted from the width. A pane no wider than those margins
-    // cannot host the column: shrinkClamped's min_dim floor would flare it
-    // over the stack (primary_width near 0 is enough to get here). Park the
-    // master; the stack survives.
+    // The master column gets a full gap on its screen edge and a half-gap toward the
+    // stack (both edges full when there is no stack); borders are then subtracted from
+    // the width. A pane no wider than those margins cannot host the column:
+    // shrinkClamped's min_dim floor would flare it over the stack (primary_width near
+    // 0 suffices). Park the master; the stack survives.
     const master_margin = if (stack_n > 0) stackSeamMargin(m) else tiling.totalInset(m.gap, m);
     if (master_w > master_margin) {
         const master_inner_w = tiling.shrinkClamped(master_w, master_margin, ctx.min_dim);
@@ -116,8 +111,8 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     );
 }
 
-/// Tile a vertical column at fixed `x` with content width `inner_w`,
-/// distributing heights via cumulative division with max_height capping.
+/// Tile a vertical column at fixed `x` with content width `inner_w`, distributing
+/// heights via cumulative division with max_height capping.
 fn tileColumn(
     ctx: tiling.LayoutCtx,
     windows: []const model.WindowId,
@@ -133,14 +128,11 @@ fn tileColumn(
     var heights_buf: [model.max_tiled_windows]u16 = undefined;
     const heights = heights_buf[0..windows.len];
     const used = fillHeights(ctx, windows, avail, boost, heights);
-    // Every water-filled height floors at min_dim, so the total can exceed
-    // avail when a boosted share starves a sibling below its floor (or the
-    // fair shares were already under it): parking the column beats flaring
-    // its bottom rows off the workarea. Subsumes the old avail <
-    // count * min_dim pre-check -- the even-floor case overflows the same
-    // way. A zero height in the mix (min_dim=0 splits rounding a share down
-    // to 0) is the unmappable twin: park rather than hand the server a
-    // zero-area rect.
+    // Every water-filled height floors at min_dim, so the total can exceed avail when
+    // a boosted share starves a sibling below its floor (or fair shares were already
+    // under it): parking the column beats flaring its bottom rows off the workarea. A
+    // zero height in the mix (min_dim=0 splits rounding a share to 0) is the unmappable
+    // twin: park rather than hand the server a zero-area rect.
     var any_zero = false;
     for (heights) |hi| {
         if (hi == 0) any_zero = true;
@@ -150,8 +142,8 @@ fn tileColumn(
         return;
     }
 
-    // If every window is capped, sum(heights) < avail; centre the stack in
-    // the column instead of stranding the slack at the bottom.
+    // If every window is capped, sum(heights) < avail: centre the stack in the column
+    // instead of stranding the slack at the bottom.
     const dead_space: u32 = @as(u32, avail) -| used;
     const pad_top: u16 = @intCast(dead_space / 2);
 
@@ -163,26 +155,24 @@ fn tileColumn(
     }
 }
 
-/// Per-window state for the water-fill: the snapshot `max_height` and the
-/// pinned (capped) flag, packed in one AoS slot -- both are indexed only by
-/// position in the column and consulted together on every pinning pass.
+/// Per-window water-fill state: the snapshot `max_height` and the pinned flag, packed
+/// in one AoS slot -- both indexed by column position and consulted together on every
+/// pinning pass.
 const FillSlot = struct {
     max_h: u16 = 0,
     capped: bool = false,
 };
 
-/// Water-filling: pins windows whose max_height is at or below their fair
-/// share and redistributes their pixels, then distributes heights to the rest.
-/// Zero boost uses an even split. Returns the total pixel height used.
+/// Water-filling: pins windows whose max_height is at or below their fair share and
+/// redistributes their pixels, then distributes heights to the rest. Zero boost uses
+/// an even split. Returns the total pixel height used.
 fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u16, boost: StackBoost, out: []u16) u32 {
     const n: u16 = @intCast(windows.len);
     const zero_boost = boost.isZero();
 
-    // Per-window fill state as one AoS slot: the snapshot max_height AND the
-    // pinned (capped) flag, indexed by window position. Snapshot each
-    // window's max_height ONCE: the water-fill below re-reads the hint inside
-    // its pinning passes, and hoisting it keeps those passes O(n) plain u16
-    // compares instead of re-resolving the hint each time.
+    // Snapshot each window's max_height ONCE: the water-fill below would otherwise
+    // re-read the hint inside every pinning pass, and hoisting keeps those passes O(n)
+    // plain u16 compares.
     var slots_buf: [model.max_tiled_windows]FillSlot = @splat(.{});
     const slots = slots_buf[0..windows.len];
     for (windows, 0..) |win, i| slots[i].max_h = ctx.v.hintsFor(win).max_height;
@@ -196,8 +186,8 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
         for (windows, 0..) |_, i| {
             if (slots[i].capped) continue;
             const w_i: f32 = windowWeight(@intCast(i), n, boost);
-            // rem_weight ≥ rem_count here (windowWeight ≥ 1.0, boost ≥ 0), so
-            // the division never divides by zero — no `else 0` arm needed.
+            // rem_weight ≥ rem_count here (windowWeight ≥ 1.0, boost ≥ 0), so the
+            // division can never divide by zero.
             const fair: u16 = @intFromFloat(@as(f32, @floatFromInt(rem_avail)) * w_i / rem_weight);
             if (slots[i].max_h > 0 and slots[i].max_h <= fair) {
                 out[i] = @max(ctx.min_dim, slots[i].max_h);
@@ -210,12 +200,11 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
         }
     }
 
-    // Three rounding schemes coexist here, deliberately not merged: the
-    // zero-boost pass uses integer even-split chunks (windowHeight: largest
-    // rows first, any row differs from its neighbor by <= 1px); the boost pass
-    // rounds cumulative pixel boundaries to nearest and diffs them; pinned
-    // windows take their exact hint floored at min_dim. The pin threshold
-    // `fair` above floors too, but only as a comparator.
+    // Three rounding schemes coexist deliberately unmerged: the zero-boost pass uses
+    // integer even-split chunks (windowHeight: any row differs from its neighbor by
+    // <= 1px); the boost pass rounds cumulative pixel boundaries to nearest and diffs
+    // them; pinned windows take their exact hint floored at min_dim. The pin threshold
+    // `fair` above floors too, only as a comparator.
     var cum: f32 = 0;
     var prev_px: f32 = 0;
     var seen: u16 = 0;
@@ -239,7 +228,7 @@ fn fillHeights(ctx: tiling.LayoutCtx, windows: []const model.WindowId, avail: u1
 }
 
 /// Weight of stack slot `i`: 1.0 baseline plus `boost.top` (first slot) and
-/// `boost.bottom` (last slot); both apply harmlessly when `count == 1`.
+/// `boost.bottom` (last); both apply harmlessly when `count == 1`.
 inline fn windowWeight(i: u16, count: u16, boost: StackBoost) f32 {
     var w: f32 = 1.0;
     if (i == 0) w += boost.top;
@@ -255,8 +244,8 @@ inline fn rowPitch(m: model.Margins) u16 {
     return m.gap +| 2 *| m.border;
 }
 
-/// Minimum stack-pane width: widest bounded slave's max_width (floored to
-/// min_dim) plus gap/border margins; horizontal mirror of max_height capping.
+/// Minimum stack-pane width: widest bounded slave's max_width (floored to min_dim)
+/// plus gap/border margins; horizontal mirror of max_height capping.
 fn minStackWidth(
     ctx: tiling.LayoutCtx,
     windows: []const model.WindowId,
@@ -268,17 +257,15 @@ fn minStackWidth(
         widest_bounded = @max(widest_bounded, @max(ctx.min_dim, max_w));
     }
     if (widest_bounded == 0) return 0;
-    // Reverse of tileStack's single-column stack_inner_w shrink: pane width
-    // = content + (stack half-gap + shared gap + doubled border).
+    // Reverse of tileStack's single-column shrink: pane width = content +
+    // (stack half-gap + shared gap + doubled border).
     return widest_bounded +| stackSeamMargin(ctx.m);
 }
 
-/// Tile the stack pane, spilling into a column-major overflow grid when the
-/// stack exceeds what fits in a single column.
-///
-/// `row_fit` is compute's single row-fit computation (shared with the master
-/// COUNT cap). `boost` only affects the single-column path, see
-/// tileStackExtra for why.
+/// Tile the stack pane, spilling into a column-major overflow grid when the stack
+/// exceeds a single column. `row_fit` is compute's single row-fit computation (shared
+/// with the master COUNT cap); `boost` only affects the single-column path (see
+/// tileStackExtra).
 fn tileStack(
     ctx: tiling.LayoutCtx,
     windows: []const model.WindowId,
@@ -292,9 +279,9 @@ fn tileStack(
     const stack_n: u16 = @intCast(windows.len);
 
     if (stack_n <= row_fit) {
-        // A stack pane no wider than its seam+border margins cannot host a
-        // column: shrinkClamped's min_dim floor would flare it over the
-        // master (or the screen edge). Park the stack; the master survives.
+        // A stack pane no wider than its seam+border margins cannot host a column:
+        // shrinkClamped's min_dim floor would flare it over the master (or the screen
+        // edge). Park the stack; the master survives.
         if (w <= stackSeamMargin(ctx.m)) {
             for (windows) |win| tiling.emitHidden(ctx.out, win);
             return;
@@ -306,8 +293,8 @@ fn tileStack(
     tileStackExtra(ctx, windows, x, y_offset, w, h, row_fit);
 }
 
-/// Column-major overflow grid: row `r` holds windows r, r+max_fit, ...
-/// Overflow rows skip max_height redistribution and the stack boost.
+/// Column-major overflow grid: row `r` holds windows r, r+max_fit, ... Overflow rows
+/// skip max_height redistribution and the stack boost.
 fn tileStackExtra(
     ctx: tiling.LayoutCtx,
     windows: []const model.WindowId,
@@ -318,56 +305,53 @@ fn tileStackExtra(
     max_fit: u16,
 ) void {
     const stack_n: u16 = @intCast(windows.len);
-    // Same seam-margin floor as the single-column path: a stack pane no
-    // wider than its seam+border margins cannot host even one column (the
-    // min_col_w floor below would otherwise inflate a column past the pane
-    // and off the workarea). Park the stack; the master survives.
+    // Same seam-margin floor as the single-column path: a pane no wider than its
+    // seam+border margins cannot host even one column (min_col_w below would otherwise
+    // inflate a column past the pane). Park; master survives.
     if (w <= stackSeamMargin(ctx.m)) {
         for (windows) |win| tiling.emitHidden(ctx.out, win);
         return;
     }
     const row_avail = calcAvailableHeight(h, max_fit, ctx.m, ctx.min_dim);
-    // Row heights floor at min_dim too: rows whose share cannot hold
-    // max_fit * min_dim would spill the bottom row off the workarea.
-    // Each row takes an integer share of row_avail (windowHeight), so every
-    // row is >= 1 only while row_avail >= max_fit; the min_dim floor is the
-    // stronger bound whenever min_dim >= 1.
+    // Row heights floor at min_dim too: rows whose share cannot hold max_fit * min_dim
+    // would spill the bottom row off the workarea. Each row takes an integer share of
+    // row_avail (windowHeight), so every row is >= 1 only while row_avail >= max_fit;
+    // min_dim is the stronger bound at >= 1.
     if (row_avail < @max(max_fit, max_fit *| ctx.min_dim)) {
         for (windows) |win| tiling.emitHidden(ctx.out, win);
         return;
     }
-    // row_fit invariant: with row_avail >= max_fit each row's integer share
-    // of row_avail is >= 1 (consecutive cumulative-division floors differ by
-    // at least one), so the emission below can never hand the server a
-    // zero-height row. Debug-only: no release cost.
+    // row_fit invariant: with row_avail >= max_fit each row's integer share is >= 1
+    // (consecutive cumulative-division floors differ by at least one), so the emission
+    // can never hand the server a zero-height row. Debug-only.
     std.debug.assert(row_avail >= max_fit);
 
     const min_col_w: u16 = ctx.min_dim +| model.doubledBorder(ctx.m);
 
     var row: u16 = 0;
     while (row < max_fit) : (row += 1) {
-        // Cap each column to a min_dim+border window so a column's origin never
-        // leaves the stack pane; surplus (a row narrower than the column count)
-        // has no free row to spill into and is parked instead.
+        // Cap each column to a min_dim+border window so a column's origin never leaves
+        // the stack pane; surplus (a row narrower than the column count) has no free
+        // row to spill into and is parked.
         const cols_by_count: u16 = (stack_n - row + max_fit - 1) / max_fit;
-        // The width budget is the pane minus the LEADING seam: column k
-        // starts at seam + k * (col_w + gap), so the last column needs
-        // seam + cols * min_col_w + (cols - 1) * gap <= w. Budgeting the
-        // seam out let a narrow pane claim one column too many and the
-        // stride pushed it off the workarea (fuzz-found: w=24, seam=5,
-        // cols_by_width=2 -> second column 2px past the pane edge).
+        // The width budget is the pane minus the LEADING seam: column k starts at
+        // seam + k * (col_w + gap), so the last column needs
+        // seam + cols * min_col_w + (cols-1)*gap <= w. Budgeting the seam out let a
+        // narrow pane claim one column too many and the stride pushed it off the
+        // workarea (fuzz-found: w=24, seam=5, cols_by_width=2 -> second column 2px past
+        // the pane edge).
         const usable_w = w -| tiling.seamGap(ctx.m);
         const cols_by_width: u16 = @max(1, (usable_w +| ctx.m.gap) / @max(1, min_col_w +| ctx.m.gap));
         const cols_in_row: u16 = @max(1, @min(cols_by_count, cols_by_width));
 
         const gaps_in_row = tiling.seamGap(ctx.m) +| ctx.m.gap *| cols_in_row;
-        // The min_col_w floor is capped by the pane: a count-driven column
-        // count can ask for more pixels than a narrow pane has.
+        // The min_col_w floor is capped by the pane: a count-driven column count can ask
+        // for more pixels than a narrow pane has.
         const row_total_w: u16 = if (w > gaps_in_row) w - gaps_in_row else @min(cols_in_row *| min_col_w, w);
         const col_w = row_total_w / cols_in_row;
-        // A column narrower than the doubled border: the shrink's min_dim
-        // floor would flare the window over its neighbour. Park the row's
-        // windows (the col >= cols_in_row park below is the sibling guard).
+        // A column narrower than the doubled border: the shrink's min_dim floor would
+        // flare the window over its neighbour. Park the row's windows (the col >=
+        // cols_in_row park below is the sibling guard).
         if (col_w <= model.doubledBorder(ctx.m)) {
             var park_idx: u16 = row;
             while (park_idx < stack_n) : (park_idx += max_fit) tiling.emitHidden(ctx.out, windows[park_idx]);
@@ -383,8 +367,8 @@ fn tileStackExtra(
         var win_idx: u16 = row;
         while (win_idx < stack_n) : (win_idx += max_fit) {
             const col: u16 = (win_idx - row) / max_fit;
-            // Columns past the width cap would start outside the pane; park
-            // them (no in-pane row remains for a true spill).
+            // Columns past the width cap would start outside the pane; park them (no
+            // in-pane row remains for a true spill).
             if (col >= cols_in_row) {
                 tiling.emitHidden(ctx.out, windows[win_idx]);
                 continue;
@@ -394,46 +378,42 @@ fn tileStackExtra(
     }
 }
 
-/// Shared single-window row emission used by both layout passes (the stack
-/// column and the multi-column grid). The two HEIGHT DISTRIBUTIONS stay at
-/// the call sites on purpose: they differ in the min_dim-floor corner, and
-/// merging them is not behavior-preserving.
+/// Shared single-window row emission used by both layout passes. The two HEIGHT
+/// DISTRIBUTIONS stay at the call sites on purpose: they differ in the min_dim-floor
+/// corner, and merging them is not behavior-preserving.
 inline fn emitRow(ctx: tiling.LayoutCtx, win: model.WindowId, px: u16, py: u16, w: u16, h: u16) void {
-    // Every caller parks degenerate geometry instead of emitting it (a zero
-    // height share, a column at/below its doubled border, a pane at/below its
-    // seam margin), so a zero here is a caller bug. The sink would reject the
-    // configure (width/height 0 is a BadValue), but a Debug assert names the
-    // layout path instead of the server error. Debug-only: no release cost.
+    // Every caller parks degenerate geometry instead of emitting it (zero height
+    // share, column at/below its doubled border, pane at/below its seam margin), so a
+    // zero here is a caller bug. The sink would reject the configure (0 is a BadValue),
+    // but a Debug assert names the layout path instead of the server error. Debug-only.
     std.debug.assert(w >= 1 and h >= 1);
-    // px is relative to the workarea's left edge (master_x/stack_origin both
-    // start at 0 within screen_w): offset it by the workarea origin (waX) so
-    // it lands on a side-claimed workarea, not the screen's left edge.
+    // px is relative to the workarea's left edge (master_x/stack_origin both start at
+    // 0 within screen_w): offset by the workarea origin (waX) so it lands on a
+    // side-claimed workarea, not the screen's left edge.
     tiling.emitRect(ctx.v, ctx.out, win, @as(i32, @intCast(px)) + tiling.waX(ctx.v.workarea), @intCast(py), w, h);
 }
 
-/// Total pixel height available for window content after gaps and borders.
-/// Saturates to 0 when the margins exceed total_h (the degenerate case the
-/// callers' min_dim-fit guards turn into a park: the old count * min_dim
-/// fallback here produced heights that flared off the workarea instead).
+/// Total pixel height available for content after gaps and borders. Saturates to 0
+/// when the margins exceed total_h -- the degenerate case the callers' min_dim-fit
+/// guards turn into a park.
 inline fn calcAvailableHeight(total_h: u16, count: u16, m: model.Margins, min_dim: u16) u16 {
     _ = min_dim;
-    // gap + count * rowPitch: the row seam gaps (one leading, count+1 with the
-    // trailing gap folded in) plus each row's doubled border.
+    // gap + count * rowPitch: the row seam gaps (one leading, count+1 with the trailing
+    // gap folded in) plus each row's doubled border.
     const overhead = m.gap +| count *| rowPitch(m);
     return total_h -| overhead;
 }
 
-/// Height of window `i` out of `count`, distributing `available` pixels via
-/// cumulative integer division. No two siblings differ by more than 1 px.
+/// Height of window `i` out of `count`, distributing `available` pixels via cumulative
+/// integer division. No two siblings differ by more than 1 px.
 inline fn windowHeight(i: u16, count: u16, available: u16, min_dim: u16) u16 {
     const hi: u32 = (@as(u32, i) + 1) * @as(u32, available) / @as(u32, count);
     const lo: u32 = @as(u32, i) * @as(u32, available) / @as(u32, count);
     return @max(min_dim, @as(u16, @intCast(hi - lo)));
 }
 
-/// This layout's registry contribution: metadata plus the dispatch hook.
-/// The ONE variant table. `fifo_variant`, `variant_count`, `variant_parse`
-/// and `indicators` are all derived from it by layoutModule.
+/// The ONE variant table for this layout; layoutModule derives `fifo_variant`,
+/// `variant_count`, `variant_parse` and `indicators` from it.
 const variants = [_]tiling.Variant{
     .{ .name = "lifo", .indicator = "[N]" },
     .{ .name = "fifo", .indicator = "=N=", .fifo = true },

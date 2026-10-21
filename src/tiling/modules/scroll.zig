@@ -5,19 +5,18 @@ const model = @import("model");
 const tiling = @import("tiling");
 
 // GROW DUTY (optional): on window grow, callers may pre-clamp viewport_offset
-// to maxOffset(n, slotWidth(wa.w), wa.w) and update viewport_prev_count
-// (see pipeline.preReconcileDuties); compute clamps internally either way.
-// slotWidth/maxOffset feed the viewport commands too.
+// to maxOffset(n, slotWidth(wa.w), wa.w) and update viewport_prev_count (see
+// pipeline.preReconcileDuties); compute clamps internally either way.
 
-/// Pixel width of one scroll slot: exactly half the screen width. Single
-/// source of truth; maxOffset and compute derive their geometry from it.
+/// Pixel width of one scroll slot: exactly half the screen width. Single source
+/// of truth; maxOffset and compute derive their geometry from it.
 pub fn slotWidth(screen_w: u16) i32 {
     return @intCast(screen_w / 2);
 }
 
-/// Maximum scroll offset: reached when the last of `n` windows' right edge
-/// is flush with the screen's right edge. Zero (nothing to scroll) when the
-/// strip is no wider than the screen.
+/// Maximum scroll offset: reached when the last of `n` windows' right edge is
+/// flush with the screen's right edge. Zero (nothing to scroll) when the strip
+/// is no wider than the screen.
 pub fn maxOffset(n: usize, slot_w: i32, screen_w: u16) i32 {
     const n_i32: i32 = @intCast(n);
     const sw_i32: i32 = @intCast(screen_w);
@@ -36,9 +35,8 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     const screen_h = tiling.waHeight(v.workarea);
 
     const slot_w: i32 = slotWidth(screen_w);
-    // A workarea under two pixels wide has no slot at all (slotWidth
-    // truncates to 0): every window would clip to the same 1px column.
-    // Park the strip instead.
+    // A workarea under two pixels wide has no slot at all (slotWidth truncates
+    // to 0): every window would clip to the same 1px column. Park instead.
     if (slot_w < 1) {
         for (windows) |win| tiling.emitHidden(out, win);
         return;
@@ -46,13 +44,12 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
 
     const sw_i32: i32 = @intCast(screen_w);
 
-    // Clamped internally (self-contained); the optional pre-clamp grow duty is
-    // described at the module header.
+    // Clamped internally; the optional pre-clamp grow duty is at the header.
     const scroll: i32 = clampOffset(v.params.viewport_offset, windows.len, screen_w);
 
-    // A workarea smaller than the edge-gap plus a border-inset pane on either
-    // axis cannot host a slot: shrinkClamped's min_dim floor would flare the
-    // content rect off the workarea (the width path already clips to hidden).
+    // A workarea smaller than edge-gap plus a border-inset pane on either axis
+    // cannot host a slot: shrinkClamped's min_dim floor would flare the content
+    // rect off the workarea (the width path already clips to hidden).
     if (!tiling.insetFits(screen_w, screen_h, tiling.totalInset(m.gap, m))) {
         for (windows) |win| tiling.emitHidden(out, win);
         return;
@@ -85,11 +82,9 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
         // The visibility cutoff uses the EMITTED width, not the stale slot
         // width: a boundary slot is parked using exactly what would be on
         // screen, so a slot that clipped to empty is caught off-viewport here
-        // instead of mapping a sliver of window past the edge.
-        //
-        // Clip the emitted rect against the screen (workarea-relative) bounds:
-        // a slot straddling an edge emits only its visible slice rather than a
-        // straddling rect whose one side maps an offscreen sliver.
+        // instead of mapping a sliver past the edge. The clip below therefore
+        // emits only a slot's visible slice, never a straddling rect whose far
+        // side maps an offscreen sliver.
         var clipped_x = x;
         var clipped_w: i32 = @intCast(content_w);
         if (clipped_x < 0) {
@@ -105,13 +100,11 @@ fn compute(v: *const tiling.View, out: *tiling.List) void {
     }
 }
 
-/// THE scroll clamp: a viewport offset is always in [0, max_off] for
-/// the CURRENT window count and slot width. Two sites need that and they used
-/// to spell it differently -- `@max(0, @min(...))` in the layout,
-/// `std.math.clamp` in the pre-reconcile grow duty -- so tightening one bound
-/// (a different max_off, a signed-vs-unsigned edge) would silently not apply
-/// to the other, and the two answers disagree by exactly the window that
-/// scrolls the furthest.
+/// THE scroll clamp: a viewport offset is always in [0, max_off] for the
+/// CURRENT window count and slot width. Two sites need it, and spelling them
+/// separately (`@max(0, @min(...))` in the layout vs `std.math.clamp` in the
+/// grow duty) would let tightening one bound silently not apply to the other --
+/// the two answers would disagree by exactly the window that scrolls furthest.
 fn clampOffset(offset: i32, n: usize, wa_width: u16) i32 {
     const slot_w = slotWidth(wa_width);
     const max_off = maxOffset(n, slot_w, wa_width);
@@ -119,9 +112,9 @@ fn clampOffset(offset: i32, n: usize, wa_width: u16) i32 {
 }
 
 /// Pre-reconcile duty (pure): snap right when the visible count grew
-/// (spawn/restore/tag-add), then clamp to content. Takes the workspace's
-/// layout params BY VALUE; the pipeline choke point applies the returned
-/// delta (value-in, value-out -- no mutable pointer into the model).
+/// (spawn/restore/tag-add), then clamp to content. Takes `LayoutParams` BY
+/// VALUE; the pipeline choke point applies the returned delta -- no mutable
+/// pointer into the model.
 fn preReconcileHook(p: model.LayoutParams, n: usize, wa_width: u16) model.LayoutParams {
     const slot_w = slotWidth(wa_width);
     const max_off = maxOffset(n, slot_w, wa_width);
@@ -132,7 +125,6 @@ fn preReconcileHook(p: model.LayoutParams, n: usize, wa_width: u16) model.Layout
     return next;
 }
 
-/// This layout's registry contribution: metadata plus the dispatch hooks.
 pub const module = tiling.layoutModule("scroll", "[|]", compute, &.{}, .{
     .slotWidth = slotWidth,
     .maxOffset = maxOffset,

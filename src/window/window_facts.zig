@@ -1,14 +1,10 @@
-//! Per-window cache for window metadata.
-//! Caches the window title as the single source
-//! of truth. Title reads use cache-only peeks (no X11 on the draw path), with
-//! pipelined batch admission (_NET_WM_NAME preferred over WM_NAME) and a
-//! single-window refresh on rename. Geometry remains in the model/sync ledger.
-//! The window-facts cache is the single source of truth for window titles: admission
-//! fires _NET_WM_NAME + WM_NAME as part of the pipelined admission cookie
-//! batch and caches the winner per window id; a title PropertyNotify
-//! re-fetches that one window. The bar reads via peekTitle() -- a cache hit,
-//! no X11 in the draw path, and no positional title slot anywhere, so a fetch
-//! can never land on the wrong window.
+//! Per-window cache for window metadata — the single source of truth for
+//! window titles. Admission fires _NET_WM_NAME + WM_NAME as part of the
+//! pipelined admission cookie batch and caches the winner per window id; a
+//! title PropertyNotify re-fetches that one window. The bar reads via
+//! peekTitle() — a cache hit, no X11 on the draw path, and no positional
+//! title slot anywhere, so a fetch can never land on the wrong window.
+//! Geometry remains in the model/sync ledger.
 
 const std = @import("std");
 
@@ -23,8 +19,7 @@ const idmap = @import("idmap");
 /// store time (`setTitle`). Sized from the consumer: the bar truncates for
 /// display against the available width, so the tail of a long title is never
 /// rendered, and the inline buffer costs `max_window_cache` (512) x this, so
-/// a bigger buffer would only buy bytes no reader can see. The title fetch is
-/// sized to this constant, so fetch and cache move together.
+/// a bigger buffer would only buy bytes no reader can see.
 pub const max_title_len = 256;
 
 const WindowData = struct {
@@ -42,37 +37,33 @@ const WindowData = struct {
 /// Hard upper bound on cached windows: the store is a fixed-capacity
 /// `IdMap`, so this ceiling bounds memory outright — no heap, no growth
 /// path. A normal desktop never exceeds a few dozen managed windows; 512
-/// is a generous ceiling that prevents a runaway client from costing
-/// unbounded memory. Shared with icccm's focus-property cache.
+/// prevents a runaway client from costing unbounded memory. Shared with
+/// icccm's focus-property cache.
 ///
-/// The ceiling is deliberately ABOVE the model's store_capacity, not equal
-/// to it: an unmapped or never-admitted client can still deliver property
+/// Deliberately ABOVE the model's store_capacity, not equal to it: an
+/// unmapped or never-admitted client can still deliver property
 /// notifications and earn a cache entry, so sizing the cache AT the model
 /// bound would let transient clients evict live entries and make the cache
 /// the binding constraint where the model is meant to be.
 const max_entries = idmap.max_window_cache;
 
 // Module-level singleton: always-valid and allocation-free. Before init()
-// (and after deinit()) it is simply empty — peeks miss and writes land —
-// so there is no lifecycle guard to get wrong; init()/deinit() reset the
-// table only, matching every other module's restart discipline.
+// (and after deinit()) it is simply empty — peeks miss and writes land — so
+// there is no lifecycle guard to get wrong.
 var cache: idmap.IdMap(WindowData, max_entries) = .{};
 
-/// How many windows currently hold a cache entry (0 before init).
-///
-/// Exposed as a bare integer so the map type stays private to this file
-/// instead of leaking through the API as an unnameable pointer; a test that
-/// needs evidence that the ceiling actually dropped an entry rather than
-/// overwriting one reads this one integer.
+/// How many windows currently hold a cache entry (0 before init). Bare
+/// integer so the map type stays private to this file; a test that needs
+/// evidence the ceiling dropped an entry rather than overwriting one reads
+/// this.
 pub fn cachedWindowCount() usize {
     return cache.count();
 }
 
-/// Allocation-free store: nothing to release, so init/deinit only reset
-/// the table AND the latched title-atom resolution (a deinit()+init() cycle —
-/// session restart, test harness — must not carry stale titles or stale atom
-/// ids over). The ignored allocator keeps the standard module-lifecycle
-/// signature window.init calls.
+/// Allocation-free store: nothing to release, so init/deinit only reset the
+/// table AND the latched title-atom resolution (a deinit()+init() cycle must
+/// not carry stale titles or stale atom ids over). The ignored allocator
+/// keeps the standard module-lifecycle signature window.init calls.
 pub fn init(_: std.mem.Allocator) void {
     cache.clear();
     resetAtoms();
@@ -87,8 +78,6 @@ pub fn deinit() void {
 pub fn removeWindow(window_id: u32) void {
     _ = cache.remove(window_id);
 }
-
-// Window-facts cache (title + border + geometry facts per window id)
 
 const property_no_delete = icccm.property_no_delete;
 
@@ -106,12 +95,11 @@ pub const TitleCookies = struct {
 fn ensureAtoms() void {
     if (atoms_resolved) return;
     // `getAtomCached` answers null only while the atom cache is NOT READY
-    // yet (a transient boot/test ordering) -- never "the server lacks the
+    // yet (a transient boot/test ordering) — never "the server lacks the
     // atom": interning is all-or-nothing at `atoms.initAtomCache`, and a
     // failure there aborts init. Latching that null before success would
-    // permanently disable _NET_WM_NAME for the whole session, so only a
-    // full answer latches and the null is retried next time (P1-37;
-    // window_facts_test's primed-then-cleared latch tests).
+    // permanently disable _NET_WM_NAME for the whole session, so only a full
+    // answer latches and the null is retried next time.
     const name = atoms.getAtomCached("_NET_WM_NAME") orelse return;
     const utf = atoms.getAtomCached("UTF8_STRING") orelse return;
     net_wm_name = name;
@@ -119,10 +107,10 @@ fn ensureAtoms() void {
     atoms_resolved = true;
 }
 
-/// Drop the latched title-atom resolution with the rest of the module state
-/// (P1-37): the restart discipline above promises a deinit()+init() cycle
-/// starts empty, and the atom ids belong to that cycle as much as the titles
-/// do — a latch surviving a restart would carry the previous session's
+/// Drop the latched title-atom resolution with the rest of the module state:
+/// the restart discipline above promises a deinit()+init() cycle starts
+/// empty, and the atom ids belong to that cycle as much as the titles do —
+/// a latch surviving a restart would carry the previous session's
 /// resolution into a fresh one.
 fn resetAtoms() void {
     atoms_resolved = false;
@@ -130,11 +118,10 @@ fn resetAtoms() void {
     utf8_string = null;
 }
 
-/// Test seam (P1-37): run the lazy atom resolution NOW and report what it
-/// latched. The production callers (`fireTitleCookies`/`pickTitle`) only
-/// reach `ensureAtoms` through a live connection, so the latch rule above
-/// (a null answer must NOT latch) is otherwise unobservable headless.
-/// `window_facts_test` drives this with `atoms.swapAtomCacheForTest`.
+/// Test seam: run the lazy atom resolution NOW and report what it latched.
+/// The production callers (`fireTitleCookies`/`pickTitle`) only reach
+/// `ensureAtoms` through a live connection, so the latch rule (a null answer
+/// must NOT latch) is otherwise unobservable headless.
 pub fn resolveTitleAtomsForTest() struct { resolved: bool, net_wm_name: ?u32, utf8_string: ?u32 } {
     ensureAtoms();
     return .{
@@ -236,12 +223,12 @@ fn takePropertyReply(
     const r = reply.*;
     if (r.format != 8 or r.value_len == 0 or r.type != atom_type) return null;
     const len: usize = @intCast(r.value_len);
-    // The fetch asks for `max_title_len` 32-bit units -- four bytes each --
-    // so a long title's reply can outrun this buffer. Truncate to the buffer
-    // instead of refusing the reply: the old `len > buf.len` guard dropped
-    // BOTH properties (the WM_NAME fallback went through the same check), so
-    // the longest titles -- exactly the ones the bar most needs to show --
-    // got a blank segment. `setTitle` owns the final bound and the
+    // The fetch asks for `max_title_len` 32-bit units — four bytes each — so
+    // a long title's reply can outrun this buffer. Truncate to the buffer
+    // instead of refusing the reply: a `len > buf.len` guard would drop BOTH
+    // properties (the WM_NAME fallback goes through the same check), so the
+    // longest titles — exactly the ones the bar most needs to show — get a
+    // blank segment. `setTitle` owns the final bound and the
     // character-boundary trim; this copy just feeds it the head of the value.
     const n = @min(len, buf.len);
     const value_ptr: [*]const u8 = @ptrCast(xcb.xcb_get_property_value(reply));
@@ -252,16 +239,16 @@ fn takePropertyReply(
 /// Caches `title` for `win` by copying it into the entry's inline buffer
 /// (POD storage, no heap, no free). Public because it is the cache's write
 /// side (the pipelined admission path reaches it through
-/// `collectTitleCookies`), which the headless `window_facts_test` exercises for
-/// the overwrite/cap lifecycle.
+/// `collectTitleCookies`), which `window_facts_test` exercises for the
+/// overwrite/cap lifecycle.
 ///
-/// THE AT-CAPACITY POLICY, in one place: a full store drops a NEW
-/// window's title rather than evicting an existing one — overwrites of
-/// already-cached windows hit `getPtr` first and are exempt from the
-/// ceiling. Caching is an optimization and every reader has a correct
-/// fall-through, so a dropped entry costs a slower path, never a wrong
-/// answer. A writer whose value MUST reach the server never goes through
-/// here at all: border-pixel/width dedup asks the sent ledger instead
+/// THE AT-CAPACITY POLICY, in one place: a full store drops a NEW window's
+/// title rather than evicting an existing one — overwrites of already-cached
+/// windows hit `getPtr` first and are exempt from the ceiling. Caching is an
+/// optimization and every reader has a correct fall-through, so a dropped
+/// entry costs a slower path, never a wrong answer. A writer whose value
+/// MUST reach the server never goes through here at all: border-pixel/width
+/// dedup asks the sent ledger instead
 /// (`ledger.markSentBorderPixelIfChanged` owns the "send anyway" rule).
 pub fn storeTitle(win: u32, title: []const u8) void {
     const wd = cache.getPtr(win) orelse blk: {
@@ -279,12 +266,12 @@ pub fn storeTitle(win: u32, title: []const u8) void {
 ///
 /// The cut can land inside a multi-byte UTF-8 sequence (the wire reply is
 /// first truncated to this buffer, and the reply may itself end mid-char).
-/// Pango rejects an invalid UTF-8 slice outright by painting nothing -- the
-/// blank title segment this guards against -- so back the cut up to the last
+/// Pango rejects an invalid UTF-8 slice outright by painting nothing — the
+/// blank title segment this guards against — so back the cut up to the last
 /// whole character: walk off any trailing continuation bytes to their lead,
 /// then drop that lead too when its sequence does not fit the kept bytes.
-/// A complete title is returned unchanged (the walk is a no-op on a whole
-/// trailing character); ASCII reaches at most one non-continuation test.
+/// A complete title is returned unchanged; ASCII reaches at most one
+/// non-continuation test.
 fn setTitle(wd: *WindowData, title: []const u8) void {
     // Completeness is judged against the CUT end, not the source tail: a
     // source longer than the buffer may well hold the continuation bytes we
@@ -311,17 +298,16 @@ fn setTitle(wd: *WindowData, title: []const u8) void {
 }
 
 /// The bar's read path: the cached title for `win`, or "" when absent.
-/// Pure cache hit -- never touches the wire.
+/// Pure cache hit — never touches the wire.
 ///
 /// ## BORROW CONTRACT
 ///
 /// The returned slice ALIASES the cache's own `title_buf` for `win`. It is
-/// valid until the next `storeTitle`/`setTitle` for that SAME window, and the
-/// call is not const-correct about it: nothing in the type says so, which is
-/// why the bar copies instead of retaining (see `focused_title_buf`). A caller
-/// that needs the title to survive a cache write must copy it -- there is no
-/// ownership transfer here and the "" for an unknown window is a static
-/// string, not a per-window one.
+/// valid until the next `storeTitle`/`setTitle` for that SAME window, and
+/// nothing in the type says so, which is why the bar copies instead of
+/// retaining (see `focused_title_buf`). A caller that needs the title to
+/// survive a cache write must copy it — there is no ownership transfer
+/// here and the "" for an unknown window is a static string.
 pub fn peekTitle(win: u32) []const u8 {
     const wd = cache.getPtr(win) orelse return "";
     return wd.title();

@@ -1,14 +1,13 @@
 //! The config document model: `Value`, `Section`, `Document`, and the
 //! duplicate-key policy shared by every parse path.
 //!
-//! Ownership model: every document produced by one load borrows from a single
-//! load-scoped arena (the caller's `allocator`). String values are slices into
-//! the source `content` where possible, and cross-document merging SHARES
-//! keys and values rather than deep-copying them, because all documents in a
-//! load share one allocator. This is only sound when every `parse`/`merge` in
-//! a load is called with the same arena-backed allocator; the arena reset at
-//! the end of the load reclaims everything, so Document/Section/Value own
-//! nothing and have no deinit.
+//! Ownership: every document produced by one load borrows from a single
+//! load-scoped arena. String values are slices into the source `content`
+//! where possible, and cross-document merging SHARES keys and values rather
+//! than deep-copying them (all documents in a load share one allocator).
+//! Sound only when every `parse`/`merge` in a load uses the same arena; the
+//! arena reset reclaims everything, so Document/Section/Value own nothing
+//! and have no deinit.
 
 const std = @import("std");
 const log = std.log.scoped(.document);
@@ -16,8 +15,7 @@ const types = @import("types");
 
 /// Error set shared by the dialect reader, the duplicate-key policy, and
 /// the cross-file merge. Error VALUES (`error.InvalidValue` etc.) are
-/// global in Zig and need no import at their use sites; only code that
-/// names the set as a type (the reader's fns) imports this module.
+/// global in Zig; only code that names the set as a type imports this module.
 pub const ParseError = error{
     InvalidSyntax,
     InvalidSection,
@@ -28,13 +26,12 @@ pub const ParseError = error{
 
 /// A parsed value.
 ///
-/// Deliberately carries NO source span: the section already records
-/// the source line of every key it inserted (`Entry.line`),
-/// and that is the line a user needs -- a knob error is reported against a KEY
-/// PATH inside a section, and every diagnostic in this file reaches the section
-/// that owns the key. Putting a line/column on each of the six union variants
-/// instead would mean 30 construction sites carrying it, plus every method that
-/// synthesizes or returns a `Value` (lastScalar/asScalar/accumulate), all to
+/// Deliberately carries NO source span: the section already records the
+/// source line of every key it inserted (`Entry.line`), and that is the line
+/// a user needs -- a knob error is reported against a KEY PATH inside a
+/// section, and every diagnostic reaches the section that owns the key.
+/// Putting a line/column on each of the six union variants would mean 30
+/// construction sites carrying it, plus every synthesizing method, all to
 /// report a number already available one level up.
 pub const Value = union(enum) {
     integer: i64,
@@ -44,11 +41,10 @@ pub const Value = union(enum) {
     // duplicate-key accumulation (`accumulate`): scalar reads then implement
     // "later declaration wins" (the latest value is the LAST element) while
     // array consumers see the full accumulation. A *literal* array (a `[...]`
-    // bracket list or a bare multi-token spelling, both created once at parse
-    // time) is `accumulated == false`: it is never a scalar -- `resolveColorExpr`
-    // owns it as a color-mix (bare lists mix equally) and array consumers read
-    // it as-is. Keeps "genuinely duplicated keys" distinct from "one author
-    // wrote a list".
+    // bracket list or a bare multi-token spelling) is `accumulated == false`:
+    // it is never a scalar -- `resolveColorExpr` owns it as a color-mix and
+    // array consumers read it as-is. Keeps "genuinely duplicated keys"
+    // distinct from "one author wrote a list".
     array: struct { list: std.ArrayList(Value), accumulated: bool = false },
     color: u32,
     scalable: types.ScalableValue,
@@ -56,8 +52,8 @@ pub const Value = union(enum) {
     // Scalar reads resolve through the last element ONLY for accumulated
     // duplicate arrays (later declaration wins). A literal array is not a
     // scalar, so it yields null here and callers fall back to their own
-    // array handling (resolveColorExpr for colors). Not `inline` because
-    // recursion into an accumulated duplicate array is rejected.
+    // array handling. Not `inline` because recursion into an accumulated
+    // duplicate array is rejected.
     fn lastScalar(self: Value) ?Value {
         return switch (self) {
             .array => |arr| if (arr.accumulated and arr.list.items.len > 0)
@@ -80,9 +76,9 @@ pub const Value = union(enum) {
                 .boolean => |b| b,
                 else => null,
             },
-            // A bare number in TOML arrives as `integer` (`dpi = 144`) or,
-            // when written with a fraction, as `scalable` (`dpi = 144.0`).
-            // Both mean the same knob, so both widen.
+            // A bare number arrives as `integer` (`dpi = 144`) or, with a
+            // fraction, as `scalable` (`dpi = 144.0`). Both mean the same
+            // knob, so both widen.
             f32 => switch (scalar) {
                 .integer => |i| @floatFromInt(i),
                 .scalable => |sc| sc.value,
@@ -116,22 +112,20 @@ pub const Section = struct {
     /// One entry per declared key, in document order. This array IS the
     /// section: one place per key, so there is no second copy to keep in
     /// step. A section holds tens of keys and is read only during a config
-    /// load, so the linear scan below costs a comparison or two, and
-    /// iteration is document order for free.
-    /// Nothing to allocate up front: the array grows as keys are inserted,
-    /// and a section is never read before parsing has finished.
+    /// load, so the linear scan costs a comparison or two, and iteration is
+    /// document order for free. Nothing to allocate up front: the array
+    /// grows as keys are inserted.
     entries: std.ArrayListUnmanaged(Entry) = .empty,
     // The section header this Section belongs to ("" for the root pairs that
-    // have no header). Filled by parse() when a section is created; merged
-    // sections carry their source name through the shared-value merge.
+    // have no header). Filled by parse(); merged sections carry their source
+    // name through the shared-value merge.
     name: []const u8 = "",
-    /// Duplicate-accumulate exemptions (D13): the (section, key) pairs where
+    /// Duplicate-accumulate exemptions: the (section, key) pairs where
     /// accumulating duplicate declarations is the point (bind tables, rule
     /// tables), so a scalar read of an array must not warn "later wins".
     /// The parser stays fragment-agnostic: the list is empty at parse time
     /// and installed on every section by `Document.installAccumulateExempt`
-    /// (config.zig passes the composed union of the present fragments'
-    /// exports) before the first `get`.
+    /// (config.zig passes the composed union) before the first `get`.
     accumulate_exempt: []const types.SectionKey = &.{},
 
     /// What the parser knows about one declared key.
@@ -146,13 +140,10 @@ pub const Section = struct {
         line: usize = 0,
         /// File the FIRST declaration came from; feeds the same diagnostics
         /// as `line`, so a key that an include/theme file contributed names
-        /// THAT file, not just a line number. Borrows like `key`/`value`:
-        /// parse labels it with the parser's source label ("<input>" for
-        /// pathless inputs) and the merge passes the origin entry's slice
-        /// through, both of which must outlive the document (source_path,
-        /// the load-arena'd include paths). "" only for entries built
-        /// without one; diagnostics then label it "<input>" like the parser
-        /// does.
+        /// THAT file. Borrows like `key`/`value`: parse labels it with the
+        /// parser's source label and the merge passes the origin slice
+        /// through, both outliving the document. "" only for entries built
+        /// without one; diagnostics then label it "<input>".
         file: []const u8 = "",
         /// Read by get()/getAs()/markConsumed, or visited by
         /// orderedIterator(). A key no reader examined is reported by
@@ -183,28 +174,26 @@ pub const Section = struct {
         return if (e.file.len == 0) "<input>" else e.file;
     }
 
-    // Iterates pairs in document (insertion) order; deterministic.
-    // Values are the live (possibly accumulated) values.
-    // Every key the walk visits is marked consumed, so a section read this way
-    // needs no separate markConsumed prologue: the walk itself is the read.
+    // Iterates pairs in document (insertion) order; deterministic. Values
+    // are the live (possibly accumulated) values. Every key the walk visits
+    // is marked consumed, so a section read this way needs no separate
+    // markConsumed prologue: the walk itself is the read.
     pub fn orderedIterator(self: *Section) OrderedIterator {
         return .{ .section = self, .idx = 0 };
     }
 
     // Records `key` as recognised so it won't be reported by warnUnconsumed.
-    // Called by `get()`/`getAs()` (typed readers) and by OrderedIterator.next()
-    // (the document-order readers); nothing else needs to call it.
+    // Called by get()/getAs() and OrderedIterator.next(); nothing else needs it.
     pub fn markConsumed(self: *Section, key: []const u8) void {
         const i = self.indexOf(key) orelse return;
         self.entries.items[i].consumed = true;
     }
 
-    // Warns about every key in the section that was never examined via
-    // get()/getAs()/markConsumed(); typically a typo in the key name, since
-    // the parser otherwise accepts it silently. Names the source file:line so
-    // a large config's typos are findable AND an include file's typos name
-    // that file. Iterates `entries`, which IS document order, so warnings are
-    // deterministic and O(n).
+    // Warns about every key never examined via get()/getAs()/markConsumed();
+    // typically a typo in the key name, since the parser accepts it silently.
+    // Names the source file:line so a large config's typos are findable AND an
+    // include file's typos name that file. Iterates `entries` (document
+    // order), so warnings are deterministic and O(n).
     pub fn warnUnconsumed(self: *const Section, section_name: []const u8) void {
         for (self.entries.items) |e| {
             if (e.consumed) continue;
@@ -222,12 +211,11 @@ pub const Section = struct {
         return self.entries.items[i].value;
     }
 
-    // A key that accumulated duplicate declarations reads as an array,
-    // but a scalar request resolves to the last declaration. Warn once (per
+    // A key that accumulated duplicate declarations reads as an array, but a
+    // scalar request resolves to the last declaration. Warn once (per
     // section+key) so silent last-wins isn't a surprise -- except in the
     // sections where accumulated arrays ARE the point: the fragment-declared
-    // exemption list (bind tables, rule tables; D13 single-sourcing) plus
-    // the root `include` key, which is parser vocabulary and stays here.
+    // exemption list (bind tables, rule tables) plus the root `include` key.
     /// Takes the entry's index rather than its key: the caller has just
     /// located it, and a second scan for the same key would be pure waste.
     fn warnScalarDuplicate(self: *Section, i: usize) void {
@@ -247,8 +235,7 @@ pub const Section = struct {
         }
         if (exempt) return;
         e.scalar_dup_warned = true;
-        // Root pairs (no section header) warn under a "[root]" label so one
-        // format serves both cases.
+        // Root pairs (no section header) warn under a "[root]" label.
         log.warn(
             "Duplicate key '{s}' in section [{s}] accumulates into an array ({d} declarations, first at {s}:{d}); scalar reads use the last value",
             .{ e.key, if (self.name.len == 0) "root" else self.name, e.value.array.list.items.len, fileLabel(e.*), e.line },
@@ -288,12 +275,12 @@ pub const Section = struct {
 
 /// What the reader was looking for when it gave up, in the reader's own terms.
 ///
-/// The error NAMES alone ("InvalidValue") tell a user which bucket to blame and
+/// Error NAMES alone ("InvalidValue") tell a user which bucket to blame and
 /// nothing about what to write instead, and this dialect is hand-written, so
-/// the accepted forms are a deliberate list (see the file header) that a user
-/// cannot infer from the error. Each variant states the form it was parsing.
-/// OutOfMemory is absent on purpose: it is not a syntax complaint, it is a
-/// retryable allocator failure, and no amount of "expected" text helps.
+/// the accepted forms are a deliberate list that a user cannot infer from the
+/// error. Each variant states the form it was parsing. OutOfMemory is absent
+/// on purpose: it is a retryable allocator failure, and no amount of
+/// "expected" text helps.
 pub fn expectedForm(err: ParseError) []const u8 {
     return switch (err) {
         error.InvalidSyntax => "a bare key (letters, digits, '_', '-', '+', '/'; no dots — dotted names belong in section headers), optionally quoted",
@@ -357,8 +344,7 @@ pub const Document = struct {
     /// Set when any line in this document was warn-and-skipped, or when a
     /// whole file it represents was skipped during the load's merge.
     /// config.zig turns a had_errors merged document into
-    /// error.ConfigParseFailed so a broken config can't silently partial-load
-    /// (the existing per-line/file warns surface anyway).
+    /// error.ConfigParseFailed so a broken config can't silently partial-load.
     had_errors: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Document {
@@ -375,10 +361,10 @@ pub const Document = struct {
         return self.sections.getPtr(name);
     }
 
-    /// Installs the fragment-declared duplicate-accumulate exemptions (D13,
-    /// see `Section.accumulate_exempt`) on the root and every section.
-    /// Called once on the finished (merged) document, before the first
-    /// `get`: all sections exist by then, and none is created afterwards.
+    /// Installs the fragment-declared duplicate-accumulate exemptions (see
+    /// `Section.accumulate_exempt`) on the root and every section. Called
+    /// once on the finished (merged) document, before the first `get`: all
+    /// sections exist by then, and none is created afterwards.
     pub fn installAccumulateExempt(self: *Document, exempt: []const types.SectionKey) void {
         self.root.accumulate_exempt = exempt;
         var it = self.sections.valueIterator();
@@ -387,11 +373,10 @@ pub const Document = struct {
 };
 
 /// The named color-palette slots a theme declares once and any color-valued
-/// knob may reference by full name (`border_focused = primary_color`,
-/// `title = secondary_color`, ...). `primary_color` doubles as the bar's
-/// default accent knob; the other three are pure
-/// palette declarations currently consumed by the fallback chain and the
-/// theme's `[bar.properties]` entries. `pub` because the palette
+/// knob may reference by full name (`border_focused = primary_color`).
+/// `primary_color` doubles as the bar's default accent knob; the other three
+/// are pure palette declarations currently consumed by the fallback chain
+/// and the theme's `[bar.properties]` entries. `pub` because the palette
 /// collection lives in color.zig (the color sub-language's home).
 pub const palette_var_names = [_][]const u8{
     types.palette_primary_color,
@@ -423,12 +408,11 @@ pub fn ensureArray(allocator: std.mem.Allocator, old_val: *Value) !void {
 
 // Accumulates `incoming` into `old_val`. An array-valued `incoming` is
 // flattened. Values are SHARED, never copied: all documents in a load share
-// one arena, so pointers stay valid until the load's arena reset. Scalar
-// getters resolve to the LAST element (later files win); asArray sees the
-// full accumulation so keybindings, `include`, `layouts`, etc. chain. The result
-// is always an ACCUMULATED array (genuinely duplicated keys), marking it so
-// literal arrays (bracket lists / bare multi-token spellings) stay distinct:
-// scalar later-wins applies to accumulated arrays only.
+// one arena. Scalar getters resolve to the LAST element (later files win);
+// asArray sees the full accumulation so keybindings, `include`, `layouts`,
+// etc. chain. The result is always an ACCUMULATED array (genuinely
+// duplicated keys), keeping literal arrays (bracket lists) distinct: scalar
+// later-wins applies to accumulated arrays only.
 pub fn accumulate(
     allocator: std.mem.Allocator,
     old_val: *Value,
@@ -448,10 +432,9 @@ pub fn accumulate(
 // (mergeSectionsInto), so both paths apply the identical duplicate policy:
 // scalar reads later resolve to the LAST declaration (later file wins), array
 // reads see the full accumulation, and the key is recorded as duplicated for
-// the scalar-read warning. `line`/`file` are the source location involved when
-// the key is FIRST inserted; they only feed the best-effort diagnostics, and
-// duplicate declarations keep the original location (so a cross-file duplicate
-// reports the first file's line, not the later file's).
+// the scalar-read warning. `line`/`file` are the source location involved
+// when the key is FIRST inserted; duplicate declarations keep the original
+// location (a cross-file duplicate reports the first file's line).
 pub fn insertOrAccumulate(
     allocator: std.mem.Allocator,
     section: *Section,
@@ -461,9 +444,8 @@ pub fn insertOrAccumulate(
     file: []const u8,
 ) !void {
     if (section.indexOf(key)) |i| {
-        // The entry's value is where a duplicate accumulates, so the array a
-        // scalar read later resolves to is built in place -- there is no
-        // second map to update alongside it.
+        // A duplicate accumulates into the entry's value, so the array a
+        // scalar read later resolves to is built in place.
         const e = &section.entries.items[i];
         try accumulate(allocator, &e.value, value);
         e.duplicated = true;
@@ -479,9 +461,8 @@ pub fn insertOrAccumulate(
 
 // Merges `src`'s pairs into `dst`; duplicate keys accumulate into arrays,
 // exactly as within one file: a keybinding in two files runs both actions.
-// Scalar reads resolve to the last declaration (later file wins); array
-// reads see the full accumulation; `src` is unmodified. Keys and values are
-// shared (arena), so nothing is copied or freed.
+// `src` is unmodified. Keys and values are shared (arena), so nothing is
+// copied or freed.
 fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Section) !void {
     // Raw entry iteration on purpose, NOT orderedIterator(): walking with the
     // iterator marks keys consumed on `src`, and a section dst does not have
@@ -493,10 +474,9 @@ fn mergeSectionsInto(allocator: std.mem.Allocator, dst: *Section, src: *const Se
 }
 
 // Merges `src` into `dst`; duplicate keys accumulate into arrays rather than
-// overwriting, equivalent to writing all pairs in one file. Scalar reads
-// resolve to the last element (later files win); array reads see every
-// declaration. Parse-error state propagates so a merged document reports a
-// failure (error.ConfigParseFailed) when ANY contributing file had errors.
+// overwriting, equivalent to writing all pairs in one file. Parse-error state
+// propagates so a merged document reports a failure when ANY contributing
+// file had errors.
 pub fn mergeDocumentsInto(
     allocator: std.mem.Allocator,
     dst: *Document,
@@ -511,8 +491,8 @@ pub fn mergeDocumentsInto(
         if (dst.sections.getPtr(name)) |dst_sec| {
             try mergeSectionsInto(allocator, dst_sec, entry.value_ptr);
         } else {
-            // Share the section (and its name) as-is: both documents live in
-            // the same arena, and nothing is freed until the load's reset.
+            // Share the section as-is: both documents live in the same
+            // arena, and nothing is freed until the load's reset.
             try dst.sections.put(name, entry.value_ptr.*);
         }
     }

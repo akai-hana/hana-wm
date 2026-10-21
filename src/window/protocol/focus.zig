@@ -620,12 +620,18 @@ pub inline fn crossingShouldDrop(root_x: i16, root_y: i16) bool {
 /// Guards against workspace membership and hidden state before calling
 /// grabFocus(.mouse_enter). The .mouse_enter reason is the direct
 /// EnterNotify path: lightweight, no raise, no confirm.
+/// True when `win` can be the target of a focus attempt: on the current
+/// workspace (or all-view) and not hidden. The ONE spelling of the
+/// visibility rule — hover (`maybeFocusWindow`) and EWMH activation
+/// (`client_events`) both gate through here, so the two cannot drift.
+pub inline fn canFocusReach(win: u32) bool {
+    const m = pipeline.state();
+    if (!query.isOnCurrentWorkspace(win) and !m.all_view_active) return false;
+    return !registry.hide.callHookBool(.isWindowHidden, .{ m, win });
+}
+
 pub inline fn maybeFocusWindow(win: u32) void {
-    // In all-view mode every window is visible on the current workspace
-    // regardless of its tag mask, so hover must be able to focus it too; a
-    // bare membership check made all-view windows un-focusable by ENTER.
-    if (!query.isOnCurrentWorkspace(win) and !pipeline.state().all_view_active) return;
-    if (registry.hide.callHookBool(.isWindowHidden, .{ pipeline.state(), win })) return;
+    if (!canFocusReach(win)) return;
     grabFocus(win, .mouse_enter);
 }
 

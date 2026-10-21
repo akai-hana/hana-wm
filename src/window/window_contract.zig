@@ -1,21 +1,19 @@
 //! The window sub-system hook set (`WindowModule`): every module under
 //! `src/window/modules/` binds its `pub const module` value to this type,
 //! binding only the hooks it owns (everything else stays default). Engine-
-//! local — lives beside the window subsystem, not in core — because the
-//! window engine is never deleted by the modularity matrix and only the
-//! window owner consumes this contract. The shared dispatch primitives
-//! (`providerOf`, `callAll`) live in `contract_dispatch.zig`; the cross-engine
+//! local — beside the window subsystem, not in core — because only the
+//! window owner consumes this contract. Dispatch primitives
+//! (`providerOf`, `callAll`) live in `contract_dispatch.zig`; cross-engine
 //! tiling vocabulary lives in `tiling_contract.zig`. Pure vocabulary, no
 //! X11, no feature imports.
 //!
-//! The single-binder hooks are GROUPED into per-family structs (D12/P2-54):
-//! a community module binds one family at a time (`.{ .hide = .{ ... } }`),
-//! the window layer dispatches through the matching family namespace
+//! The single-binder hooks are GROUPED into per-family structs: a community
+//! module binds one family at a time (`.{ .hide = .{ ... } }`), the window
+//! layer dispatches through the matching family namespace
 //! (`registry.hide.callHook(.hideWindow, ...)`), and the flat
-//! `single_binder_hooks` list is DERIVED from the family structs' fields —
-//! there is no hand-maintained hook-name array left to drift. Lifecycle,
-//! persistence, and the protocol-side hooks stay flat and multi-binder at
-//! the top level, exactly as before.
+//! `single_binder_hooks` list is DERIVED from the families' fields — no
+//! hand-maintained hook-name array left to drift. Lifecycle, persistence
+//! and protocol-side hooks stay flat and multi-binder at the top level.
 
 const std = @import("std");
 const model = @import("model");
@@ -63,9 +61,8 @@ pub const HideHooks = struct {
 /// is bound — meaning "is this window covering" would answer FALSE in such
 /// a build while the model held the intent. `model.coveringWsOf` /
 /// `model.isCovering` / `model.isCoveringOn` cannot be unbound, and neither
-/// can the occupant questions: both rules live in `model.coveringOccupantOn`
-/// (P2-51 consolidated the old OR scan and this family's former
-/// `visibleCoveringOnWs` AND hook into it).
+/// can the occupant questions: both rules live in
+/// `model.coveringOccupantOn`.
 pub const CoveringHooks = struct {
     /// Toggle the covering (fullscreen) capture on/off for `win`.
     /// Returns true iff a state transition happened.
@@ -129,13 +126,12 @@ pub const DragHooks = struct {
 };
 
 /// User-facing commands. Each command's WHOLE transition — one model write
-/// plus the reconcile that follows it — lives in the module that owns the
-/// state it writes; these hooks are how the core/input and bar call sites
-/// reach them: the core never names an optional module directly, so a tree
-/// without the module simply has no binder and the command no-ops. Command
-/// hooks take no `*model.Model`: the command resolves the live model through
-/// the pipeline itself, which is what makes it a command rather than a model
-/// transition.
+/// plus the reconcile that follows — lives in the module that owns the state
+/// it writes; these hooks are how the core/input and bar call sites reach
+/// them: the core never names an optional module directly, so a tree without
+/// the module has no binder and the command no-ops. Command hooks take no
+/// `*model.Model`: the command resolves the live model through the pipeline
+/// itself, which is what makes it a command rather than a model transition.
 pub const CommandHooks = struct {
     /// Switch the viewed workspace to `ws` (the `switch_workspace` bind).
     switchWorkspace: ?*const fn (u8) void = null,
@@ -209,18 +205,14 @@ pub const WindowModule = struct {
     /// Required (non-empty, unique) for any module binding `serializeWindow`;
     /// the generated registry rejects the other case at compile time.
     ///
-    /// Why a name and not the ordinal it replaces: the ordinal is a position
-    /// in a build-generated list, so removing or reordering an unrelated module
-    /// renumbers every module after it and a saved session's fast path starts
-    /// pointing at a DIFFERENT module -- which then either declines (recovered
-    /// by the magic-byte scan, after a wasted call that may mis-adopt) or
-    /// claims a blob it does not own. A name cannot shift. The cost is that a
-    /// rename invalidates that one module's saved blobs, which degrade to the
-    /// same scan -- strictly less damage than a reordering.
-    ///
-    /// The magic-byte scan stays the fallback either way, because a name only
-    /// narrows WHICH module is asked first; it is the payload's own self-
-    /// identifying tag that decides.
+    /// A name, not the ordinal it replaces: the ordinal is a position in a
+    /// build-generated list, so removing or reordering an unrelated module
+    /// renumbers every module after it and a saved session's fast path points
+    /// at a DIFFERENT module. A name cannot shift. A rename invalidates that
+    /// one module's saved blobs, which degrade to the same scan — strictly
+    /// less damage than a reordering. The magic-byte scan stays the fallback
+    /// either way: a name only narrows WHICH module is asked first; the
+    /// payload's own self-identifying tag decides.
     name: []const u8 = "",
 
     // Lifecycle. Uniform `anyerror!void` so the dispatch loop can `try` each.
@@ -230,17 +222,14 @@ pub const WindowModule = struct {
     notifyConfigureIfPending: ?*const fn (u32, u16, u16) void = null,
     onWindowGone: ?*const fn (u32) void = null,
     // Session persistence hooks: modules marshal/unmarshal their per-window
-    // state as an opaque blob; handoff carries `[]u8` bytes and the
-    // wire layer dispatches. `serializeWindow` null => nothing persisted.
-    // The model is handed across the WRITE side as a read-only `*const
-    // model.Model` (serialization never mutates; the caller holds the const
-    // handle and does NOT @constCast), and each module decides from that
-    // state whether it owns the window's blob (at most one module returns
-    // bytes per window). `deserializeWindow` returns whether this module
-    // claimed the blob; handoff stamps the claiming module's name onto every
-    // blob, so adoption fast-paths on that name and falls back to the legacy
-    // registry ordinal -- then the hooks' self-identifying format tag (magic
-    // byte) -- when the name no longer resolves.
+    // state as an opaque blob. `serializeWindow` null => nothing persisted.
+    // The model crosses the WRITE side as a read-only `*const model.Model`
+    // (serialization never mutates; the caller does NOT @constCast), and each
+    // module decides from that state whether it owns the window's blob (at
+    // most one module returns bytes per window). `deserializeWindow` returns
+    // whether this module claimed the blob; handoff stamps the claiming
+    // module's name onto every blob, so adoption fast-paths on that name and
+    // falls back to the magic-byte tag when the name no longer resolves.
     serializeWindow: ?*const fn (*const model.Model, u32, std.mem.Allocator) ?[]const u8 = null,
     deserializeWindow: ?*const fn (u32, []const u8, *model.Model) bool = null,
     setEwmhFullscreenState: ?*const fn (u32, bool) void = null,
@@ -260,17 +249,13 @@ pub const WindowModule = struct {
     command: CommandHooks = .{},
     borders: BordersHooks = .{},
 
-    /// The hooks whose contract is "at most one module binds this": dispatch is
-    /// first-match (`providerOf`/`callHook`, invoked by the owner's family
-    /// or top-level wrapper), so a second binder would be silently ignored.
-    /// DERIVED from the family structs' fields (D12/P2-54) — adding a family
-    /// hook adds it here with no second edit. Every other top-level hook is
-    /// adopted by explicit registry loops (init/deinit,
-    /// notifyConfigureIfPending, onWindowGone, the serialize/deserialize
-    /// persistence hooks, setEwmhFullscreenState, armPendingBarHide/Show,
-    /// resolvePendingBarNow) and may have many binders. The build-generated
-    /// `window_modules` registry asserts at comptime (via `hookBinds`) that
-    /// each name below has <= 1 binder.
+    /// The hooks whose contract is "at most one module binds this": dispatch
+    /// is first-match (`providerOf`/`callHook`), so a second binder is
+    /// silently ignored. DERIVED from the family structs' fields — adding a
+    /// family hook adds it here with no second edit. Every other top-level
+    /// hook is adopted by explicit registry loops and may have many binders.
+    /// The generated `window_modules` registry asserts at comptime (via
+    /// `hookBinds`) that each name below has <= 1 binder.
     pub const single_binder_hooks = blk: {
         @setEvalBranchQuota(20_000);
         var out: []const []const u8 = &.{};
@@ -280,15 +265,13 @@ pub const WindowModule = struct {
         break :blk out;
     };
 
-    /// The complementary half of the classification: `WindowModule` hooks
-    /// whose dispatch is an explicit registry LOOP, so several modules may
-    /// bind them and every one is adopted. Together with the derived
-    /// `single_binder_hooks` (family fields + `name` in neither list) this
-    /// is a PARTITION of the contract's top-level fields, asserted below --
-    /// which is the point. The at-most-one check for a newly added first-
-    /// match hook only runs if the name is listed, so an unlisted new hook
-    /// escapes it; classifying both halves makes a new hook a compile error
-    /// instead.
+    /// The complementary half of the classification: hooks whose dispatch is
+    /// an explicit registry LOOP, so several modules may bind them and every
+    /// one is adopted. Together with `single_binder_hooks` (family fields;
+    /// `name` in neither list) this is a PARTITION of the top-level fields,
+    /// asserted below. The at-most-one check only runs for a listed name, so
+    /// classifying both halves makes a new unlisted hook a compile error
+    /// instead of an escape from enforcement.
     pub const multi_binder_hooks = [_][]const u8{
         "init",                     "deinit",
         "notifyConfigureIfPending", "onWindowGone",
@@ -297,22 +280,18 @@ pub const WindowModule = struct {
         "armPendingBarShow",        "resolvePendingBarNow",
     };
 
-    /// `WindowModule` top-level fields that are NOT directly-dispatched
-    /// hooks: the `name` data field plus the seven family containers (each
-    /// dispatches THROUGH its own namespace, so no top-level hook lists name
-    /// them). The partition invariant below has to account for them: the
-    /// honest form is "every top-level field is classified, as multi-
-    /// dispatch, or as data/family" -- and a field still has to be classified
-    /// to get here, so adding one without a decision is still a compile error.
+    /// The top-level fields that are NOT hooks: the `name` data field plus
+    /// the seven family containers (each dispatches THROUGH its own
+    /// namespace). Held to the inverse assert below, so adding a field
+    /// without a decision is still a compile error.
     pub const non_hook_fields = [_][]const u8{
         "name",     "hide", "covering", "workspaces",
         "floating", "drag", "command",  "borders",
     };
 
     /// The family (by `families` index) that owns the flat hook `hook`,
-    /// resolved at comptime. Null when no family declares it — which for a
-    /// name in `single_binder_hooks` is a contract bug, caught by the
-    /// comptime assert below.
+    /// resolved at comptime. Null when no family declares it — a contract
+    /// bug for a name in `single_binder_hooks`, caught by the assert below.
     pub fn hookFamily(comptime hook: []const u8) ?usize {
         @setEvalBranchQuota(20_000);
         for (families, 0..) |fam, i| {
@@ -323,13 +302,10 @@ pub const WindowModule = struct {
         return null;
     }
 
-    /// Binder probe for the generated registry's at-most-one check: does
-    /// this module bind the flat hook `hook` (resolved through its family)?
-    /// An unknown name is a compile error, not a silent false — a renamed
-    /// hook left in a list would otherwise turn the whole claim into a
-    /// no-op. Top-level contracts without families (Segment) provide their
-    /// own flat probe under the same name, so the generated check is
-    /// uniform.
+    /// Binder probe for the registry's at-most-one check: does this module
+    /// bind the flat hook `hook` (resolved through its family)? An unknown
+    /// name is a compile error, not a silent false — a renamed hook left in
+    /// a list would otherwise turn the whole claim into a no-op.
     pub fn hookBinds(m: WindowModule, comptime hook: []const u8) bool {
         const fi = hookFamily(hook) orelse @compileError(
             "WindowModule has no hook '" ++ hook ++ "' in any family; " ++
@@ -347,28 +323,19 @@ comptime {
     @setEvalBranchQuota(20_000);
     // 18 top-level fields: 1 data + 10 multi + 7 family containers; the 40
     // single-binder hooks live INSIDE the families. The lists are not
-    // documentation dressed as code -- build.zig's generated registry
-    // consumes `single_binder_hooks` (via `hookBinds`) to reject a second
-    // binder at comptime, and that check only runs for names the list
-    // contains. The partition below is what makes "added a hook, forgot to
-    // classify it" a compile error instead of an escape from the at-most-one
-    // enforcement.
+    // documentation dressed as code — build.zig's generated registry consumes
+    // `single_binder_hooks` (via `hookBinds`) to reject a second binder at
+    // comptime, and that check only runs for names the list contains. The
+    // partition below is what makes "added a hook, forgot to classify it" a
+    // compile error instead of an escape from the at-most-one enforcement.
     //
     // Every `WindowModule` TOP-LEVEL field is classified exactly once: either
-    // listed in `multi_binder_hooks`, or in `non_hook_fields` (data or a
-    // family container). A family FIELD lives inside its family struct, where
-    // every field is a single-binder hook by construction. `s == m` fails for
-    // both "added a hook, forgot to classify it" and "classified it as both";
-    // a field in `non_hook_fields` skips the check and is instead held to the
-    // inverse assert below (a data/family list naming a removed field is also
-    // an error).
-    //
-    // This is a `WindowModule`-only property, unlike the at-most-one binder
-    // count: it holds because every `WindowModule` top-level field is either
-    // a multi-dispatch hook or one of the named data/family fields. `Segment`
-    // carries data fields too (name, props, dirty_sources, clickable) and is
-    // not partitioned at all -- it declares only the at-most-one hooks and the
-    // generated registry enforces the count.
+    // in `multi_binder_hooks`, or in `non_hook_fields` (data or a family
+    // container). A family FIELD lives inside its family struct, where every
+    // field is a single-binder hook by construction. `s == m` fails for both
+    // "added a hook, forgot to classify it" and "classified it as both"; a
+    // field in `non_hook_fields` skips the check and is held to the inverse
+    // assert below.
     for (std.meta.fields(WindowModule)) |f| {
         if (dispatch.isListed(&WindowModule.non_hook_fields, f.name)) continue;
         const s = dispatch.isListed(WindowModule.single_binder_hooks, f.name);
@@ -384,8 +351,7 @@ comptime {
     dispatch.assertListedFields(WindowModule, "non_hook_fields", &WindowModule.non_hook_fields);
     // Every derived single-binder name resolves to a family (hookFamily)
     // and appears once: two families claiming one hook name would make the
-    // derived list contain it twice, and the registry's binder count would
-    // then double-count nothing while the at-most-one claim became ambiguous.
+    // derived list contain it twice and the at-most-one claim ambiguous.
     for (WindowModule.single_binder_hooks, 0..) |hook, i| {
         if (WindowModule.hookFamily(hook) == null) @compileError(
             "single_binder_hooks contains '" ++ hook ++ "', which no family struct declares",

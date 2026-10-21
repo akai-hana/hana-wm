@@ -3,14 +3,14 @@
 //!
 //! The document model (`Value`, `Section`, `Document`, the duplicate-key
 //! policy, `ParseError`) and the cross-file merge live beside this file in
-//! `document.zig`; both re-export their names through this
-//! file so existing `parser.*` call sites keep one import. What the model
-//! owns (nothing -- one arena per load) is documented in `document.zig`.
+//! `document.zig`; both re-export their names through this file so existing
+//! `parser.*` call sites keep one import. What the model owns (nothing --
+//! one arena per load) is documented in `document.zig`.
 //!
-//! ACCEPTED SUBSET (everything outside this list is a parse error, by design --
-//! this is a hand-written reader for one config dialect, not a TOML
-//! implementation, and silently accepting a construct whose semantics we would
-//! then have to approximate is worse than rejecting it):
+//! ACCEPTED SUBSET (everything outside this list is a parse error, by design:
+//! a hand-written reader for one config dialect, not a TOML implementation --
+//! silently accepting a construct whose semantics we would then approximate
+//! is worse than rejecting it):
 //!
 //!   `[table]` headers, one level, flat keys only;
 //!   `key = value` pairs, plus the bare-key shorthand (`key` == `key = true`,
@@ -22,9 +22,8 @@
 //!
 //! REJECTED, with the error each produces:
 //!
-//!   inline tables (`{ a = 1 }`), dotted keys (`a.b = 1`), array-of-tables
-//!   (`[[x]]`), date/time literals, multi-line/basic strings, escapes beyond
-//!   the supported set -> InvalidValue
+//!   inline tables, dotted keys, array-of-tables, date/time literals,
+//!   multi-line/basic strings, escapes beyond the supported set -> InvalidValue
 //!   a bare decimal where an integer is expected (e.g. `tag_count = 2.5`)
 //!   -> InvalidValue at the consuming knob, not the parser (bare decimals
 //!   tokenize as a scalable absolute; the whole-number case stays an int)
@@ -32,8 +31,6 @@
 //!   a `[header]` that does not open a section the reader accepts -> InvalidSection
 //!   a color token that is not a valid 24-bit hex              -> InvalidColor
 //!   allocator exhaustion (distinct so callers can retry)     -> OutOfMemory
-//!
-//! The error set is `ParseError`, declared in `document.zig`.
 const std = @import("std");
 const log = std.log.scoped(.parser);
 const types = @import("types");
@@ -42,8 +39,8 @@ const document = @import("document");
 
 // Re-exports: the model and the cross-file merge both live beside this file
 // (document.zig); `parser.*` keeps naming them so callers (schema, sections,
-// discover, tests) hold one import. The dialect itself
-// tokenizer, weight/color token spellings, `parse` stays here.
+// discover, tests) hold one import. The dialect tokenizer, weight/color token
+// spellings, and `parse` stay here.
 pub const Value = document.Value;
 pub const Section = document.Section;
 pub const Document = document.Document;
@@ -54,9 +51,8 @@ const ParseError = document.ParseError;
 /// Core parser for a `(weight:DIGITS[%])` prefix at the head of `s`, where `s`
 /// is the token with any leading `+` already stripped. Returns the weight and
 /// the index just past the closing `)`; null when `s` does not open with a
-/// well-formed weight marker. All three weight helpers (`isWeightToken`,
-/// `weightFromToken`, `splitWeightPrefix`) are expressed on top of this so the
-/// marker grammar is spelled exactly once.
+/// well-formed weight marker. All three weight helpers are expressed on top of
+/// this so the marker grammar is spelled exactly once.
 fn parseWeightPrefix(s: []const u8) ?struct { weight: u32, end: usize } {
     const prefix = "(weight:";
     if (!std.mem.startsWith(u8, s, prefix)) return null;
@@ -82,8 +78,8 @@ pub fn isWeightToken(raw: []const u8) bool {
 
 /// The weight (0-100) carried by a whole weight-marker token; null when `raw`
 /// is not one. `+(weight:N%)` annotates the operand RIGHT after the `+`; the
-/// operand at the head of the chain absorbs the remaining weight.
-/// Test seam: pure parse core pinned by parser_test.
+/// operand at the head of the chain absorbs the remaining weight. Test seam:
+/// pure parse core pinned by parser_test.
 pub fn weightFromToken(raw: []const u8) ?u32 {
     const s = if (raw.len > 0 and raw[0] == '+') raw[1..] else raw;
     const p = parseWeightPrefix(s) orelse return null;
@@ -127,8 +123,8 @@ const Parser = struct {
     pos: usize,
     line: usize,
     /// Position of the first byte of the current line, so diagnostics can
-    // report a column (`pos - line_start`). Reset whenever a newline is
-    // consumed by any scanner.
+    /// report a column (`pos - line_start`). Reset whenever a newline is
+    /// consumed by any scanner.
     line_start: usize = 0,
     /// Owning Document's had_errors flag; set whenever a line is warn-and-
     // skipped so the load can fail on broken configs.
@@ -136,9 +132,8 @@ const Parser = struct {
     /// File path named in every per-line diagnostic; "" = in-memory input.
     source_path: []const u8 = "",
     // Current nested-array depth, checked against max_array_depth so a
-    // pathologically deep literal (`[[[[[...]]]]]`) can't exhaust the stack.
-    // Config is locally authored and trusted, so this is a defensive
-    // backstop, not a response to observed input.
+    // pathologically deep literal can't exhaust the stack. Config is locally
+    // authored and trusted, so this is a defensive backstop.
     array_depth: usize = 0,
 
     fn init(allocator: std.mem.Allocator, content: []const u8, had_errors: *bool) Parser {
@@ -254,10 +249,9 @@ const Parser = struct {
         // parsed string: nothing is duped or freed.
         const key = self.content[start..self.pos];
         if (key.len == 0) return ParseError.InvalidSyntax;
-        // Dotted key (`a.b = 1`): rejected per the header contract (D9). The
-        // reader has no dotted-key namespace — dotted NAMES only exist as
-        // section headers ([a.b], parseSection) — so a dot here is always a
-        // typo'd path, not a loadable key.
+        // Dotted key (`a.b = 1`): rejected per the header contract. The reader
+        // has no dotted-key namespace -- dotted NAMES only exist as section
+        // headers ([a.b]) -- so a dot here is always a typo'd path.
         if (std.mem.indexOfScalar(u8, key, '.') != null) return ParseError.InvalidSyntax;
         return key;
     }
@@ -323,7 +317,7 @@ const Parser = struct {
 
     // True when `raw` has the exact `dddd-dd-dd` date shape (e.g.
     // "2024-01-01"): ten bytes, digits everywhere except '-' at index 4 and
-    // 7. Shape only — 2024-13-45 is rejected too (there is no date type to
+    // 7. Shape only -- 2024-13-45 is rejected too (there is no date type to
     // validate against, which is exactly why the shape is rejected at all).
     fn isDateShaped(raw: []const u8) bool {
         if (raw.len != 10) return false;
@@ -394,9 +388,8 @@ const Parser = struct {
         if (isWeightToken(raw)) return .{ .string = raw };
 
         // Date-shaped bare token (`d = 2024-01-01`): rejected per the header
-        // contract (D9). The reader has no date type; without this guard the
-        // string fallback would silently swallow a date (or a typo'd numeric
-        // value shaped like one) as a valid string.
+        // contract. The reader has no date type; without this guard the string
+        // fallback would silently swallow a date as a valid string.
         if (isDateShaped(raw)) return ParseError.InvalidValue;
 
         if (raw.len > 1 and raw[raw.len - 1] == '%') {
@@ -469,8 +462,8 @@ const Parser = struct {
         const c = self.peek() orelse return ParseError.InvalidValue;
 
         // Inline table at the value head (`x = { a = 1 }`): rejected per the
-        // header contract (D9). Without this arm the '{' would tokenize as a
-        // bare token and the whole line would silently become a string array.
+        // header contract. Without this arm the '{' would tokenize as a bare
+        // token and the whole line would silently become a string array.
         if (c == '{') return ParseError.InvalidValue;
 
         if (c == '[') return .{ .array = .{ .list = try self.parseArray() } };
@@ -528,7 +521,6 @@ const Parser = struct {
         // parseKeybindings treats array values as sequences; scalar
         // reads of a repeated key resolve to the last declaration.
         try document.insertOrAccumulate(self.allocator, section, key, value, self.line, self.sourceLabel());
-
         self.skipWhitespace();
         self.advanceAfterPair(key);
     }

@@ -36,17 +36,16 @@ const max_section_name_bytes = 64;
 /// Loads `<dir_path>/config.toml` plus that file's `include`s -- and nothing
 /// else. Every other top-level `*.toml` in the directory is inert (reported by
 /// discover.warnInertSiblings, never merged), so a file dropped into the
-/// directory cannot change the config behind the user's back: a config dir
-/// contributes exactly what its entry file names.
+/// directory cannot change the config behind the user's back.
 fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !composed.Config {
     const entry_path = try std.fs.path.join(allocator, &.{ dir_path, discover.entry_file });
     defer allocator.free(entry_path);
     const cfg = parseAndBuild(allocator, parseDirEntryDoc, FileInput{ .path = entry_path, .base_dir = dir_path }) catch |err| switch (err) {
         // Only the entry file itself can surface FileNotFound here (a MISSING
         // include fails as a had_errors parse instead, which is fatal), so
-        // this is "the directory is not a config source" and the search moves
-        // on -- after reporting what it held, so a tree the user meant to be
-        // live cannot vanish without a word on stderr.
+        // this is "the directory is not a config source" -- after reporting
+        // what it held, so a tree the user meant to be live cannot vanish
+        // without a word on stderr.
         error.FileNotFound => {
             discover.warnEntrylessDir(allocator, dir_path);
             return err;
@@ -63,23 +62,22 @@ fn loadConfigFromDir(allocator: std.mem.Allocator, dir_path: []const u8) !compos
 /// `include`s (see loadConfigFromDir); a file location is that file plus its
 /// `include`s.
 /// `source` receives where the config actually came from (user vs fallback),
-/// so callers with different boot/reload semantics (see reload.handleConfigReload)
-/// need no separate existence probe. `allow_pinned_snapshot` admits the one
-/// boot-only win over that order: a re-exec successor (reload_hana,
-/// restart.execNext) pinning HANA_CONFIG_DIR to the frozen last-good snapshot.
-/// The in-place reload path MUST pass false -- HANA_CONFIG_DIR stays set for
-/// the process lifetime after the first re-exec, so honoring it there would
-/// re-read the frozen snapshot instead of the user's live config files, and
+/// so callers with different boot/reload semantics need no separate existence
+/// probe. `allow_pinned_snapshot` admits the one boot-only win over that
+/// order: a re-exec successor pinning HANA_CONFIG_DIR to the frozen last-good
+/// snapshot. The in-place reload path MUST pass false -- HANA_CONFIG_DIR stays
+/// set for the process lifetime after the first re-exec, so honoring it there
+/// would re-read the frozen snapshot instead of the live config, and
 /// bind/theme edits would never hot-reload.
 pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, allow_pinned_snapshot: bool) !composed.Config {
     const paths = try discover.searchPaths(allocator);
     defer paths.deinit(allocator);
 
-    // A re-exec hand-off (reload_hana, restart.execNext) pins HANA_CONFIG_DIR
-    // to the frozen last-good snapshot, so the successor boots an identical
-    // config WITHOUT re-reading the live config tree. Any failure falls
-    // through to the normal search (a broken snapshot must not silently swap
-    // in the embedded fallback over an otherwise-fine user config).
+    // A re-exec hand-off pins HANA_CONFIG_DIR to the frozen last-good
+    // snapshot, so the successor boots an identical config WITHOUT re-reading
+    // the live config tree. Any failure falls through to the normal search (a
+    // broken snapshot must not silently swap in the embedded fallback over an
+    // otherwise-fine user config).
     if (allow_pinned_snapshot) {
         if (std.c.getenv("HANA_CONFIG_DIR")) |env_z| {
             const env = std.mem.span(env_z);
@@ -97,9 +95,9 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
     }
 
     // Try directories first (each holds one entry file plus its includes),
-    // then single files. The order comes from `discover.search_order`; each
-    // tag resolves its path, loader, provenance and wording in one switch, so
-    // a new location cannot be added with a missing or mismatched field.
+    // then single files. Each tag resolves its path, loader, provenance and
+    // wording in one switch, so a new location cannot be added with a missing
+    // or mismatched field.
     inline for (discover.search_order) |loc| {
         const at: discover.SearchAttempt = switch (loc) {
             .xdg_dir => .{ .path = paths.xdg_dir, .load = loadConfigFromDir, .is_dir = true },
@@ -107,16 +105,14 @@ pub fn loadConfigDefault(allocator: std.mem.Allocator, source: *DefaultSource, a
             .xdg_file => .{ .path = paths.xdg_file, .load = loadConfig, .is_dir = false },
             .local_file => .{ .path = paths.local_file, .load = loadConfig, .is_dir = false },
         };
-        // `loc` is comptime (inline for), so the log format stays comptime-known
-        // -- which is why it is chosen from the tag rather than carried in
-        // `at`, where the runtime path would make the whole struct runtime.
+        // `loc` is comptime (inline for), so the log format stays
+        // comptime-known -- chosen from the tag rather than carried in `at`.
         const err_msg = switch (loc) {
             .xdg_dir, .local_dir => "Config load error from {s}: {}",
             .xdg_file, .local_file => "hana: config file '{s}' found but failed to load: {}; falling back",
         };
-        // `orelse continue` would read better, but a labeled-`inline for` body
-        // rejects it (comptime control flow in a runtime block); the explicit
-        // `if` is the same thing and costs one line.
+        // `orelse continue` would read better, but a labeled-`inline for`
+        // body rejects it (comptime control flow in a runtime block).
         if (try discover.tryLoadOrWarn(at.load, allocator, at.path, err_msg)) |cfg| {
             snapshot_mod.rememberGoodSource(allocator, at.path, at.is_dir);
             source.* = .user;

@@ -1,6 +1,5 @@
-//! Systatus memory readout.
-//! Computes used memory % from MemTotal vs MemAvailable in /proc/meminfo.
-//! Null when meminfo is unreadable; the segment then simply skips this item.
+//! Systatus memory readout: used % from MemTotal vs MemAvailable in
+//! /proc/meminfo. Null when meminfo is unreadable; the segment skips it.
 
 const std = @import("std");
 const systatus = @import("systatus");
@@ -25,16 +24,16 @@ pub fn usedPct(total: u64, avail: u64) ?u8 {
     return @intCast(@min((used * 100) / total, 100));
 }
 
-/// Owner state (P2-58): the format scratch buffer `percentSample` writes
-/// into. Single main-thread instance; no loose module-level scalars.
+/// Owner state: the format scratch buffer `percentSample` writes into. No
+/// loose module-level scalars.
 const RamState = struct {
     num: [16]u8 = undefined,
 };
 var g: RamState = .{};
 
-/// Used memory %, or null when meminfo is unreadable or -- because the read is
-/// truncation-aware -- too large to trust whole: a meminfo past the buffer is
-/// an I/O problem, not "no RAM".
+/// Used memory %, or null when meminfo is unreadable or -- because the read
+/// is truncation-aware -- too large to trust whole: a meminfo past the
+/// buffer is an I/O problem, not "no RAM".
 fn read() ?systatus.Sample {
     var buf: [4096]u8 = undefined;
     const r = systatus.readFileChecked("/proc/meminfo", &buf) orelse return null;
@@ -45,7 +44,6 @@ fn read() ?systatus.Sample {
     return systatus.percentSample(&g.num, pct);
 }
 
-/// This readout's binding to the systatus surface (`systatus.Sub`).
 pub const sub: systatus.Sub = .{
     .name = "ram",
     .label = "RAM",

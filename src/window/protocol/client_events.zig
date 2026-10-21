@@ -323,16 +323,13 @@ pub fn handleClientMessage(event: *const xcb.xcb_client_message_event_t) void {
             );
             return;
         }
-        // Reachability bound, mirroring hover's guards (focus.maybeFocusWindow):
-        // model focus must never land on a window the user cannot see. A
-        // window on another workspace (or hidden/minimized) is dropped, not
+        // Reachability bound, shared with hover (focus.canFocusReach): model
+        // focus must never land on a window the user cannot see. A window on
+        // another workspace (or hidden/minimized) is dropped, not
         // switched-to -- a spoofable message must not yank the user's
         // workspace view, and focusing a parked window would strand focus
         // off-screen where neither borders nor the bar can reach it.
-        const m = pipeline.state();
-        if ((!query.isOnCurrentWorkspace(win) and !m.all_view_active) or
-            registry.hide.callHookBool(.isWindowHidden, .{ m, win }))
-        {
+        if (!focus.canFocusReach(win)) {
             warnOnce(
                 &state.warned_active_unreachable,
                 "Ignoring _NET_ACTIVE_WINDOW for unreachable window 0x{x} (other workspace or hidden)",

@@ -1,8 +1,8 @@
-//! DPI detection and scaling utilities.
-//! Detects display DPI and scales bar dimensions for consistent appearance across resolutions.
-//! The display-free half (RESOURCE_MANAGER parsing, geometry→DPI formula,
-//! sanity band) lives here too -- it exists only to serve the detection path
-//! below; `dpi_test.zig` exercises it without an X server.
+//! DPI detection and scaling utilities: detects display DPI and scales bar
+//! dimensions for consistent appearance across resolutions. The display-free
+//! half (RESOURCE_MANAGER parsing, geometry→DPI formula, sanity band) lives
+//! here too, to serve the detection path; `dpi_test.zig` exercises it without
+//! an X server.
 
 const std = @import("std");
 
@@ -19,8 +19,8 @@ const baseline_dpi = core.baseline_dpi;
 
 /// Reasonable-DPI band applied to both the geometry-derived and Xft.dpi paths.
 /// Values outside this range (or non-finite) are rejected as misconfiguration
-/// rather than being fed straight into Pango, where 0/negative/NaN DPI would
-/// produce divide-by-zero or garbage font metrics.
+/// rather than fed straight into Pango, where 0/negative/NaN DPI would produce
+/// divide-by-zero or garbage font metrics.
 const min_reasonable_dpi: f32 = 50.0;
 const max_reasonable_dpi: f32 = 300.0;
 
@@ -36,14 +36,14 @@ pub const Geometry = struct {
     height_mm: u32,
 };
 
-/// Index of the first occurrence of `key` that sits at a LINE BOUNDARY (the
-/// string head, or the byte after a newline), or null when there is none.
+/// Index of the first occurrence of `key` at a LINE BOUNDARY (string head, or
+/// the byte after a newline), or null when there is none.
 fn lineStartOf(haystack: []const u8, key: []const u8) ?usize {
     var from: usize = 0;
     while (from + key.len <= haystack.len) {
         const at = std.mem.indexOfPos(u8, haystack, from, key) orelse return null;
         if (at == 0 or haystack[at - 1] == '\n') return at;
-        // Not at a line start: keep looking from just past this occurrence.
+        // Not at a line start: keep looking past this occurrence.
         from = at + 1;
     }
     return null;
@@ -52,11 +52,9 @@ fn lineStartOf(haystack: []const u8, key: []const u8) ?usize {
 /// Finds and parses the Xft.dpi value within a raw RESOURCE_MANAGER string.
 ///
 /// The key is matched at a LINE BOUNDARY, not as a bare substring. A plain
-/// `indexOf` would let any key whose name ends in "Xft.dpi:" match -- e.g. a
-/// client's "NotXft.dpi: 96" or "MyXft.dpi: 144" would be read as hana's own
-/// setting, silently overriding the real resolution. The X resource format
-/// is one name/value binding per line, so a binding starts at the string
-/// head or right after a newline; that is the only place a match is valid.
+/// `indexOf` would let any key ending in "Xft.dpi:" match -- e.g. a client's
+/// "NotXft.dpi: 96" read as hana's own setting. X resources are one binding
+/// per line.
 pub fn parseXftDpi(resource_str: []const u8) ?f32 {
     const prefix = "Xft.dpi:";
     const start = lineStartOf(resource_str, prefix) orelse return null;
@@ -69,8 +67,8 @@ pub fn parseXftDpi(resource_str: []const u8) ?f32 {
 }
 
 /// Computes DPI from physical screen dimensions, or null when the screen
-/// reports 0mm (virtual displays and headless X report this). Null rather
-/// than a silent baseline: the caller owns the decision and the log message.
+/// reports 0mm (virtual displays and headless X). Null rather than a silent
+/// baseline: the caller owns the decision and the log message.
 pub fn calcDpiFromGeometry(g: Geometry) ?f32 {
     if (g.width_mm == 0 or g.height_mm == 0) return null;
     const width_px: f32 = @floatFromInt(g.width_px);
@@ -93,15 +91,14 @@ const font_baseline_height: f32 = 1080.0;
 
 /// The bar-height policy as ONE value. Three loose pub consts would leave a
 /// caller to apply them together, and nothing would stop someone clamping
-/// against the min and forgetting the cap. Grouping them makes "the policy"
-/// a thing you can pass, not a convention you have to remember.
+/// against the min and forgetting the cap.
 const BarHeightPolicy = struct {
-    /// Minimum bar height in pixels. `scaleBarHeight` clamps an explicit
+    /// Minimum bar height in pixels; `scaleBarHeight` clamps an explicit
     /// `height` up to this floor.
     min_px: u16 = 20,
     /// Pixel cap on an auto-sized bar (no explicit `height`): an unconfigured
-    /// bar derives its height from font metrics, and this bounds that
-    /// derivation so a huge fallback font can't take over the whole screen.
+    /// bar derives its height from font metrics, and this bounds that so a huge
+    /// fallback font can't take over the whole screen.
     max_px: u16 = 200,
     /// Fallback bar height when even font metrics are unavailable: a small
     /// strip-sized default that stays in proportion on any screen.
@@ -120,28 +117,26 @@ pub fn clampBarHeight(px: i32) u16 {
     ));
 }
 
-/// Maximum number of u32 words to request for the RESOURCE_MANAGER property (4 KB).
-/// Xft.dpi is almost always near the start; a smaller fetch is faster and
-/// sufficient for the common case.
+/// Maximum u32 words to request for RESOURCE_MANAGER (4 KB). Xft.dpi is almost
+/// always near the start; a smaller fetch is faster and sufficient.
 const resource_manager_max_len: u32 = 1024;
 
 /// Larger retry fetch (16 KB) used when Xft.dpi is not in the first probe.
 const resource_manager_retry_len: u32 = 4096;
 
 /// Result of probing RESOURCE_MANAGER. `.got_string` is true when a
-/// structurally valid string came back (regardless of whether it held an
-/// entry), so callers can tell "entry not in this window" from "unreadable".
+/// structurally valid string came back, so callers can tell "entry not in this
+/// window" from "unreadable".
 const XftProbe = struct {
     got_string: bool = false,
     dpi: ?f32 = null,
-    /// True when the fetch was cut short (reply.bytes_after > 0). Lets the
-    /// caller distinguish "Xft.dpi genuinely absent from this window of the
-    /// resource string" from "the probe window was too small to see it".
+    /// True when the fetch was cut short (reply.bytes_after > 0). Distinguishes
+    /// "Xft.dpi genuinely absent from this window" from "the probe was too
+    /// small to see it".
     possibly_truncated: bool = false,
 };
 
-/// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi
-/// from it.
+/// Fetches RESOURCE_MANAGER (up to `max_len` u32 words) and parses Xft.dpi.
 fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len: u32) XftProbe {
     const prop_cookie = xcb.xcb_get_property(conn, 0, root, atom, xcb.XCB_ATOM_STRING, 0, max_len);
     const prop_reply = xcb.xcb_get_property_reply(conn, prop_cookie, null) orelse return .{};
@@ -157,36 +152,35 @@ fn probeXftDpi(conn: core.Connection, root: xcb.xcb_window_t, atom: u32, max_len
     return .{
         .got_string = true,
         .dpi = parseXftDpi(resource_str),
-        // Truncation is `bytes_after > 0`, not the value_len hitting the
-        // requested cap (a string of exactly cap length is complete).
+        // Truncation is `bytes_after > 0`, not value_len hitting the requested
+        // cap (a string of exactly cap length is complete).
         .possibly_truncated = prop_reply.*.bytes_after > 0,
     };
 }
 
 /// Reads the Xft.dpi value from the X RESOURCE_MANAGER property, if present.
-/// Returns null when the property is absent, empty, or does not contain an Xft.dpi entry.
+/// Null when the property is absent, empty, or holds no Xft.dpi entry.
 fn readXftDpi(conn: core.Connection, screen: core.Screen) ?f32 {
-    // Resolve the atom from the shared cache; a property request with atom 0
-    // just comes back empty, so a cache miss reads as "no Xft.dpi".
+    // Resolve the atom from the shared cache; a request with atom 0 comes
+    // back empty, so a cache miss reads as "no Xft.dpi".
     const atom = atoms.getAtomOrZero("RESOURCE_MANAGER");
     const root = screen.root;
 
     // Xft.dpi is almost always near the start; a smaller first fetch is
-    // faster and sufficient for the common case.
+    // faster and sufficient.
     const first = probeXftDpi(conn, root, atom, resource_manager_max_len);
     if (first.dpi) |dpi| return dpi;
 
-    // Xft.dpi was not in the first resource_manager_max_len bytes; retry with a
-    // larger fetch ONLY when the reply was a string AND was cut short
-    // (bytes_after > 0). An untruncated fetch that lacks Xft.dpi genuinely
-    // lacks it; a bigger fetch would return the same bytes.
+    // Xft.dpi was not in the first resource_manager_max_len bytes; retry with
+    // a larger fetch ONLY when the reply was a string AND was cut short. An
+    // untruncated fetch that lacks Xft.dpi genuinely lacks it.
     if (!first.got_string or !first.possibly_truncated) return null;
     return probeXftDpi(conn, root, atom, resource_manager_retry_len).dpi;
 }
 
-/// Detect DPI: Xft.dpi from X resources -> geometry calculation -> baseline_dpi (96).
-/// Called once at startup; `core.setDpi` records the result for the process
-/// lifetime (and on a RandR size change, which can move it).
+/// Detect DPI: Xft.dpi from X resources -> geometry calculation -> baseline_dpi
+/// (96). Called once at startup; `core.setDpi` records the result for the
+/// process lifetime (and on a RandR size change, which can move it).
 pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     if (readXftDpi(conn, screen)) |xft_dpi| {
         if (isReasonableDpi(xft_dpi)) {
@@ -196,8 +190,8 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
         log.warn("Ignoring unreasonable Xft.dpi value {d:.1}", .{xft_dpi});
     }
 
-    // The formula is pure and returns null for a 0mm screen (the
-    // "virtual display" case), so the decision and its log stay here.
+    // The formula is pure and returns null for a 0mm screen (the virtual
+    // display case), so the decision and its log stay here.
     const geometry_dpi = calcDpiFromGeometry(.{
         .width_px = screen.width_in_pixels,
         .height_px = screen.height_in_pixels,
@@ -215,21 +209,12 @@ pub fn detectDpi(conn: core.Connection, screen: core.Screen) f32 {
     return geometry_dpi;
 }
 
-/// Scales a font size value against the screen HEIGHT, clamped to a minimum of
-/// 1px. Percentage values are relative to font_baseline_height (1080px)
-/// rather than the screen baseline, so font sizes degrade more gracefully on
-/// smaller screens.
+/// Scales a font size value against the screen HEIGHT, clamped to a minimum
+/// of 1px. Percentage values are relative to font_baseline_height (1080px)
+/// rather than the screen baseline.
 ///
-/// Takes the height as a plain value rather than a `core.Screen`. Two shapes
-/// of this one function (one taking a whole screen, one a width/height pair)
-/// would leave a caller holding only a height, or the wrong half of the pair,
-/// with no signature that makes the mistake impossible: width and height are
-/// the same type, and a swap compiles silently and scales a 2560-wide screen
-/// as if it were 1440 tall. A single scalar reference cannot be transposed.
-///
-/// The bar's metric resolution takes its inputs as plain values so it can be
-/// resolved and tested without a live screen, and this is the only
-/// screen-derived input it needs.
+/// Takes the height as a plain value rather than a `core.Screen`: a swap of
+/// width for height compiles silently.
 pub fn scaleFontSizeForHeight(value: types.ScalableValue, screen_height_px: u16) u16 {
     const screen_height: f32 = @floatFromInt(screen_height_px);
     const raw = if (value.is_percentage)
@@ -239,13 +224,13 @@ pub fn scaleFontSizeForHeight(value: types.ScalableValue, screen_height_px: u16)
     return scaling.roundToU16(raw, 1.0);
 }
 
-/// Converts a scalable bar height value to pixels, clamped into the
-/// bar-height policy's range.
+/// Converts a scalable bar height value to pixels, clamped into the bar-height
+/// policy's range.
 pub fn scaleBarHeight(value: types.ScalableValue, screen_height: u16) u16 {
     const screen_height_f: f32 = @floatFromInt(screen_height);
     const scaled_px: f32 = scaling.scaleToPixels(value, screen_height_f);
-    // clampBarHeight, not a bare @max: the floor and the cap are one policy
-    // value to apply together, so a large `height` can't hand the bar more of
-    // the screen than the policy allows.
+    // clampBarHeight, not a bare @max: floor and cap are one policy value to
+    // apply together, so a large `height` can't hand the bar more than the
+    // policy allows.
     return clampBarHeight(@intFromFloat(scaled_px));
 }
