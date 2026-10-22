@@ -170,15 +170,15 @@ pub const Surface = struct {
     /// `cairo_surface` is an xcb surface backed by `pixmap`. Glyphs go
     /// through cairo and are buffered until the frame's blit flushes them;
     /// `xcb_poly_fill_rectangle` goes on the wire immediately, so the server
-    /// sees: every fill of the frame, then every glyph of the frame,
-    /// regardless of the order modules called them in. That is what makes
-    /// `fillRect` usable as a BACKGROUND: the segment fills first and the
-    /// label lands on top of it.
+    /// sees every fill of the frame, then every glyph, regardless of the
+    /// order modules called them in. That is what makes `fillRect` usable as
+    /// a BACKGROUND: the segment fills first, the label lands on top.
     ///
-    /// The rule is enforced at the top: the first XCB write of a frame
-    /// quiesces cairo first, so no cairo operation can be left pending
-    /// across the boundary where the two orderings diverge.
-    pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {        // Image surface (no pixmap): the same pixels via cairo, so a
+    /// Enforced at the top: the first XCB write of a frame quiesces cairo
+    /// first, so no cairo operation is left pending across the boundary
+    /// where the two orderings diverge.
+    pub fn fillRect(self: *Surface, x: u16, y: u16, width: u16, height: u16, color: u32) void {
+        // Image surface (no pixmap): the same pixels via cairo, so a
         // headless frame still paints a background. The wire-only state
         // below is skipped entirely -- no GC to arm, no ordering to enforce.
         if (self.pixmap == 0) {
