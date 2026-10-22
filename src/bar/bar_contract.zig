@@ -14,11 +14,10 @@ const dispatch = @import("contract_dispatch");
 /// binds its `pub const module` value to this type, binding only the hooks
 /// it owns (everything else stays `null`). build.zig emits a `bar_modules`
 /// registry array; the bar orchestrator iterates it with uniform loops, so
-/// adding a segment is a drop-in file and removing one degrades to shorter
-/// loops. Same open-addon contract as `WindowModule`, typed for bar segments.
-///
-/// Type-free hooks: hooks that must carry bar-side structs pass
-/// `*anyopaque`; the segment casts to the shared bar vocabulary it imports.
+/// adding a segment is a drop-in file. Same open-addon contract as
+/// `WindowModule`, typed for bar segments. Type-free hooks: hooks that must
+/// carry bar-side structs pass `*anyopaque`; the segment casts to the
+/// shared bar vocabulary it imports.
 pub const DirtySources = packed struct(u2) {
     /// A focus change (focus_rev diff) repaints this segment.
     focus: bool = false,
@@ -47,9 +46,8 @@ pub const BarOverlay = struct {
 /// The X key-press event a segment's `handleKeypress` hook receives,
 /// opaque. The concrete struct is `core.xcb.xcb_key_press_event_t`; bar.zig
 /// casts the real event INTO this opaque type, and the prompt module casts
-/// back to read the fields. Keeping it opaque here is what keeps this file
-/// importable by a non-X consumer while still letting consumers name the
-/// real type on their side.
+/// back to read the fields. Keeping it opaque here keeps this file
+/// importable by a non-X consumer while consumers still name the real type.
 pub const KeyPressEvent = opaque {};
 
 /// The X-free, typed per-frame environment a segment's `draw` reads. The
@@ -77,7 +75,7 @@ pub const DrawEnv = struct {
 ///
 /// The two outcomes are not the same: a readout with nothing to show (no
 /// battery, unreadable file) is a SUCCESS that occupies zero width, while
-/// a failed draw is a success-shaped fallback the bar substitutes.
+/// a failed draw is a fallback the bar substitutes.
 pub const Painted = struct {
     /// x just past the painted content.
     end_x: u16,
@@ -100,8 +98,8 @@ pub const Painted = struct {
 /// Live workspace facts every segment's hooks may read. Pure data, no bar
 /// types, so it lives HERE rather than in bar/segment.zig: the
 /// `naturalWidth` hook takes it as a real `*const Frame`, and a hook
-/// signature cannot name a type the contract may not import.
-/// bar/segment.zig re-exports this as the name readers use.
+/// signature cannot name a type the contract may not import. bar/segment.zig
+/// re-exports this as the name readers use.
 pub const Frame = struct {
     workspace_count: u32 = 0,
     current_workspace: u8 = 0,
@@ -113,8 +111,8 @@ pub const Frame = struct {
 ///
 /// Every field is named rather than positional: `offset: u16` and the two
 /// direction bools are indistinguishable positionally at the call site, so
-/// a transposed pair would type-check. A named struct makes the ignored
-/// fields `_ = ctx.redraw` instead of a wall of `_:` parameters.
+/// a transposed pair would type-check, and ignored fields become
+/// `_ = ctx.redraw` instead of a wall of `_:` parameters.
 pub const ClickCtx = struct {
     /// Pixels from the segment's recorded left edge. Compare against the
     /// width the row reserved (`naturalWidth`), not the last painted width.
@@ -141,12 +139,11 @@ pub const Segment = struct {
     /// `overlay` the single runtime overlay; both are reached by
     /// first-match lookup, so a second binder would be silently ignored.
     /// Declared on the TYPE so the generated `bar_modules` registry finds
-    /// it with `@hasDecl(T, "single_binder_hooks")` and enforces the count
-    /// on the fields that actually carry it.
+    /// it with `@hasDecl(T, "single_binder_hooks")` and enforces the count.
     ///
     /// `naturalWidth` is deliberately NOT listed: every segment binds its
     /// own (it is that segment's reserved width, not a shared facility), so
-    /// listing it would be false and the count assert would reject every
+    /// listing it would be false and the assert would reject every
     /// two-segment bar.
     pub const single_binder_hooks = [_][]const u8{
         "measureString", "overlay",
@@ -173,18 +170,17 @@ pub const Segment = struct {
     /// Declares the segment claims a share of the reserved center slot (the
     /// title segment). A center row's center-slot segments split the
     /// clamped center budget EVENLY, left-to-right in config order. The
-    /// first binder (config order) additionally owns the title-centric bar
-    /// behaviors (click-to-focus, chrome-overlay toggle).
+    /// first binder additionally owns the title-centric bar behaviors
+    /// (click-to-focus, chrome-overlay toggle).
     center_slot: bool = false,
     /// Which core fact-revisions repaint this segment (title: focus+frame;
     /// workspaces/tags: frame; everything else: none).
     dirty_sources: DirtySources = .{},
     /// Runtime "repaint me on every draw" query. A segment whose content
-    /// advances on its own cadence (e.g. a scrolling title marquee) claims
-    /// this hook and returns true while that motion is active: the bar then
-    /// repaints the segment on every draw submission even when change
-    /// detection says nothing changed. Name-free: the segment owns the
-    /// query's state; the bar merely honours the declared capability.
+    /// advances on its own cadence (a scrolling marquee) claims this hook
+    /// and returns true while that motion is active: the bar repaints it on
+    /// every draw submission even when change detection says nothing
+    /// changed. Name-free: the segment owns the query's state.
     needsRepaint: ?*const fn () bool = null,
     /// Whether the segment participates in click-hit bounds. Segments opt
     /// out by setting this false.
@@ -216,11 +212,10 @@ pub const Segment = struct {
     /// every draw, so the reservation can follow the content.
     ///
     /// The bar owns the row reservation, so a segment should not have to
-    /// remember to record its own drawn width -- forgetting to is silent
-    /// and shows up as a segment locked onto its startup width. The sink
-    /// stays a hook because the width belongs to the segment: a multi-slot
-    /// module splits it across its slots, and a module with no measured
-    /// width (the clock, layout) leaves this null.
+    /// remember to record its own width -- forgetting is silent and locks
+    /// the segment onto its startup width. Stays a hook because the width
+    /// belongs to the segment: a multi-slot module splits it across slots,
+    /// and one with no measured width (clock, layout) leaves this null.
     onPainted: ?*const fn (u16) void = null,
     /// Click dispatch for recorded bounds; mirrors the chrome-surface
     /// input routing. All of it arrives in one named `ClickCtx`.
@@ -245,15 +240,13 @@ pub const Segment = struct {
     //
     // `KeyPressEvent` is OPAQUE here and the real xcb struct at the cast
     // points (bar.zig produces it, prompt.zig reads it): this file is
-    // X-free, so the field cannot name an xcb type. Prompt-only today:
-    // `chromeHandleKeypress` is the single caller (bar.zig).
+    // X-free, so the field cannot name an xcb type. Prompt-only today.
     handleKeypress: ?*const fn (*const KeyPressEvent, ?*const types.Action) bool = null,
     /// Module queued a redraw (width change, subprocess output, blink
     /// tick). Returning true DRAINS the request and forces a whole-bar
     /// redraw in the CURRENT batch: every caller funnels through
     /// `render.foldModuleRedraw`, which marks the bar dirty on a true
-    /// return, so no wake path can drop a request and no path can redraw
-    /// twice for one flag.
+    /// return, so no wake path can drop a request or redraw twice.
     consumeRedrawRequest: ?*const fn () bool = null,
     /// Config reload: drop caches built against the old config (prompt
     /// caret geometry, title pivot). Fired once by the reload swap
