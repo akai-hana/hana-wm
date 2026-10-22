@@ -4,9 +4,8 @@
 //! this module only owns the title slot and the prompt overlay.
 
 // The title reads no global state: config arrives per draw on the render
-// context, and even the refresh rate is only *read* (the hz memo `bar.init`
-// primes). A DRAW must not detect a refresh rate, because detection writes
-// that shared memo.
+// context, and even the refresh rate is only *read* (`bar.init` primes the
+// hz memo). A DRAW must not detect it, because detection writes that memo.
 const hz = @import("hz");
 
 const types = @import("types");
@@ -18,9 +17,8 @@ const vocab = @import("vocab");
 const contract = @import("bar_contract");
 const dispatch = @import("contract_dispatch");
 // The scrolling title addon binds its hooks to this contract; membership in
-// the generated `title_subs` registry is driven by file presence alone, so
-// this module never names it. Dropping carousel.zig just shortens `addons`
-// and the title falls back to static (ellipsis) rendering.
+// the generated `title_subs` registry is file-presence driven, so this module
+// never names it; dropping carousel.zig leaves static (ellipsis) rendering.
 const core = @import("core");
 /// The whole scroll decoration for one frame, as ONE value. Declared HERE,
 /// in the contract, not in the extensor: this contract's shape must not
@@ -46,13 +44,11 @@ pub const Scroller = struct {
 };
 
 /// The registry-facing spelling of this contract: build.zig types the
-/// generated `title_subs` array through it, so the generated module
-/// never names the concrete struct or a sibling's import alias.
+/// generated `title_subs` array through it, so no module names the struct.
 pub const Binding = Scroller;
-// The scroller is a SINGLETON slot, and taking `addons[0]` says nothing about
-// that: a second `Scroller` addon would be silently dropped while the
-// registry still looks like a registry. One decorator composes; two need the
-// slot to become a capability query.
+// The scroller is a SINGLETON slot, and taking `addons[0]` says nothing
+// about that: a second `Scroller` addon would be silently dropped while the
+// registry still looks like a registry. One decorator composes.
 const subs = @import("title_subs").addons;
 comptime {
     if (subs.len > 1) @compileError("title: at most one Scroller addon");
@@ -64,9 +60,8 @@ const scroller: ?Scroller = if (subs.len != 0) subs[0] else null;
 fn noPivot() void {}
 const pivot: *const fn () void = if (scroller) |s| s.pivot else noPivot;
 
-// The prompt overlays this slot when active: it binds a runtime-overlay
-// value (contract.BarOverlay) on its Segment, found through the generated bar
-// segment registry -- name-free, like every other registry capability.
+// The prompt overlays this slot when active: it binds a runtime-overlay value
+// (contract.BarOverlay) on its Segment, found through the bar segment registry.
 const overlay: ?contract.BarOverlay = if (dispatch.providerOf(contract.Segment, segmod.all(), .overlay)) |m|
     m.overlay.?
 else
@@ -85,9 +80,8 @@ const SegmentGeometry = struct {
 
 const title_lead_px: u16 = 4;
 
-/// Shared body of all title draw entry points. Window entries are read from
-/// the snapshot (in-process caches populated by the bar); no X11 and no
-/// owned buffers to free. Infallible: every text and rect op on this path is.
+/// Shared body of all title draw entry points. Entries are read from the
+/// snapshot (in-process caches); no X11, no owned buffers, all infallible.
 fn drawInner(
     ctx: vocab.TitleRenderContext,
     snapshot: vocab.TitleSnapshot,
@@ -120,14 +114,12 @@ fn drawSingleWindow(
     const baseline_y = ctx.dc.baselineY(ctx.height);
     const text_geom = titleTextGeom(ctx, ctx.start_x, ctx.width);
 
-    // A minimized cell shows its own title and never enters the carousel:
-    // the two branches differ in fg (always `fg`, even on a focused
-    // workspace) and in the scroll gate, so they are not one if/else.
+    // A minimized cell shows its own title and never enters the carousel: the
+    // branches differ in fg and in the scroll gate, so they are not one if/else.
     if (is_minimized) {
         // The minimized cell never consults the scroller, but a marquee the
-        // pre-minimize focused frame left live would keep repainting. Hand
-        // the scroller one retiring call (enabled=false) so it stops and
-        // the poll deadline clears.
+        // pre-minimize frame left live would keep repainting; one retiring call
+        // (enabled=false) stops it and clears the poll deadline.
         if (scroller) |s| {
             const title_width = if (snapshot.minimized_title.len > 0) ctx.dc.measureTextWidth(snapshot.minimized_title) else 0;
             _ = s.offsetFor(
@@ -171,8 +163,7 @@ fn drawSingleWindow(
 
 /// Draws the focused window's title: live marquee if it overflows and
 /// scrolling is enabled, ellipsised title if it overflows and is not, plain
-/// text if it fits. `text_w` is measured here because all three cases want
-/// it and no caller could have it cheaper.
+/// text if it fits. `text_w` is measured here: all three cases want it.
 fn drawFittedTitle(
     ctx: vocab.TitleRenderContext,
     baseline_y: u16,
@@ -185,11 +176,10 @@ fn drawFittedTitle(
     const text_w = ctx.dc.measureTextWidth(title);
     const now = core.monotonicMs();
 
-    // Unfocused cells never touch the carousel: it tracks exactly one cell
-    // per frame, the focused one. For the focused cell the scroller is
-    // consulted on BOTH outcomes -- scrolling when it still overflows, and
-    // a retiring call (enabled=false) when it no longer does, so the state
-    // machine and with it the poll deadline stop asking for frames.
+    // Unfocused cells never touch the carousel: it tracks exactly one cell per
+    // frame, the focused one. The focused cell is consulted on BOTH outcomes --
+    // scrolling when it still overflows, a retiring call (enabled=false) when it
+    // does not -- so the state machine and poll deadline stop asking for frames.
     if (scroll_enabled) {
         if (scroller) |s| {
             const scroll = s.offsetFor(
@@ -301,11 +291,10 @@ fn drawSegmentedTitles(
 // Segment hooks
 
 /// Owner state for the title segment (P2-58): `overlay_was_active` latches
-/// the last draw handing the slot to the prompt overlay so the overlay close
-/// can be noticed (resuming without a pivot would teleport the marquee).
+/// the last draw handing the slot to the prompt overlay so its close can be
+/// noticed (resuming without a pivot would teleport the marquee).
 /// `scroll_active` is the last frame's scroll-active bit, recorded from the
-/// single scroller call, for the one consumer that is not a draw
-/// (needsRepaintHook).
+/// single scroller call, for the one non-draw consumer (needsRepaintHook).
 const TitleState = struct {
     overlay_was_active: bool = false,
     scroll_active: bool = false,
@@ -318,13 +307,11 @@ fn drawHook(ctx: *anyopaque, x: u16) !contract.Painted {
         // The overlay returns advanced x, not a width report: it covers
         // the whole slot, so the span is the reserved width by construction.
         // The title declares no `onPainted` -- its reservation is
-        // `title_min_width`, fixed by construction -- so nothing is
-        // forwarded on the title's behalf.
+        // `title_min_width` -- so nothing is forwarded on its behalf.
         return contract.Painted.span(x, try o.draw(ctx, x));
     };
-    // Overlay just closed after at least one overlay frame: pivot the
-    // scroller's elapsed-time base so motion continues from the last shown
-    // offset instead of catching the whole session in one frame.
+    // Overlay just closed after at least one overlay frame: pivot the scroller's
+    // elapsed-time base so motion continues from the last shown offset.
     if (g.overlay_was_active) {
         g.overlay_was_active = false;
         pivot();
@@ -355,8 +342,7 @@ fn pollTimeoutMsHook() i32 {
     // The prompt overlay covers the whole title slot while open, so no
     // scroller is visible; contribute no wakeup instead of leaving it
     // polling hidden pixels. The next visible draw re-arms motion via
-    // offsetFor. The title owns this decision, so the overlay never
-    // reaches into the scroller to pause it.
+    // offsetFor. The title owns this decision.
     if (overlayActive()) return -1;
     if (scroller) |s| return s.pollDeadlineMs(core.monotonicMs(), hz.detectedHz());
     return -1;
@@ -366,9 +352,8 @@ fn pollTimeoutMsHook() i32 {
 /// actively scrolling, motion only advances while the title draw runs, so
 /// the bar must repaint this segment on every submission even when change
 /// detection marks nothing dirty. While the prompt overlay covers the slot,
-/// the marquee is hidden and the overlay's own pending repaints are
-/// forwarded instead: the bar then repaints just this slot for a caret
-/// toggle rather than forcing a whole-bar redraw.
+/// the marquee is hidden and the overlay's pending repaints are forwarded
+/// instead: the bar repaints just this slot, not a whole-bar redraw.
 fn needsRepaintHook() bool {
     if (overlay) |o| if (o.is_active()) return o.needsRepaint();
     return g.scroll_active;
@@ -389,11 +374,10 @@ pub const module = segmod.module(
         .on_click = onClickHook,
         // Both hooks rebase the scroller's elapsed-time clock at `pivot`,
         // for two different reasons, so the reasons live at `pivot` itself.
-        // On show: a marquee that was scrolling when the bar hid resumes
-        // from its last shown offset rather than catching the whole hidden
-        // gap in one frame. On reload: config is about to change the
-        // scroller's own inputs, so the base is rebased instead of
-        // integrated across the change.
+        // On show: a marquee scrolling when the bar hid resumes from its
+        // last shown offset rather than catching the hidden gap in one
+        // frame. On reload: config is about to change the scroller's own
+        // inputs, so the base is rebased, not integrated across the change.
         .onBarShown = pivot,
         .invalidateReloadCaches = pivot,
     },

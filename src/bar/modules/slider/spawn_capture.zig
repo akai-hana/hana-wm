@@ -5,15 +5,15 @@
 //! out of the slider package when the split made it plain that nothing here
 //! is slider-specific: run the child, drain its stdout so a full pipe can
 //! never stall it, report the bytes (or exit status), and let the caller keep
-//! its fixed buffers. Anything in the bar that needs to run a command and read
-//! its output belongs here rather than growing its own spawn dance.
+//! its fixed buffers. Anything in the bar that needs to run a command and
+//! read its output belongs here.
 //!
 //! Everything here is DEADLINED: the poll loop and the post-EOF wait share one
 //! `timeout_ms` budget, and an expiring budget SIGKILLs the child and reports
 //! failure. `popen`/`pclose` had no such bound -- a helper wedged on a locked
 //! device or a dead daemon socket froze the WM's event loop for the child's
 //! entire lifetime, and popen exposes no pid to break it out. A timed-out run
-//! reports the total failure (null / empty) rather than truncated output: a
+//! reports total failure (null / empty) rather than truncated output: a
 //! partial volume reading is worse than no reading.
 
 const std = @import("std");

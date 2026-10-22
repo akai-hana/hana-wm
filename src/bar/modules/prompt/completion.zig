@@ -2,8 +2,7 @@
 //! the ghost-completion suffix, and the run-history ring (newest first,
 //! persisted append-only under `$HOME`). State lives in this module's global
 //! so no allocation or partial-OOM bookkeeping exists; the package core
-//! (`prompt.zig`) owns activation and key routing and reaches the tables
-//! through the accessors below.
+//! (`prompt.zig`) owns activation and key routing.
 
 const std = @import("std");
 
@@ -58,10 +57,9 @@ const CompState = struct {
 
 var g: CompState = .{};
 
-/// The current ghost-completion suffix (empty when none). The slice
-/// aliases this module's storage and is valid until the next
-/// completion-table or history rebuild -- the same lifetime the
-/// caller's buffer already had.
+/// The current ghost-completion suffix (empty when none). The slice aliases
+/// this module's storage and is valid until the next table or history
+/// rebuild -- the lifetime the caller's buffer already had.
 pub fn ghost() []const u8 {
     return g.ghost_buf[0..g.ghost_len];
 }
@@ -179,10 +177,8 @@ inline fn setGhost(suffix: []const u8) void {
 /// space, as {token, byte offset of the token's first byte}.
 ///
 /// Word-at-cursor is what the completion sources need: they match a token,
-/// not a prefix of a line, and the buffer they see is exactly the token.
-///
-/// `cursor` is passed rather than read so the split is a pure function of
-/// (buffer, cursor) and testable without the module's global state.
+/// not a prefix of a line. `cursor` is passed rather than read so the split
+/// is a pure function of (buffer, cursor), testable without module state.
 const WordAtCursor = struct {
     token: []const u8,
     /// Byte offset of `token` within the buffer it came from.
@@ -197,11 +193,10 @@ pub fn wordAtCursor(buf: []const u8, cursor: usize) WordAtCursor {
 
 /// Where a candidate match comes from.
 ///
-/// The two sources need genuinely different lookups -- one walks a ring newest
-/// first, the other binary-searches a sorted table -- but they are the same
-/// QUESTION ("what extends this token?"), and expressing that as a union keeps
-/// the priority order in one place instead of spread across two loops that
-/// have to be kept in sync by hand.
+/// The two sources need different lookups -- one walks a ring newest first,
+/// the other binary-searches a sorted table -- but they are the same QUESTION
+/// ("what extends this token?"), and a union keeps the priority order in one
+/// place instead of two loops kept in sync by hand.
 pub const CompletionSource = enum {
     /// The history ring, newest entry first: what the user actually ran
     /// before, which outranks anything merely installed.
@@ -214,11 +209,8 @@ pub const CompletionSource = enum {
 
 /// Ghost for `token` from `source`, or null when that source has no
 /// completion. The suffix only: `setGhost` receives text to APPEND to what is
-/// already typed.
-///
-/// Returned slices point into the module's own storage (the ring and the
-/// comp table), so they are valid until the next completion-table or history
-/// rebuild -- the same lifetime the caller's buffer already had.
+/// already typed. Returned slices point into the module's own storage (the
+/// ring and comp table), valid until the next table or history rebuild.
 fn completeToken(token: []const u8, source: CompletionSource) ?[]const u8 {
     if (token.len == 0) return null;
     return switch (source) {
@@ -265,11 +257,8 @@ fn completeFromExecutables(token: []const u8) ?[]const u8 {
 /// Recompute the ghost-text suggestion based on the current buffer.
 /// Priority: history (newest first) -> any executable match.
 /// INSERT mode only, and only with the cursor at the end of the buffer: a
-/// ghost is a suggestion about text that is about to be appended, which a
-/// mid-buffer cursor has no room for.
-///
-/// `vim_state` is the package core's editor state (the one the key handlers
-/// drive); this module keeps no second copy.
+/// ghost is a suggestion about text about to be appended, which a mid-buffer
+/// cursor has no room for. `vim_state` is the package core's editor state.
 pub fn updateGhost(vim_state: *const editor.EditorState) void {
     g.ghost_len = 0;
 
@@ -371,8 +360,7 @@ fn histLoadFile(allocator: std.mem.Allocator, path: []const u8) void {
 
     // History semantics want the NEWEST entries, which live at the file's
     // tail. Position the read window at EOF - window so an overgrown file
-    // can't push recent entries out of the fixed read; a partial
-    // line at the window head is dropped below.
+    // can't push recent entries out of the fixed read.
     const fsize: u64 = if (file.stat(io) catch null) |st| st.size else 0;
     const read_off: u64 = if (fsize > hist_read_window) fsize - hist_read_window else 0;
 
@@ -390,9 +378,8 @@ fn histLoadFile(allocator: std.mem.Allocator, path: []const u8) void {
 
     // Only the trailing max_lines lines are eligible: history consumers walk
     // them back-to-front for newest-first priority, so dropping the head of
-    // an overgrown file keeps the freshest entries visible once it outgrows
-    // the window. The spans live in a ring indexed modulo max_lines, so the
-    // scan only ever remembers the LAST max_lines lines.
+    // an overgrown file keeps the freshest entries visible. The spans live in
+    // a ring indexed modulo max_lines.
     const max_lines = max_history * 2;
     var spans: [max_lines]LineSpan = undefined;
     var total: usize = 0;
@@ -455,8 +442,7 @@ pub fn loadHistory(allocator: std.mem.Allocator) void {
 /// Records the command in the run-history ring, then hands the exec to the
 /// global spawn facility (core/process/spawn.zig): WM-as-subreaper with a
 /// spawn-report pipe, plus workspace routing for any window the command opens
-/// (spawn-crossing suppression, so it lands on the workspace the prompt was
-/// invoked from).
+/// (spawn-crossing suppression: it lands where the prompt was invoked).
 pub fn spawnCommand(cmd: []const u8) void {
     histPrepend(cmd);
     histAppendToFile(cmd);

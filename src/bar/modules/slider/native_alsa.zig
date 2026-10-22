@@ -7,27 +7,25 @@
 //! per-event, un-throttled volume scrolls/drags possible on ALSA-only
 //! machines (pure ALSA, no PulseAudio/PipeWire).
 //!
-//! Activation gate: the volume segment only attaches this backend when no
-//! PulseAudio runtime is present. When PipeWire/PulseAudio is in the mix, the
-//! system's default `Master` is a software mixer element (PipeWire's
-//! `pipewire-alsa` softvol, range 0-65536), and writing the raw card control
-//! would change a different element than the one `amixer`/`pactl` display. On
-//! a pure-ALSA box the default `Master` *is* the card's `Master Playback
-//! Volume` control, so a direct ioctl is byte-identical in effect to
-//! `amixer set Master N%`.
+//! Activation gate: attach only when no PulseAudio runtime is present. With
+//! PipeWire/PulseAudio in the mix the system's default `Master` is a
+//! software mixer element (PipeWire's `pipewire-alsa` softvol, 0-65536), so
+//! writing the raw card control would change a different element than the
+//! one `amixer`/`pactl` display. On a pure-ALSA box the default `Master`
+//! *is* the card's `Master Playback Volume` control, making a direct ioctl
+//! byte-identical to `amixer set Master N%`.
 //!
 //! Device selection: scan `controlC0..controlC31`, enumerate each card's
-//! elements (`SNDRV_CTL_IOCTL_ELEM_LIST`), and take the first MIXER-interface
-//! INTEGER control named `Master Playback Volume` (falling back to `Master`)
-//! that is readable and writable. The optional mute control `Master Playback
-//! Switch` (BOOLEAN) is attached the same way.
+//! elements, and take the first MIXER-interface INTEGER control named
+//! `Master Playback Volume` (falling back to `Master`) that is readable and
+//! writable; the optional `Master Playback Switch` (BOOLEAN) attaches the
+//! same way.
 //!
 //! Everything below is pure kernel ABI. The structs are pinned by runtime
 //! verification against the live device (sizes id=64 list=80 info=272
 //! value=1224 on x86_64/aarch64/riscv64) and encode exactly the UAPI layout
-//! in `include/uapi/sound/asound.h` (`SNDRV_CTL_IOCTL_ELEM_LIST/INFO/READ/
-//! WRITE`); percent mapping follows `amixer`'s linear [min..max] <-> 0-100
-//! scale.
+//! in `include/uapi/sound/asound.h`; percent mapping follows `amixer`'s
+//! linear [min..max] <-> 0-100 scale.
 
 const std = @import("std");
 const slider = @import("slider");

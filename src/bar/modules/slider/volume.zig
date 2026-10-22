@@ -1,7 +1,7 @@
 //! Volume slider sub: shows the default sink's level and mute state and
 //! controls it, bound to the slider core's `Sub` contract. This module owns
-//! the sink's TRUTH -- backend attach/probe, reads, writes, display format --
-//! while the slider core owns the shared render shell, interaction, poll,
+//! the sink's TRUTH -- backend attach/probe, reads, writes, display format
+//! -- while the slider core owns the shared render shell, interaction, poll
 //! and commit clock.
 //!
 //! Backends, most-native first. The resolved backend is LATCHED: once a read
@@ -18,10 +18,8 @@
 //!   3. `amixer` subprocess -- ALSA, when alsa-utils is installed.
 //!   4. `/dev/snd/controlC*` ioctls (`native_alsa.zig`) -- the ALSA floor.
 //!
-//! The two native rungs are why `commit_cost` is a per-sub query: single
-//! in-process round trips (`.immediate`) vs the two subprocess rungs that
-//! fork (`.rate_limited`), and the slider core throttles on the difference.
-//! The 0-100 % clamp in `commit` is the single guard for every caller.
+//! The two native rungs are why `commit_cost` is a per-sub query (`.immediate`
+//! vs `.rate_limited`). The 0-100 % clamp in `commit` guards every caller.
 
 const std = @import("std");
 const log = std.log.scoped(.volume);
@@ -42,13 +40,11 @@ const Backend = enum { unknown, pulse, alsa };
 /// Owner state (P2-58): the latched backend, the display value, the ladder
 /// negative cache, the two in-process rung handles, and the optimistic-commit
 /// muted bits. Attached handles: non-null means the rung won the ladder walk
-/// and is latched. Probed lazily; given up on when a read fails. The
-/// negative cache stops every read against a dead daemon re-walking all four
-/// rungs (up to three `popen`s, each blocking the WM loop). The recheck
+/// and is latched. The negative cache stops every read against a dead daemon
+/// re-walking all four rungs (up to three blocking `popen`s). The recheck
 /// window is separate from the cache deadline so a cheap reachability check
 /// can retry long before the cache expires. `pulse_muted`/`alsa_muted` are
-/// the last muted bits reported by each native rung, used by the
-/// optimistic-commit path to echo the committed state before the next read.
+/// each rung's last muted bits, echoed before the next read.
 const VolumeState = struct {
     backend: Backend = .unknown,
     pct: u8 = 0,
@@ -67,16 +63,13 @@ var g: VolumeState = .{};
 pub const reprobe_interval_ms: i64 = 15_000;
 
 /// What the negative cache says about one poll: whether the ladder may be
-/// walked. One bool, because there is exactly one thing to forget: the
-/// latched backend. (A failed native read un-latches its attach directly;
-/// a daemon-reachability CHANGE is what grants the walk that finds a daemon
-/// started after this cache wrote the machine off. See `probeDue`.)
+/// walked. One bool, because there is exactly one thing to forget: the latched
+/// backend. A daemon-reachability CHANGE grants the walk that finds it late.
 pub const Probe = struct { walk: bool };
 
 /// The pure re-probe decision: whether a poll may walk the ladder again, and
 /// whether it must first re-ask reachability. No clock, no IO -- testable.
-///   - No recorded failure: the ladder has never completed, so it runs.
-///   - Slow deadline passed: retry on the deadline alone.
+///   - No recorded failure: run. Slow deadline passed: retry on it alone.
 ///   - Recheck window arrived: ask again; a CHANGED answer is the trigger.
 ///   - Otherwise: skip -- the whole point of the negative cache.
 pub fn probeDecision(
@@ -124,9 +117,8 @@ fn probeDue() bool {
 }
 
 /// The rung a latched backend is read through. Named so the backend ->
-/// rung mapping is checkable without a daemon: the point of the latch is
-/// that this mapping is consulted directly and never re-derived by
-/// re-walking the ladder.
+/// rung mapping is checkable without a daemon: the latch consults it
+/// directly and never re-derives it by re-walking the ladder.
 pub const Rung = enum { native_pulse, pactl, amixer, native_alsa, none };
 
 pub fn latchedRung(backend: Backend) Rung {
@@ -150,10 +142,9 @@ pub fn optimisticAfter(backend: Backend, v: u8, current: u8) u8 {
     return optimisticLevel(backend, v) orelse current;
 }
 
-/// The negative cache after one ladder run. A rung answered so it is
-/// CLEARED -- an armed failure must never outlive the success that disproved
-/// it. Nothing answered so it is armed at `now`, which stops the next poll
-/// and right-click from re-paying for up to three blocked subprocess spawns.
+/// The negative cache after one ladder run. A rung answered so it is CLEARED
+/// -- an armed failure must never outlive the success that disproved it.
+/// Nothing answered: armed at `now`, so the next poll and right-click skip it.
 pub fn noteLadderResult(ok: bool, now: i64) ?i64 {
     return if (ok) null else now;
 }
@@ -178,9 +169,8 @@ pub fn parsePercent(out: []const u8) ?u8 {
 /// The one-time diagnostic for a machine where every rung failed. Distinct
 /// from the MUTE display: MUTE is the steady state (the sink may genuinely
 /// be muted); this is the one line saying *why* there is no level. Armed
-/// once per process: the poll loop would otherwise repeat it every 5 s, and
-/// a bar that says the same thing every five seconds is how a real fault
-/// gets ignored.
+/// once per process: the poll would otherwise repeat it every 5 s, and a bar
+/// that repeats itself is how a real fault gets ignored.
 fn logNoBackend() void {
     if (g.reason_logged) return;
     g.reason_logged = true;
@@ -263,8 +253,7 @@ fn changedFrom(had_value: bool, old_pct: u8, old_muted: bool) bool {
 ///   3. `amixer` -- ALSA, when alsa-utils is installed.
 ///   4. `/dev/snd/controlC*` -- the ALSA floor: kernel ioctls only.
 /// Deliberately NOT "most-native first": rung 1 only exists on Pulse-family
-/// machines; putting it ahead of `amixer` would cost a failed dlopen on every
-/// pure-ALSA box. Rungs 1 and 4 are the coverage floor for CLI-less installs.
+/// machines, so it would cost a failed dlopen on every pure-ALSA box.
 fn runLadder() bool {
     const had_value = g.has_value;
     const old_pct = g.pct;
@@ -301,8 +290,7 @@ fn runLadder() bool {
 
 /// One subprocess rung: run `vol_cmd`, parse a percentage, then derive the
 /// mute state. `mute_cmd` empty means the mute answer is in the volume
-/// output (`amixer` reports both in one line). Mute flag stored in
-/// VolumeState.pulse_muted / alsa_muted.
+/// output (`amixer` reports both in one line).
 fn tryRung(backend: Backend, vol_cmd: []const u8, mute_cmd: []const u8, on_token: []const u8) ?u8 {
     var buf: [1024]u8 = undefined;
     const out = spawn_capture.runOut(vol_cmd, &buf);
@@ -354,8 +342,7 @@ fn tryRungNativeAlsa() bool {
 
 /// The latency class of one commit on the live backend: the two native rungs
 /// are a single ioctl/libpulse call (`.immediate`); the two subprocess rungs
-/// fork (`.rate_limited`). Per-sub query because the slider core throttles on
-/// it; folding to a constant would push the distinction into every caller.
+/// fork (`.rate_limited`). Per-sub query because the slider core throttles on it.
 fn commitCost() slider.CommitCost {
     return switch (latchedRung(g.backend)) {
         .native_pulse, .native_alsa => .immediate,
@@ -395,8 +382,7 @@ fn write(w: slider.Write, v: u8) void {
         .commit => commitPct(v),
         // Press set / drag end. The value just committed IS the display
         // value, shown optimistically; the next poll confirms against the
-        // real sink. With no backend the display does not move, because
-        // commitPct wrote nothing.
+        // real sink. With no backend the display does not move.
         .apply => {
             commitPct(v);
             g.pct = optimisticAfter(g.backend, v, g.pct);
@@ -405,10 +391,9 @@ fn write(w: slider.Write, v: u8) void {
 }
 
 /// Renders the display string into `buf`, substituting `{pct}` and `{state}`,
-/// returning the text (plus the numeric region). Truncated tail is still
-/// scan-safe. With no backend at all, `muted` is forced true so the segment
-/// renders MUTE rather than `VOL 0%`: `VOL 0%` would claim a level was read
-/// from a sink when no sink was ever reached.
+/// returning the text (plus the numeric region). Truncated tail is scan-safe.
+/// With no backend at all, `muted` is forced true so the segment renders MUTE
+/// rather than `VOL 0%`, which would claim a sink read that never happened.
 fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Label {
     const effective_mute = muted or !g.has_value;
     const fmt = if (effective_mute)
@@ -421,10 +406,9 @@ fn renderDisplay(config: bar_config.Config, muted: bool, buf: []u8) drawing.Labe
 
 /// Idle label hook: the slider core renders this during the segment's draw.
 /// Test-only seam: the display state `label` reads is module-private and its
-/// tests live in `src/test/bar/volume_test.zig` (which runs from the test
-/// ROOT, so an inline test in an imported module is never analyzed). A plain
-/// `pub` on the globals would export mutable global state; this scopes the
-/// write to an obviously test-shaped name.
+/// tests live in `src/test/bar/volume_test.zig` (run from the test ROOT, so
+/// an inline test in an imported module is never analyzed). A plain `pub`
+/// would export mutable global state; this scopes the write to a test name.
 pub fn setDisplayForTest(pct: u8, muted: bool) void {
     g.pct = pct;
     g.muted = muted;
@@ -443,8 +427,7 @@ pub fn clearValueForTest() void {
 
 /// Test seam for the latch/rung mapping: a test that never clears the
 /// native backends lets one stale backend choice leak into the next
-/// assertion. Clearing here keeps each latchedRung decision pinned to this
-/// test's own state.
+/// assertion; clearing here pins each latchedRung decision to its own state.
 pub fn clearNativeBackendForTest() void {
     g.native_pulse = null;
     g.native_alsa = null;
@@ -457,8 +440,7 @@ pub fn label(config: bar_config.Config, buf: []u8) drawing.Label {
 /// Right-click: flip the sink's mute state. Routed through the LATCHED rung
 /// like every other commit, so the native backends -- whose protocol takes
 /// an ABSOLUTE mute state, not a toggle -- set the inverted observed state
-/// directly instead of spawning a CLI that would talk to a different mixer.
-/// Returns through the same follow-up read.
+/// directly instead of spawning a CLI that would talk to another mixer.
 fn toggleMute() void {
     switch (latchedRung(g.backend)) {
         .native_pulse => {

@@ -37,15 +37,13 @@ const RenderState = struct {
     // Caret-blink scoped repaint: set by `blinkTick`, cleared in `draw`.
     // Unlike `redraw_pending` (which forces a full-bar redraw because it
     // accompanies layout-affecting changes), this only asks the host title
-    // slot to repaint, so a caret toggle costs one title-region blit rather
-    // than a whole-bar repaint.
+    // slot to repaint, so a caret toggle costs one title-region blit.
     blink_repaint: bool = false,
 
     // Layout cache: pixel width of the pre-caret text, the block-caret width,
-    // and the scroll offset keeping the caret visible. Recomputed in
-    // `drawActive` only when `layout_dirty` is set (keypress, activate,
-    // or bar-height change): the caret-blink redraws an identical frame each
-    // blink, so ticks reuse these instead of ~20 Pango shape passes.
+    // and the scroll offset keeping the caret visible. Recomputed in `drawActive`
+    // only when `layout_dirty` is set (keypress, activate, bar-height change):
+    // blink ticks redraw an identical frame and reuse these, not ~20 Pango passes.
     cached_pre_w: u16 = 0,
     cached_caret_w: u16 = 0,
     cached_scroll_x: u16 = 0,
@@ -56,8 +54,7 @@ const RenderState = struct {
 var g: RenderState = .{};
 
 /// Invalidates every cache derived from config/font metrics or bar height.
-/// Called from bar.applyReload: these module globals are built against the
-/// OLD config's fonts and bar height, and a reload can change both.
+/// Called from bar.applyReload: built against the OLD config's fonts/height.
 pub fn invalidateReloadCaches() void {
     g.cached_prompt_w = null;
     g.cached_mode_w = .{null} ** num_modes;
@@ -81,8 +78,7 @@ pub fn blinkTick() void {
 
 /// Clears the scoped repaint flag. Called by the package core's `draw`
 /// BEFORE painting (not after): clearing first means a draw error still
-/// consumes the request, so a persistently failing overlay can't
-/// re-request forever.
+/// consumes the request, so a failing overlay can't re-request forever.
 pub fn clearBlinkRepaint() void {
     g.blink_repaint = false;
 }
@@ -100,9 +96,8 @@ pub fn showCaret() void {
 const WidthRel = enum { ge, gt };
 
 /// Binary search: first byte offset where `measureTextWidth(text[0..offset])`
-/// is `>= t` (ge) or `> t` (gt). Returns `text.len` when no index satisfies
-/// it. Maps a pixel scroll offset to a character boundary (ge), or finds the
-/// first index overflowing a width cap (gt). The prompt is its only consumer.
+/// is `>= t` (ge) or `> t` (gt), else `text.len`: a pixel scroll offset maps
+/// to a character boundary (ge), or the first index overflowing a cap (gt).
 fn measureBound(dc: *drawing.DrawContext, text: []const u8, t: u16, comptime rel: WidthRel) usize {
     var lo: usize = 0;
     var hi: usize = text.len;
@@ -116,19 +111,17 @@ fn measureBound(dc: *drawing.DrawContext, text: []const u8, t: u16, comptime rel
 }
 
 /// On-screen origin of a `w`-wide span at pen `px` clipped to the visible
-/// window `[tl, se)`, or null when the span lies fully off-screen. Shared by
-/// the pre-cursor span draw and the block cursor: both must skip the
-/// invisible prefix and start painting at `max(px, tl)`.
+/// window `[tl, se)`, or null when fully off-screen. Shared by the pre-cursor
+/// span draw and the block cursor: both skip the invisible prefix.
 inline fn clipOrigin(px: i32, w: u32, tl: i32, se: i32) ?i32 {
     if (px + @as(i32, @intCast(w)) <= tl or px >= se) return null;
     return @max(px, tl);
 }
 
 /// Draw `text` from the virtual pen `px` clipped to `[text_left_x, scroll_end_x)`.
-/// Non-post (`post=false`) is the pre-cursor span: hard-clips both edges without
-/// ellipsis and always advances `px.*` by the full text width, using the caller's
-/// measured `text_w` (null to measure here). Post (`post=true`) ellipsizes on
-/// overflow to the right edge and never advances the pen.
+/// Non-post is the pre-cursor span: hard-clips both edges without ellipsis and
+/// always advances `px.*` by the full text width (caller's `text_w`, null to
+/// measure here). Post ellipsizes on overflow and never advances the pen.
 inline fn drawScrollSpan(
     comptime post: bool,
     dc: *drawing.DrawContext,
@@ -162,9 +155,8 @@ inline fn drawScrollSpan(
     const draw_x: u16 = @intCast(origin);
     const available: u16 = @intCast(se - origin);
 
-    // Clip the visible suffix to the available width on the right. When no
-    // left clip occurred and the full text fits, `w` (already measured) skips
-    // the binary-search pass entirely.
+    // Clip the visible suffix to the available width on the right; when no left
+    // clip occurred and the text fits, the measured `w` skips the binary search.
     const suffix = text[start..];
     const visible = if (start == 0 and w <= available)
         text
@@ -186,7 +178,6 @@ const CursorStyle = struct {
 };
 
 /// Draw a filled block cursor over `buf[lo..hi]` and advance `px.*` past it.
-///
 /// Shared by visual selection highlighting and the normal/replace character
 /// cursor: "highlight a byte range with an accent block and inverse text".
 /// `lo == hi` draws an empty space-sized block (end-of-line).
@@ -221,9 +212,8 @@ inline fn drawBlockCursor(
 }
 
 /// Lazily cache the caret geometry: font metrics and bar height are constant
-/// between reloads, so this runs at most once. Hoisted before the pill and
-/// mode branches so the lazy-init runs exactly once regardless of which
-/// branch executes first.
+/// between reloads, so this runs at most once -- hoisted before the pill and
+/// mode branches so lazy-init runs exactly once.
 fn ensureCaretGeom(dc: *drawing.DrawContext, height: u16) void {
     if (g.cached_caret_top == null) {
         const asc, const desc = dc.metrics();
@@ -245,10 +235,9 @@ fn promptWidth(dc: *drawing.DrawContext, prompt: []const u8) u16 {
 }
 
 /// Recompute the cached caret widths and scroll offset, but only when
-/// `layout_dirty` or a bar-height change demands it. The caret-blink redraws
-/// an identical frame every blink, so blink ticks reuse these instead of ~20
-/// Pango shape passes per tick; the cache needs invalidating only when
-/// buffer, cursor, mode, or height changes.
+/// `layout_dirty` or a bar-height change demands it: blink ticks redraw an
+/// identical frame and reuse these instead of ~20 Pango shape passes. Only
+/// buffer, cursor, mode, or height changes invalidate the cache.
 fn refreshLayoutCache(
     dc: *drawing.DrawContext,
     height: u16,
@@ -297,12 +286,10 @@ fn refreshLayoutCache(
 }
 
 /// Right-pinned mode widget: a filled pill (accent bg, white text) with
-/// `pill_h_pad` on both sides so the text never touches the pill edge and
-/// there's a gap to the scrollable region. The label is the active vim mode's
-/// label (empty in the null-vim build, which skips the pill entirely).
-///
-/// Returns the scrollable region's right edge (the pill's left edge), or null
-/// when no room remains for text; callers return immediately.
+/// `pill_h_pad` on both sides so the text never touches the pill edge. The
+/// label is the active vim mode's label (empty in the null-vim build, which
+/// skips the pill entirely). Returns the scrollable region's right edge
+/// (the pill's left edge), or null when no room remains for text.
 fn drawPill(
     dc: *drawing.DrawContext,
     height: u16,
@@ -316,10 +303,9 @@ fn drawPill(
     const white: u32 = 0xFFFFFFFF;
 
     // The pill describes the mode the handler is actually in. Gating it
-    // on the config key suppressed it for exactly the addons that installed a
-    // mode engine, so the bar showed a mode the user was in with no label.
-    // The width comes from the mode, not from measuring here: the bar no
-    // longer owns the "label implies pill" rule, only the drawing of it.
+    // on the config key suppressed it for exactly the addons that installed
+    // a mode engine, so the bar showed a mode with no label. The width
+    // comes from the mode: the bar owns only the drawing, not the rule.
     const mode_idx: usize = @intFromEnum(vim_state.mode);
     const mode_w: u16 = if (editor.addon_active)
         vim_state.mode.hintWidth(dc, &g.cached_mode_w[mode_idx])
@@ -334,9 +320,8 @@ fn drawPill(
     const pill_fits = text_end_x >= pill_w;
 
     // Reserve the pill width on the right; the scrollable region ends here.
-    // When the label cannot fit we drop the pill but still give the text the
-    // whole region: blanking the prompt because the mode pill didn't fit hid
-    // the user's typing.
+    // When the label cannot fit we drop the pill but still give the text
+    // the whole region: blanking the prompt hid the user's typing.
     const scroll_end_x: u16 = if (show_pill and pill_fits)
         text_end_x - pill_w
     else
@@ -358,9 +343,8 @@ fn drawPill(
     return scroll_end_x;
 }
 
-/// Insert mode: blinking thin caret; the caret position does not consume its
-/// character, and ghost text appears dimmed after the cursor when at end.
-/// Post-cursor text is drawn by the shared tail in drawActive.
+/// Insert mode: blinking thin caret; the caret does not consume its character,
+/// ghost text dims after the cursor at end (post text from the shared tail).
 fn drawInsertMode(
     dc: *drawing.DrawContext,
     baseline: u16,
@@ -410,11 +394,9 @@ fn drawNormalMode(
     );
 }
 
-/// Render the active input UI.
-///
-/// Layout: [ pad | scrollable: PROMPT | pre | CURSOR/SELECTION | post |
-/// MODE_LABEL | pad ]. The mode label is pinned right (never scrolls); the
-/// scrollable region keeps the cursor in view.
+/// Render the active input UI. Layout: [ pad | scrollable: PROMPT | pre |
+/// CURSOR/SELECTION | post | MODE_LABEL | pad ]. The mode label is pinned
+/// right (never scrolls); the scrollable region keeps the cursor in view.
 pub fn drawActive(
     dc: *drawing.DrawContext,
     // By pointer, not by value: this is a per-frame draw that only READS
@@ -452,8 +434,7 @@ pub fn drawActive(
     const prompt_w = promptWidth(dc, prompt);
 
     // In INSERT mode the caret doesn't consume its character; post_text
-    // starts at cursor and caret_w is `cursor_width`; all other modes use a
-    // full-character block.
+    // starts at cursor and caret_w is `cursor_width`; others use a block.
     const pre_cur_text = vim_state.buf[0..vim_state.cursor];
     refreshLayoutCache(dc, height, prompt, prompt_w, vim_state, pre_cur_text, max_scroll_px);
 
@@ -467,8 +448,7 @@ pub fn drawActive(
         try drawScrollSpan(false, dc, &px, text_left_x, scroll_end_x, baseline, pre_cur_text, g.cached_pre_w, fg);
 
     // Mode-specific caret/ghost rendering; post-cursor text is common to both
-    // (the block cursor advances px past its own character in NORMAL, the
-    // caret consumes none in INSERT), so it is drawn once below.
+    // (block cursor advances px in NORMAL, caret consumes none), drawn once.
     switch (vim_state.mode) {
         .insert => try drawInsertMode(dc, baseline, text_left_x, scroll_end_x, &px, vim_state, accent),
         else => try drawNormalMode(dc, height, baseline, text_left_x, scroll_end_x, &px, vim_state, accent, bg),
@@ -479,10 +459,9 @@ pub fn drawActive(
 
     // No blitRegion here: the prompt draws as a segment inside performDraw,
     // whose end-of-batch queueBlit copies the whole frame (and the caller
-    // flushes it). A mid-frame region copy+flush here would (a) enqueue a
-    // redundant second copy_area + flush per prompt frame and, worse, (b)
-    // snapshot the off-screen pixmap BEFORE sibling segments in the same
-    // batch are painted, briefly showing stale neighbors. Let the batch-end
-    // full blit win.
+    // flushes it). A mid-frame region copy+flush would enqueue a redundant
+    // second copy_area per prompt frame and, worse, snapshot the off-screen
+    // pixmap BEFORE sibling segments in the same batch are painted, showing
+    // stale neighbors. Let the batch-end full blit win.
     return end_x;
 }

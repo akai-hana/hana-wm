@@ -25,19 +25,18 @@ pub const Sample = struct { total: u64, idle: u64 };
 pub fn parseCpuLine(s: []const u8) ?Sample {
     if (!std.mem.startsWith(u8, s, "cpu ")) return null;
 
-    // ONLY the leading aggregate line, and only the part of the input up to
-    // its newline. Two reasons, both load-bearing:
+    // ONLY the leading aggregate line, and only the part of the input up
+    // to its newline. Two reasons, both load-bearing:
     //
-    //  - /proc/stat continues with one line PER logical CPU ("cpu0", "cpu1",
-    //    ...), so tokenizing the whole buffer walks off the aggregate line
-    //    into those. `tokenizeAny` splits on the newline too, so a kernel
-    //    reporting fewer aggregate counters than the array holds reaches
-    //    "cpu0" and fails the whole parse on a non-numeric token -- the
-    //    readout silently vanishes.
+    //  - /proc/stat continues with one line PER logical CPU ("cpu0", ...),
+    //    so tokenizing the whole buffer walks off the aggregate line into
+    //    those; a kernel reporting fewer aggregate counters than the array
+    //    holds then fails the whole parse on "cpu0" and the readout
+    //    silently vanishes.
     //  - The field count is not fixed: kernels report user nice system idle
-    //    iowait irq softirq steal and MAY add guest/guest_nice (10 here). A
-    //    fixed array silently DROPS the tail, so `total` under-counts and
-    //    every derived percentage is computed against the wrong denominator.
+    //    iowait irq softirq steal and MAY add guest/guest_nice. A fixed
+    //    array silently DROPS the tail, so `total` under-counts and every
+    //    derived percentage uses the wrong denominator.
     const line = s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
 
     var nums: [16]u64 = undefined;
@@ -72,21 +71,16 @@ pub fn utilBetween(prev: Sample, cur: Sample) ?u8 {
     return @intCast(@min(busy, 100));
 }
 
-/// Busy % over the whole span the kernel has been counting, i.e. since boot.
-/// This is the reading for the very first sample, which by definition has no
-/// predecessor to subtract. Every later sample uses `utilBetween` and is a
-/// real interval reading, so this value lives exactly one frame.
-///
-/// It is a genuine measurement rather than a placeholder: /proc/stat's
-/// counters are cumulative from boot, so this is the true average
-/// utilization over that span. It just answers a different question than every
-/// later frame ("since boot" vs "since the last tick"), which is why it does
-/// not recur. Null only when the kernel has counted nothing yet.
+/// Busy % over the whole span the kernel has been counting, i.e. since
+/// boot: the first sample, which by definition has no predecessor. Every
+/// later sample uses `utilBetween` (an interval reading), so this lives
+/// exactly one frame. A genuine measurement (counters are cumulative from
+/// boot), just answering "since boot" instead of "since the last tick".
+/// Null only when the kernel has counted nothing yet.
 pub fn bootAverage(cur: Sample) ?u8 {
-    // Computed directly rather than by handing a zeroed predecessor to
-    // `utilBetween`: that helper treats `total == 0` as an unusable baseline
-    // (a rewound counter), and a boot average's baseline legitimately IS zero.
-    // Same arithmetic, one read, no predecessor.
+    // Computed directly rather than via a zeroed predecessor to
+    // `utilBetween`: that helper treats `total == 0` as an unusable
+    // baseline (a rewound counter), and a boot average's legitimately IS zero.
     if (cur.total == 0) return null;
     const busy = cur.total -| cur.idle;
     return @intCast(@min(busy * 100 / cur.total, 100));
@@ -105,10 +99,9 @@ var g: CpuState = .{};
 /// "truncated is fine here, truncated *inside line 1* is not" rule is
 /// testable without a live multi-core /proc.
 ///
-/// Only the leading aggregate line is needed, so the per-CPU lines past it
-/// are safe to lose. What must NOT be accepted is a read that stopped INSIDE
-/// the aggregate line: that parses as a smaller total and silently yields a
-/// wrong delta. A newline inside the buffer proves line 1 is whole.
+/// Per-CPU lines past line 1 are safe to lose; a read that stopped INSIDE
+/// the aggregate line parses as a smaller total and yields a wrong delta.
+/// A newline inside the buffer proves line 1 is whole.
 pub fn aggregateLineComplete(bytes: []const u8, truncated: bool) bool {
     if (!truncated) return true;
     return std.mem.indexOfScalar(u8, bytes, '\n') != null;

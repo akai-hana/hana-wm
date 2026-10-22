@@ -1,7 +1,6 @@
 //! Pango font book: the layout/description/metrics lifecycle for one draw
 //! target (`FontBook`), the one-shot text run, the metric probe, the
-//! sized-font list, and the Xft->Pango name conversion. Font state has one
-//! owner here so the lifecycle can change without touching the painters.
+//! sized-font list, and the Xft->Pango name conversion.
 
 const std = @import("std");
 const log = std.log.scoped(.fonts);
@@ -12,8 +11,7 @@ const bindings = @import("bindings");
 /// Default point size for scaled metrics; also the size in the fallback
 /// font description, so the last-resort font and the metric probe always
 /// agree. Lives HERE so this file needs no metrics import (metrics.zig's
-/// probe adapters import this file; the shared number must not force a
-/// fonts<->metrics cycle).
+/// probe adapters import this file; the number must not force a cycle).
 pub const default_scaled_font_size: u16 = 10;
 
 /// Fallback Pango description when no configured font loads: monospace at
@@ -31,11 +29,9 @@ const fallbackFont = default_fallback_font;
 /// it sets the layout's text -- so on one shared layout, measuring a string
 /// and then painting something else paints the measurement unless the text
 /// is reset; style attributes attached for one draw and not detached change
-/// every LATER draw. A run's layout is private, so measuring cannot disturb
-/// a draw, and its attributes die with it.
-///
-/// Draw helpers are infallible: a failed run degrades to an empty run that
-/// measures 0 and paints nothing.
+/// every LATER draw. A run's layout is private, and its attributes die with
+/// it. Draw helpers are infallible: a failed run measures 0 and paints
+/// nothing.
 pub const TextRun = struct {
     /// Null exactly when the run could not be built; every method tolerates it.
     layout: ?*bindings.PangoLayout = null,
@@ -63,17 +59,15 @@ pub const TextRun = struct {
 };
 
 /// Bound on the text-width cache: a full cache is cleared wholesale rather
-/// than evicted entry-by-entry. A measure is cheap to recompute, the strings
-/// are per-config and few, and a many-distinct-strings caller merely misses.
+/// than evicted entry-by-entry -- a measure is cheap to recompute.
 const measure_cache_max: u32 = 512;
 
 /// `sized_px` sentinel for "no size override" (the key carries the dimension
 /// so a sized measure can join without colliding with an unsized one).
 const no_sized_px: u16 = std.math.maxInt(u16);
 
-/// Cache key: measured text content plus the style bits and size that
-/// derived its width. Content-keyed, never pointer-keyed (a font swap
-/// rebuilds every description, so pointer identity would alias stale widths).
+/// Cache key: measured text content plus the style bits and size that derived
+/// its width. Content-keyed, never pointer-keyed (a font swap would alias).
 const MeasureKey = struct {
     /// Borrowed on lookup, owned by the map on insert (`MeasureEntry`).
     text: []const u8,
@@ -116,10 +110,9 @@ fn propsBits(props: bar_config.SegmentProps) u8 {
 /// description the indicator-glyph path needs.
 ///
 /// One owner. `loadFont` is the only thing that swaps the base description,
-/// so it invalidates the sized copy directly and the sized cache key is just
-/// `sized_px` -- no pointer comparison against the base. The same rule
-/// governs the text-width cache: keyed by TEXT CONTENT + style bits + size,
-/// never by a layout/description pointer; a font swap drops every width.
+/// so the sized cache key is just `sized_px` -- no pointer comparison. The
+/// text-width cache follows the same rule: keyed by TEXT CONTENT + style
+/// bits + size, never by a pointer; a font swap drops every width.
 pub const FontBook = struct {
     allocator: std.mem.Allocator,
     pango_layout: *bindings.PangoLayout,
@@ -128,8 +121,7 @@ pub const FontBook = struct {
     cached_metrics: ?struct { i16, i16 } = null,
     /// Bounded (text, style bits, size) -> pixel width map. Replaces a
     /// per-call Pango layout alloc for the common case of measuring the same
-    /// label repeatedly. A full cache is cleared wholesale, not LRU: a
-    /// measure is cheap to recompute.
+    /// label repeatedly. Cleared wholesale, not LRU: a measure is cheap.
     measure_cache: MeasureCache = .empty,
     /// Uncached (real Pango) measures since construction; the observable
     /// a "static label measures once per config" test asserts against.
@@ -231,9 +223,8 @@ pub const FontBook = struct {
     }
 
     /// Measures `text` with `props` styling through the same cache. Styled
-    /// and unstyled measures of one string are distinct keys (style bits +
-    /// sized_px are part of the key), so a width can never be served from an
-    /// entry that measured something else.
+    /// and unstyled measures of one string are distinct keys, so a width can
+    /// never be served from an entry that measured something else.
     pub fn measureTextWidthStyled(self: *FontBook, text: []const u8, props: bar_config.SegmentProps) u16 {
         return self.measureCached(text, props, props.size);
     }
@@ -253,8 +244,7 @@ pub const FontBook = struct {
 
     /// Inserts an owned copy of `key`'s text plus the measured width. An
     /// allocation failure (or a full cache) just leaves the entry unstored:
-    /// the width is still returned and the next measure misses and retries --
-    /// a cache that cannot grow must never fail a measure.
+    /// the width is still returned, so a full cache never fails a measure.
     fn storeMeasure(self: *FontBook, key: MeasureKey, width: u16) void {
         if (self.measure_cache.count() >= measure_cache_max) self.clearMeasureCache();
         const owned = self.allocator.dupe(u8, key.text) catch return;
@@ -264,9 +254,8 @@ pub const FontBook = struct {
         };
     }
 
-    /// Frees every owned key text and empties the map, retaining capacity.
-    /// Called on the one thing that invalidates every width: a
-    /// base-description swap (`loadFont`), plus `deinit`.
+    /// Frees every owned key text and empties the map, retaining capacity;
+    /// called on a base-description swap (`loadFont`) and at `deinit`.
     fn clearMeasureCache(self: *FontBook) void {
         var it = self.measure_cache.valueIterator();
         while (it.next()) |entry| self.allocator.free(entry.owned_text);
@@ -394,12 +383,10 @@ pub fn probeFontMetrics(
 /// Owned, size-suffixed copies of the configured font list. A VALUE that
 /// owns what it built: every entry is an owned copy, so deinit has nothing
 /// to infer. Ownership is never read back from the live config -- inferring
-/// it from POINTER IDENTITY against live config is wrong whenever a config
-/// swap between build and free (a reload mid-frame) hands out a borrowed
-/// entry to free or an owned one to leak. Runs once per DrawContext
-/// creation, not a hot path. `fonts` and `font_size` are REQUIRED: a caller
-/// measuring a trial size passes the trial; a caller drawing the bar passes
-/// the resolved metrics and the live config's font list.
+/// it from POINTER IDENTITY is wrong whenever a config swap between build
+/// and free (a reload mid-frame) hands out a borrowed entry to free or an
+/// owned one to leak. `fonts` and `font_size` are REQUIRED: a trial-size
+/// prober passes the trial; a bar drawer passes resolved metrics.
 pub const SizedFontList = struct {
     allocator: std.mem.Allocator,
     items: [][]const u8,
@@ -432,9 +419,8 @@ fn createPangoLayout(ctx: *bindings.cairo_t, dpi: f32) !*bindings.PangoLayout {
 }
 
 /// Converts Xft `"FontName:size=N:weight=bold"` (or a comma-joined fallback
-/// chain) to Pango `"FontName,OtherFont Bold N"`. Comma-joined families are
-/// kept as a Pango family list so multi-font configs get real per-glyph
-/// fallback rather than first-family-only.
+/// chain) to Pango `"FontName,OtherFont Bold N"`. Comma-joined families stay
+/// a Pango family list, so multi-font configs get real per-glyph fallback.
 fn convertFontName(allocator: std.mem.Allocator, xft_name: []const u8) ![:0]const u8 {
     if (std.mem.indexOfScalar(u8, xft_name, ':') == null and
         std.mem.indexOfScalar(u8, xft_name, ',') == null)

@@ -66,8 +66,7 @@ pub fn centerRowBudget(
 /// `[bar.properties]` styling applied, injected so this derivation needs
 /// no Pango. Styled, because the draw measures the same probe styled: an
 /// unstyled budget reserves a narrower slot than a bold/italic clock
-/// paints, and the row overlaps until an unrelated full redraw. For plain
-/// props the two probes are identical, so styled costs nothing.
+/// paints, and the row overlaps until an unrelated full redraw.
 pub fn mergedClockWidth(
     ctx: anytype,
     config: bar_config.Config,

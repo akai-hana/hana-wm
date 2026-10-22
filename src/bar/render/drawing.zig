@@ -34,9 +34,8 @@ inline fn showLayoutAtBaseline(
     bindings.pango_cairo_show_layout(ctx, layout);
 }
 
-/// The validated span `[start, start + len)` inside `text`, or null when
-/// not a legal non-empty range. Explicit offsets from the caller, so this
-/// only range-checks -- pure and testable without Pango/cairo/display.
+/// The validated span `[start, start + len)` inside `text`, or null when not a
+/// legal non-empty range. Explicit offsets: pure, testable without Pango/cairo.
 const ValueRange = struct { start: usize, len: usize };
 
 pub fn valueRange(text: []const u8, start: usize, len: usize) ?ValueRange {
@@ -65,11 +64,10 @@ pub const Label = struct {
 
 /// Shared substitution walker for volume/brightness display formats:
 /// substitutes every `{pct}` with the decimal `pct` and (when `state` is
-/// non-null) every `{state}` with that marker. Overflow stops the walk;
-/// the truncated tail is still scan-safe. Other `{...}` pass through
+/// non-null) every `{state}` with that marker. Overflow stops the walk
+/// (the truncated tail stays scan-safe); other `{...}` pass through
 /// literally. Records the numeric value region (first `{pct}` plus a
-/// directly-following literal `%`) so the segment can paint it in the
-/// `_value` color.
+/// directly-following literal `%`) for the `_value` color.
 pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u8) Label {
     var n: usize = 0;
     var i: usize = 0;
@@ -111,10 +109,9 @@ pub fn renderLineValue(format: []const u8, pct: u8, state: ?[]const u8, buf: []u
     return .{ .text = buf[0..n], .value_start = value_start, .value_len = value_len };
 }
 
-/// A foreground colour for the byte range `[start, start + len)` of the
-/// laid-out text. Pango interprets offsets in BYTES and attributes by glyph
-/// run, so a range splitting a multi-byte char degrades to intersecting
-/// glyphs (in-tree callers pass ASCII numerals, which is exact).
+/// A foreground colour for the byte range `[start, start + len)` of the laid-out
+/// text. Pango interprets offsets in BYTES and attributes by glyph run, so a
+/// range splitting a multi-byte char degrades (callers pass ASCII numerals).
 fn foregroundAttr(list: *bindings.PangoAttrList, start: usize, len: usize, rgb: u32) void {
     // hana stores 0xRRGGBB; Pango wants each channel scaled to 0..65535.
     const scale8to16 = struct {
@@ -223,10 +220,9 @@ pub const DrawContext = struct {
         bindings.pango_cairo_show_layout(self.surface.ctx, l);
     }
 
-    /// Draws `text` with its left edge at `x` and baseline at `y`.
-    /// Infallible: a run that cannot be built degrades to an empty run
-    /// that measures 0 and paints nothing. The one genuinely fallible text
-    /// path is `drawTextSized` (can return `error.NoFont`).
+    /// Draws `text` with its left edge at `x` and baseline at `y`. Infallible:
+    /// a run that cannot be built degrades to an empty run (0, paints nothing).
+    /// The one fallible text path is `drawTextSized` (`error.NoFont`).
     pub fn drawText(self: *DrawContext, x: u16, y: u16, text: []const u8, color: u32) void {
         self.drawTextImpl(x, y, text, null, color, .{});
     }
@@ -319,8 +315,7 @@ pub const DrawContext = struct {
     /// Fill background, measure `text` (with `props` so bold/italic reserve
     /// the right slot), draw at baseline, return x + width. `min_w` forces
     /// the background to span at least that many text pixels (plus padding)
-    /// so a region-scoped repaint of a shrunken segment still wipes its
-    /// whole previous slot.
+    /// so a region-scoped repaint of a shrunken segment wipes its old slot.
     fn paintedSegment(
         self: *DrawContext,
         x: u16,
@@ -333,9 +328,8 @@ pub const DrawContext = struct {
         props: bar_config.SegmentProps,
     ) !u16 {
         // One run measured AND painted so reserved width and painted styling
-        // come from one derivation: measuring and painting through two passes
-        // on a shared layout lets a styled segment reserve one width and paint
-        // another, because the second pass can re-derive the styling.
+        // come from one derivation: two passes on a shared layout let a styled
+        // segment reserve one width and paint another.
         var run = self.fonts.beginRun(text, props, props.size);
         defer run.deinit();
         const text_w = run.measure();
@@ -388,8 +382,7 @@ pub const DrawContext = struct {
 /// set, the background fill always spans at least its measured width plus
 /// padding: the clock uses this so a region-scoped repaint of a NARROWER
 /// display mode repaints the whole reserved slot instead of leaving stale
-/// pixels. Collapses the otherwise repeated argument list of the icon-ish
-/// segment modules.
+/// pixels. Collapses the repeated argument list of the icon-ish modules.
 pub fn drawPaddedSegment(
     dc: *DrawContext,
     config: bar_config.Config,
@@ -447,11 +440,10 @@ pub fn drawPaddedSegmentValue(
     // the true advance, so the cursor drifts while the reserved width is
     // still measured from the whole string.
     //
-    // Pango owning the range also composes for free: the value colour applies
-    // alongside ellipsize and style props, and the props go on the SAME
-    // layout as the range so the two cannot disagree about shaping. Both live
-    // in the run's OWN attribute list / layout: deinit unrefs both together,
-    // so there is no restore to forget.
+    // Pango owning the range also composes for free: the value colour
+    // applies alongside ellipsize and style props, and the props go on the
+    // SAME layout as the range so the two cannot disagree about shaping.
+    // Both live in the run's own attribute list, so deinit unrefs both.
     var run = dc.fonts.beginRun(text, props, props.size);
     defer run.deinit();
     if (run.layout) |l| {
@@ -475,10 +467,9 @@ pub fn drawPaddedSegmentValue(
     return x + width;
 }
 
-/// Loads the configured fonts into `dc`. Called once per DrawContext
-/// creation. `allocator`/`font_names` passed in rather than read from
-/// `core.getState()`: the caller that already holds cs does not want a
-/// hidden second source of truth for the bar's fonts.
+/// Loads the configured fonts into `dc`. Called once per DrawContext creation.
+/// `allocator`/`font_names` passed in rather than read from `core.getState()`:
+/// the caller holding cs wants no hidden second source of truth for fonts.
 pub fn loadBarFonts(dc: *DrawContext, allocator: std.mem.Allocator, font_names: []const []const u8, font_size: u16) !void {
     var sized = try fonts.SizedFontList.build(allocator, font_names, font_size);
     defer sized.deinit();

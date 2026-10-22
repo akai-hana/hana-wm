@@ -3,24 +3,22 @@
 //!
 //! None of it needs `DrawCtx`, `BarHandlers` or any X connection -- it is
 //! geometry over a snapshot -- so it is owned by the title module, the only
-//! thing that renders it, rather than sharing bar/segment.zig's segment
-//! vocabulary.
+//! thing that renders it, rather than sharing bar/segment.zig's vocabulary.
 //!
-//! `segmentBounds` and its inverse are the load-bearing pair: the draw and the
-//! hit-test MUST agree on which pixels belong to which window, or a click
-//! selects a neighbour. They are here together for that reason -- that pairing
-//! is the invariant, and splitting them across files is how it silently rots.
+//! `segmentBounds` and its inverse are the load-bearing pair: the draw and
+//! the hit-test MUST agree on which pixels belong to which window, or a
+//! click selects a neighbour. They are here together for that reason --
+//! splitting them across files is how the pairing silently rots.
 //!
-//! A private sibling of `title.zig` in a `modules/` tree, and therefore
-//! NOT a segment of its own: it shares neither its directory name nor the
-//! binding a registered module declares, so the build registry leaves it
-//! alone. `carousel.zig` already sits beside `title.zig` in exactly this
-//! arrangement, as an addon rather than a segment.
+//! A private sibling of `title.zig` in a `modules/` tree, and therefore NOT
+//! a segment of its own (like `carousel.zig` beside it): it shares neither
+//! its directory name nor the registered binding, so the registry leaves it
+//! alone.
 //!
 //! (Build note: that registry is a TEXT scan for the binding spelling, so
-//! this file must never quote the binding declaration literally -- not even in
-//! a comment. The first draft did, and the build tried to register geom.zig as
-//! a segment.)
+//! this file must never quote the binding declaration literally -- not even
+//! in a comment. The first draft did, and the build tried to register
+//! geom.zig as a segment.)
 
 const std = @import("std");
 

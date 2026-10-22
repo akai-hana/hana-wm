@@ -8,12 +8,11 @@
 //! owns the machinery every readout shares: arm-on-first-draw, the poll
 //! deadline, dirty redraw requests, and the "<label> <pct>%" render.
 //!
-//! This per-segment lifecycle is a structural twin of slider.zig's. The two
-//! are deliberately NOT merged: a readout is read-only on one fixed cadence,
-//! while a slider adds drag/scroll, a commit throttle, per-control cadences
-//! and a click bound -- so the extracted core would be a parameterised
-//! contract surface around a thin body. The shared shape is kept explicit in
-//! each file instead; see slider.zig.
+//! This per-segment lifecycle is a structural twin of slider.zig's, but the
+//! two are deliberately NOT merged: a readout is read-only on one fixed
+//! cadence, while a slider adds drag/scroll, a commit throttle and per-control
+//! cadences -- an extracted core would be a parameterised contract surface
+//! around a thin body. See slider.zig.
 
 const std = @import("std");
 const drawing = @import("drawing");
@@ -31,12 +30,11 @@ fn readIntervalMs() i64 {
 const render_buf_len: usize = 128;
 
 // Closed-core / open-module: the CLOSED CORE is this file (`Sub` + the
-// per-segment poll/render machinery); the OPEN MODULES are the sibling `.zig`
-// files, each binding `pub const sub: Sub`, and membership in `subs` -- and
-// therefore a bar segment named after it -- comes from FILE PRESENCE alone.
+// per-segment poll/render machinery); the OPEN MODULES are the sibling files,
+// each binding `pub const sub: Sub`, and membership in `subs` -- and therefore
+// a bar segment named after it -- comes from FILE PRESENCE alone.
 //
-// To add a readout: drop `foo.zig` beside this file exporting
-// `pub const sub: Sub`. Every file here besides systatus.zig must export it.
+// To add a readout: drop `foo.zig` beside this file exporting `pub const sub`.
 
 pub const Sub = struct {
     /// Config identity ("ram", "cpu", ...): the name its bar segment is
@@ -50,8 +48,7 @@ pub const Sub = struct {
 };
 
 /// The registry-facing spelling of this contract: build.zig types the
-/// generated `systatus_subs` array through it, so the generated module
-/// never names the concrete struct or a sibling's import alias.
+/// generated `systatus_subs` array through it, so no module names the struct.
 pub const Binding = Sub;
 
 /// One reading from a readout, carrying its DISPLAY text: the module owns
@@ -92,8 +89,7 @@ pub fn readFileChecked(path: []const u8, buf: []u8) ?FileRead {
 /// Consecutive failed reads tolerated before a readout collapses. One
 /// transient miss (a sysfs attribute mid-update, an EAGAIN on procfs) must
 /// not blank the segment: collapsing on a single failure causes a visible
-/// blink plus a spurious re-lay on every hiccup. After this many, the
-/// readout is treated as genuinely gone and the slot collapses for real.
+/// blink plus a spurious re-lay on every hiccup. After this many it is gone.
 const miss_tolerance: u8 = 3;
 
 /// How long a collapsed-ABSENT readout goes unprobed before one more chance.
@@ -120,9 +116,8 @@ const Readout = struct {
     /// last-good window (see `refresh`) can keep it without a second buffer.
     last: [render_buf_len]u8 = undefined,
     len: usize = 0,
-    /// Byte range of the numeric readout ("42%") inside `last`; `value_len ==
-    /// 0` when there is no value this tick. The number is painted with the
-    /// segment's `_value` color while the label keeps its own.
+    /// Byte range of the numeric readout ("42%") inside `last`; `value_len == 0`
+    /// when there is no value this tick. The number paints in `_value`.
     value_start: usize = 0,
     value_len: usize = 0,
 };
@@ -184,8 +179,7 @@ fn refresh(idx: usize) bool {
         st.misses = 0;
         // Recovering from absence re-fills the rendered text, so the ordinary
         // `changed` check below requests the redraw and the width store
-        // re-expands the slot -- nothing extra is needed for the recovery
-        // path, only the latch itself has to be cleared.
+        // re-expands the slot -- only the latch itself has to be cleared.
         st.absent = false;
         const r = render(sub.label, sample, buf[0..]);
         n = r.text.len;
@@ -212,15 +206,13 @@ fn refresh(idx: usize) bool {
 }
 
 /// Poll deadline for readout `idx`: the segment doesn't arm itself until its
-/// first draw (when the bar actually renders it), so an unconfigured readout
-/// never wakes the loop. Returns -1 while unarmed, ms until the next read
-/// otherwise (0 = due now).
+/// first draw, so an unconfigured readout never wakes the loop. Returns -1
+/// while unarmed, ms until the next read otherwise (0 = due now).
 fn pollDeadlineMsFor(comptime idx: usize) i32 {
     const st = &g_readouts[idx];
     if (!st.armed) return -1;
     // An absent readout still contributes a wakeup, but only on the slow
-    // re-probe cadence: stopping entirely would make a hot-swapped battery or
-    // a since-boot /sysfs file invisible forever.
+    // re-probe cadence: stopping entirely would hide a hot-swapped battery.
     const interval: i64 = if (st.absent) absent_reprobe_ms else readIntervalMs();
     const left = st.next_read_ms - core.realtimeMs();
     if (left <= 0) return 0;
@@ -239,9 +231,8 @@ fn onPollWakeupFor(comptime idx: usize) void {
 }
 
 /// A redraw is owed for either reason the segment can change shape: the
-/// TEXT changed (refresh), or the painted WIDTH changed (widthState). Both are
-/// consumed here, so the caller sees one answer and neither source can leak a
-/// stale request.
+/// TEXT changed (refresh), or the painted WIDTH changed (widthState). Both
+/// are consumed here, so neither source can leak a stale request.
 fn consumeRedrawRequestFor(comptime idx: usize) bool {
     const st = &g_readouts[idx];
     const p = st.pending_redraw;
@@ -276,15 +267,13 @@ fn drawFor(comptime idx: usize, ctx: *anyopaque, x: u16) !contract.Painted {
     // Report the ACTUAL painted width, not the row reservation: the row must
     // follow the text or the segment locks onto the startup probe and paints
     // over its right neighbors ("RAM 42%" clipped by the next slot). The bar
-    // hands that width back through onPainted, whose store raises the redraw
-    // request on change, so the re-layout is not this module's job.
+    // feeds it back through onPainted, which raises the redraw on change.
     return contract.Painted.span(x, end_x);
 }
 
 /// The bar-module binding for readout `i` (comptime so each instantiation is
 /// a distinct segment with its own hooks into `subs[i]`'s state). Emitted by
-/// build.zig per discovered readout with a `pub const sub`, in the same
-/// alphabetical order as `subs`.
+/// build.zig per discovered readout, in `subs` order.
 pub fn segmentFor(comptime i: usize) contract.Segment {
     const Hooks = struct {
         fn poll() i32 {

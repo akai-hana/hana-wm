@@ -14,14 +14,13 @@
 //! structs we touch are read as raw bytes. Layouts are stable across the
 //! pulse 1.x-16.x era, but every field is guard-checked at runtime; a failed
 //! guard abandons the backend. `pa_server_info` has a version-dependent
-//! hole: `server_version2` was added in pulse 16.0, moving
-//! `default_sink_name` from offset 40 to 48; both are tried.
+//! hole: `server_version2` (pulse 16.0) moved `default_sink_name` from
+//! offset 40 to 48; both are tried.
 //!
 //! Lifecycle: attach is attempted once and cached by the volume segment; a
 //! failed attach tears every handle down so the next probe starts clean.
-//! One-shot ops never overlap, so per-op state lives in module globals,
-//! and each op's userdata carries its generation so a late callback is
-//! dropped.
+//! One-shot ops never overlap (per-op state in module globals), and each
+//! op's userdata carries its generation so a late callback is dropped.
 
 const std = @import("std");
 const core = @import("core");
@@ -584,12 +583,12 @@ pub const Backend = struct {
     /// (P2-58): the single-backend module's `PulseState` fields ARE the
     /// handles this `Backend` was built from, so the caller (the volume
     /// segment) must drop its own copy of the `Backend` immediately after
-    /// this call returns -- the `lib` function pointers inside it are dead
-    /// once the dlopen handle closes. Concretely: (1) stop+disconnect the
+    /// this returns -- the `lib` function pointers inside it are dead once
+    /// the dlopen handle closes. Concretely: (1) stop+disconnect the
     /// mainloop under the lock, (2) free the context, (3) free the mainloop,
     /// (4) close the DynLib (which invalidates every `Fn*` pointer), (5)
-    /// null the `PulseState` handles so a late probe re-attaches from
-    /// scratch. Nothing may call into `lib` after step (4).
+    /// null the `PulseState` handles so a late probe re-attaches. Nothing
+    /// may call into `lib` after step (4).
     pub fn deinit(_: *Backend) void {
         _ = abortAttach(g.oplib.?, g.mainloop, g.ctx, true);
     }
