@@ -34,28 +34,24 @@ pub const addon: title_mod.Scroller = .{
 const scroll_exit_slack_px: u16 = 8;
 
 /// Owner state for the marquee (P2-58): motion clock plus identity. The
-/// motion clock has an ANCHOR and the position is a pure function of the
-/// frame time, so frame-rate independence is true by construction: any
-/// number of draws at any times agree on the position.
+/// motion clock has an ANCHOR and the position is a pure function of frame
+/// time, so frame-rate independence holds by construction.
 ///
-/// `shown_off_px` is NOT an accumulator: it remembers the last offset
-/// actually handed out, for the `pivot` rebase, which must continue from
-/// the position on screen rather than one recomputed with a moved clock.
+/// `shown_off_px` is NOT an accumulator: the last offset actually handed
+/// out, for the `pivot` rebase, which must continue from the on-screen
+/// position rather than one recomputed with a moved clock. `last_drawn_ms`
+/// paces `pollDeadlineMs`; deliberately NOT `anchor_ms` + offset, because
+/// after a `pivot` that sum no longer names the last draw.
 ///
-/// `last_drawn_ms` is when a frame was last handed out, for `pollDeadlineMs`
-/// to pace the bar's poll timeout. Deliberately NOT derived from
-/// `anchor_ms` + offset: after a `pivot` that sum no longer names the last
-/// draw.
+/// `scrolling` is whether the tracked cell overflows RIGHT NOW; it is
+/// assigned `overflows` (which conjoins the `enabled` policy draw passes
+/// in), so `pollDeadlineMs` needs no separate policy channel.
 ///
-/// `scrolling` is whether the tracked cell is overflowing RIGHT NOW. The
-/// scroller is GIVEN its `enabled` policy by draw and never goes looking
-/// for it: `scrolling` is assigned `overflows`, which conjoins `enabled`,
-/// so `pollDeadlineMs` needs no separate policy channel.
-///
-/// `pivot_next_frame` is set when the bar re-appears after a hide, or when
-/// config changed: consumed by the next offsetFor so that frame rebases
-/// its elapsed-time clock at `now` instead of integrating the whole gap.
-const CarouselState = struct {    anchor_ms: i64 = 0,
+/// `pivot_next_frame` is set when the bar re-appears after a hide or config
+/// changed: consumed by the next offsetFor, which rebases its clock at
+/// `now` instead of integrating the whole gap.
+const CarouselState = struct {
+    anchor_ms: i64 = 0,
     shown_off_px: f32 = 0,
     last_drawn_ms: i64 = 0,
     active_win: u32 = 0,
@@ -105,10 +101,8 @@ pub fn offsetFor(
     const cycle: f32 = @as(f32, @floatFromInt(text_w)) + @as(f32, gap_px);
 
     // One transition, two reasons: the text fits (or the feature is off),
-    // so the segment draws statically; or this is the FIRST frame of an
-    // overflowing cell. Either way the clock is re-anchored at `now` and
-    // the offset is the head, so motion -- or its retirement -- begins on
-    // the NEXT frame.
+    // or this is the FIRST frame of an overflowing cell. Either way the
+    // clock re-anchors at `now` and the offset is the head.
     //
     // The starting-over case reports `active = true`, not false: `false`
     // sends the renderer through its static ellipsis path, so arriving at
